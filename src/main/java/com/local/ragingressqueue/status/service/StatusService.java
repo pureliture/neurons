@@ -1,7 +1,7 @@
 package com.local.ragingressqueue.status.service;
 
-import com.local.ragingressqueue.adapter.infra.nats.QueueStatusProvider;
-import com.local.ragingressqueue.adapter.infra.nats.QueueStatusSnapshot;
+import com.local.ragingressqueue.queue.port.QueueStatusProvider;
+import com.local.ragingressqueue.queue.port.QueueStatusSnapshot;
 import com.local.ragingressqueue.target.port.RagTargetAdapter;
 import com.local.ragingressqueue.target.port.TargetPressureSnapshot;
 import org.springframework.beans.factory.annotation.Autowired;

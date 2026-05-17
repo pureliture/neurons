@@ -1,6 +1,6 @@
 package com.local.ragingressqueue.status.service;
 
-import com.local.ragingressqueue.adapter.infra.nats.QueueStatusSnapshot;
+import com.local.ragingressqueue.queue.port.QueueStatusSnapshot;
 import com.local.ragingressqueue.delivery.domain.DeliveryResult;
 import com.local.ragingressqueue.delivery.domain.TargetPressure;
 import com.local.ragingressqueue.ingest.domain.IngestJob;

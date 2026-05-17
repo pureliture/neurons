@@ -1,5 +1,7 @@
 package com.local.ragingressqueue.adapter.infra.nats;
 
+import com.local.ragingressqueue.queue.port.QueueStatusProvider;
+import com.local.ragingressqueue.queue.port.QueueStatusSnapshot;
 import io.nats.client.JetStreamApiException;
 import io.nats.client.JetStreamManagement;
 import io.nats.client.api.ConsumerInfo;
