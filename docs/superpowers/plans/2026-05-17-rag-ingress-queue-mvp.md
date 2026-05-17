@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Reviewed implementation plan
+**Status:** Implementation in progress; JVM build/offline postcheck verified, compose runtime smoke blocked
 
 **Goal:** Java 25 + Spring Boot 4.x 기반 `rag-ingress-queue` MVP를 만들어 redacted RAG-ready document enqueue, NATS JetStream publish, worker pressure gate, target adapter boundary, redacted status/postcheck를 검증 가능하게 구현한다.
 
 **Architecture:** `ingress-api`는 validation과 JetStream publish만 담당하고, `ingress-worker`는 durable pull consumer와 `RagTargetAdapter` 호출만 담당한다. RAGFlow-specific dataset/document ID, parser status, credential은 `RAGFlowAdapter` 내부와 adapter-private opaque handle로 격리한다.
 
-**Tech Stack:** Java 25, Spring Boot 4.x, Maven, NATS JetStream, JUnit 5, Spring Boot Test, Testcontainers `GenericContainer` for NATS, Docker, structured JSON logging.
+**Tech Stack:** Corretto 25, Spring Boot 4.x, Gradle, NATS JetStream, JUnit 5, Spring Boot Test, fake-port unit tests, Docker Compose runtime smoke, structured JSON logging. Testcontainers-backed NATS integration remains deferred until Docker runtime is available.
 
 ---
 
@@ -18,13 +18,14 @@
 - Existing implementation files: none
 - Existing docs: `README.md`, `docs/requirements.md`, `docs/adr-0001-rag-ingress-queue.md`, `docs/rag-ingress-queue-architecture.html`
 - Local runtime check on 2026-05-17:
-  - `java -version`: blocked, macOS stub reports no Java Runtime
-  - `mvn -version`: blocked, command unavailable
-  - `gradle -version`: blocked, command unavailable
+  - `java -version`: available after Corretto 25 installation
+  - `gradle -version`: available after Gradle installation
   - `docker --version`: available, Docker 29.3.0
   - `docker compose version`: blocked, compose plugin unavailable
 
-This means local full verification is blocked until Java 25 and Maven are installed or CI/container tooling is provided. The plan still defines exact verification commands and explicitly separates implementation completion from runtime verification completion.
+This means local build/test verification can run with Corretto 25 and Gradle. Runtime compose verification remains blocked until Docker daemon and Docker Compose are available.
+
+Implementation note from 2026-05-17: the initial Gradle/Spring Boot skeleton, validation/API/worker tests, JetStream publish ack publisher, durable pull consumer wiring, fail-closed RAGFlow adapter skeleton, compose file, and offline postcheck are implemented locally. Fresh runtime proof still requires Docker daemon plus Docker Compose availability; do not mark runtime verification complete from offline evidence.
 
 ## Progress Visibility Rules
 
@@ -58,7 +59,7 @@ Milestones:
 
 | Phase | Purpose | Skill/Plugin |
 |---|---|---|
-| 0. Worktree and toolchain gate | avoid main branch implementation, confirm Java/Maven/Docker availability | `superpowers:using-git-worktrees`, RTK policy |
+| 0. Worktree and toolchain gate | avoid main branch implementation, confirm Corretto 25/Gradle/Docker availability | `superpowers:using-git-worktrees`, RTK policy |
 | 1. Documentation/source refresh | keep README/requirements/ADR/spec aligned | `documentation`, `architecture`, `system-design` |
 | 2. RED test design | define failing tests before production code | `testing-strategy`, `superpowers:test-driven-development` |
 | 3. Core implementation | domain, validation, API, queue, worker, adapter | `superpowers:subagent-driven-development` |
@@ -157,7 +158,8 @@ Public DTOs use a target-neutral versioned envelope:
 
 Create:
 
-- `pom.xml`: Maven build, Spring Boot 4.x, Java 25, test dependencies.
+- `settings.gradle`: Gradle project name.
+- `build.gradle`: Gradle build, Spring Boot 4.x, Java 25, test dependencies.
 - `src/main/java/com/local/ragingressqueue/RagIngressQueueApplication.java`: Spring Boot entrypoint.
 - `src/main/java/com/local/ragingressqueue/api/IngressController.java`: `/v1/ingest/enqueue`, `/healthz`, `/status`.
 - `src/main/java/com/local/ragingressqueue/api/dto/*.java`: API request/response DTOs.
@@ -165,12 +167,12 @@ Create:
 - `src/main/java/com/local/ragingressqueue/core/validation/*.java`: request validation and redaction guard.
 - `src/main/java/com/local/ragingressqueue/core/SafeJobSummary.java`: redacted log/status summary only.
 - `src/main/java/com/local/ragingressqueue/queue/*.java`: publish/fetch ports plus NATS JetStream implementation.
-- `src/main/java/com/local/ragingressqueue/queue/JetStreamProvisioner.java`: idempotent stream/consumer creation and drift check.
+- `src/main/java/com/local/ragingressqueue/queue/NatsJetStreamProvisioner.java`: idempotent stream/consumer creation and drift check.
 - `src/main/java/com/local/ragingressqueue/worker/*.java`: worker loop, pressure gate, delivery orchestration.
 - `src/main/java/com/local/ragingressqueue/target/*.java`: `RagTargetAdapter` contract and target status model.
 - `src/main/java/com/local/ragingressqueue/target/ragflow/*.java`: first RAGFlow adapter skeleton with adapter-private opaque references.
 - `src/main/resources/application.yml`: virtual threads, actuator, queue/profile config.
-- `src/test/java/com/local/ragingressqueue/**`: unit, Web MVC, fake adapter, Testcontainers integration tests.
+- `src/test/java/com/local/ragingressqueue/**`: unit, Web MVC, fake adapter/fake gateway, compose contract tests; Testcontainers integration is deferred until Docker is available.
 - `compose.yaml`: separate `rag-ingress-queue` services.
 - `scripts/redaction-denylist.txt`: shared forbidden pattern source.
 - `scripts/postcheck.sh`: redacted local postcheck.
@@ -203,7 +205,7 @@ Run:
 
 ```bash
 rtk java -version
-rtk mvn -version
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle -version'
 rtk docker --version
 rtk docker compose version
 ```
@@ -212,12 +214,12 @@ Expected for full local verification:
 
 ```text
 java: Java 25 runtime available
-mvn: Maven 3.6.3 or later available
+gradle: Gradle 9.x available with Amazon Corretto 25 launcher/daemon JVM
 docker: available
 docker compose: available
 ```
 
-Observed at plan creation: Java/Maven/compose are blocked locally. If still blocked, mark runtime verification `blocked` and do not claim build/test success.
+Observed after toolchain installation: Corretto 25 and Gradle are available. If Docker daemon or Compose remain blocked, mark runtime verification `blocked` and do not claim compose smoke success.
 
 - [ ] **Step 3: Record evidence**
 
@@ -232,7 +234,8 @@ The file must not contain secrets or private payloads.
 ## Task 1: Build Skeleton and Application Config
 
 **Files:**
-- Create: `pom.xml`
+- Create: `settings.gradle`
+- Create: `build.gradle`
 - Create: `src/main/java/com/local/ragingressqueue/RagIngressQueueApplication.java`
 - Create: `src/main/resources/application.yml`
 - Test: `src/test/java/com/local/ragingressqueue/RagIngressQueueApplicationTests.java`
@@ -260,81 +263,65 @@ class RagIngressQueueApplicationTests {
 Run:
 
 ```bash
-rtk mvn test -Dtest=RagIngressQueueApplicationTests
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests RagIngressQueueApplicationTests'
 ```
 
-Expected: FAIL because `pom.xml` and/or application entrypoint does not exist.
+Expected: FAIL because `settings.gradle`, `build.gradle`, and/or application entrypoint does not exist.
 
-- [ ] **Step 3: Add Maven build**
+- [ ] **Step 3: Add Gradle build**
 
-Create `pom.xml`:
+Create `settings.gradle`:
 
-```xml
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
-  <modelVersion>4.0.0</modelVersion>
+```groovy
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
 
-  <parent>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-parent</artifactId>
-    <version>4.0.6</version>
-    <relativePath/>
-  </parent>
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        mavenCentral()
+    }
+}
 
-  <groupId>com.local</groupId>
-  <artifactId>rag-ingress-queue</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
-  <name>rag-ingress-queue</name>
+rootProject.name = 'rag-ingress-queue'
+```
 
-  <properties>
-    <java.version>25</java.version>
-  </properties>
+Create `build.gradle`:
 
-  <dependencies>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-webmvc</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-actuator</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-validation</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.nats</groupId>
-      <artifactId>jnats</artifactId>
-      <version>2.25.2</version>
-    </dependency>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-test</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.testcontainers</groupId>
-      <artifactId>testcontainers</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.testcontainers</groupId>
-      <artifactId>junit-jupiter</artifactId>
-      <scope>test</scope>
-    </dependency>
-  </dependencies>
+```groovy
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '4.0.6'
+    id 'io.spring.dependency-management' version '1.1.7'
+}
 
-  <build>
-    <plugins>
-      <plugin>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-maven-plugin</artifactId>
-      </plugin>
-    </plugins>
-  </build>
-</project>
+group = 'com.local'
+version = '0.1.0-SNAPSHOT'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'io.nats:jnats:2.25.2'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.testcontainers:testcontainers:2.0.5'
+    testImplementation 'org.testcontainers:testcontainers-junit-jupiter:2.0.5'
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+}
 ```
 
 - [ ] **Step 4: Add application entrypoint**
@@ -401,7 +388,7 @@ rag-ingress:
 Run:
 
 ```bash
-rtk mvn test -Dtest=RagIngressQueueApplicationTests
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests RagIngressQueueApplicationTests'
 ```
 
 Expected: PASS.
@@ -474,12 +461,9 @@ class IngestJobValidatorTest {
     }
 
     @Test
-    void rejectsSameIdempotencyKeyWithDifferentContentHash() {
-        IngestJob first = validJob().withIdempotencyKey("stable-key");
-        IngestJob second = validJob()
-            .withIdempotencyKey("stable-key")
-            .withContentHash("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
-        assertThat(validator.validateIdempotencyPair(first, second)).contains("idempotencyKey conflict");
+    void rejectsUnknownTopLevelKind() {
+        IngestJob job = validJob().withKind("unexpected_kind");
+        assertThat(validator.validate(job)).anyMatch(v -> v.contains("kind is unknown"));
     }
 
     @Test
@@ -514,7 +498,7 @@ class IngestJobValidatorTest {
 Run:
 
 ```bash
-rtk mvn test -Dtest=IngestJobValidatorTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests IngestJobValidatorTest'
 ```
 
 Expected: FAIL because domain and validator classes do not exist.
@@ -542,7 +526,7 @@ ACCEPTED, DELIVERED, INDEXING, INDEXED, FAILED, THROTTLED
 Run:
 
 ```bash
-rtk mvn test -Dtest=IngestJobValidatorTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests IngestJobValidatorTest'
 ```
 
 Expected: PASS.
@@ -572,7 +556,7 @@ Create tests with these method names:
 Run:
 
 ```bash
-rtk mvn test -Dtest=RedactionGuardTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests RedactionGuardTest'
 ```
 
 Expected: FAIL because `RedactionGuard` does not exist.
@@ -607,7 +591,7 @@ jobId/hashPrefix, source provider/project, targetProfile, kind, contentType, pre
 Run:
 
 ```bash
-rtk mvn test -Dtest=RedactionGuardTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests RedactionGuardTest'
 ```
 
 Expected: PASS.
@@ -644,7 +628,7 @@ Test cases:
 Run:
 
 ```bash
-rtk mvn test -Dtest=IngressControllerTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests IngressControllerTest'
 ```
 
 Expected: FAIL because controller and DTOs do not exist.
@@ -671,7 +655,7 @@ Implementation rules:
 Run:
 
 ```bash
-rtk mvn test -Dtest=IngressControllerTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests IngressControllerTest'
 ```
 
 Expected: PASS.
@@ -704,7 +688,7 @@ approved_memory_card -> rag.ingress.document
 Run:
 
 ```bash
-rtk mvn test -Dtest=SubjectRouterTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests SubjectRouterTest'
 ```
 
 Expected: FAIL because `SubjectRouter` does not exist.
@@ -718,7 +702,7 @@ Expected: FAIL because `SubjectRouter` does not exist.
 Run:
 
 ```bash
-rtk mvn test -Dtest=SubjectRouterTest,NatsJetStreamPublisherContractTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests SubjectRouterTest --tests NatsJetStreamPublisherContractTest'
 ```
 
 Expected: PASS.
@@ -736,7 +720,7 @@ Test method names:
 Run:
 
 ```bash
-rtk mvn test -Dtest=JetStreamProvisionerTest,NatsJetStreamPublisherIntegrationTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests JetStreamProvisionerTest --tests NatsJetStreamPublisherIntegrationTest'
 ```
 
 Expected: FAIL before `JetStreamProvisioner` and Testcontainers-backed implementation exist.
@@ -756,10 +740,10 @@ Add an integration test profile/class that:
 Run:
 
 ```bash
-rtk mvn test -Dtest=NatsJetStreamPublisherIntegrationTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests NatsJetStreamPublisherIntegrationTest'
 ```
 
-Expected: PASS when Docker and Java/Maven are available. If runtime is blocked, record exact blocker and do not claim integration verification.
+Expected: PASS when Docker and Gradle are available. If Docker runtime is blocked, record exact blocker and do not claim integration verification.
 
 ## Task 6: Worker Pressure Gate
 
@@ -787,7 +771,7 @@ Test cases:
 Run:
 
 ```bash
-rtk mvn test -Dtest=IngestWorkerTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests IngestWorkerTest'
 ```
 
 Expected: FAIL because worker classes do not exist.
@@ -806,7 +790,7 @@ Rules:
 Run:
 
 ```bash
-rtk mvn test -Dtest=IngestWorkerTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests IngestWorkerTest'
 ```
 
 Expected: PASS.
@@ -835,7 +819,7 @@ Test cases:
 Run:
 
 ```bash
-rtk mvn test -Dtest=RagFlowAdapterTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests RagFlowAdapterTest'
 ```
 
 Expected: FAIL because adapter classes do not exist.
@@ -849,7 +833,7 @@ Do not call live RAGFlow in unit tests. Introduce a client port that can be back
 Run:
 
 ```bash
-rtk mvn test -Dtest=RagFlowAdapterTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests RagFlowAdapterTest'
 ```
 
 Expected: PASS.
@@ -883,7 +867,7 @@ Assert `/status` and `StatusService` include:
 Run:
 
 ```bash
-rtk mvn test -Dtest=StatusServiceTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests StatusServiceTest'
 ```
 
 Expected: FAIL because status service does not exist.
@@ -906,8 +890,8 @@ Expected: FAIL because status service does not exist.
 Run:
 
 ```bash
-rtk mvn test -Dtest=StatusServiceTest
-rtk mvn test -Dtest=PostcheckOutputTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests StatusServiceTest'
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests PostcheckOutputTest'
 rtk bash scripts/postcheck.sh --offline --timeout 30
 ```
 
@@ -937,7 +921,7 @@ Assert:
 Run:
 
 ```bash
-rtk mvn test -Dtest=ComposeConfigTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests ComposeConfigTest'
 ```
 
 Expected: FAIL because compose/Dockerfile do not exist.
@@ -957,6 +941,8 @@ services:
       - "127.0.0.1:4222:4222"
   ingress-api:
     build: .
+    ports:
+      - "127.0.0.1:8080:8080"
     environment:
       SPRING_PROFILES_ACTIVE: api
       RAG_INGRESS_NATS_URL: nats://nats-jetstream:4222
@@ -966,6 +952,7 @@ services:
     build: .
     environment:
       SPRING_PROFILES_ACTIVE: worker
+      SPRING_MAIN_WEB_APPLICATION_TYPE: none
       RAG_INGRESS_NATS_URL: nats://nats-jetstream:4222
     depends_on:
       - nats-jetstream
@@ -978,7 +965,7 @@ volumes:
 Run:
 
 ```bash
-rtk mvn test -Dtest=ComposeConfigTest
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests ComposeConfigTest'
 ```
 
 Expected: PASS.
@@ -989,11 +976,11 @@ Run:
 
 ```bash
 rtk docker compose -f compose.yaml up --build -d
-rtk timeout 30s bash scripts/postcheck.sh --timeout 30 --evidence build/reports/rag-ingress-queue/postcheck.json
+rtk bash scripts/postcheck.sh --timeout 30 --evidence build/reports/rag-ingress-queue/postcheck.json
 rtk docker compose -f compose.yaml down
 ```
 
-Expected: PASS. If `docker compose` is unavailable, mark runtime verification `blocked` with the exact command output.
+Expected: API shape postcheck PASS plus separate NATS/worker smoke evidence. If `docker compose` is unavailable, mark runtime verification `blocked` with the exact command output. The postcheck JSON must not set `runtime.verified=true` unless JetStream stream/consumer, publish ack, and worker fetch/ack/nak evidence were also gathered.
 
 Abort criteria:
 
@@ -1072,17 +1059,17 @@ Do not reintroduce `ragflow_ready_document` as a public payload kind.
 Run:
 
 ```bash
-rtk mvn test
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test'
 ```
 
-Expected: PASS. If blocked by missing Java/Maven, final report must say runtime verification is blocked.
+Expected: PASS. If blocked by missing Java/Gradle, final report must say implementation verification is blocked.
 
 - [ ] **Step 2: Run redaction scan**
 
 Run:
 
 ```bash
-rtk rg -n -f scripts/redaction-denylist.txt README.md docs src scripts compose.yaml Dockerfile pom.xml
+rtk rg -n -f scripts/redaction-denylist.txt README.md docs src scripts compose.yaml Dockerfile build.gradle settings.gradle
 ```
 
 Expected: only negative-test/policy mentions, no live secrets or private payloads.
@@ -1105,7 +1092,7 @@ Run:
 
 ```bash
 rtk git status --short
-rtk git add pom.xml src compose.yaml Dockerfile scripts README.md docs/superpowers docs/runbooks
+rtk git add settings.gradle build.gradle src compose.yaml Dockerfile scripts README.md docs/superpowers docs/runbooks
 rtk git diff --cached --stat
 ```
 

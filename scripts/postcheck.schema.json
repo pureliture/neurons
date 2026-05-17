@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["mode", "queue", "target", "documentStatus", "authorization", "externalStatus", "runtime"],
+  "properties": {
+    "mode": {"type": "string"},
+    "queue": {"type": "object"},
+    "target": {"type": "object"},
+    "documentStatus": {"type": "object"},
+    "authorization": {"type": "object"},
+    "externalStatus": {"type": "string"},
+    "runtime": {"type": "object"}
+  }
+}
