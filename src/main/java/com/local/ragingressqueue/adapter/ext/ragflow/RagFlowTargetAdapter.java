@@ -5,6 +5,7 @@ import com.local.ragingressqueue.common.TargetIndexingState;
 import com.local.ragingressqueue.delivery.domain.TargetPressure;
 import com.local.ragingressqueue.target.port.RagTargetAdapter;
 import com.local.ragingressqueue.delivery.domain.DeliveryResult;
+import com.local.ragingressqueue.target.port.TargetPressureSnapshot;
 import com.local.ragingressqueue.target.port.TargetStatusSnapshot;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -15,7 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 @Component
-@Profile("worker")
+@Profile({"api", "worker"})
 public class RagFlowTargetAdapter implements RagTargetAdapter {
     private final boolean deliveryEnabled;
     private final String baseUrl;
@@ -90,14 +91,16 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
     }
 
     @Override
-    public TargetPressure checkPressure(String targetProfile) {
+    public TargetPressureSnapshot pressureSnapshot(String targetProfile) {
         if (!isConfigured(targetProfile)) {
-            return TargetPressure.CLOSED;
+            return TargetPressureSnapshot.closed("not_configured");
         }
         try {
-            return pressurePolicy.evaluate(gateway.pressureSnapshot(baseUrl, apiKey, datasetId(targetProfile)));
+            RagFlowPressureSnapshot s = gateway.pressureSnapshot(baseUrl, apiKey, datasetId(targetProfile));
+            TargetPressure p = pressurePolicy.evaluate(s);
+            return new TargetPressureSnapshot(p, s.running(), s.unstart(), s.sampled(), null);
         } catch (RuntimeException error) {
-            return TargetPressure.CLOSED;
+            return TargetPressureSnapshot.closed("pressure_read_failed");
         }
     }
 

@@ -40,7 +40,7 @@ public class IngestWorker {
     }
 
     public DeliveryDecision runOnce() {
-        TargetPressure pressure = adapter.checkPressure(targetProfile);
+        TargetPressure pressure = adapter.pressureSnapshot(targetProfile).pressure();
         if (pressure != TargetPressure.OPEN) {
             return DeliveryDecision.skippedPressure("target pressure is " + pressure);
         }

@@ -190,8 +190,8 @@ class IngestWorkerTest {
         }
 
         @Override
-        public TargetPressure checkPressure(String targetProfile) {
-            return pressure;
+        public com.local.ragingressqueue.target.port.TargetPressureSnapshot pressureSnapshot(String targetProfile) {
+            return new com.local.ragingressqueue.target.port.TargetPressureSnapshot(pressure, 0, 0, 0, null);
         }
 
         @Override

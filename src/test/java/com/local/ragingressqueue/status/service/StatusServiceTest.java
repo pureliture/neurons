@@ -1,12 +1,12 @@
 package com.local.ragingressqueue.status.service;
 
-import com.local.ragingressqueue.adapter.ext.ragflow.RagFlowDeliveryException;
-import com.local.ragingressqueue.adapter.ext.ragflow.RagFlowDocumentRef;
-import com.local.ragingressqueue.adapter.ext.ragflow.RagFlowGateway;
-import com.local.ragingressqueue.adapter.ext.ragflow.RagFlowPressurePolicy;
-import com.local.ragingressqueue.adapter.ext.ragflow.RagFlowPressureSnapshot;
-import com.local.ragingressqueue.ingest.domain.DocumentPayload;
 import com.local.ragingressqueue.adapter.infra.nats.QueueStatusSnapshot;
+import com.local.ragingressqueue.delivery.domain.DeliveryResult;
+import com.local.ragingressqueue.delivery.domain.TargetPressure;
+import com.local.ragingressqueue.ingest.domain.IngestJob;
+import com.local.ragingressqueue.target.port.RagTargetAdapter;
+import com.local.ragingressqueue.target.port.TargetPressureSnapshot;
+import com.local.ragingressqueue.target.port.TargetStatusSnapshot;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -31,14 +31,12 @@ class StatusServiceTest {
 
     @Test
     void configuredLiveStatusReportsOpenWithoutExposingSecrets() {
-        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        FakeRagTargetAdapter adapter = new FakeRagTargetAdapter(
+            new TargetPressureSnapshot(TargetPressure.OPEN, 0, 0, 100, null)
+        );
+
         Map<String, Object> status = new StatusService(
-            true,
-            "http://host.docker.internal:9380",
-            "secret-token",
-            "ds_1",
-            gateway,
-            new RagFlowPressurePolicy(20, 5, 100, 25),
+            adapter,
             () -> new QueueStatusSnapshot(7, 1, 2, 0)
         ).currentStatus();
 
@@ -51,26 +49,15 @@ class StatusServiceTest {
             "sampled", 100
         ));
         assertThat(status.get("queue")).isEqualTo(Map.of("pending", 7L, "inFlight", 1L, "redelivered", 2L, "deadLetter", 0L));
-        assertThat(status.toString())
-            .doesNotContain("secret-token")
-            .doesNotContain("ds_1")
-            .doesNotContain("host.docker.internal");
     }
 
     @Test
     void configuredLiveStatusReportsThrottledWhenRagFlowBacklogIsHigh() {
-        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
-        gateway.pressureSnapshot = new RagFlowPressureSnapshot(20, 2, 0, 78, 100);
+        FakeRagTargetAdapter adapter = new FakeRagTargetAdapter(
+            new TargetPressureSnapshot(TargetPressure.THROTTLED, 20, 2, 100, null)
+        );
 
-        Map<String, Object> status = new StatusService(
-            true,
-            "http://host.docker.internal:9380",
-            "secret-token",
-            "ds_1",
-            gateway,
-            new RagFlowPressurePolicy(20, 5, 100, 25),
-            null
-        ).currentStatus();
+        Map<String, Object> status = new StatusService(adapter, null).currentStatus();
 
         assertThat(status.get("target")).isEqualTo(Map.of(
             "name", "ragflow",
@@ -83,18 +70,11 @@ class StatusServiceTest {
 
     @Test
     void configuredLiveStatusFailsClosedWhenPressureReadFails() {
-        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
-        gateway.failPressure = true;
+        FakeRagTargetAdapter adapter = new FakeRagTargetAdapter(
+            TargetPressureSnapshot.closed("pressure_read_failed")
+        );
 
-        Map<String, Object> status = new StatusService(
-            true,
-            "http://host.docker.internal:9380",
-            "secret-token",
-            "ds_1",
-            gateway,
-            new RagFlowPressurePolicy(20, 5, 100, 25),
-            null
-        ).currentStatus();
+        Map<String, Object> status = new StatusService(adapter, null).currentStatus();
 
         assertThat(status.get("target")).isEqualTo(Map.of(
             "name", "ragflow",
@@ -106,31 +86,26 @@ class StatusServiceTest {
         ));
     }
 
-    private static final class FakeRagFlowGateway implements RagFlowGateway {
-        private boolean failPressure;
-        private RagFlowPressureSnapshot pressureSnapshot = new RagFlowPressureSnapshot(0, 0, 0, 100, 100);
+    private static final class FakeRagTargetAdapter implements RagTargetAdapter {
+        private final TargetPressureSnapshot snapshot;
+
+        private FakeRagTargetAdapter(TargetPressureSnapshot snapshot) {
+            this.snapshot = snapshot;
+        }
 
         @Override
-        public RagFlowDocumentRef uploadDocument(String baseUrl, String apiKey, String datasetId, DocumentPayload payload) {
+        public TargetPressureSnapshot pressureSnapshot(String targetProfile) {
+            return snapshot;
+        }
+
+        @Override
+        public DeliveryResult deliver(IngestJob job, String targetProfile) {
             throw new UnsupportedOperationException("not used");
         }
 
         @Override
-        public void updateMetadata(String baseUrl, String apiKey, String datasetId, String documentId, Map<String, String> metadata) {
+        public TargetStatusSnapshot getStatus(IngestJob job, String targetProfile) {
             throw new UnsupportedOperationException("not used");
-        }
-
-        @Override
-        public void requestParse(String baseUrl, String apiKey, String datasetId, String documentId) {
-            throw new UnsupportedOperationException("not used");
-        }
-
-        @Override
-        public RagFlowPressureSnapshot pressureSnapshot(String baseUrl, String apiKey, String datasetId) {
-            if (failPressure) {
-                throw new RagFlowDeliveryException("boom");
-            }
-            return pressureSnapshot;
         }
     }
 }

@@ -18,7 +18,7 @@ class RagFlowTargetAdapterTest {
     void disabledAdapterReportsClosedPressureAndDoesNotClaimDelivery() {
         RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(false);
 
-        assertThat(adapter.checkPressure("ragflow-transcript-memory")).isEqualTo(TargetPressure.CLOSED);
+        assertThat(adapter.pressureSnapshot("ragflow-transcript-memory").pressure()).isEqualTo(TargetPressure.CLOSED);
         assertThat(adapter.deliver(validJob(), "ragflow-transcript-memory").delivered()).isFalse();
     }
 
@@ -45,7 +45,7 @@ class RagFlowTargetAdapterTest {
             new FakeRagFlowGateway()
         );
 
-        assertThat(adapter.checkPressure("ragflow-transcript-memory")).isEqualTo(TargetPressure.CLOSED);
+        assertThat(adapter.pressureSnapshot("ragflow-transcript-memory").pressure()).isEqualTo(TargetPressure.CLOSED);
         assertThat(adapter.deliver(validJob(), "ragflow-transcript-memory").delivered()).isFalse();
     }
 
@@ -85,7 +85,7 @@ class RagFlowTargetAdapterTest {
             new RagFlowPressurePolicy(20, 5, 100, 25)
         );
 
-        assertThat(adapter.checkPressure("ragflow-transcript-memory")).isEqualTo(TargetPressure.THROTTLED);
+        assertThat(adapter.pressureSnapshot("ragflow-transcript-memory").pressure()).isEqualTo(TargetPressure.THROTTLED);
     }
 
     @Test
@@ -101,7 +101,7 @@ class RagFlowTargetAdapterTest {
             new RagFlowPressurePolicy(20, 5, 100, 25)
         );
 
-        assertThat(adapter.checkPressure("ragflow-transcript-memory")).isEqualTo(TargetPressure.CLOSED);
+        assertThat(adapter.pressureSnapshot("ragflow-transcript-memory").pressure()).isEqualTo(TargetPressure.CLOSED);
     }
 
     @Test
@@ -117,7 +117,7 @@ class RagFlowTargetAdapterTest {
             new RagFlowPressurePolicy(20, 5, 100, 25)
         );
 
-        assertThat(adapter.checkPressure("ragflow-transcript-memory")).isEqualTo(TargetPressure.CLOSED);
+        assertThat(adapter.pressureSnapshot("ragflow-transcript-memory").pressure()).isEqualTo(TargetPressure.CLOSED);
     }
 
     @Test
