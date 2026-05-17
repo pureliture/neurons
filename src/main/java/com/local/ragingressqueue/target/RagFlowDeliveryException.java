@@ -1,11 +1,11 @@
 package com.local.ragingressqueue.target;
 
-class RagFlowDeliveryException extends RuntimeException {
-    RagFlowDeliveryException(String message) {
+public class RagFlowDeliveryException extends RuntimeException {
+    public RagFlowDeliveryException(String message) {
         super(message);
     }
 
-    RagFlowDeliveryException(String message, Throwable cause) {
+    public RagFlowDeliveryException(String message, Throwable cause) {
         super(message, cause);
     }
 }

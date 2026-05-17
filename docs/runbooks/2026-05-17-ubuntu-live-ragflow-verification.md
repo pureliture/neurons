@@ -65,15 +65,16 @@ Fresh same-document gate evidence:
 }
 ```
 
-Reusable verifier evidence:
+Reusable verifier evidence, updated after backlog-aware pressure was added:
 
 ```bash
 ./scripts/live-ragflow-verify.py \
   --existing-filename rag_ingress_live_verify_614f22f62501.md \
   --allow-same-document-chunk-fallback \
   --allow-preauthorized-existing-document \
-  --timeout 30 \
-  --evidence build/reports/rag-ingress-queue/live-ragflow-verify.json
+  --allow-closed-existing-document \
+  --timeout 180 \
+  --evidence build/reports/rag-ingress-queue/live-existing-closed-pressure-verify-v2.json
 ```
 
 Result:
@@ -82,13 +83,17 @@ Result:
 {
   "runtime": {
     "verified": true,
-    "scope": "ubuntu-compose-live-ragflow-write-external-authorization-recall-promote"
+    "scope": "ubuntu-compose-existing-live-document-external-authorization-recall-promote",
+    "targetPressure": "CLOSED"
   },
   "status": {
     "externalStatus": "configured",
     "target": {
       "name": "ragflow",
-      "pressure": "OPEN"
+      "pressure": "CLOSED",
+      "running": 2121,
+      "unstart": 34,
+      "sampled": 200
     }
   },
   "ragflowWrite": {
@@ -122,9 +127,18 @@ Current `/status`:
 
 ```json
 {
+  "queue": {
+    "pending": 0,
+    "inFlight": 0,
+    "redelivered": 0,
+    "deadLetter": 0
+  },
   "target": {
     "name": "ragflow",
-    "pressure": "OPEN"
+    "pressure": "CLOSED",
+    "running": 2115,
+    "unstart": 34,
+    "sampled": 200
   },
   "externalStatus": "configured",
   "authorization": {
@@ -137,4 +151,10 @@ Current `/status`:
 
 ## Known Constraint
 
-`transcript-memory`에는 기존 RAGFlow parser backlog가 있다. 새 live-written document의 parser `DONE`까지 기다리는 검증은 현재 불안정하므로, runtime verification은 same-document chunk fallback을 사용한다. 이 fallback은 RAGFlow REST API를 통한 live write이며 DB/volume 직접 조작이 아니다.
+`transcript-memory`에는 기존 RAGFlow parser backlog가 있다. 현재 backlog-aware pressure gate는 이 상태를 `CLOSED`로 판정하므로 fresh queue-to-RAGFlow write는 의도적으로 진행하지 않는다. 이 상태에서 verifier가 증명하는 것은 기존 live-written document에 대한 external authorization과 recall/promote eligibility이며, fresh write proof가 아니다.
+
+상용 운영 기준:
+
+- `pressure=CLOSED`: enqueue는 가능하지만 worker는 drain하지 않는다.
+- queued work는 RAGFlow backlog가 threshold 아래로 내려가 `OPEN`이 된 뒤 drain된다.
+- backlog가 닫힌 상태에서 새 live write를 강제로 밀어 넣지 않는다.

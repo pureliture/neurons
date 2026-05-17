@@ -71,6 +71,54 @@ class RagFlowTargetAdapterTest {
     }
 
     @Test
+    void enabledAdapterThrottlesWhenRagFlowRunningBacklogReachesLimit() {
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        gateway.pressureSnapshot = new RagFlowPressureSnapshot(20, 0, 0, 100, 120);
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway,
+            new RagFlowPressurePolicy(20, 5, 100, 25)
+        );
+
+        assertThat(adapter.checkPressure("ragflow-transcript-memory")).isEqualTo(TargetPressure.THROTTLED);
+    }
+
+    @Test
+    void enabledAdapterClosesWhenRagFlowBacklogReachesHardLimit() {
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        gateway.pressureSnapshot = new RagFlowPressureSnapshot(100, 0, 0, 100, 200);
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway,
+            new RagFlowPressurePolicy(20, 5, 100, 25)
+        );
+
+        assertThat(adapter.checkPressure("ragflow-transcript-memory")).isEqualTo(TargetPressure.CLOSED);
+    }
+
+    @Test
+    void enabledAdapterFailsClosedWhenRagFlowPressureCannotBeRead() {
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        gateway.failPressure = true;
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway,
+            new RagFlowPressurePolicy(20, 5, 100, 25)
+        );
+
+        assertThat(adapter.checkPressure("ragflow-transcript-memory")).isEqualTo(TargetPressure.CLOSED);
+    }
+
+    @Test
     void enabledAdapterReturnsFailedWhenRagFlowRejectsUpload() {
         FakeRagFlowGateway gateway = new FakeRagFlowGateway();
         gateway.failUpload = true;
@@ -116,10 +164,12 @@ class RagFlowTargetAdapterTest {
 
     private static final class FakeRagFlowGateway implements RagFlowGateway {
         private boolean failUpload;
+        private boolean failPressure;
         private String uploadDatasetId;
         private String uploadFilename;
         private Map<String, String> metadata = new HashMap<>();
         private boolean parseRequested;
+        private RagFlowPressureSnapshot pressureSnapshot = new RagFlowPressureSnapshot(0, 0, 0, 100, 100);
 
         @Override
         public RagFlowDocumentRef uploadDocument(
@@ -144,6 +194,14 @@ class RagFlowTargetAdapterTest {
         @Override
         public void requestParse(String baseUrl, String apiKey, String datasetId, String documentId) {
             parseRequested = true;
+        }
+
+        @Override
+        public RagFlowPressureSnapshot pressureSnapshot(String baseUrl, String apiKey, String datasetId) {
+            if (failPressure) {
+                throw new RagFlowDeliveryException("boom");
+            }
+            return pressureSnapshot;
         }
     }
 }

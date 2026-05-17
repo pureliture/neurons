@@ -7,6 +7,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 
 def http_json(base_url, path, payload=None, expect_status=200):
@@ -75,6 +76,7 @@ def wait_for_health(base_url, timeout_seconds):
 
 
 def valid_enqueue_payload(body):
+    marker = "runtime-verify-" + uuid.uuid4().hex[:12]
     return {
         "schemaVersion": "rag_ingress_enqueue.v1",
         "source": {
@@ -92,13 +94,20 @@ def valid_enqueue_payload(body):
                 "metadata": {
                     "schema_version": "agent_knowledge_document.v2",
                     "result_type": "conversation_chunk",
+                    "runtime_verify_marker": marker,
                 },
             },
         },
         "contentHash": "sha256:" + hashlib.sha256(body.encode()).hexdigest(),
         "targetProfile": "ragflow-transcript-memory",
         "kind": "conversation_chunk",
+        "idempotencyKey": marker,
     }
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
 
 
 def main():
@@ -108,6 +117,7 @@ def main():
     parser.add_argument("--nats-port", type=int, default=4222)
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--evidence", default="build/reports/rag-ingress-queue/runtime-verify.json")
+    parser.add_argument("--expected-pressure", default="CLOSED", choices=["CLOSED", "THROTTLED"])
     args = parser.parse_args()
 
     health = wait_for_health(args.api_url, args.timeout)
@@ -125,13 +135,22 @@ def main():
         text=True,
     )
     postcheck_json = json.loads(postcheck)
+    stream_before = jetstream_request(args.nats_host, args.nats_port, "$JS.API.STREAM.INFO.RAG_INGRESS_QUEUE")
+    consumer_before = jetstream_request(
+        args.nats_host,
+        args.nats_port,
+        "$JS.API.CONSUMER.INFO.RAG_INGRESS_QUEUE.rag_target_delivery_worker",
+    )
+    before_messages = stream_before.get("state", {}).get("messages", 0)
+    before_last_seq = stream_before.get("state", {}).get("last_seq", 0)
+    before_delivered_consumer_seq = consumer_before.get("delivered", {}).get("consumer_seq", 0)
 
     body = (
         "---\n"
         "schema_version: agent_knowledge_document.v2\n"
         "result_type: conversation_chunk\n"
         "---\n"
-        "redacted ubuntu runtime verification body\n"
+        "redacted ubuntu runtime verification body " + uuid.uuid4().hex[:12] + "\n"
     )
     enqueue = http_json(args.api_url, "/v1/ingest/enqueue", valid_enqueue_payload(body), 202)
 
@@ -151,7 +170,8 @@ def main():
     evidence = {
         "runtime": {
             "verified": True,
-            "scope": "ubuntu-compose-api-nats-closed-pressure-worker-gate",
+            "scope": "ubuntu-compose-api-nats-pressure-worker-gate",
+            "expectedPressure": args.expected_pressure,
         },
         "health": health,
         "status": status,
@@ -179,18 +199,27 @@ def main():
         },
     }
 
-    assert evidence["health"] == {"component": "ingress-api", "status": "ok"}
-    assert evidence["status"]["target"]["pressure"] == "CLOSED"
-    assert evidence["enqueue"]["accepted"] is True
-    assert evidence["enqueue"]["jobId"] == "RAG_INGRESS_QUEUE:1"
-    assert evidence["redactionRejection"]["accepted"] is False
-    assert evidence["stream"]["messages"] == 1
-    assert evidence["stream"]["lastSeq"] == 1
-    assert evidence["consumer"]["numPending"] == 1
-    assert evidence["consumer"]["numAckPending"] == 0
-    assert evidence["consumer"]["numRedelivered"] == 0
-    assert evidence["consumer"]["delivered"]["consumer_seq"] == 0
-    assert evidence["consumer"]["delivered"]["stream_seq"] == 0
+    require(evidence["health"] == {"component": "ingress-api", "status": "ok"}, "healthz did not return ok")
+    require(evidence["status"]["target"]["pressure"] == args.expected_pressure, "target pressure mismatch")
+    require(evidence["enqueue"]["accepted"] is True, "enqueue was not accepted")
+    require(
+        evidence["enqueue"]["jobId"] == "RAG_INGRESS_QUEUE:" + str(before_last_seq + 1),
+        "enqueue did not create the next stream sequence",
+    )
+    require(evidence["redactionRejection"]["accepted"] is False, "redaction rejection was accepted")
+    require(evidence["stream"]["messages"] == before_messages + 1, "stream message count did not increase by one")
+    require(evidence["stream"]["lastSeq"] == before_last_seq + 1, "stream last sequence did not increase by one")
+    require(evidence["consumer"]["numPending"] >= 1, "consumer pending count did not show queued work")
+    require(evidence["consumer"]["numAckPending"] == 0, "worker has an ack-pending message while pressure is closed")
+    require(evidence["consumer"]["numRedelivered"] == 0, "message was redelivered during no-drain verification")
+    require(
+        evidence["consumer"]["delivered"]["consumer_seq"] == before_delivered_consumer_seq,
+        "consumer delivered sequence advanced under blocked pressure",
+    )
+    require(
+        evidence["consumer"]["delivered"]["stream_seq"] <= before_last_seq,
+        "consumer stream sequence advanced under blocked pressure",
+    )
 
     with open(args.evidence, "w", encoding="utf-8") as output:
         json.dump(evidence, output, indent=2, sort_keys=True)
