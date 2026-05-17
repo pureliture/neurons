@@ -31,7 +31,7 @@
 
 ## 현재 구현 상태
 
-현재 repo는 초기 구현 단계다. Gradle 기반 Java/Spring Boot skeleton, validation/API/worker 단위 테스트, JetStream publish ack 기반 API publisher, durable pull consumer wiring, compose 파일, offline postcheck가 있다. Ubuntu Docker/Compose runtime smoke는 `RAG_INGRESS_QUEUE:1` publish ack까지 확인했다. live RAGFlow smoke는 아직 없다.
+현재 repo는 초기 구현 단계다. Gradle 기반 Java/Spring Boot skeleton, validation/API/worker 단위 테스트, JetStream publish ack 기반 API publisher, durable pull consumer wiring, compose 파일, offline postcheck가 있다. Ubuntu Docker/Compose runtime verification은 `runtime.verified=true`까지 확인했다. live RAGFlow smoke는 아직 없다.
 
 `api` profile은 NATS JetStream publish ack를 받은 경우에만 enqueue accepted를 반환한다. `worker` profile은 durable pull consumer를 사용하지만, live RAGFlow delivery는 별도 승인 전까지 `rag-ingress.target.ragflow.delivery-enabled=false`로 닫아 둔다.
 

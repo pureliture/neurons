@@ -16,6 +16,7 @@ docker info --format '{{.ServerVersion}}'
 docker compose version
 docker compose -f compose.yaml up --build -d
 bash scripts/postcheck.sh --timeout 30 --evidence build/reports/rag-ingress-queue/postcheck.json
+./scripts/runtime-verify.py --timeout 30 --evidence build/reports/rag-ingress-queue/runtime-verify.json
 curl -fsS -H 'Content-Type: application/json' --data @/tmp/rag-ingress-enqueue.json http://127.0.0.1:8080/v1/ingest/enqueue
 docker compose -f compose.yaml down
 ```
@@ -28,7 +29,9 @@ docker compose -f compose.yaml down
 - Container state during smoke: all three services running
 - API health: `{"component":"ingress-api","status":"ok"}`
 - Online postcheck: passed API shape/redaction scan; `runtime.verified=false` by design because it does not prove worker delivery.
+- Runtime verifier: `runtime.verified=true`, scope `ubuntu-compose-api-nats-closed-pressure-worker-gate`
 - Enqueue response: `{"accepted":true,"jobId":"RAG_INGRESS_QUEUE:1","status":"queued","errors":[]}`
+- Redaction rejection: `{"accepted":false,"status":"rejected","errors":["request rejected"]}` with no token echo
 - JetStream stream info:
   - stream: `RAG_INGRESS_QUEUE`
   - subjects: `rag.ingress.>`
@@ -51,6 +54,7 @@ Runtime verification is now stronger than the earlier Mac-local blocker:
 - Verified: API publishes to JetStream and receives a publish ack.
 - Verified: stream and durable consumer exist.
 - Verified: default target pressure is `CLOSED`, so the worker does not fetch/deliver while live RAGFlow delivery is disabled.
+- Verified: invalid bearer-token payload is rejected without echo.
 
 Not verified:
 
