@@ -14,6 +14,10 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: api
       RAG_INGRESS_NATS_URL: nats://nats-jetstream:4222
+      RAGFLOW_DELIVERY_ENABLED: ${RAGFLOW_DELIVERY_ENABLED:-false}
+      RAGFLOW_BASE_URL: ${RAGFLOW_BASE_URL:-}
+      RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:-}
+      RAGFLOW_TRANSCRIPT_MEMORY_DATASET_ID: ${RAGFLOW_TRANSCRIPT_MEMORY_DATASET_ID:-}
     depends_on:
       - nats-jetstream
 
@@ -23,6 +27,12 @@ services:
       SPRING_PROFILES_ACTIVE: worker
       SPRING_MAIN_WEB_APPLICATION_TYPE: none
       RAG_INGRESS_NATS_URL: nats://nats-jetstream:4222
+      RAGFLOW_DELIVERY_ENABLED: ${RAGFLOW_DELIVERY_ENABLED:-false}
+      RAGFLOW_BASE_URL: ${RAGFLOW_BASE_URL:-}
+      RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:-}
+      RAGFLOW_TRANSCRIPT_MEMORY_DATASET_ID: ${RAGFLOW_TRANSCRIPT_MEMORY_DATASET_ID:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - nats-jetstream
 

@@ -25,17 +25,23 @@ rag-ingress:
     poll-interval-ms: 1000
   target:
     ragflow:
-      delivery-enabled: false
+      delivery-enabled: ${RAGFLOW_DELIVERY_ENABLED:false}
+      base-url: ${RAGFLOW_BASE_URL:}
+      api-key: ${RAGFLOW_API_KEY:}
   target-profiles:
     ragflow-transcript-memory:
       adapter: ragflow
       dataset-role: transcript-memory
+      dataset-id: ${RAGFLOW_TRANSCRIPT_MEMORY_DATASET_ID:}
     ragflow-session-summary:
       adapter: ragflow
       dataset-role: session-summary
+      dataset-id: ${RAGFLOW_SESSION_SUMMARY_DATASET_ID:}
     ragflow-task-summary:
       adapter: ragflow
       dataset-role: task-summary
+      dataset-id: ${RAGFLOW_TASK_SUMMARY_DATASET_ID:}
     ragflow-approved-memory-card:
       adapter: ragflow
       dataset-role: approved-memory-card
+      dataset-id: ${RAGFLOW_APPROVED_MEMORY_CARD_DATASET_ID:}

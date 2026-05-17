@@ -62,6 +62,9 @@ Not verified:
 - worker fetch/ack/nak against an enabled target adapter
 - external authorization pass for recall/promote eligibility
 
+Follow-up live verification is documented in
+`docs/runbooks/2026-05-17-ubuntu-live-ragflow-verification.md`.
+
 ## Cleanup
 
 `docker compose -f compose.yaml down` was run. The named NATS volume was not removed with `down -v`.
