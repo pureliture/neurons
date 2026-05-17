@@ -12,6 +12,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Profile;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -19,6 +21,7 @@ import java.time.Duration;
 
 @Component
 @Profile({"api", "worker"})
+@Order(Ordered.HIGHEST_PRECEDENCE)
 public class NatsJetStreamProvisioner implements ApplicationRunner {
     private static final String INGEST_SUBJECTS = "rag.ingress.>";
 
