@@ -53,6 +53,31 @@ Abort criteria:
 - Worker fetches or delivers while target pressure is `THROTTLED` or `CLOSED`.
 - API returns accepted without a JetStream publish ack.
 
+## RAGFlow Pressure Gate
+
+Production runtime must not treat “RAGFlow is configured” as enough evidence to drain the spool. The API and worker both read a redacted RAGFlow document status sample and calculate pressure from parsing backlog:
+
+- `OPEN`: backlog below all configured thresholds.
+- `THROTTLED`: `RUNNING` or `UNSTART` count reaches the throttle threshold. The worker must not fetch from JetStream.
+- `CLOSED`: hard threshold reached, configuration missing, or the RAGFlow pressure read fails. The worker must not fetch from JetStream.
+
+Default thresholds:
+
+```text
+RAGFLOW_PRESSURE_RUNNING_THROTTLE_THRESHOLD=20
+RAGFLOW_PRESSURE_UNSTART_THROTTLE_THRESHOLD=5
+RAGFLOW_PRESSURE_RUNNING_CLOSED_THRESHOLD=100
+RAGFLOW_PRESSURE_UNSTART_CLOSED_THRESHOLD=25
+```
+
+When live RAGFlow is already backlogged, run the runtime gate with the actual blocked pressure:
+
+```bash
+python3 scripts/runtime-verify.py --expected-pressure CLOSED
+```
+
+This proves that ingest accepts a sanitized job into JetStream while the worker leaves it pending instead of adding more load to RAGFlow.
+
 ## Live RAGFlow Gate
 
 Do not run live RAGFlow calls without a separate approval packet containing:
@@ -65,7 +90,7 @@ Do not run live RAGFlow calls without a separate approval packet containing:
 - rollback owner
 - expected evidence
 
-Live RAGFlow smoke proves sanitized upload/status behavior only. It does not prove external authorization or recall/promote eligibility. The default worker config keeps `rag-ingress.target.ragflow.delivery-enabled=false` until this gate is explicitly approved.
+Live RAGFlow smoke proves sanitized upload/status behavior only. It does not prove external authorization or recall/promote eligibility by itself. If pressure is `THROTTLED` or `CLOSED`, do not enqueue a new live write; use a previously written live document for external authorization and recall/promote verification, or wait until pressure returns to `OPEN`. Existing-document verification must be reported as existing-document recall/promote verification, not as a fresh queue-to-RAGFlow write proof.
 
 ## Rollback
 

@@ -28,6 +28,11 @@ rag-ingress:
       delivery-enabled: ${RAGFLOW_DELIVERY_ENABLED:false}
       base-url: ${RAGFLOW_BASE_URL:}
       api-key: ${RAGFLOW_API_KEY:}
+      pressure:
+        running-throttle-threshold: ${RAGFLOW_PRESSURE_RUNNING_THROTTLE_THRESHOLD:20}
+        unstart-throttle-threshold: ${RAGFLOW_PRESSURE_UNSTART_THROTTLE_THRESHOLD:5}
+        running-closed-threshold: ${RAGFLOW_PRESSURE_RUNNING_CLOSED_THRESHOLD:100}
+        unstart-closed-threshold: ${RAGFLOW_PRESSURE_UNSTART_CLOSED_THRESHOLD:25}
   target-profiles:
     ragflow-transcript-memory:
       adapter: ragflow

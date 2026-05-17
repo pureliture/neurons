@@ -19,9 +19,10 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
     private final String apiKey;
     private final Map<String, String> datasetIds;
     private final RagFlowGateway gateway;
+    private final RagFlowPressurePolicy pressurePolicy;
 
     public RagFlowTargetAdapter(@Value("${rag-ingress.target.ragflow.delivery-enabled:false}") boolean deliveryEnabled) {
-        this(deliveryEnabled, "", "", Map.of(), null);
+        this(deliveryEnabled, "", "", Map.of(), null, RagFlowPressurePolicy.DEFAULT);
     }
 
     @Autowired
@@ -33,6 +34,10 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
         @Value("${rag-ingress.target-profiles.ragflow-session-summary.dataset-id:}") String sessionSummaryDatasetId,
         @Value("${rag-ingress.target-profiles.ragflow-task-summary.dataset-id:}") String taskSummaryDatasetId,
         @Value("${rag-ingress.target-profiles.ragflow-approved-memory-card.dataset-id:}") String approvedMemoryCardDatasetId,
+        @Value("${rag-ingress.target.ragflow.pressure.running-throttle-threshold:20}") int runningThrottleThreshold,
+        @Value("${rag-ingress.target.ragflow.pressure.unstart-throttle-threshold:5}") int unstartThrottleThreshold,
+        @Value("${rag-ingress.target.ragflow.pressure.running-closed-threshold:100}") int runningClosedThreshold,
+        @Value("${rag-ingress.target.ragflow.pressure.unstart-closed-threshold:25}") int unstartClosedThreshold,
         RagFlowGateway gateway
     ) {
         this(
@@ -45,7 +50,13 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
                 "ragflow-task-summary", taskSummaryDatasetId,
                 "ragflow-approved-memory-card", approvedMemoryCardDatasetId
             ),
-            gateway
+            gateway,
+            new RagFlowPressurePolicy(
+                runningThrottleThreshold,
+                unstartThrottleThreshold,
+                runningClosedThreshold,
+                unstartClosedThreshold
+            )
         );
     }
 
@@ -56,11 +67,23 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
         Map<String, String> datasetIds,
         RagFlowGateway gateway
     ) {
+        this(deliveryEnabled, baseUrl, apiKey, datasetIds, gateway, RagFlowPressurePolicy.DEFAULT);
+    }
+
+    RagFlowTargetAdapter(
+        boolean deliveryEnabled,
+        String baseUrl,
+        String apiKey,
+        Map<String, String> datasetIds,
+        RagFlowGateway gateway,
+        RagFlowPressurePolicy pressurePolicy
+    ) {
         this.deliveryEnabled = deliveryEnabled;
         this.baseUrl = trimToEmpty(baseUrl);
         this.apiKey = trimToEmpty(apiKey);
         this.datasetIds = datasetIds;
         this.gateway = gateway;
+        this.pressurePolicy = pressurePolicy;
     }
 
     @Override
@@ -68,7 +91,11 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
         if (!isConfigured(targetProfile)) {
             return TargetPressure.CLOSED;
         }
-        return TargetPressure.OPEN;
+        try {
+            return pressurePolicy.evaluate(gateway.pressureSnapshot(baseUrl, apiKey, datasetId(targetProfile)));
+        } catch (RuntimeException error) {
+            return TargetPressure.CLOSED;
+        }
     }
 
     @Override

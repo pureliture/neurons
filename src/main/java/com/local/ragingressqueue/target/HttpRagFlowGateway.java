@@ -14,13 +14,15 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.UUID;
 
 @Component
-@Profile("worker")
+@Profile({"api", "worker"})
 class HttpRagFlowGateway implements RagFlowGateway {
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
+    private static final int PRESSURE_SAMPLE_SIZE = 200;
 
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
@@ -76,6 +78,62 @@ class HttpRagFlowGateway implements RagFlowGateway {
         }
     }
 
+    @Override
+    public RagFlowPressureSnapshot pressureSnapshot(String baseUrl, String apiKey, String datasetId) {
+        RagFlowPressureSnapshot recent = pressureSnapshotForQuery(baseUrl, apiKey, datasetId, "page=1&page_size=" + PRESSURE_SAMPLE_SIZE);
+        RagFlowPressureSnapshot running = pressureSnapshotForQuery(baseUrl, apiKey, datasetId, "page=1&page_size=1&run=RUNNING");
+        RagFlowPressureSnapshot unstart = pressureSnapshotForQuery(baseUrl, apiKey, datasetId, "page=1&page_size=1&run=UNSTART");
+        return new RagFlowPressureSnapshot(
+            Math.max(recent.running(), running.total()),
+            Math.max(recent.unstart(), unstart.total()),
+            recent.failed(),
+            recent.done(),
+            recent.sampled(),
+            recent.total()
+        );
+    }
+
+    private RagFlowPressureSnapshot pressureSnapshotForQuery(String baseUrl, String apiKey, String datasetId, String query) {
+        JsonNode data = request(
+            "GET",
+            baseUrl + "/api/v1/datasets/" + path(datasetId) + "/documents?" + query,
+            apiKey,
+            "",
+            null
+        );
+        int total = data.path("total").asInt(0);
+        JsonNode documents = data.path("docs");
+        if (!documents.isArray()) {
+            documents = data;
+        }
+        if (!documents.isArray()) {
+            throw new RagFlowDeliveryException("ragflow document list response missing docs");
+        }
+
+        int running = 0;
+        int unstart = 0;
+        int failed = 0;
+        int done = 0;
+        int sampled = 0;
+        for (Iterator<JsonNode> iterator = documents.elements(); iterator.hasNext();) {
+            sampled++;
+            String run = text(iterator.next(), "run");
+            if ("RUNNING".equals(run)) {
+                running++;
+            } else if ("UNSTART".equals(run)) {
+                unstart++;
+            } else if ("FAIL".equals(run) || "FAILED".equals(run) || "CANCEL".equals(run)) {
+                failed++;
+            } else if ("DONE".equals(run)) {
+                done++;
+            }
+        }
+        if (total < sampled) {
+            total = sampled;
+        }
+        return new RagFlowPressureSnapshot(running, unstart, failed, done, sampled, total);
+    }
+
     private void requestJson(String method, String url, String apiKey, Map<String, ?> payload) {
         try {
             byte[] body = objectMapper.writeValueAsBytes(payload);
@@ -86,13 +144,18 @@ class HttpRagFlowGateway implements RagFlowGateway {
     }
 
     private JsonNode request(String method, String url, String apiKey, String contentType, byte[] body) {
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-            .timeout(TIMEOUT)
-            .method(method, HttpRequest.BodyPublishers.ofByteArray(body))
-            .header("Authorization", "Bearer " + apiKey)
-            .header("Content-Type", contentType)
-            .build();
         try {
+            HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(url))
+                .timeout(TIMEOUT)
+                .method(
+                    method,
+                    body == null ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofByteArray(body)
+                )
+                .header("Authorization", "Bearer " + apiKey);
+            if (contentType != null && !contentType.isBlank()) {
+                builder.header("Content-Type", contentType);
+            }
+            HttpRequest request = builder.build();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             if (response.statusCode() >= 400) {
                 throw new RagFlowDeliveryException("ragflow http request failed");
@@ -102,6 +165,8 @@ class HttpRagFlowGateway implements RagFlowGateway {
                 throw new RagFlowDeliveryException("ragflow api request failed");
             }
             return root.path("data");
+        } catch (IllegalArgumentException error) {
+            throw new RagFlowDeliveryException("ragflow http request invalid", error);
         } catch (IOException error) {
             throw new RagFlowDeliveryException("ragflow http request failed", error);
         } catch (InterruptedException error) {

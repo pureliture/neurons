@@ -233,6 +233,8 @@ def main():
     parser.add_argument("--existing-filename", default="")
     parser.add_argument("--allow-same-document-chunk-fallback", action="store_true")
     parser.add_argument("--allow-preauthorized-existing-document", action="store_true")
+    parser.add_argument("--allow-throttled-existing-document", action="store_true")
+    parser.add_argument("--allow-closed-existing-document", action="store_true")
     args = parser.parse_args()
 
     if not args.ragflow_api_key:
@@ -255,9 +257,22 @@ def main():
 
     health = wait_until(deadline, lambda: http_json(args.api_url, "/healthz"), "ingress-api health")
     status = http_json(args.api_url, "/status")
-    if status.get("target", {}).get("pressure") != "OPEN":
+    target_pressure = status.get("target", {}).get("pressure")
+    if target_pressure != "OPEN":
+        allowed_existing_document = (
+            args.existing_filename
+            and (
+                (target_pressure == "THROTTLED" and args.allow_throttled_existing_document)
+                or (target_pressure == "CLOSED" and args.allow_closed_existing_document)
+            )
+        )
+        if not allowed_existing_document:
+            raise RuntimeError("ingress target pressure is not OPEN")
+
+    if target_pressure != "OPEN" and not args.existing_filename:
         raise RuntimeError("ingress target pressure is not OPEN")
 
+    existing_document_mode = bool(args.existing_filename)
     if args.existing_filename:
         enqueue = {"accepted": True, "status": "preexisting_live_document"}
     else:
@@ -339,7 +354,12 @@ def main():
     evidence = {
         "runtime": {
             "verified": True,
-            "scope": "ubuntu-compose-live-ragflow-write-external-authorization-recall-promote",
+            "scope": (
+                "ubuntu-compose-existing-live-document-external-authorization-recall-promote"
+                if existing_document_mode
+                else "ubuntu-compose-live-ragflow-write-external-authorization-recall-promote"
+            ),
+            "targetPressure": target_pressure,
         },
         "health": health,
         "status": {
