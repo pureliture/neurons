@@ -1,0 +1,1113 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>rag-ingress-queue 백엔드 아키텍처 설계</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+KR:wght@300;400;500;600;700&family=Teko:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-deep: #06060e;
+      --bg-surface: #0e0e18;
+      --bg-card: #141420;
+      --bg-card-hover: #1a1a2e;
+      --text-primary: #e8e8f0;
+      --text-secondary: #7a7a8e;
+      --text-muted: #4a4a5e;
+      --border-subtle: #1f1f35;
+      --border-hover: #2a2a45;
+      --tier1: #ff3d00;
+      --tier1-glow: rgba(255, 61, 0, 0.15);
+      --tier2: #ffc107;
+      --tier2-glow: rgba(255, 193, 7, 0.15);
+      --tier3: #00bfa5;
+      --tier3-glow: rgba(0, 191, 165, 0.15);
+      --accent-cyan: #00e5ff;
+      --accent-blue: #2979ff;
+      --accent-purple: #7c4dff;
+      --layer-api: #ff3d00;
+      --layer-service: #ffc107;
+      --layer-domain: #00bfa5;
+      --layer-port: #2979ff;
+      --layer-adapter-infra: #00bfa5;
+      --layer-adapter-ext: #7c4dff;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--bg-deep);
+      color: var(--text-primary);
+      font-family: 'Noto Sans KR', sans-serif;
+      line-height: 1.7;
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+      background-size: 60px 60px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .hero {
+      position: relative;
+      z-index: 1;
+      padding: 60px 40px 30px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    .hero-badge {
+      display: inline-block;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--accent-cyan);
+      border: 1px solid var(--accent-cyan);
+      padding: 6px 16px;
+      margin-bottom: 20px;
+    }
+
+    .hero h1 {
+      font-family: 'Teko', 'Noto Sans KR', sans-serif;
+      font-size: clamp(40px, 6vw, 80px);
+      font-weight: 700;
+      line-height: 0.95;
+      letter-spacing: -1px;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+
+    .hero h1 .highlight { color: var(--accent-cyan); text-shadow: 0 0 40px rgba(0,229,255,0.15); }
+
+    .hero-subtitle {
+      font-size: 16px;
+      font-weight: 300;
+      color: var(--text-secondary);
+      max-width: 700px;
+    }
+
+    .section {
+      position: relative;
+      z-index: 1;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 40px 40px;
+    }
+
+    .section-title {
+      font-family: 'Teko', 'Noto Sans KR', sans-serif;
+      font-size: 32px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .section-title .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    .section-desc {
+      font-size: 14px;
+      color: var(--text-secondary);
+      margin-bottom: 28px;
+      max-width: 800px;
+    }
+
+    .arch-diagram {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 16px;
+      padding: 32px;
+      margin-bottom: 40px;
+      overflow-x: auto;
+    }
+
+    .layer-row {
+      display: flex;
+      align-items: stretch;
+      gap: 2px;
+      margin-bottom: 2px;
+      min-height: 80px;
+    }
+
+    .layer-label {
+      width: 140px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding-right: 16px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+    }
+
+    .layer-blocks {
+      flex: 1;
+      display: flex;
+      gap: 8px;
+      align-items: stretch;
+    }
+
+    .block {
+      flex: 1;
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 12px 14px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--text-secondary);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 140px;
+      transition: all 0.3s ease;
+    }
+
+    .block:hover {
+      border-color: var(--border-hover);
+      background: var(--bg-card-hover);
+    }
+
+    .block-name {
+      font-family: 'Noto Sans KR', sans-serif;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .block-package {
+      font-size: 10px;
+      color: var(--text-muted);
+      word-break: break-all;
+    }
+
+    .block-api { border-left: 3px solid var(--layer-api); }
+    .block-service { border-left: 3px solid var(--layer-service); }
+    .block-domain { border-left: 3px solid var(--layer-domain); }
+    .block-port { border-left: 3px solid var(--layer-port); }
+    .block-adapter-infra { border-left: 3px solid var(--layer-adapter-infra); }
+    .block-adapter-ext { border-left: 3px solid var(--layer-adapter-ext); }
+
+    .arrow-row {
+      display: flex;
+      align-items: center;
+      padding-left: 140px;
+      height: 24px;
+      position: relative;
+    }
+
+    .arrow-line {
+      flex: 1;
+      height: 2px;
+      background: linear-gradient(90deg, var(--text-muted), transparent);
+      position: relative;
+    }
+
+    .arrow-line::after {
+      content: '↓';
+      position: absolute;
+      right: -8px;
+      top: -9px;
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+
+    .arrow-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: var(--text-muted);
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--bg-deep);
+      padding: 0 8px;
+    }
+
+    .package-tree {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 24px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      line-height: 2;
+      overflow-x: auto;
+    }
+
+    .tree-line {
+      display: block;
+      color: var(--text-secondary);
+    }
+
+    .tree-indent { padding-left: 24px; }
+    .tree-indent2 { padding-left: 48px; }
+    .tree-indent3 { padding-left: 72px; }
+
+    .tree-pkg { color: var(--text-primary); }
+    .tree-file { color: var(--text-muted); }
+
+    .compare-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    .compare-table th {
+      text-align: left;
+      padding: 12px 16px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      border-bottom: 2px solid var(--border-hover);
+      font-weight: 500;
+    }
+
+    .compare-table td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border-subtle);
+      vertical-align: top;
+    }
+
+    .compare-table tr:hover td {
+      background: rgba(255,255,255,0.02);
+    }
+
+    .status-badge {
+      display: inline-block;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      padding: 3px 10px;
+      border-radius: 4px;
+      letter-spacing: 1px;
+    }
+
+    .status-ok { background: rgba(0, 191, 165, 0.1); color: var(--tier3); border: 1px solid var(--tier3); }
+    .status-partial { background: rgba(255, 193, 7, 0.1); color: var(--tier2); border: 1px solid var(--tier2); }
+    .status-missing { background: rgba(255, 61, 0, 0.1); color: var(--tier1); border: 1px solid var(--tier1); }
+    .status-na { background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid var(--border-subtle); }
+
+    .legend {
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+      margin-top: 20px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border-subtle);
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .legend-color {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+    }
+
+    .proposed-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+    }
+
+    @media (max-width: 1100px) {
+      .proposed-grid { grid-template-columns: 1fr; }
+    }
+
+    .proposed-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 24px;
+      transition: all 0.3s ease;
+    }
+
+    .proposed-card:hover {
+      border-color: var(--border-hover);
+      transform: translateY(-2px);
+    }
+
+    .proposed-card .card-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .proposed-card .card-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+    }
+
+    .proposed-card .card-title {
+      font-family: 'Teko', 'Noto Sans KR', sans-serif;
+      font-size: 22px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .proposed-card ul {
+      list-style: none;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 2.2;
+    }
+
+    .proposed-card ul li::before {
+      content: '→ ';
+      color: var(--text-muted);
+    }
+
+    .dep-diagram {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 16px;
+      padding: 32px;
+      text-align: center;
+    }
+
+    .dep-boxes {
+      display: flex;
+      justify-content: center;
+      gap: 40px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+
+    .dep-box {
+      padding: 16px 24px;
+      border-radius: 8px;
+      border: 1px solid;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      min-width: 140px;
+    }
+
+    .dep-box.api { border-color: var(--layer-api); color: var(--layer-api); }
+    .dep-box.service { border-color: var(--layer-service); color: var(--layer-service); }
+    .dep-box.domain { border-color: var(--layer-domain); color: var(--layer-domain); }
+    .dep-box.port { border-color: var(--layer-port); color: var(--layer-port); }
+    .dep-box.adapter { border-color: var(--layer-adapter-ext); color: var(--layer-adapter-ext); }
+
+    .dep-arrows {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--text-muted);
+      line-height: 2;
+    }
+
+    .dep-arrows .arrow { color: var(--text-secondary); }
+    .dep-arrows .forbid { color: var(--tier1); text-decoration: line-through; }
+
+    .port-adapter-note {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 32px;
+    }
+
+    .port-adapter-note h3 {
+      font-family: 'Teko', 'Noto Sans KR', sans-serif;
+      font-size: 22px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--accent-cyan);
+      margin-bottom: 16px;
+    }
+
+    .port-adapter-note p {
+      font-size: 14px;
+      color: var(--text-secondary);
+      margin-bottom: 12px;
+      line-height: 1.8;
+    }
+
+    .port-adapter-note code {
+      background: rgba(255,255,255,0.05);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--text-primary);
+    }
+
+    .pa-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+      margin-top: 16px;
+    }
+
+    @media (max-width: 900px) {
+      .pa-grid { grid-template-columns: 1fr; }
+    }
+
+    .pa-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .pa-card h4 {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    .pa-card.infra h4 { color: var(--layer-adapter-infra); }
+    .pa-card.ext h4 { color: var(--layer-adapter-ext); }
+
+    .pa-card p {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.7;
+    }
+
+    .footer-note {
+      max-width: 1400px;
+      margin: 40px auto 60px;
+      padding: 0 40px;
+      font-size: 13px;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border-subtle);
+      padding-top: 24px;
+    }
+
+    .footer-note code {
+      background: rgba(255,255,255,0.05);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+
+  <section class="hero">
+    <div class="hero-badge">Backend Architecture Design Document</div>
+    <h1>
+      rag-ingress-queue<br>
+      <span class="highlight">백엔드 아키텍처</span> 설계
+    </h1>
+    <p class="hero-subtitle">
+      컴포넌트 드리븐 레이어드 아키텍처를 기반으로 한 패키지 구조 설계.
+      기능 단위 패키징(Feature-based Packaging) + 포트-어댑터 패턴 적용.
+    </p>
+  </section>
+
+  <section class="section">
+    <div class="section-title">
+      <div class="dot" style="background: var(--accent-cyan)"></div>
+      포트-어댑터 패턴 개념 정리
+    </div>
+    <div class="section-desc">
+      헥사고날 아키텍처의 핵심 개념입니다. <strong>포트(Port)</strong>는 우리 도메인이 정의한 인터페이스이고,
+      <strong>어댑터(Adapter)</strong>는 그 인터페이스를 외부 기술/서비스에 맞게 구현한 것입니다.
+      인프라와 어댑터는 같은 개념의 두 종류입니다.
+    </div>
+
+    <div class="port-adapter-note">
+      <h3>Port = 인터페이스 / Adapter = 구현체</h3>
+      <p>
+        <code>IngestPublisher</code> (Port, 인터페이스) ← 우리 도메인이 "메시지를 보낸다"고 정의<br>
+        <code>NatsIngestPublisher</code> (Adapter, 구현체) ← NATS JetStream으로 실제로 보냄
+      </p>
+      <p>
+        <code>RagTargetAdapter</code> (Port, 인터페이스) ← 우리 도메인이 "타겟에 전달한다"고 정의<br>
+        <code>RagFlowTargetAdapter</code> (Adapter, 구현체) ← RAGFlow REST API로 실제로 전달
+      </p>
+
+      <div class="pa-grid">
+        <div class="pa-card infra">
+          <h4>인프라 어댑터</h4>
+          <p>
+            우리 시스템이 사용하는 기술 인프라를 도메인에 맞게 감쌉니다.<br><br>
+            예: NATS (메시징), Caffeine (캐시), WebClient (HTTP 클라이언트 설정)<br><br>
+            → "우리가 기술을 도메인 방식으로 사용한다"
+          </p>
+        </div>
+        <div class="pa-card ext">
+          <h4>외부 서비스 어댑터</h4>
+          <p>
+            외부 비즈니스 서비스를 우리 도메인에 맞게 감쌉니다.<br><br>
+            예: RAGFlow (RAG 타겟), GitLab (소스 저장소), 외부 인증 서버<br><br>
+            → "외부 서비스를 우리 도메인 방식으로 사용한다"
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-title">
+      <div class="dot" style="background: var(--tier1)"></div>
+      현재 구조 — 기술 계층 중심 패키징
+    </div>
+    <div class="section-desc">
+      현재 rag-ingress-queue는 계층(기술) 단위로 패키지가 분리되어 있습니다.
+      기능(도메인) 단위 분리가 없어 여러 기능이 한 패키지에 섞여 있습니다.
+    </div>
+
+    <div class="arch-diagram">
+      <div class="layer-row">
+        <div class="layer-label" style="color: var(--layer-api)">표현 계층</div>
+        <div class="layer-blocks">
+          <div class="block block-api">
+            <div class="block-name">IngressController</div>
+            <div class="block-package">api/</div>
+          </div>
+          <div class="block block-api">
+            <div class="block-name">StatusService</div>
+            <div class="block-package">api/ ← RAGFlow 직접 의존</div>
+          </div>
+        </div>
+      </div>
+      <div class="arrow-row"><div class="arrow-line"></div><div class="arrow-label">의존</div></div>
+      <div class="layer-row">
+        <div class="layer-label" style="color: var(--layer-domain)">도메인 계층</div>
+        <div class="layer-blocks">
+          <div class="block block-domain">
+            <div class="block-name">IngestJob, DocumentPayload</div>
+            <div class="block-package">core/</div>
+          </div>
+          <div class="block block-domain">
+            <div class="block-name">Validator, RedactionGuard</div>
+            <div class="block-package">core/validation/</div>
+          </div>
+        </div>
+      </div>
+      <div class="arrow-row"><div class="arrow-line"></div><div class="arrow-label">의존</div></div>
+      <div class="layer-row">
+        <div class="layer-label" style="color: var(--layer-port)">포트 계층</div>
+        <div class="layer-blocks">
+          <div class="block block-port">
+            <div class="block-name">IngestPublisher (Port)</div>
+            <div class="block-package">queue/queue 인터페이스</div>
+          </div>
+          <div class="block block-port">
+            <div class="block-name">IngestConsumer (Port)</div>
+            <div class="block-package">queue/queue 인터페이스</div>
+          </div>
+          <div class="block block-port">
+            <div class="block-name">RagTargetAdapter (Port)</div>
+            <div class="block-package">target/제네릭 계약</div>
+          </div>
+        </div>
+      </div>
+      <div class="arrow-row"><div class="arrow-line"></div><div class="arrow-label">구현</div></div>
+      <div class="layer-row">
+        <div class="layer-label" style="color: var(--layer-adapter-ext)">어댑터 계층</div>
+        <div class="layer-blocks">
+          <div class="block block-adapter-infra">
+            <div class="block-name">NatsIngestPublisher</div>
+            <div class="block-package">queue/ ← 인프라 어댑터</div>
+          </div>
+          <div class="block block-adapter-infra">
+            <div class="block-name">NatsIngestConsumer</div>
+            <div class="block-package">queue/ ← 인프라 어댑터</div>
+          </div>
+          <div class="block block-adapter-ext">
+            <div class="block-name">RagFlowTargetAdapter</div>
+            <div class="block-package">target/ ← 외부 어댑터 (제네릭에 섞임)</div>
+          </div>
+          <div class="block block-adapter-ext">
+            <div class="block-name">HttpRagFlowGateway</div>
+            <div class="block-package">target/ ← 외부 어댑터 (제네릭에 섞임)</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="package-tree">
+      <span class="tree-line tree-pkg">com.local.ragingressqueue</span>
+      <span class="tree-line tree-indent tree-pkg">├── api/ ← enqueue, status, healthz 모두 여기</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── IngressController.java</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── StatusService.java ← RAGFlow 직접 의존 (문제)</span>
+      <span class="tree-line tree-indent2 tree-file">│   └── IdempotencyStore.java</span>
+      <span class="tree-line tree-indent tree-pkg">├── core/ ← 도메인 + 검증 혼합</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── IngestJob.java</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── DocumentPayload.java</span>
+      <span class="tree-line tree-indent2 tree-file">│   └── validation/</span>
+      <span class="tree-line tree-indent tree-pkg">├── queue/ ← 포트 + 인프라 어댑터 혼합 (문제)</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── IngestPublisher.java ← Port (인터페이스)</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── NatsIngestPublisher.java ← 인프라 Adapter</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── NatsIngestConsumer.java ← 인프라 Adapter</span>
+      <span class="tree-line tree-indent2 tree-file">│   └── NatsJetStreamProvisioner.java</span>
+      <span class="tree-line tree-indent tree-pkg">├── worker/ ← worker 로직 + 설정</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── IngestWorker.java</span>
+      <span class="tree-line tree-indent2 tree-file">│   └── WorkerConfiguration.java</span>
+      <span class="tree-line tree-indent tree-pkg">└── target/ ← 포트 + 외부 어댑터 혼합 (문제)</span>
+      <span class="tree-line tree-indent2 tree-file">    ├── RagTargetAdapter.java ← Port (제네릭 계약)</span>
+      <span class="tree-line tree-indent2 tree-file">    ├── RagFlowTargetAdapter.java ← 외부 Adapter</span>
+      <span class="tree-line tree-indent2 tree-file">    ├── HttpRagFlowGateway.java ← 외부 Adapter</span>
+      <span class="tree-line tree-indent2 tree-file">    └── RagFlowPressurePolicy.java ← 외부 Adapter</span>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-title">
+      <div class="dot" style="background: var(--accent-blue)"></div>
+      참조 구조 — sidebeam-backend (컴포넌트 드리븐 레이어드)
+    </div>
+    <div class="section-desc">
+      sidebeam-backend는 기능(도메인) 단위로 패키지를 분리하고, 각 기능 내부에서 계층형 구조를 유지합니다.
+      컴포넌트 드리븐 + 레이어드의 혼합 패턴입니다.
+    </div>
+
+    <div class="package-tree">
+      <span class="tree-line tree-pkg">com.sidebeam</span>
+      <span class="tree-line tree-indent tree-pkg">├── bookmark/ ← 기능 단위 (북마크)</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── controller/ ← 기능 내 계층</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── service/      impl/ ← 구현체 분리</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── domain/         model/ ← 도메인 모델</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── dto/ ← DTO 분리</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── repository/     impl/ ← 저장소 분리</span>
+      <span class="tree-line tree-indent2 tree-file">│   └── mapper/ ← MapStruct 매퍼</span>
+      <span class="tree-line tree-indent tree-pkg">├── common/ ← 공통 인프라 (기술 계층)</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── cache/</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── core/           exception/ ← 예외 계층</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── logging/</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── rest/           config/ ← 글로벌 REST 설정</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── security/</span>
+      <span class="tree-line tree-indent2 tree-file">│   └── web/            filter/ ← 필터</span>
+      <span class="tree-line tree-indent tree-pkg">└── external/ ← 외부 시스템 전용 패키지</span>
+      <span class="tree-line tree-indent2 tree-file">    └── gitlab/</span>
+      <span class="tree-line tree-indent3 tree-file">        ├── service/    GitLabApiClient.java ← 구현체 (Port 없음)</span>
+      <span class="tree-line tree-indent3 tree-file">        ├── dto/ ← 외부 API용 DTO</span>
+      <span class="tree-line tree-indent3 tree-file">        └── config/     property/ ← 설정 외부화</span>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-title">
+      <div class="dot" style="background: var(--tier3)"></div>
+      제안 구조 — 컴포넌트 드리븐 레이어드 + 포트-어댑터
+    </div>
+    <div class="section-desc">
+      기능 단위 패키징 + 포트/어댑터 명확 분리를 적용한 제안 구조입니다.
+      Port는 기능별로 존재하고, Adapter는 기술 종류(인프라/외부)에 따라 분리됩니다.
+    </div>
+
+    <div class="arch-diagram">
+      <div class="layer-row">
+        <div class="layer-label" style="color: var(--layer-api)">표현 계층</div>
+        <div class="layer-blocks">
+          <div class="block block-api">
+            <div class="block-name">IngressController</div>
+            <div class="block-package">ingest/api/</div>
+          </div>
+          <div class="block block-api">
+            <div class="block-name">StatusController</div>
+            <div class="block-package">status/api/ ← 추상화된 상태</div>
+          </div>
+        </div>
+      </div>
+      <div class="arrow-row"><div class="arrow-line"></div><div class="arrow-label">의존</div></div>
+      <div class="layer-row">
+        <div class="layer-label" style="color: var(--layer-service)">응용 계층</div>
+        <div class="layer-blocks">
+          <div class="block block-service">
+            <div class="block-name">EnqueueService</div>
+            <div class="block-package">ingest/service/</div>
+          </div>
+          <div class="block block-service">
+            <div class="block-name">DeliveryService</div>
+            <div class="block-package">delivery/service/</div>
+          </div>
+          <div class="block block-service">
+            <div class="block-name">StatusService</div>
+            <div class="block-package">status/service/ ← Port만 의존</div>
+          </div>
+        </div>
+      </div>
+      <div class="arrow-row"><div class="arrow-line"></div><div class="arrow-label">의존</div></div>
+      <div class="layer-row">
+        <div class="layer-label" style="color: var(--layer-domain)">도메인 계층</div>
+        <div class="layer-blocks">
+          <div class="block block-domain">
+            <div class="block-name">IngestJob, DocumentPayload</div>
+            <div class="block-package">ingest/domain/</div>
+          </div>
+          <div class="block block-domain">
+            <div class="block-name">TargetPressure, DeliveryDecision</div>
+            <div class="block-package">delivery/domain/</div>
+          </div>
+          <div class="block block-domain">
+            <div class="block-name">Validation, Redaction</div>
+            <div class="block-package">ingest/domain/validation/</div>
+          </div>
+        </div>
+      </div>
+      <div class="arrow-row"><div class="arrow-line"></div><div class="arrow-label">의존</div></div>
+      <div class="layer-row">
+        <div class="layer-label" style="color: var(--layer-port)">포트 계층</div>
+        <div class="layer-blocks">
+          <div class="block block-port">
+            <div class="block-name">IngestPublisher (Port)</div>
+            <div class="block-package">queue/port/</div>
+          </div>
+          <div class="block block-port">
+            <div class="block-name">IngestConsumer (Port)</div>
+            <div class="block-package">queue/port/</div>
+          </div>
+          <div class="block block-port">
+            <div class="block-name">RagTargetAdapter (Port)</div>
+            <div class="block-package">target/port/</div>
+          </div>
+        </div>
+      </div>
+      <div class="arrow-row"><div class="arrow-line"></div><div class="arrow-label">구현</div></div>
+      <div class="layer-row">
+        <div class="layer-label" style="color: var(--layer-adapter-ext)">어댑터 계층</div>
+        <div class="layer-blocks">
+          <div class="block block-adapter-infra">
+            <div class="block-name">NatsIngestPublisher</div>
+            <div class="block-package">adapter/infra/nats/ ← 인프라 어댑터</div>
+          </div>
+          <div class="block block-adapter-infra">
+            <div class="block-name">NatsIngestConsumer</div>
+            <div class="block-package">adapter/infra/nats/ ← 인프라 어댑터</div>
+          </div>
+          <div class="block block-adapter-ext">
+            <div class="block-name">RagFlowTargetAdapter</div>
+            <div class="block-package">adapter/ext/ragflow/ ← 외부 어댑터</div>
+          </div>
+          <div class="block block-adapter-ext">
+            <div class="block-name">HttpRagFlowGateway</div>
+            <div class="block-package">adapter/ext/ragflow/ ← 외부 어댑터</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="package-tree">
+      <span class="tree-line tree-pkg">com.local.ragingressqueue</span>
+      <span class="tree-line tree-indent tree-pkg">├── ingest/ ← 인제스트 기능 (enqueue)</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── api/              IngressController.java</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── service/          EnqueueService.java</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── domain/           IngestJob.java, DocumentPayload.java</span>
+      <span class="tree-line tree-indent2 tree-file">│   └── dto/              EnqueueRequest.java, EnqueueResponse.java</span>
+      <span class="tree-line tree-indent tree-pkg">├── delivery/ ← 딜리버리 기능 (worker + target)</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── worker/           IngestWorker.java, WorkerLoopRunner.java</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── service/          DeliveryService.java ← targetProfile 라우팅</span>
+      <span class="tree-line tree-indent2 tree-file">│   └── domain/           DeliveryDecision.java, TargetPressure.java</span>
+      <span class="tree-line tree-indent tree-pkg">├── status/ ← 상태 조회 기능</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── api/              StatusController.java</span>
+      <span class="tree-line tree-indent2 tree-file">│   └── service/          StatusService.java ← RagTargetAdapter만 의존</span>
+      <span class="tree-line tree-indent tree-pkg">├── queue/ ← 큐 포트 (인터페이스만)</span>
+      <span class="tree-line tree-indent2 tree-file">│   └── port/             IngestPublisher.java, IngestConsumer.java</span>
+      <span class="tree-line tree-indent tree-pkg">├── target/ ← 타겟 포트 (인터페이스만)</span>
+      <span class="tree-line tree-indent2 tree-file">│   └── port/             RagTargetAdapter.java ← 유일한 제네릭 계약</span>
+      <span class="tree-line tree-indent tree-pkg">├── adapter/ ← 어댑터 구현체 (Port의 구현)</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── infra/            ← 인프라 어댑터 (기술)</span>
+      <span class="tree-line tree-indent3 tree-file">│   │   └── nats/         NatsIngestPublisher.java, NatsIngestConsumer.java</span>
+      <span class="tree-line tree-indent3 tree-file">│   │       NatsJetStreamProvisioner.java</span>
+      <span class="tree-line tree-indent2 tree-file">│   └── ext/              ← 외부 서비스 어댑터</span>
+      <span class="tree-line tree-indent3 tree-file">│       └── ragflow/      RagFlowTargetAdapter.java, HttpRagFlowGateway.java</span>
+      <span class="tree-line tree-indent tree-pkg">└── common/ ← 공통 인프라</span>
+      <span class="tree-line tree-indent2 tree-file">    ├── config/           NatsJetStreamConfiguration.java</span>
+      <span class="tree-line tree-indent2 tree-file">    ├── exception/        ApplicationException, BusinessException, ErrorCode</span>
+      <span class="tree-line tree-indent2 tree-file">    ├── logging/          SensitiveDataMaskingConverter.java</span>
+      <span class="tree-line tree-indent2 tree-file">    └── web/              CorrelationIdFilter.java</span>
+    </div>
+
+    <div class="legend">
+      <div class="legend-item"><div class="legend-color" style="background: var(--layer-api)"></div>표현 계층 (Controller)</div>
+      <div class="legend-item"><div class="legend-color" style="background: var(--layer-service)"></div>응용 계층 (Service)</div>
+      <div class="legend-item"><div class="legend-color" style="background: var(--layer-domain)"></div>도메인 계층 (Domain/Validation)</div>
+      <div class="legend-item"><div class="legend-color" style="background: var(--layer-port)"></div>포트 계층 (인터페이스)</div>
+      <div class="legend-item"><div class="legend-color" style="background: var(--layer-adapter-infra)"></div>인프라 어댑터 (기술 구현)</div>
+      <div class="legend-item"><div class="legend-color" style="background: var(--layer-adapter-ext)"></div>외부 어댑터 (서비스 구현)</div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-title">
+      <div class="dot" style="background: var(--accent-purple)"></div>
+      계층 의존성 규칙 (ArchUnit 검증 대상)
+    </div>
+    <div class="section-desc">
+      아래 규칙을 ArchUnit 테스트로 코드화하여 CI에서 자동 검증합니다.
+      위반 시 빌드가 실패하므로 아키텍처 드리프트를 방지합니다.
+    </div>
+
+    <div class="dep-diagram">
+      <div class="dep-boxes">
+        <div class="dep-box api">api (표현)</div>
+        <div class="dep-box service">service (응용)</div>
+        <div class="dep-box domain">domain (도메인)</div>
+        <div class="dep-box port">port (포트)</div>
+        <div class="dep-box adapter">adapter (어댑터)</div>
+      </div>
+      <div class="dep-arrows">
+        <div class="arrow">api → service → domain → port ← adapter</div>
+        <div class="arrow">common (exception, logging, config)는 모든 계층에서 참조 가능</div>
+        <div class="forbid">✗ service는 api를 알 수 없음 (순환 참조 방지)</div>
+        <div class="forbid">✗ domain은 adapter를 알 수 없음 (순수성 유지)</div>
+        <div class="forbid">✗ adapter 내부 구현은 다른 adapter에 노출 불가</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-title">
+      <div class="dot" style="background: var(--tier2)"></div>
+      세 구조 비교표
+    </div>
+
+    <div style="overflow-x: auto">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>패턴/속성</th>
+            <th>현재 rag-ingress-queue</th>
+            <th>sidebeam-backend</th>
+            <th>제안 구조</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>패키징 방식</td>
+            <td><span class="status-badge status-partial">기술 계층</span></td>
+            <td><span class="status-badge status-ok">기능 단위</span></td>
+            <td><span class="status-badge status-ok">기능 단위 + 포트-어댑터</span></td>
+          </tr>
+          <tr>
+            <td>포트-어댑터 분리</td>
+            <td><span class="status-badge status-partial">Port/Adapter 있음, 패키지 혼합</span></td>
+            <td><span class="status-badge status-missing">논리적 Port 없음</span></td>
+            <td><span class="status-badge status-ok">Port/Adapter 명확 분리</span></td>
+          </tr>
+          <tr>
+            <td>어댑터 분류</td>
+            <td><span class="status-badge status-missing">인프라/외부 구분 없음</span></td>
+            <td><span class="status-badge status-partial">external/로 분리 (Port 없음)</span></td>
+            <td><span class="status-badge status-ok">adapter/infra vs adapter/ext</span></td>
+          </tr>
+          <tr>
+            <td>예외 처리</td>
+            <td><span class="status-badge status-missing">계층 없음, Controller 직접 조립</span></td>
+            <td><span class="status-badge status-ok">ApplicationException + ErrorCode + @RestControllerAdvice</span></td>
+            <td><span class="status-badge status-ok">sidebeam 스타일 적용</span></td>
+          </tr>
+          <tr>
+            <td>설정 외부화</td>
+            <td><span class="status-badge status-partial">@Value 산재</span></td>
+            <td><span class="status-badge status-ok">@ConfigurationProperties + Jasypt</span></td>
+            <td><span class="status-badge status-ok">@ConfigurationProperties 적용</span></td>
+          </tr>
+          <tr>
+            <td>아키텍처 테스트</td>
+            <td><span class="status-badge status-missing">없음</span></td>
+            <td><span class="status-badge status-ok">ArchUnit 3개 규칙</span></td>
+            <td><span class="status-badge status-ok">ArchUnit 5개 규칙 제안</span></td>
+          </tr>
+          <tr>
+            <td>백프레셔/압력 게이트</td>
+            <td><span class="status-badge status-ok">TargetPressure + RagFlowPressurePolicy</span></td>
+            <td><span class="status-badge status-na">해당 없음</span></td>
+            <td><span class="status-badge status-ok">유지</span></td>
+          </tr>
+          <tr>
+            <td>로그 마스킹</td>
+            <td><span class="status-badge status-missing">Payload 검증만</span></td>
+            <td><span class="status-badge status-ok">Logback Converter (런타임)</span></td>
+            <td><span class="status-badge status-ok">sidebeam 스타일 적용</span></td>
+          </tr>
+          <tr>
+            <td>Correlation ID / MDC</td>
+            <td><span class="status-badge status-missing">없음</span></td>
+            <td><span class="status-badge status-ok">필터 + MDC + 응답 반사</span></td>
+            <td><span class="status-badge status-ok">적용</span></td>
+          </tr>
+          <tr>
+            <td>커버리지 강제</td>
+            <td><span class="status-badge status-missing">없음</span></td>
+            <td><span class="status-badge status-ok">Jacoco 80/70</span></td>
+            <td><span class="status-badge status-ok">report-only → threshold 순차</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-title">
+      <div class="dot" style="background: var(--accent-cyan)"></div>
+      기능(컴포넌트)별 상세 구조
+    </div>
+    <div class="section-desc">
+      각 기능은 독립적으로 이해할 수 있는 단위입니다. 기능 간 의존은 최소화하고,
+      공통 인프라(common)와 포트(port)를 통해서만 연결됩니다.
+    </div>
+
+    <div class="proposed-grid">
+      <div class="proposed-card">
+        <div class="card-header">
+          <div class="card-icon" style="background: rgba(255,61,0,0.15); color: var(--tier1)">📥</div>
+          <div class="card-title" style="color: var(--tier1)">ingest</div>
+        </div>
+        <ul>
+          <li>POST /v1/ingest/enqueue 처리</li>
+          <li>요청 검증 (validation + redaction)</li>
+          <li>JetStream publish (via queue.port)</li>
+          <li>Idempotency key 관리</li>
+          <li>api → service → domain → queue.port 의존</li>
+        </ul>
+      </div>
+
+      <div class="proposed-card">
+        <div class="card-header">
+          <div class="card-icon" style="background: rgba(255,193,7,0.15); color: var(--tier2)">🚚</div>
+          <div class="card-title" style="color: var(--tier2)">delivery</div>
+        </div>
+        <ul>
+          <li>Worker pull consumer 루프</li>
+          <li>TargetProfile별 라우팅</li>
+          <li>Pressure check → deliver / skip</li>
+          <li>Retry / nak / ack 정책</li>
+          <li>worker → service → domain → target.port 의존</li>
+        </ul>
+      </div>
+
+      <div class="proposed-card">
+        <div class="card-header">
+          <div class="card-icon" style="background: rgba(0,191,165,0.15); color: var(--tier3)">📡</div>
+          <div class="card-title" style="color: var(--tier3)">status</div>
+        </div>
+        <ul>
+          <li>GET /status 응답 생성</li>
+          <li>Queue 상태 (pending, inFlight, deadLetter)</li>
+          <li>Target 상태 (pressure, adapter snapshot)</li>
+          <li>RAGFlow 설정에 직접 의존하지 않음</li>
+          <li>api → service → target.port 의존</li>
+        </ul>
+      </div>
+
+      <div class="proposed-card">
+        <div class="card-header">
+          <div class="card-icon" style="background: rgba(41,121,255,0.15); color: var(--accent-blue)">📨</div>
+          <div class="card-title" style="color: var(--accent-blue)">queue (port)</div>
+        </div>
+        <ul>
+          <li>IngestPublisher — 메시지 발행 인터페이스</li>
+          <li>IngestConsumer — 메시지 소비 인터페이스</li>
+          <li>도메인이 큐 기술을 몰라도 됨</li>
+          <li>NATS, Kafka, RabbitMQ 교체 가능</li>
+          <li>구현체는 adapter/infra/nats/</li>
+        </ul>
+      </div>
+
+      <div class="proposed-card">
+        <div class="card-header">
+          <div class="card-icon" style="background: rgba(124,77,255,0.15); color: var(--accent-purple)">🎯</div>
+          <div class="card-title" style="color: var(--accent-purple)">target (port)</div>
+        </div>
+        <ul>
+          <li>RagTargetAdapter — 타겟 전달 인터페이스</li>
+          <li>checkPressure(), deliver(), snapshot()</li>
+          <li>도메인이 RAGFlow를 몰라도 됨</li>
+          <li>Qdrant, Weaviate 등 교체 가능</li>
+          <li>구현체는 adapter/ext/ragflow/</li>
+        </ul>
+      </div>
+
+      <div class="proposed-card">
+        <div class="card-header">
+          <div class="card-icon" style="background: rgba(0,191,165,0.15); color: var(--layer-adapter-infra)">⚙️</div>
+          <div class="card-title" style="color: var(--layer-adapter-infra)">adapter/infra</div>
+        </div>
+        <ul>
+          <li>NatsIngestPublisher — Port 구현 (메시징)</li>
+          <li>NatsIngestConsumer — Port 구현 (메시징)</li>
+          <li>NatsJetStreamProvisioner — Stream 생성</li>
+          <li>기술 인프라를 도메인 방식으로 감쌈</li>
+          <li>→ "우리가 기술을 사용한다"</li>
+        </ul>
+      </div>
+
+      <div class="proposed-card">
+        <div class="card-header">
+          <div class="card-icon" style="background: rgba(124,77,255,0.15); color: var(--layer-adapter-ext)">🔌</div>
+          <div class="card-title" style="color: var(--layer-adapter-ext)">adapter/ext</div>
+        </div>
+        <ul>
+          <li>RagFlowTargetAdapter — Port 구현 (RAG 타겟)</li>
+          <li>HttpRagFlowGateway — HTTP 클라이언트</li>
+          <li>RagFlowPressurePolicy — 압력 계산</li>
+          <li>외부 서비스를 도메인 방식으로 감쌈</li>
+          <li>→ "외부 서비스를 우리가 사용한다"</li>
+        </ul>
+      </div>
+
+      <div class="proposed-card">
+        <div class="card-header">
+          <div class="card-icon" style="background: rgba(255,255,255,0.08); color: var(--text-secondary)">🛠️</div>
+          <div class="card-title" style="color: var(--text-secondary)">common</div>
+        </div>
+        <ul>
+          <li>config: Spring 설정, @ConfigurationProperties</li>
+          <li>exception: 계층형 예외 + ErrorCode enum</li>
+          <li>logging: SensitiveDataMaskingConverter</li>
+          <li>web: CorrelationIdFilter, ApiKeyAuthFilter</li>
+          <li>모든 기능이 참조 가능 (최하위 계층)</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <div class="footer-note">
+    <strong>참고:</strong> 이 설계는
+    <code>/docs/superpowers/reviews/sidebeam-cross-review-combined.md</code>
+    에서 파생되었습니다. ACO 어드바이저리 리뷰(#1, #2)와 3개 sidebeam 분석 에이전트의 결과를 종합.
+    <br>
+    모든 변경은 코드 전용이며 런타임 부작용이 없습니다.
+    검증 명령: <code>JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test</code> +
+    <code>bash scripts/postcheck.sh --offline --timeout 30</code>
+  </div>
+
+</body>
+</html>

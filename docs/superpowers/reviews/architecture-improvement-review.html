@@ -1,0 +1,1154 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>rag-ingress-queue 아키텍처 개선 리뷰</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+KR:wght@300;400;500;600;700&family=Teko:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-deep: #06060e;
+      --bg-surface: #0e0e18;
+      --bg-card: #141420;
+      --bg-card-hover: #1a1a2e;
+      --text-primary: #e8e8f0;
+      --text-secondary: #7a7a8e;
+      --text-muted: #4a4a5e;
+      --border-subtle: #1f1f35;
+      --border-hover: #2a2a45;
+      --tier1: #ff3d00;
+      --tier1-glow: rgba(255, 61, 0, 0.15);
+      --tier2: #ffc107;
+      --tier2-glow: rgba(255, 193, 7, 0.15);
+      --tier3: #00bfa5;
+      --tier3-glow: rgba(0, 191, 165, 0.15);
+      --defer: #607d8b;
+      --defer-glow: rgba(96, 125, 139, 0.15);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--bg-deep);
+      color: var(--text-primary);
+      font-family: 'Noto Sans KR', 'Outfit', sans-serif;
+      line-height: 1.7;
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+      background-size: 60px 60px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    body::after {
+      content: '';
+      position: fixed;
+      top: -50%;
+      left: -20%;
+      width: 200%;
+      height: 200%;
+      background: linear-gradient(
+        135deg,
+        transparent 49.8%,
+        rgba(255, 61, 0, 0.03) 49.9%,
+        rgba(255, 61, 0, 0.03) 50.1%,
+        transparent 50.2%
+      );
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .hero {
+      position: relative;
+      z-index: 1;
+      padding: 80px 40px 40px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    .hero-badge {
+      display: inline-block;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--tier1);
+      border: 1px solid var(--tier1);
+      padding: 6px 16px;
+      margin-bottom: 24px;
+      opacity: 0;
+      animation: fadeSlideUp 0.6s ease forwards;
+    }
+
+    .hero h1 {
+      font-family: 'Teko', 'Noto Sans KR', sans-serif;
+      font-size: clamp(48px, 8vw, 120px);
+      font-weight: 700;
+      line-height: 0.9;
+      letter-spacing: -1px;
+      text-transform: uppercase;
+      margin-bottom: 16px;
+      opacity: 0;
+      animation: fadeSlideUp 0.6s ease 0.1s forwards;
+    }
+
+    .hero h1 .highlight {
+      color: var(--tier1);
+      text-shadow: 0 0 40px var(--tier1-glow);
+    }
+
+    .hero-subtitle {
+      font-family: 'Noto Sans KR', sans-serif;
+      font-size: 17px;
+      font-weight: 300;
+      color: var(--text-secondary);
+      max-width: 650px;
+      margin-bottom: 40px;
+      opacity: 0;
+      animation: fadeSlideUp 0.6s ease 0.2s forwards;
+    }
+
+    .aco-meta {
+      display: flex;
+      gap: 32px;
+      flex-wrap: wrap;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border-subtle);
+      padding-top: 20px;
+      opacity: 0;
+      animation: fadeSlideUp 0.6s ease 0.3s forwards;
+    }
+
+    .aco-meta span {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .aco-meta .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--tier3);
+    }
+
+    .summary-bar {
+      position: relative;
+      z-index: 1;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 0 40px 60px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      background: var(--border-subtle);
+      border-radius: 8px;
+      overflow: hidden;
+      opacity: 0;
+      animation: fadeSlideUp 0.6s ease 0.4s forwards;
+    }
+
+    .summary-item {
+      background: var(--bg-surface);
+      padding: 28px 24px;
+      text-align: center;
+    }
+
+    .summary-item .number {
+      font-family: 'Teko', sans-serif;
+      font-size: 56px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .summary-item:nth-child(1) .number { color: var(--tier1); }
+    .summary-item:nth-child(2) .number { color: var(--tier2); }
+    .summary-item:nth-child(3) .number { color: var(--tier3); }
+    .summary-item:nth-child(4) .number { color: var(--defer); }
+
+    .summary-item .label {
+      font-family: 'Noto Sans KR', sans-serif;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      margin-top: 8px;
+    }
+
+    .content {
+      position: relative;
+      z-index: 1;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 0 40px 80px;
+    }
+
+    .tiers-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+    }
+
+    @media (max-width: 1100px) {
+      .tiers-grid { grid-template-columns: 1fr; }
+      .summary-bar { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    .tier-column {
+      opacity: 0;
+      animation: fadeSlideUp 0.6s ease forwards;
+    }
+
+    .tier-column:nth-child(1) { animation-delay: 0.5s; }
+    .tier-column:nth-child(2) { animation-delay: 0.6s; }
+    .tier-column:nth-child(3) { animation-delay: 0.7s; }
+
+    .tier-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 20px 0;
+      border-bottom: 2px solid;
+      margin-bottom: 20px;
+    }
+
+    .tier-column:nth-child(1) .tier-header { border-color: var(--tier1); }
+    .tier-column:nth-child(2) .tier-header { border-color: var(--tier2); }
+    .tier-column:nth-child(3) .tier-header { border-color: var(--tier3); }
+
+    .tier-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: 'Teko', sans-serif;
+      font-size: 24px;
+      font-weight: 600;
+    }
+
+    .tier-column:nth-child(1) .tier-icon { background: var(--tier1-glow); color: var(--tier1); border: 1px solid var(--tier1); }
+    .tier-column:nth-child(2) .tier-icon { background: var(--tier2-glow); color: var(--tier2); border: 1px solid var(--tier2); }
+    .tier-column:nth-child(3) .tier-icon { background: var(--tier3-glow); color: var(--tier3); border: 1px solid var(--tier3); }
+
+    .tier-title {
+      font-family: 'Teko', 'Noto Sans KR', sans-serif;
+      font-size: 28px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .tier-column:nth-child(1) .tier-title { color: var(--tier1); }
+    .tier-column:nth-child(2) .tier-title { color: var(--tier2); }
+    .tier-column:nth-child(3) .tier-title { color: var(--tier3); }
+
+    .tier-desc {
+      font-size: 13px;
+      color: var(--text-muted);
+      font-weight: 400;
+    }
+
+    .improvement-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 12px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .improvement-card::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      border-radius: 12px 0 0 12px;
+      transition: width 0.3s ease;
+    }
+
+    .tier-column:nth-child(1) .improvement-card::before { background: var(--tier1); }
+    .tier-column:nth-child(2) .improvement-card::before { background: var(--tier2); }
+    .tier-column:nth-child(3) .improvement-card::before { background: var(--tier3); }
+
+    .improvement-card:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-hover);
+      transform: translateY(-2px);
+    }
+
+    .tier-column:nth-child(1) .improvement-card:hover {
+      box-shadow: 0 8px 32px var(--tier1-glow), 0 0 0 1px var(--tier1);
+    }
+    .tier-column:nth-child(2) .improvement-card:hover {
+      box-shadow: 0 8px 32px var(--tier2-glow), 0 0 0 1px var(--tier2);
+    }
+    .tier-column:nth-child(3) .improvement-card:hover {
+      box-shadow: 0 8px 32px var(--tier3-glow), 0 0 0 1px var(--tier3);
+    }
+
+    .improvement-card:hover::before { width: 4px; }
+
+    .card-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .card-number {
+      font-family: 'Teko', sans-serif;
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1;
+      min-width: 32px;
+    }
+
+    .tier-column:nth-child(1) .card-number { color: var(--tier1); }
+    .tier-column:nth-child(2) .card-number { color: var(--tier2); }
+    .tier-column:nth-child(3) .card-number { color: var(--tier3); }
+
+    .card-title {
+      font-family: 'Noto Sans KR', sans-serif;
+      font-size: 15px;
+      font-weight: 600;
+      line-height: 1.4;
+      flex: 1;
+    }
+
+    .card-files {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      line-height: 1.8;
+      padding-left: 44px;
+    }
+
+    .card-files code {
+      background: rgba(255,255,255,0.05);
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: var(--text-secondary);
+    }
+
+    .card-meta {
+      display: flex;
+      gap: 8px;
+      padding-left: 44px;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      padding: 4px 10px;
+      border-radius: 4px;
+      border: 1px solid;
+    }
+
+    .badge-leverage-high {
+      background: rgba(0, 191, 165, 0.1);
+      color: var(--tier3);
+      border-color: var(--tier3);
+    }
+
+    .badge-leverage-mid {
+      background: rgba(255, 193, 7, 0.1);
+      color: var(--tier2);
+      border-color: var(--tier2);
+    }
+
+    .badge-files {
+      background: rgba(255,255,255,0.05);
+      color: var(--text-muted);
+      border-color: var(--border-subtle);
+    }
+
+    .card-detail {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.4s ease, padding 0.4s ease;
+      padding-left: 44px;
+    }
+
+    .improvement-card.expanded .card-detail {
+      max-height: 400px;
+      padding-top: 16px;
+    }
+
+    .card-detail p {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.7;
+      margin-bottom: 8px;
+    }
+
+    .card-detail .detail-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-top: 12px;
+      margin-bottom: 4px;
+    }
+
+    .card-detail .detail-value {
+      font-size: 13px;
+      color: var(--text-primary);
+    }
+
+    .expand-icon {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      font-size: 18px;
+      color: var(--text-muted);
+      transition: transform 0.3s ease;
+    }
+
+    .improvement-card.expanded .expand-icon {
+      transform: rotate(180deg);
+    }
+
+    .defer-section {
+      position: relative;
+      z-index: 1;
+      max-width: 1400px;
+      margin: 60px auto 0;
+      padding: 0 40px 80px;
+      opacity: 0;
+      animation: fadeSlideUp 0.6s ease 0.8s forwards;
+    }
+
+    .defer-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 20px 0;
+      border-bottom: 2px solid var(--defer);
+      margin-bottom: 20px;
+    }
+
+    .defer-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: 'Teko', sans-serif;
+      font-size: 24px;
+      font-weight: 600;
+      background: var(--defer-glow);
+      color: var(--defer);
+      border: 1px solid var(--defer);
+    }
+
+    .defer-title {
+      font-family: 'Teko', 'Noto Sans KR', sans-serif;
+      font-size: 28px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--defer);
+    }
+
+    .defer-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    @media (max-width: 1100px) {
+      .defer-grid { grid-template-columns: 1fr; }
+    }
+
+    .defer-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 20px;
+      opacity: 0.7;
+      transition: all 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .defer-card::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      border-radius: 12px 0 0 12px;
+      background: var(--defer);
+    }
+
+    .defer-card:hover {
+      opacity: 1;
+      border-color: var(--defer);
+    }
+
+    .defer-card .card-number { color: var(--defer); }
+
+    .constraints {
+      position: relative;
+      z-index: 1;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 0 40px 60px;
+      opacity: 0;
+      animation: fadeSlideUp 0.6s ease 0.9s forwards;
+    }
+
+    .constraints-inner {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 24px;
+    }
+
+    .constraints-title {
+      font-family: 'Teko', 'Noto Sans KR', sans-serif;
+      font-size: 22px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-secondary);
+      margin-bottom: 16px;
+    }
+
+    .constraint-list {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+
+    @media (max-width: 900px) {
+      .constraint-list { grid-template-columns: 1fr; }
+    }
+
+    .constraint-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      padding: 8px 0;
+    }
+
+    .constraint-item .status {
+      width: 8px;
+      height: 8px;
+      border-radius: 2px;
+      flex-shrink: 0;
+    }
+
+    .constraint-item .status.locked { background: var(--tier1); }
+    .constraint-item .status.open { background: var(--tier3); }
+
+    .removed-section {
+      position: relative;
+      z-index: 1;
+      max-width: 1400px;
+      margin: 40px auto 0;
+      padding: 0 40px 40px;
+      opacity: 0;
+      animation: fadeSlideUp 0.6s ease 1.0s forwards;
+    }
+
+    .removed-title {
+      font-family: 'Teko', 'Noto Sans KR', sans-serif;
+      font-size: 22px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+    }
+
+    .removed-item {
+      font-size: 13px;
+      color: var(--text-muted);
+      padding: 6px 0;
+      border-bottom: 1px dashed var(--border-subtle);
+    }
+
+    .removed-item span {
+      text-decoration: line-through;
+      opacity: 0.6;
+    }
+
+    .removed-item .reason {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-left: 8px;
+    }
+
+    @keyframes fadeSlideUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .tier-column:nth-child(1) .tier-icon {
+      animation: pulse 2s ease infinite;
+    }
+  </style>
+</head>
+<body>
+
+  <section class="hero">
+    <div class="hero-badge">ACO 어드바이저리 리뷰 + Sidebeam 크로스 리퍼런스</div>
+    <h1>
+      rag-ingress-queue<br>
+      <span class="highlight">아키텍처</span> 개선 리뷰
+    </h1>
+    <p class="hero-subtitle">
+      ACO 어드바이저리 결과(P1/P2)와 sidebeam-backend 참조 스타일을 병합하여
+      위험 조정 가치 기준으로 정렬했습니다. 카드를 클릭하면 상세 내용이 펼쳐집니다.
+    </p>
+    <div class="aco-meta">
+      <span><div class="dot"></div> ACO 실행 #1: 7155fc88-d2c6-48a8-a414-9ad28c82dbc7</span>
+      <span><div class="dot"></div> ACO 실행 #2: fb5a8515-7334-4ad4-bb54-20f8871bd9bb</span>
+      <span><div class="dot"></div> Sidebeam 에이전트: 3개 (아키텍처, 외부서비스, 품질)</span>
+      <span><div class="dot"></div> 대상: Java 25 + Spring Boot 4.x + NATS JetStream</span>
+    </div>
+  </section>
+
+  <div class="summary-bar">
+    <div class="summary-item">
+      <div class="number">05</div>
+      <div class="label">1단계 — 구조 개선</div>
+    </div>
+    <div class="summary-item">
+      <div class="number">05</div>
+      <div class="label">2단계 — 경계 강화</div>
+    </div>
+    <div class="summary-item">
+      <div class="number">05</div>
+      <div class="label">3단계 — 운영성 향상</div>
+    </div>
+    <div class="summary-item">
+      <div class="number">03</div>
+      <div class="label">보류 항목</div>
+    </div>
+  </div>
+
+  <div class="content">
+    <div class="tiers-grid">
+
+      <!-- Tier 1 -->
+      <div class="tier-column">
+        <div class="tier-header">
+          <div class="tier-icon">01</div>
+          <div>
+            <div class="tier-title">1단계</div>
+            <div class="tier-desc">구조 및 정합성 — 즉시 실행</div>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">1</div>
+            <div class="card-title">Worker가 메시지의 targetProfile로 라우팅</div>
+          </div>
+          <div class="card-files">
+            <code>worker/IngestWorker.java:42,59</code><br>
+            <code>worker/WorkerConfiguration.java</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-high">레버리지: 높음</span>
+            <span class="badge badge-files">2개 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>Worker가 생성자 주입된 <code>targetProfile</code>만 사용하고 <code>message.job().targetProfile()</code>을 무시합니다. 4개 프로파일이 이미 설정에 존재하지만 라우팅이 깨져 있습니다.</p>
+            <div class="detail-label">수정</div>
+            <p>Worker가 각 메시지에서 프로파일을 읽고, 어댑터/프로파일 매핑을 조회한 뒤 pressure check와 delivery를 수행합니다.</p>
+            <div class="detail-label">파일</div>
+            <p class="detail-value">IngestWorker.java, WorkerConfiguration.java</p>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">2</div>
+            <div class="card-title">JetStreamProvisioner drift 감지 fail-closed</div>
+          </div>
+          <div class="card-files">
+            <code>queue/NatsJetStreamProvisioner.java:58</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-high">레버리지: 높음</span>
+            <span class="badge badge-files">1개 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>시작 시 <code>updateStream</code> / <code>addOrUpdateConsumer</code>가 기존 큐 설정을 조용히 수정합니다. 설정 drift가 감지되지 않습니다.</p>
+            <div class="detail-label">수정</div>
+            <p>기존 설정을 읽고 subjects, retention, storage, ackPolicy, maxDeliver, ackWait를 비교합니다. drift 시 fail-closed(throw). 자동 수정은 명시적 override 플래그가 필요합니다.</p>
+            <div class="detail-label">파일</div>
+            <p class="detail-value">NatsJetStreamProvisioner.java</p>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">3</div>
+            <div class="card-title">StatusService가 RagTargetAdapter만 의존하도록</div>
+          </div>
+          <div class="card-files">
+            <code>api/StatusService.java</code><br>
+            <code>target/RagTargetAdapter.java</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-high">레버리지: 높음</span>
+            <span class="badge badge-files">2개 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>StatusService가 RagFlowGateway, RagFlowPressurePolicy, RAGFlow 설정에 직접 결합합니다. Core API 계층이 어댑터-프라이빗 상세정보를 유출합니다.</p>
+            <div class="detail-label">수정</div>
+            <p><code>snapshot()</code> 메서드를 RagTargetAdapter 계약에 추가합니다. StatusService는 계약만 의존합니다. 새 어댑터 추가 시 StatusService 변경 불필요.</p>
+            <div class="detail-label">파일</div>
+            <p class="detail-value">StatusService.java, RagTargetAdapter.java</p>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">4</div>
+            <div class="card-title">Postcheck 스키마 검증 연결</div>
+          </div>
+          <div class="card-files">
+            <code>scripts/postcheck.sh:66</code><br>
+            <code>scripts/postcheck.schema.json</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-mid">레버리지: 중간-높음</span>
+            <span class="badge badge-files">2개 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>postcheck.schema.json은 존재하지만 postcheck.sh는 jq로 필드 존재만 확인합니다. 실제 스키마 준수 검증이 없습니다.</p>
+            <div class="detail-label">수정</div>
+            <p>postcheck.sh에 스키마 검증 단계를 추가합니다. 자동 검증을 위한 PostcheckOutputTest를 추가합니다.</p>
+            <div class="detail-label">파일</div>
+            <p class="detail-value">postcheck.sh, postcheck.schema.json</p>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">5</div>
+            <div class="card-title">DeliveryResult.targetRef 불투명 핸들 구현</div>
+          </div>
+          <div class="card-files">
+            <code>target/RagFlowTargetAdapter.java:114</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-mid">레버리지: 중간</span>
+            <span class="badge badge-files">1개 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>DeliveryResult.targetRef가 하드코딩된 "redacted" 문자열을 반환합니다. 스펙에는 불투명 핸들 계약이 존재하지만 구현되지 않았습니다.</p>
+            <div class="detail-label">수정</div>
+            <p>documentId의 해시 등 실제 불투명 핸들을 반환합니다. 어댑터-프라이빗 ID를 제네릭 계층 밖에 유지합니다.</p>
+            <div class="detail-label">파일</div>
+            <p class="detail-value">RagFlowTargetAdapter.java</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tier 2 -->
+      <div class="tier-column">
+        <div class="tier-header">
+          <div class="tier-icon">02</div>
+          <div>
+            <div class="tier-title">2단계</div>
+            <div class="tier-desc">아키텍처 경계 강화</div>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">6</div>
+            <div class="card-title">RAGFlow 패키지 분리</div>
+          </div>
+          <div class="card-files">
+            <code>target/RagFlowTargetAdapter.java</code><br>
+            <code>target/HttpRagFlowGateway.java</code><br>
+            <code>target/RagFlowGateway.java</code><br>
+            <code>target/RagFlowDocumentRef.java</code><br>
+            <code>target/RagFlowPressurePolicy.java</code><br>
+            <code>target/RagFlowPressureSnapshot.java</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-mid">레버리지: 중간-높음</span>
+            <span class="badge badge-files">6개 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>RAGFlow 관련 클래스가 제네릭 target 패키지에 섞여 있습니다. 어댑터-프라이빗과 제네릭 계약의 경계가 흐립니다.</p>
+            <div class="detail-label">수정</div>
+            <p>모든 RAGFlow 클래스를 <code>target.ragflow</code> 하위 패키지로 이동합니다. RagTargetAdapter, TargetStatusSnapshot, TargetPressure만 제네릭 target에 남깁니다.</p>
+            <div class="detail-label">파일</div>
+            <p class="detail-value">6개 파일 이동 + import 업데이트</p>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">7</div>
+            <div class="card-title">ArchUnit 아키텍처 테스트</div>
+          </div>
+          <div class="card-files">
+            <code>신규: src/test/java/.../architecture/ArchitectureTest.java</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-mid">레버리지: 중간</span>
+            <span class="badge badge-files">신규 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>자동화된 아키텍처 규칙 강제가 없습니다. 패키지 의존성 방향(api → core → queue → target)이 코드로 보장되지 않습니다.</p>
+            <div class="detail-label">수정</div>
+            <p>ArchUnit 1.4.1 의존성을 추가합니다. ArchitectureTest를 생성하여: api가 target을 직접 의존하지 않음, core가 queue를 의존하지 않음 등을 강제합니다.</p>
+            <div class="detail-label">참조</div>
+            <p class="detail-value">sidebeam-backend ArchitectureTest 패턴</p>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">8</div>
+            <div class="card-title">@ConfigurationProperties 도입</div>
+          </div>
+          <div class="card-files">
+            <code>application.yml</code><br>
+            <code>target/RagFlowTargetAdapter.java</code><br>
+            <code>queue/NatsJetStreamConfiguration.java</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-mid">레버리지: 중간</span>
+            <span class="badge badge-files">3개 이상 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>@Value 주입이 클래스 전체에 산재되어 있습니다. 타입 안전한 설정 빈이 없습니다. @ConfigurationProperties 패턴이 없습니다.</p>
+            <div class="detail-label">수정</div>
+            <p>RagFlowProperties, QueueProperties, WorkerProperties 클래스를 @ConfigurationProperties로 생성합니다. @Value를 생성자 주입 타입 빈으로 교체합니다.</p>
+            <div class="detail-label">참조</div>
+            <p class="detail-value">sidebeam GitLabApiProperties, RestClientProperties 패턴</p>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">9</div>
+            <div class="card-title">범위 제한 예외 처리</div>
+          </div>
+          <div class="card-files">
+            <code>api/IngressController.java</code><br>
+            <code>신규: exception 패키지</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-mid">레버리지: 중간</span>
+            <span class="badge badge-files">신규 + 1개 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>컨트롤러가 직접 ResponseEntity를 상태 코드와 함께 조립합니다. 예외 계층이 없습니다. @RestControllerAdvice가 없습니다.</p>
+            <div class="detail-label">수정</div>
+            <p>ApplicationException → Business/Technical/Validation 계층 + ErrorCode enum을 추가합니다. enqueue 경로에만 범위 제한된 @RestControllerAdvice를 적용합니다. 전체 auto-wrap은 /healthz, /status 계약을 깨뜨리므로 피합니다.</p>
+            <div class="detail-label">참조</div>
+            <p class="detail-value">sidebeam 예외 계층 + GlobalExceptionHandler</p>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">10</div>
+            <div class="card-title">IdempotencyStore 한계 문서화</div>
+          </div>
+          <div class="card-files">
+            <code>api/IdempotencyStore.java</code><br>
+            <code>queue/NatsIngestPublisher.java:39</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-mid">레버리지: 낮음-중간</span>
+            <span class="badge badge-files">2개 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>IdempotencyStore가 인메모리 ConcurrentHashMap입니다. API 재시작/복제 시 깨집니다. 이미 Nats-Msg-Id를 dedupe에 사용합니다.</p>
+            <div class="detail-label">수정</div>
+            <p>"단일 API 프로세스 best-effort" 한계를 문서화합니다. 중복 publish ack 동작에 대한 테스트를 강화합니다. 코드 변경 불필요.</p>
+            <div class="detail-label">참고</div>
+            <p class="detail-value">이미 부분적으로 구현됨 (Nats-Msg-Id). 새 기능이 아닙니다.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tier 3 -->
+      <div class="tier-column">
+        <div class="tier-header">
+          <div class="tier-icon">03</div>
+          <div>
+            <div class="tier-title">3단계</div>
+            <div class="tier-desc">가시성 및 품질</div>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">11</div>
+            <div class="card-title">CorrelationIdFilter + NATS 전파</div>
+          </div>
+          <div class="card-files">
+            <code>신규: common/web/filter/CorrelationIdFilter.java</code><br>
+            <code>queue/IngestJobMessageCodec.java</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-mid">레버리지: 중간</span>
+            <span class="badge badge-files">신규 + 1개 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>분산 추적 식별자가 없습니다. HTTP 요청부터 Worker 처리까지 상관관계 체인이 없습니다.</p>
+            <div class="detail-label">수정</div>
+            <p>HTTP 요청용 CorrelationIdFilter를 추가합니다. X-Correlation-Id를 NATS 메시지 헤더로 전파합니다. MDC에 저장합니다.</p>
+            <div class="detail-label">참조</div>
+            <p class="detail-value">sidebeam CorrelationIdFilter + MDC 패턴</p>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">12</div>
+            <div class="card-title">런타임 민감 로그 마스킹</div>
+          </div>
+          <div class="card-files">
+            <code>신규: common/logging/SensitiveDataMaskingConverter.java</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-mid">레버리지: 중간</span>
+            <span class="badge badge-files">신규 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>RedactionGuard는 payload 검증만 담당합니다. 런타임 로그 마스킹이 없습니다. HTTP 헤더의 Bearer 토큰이 로그에 유출될 수 있습니다.</p>
+            <div class="detail-label">수정</div>
+            <p>Logback 패턴 변환기를 추가하여 password/token/JWT/dataset_id/document_id를 런타임에 마스킹합니다.</p>
+            <div class="detail-label">참조</div>
+            <p class="detail-value">sidebeam SensitiveDataMaskingConverter</p>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">13</div>
+            <div class="card-title">멱등-안전 호출용 RetryPolicy</div>
+          </div>
+          <div class="card-files">
+            <code>target/RagFlowGateway.java</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-mid">레버리지: 중간</span>
+            <span class="badge badge-files">1개 이상 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>RAGFlow 어댑터에 재시도가 없습니다. 전체 upload/update/parse 재시도는 JetStream redelivery와 충돌합니다.</p>
+            <div class="detail-label">수정</div>
+            <p>RetryPolicy 인터페이스를 추가합니다. 멱등-안전 경계에만 적용: pressure check, status read. upload/update/parse 재시도는 JetStream의 책임입니다.</p>
+            <div class="detail-label">참조</div>
+            <p class="detail-value">sidebeam RetryPolicy + SimpleRetryPolicy</p>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">14</div>
+            <div class="card-title">Jacoco 커버리지 플러그인</div>
+          </div>
+          <div class="card-files">
+            <code>build.gradle</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-mid">레버리지: 낮음-중간</span>
+            <span class="badge badge-files">1개 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>커버리지 도구가 없습니다. 품질 기준이 없습니다.</p>
+            <div class="detail-label">수정</div>
+            <p>Jacoco 플러그인을 추가합니다. report-only부터 시작합니다. 점진적으로 threshold를 추가합니다(sidebeam: 80% 라인, 70% 브랜치).</p>
+            <div class="detail-label">참조</div>
+            <p class="detail-value">sidebeam build.gradle.kts jacoco 설정</p>
+          </div>
+        </div>
+
+        <div class="improvement-card" onclick="toggleCard(this)">
+          <div class="expand-icon">&#9662;</div>
+          <div class="card-header">
+            <div class="card-number">15</div>
+            <div class="card-title">구조화된 JSON 로깅</div>
+          </div>
+          <div class="card-files">
+            <code>build.gradle</code><br>
+            <code>신규: logback-spring.xml</code>
+          </div>
+          <div class="card-meta">
+            <span class="badge badge-leverage-mid">레버리지: 낮음</span>
+            <span class="badge badge-files">신규 + 1개 파일</span>
+          </div>
+          <div class="card-detail">
+            <div class="detail-label">문제</div>
+            <p>구조화된 로깅 형식이 없습니다. 중앙 로그 집계에 JSON이 필요합니다.</p>
+            <div class="detail-label">수정</div>
+            <p>Logstash Logback Encoder 의존성을 추가합니다. JSON 출력을 위한 logback-spring.xml을 구성합니다.</p>
+            <div class="detail-label">참조</div>
+            <p class="detail-value">sidebeam Logstash encoder 설정</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Defer Section -->
+  <div class="defer-section">
+    <div class="defer-header">
+      <div class="defer-icon">보류</div>
+      <div>
+        <div class="defer-title">보류 항목</div>
+        <div class="tier-desc">별도 승인 또는 이후 단계 필요</div>
+      </div>
+    </div>
+    <div class="defer-grid">
+      <div class="defer-card">
+        <div class="card-header">
+          <div class="card-number">D1</div>
+          <div class="card-title">THROTTLED 느린 fetch 동작</div>
+        </div>
+        <div class="card-detail" style="padding-left:0; max-height: none;">
+          <p>MVP 스펙은 THROTTLED를 fail-closed로 정의합니다. 트리클 딜리버리는 별도 설정, 테스트, 배포 게이트가 필요합니다. 아키텍처 수정이 아니라 동작 변경입니다.</p>
+        </div>
+      </div>
+      <div class="defer-card">
+        <div class="card-header">
+          <div class="card-number">D2</div>
+          <div class="card-title">Spring Security API 키 인증</div>
+        </div>
+        <div class="card-detail" style="padding-left:0; max-height: none;">
+          <p>MVP 범위 확장입니다. API 노출 범위가 먼저 확정되어야 합니다. 공개 엔드포인트 보호가 필요한지 검토 후 결정합니다.</p>
+        </div>
+      </div>
+      <div class="defer-card">
+        <div class="card-header">
+          <div class="card-number">D3</div>
+          <div class="card-title">전체 어댑터 호출에 RetryPolicy</div>
+        </div>
+        <div class="card-detail" style="padding-left:0; max-height: none;">
+          <p>JetStream redelivery와 충돌합니다. 메시지 수준 재시도는 JetStream이 먼저 처리합니다. 어댑터 재시도는 멱등-안전 읽기에만 적용합니다.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Removed Items -->
+  <div class="removed-section">
+    <div class="removed-title">제거된 / 중복 제안</div>
+    <div class="removed-item">
+      <span>예외 계층 전체 auto-wrap (GlobalResponseBodyAdvice)</span>
+      <span class="reason">// /healthz, /status, 기존 API 테스트 계약을 깨뜨림</span>
+    </div>
+    <div class="removed-item">
+      <span>멱등성 재구현</span>
+      <span class="reason">// 이미 구현됨: idempotencyKey → Nats-Msg-Id</span>
+    </div>
+  </div>
+
+  <!-- Constraints Footer -->
+  <div class="constraints">
+    <div class="constraints-inner">
+      <div class="constraints-title">안전 제약 조건</div>
+      <div class="constraint-list">
+        <div class="constraint-item">
+          <div class="status locked"></div>
+          <span>라이브 RAGFlow 딜리버리: delivery-enabled=false, 별도 승인 전까지 금지</span>
+        </div>
+        <div class="constraint-item">
+          <div class="status locked"></div>
+          <span>Docker/Compose 런타임 변경: compose.yaml 수정 금지</span>
+        </div>
+        <div class="constraint-item">
+          <div class="status locked"></div>
+          <span>원격 호스트 변경: 금지</span>
+        </div>
+        <div class="constraint-item">
+          <div class="status open"></div>
+          <span>로컬 빌드 검증: JAVA_HOME + gradle test + postcheck.sh</span>
+        </div>
+        <div class="constraint-item">
+          <div class="status open"></div>
+          <span>코드 전용 변경: 런타임 부작용 없음</span>
+        </div>
+        <div class="constraint-item">
+          <div class="status open"></div>
+          <span>점진적: 광범위한 재작성 없음</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function toggleCard(card) {
+      card.classList.toggle('expanded');
+    }
+  </script>
+</body>
+</html>
