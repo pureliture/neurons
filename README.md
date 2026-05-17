@@ -22,6 +22,22 @@
 - [요구사항 문서](docs/requirements.md)
 - [ADR-0001: rag-ingress-queue architecture](docs/adr-0001-rag-ingress-queue.md)
 - [시각 리뷰 HTML](docs/rag-ingress-queue-architecture.html)
+- [MVP spec](docs/superpowers/specs/2026-05-17-rag-ingress-queue-mvp-spec.md)
+- [MVP implementation plan](docs/superpowers/plans/2026-05-17-rag-ingress-queue-mvp.md)
+- [Spec review summary](docs/superpowers/reviews/2026-05-17-rag-ingress-queue-spec-review.md)
+- [Plan review summary](docs/superpowers/reviews/2026-05-17-rag-ingress-queue-plan-review.md)
+
+## 현재 구현 상태
+
+현재 repo는 문서/설계 단계다. Java/Spring Boot 구현 파일, Maven build, Docker Compose runtime, live RAGFlow smoke는 아직 없다.
+
+검증 상태는 아래처럼 분리해서 판단한다.
+
+- Implementation proof: spec/plan/review 문서 완료 여부
+- Local build/test proof: Java 25 + Maven 기반 test/build 결과
+- Runtime proof: 별도 `rag-ingress-queue` compose project smoke 결과
+- Live RAGFlow proof: 별도 승인된 sanitized live smoke 결과
+- Authorization proof: external document status table authorization pass 결과
 
 ## 핵심 원칙
 

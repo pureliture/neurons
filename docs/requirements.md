@@ -3,7 +3,7 @@
 Status: Draft aligned requirements
 Date: 2026-05-17
 Owner: local operator
-Target project path: `/Users/example/Projects/rag-ingress-queue`
+Target project path: `<repo>`
 
 ## 1. 목적
 
@@ -216,7 +216,7 @@ Request shape:
     "project": "workspace-ragflow-advisor"
   },
   "payload": {
-    "kind": "ragflow_ready_document",
+    "kind": "redacted_rag_ready_document",
     "redactionVersion": "redaction.v2",
     "document": {
       "filename": "ak-conv-codex-workspace-ragflow-advisor-session-t0001-t0008-redacted.md",
