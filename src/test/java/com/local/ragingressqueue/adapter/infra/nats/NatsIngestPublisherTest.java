@@ -3,6 +3,7 @@ package com.local.ragingressqueue.adapter.infra.nats;
 import com.local.ragingressqueue.ingest.domain.DocumentPayload;
 import com.local.ragingressqueue.ingest.domain.IngestJob;
 import com.local.ragingressqueue.ingest.domain.validation.ContentHashVerifier;
+import com.local.ragingressqueue.queue.port.PublishResult;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;

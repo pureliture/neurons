@@ -8,7 +8,7 @@ import com.local.ragingressqueue.ingest.domain.IngestJob;
 import com.local.ragingressqueue.ingest.domain.validation.IngestJobValidator;
 import com.local.ragingressqueue.ingest.domain.validation.RedactionGuard;
 import com.local.ragingressqueue.queue.port.IngestPublisher;
-import com.local.ragingressqueue.adapter.infra.nats.PublishResult;
+import com.local.ragingressqueue.queue.port.PublishResult;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.ResponseEntity;

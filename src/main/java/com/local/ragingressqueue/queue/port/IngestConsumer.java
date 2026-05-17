@@ -1,6 +1,6 @@
 package com.local.ragingressqueue.queue.port;
 
-import com.local.ragingressqueue.adapter.infra.nats.IngestMessage;
+import com.local.ragingressqueue.queue.port.IngestMessage;
 import java.util.List;
 
 public interface IngestConsumer {

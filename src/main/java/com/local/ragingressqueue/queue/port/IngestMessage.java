@@ -1,4 +1,4 @@
-package com.local.ragingressqueue.adapter.infra.nats;
+package com.local.ragingressqueue.queue.port;
 
 import com.local.ragingressqueue.ingest.domain.IngestJob;
 
