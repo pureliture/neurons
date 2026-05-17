@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Implementation in progress; JVM build/offline postcheck verified, compose runtime smoke blocked
+**Status:** Implementation in progress; JVM build/offline postcheck verified, Ubuntu compose runtime smoke verified through publish ack, live RAGFlow gate pending
 
 **Goal:** Java 25 + Spring Boot 4.x 기반 `rag-ingress-queue` MVP를 만들어 redacted RAG-ready document enqueue, NATS JetStream publish, worker pressure gate, target adapter boundary, redacted status/postcheck를 검증 가능하게 구현한다.
 
@@ -25,7 +25,7 @@
 
 This means local build/test verification can run with Corretto 25 and Gradle. Runtime compose verification remains blocked until Docker daemon and Docker Compose are available.
 
-Implementation note from 2026-05-17: the initial Gradle/Spring Boot skeleton, validation/API/worker tests, JetStream publish ack publisher, durable pull consumer wiring, fail-closed RAGFlow adapter skeleton, compose file, and offline postcheck are implemented locally. Fresh runtime proof still requires Docker daemon plus Docker Compose availability; do not mark runtime verification complete from offline evidence.
+Implementation note from 2026-05-17: the initial Gradle/Spring Boot skeleton, validation/API/worker tests, JetStream publish ack publisher, durable pull consumer wiring, fail-closed RAGFlow adapter skeleton, compose file, and offline postcheck are implemented locally. Ubuntu runtime smoke on `ragflow-ubuntu` verified Docker/Compose startup, API health, JetStream stream/consumer creation, and enqueue publish ack `RAG_INGRESS_QUEUE:1`. Live RAGFlow delivery remains a separate approval gate.
 
 ## Progress Visibility Rules
 
