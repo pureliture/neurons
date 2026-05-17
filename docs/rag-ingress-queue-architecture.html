@@ -1,0 +1,1363 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rag-ingress-queue System Architecture</title>
+  <style>
+    :root {
+      --bg: #eef2f3;
+      --surface: #ffffff;
+      --surface-soft: #f7f9f6;
+      --ink: #101817;
+      --muted: #53615f;
+      --line: #263231;
+      --grid: #d5dddc;
+      --producer: #00756b;
+      --core: #c6572b;
+      --queue: #315fad;
+      --adapter: #4f6b3d;
+      --target: #8c3b52;
+      --read: #6249a4;
+      --risk: #b3261e;
+      --ok: #217344;
+      --warn: #a85d00;
+      --shadow: 0 18px 46px rgba(20, 34, 33, .12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, rgba(38, 50, 49, .055) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(38, 50, 49, .055) 1px, transparent 1px),
+        var(--bg);
+      background-size: 32px 32px;
+      font-family: "Apple SD Gothic Neo", "Noto Sans KR", ui-sans-serif, system-ui, sans-serif;
+      line-height: 1.5;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    code {
+      padding: 2px 6px;
+      border: 1px solid rgba(38, 50, 49, .18);
+      border-radius: 4px;
+      background: rgba(255, 255, 255, .75);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .92em;
+    }
+
+    .page {
+      min-height: 100vh;
+    }
+
+    .masthead {
+      border-bottom: 4px solid var(--line);
+      background: rgba(255, 255, 255, .78);
+      backdrop-filter: blur(8px);
+    }
+
+    .masthead-inner {
+      width: min(1440px, calc(100vw - 40px));
+      margin: 0 auto;
+      padding: 28px 0 24px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 380px;
+      gap: 28px;
+      align-items: end;
+    }
+
+    .eyebrow {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font: 700 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 64px;
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 980px;
+      margin: 18px 0 0;
+      color: #2f3b39;
+      font-size: 19px;
+    }
+
+    .decision-strip {
+      display: grid;
+      gap: 8px;
+      padding: 16px;
+      border: 2px solid var(--line);
+      background: var(--surface-soft);
+      box-shadow: 8px 8px 0 rgba(38, 50, 49, .12);
+      font: 700 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .decision-strip span {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding-bottom: 7px;
+      border-bottom: 1px solid rgba(38, 50, 49, .16);
+    }
+
+    .decision-strip span:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .decision-strip b {
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .anchor-row {
+      width: min(1440px, calc(100vw - 40px));
+      margin: 0 auto;
+      padding: 14px 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .anchor-row a {
+      display: inline-flex;
+      align-items: center;
+      min-height: 36px;
+      padding: 7px 11px;
+      border: 1px solid rgba(38, 50, 49, .22);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, .7);
+      color: #263231;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .section {
+      border-bottom: 3px solid rgba(38, 50, 49, .18);
+      background: rgba(247, 249, 246, .8);
+    }
+
+    .section:nth-of-type(even) {
+      background: rgba(255, 255, 255, .72);
+    }
+
+    .section-inner {
+      width: min(1440px, calc(100vw - 40px));
+      margin: 0 auto;
+      padding: 36px 0;
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      gap: 28px;
+      margin-bottom: 22px;
+      align-items: start;
+    }
+
+    .section-kicker {
+      margin: 0;
+      color: var(--muted);
+      font: 800 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      text-transform: uppercase;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 34px;
+      line-height: 1.1;
+      letter-spacing: 0;
+    }
+
+    .section-head p {
+      margin: 7px 0 0;
+      color: var(--muted);
+      font-size: 16px;
+      max-width: 920px;
+    }
+
+    .architecture-shell {
+      position: relative;
+      padding: 18px;
+      border: 3px solid var(--line);
+      background: rgba(255, 255, 255, .92);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .architecture-grid {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: .9fr 1fr 1fr 1fr;
+      gap: 16px;
+      min-height: 640px;
+    }
+
+    .architecture-wires {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .wire {
+      fill: none;
+      stroke: var(--line);
+      stroke-width: 3;
+      stroke-linecap: round;
+      marker-end: url(#arrow);
+    }
+
+    .wire.queue {
+      stroke: var(--queue);
+    }
+
+    .wire.target {
+      stroke: var(--target);
+    }
+
+    .wire.read {
+      stroke: var(--read);
+      stroke-dasharray: 10 8;
+    }
+
+    .wire.blocked {
+      stroke: var(--risk);
+      stroke-dasharray: 4 8;
+    }
+
+    .wire-label {
+      fill: var(--ink);
+      paint-order: stroke;
+      stroke: rgba(255, 255, 255, .92);
+      stroke-width: 5;
+      stroke-linejoin: round;
+      font: 800 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .lane {
+      position: relative;
+      display: grid;
+      align-content: start;
+      gap: 12px;
+      min-height: 604px;
+      padding: 14px;
+      border: 2px solid rgba(38, 50, 49, .26);
+      background: rgba(247, 249, 246, .76);
+    }
+
+    .lane-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      min-height: 44px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid var(--line);
+    }
+
+    .lane-title h3 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+
+    .lane-title span {
+      color: var(--muted);
+      font: 800 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      text-transform: uppercase;
+    }
+
+    .node {
+      position: relative;
+      z-index: 1;
+      min-height: 126px;
+      padding: 15px;
+      border: 2px solid var(--line);
+      background: var(--surface);
+      box-shadow: 7px 7px 0 rgba(38, 50, 49, .08);
+    }
+
+    .node h4 {
+      margin: 0 0 8px;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+
+    .node p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .node strong {
+      color: var(--ink);
+    }
+
+    .node.producer {
+      border-color: var(--producer);
+    }
+
+    .node.core {
+      border-color: var(--core);
+    }
+
+    .node.queue {
+      border-color: var(--queue);
+    }
+
+    .node.adapter {
+      border-color: var(--adapter);
+    }
+
+    .node.target {
+      border-color: var(--target);
+    }
+
+    .node.read {
+      border-color: var(--read);
+    }
+
+    .node.risk {
+      border-color: var(--risk);
+      background: #fff5f3;
+    }
+
+    .tag-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 12px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 7px;
+      border: 1px solid rgba(38, 50, 49, .18);
+      border-radius: 4px;
+      background: rgba(247, 249, 246, .92);
+      color: #263231;
+      font: 700 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .callout-grid,
+    .flow-grid,
+    .contract-grid,
+    .postcheck-grid {
+      display: grid;
+      gap: 14px;
+    }
+
+    .callout-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .flow-grid {
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      counter-reset: flow;
+    }
+
+    .contract-grid {
+      grid-template-columns: 1.05fr 1fr;
+    }
+
+    .postcheck-grid {
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+    }
+
+    .card {
+      min-height: 160px;
+      padding: 16px;
+      border: 2px solid var(--line);
+      background: var(--surface);
+      box-shadow: 7px 7px 0 rgba(38, 50, 49, .07);
+    }
+
+    .card h3 {
+      margin: 0 0 8px;
+      font-size: 19px;
+      letter-spacing: 0;
+    }
+
+    .card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .card.ok {
+      border-color: var(--ok);
+    }
+
+    .card.warn {
+      border-color: var(--warn);
+      background: #fff8ec;
+    }
+
+    .card.risk {
+      border-color: var(--risk);
+      background: #fff5f3;
+    }
+
+    .flow-card {
+      position: relative;
+      min-height: 210px;
+      padding-top: 48px;
+      counter-increment: flow;
+    }
+
+    .flow-card::before {
+      content: counter(flow);
+      position: absolute;
+      top: 14px;
+      left: 14px;
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border: 2px solid var(--line);
+      border-radius: 50%;
+      background: var(--surface-soft);
+      font: 900 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .matrix {
+      width: 100%;
+      border-collapse: collapse;
+      border: 2px solid var(--line);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .matrix th,
+    .matrix td {
+      padding: 12px 14px;
+      border-bottom: 1px solid rgba(38, 50, 49, .18);
+      border-right: 1px solid rgba(38, 50, 49, .14);
+      text-align: left;
+      vertical-align: top;
+      font-size: 14px;
+    }
+
+    .matrix th {
+      background: #263231;
+      color: #ffffff;
+      font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      text-transform: uppercase;
+    }
+
+    .matrix tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .matrix td:last-child,
+    .matrix th:last-child {
+      border-right: 0;
+    }
+
+    .state-rail {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .state {
+      position: relative;
+      min-height: 164px;
+      padding: 16px;
+      border: 2px solid var(--line);
+      background: var(--surface);
+    }
+
+    .state::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      right: -16px;
+      width: 20px;
+      height: 3px;
+      background: var(--line);
+    }
+
+    .state:last-child::after {
+      display: none;
+    }
+
+    .state h3 {
+      margin: 0 0 8px;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+
+    .state p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .state.authorized {
+      border-color: var(--ok);
+      background: #f2fbf4;
+    }
+
+    .state.blocked {
+      border-color: var(--risk);
+      background: #fff5f3;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .code-panel {
+      min-height: 100%;
+      padding: 16px;
+      border: 2px solid var(--line);
+      background: #111817;
+      color: #eaf2ef;
+      overflow: auto;
+      box-shadow: var(--shadow);
+    }
+
+    .code-panel pre {
+      margin: 0;
+      font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 8px;
+      border: 1px solid rgba(38, 50, 49, .2);
+      background: rgba(255, 255, 255, .72);
+      color: #263231;
+      font: 700 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .legend i {
+      display: inline-block;
+      width: 11px;
+      height: 11px;
+      margin-right: 7px;
+      border-radius: 2px;
+      background: var(--line);
+    }
+
+    .legend .producer-mark {
+      background: var(--producer);
+    }
+
+    .legend .core-mark {
+      background: var(--core);
+    }
+
+    .legend .queue-mark {
+      background: var(--queue);
+    }
+
+    .legend .adapter-mark {
+      background: var(--adapter);
+    }
+
+    .legend .target-mark {
+      background: var(--target);
+    }
+
+    .legend .read-mark {
+      background: var(--read);
+    }
+
+    .legend .risk-mark {
+      background: var(--risk);
+    }
+
+    .footer-note {
+      color: var(--muted);
+      font-size: 13px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    @media (max-width: 1180px) {
+      .masthead-inner,
+      .section-head,
+      .contract-grid,
+      .split {
+        grid-template-columns: 1fr;
+      }
+
+      .architecture-grid,
+      .callout-grid,
+      .flow-grid,
+      .postcheck-grid,
+      .state-rail {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .architecture-wires {
+        display: none;
+      }
+
+      .lane {
+        min-height: auto;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .masthead-inner,
+      .anchor-row,
+      .section-inner {
+        width: min(100vw - 24px, 1440px);
+      }
+
+      .masthead-inner {
+        padding-top: 22px;
+      }
+
+      h1 {
+        font-size: 40px;
+      }
+
+      h2 {
+        font-size: 27px;
+      }
+
+      .lead {
+        font-size: 16px;
+      }
+
+      .architecture-shell {
+        padding: 12px;
+      }
+
+      .architecture-grid,
+      .callout-grid,
+      .flow-grid,
+      .contract-grid,
+      .postcheck-grid,
+      .state-rail,
+      .split {
+        grid-template-columns: 1fr;
+      }
+
+      .state::after {
+        top: auto;
+        right: 50%;
+        bottom: -10px;
+        width: 3px;
+        height: 16px;
+      }
+
+      .matrix {
+        display: block;
+        overflow-x: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <div class="masthead-inner">
+        <div>
+          <p class="eyebrow">System architecture review</p>
+          <h1>rag-ingress-queue</h1>
+          <p class="lead">
+            Local PC와 Mac mini에서 발생하는 redacted RAG-ready transcript, session, document ingest 요청을 단일 write path로 받아
+            downstream RAG target이 감당 가능한 속도로 전달하는 범용 ingress queue 서버다.
+            RAGFlow는 core가 아니라 첫 번째 adapter이자 현재 LLM Wiki 저장소다. Summary/card 생성과 recall 판단은 queue 책임이 아니다.
+          </p>
+        </div>
+        <aside class="decision-strip" aria-label="고정 기술 결정">
+          <span><b>Runtime</b> Java 25</span>
+          <span><b>Framework</b> Spring Boot 4.x</span>
+          <span><b>Queue</b> NATS JetStream</span>
+          <span><b>Concurrency</b> Virtual threads</span>
+          <span><b>Deployment</b> Separate Compose project</span>
+        </aside>
+      </div>
+      <nav class="anchor-row" aria-label="문서 섹션">
+        <a href="#map">System Map</a>
+        <a href="#boundary">Compose Boundary</a>
+        <a href="#spool-bridge">Session Compactor</a>
+        <a href="#write-path">Write Path</a>
+        <a href="#queue">Queue Contract</a>
+        <a href="#adapter">Adapter Contract</a>
+        <a href="#datasets">Datasets</a>
+        <a href="#ledger">Status Gate</a>
+        <a href="#postcheck">Postcheck</a>
+      </nav>
+    </header>
+
+    <section id="map" class="section">
+      <div class="section-inner">
+        <div class="section-head">
+          <p class="section-kicker">01. System Map</p>
+          <div>
+            <h2>Producer는 RAG target을 직접 write하지 않는다</h2>
+            <p>
+              <code>workspace-ragflow-advisor</code>의 현재 적용 대상은 Codex <code>Stop</code> hook이 남기는
+              <code>TranscriptCaptureSpool</code>과 기존 transcript worker다. 이 기존 경로를 Mac mini의
+              <code>session-compactor</code>로 재분류하고, Ubuntu의 <code>memory-regeneration-runner</code>는
+              RAGFlow를 읽어 derived docs를 다시 enqueue하는 batch producer로 둔다. Core server는 enqueue,
+              JetStream publish, pull worker lifecycle, adapter 호출만 맡는다.
+            </p>
+          </div>
+        </div>
+
+        <div class="architecture-shell">
+          <svg class="architecture-wires" viewBox="0 0 1440 660" preserveAspectRatio="none" aria-hidden="true">
+            <defs>
+              <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L9,3 z" fill="#263231"></path>
+              </marker>
+            </defs>
+            <path class="wire" d="M235 198 C322 198 366 198 430 198"></path>
+            <text class="wire-label" x="260" y="178">POST /v1/ingest/enqueue</text>
+            <path class="wire queue" d="M565 216 C625 216 672 216 725 216"></path>
+            <text class="wire-label" x="590" y="196">publish + ack</text>
+            <path class="wire queue" d="M845 386 C790 490 640 504 515 400"></path>
+            <text class="wire-label" x="575" y="525">pull consumer + explicit ack</text>
+            <path class="wire target" d="M930 212 C1002 212 1042 212 1090 212"></path>
+            <text class="wire-label" x="958" y="192">deliver only when OPEN</text>
+            <path class="wire read" d="M170 500 C396 610 772 610 1120 510"></path>
+            <text class="wire-label" x="438" y="620">MCP read/tool plane, no bulk target write</text>
+            <path class="wire blocked" d="M220 305 C570 90 890 88 1110 306"></path>
+            <text class="wire-label" x="522" y="106">forbidden direct RAGFlow write</text>
+          </svg>
+
+          <div class="architecture-grid">
+            <div class="lane">
+              <div class="lane-title">
+                <h3>Producers</h3>
+                <span>source</span>
+              </div>
+              <article class="node producer">
+                <h4>Codex Stop hook</h4>
+                <p><code>transcript-capture</code>가 raw transcript body 없이 locator/hash request만 private spool에 남긴다. 이 locator는 queue payload가 아니다.</p>
+                <div class="tag-list">
+                  <span class="tag">locator_only</span>
+                  <span class="tag">session_end</span>
+                  <span class="tag">request_id</span>
+                </div>
+              </article>
+              <article class="node producer">
+                <h4>TranscriptCaptureSpool</h4>
+                <p><code>pending</code>, <code>processing</code>, <code>acked</code>, <code>quarantine</code> 디렉터리를 가진 private durable inbox다.</p>
+              </article>
+              <article class="node producer">
+                <h4>Session compactor</h4>
+                <p>기존 <code>transcript-capture</code>, <code>transcript-worker</code>, <code>transcript-packer</code>를 묶은 Mac mini 역할이다. Source resolve, parse, redaction, pack까지만 담당한다.</p>
+              </article>
+              <article class="node producer">
+                <h4>Enqueue sink</h4>
+                <p>Redacted RAG-ready document job을 만든다. JetStream publish ack 또는 <code>/enqueue accepted</code> 전에는 spool ack를 하지 않는다.</p>
+              </article>
+              <article class="node producer">
+                <h4>memory-regeneration-runner</h4>
+                <p>Ubuntu batch producer다. RAGFlow redacted corpus를 읽어 session/task summary와 approved memory card 후보를 만든 뒤 다시 queue에 enqueue한다.</p>
+              </article>
+              <article class="node read">
+                <h4>MCP read/tool plane</h4>
+                <p>Status 조회, dry-run, audit, diagnostics는 가능하다. bulk ingest write는 <code>/enqueue</code>로 위임한다.</p>
+              </article>
+              <article class="node risk">
+                <h4>Forbidden</h4>
+                <p>Producer, MCP, migration script가 RAGFlow REST를 직접 bulk write하는 경로는 금지한다.</p>
+              </article>
+            </div>
+
+            <div class="lane">
+              <div class="lane-title">
+                <h3>Spring Boot Core</h3>
+                <span>gateway</span>
+              </div>
+              <article class="node core">
+                <h4>ingress-api</h4>
+                <p><code>POST /v1/ingest/enqueue</code>의 redacted RAG-ready document payload/ref를 검증하고 JetStream publish ack를 확인한 뒤 redacted response를 반환한다.</p>
+                <div class="tag-list">
+                  <span class="tag">Java 25</span>
+                  <span class="tag">Spring Boot 4.x</span>
+                  <span class="tag">Virtual threads</span>
+                </div>
+              </article>
+              <article class="node core">
+                <h4>ingress-worker</h4>
+                <p>Pull consumer batch를 가져오고 target pressure를 확인한다. Mac-only locator를 해석하지 않고, pressure가 닫혀 있으면 delivery를 멈춘다.</p>
+              </article>
+              <article class="node core">
+                <h4>Operator API</h4>
+                <p><code>/healthz</code>는 process health, <code>/status</code>는 queue와 target pressure summary만 보여준다.</p>
+              </article>
+            </div>
+
+            <div class="lane">
+              <div class="lane-title">
+                <h3>NATS JetStream</h3>
+                <span>queue</span>
+              </div>
+              <article class="node queue">
+                <h4>RAG_INGRESS_QUEUE</h4>
+                <p>WorkQueuePolicy stream이 persistence, ack, redelivery, max deliver 정책을 담당한다.</p>
+                <div class="tag-list">
+                  <span class="tag">rag.ingress.transcript</span>
+                  <span class="tag">rag.ingress.document</span>
+                </div>
+              </article>
+              <article class="node queue">
+                <h4>Durable pull consumer</h4>
+                <p><code>rag_target_delivery_worker</code>가 batch를 직접 가져온다. target pressure가 높으면 fetch 자체를 줄인다.</p>
+              </article>
+              <article class="node queue">
+                <h4>Dead-letter evidence</h4>
+                <p>pending, in-flight, redelivered, dead-letter 후보를 count 중심으로 노출한다.</p>
+              </article>
+            </div>
+
+            <div class="lane">
+              <div class="lane-title">
+                <h3>Target Adapters</h3>
+                <span>delivery</span>
+              </div>
+              <article class="node adapter">
+                <h4>RagTargetAdapter</h4>
+                <p>Core가 아는 유일한 target interface다. raw target IDs와 parser details는 adapter-private metadata로 둔다.</p>
+                <div class="tag-list">
+                  <span class="tag">checkPressure</span>
+                  <span class="tag">deliver</span>
+                  <span class="tag">getStatus</span>
+                  <span class="tag">reconcile</span>
+                </div>
+              </article>
+              <article class="node target">
+                <h4>RAGFlowAdapter v1</h4>
+                <p>RAGFlow health, parser backlog, document status를 generic pressure와 indexing state로 변환한다.</p>
+              </article>
+              <article class="node target">
+                <h4>RAGFlow LLM Wiki datasets</h4>
+                <p><code>transcript-memory</code>, <code>session-summary</code>, <code>task-summary</code>, <code>approved-memory-card</code>를 dataset-first로 분리한다.</p>
+              </article>
+              <article class="node target">
+                <h4>Future RAG target</h4>
+                <p>다른 RAG solution은 adapter 구현만 추가한다. Core service 이름과 queue contract는 유지한다.</p>
+              </article>
+            </div>
+          </div>
+        </div>
+
+        <div class="legend" aria-label="색상 범례">
+          <span><i class="producer-mark"></i>Producer</span>
+          <span><i class="core-mark"></i>Core</span>
+          <span><i class="queue-mark"></i>Queue</span>
+          <span><i class="adapter-mark"></i>Adapter</span>
+          <span><i class="target-mark"></i>Target</span>
+          <span><i class="read-mark"></i>Read plane</span>
+          <span><i class="risk-mark"></i>Forbidden path</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="boundary" class="section">
+      <div class="section-inner">
+        <div class="section-head">
+          <p class="section-kicker">02. Runtime Boundary</p>
+          <div>
+            <h2>RAGFlow compose project와 lifecycle을 분리한다</h2>
+            <p>
+              초기 구성은 별도 Docker Compose project로 시작한다.
+              RAGFlow stack, Redis, DB, volume을 직접 조작하지 않고 host-published endpoint 또는 명시적으로 허용된 bridge만 사용한다.
+            </p>
+          </div>
+        </div>
+
+        <div class="callout-grid">
+          <article class="card ok">
+            <h3>Separate project</h3>
+            <p><code>project: rag-ingress-queue</code>로 시작한다. RAGFlow compose file은 수정하지 않는다.</p>
+          </article>
+          <article class="card">
+            <h3>Three services</h3>
+            <p><code>nats-jetstream</code>, <code>ingress-api</code>, <code>ingress-worker</code>. API와 worker는 같은 image, 다른 command로 실행할 수 있다.</p>
+          </article>
+          <article class="card risk">
+            <h3>No shared internals</h3>
+            <p>RAGFlow 내부 Redis, DB, volume, parser state를 queue engine처럼 공유하지 않는다.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="spool-bridge" class="section">
+      <div class="section-inner">
+        <div class="section-head">
+          <p class="section-kicker">03. Workspace Session Compactor</p>
+          <div>
+            <h2>완성된 session compactor의 write sink만 바꾼다</h2>
+            <p>
+              기존 hook 설치와 read plane은 그대로 둔다. 변경 지점은 현재 RAGFlow REST를 직접 호출하는
+              transcript ingest worker의 sink 구간이다. Mac mini에서는 source resolve, parse, redaction, packing까지만 수행하고
+              RAGFlow upload, parse request, status polling은 <code>rag-ingress-queue</code> worker delivery로 이동시킨다.
+            </p>
+          </div>
+        </div>
+
+        <div class="split">
+          <table class="matrix" aria-label="workspace-ragflow-advisor spool mapping">
+            <thead>
+              <tr>
+                <th>Existing surface</th>
+                <th>현재 역할</th>
+                <th>rag-ingress-queue 적용 후</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>UserPromptSubmit</code></td>
+                <td>approved memory를 bounded <code>additionalContext</code>로 제공하는 read/recall path.</td>
+                <td>그대로 유지한다. Ingest queue에 넣지 않는다.</td>
+              </tr>
+              <tr>
+                <td><code>Stop</code> + <code>transcript-capture</code></td>
+                <td>session_end boundary에서 locator/hash capture request 생성.</td>
+                <td>그대로 유지한다. Hook은 RAGFlow나 NATS를 직접 호출하지 않는다.</td>
+              </tr>
+              <tr>
+                <td><code>TranscriptCaptureSpool</code></td>
+                <td><code>0700</code> root와 <code>0600</code> item으로 pending/processing/acked/quarantine 관리.</td>
+                <td>producer-side durable inbox로 유지한다. publish ack 이후에만 spool ack.</td>
+              </tr>
+              <tr>
+                <td><code>TranscriptIngestWorker</code></td>
+                <td>현재는 parse, pack, RAGFlow upload/metadata/parse request/poll까지 수행.</td>
+                <td>parse/redaction/pack은 session-compactor로 유지하고, 직접 RAGFlow upload/status poll 책임만 <code>RAGFlowAdapter</code>로 이동.</td>
+              </tr>
+              <tr>
+                <td><code>RAGFlow document status table</code></td>
+                <td>session, turn, chunk, RAGFlow document ref, indexed status, authorization state 기록.</td>
+                <td>canonical state table로 유지한다. queue ack와 authorization을 같은 상태로 취급하지 않는다.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="code-panel" aria-label="workspace session compactor flow">
+<pre>Immediate application path:
+Codex Stop hook
+  -> transcript-capture
+  -> private TranscriptCaptureSpool
+  -> session-compactor resolves local source on Mac mini
+  -> parse + redaction.v2 + conversation chunk pack
+  -> enqueue redacted RAGFlow-ready document
+  -> POST /v1/ingest/enqueue
+  -> JetStream publish ack
+  -> local spool ack
+
+Direct RAGFlow upload from the spool worker becomes
+a legacy/pre-cutover path, not the steady-state path.
+
+Batch regeneration path:
+memory-regeneration-runner
+  -> read RAGFlow transcript-memory
+  -> generate derived docs
+  -> POST /v1/ingest/enqueue
+  -> RAGFlow derived datasets</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="write-path" class="section">
+      <div class="section-inner">
+        <div class="section-head">
+          <p class="section-kicker">04. Write Path</p>
+          <div>
+            <h2>ingest write path는 하나만 허용한다</h2>
+            <p>
+              API accepted는 indexing 완료가 아니다. Local spool ack, JetStream publish ack, target indexed,
+              RAGFlow 문서 상태표 authorization, recall/promote eligible은 서로 다른 상태로 추적한다.
+            </p>
+          </div>
+        </div>
+
+        <div class="flow-grid">
+          <article class="card flow-card">
+            <h3>Capture</h3>
+            <p><code>Stop</code> hook은 raw transcript 대신 <code>locator_only</code> capture request를 private spool에 쓴다.</p>
+          </article>
+          <article class="card flow-card">
+            <h3>Bridge</h3>
+            <p>Session-compactor enqueue sink가 request를 검증한 뒤 Mac mini에서 source를 읽고 redacted RAG-ready document, <code>contentHash</code>, <code>targetProfile</code> job으로 변환한다.</p>
+          </article>
+          <article class="card flow-card">
+            <h3>Publish</h3>
+            <p><code>ingress-api</code>가 JetStream publish ack를 받은 뒤에만 local spool item을 ack할 수 있다.</p>
+          </article>
+          <article class="card flow-card">
+            <h3>Guard</h3>
+            <p>Worker는 bounded batch를 pull하고 adapter pressure가 <code>OPEN</code>일 때만 target delivery를 수행한다.</p>
+          </article>
+          <article class="card flow-card">
+            <h3>Authorize</h3>
+            <p>RAGFlow <code>DONE</code> 이후에도 문서 상태표 authorization pass 전에는 recall/promote 후보가 아니다.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="queue" class="section">
+      <div class="section-inner">
+        <div class="section-head">
+          <p class="section-kicker">05. Queue Contract</p>
+          <div>
+            <h2>NATS JetStream에 queue 책임을 위임한다</h2>
+            <p>
+              Core server가 자체 queue engine을 만들지 않는다.
+              persistence, explicit ack, redelivery, max deliver, ack wait은 JetStream stream과 consumer 설정으로 표현한다.
+            </p>
+          </div>
+        </div>
+
+        <table class="matrix" aria-label="NATS JetStream queue contract">
+          <thead>
+            <tr>
+              <th>Surface</th>
+              <th>Required shape</th>
+              <th>Operator meaning</th>
+              <th>Risk control</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Session-compactor enqueue sink</td>
+              <td>Existing <code>TranscriptCaptureSpool</code> item -> redacted RAG-ready document on <code>rag.ingress.transcript</code></td>
+              <td>기존 hook path를 유지한 채 ingress queue producer로 연결한다.</td>
+              <td>publish ack 전 local spool ack 금지. Mac-only locator, raw body, raw private path는 queue payload/response/log에 금지.</td>
+            </tr>
+            <tr>
+              <td>memory-regeneration-runner</td>
+              <td>RAGFlow redacted corpus -> derived document on <code>rag.ingress.document</code></td>
+              <td>Batch regeneration도 direct RAGFlow write 없이 같은 ingress path를 사용한다.</td>
+              <td>Runner는 queue consumer가 아니라 producer다. Summary/card 생성은 queue 책임이 아니다.</td>
+            </tr>
+            <tr>
+              <td>Stream</td>
+              <td><code>RAG_INGRESS_QUEUE</code>, <code>WorkQueuePolicy</code>, file storage</td>
+              <td>Ack된 message는 work queue에서 제거된다.</td>
+              <td>Queue persistence는 NATS가 맡고 app은 publish/delivery state만 관리한다.</td>
+            </tr>
+            <tr>
+              <td>Subjects</td>
+              <td><code>rag.ingress.transcript</code>, <code>rag.ingress.document</code></td>
+              <td>transcript와 document ingest를 같은 queue family 안에서 분리한다.</td>
+              <td>subject naming으로 target kind 확장 여지를 둔다.</td>
+            </tr>
+            <tr>
+              <td>Consumer</td>
+              <td><code>rag_target_delivery_worker</code>, durable pull, explicit ack</td>
+              <td>Worker가 target 상태에 맞춰 fetch rate를 조절한다.</td>
+              <td><code>max_ack_pending</code>, <code>ack_wait</code>, <code>max_deliver</code>를 bounded로 둔다.</td>
+            </tr>
+            <tr>
+              <td>Dead-letter</td>
+              <td>max deliver 이후 redacted failure evidence</td>
+              <td>실패 payload 원문 대신 status class와 count를 보여준다.</td>
+              <td>private path, token, raw target IDs는 노출하지 않는다.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="adapter" class="section">
+      <div class="section-inner">
+        <div class="section-head">
+          <p class="section-kicker">06. Adapter Boundary</p>
+          <div>
+            <h2>Core는 RAGFlow를 모른다</h2>
+            <p>
+              RAGFlowAdapter v1은 RAGFlow REST, parser backlog, document status를 generic pressure와 state로 바꾸는 첫 구현체다.
+              이후 target 교체는 adapter 추가로 끝나야 한다.
+            </p>
+          </div>
+        </div>
+
+        <div class="contract-grid">
+          <div class="code-panel" aria-label="RagTargetAdapter contract">
+<pre>public interface RagTargetAdapter {
+    TargetPressure checkPressure(TargetProfile profile);
+    DeliveryResult deliver(IngestJob job, TargetProfile profile);
+    IndexingStatus getStatus(TargetDocumentRef ref, TargetProfile profile);
+    ReconcileResult reconcile(TargetDocumentRef ref, DocumentStatusSnapshot statusState);
+}</pre>
+          </div>
+          <div class="callout-grid">
+            <article class="card">
+              <h3>checkPressure</h3>
+              <p><code>UNSTART</code>, <code>RUNNING</code>, stale indexing, healthz, error rate를 <code>OPEN</code>, <code>THROTTLED</code>, <code>CLOSED</code>로 변환한다.</p>
+            </article>
+            <article class="card">
+              <h3>deliver</h3>
+              <p>Core job을 target-specific upload와 parse request로 변환한다. <code>targetProfile</code>이 RAGFlow dataset role을 고르고, raw dataset_id와 document_id는 밖으로 내보내지 않는다.</p>
+            </article>
+            <article class="card">
+              <h3>getStatus</h3>
+              <p>Target document status를 <code>ACCEPTED</code>, <code>DELIVERED</code>, <code>INDEXING</code>, <code>INDEXED</code>, <code>FAILED</code>로 해석한다.</p>
+            </article>
+            <article class="card">
+              <h3>reconcile</h3>
+              <p>Target live 상태와 local document status snapshot이 어긋나면 redacted reconcile 후보를 만든다.</p>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="datasets" class="section">
+      <div class="section-inner">
+        <div class="section-head">
+          <p class="section-kicker">07. RAGFlow LLM Wiki Datasets</p>
+          <div>
+            <h2>기억 본문은 RAGFlow dataset으로 나눈다</h2>
+            <p>
+              RAGFlow는 장기기억 본문과 검색 대상이 모이는 LLM Wiki다.
+              단일 dataset에 metadata type만으로 모든 기억 데이터를 넣지 않는다.
+              <code>targetProfile</code>은 adapter가 선택할 RAGFlow dataset role을 나타낸다.
+            </p>
+          </div>
+        </div>
+
+        <table class="matrix" aria-label="RAGFlow dataset target profiles">
+          <thead>
+            <tr>
+              <th>targetProfile</th>
+              <th>RAGFlow dataset</th>
+              <th>Producer</th>
+              <th>Document kind</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>ragflow-transcript-memory</code></td>
+              <td><code>transcript-memory</code></td>
+              <td>Mac mini session-compactor</td>
+              <td><code>conversation_chunk</code></td>
+            </tr>
+            <tr>
+              <td><code>ragflow-session-summary</code></td>
+              <td><code>session-summary</code></td>
+              <td>Ubuntu memory-regeneration-runner</td>
+              <td><code>session_summary</code></td>
+            </tr>
+            <tr>
+              <td><code>ragflow-task-summary</code></td>
+              <td><code>task-summary</code></td>
+              <td>Ubuntu memory-regeneration-runner</td>
+              <td><code>task_summary</code></td>
+            </tr>
+            <tr>
+              <td><code>ragflow-approved-memory-card</code></td>
+              <td><code>approved-memory-card</code></td>
+              <td>Curation/regeneration producer</td>
+              <td><code>approved_memory_card</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="ledger" class="section">
+      <div class="section-inner">
+        <div class="section-head">
+          <p class="section-kicker">08. External Document Status Gate</p>
+          <div>
+            <h2>indexed는 recall/promote eligible이 아니다</h2>
+            <p>
+              여기서 말하는 gate는 별도 장기기억 저장소가 아니라 RAGFlow document id/hash/state/provenance/authorization을 기록하는 external local 문서 상태표다.
+              <code>rag-ingress-queue</code>는 이 상태표를 직접 소유하지 않고 redacted job/status snapshot을 제공한다.
+              Queue ack와 document indexed는 같은 의미가 아니며, Target <code>INDEXED</code> 이후에도 authorization pass 전에는 transcript memory를 recall/promote에 사용하지 않는다.
+            </p>
+          </div>
+        </div>
+
+        <div class="state-rail" aria-label="RAGFlow document status authorization state rail">
+          <article class="state">
+            <h3>captured</h3>
+            <p>Private spool에 locator/hash request가 기록된 상태다. RAGFlow indexing 증거가 아니다.</p>
+          </article>
+          <article class="state">
+            <h3>ingested</h3>
+            <p>Request가 JetStream에 publish되어 target delivery 후보가 된 상태다.</p>
+          </article>
+          <article class="state">
+            <h3>indexed</h3>
+            <p>Target RAG가 indexing 완료 상태를 반환했다. 아직 authorization 의미는 없다.</p>
+          </article>
+          <article class="state authorized">
+            <h3>authorized</h3>
+            <p>Local 문서 상태표 authorization pass가 별도로 성공한 상태다.</p>
+          </article>
+          <article class="state blocked">
+            <h3>recall/promote eligible</h3>
+            <p>authorization 이후에만 eligible이다. pass 전 indexed memory promotion은 금지한다.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="postcheck" class="section">
+      <div class="section-inner">
+        <div class="section-head">
+          <p class="section-kicker">09. Operator Evidence</p>
+          <div>
+            <h2>운영 출력은 redacted summary만 허용한다</h2>
+            <p>
+              Health, queue, target, document status 상태는 운영자가 판단할 수 있을 만큼 보여주되
+              token, raw dataset_id, raw document_id, private path, raw transcript body는 출력하지 않는다.
+            </p>
+          </div>
+        </div>
+
+        <div class="postcheck-grid">
+          <article class="card ok">
+            <h3>Spool</h3>
+            <p><code>pending</code>, <code>processing</code>, <code>acked</code>, <code>quarantine</code> count와 request parse status.</p>
+          </article>
+          <article class="card ok">
+            <h3>Compose</h3>
+            <p>project status, service health, <code>nats-jetstream</code>, <code>ingress-api</code>, <code>ingress-worker</code>.</p>
+          </article>
+          <article class="card">
+            <h3>Queue</h3>
+            <p>stream pending, consumer pending, ack pending, redelivered, dead-letter count.</p>
+          </article>
+          <article class="card">
+            <h3>Target</h3>
+            <p>adapter name, target profile, dataset role, pressure state, recent delivery status class, reconcile candidate count.</p>
+          </article>
+          <article class="card risk">
+            <h3>Redaction</h3>
+            <p>No tokens, raw IDs, raw private paths, raw transcript body, full raw RAG payload.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-inner">
+        <div class="section-head">
+          <p class="section-kicker">10. Done Criteria</p>
+          <div>
+            <h2>구현 완료 판단 기준</h2>
+            <p>문서의 성공 기준을 runtime proof로 바꾸기 위한 최소 체크포인트다.</p>
+          </div>
+        </div>
+
+        <div class="split">
+          <table class="matrix" aria-label="done criteria">
+            <thead>
+              <tr>
+                <th>Criterion</th>
+                <th>Evidence expected</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Session compactor preserves hook path</td>
+                <td><code>Stop</code> hook still writes locator/hash request; compactor resolves source on Mac mini, publishes redacted RAG-ready document job, and only then acks local spool.</td>
+              </tr>
+              <tr>
+                <td>Producer direct write removed</td>
+                <td>Post-cutover transcript ingest no longer calls RAGFlow REST directly from the spool worker.</td>
+              </tr>
+              <tr>
+                <td>JetStream publish ack visible</td>
+                <td>Enqueue response and stream pending count are redacted.</td>
+              </tr>
+              <tr>
+                <td>Pressure-aware delivery</td>
+                <td>Worker stops delivery on <code>THROTTLED</code> or <code>CLOSED</code>.</td>
+              </tr>
+              <tr>
+                <td>RAGFlow isolated in adapter</td>
+                <td>Core package has no RAGFlow-specific payload fields except opaque target profile names.</td>
+              </tr>
+              <tr>
+                <td>Dataset-first partitioning</td>
+                <td>Initial target profiles route to <code>transcript-memory</code>, <code>session-summary</code>, <code>task-summary</code>, and <code>approved-memory-card</code>.</td>
+              </tr>
+              <tr>
+                <td>Authorization gate enforced</td>
+                <td>Indexed item is not recall/promote eligible before document status authorization pass.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="code-panel" aria-label="allowed and forbidden paths">
+<pre>Allowed write path:
+Codex Stop hook
+  -> TranscriptCaptureSpool
+  -> session-compactor enqueue sink
+  -> redaction.v2 + RAGFlow-ready document
+  -> rag-ingress-queue /enqueue
+  -> NATS JetStream
+  -> ingress-worker
+  -> RagTargetAdapter
+  -> downstream RAG target
+
+memory-regeneration-runner
+  -> read RAGFlow redacted corpus
+  -> generate derived document
+  -> rag-ingress-queue /enqueue
+  -> downstream RAG target
+
+Forbidden write paths:
+Producer -> RAGFlow REST direct write
+MCP -> RAGFlow REST bulk ingest write
+Migration script -> RAGFlow REST direct write
+Post-cutover spool worker -> RAGFlow REST direct write
+memory-regeneration-runner -> RAGFlow REST direct write</pre>
+          </div>
+        </div>
+
+        <p class="footer-note">
+          Source requirements: docs/requirements.md, docs/adr-0001-rag-ingress-queue.md. Generated as an operator-facing architecture review artifact.
+        </p>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
