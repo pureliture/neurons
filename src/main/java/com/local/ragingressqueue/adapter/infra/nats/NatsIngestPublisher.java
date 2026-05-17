@@ -2,6 +2,7 @@ package com.local.ragingressqueue.adapter.infra.nats;
 
 import com.local.ragingressqueue.ingest.domain.IngestJob;
 import com.local.ragingressqueue.queue.port.IngestPublisher;
+import com.local.ragingressqueue.queue.port.PublishResult;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 

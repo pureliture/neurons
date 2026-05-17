@@ -7,7 +7,7 @@ import com.local.ragingressqueue.common.TargetIndexingState;
 import com.local.ragingressqueue.delivery.domain.TargetPressure;
 import com.local.ragingressqueue.ingest.domain.validation.ContentHashVerifier;
 import com.local.ragingressqueue.queue.port.IngestConsumer;
-import com.local.ragingressqueue.adapter.infra.nats.IngestMessage;
+import com.local.ragingressqueue.queue.port.IngestMessage;
 import com.local.ragingressqueue.delivery.domain.DeliveryResult;
 import com.local.ragingressqueue.target.port.RagTargetAdapter;
 import org.junit.jupiter.api.Test;

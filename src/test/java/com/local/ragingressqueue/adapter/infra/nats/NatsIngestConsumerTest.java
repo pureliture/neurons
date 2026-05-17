@@ -3,6 +3,8 @@ package com.local.ragingressqueue.adapter.infra.nats;
 import com.local.ragingressqueue.ingest.domain.DocumentPayload;
 import com.local.ragingressqueue.ingest.domain.IngestJob;
 import com.local.ragingressqueue.ingest.domain.validation.ContentHashVerifier;
+import com.local.ragingressqueue.queue.port.AcknowledgementHandle;
+import com.local.ragingressqueue.queue.port.IngestMessage;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;

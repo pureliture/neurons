@@ -1,6 +1,7 @@
 package com.local.ragingressqueue.adapter.infra.nats;
 
 import com.local.ragingressqueue.queue.port.IngestConsumer;
+import com.local.ragingressqueue.queue.port.IngestMessage;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 

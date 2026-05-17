@@ -2,7 +2,7 @@ package com.local.ragingressqueue.ingest.api;
 
 import com.local.ragingressqueue.ingest.domain.validation.ContentHashVerifier;
 import com.local.ragingressqueue.queue.port.IngestPublisher;
-import com.local.ragingressqueue.adapter.infra.nats.PublishResult;
+import com.local.ragingressqueue.queue.port.PublishResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
