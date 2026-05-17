@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: rag-ingress-queue
+  threads:
+    virtual:
+      enabled: true
+  main:
+    keep-alive: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+rag-ingress:
+  nats:
+    url: ${RAG_INGRESS_NATS_URL:nats://localhost:4222}
+    stream: RAG_INGRESS_QUEUE
+    consumer: rag_target_delivery_worker
+    fetch-wait-ms: 1000
+    provision-on-startup: true
+  worker:
+    target-profile: ${RAG_INGRESS_WORKER_TARGET_PROFILE:ragflow-transcript-memory}
+    poll-interval-ms: 1000
+  target:
+    ragflow:
+      delivery-enabled: false
+  target-profiles:
+    ragflow-transcript-memory:
+      adapter: ragflow
+      dataset-role: transcript-memory
+    ragflow-session-summary:
+      adapter: ragflow
+      dataset-role: session-summary
+    ragflow-task-summary:
+      adapter: ragflow
+      dataset-role: task-summary
+    ragflow-approved-memory-card:
+      adapter: ragflow
+      dataset-role: approved-memory-card

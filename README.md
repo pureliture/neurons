@@ -26,18 +26,30 @@
 - [MVP implementation plan](docs/superpowers/plans/2026-05-17-rag-ingress-queue-mvp.md)
 - [Spec review summary](docs/superpowers/reviews/2026-05-17-rag-ingress-queue-spec-review.md)
 - [Plan review summary](docs/superpowers/reviews/2026-05-17-rag-ingress-queue-plan-review.md)
+- [Operator runbook](docs/runbooks/rag-ingress-queue-operator-runbook.md)
 
 ## 현재 구현 상태
 
-현재 repo는 문서/설계 단계다. Java/Spring Boot 구현 파일, Maven build, Docker Compose runtime, live RAGFlow smoke는 아직 없다.
+현재 repo는 초기 구현 단계다. Gradle 기반 Java/Spring Boot skeleton, validation/API/worker 단위 테스트, JetStream publish ack 기반 API publisher, durable pull consumer wiring, compose 파일, offline postcheck는 있다. Docker daemon/Compose 기반 runtime smoke와 live RAGFlow smoke는 아직 없다.
+
+`api` profile은 NATS JetStream publish ack를 받은 경우에만 enqueue accepted를 반환한다. `worker` profile은 durable pull consumer를 사용하지만, live RAGFlow delivery는 별도 승인 전까지 `rag-ingress.target.ragflow.delivery-enabled=false`로 닫아 둔다.
 
 검증 상태는 아래처럼 분리해서 판단한다.
 
 - Implementation proof: spec/plan/review 문서 완료 여부
-- Local build/test proof: Java 25 + Maven 기반 test/build 결과
+- Local build/test proof: Corretto 25 + Gradle 기반 test/build 결과
 - Runtime proof: 별도 `rag-ingress-queue` compose project smoke 결과
 - Live RAGFlow proof: 별도 승인된 sanitized live smoke 결과
 - Authorization proof: external document status table authorization pass 결과
+
+## 로컬 검증
+
+```bash
+JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test
+bash scripts/postcheck.sh --offline --timeout 30 --evidence build/reports/rag-ingress-queue/postcheck.json
+```
+
+위 검증은 local unit/API/worker/compose-file 테스트와 offline evidence redaction만 증명한다. Docker daemon/Compose와 live RAGFlow 검증은 별도 gate다.
 
 ## 핵심 원칙
 
