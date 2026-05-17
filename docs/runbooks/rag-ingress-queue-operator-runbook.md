@@ -33,7 +33,7 @@ Offline postcheck proves JSON evidence formatting and redaction scan only. It do
 
 ## Compose Smoke
 
-Blocked until Docker daemon and Docker Compose are available.
+Ubuntu smoke evidence exists in `docs/runbooks/2026-05-17-ubuntu-runtime-smoke.md`. Mac-local Docker/Compose can still be unavailable; do not treat Mac-local blocker as runtime failure if Ubuntu smoke is the target environment.
 
 Expected command:
 
@@ -43,7 +43,7 @@ bash scripts/postcheck.sh --timeout 30 --evidence build/reports/rag-ingress-queu
 docker compose -f compose.yaml down
 ```
 
-Current local blocker observed on 2026-05-17: Docker daemon socket was unavailable and the installed Docker CLI did not provide the `docker compose` subcommand. Do not mark runtime verification complete until this smoke has fresh evidence.
+Mac-local blocker observed on 2026-05-17: Docker daemon socket was unavailable and the installed Docker CLI did not provide the `docker compose` subcommand. Ubuntu `ops-host` has Docker Engine and Compose available and was used for runtime smoke.
 
 Abort criteria:
 
