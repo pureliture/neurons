@@ -1,0 +1,204 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 792" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+  <defs>
+    <linearGradient id="bsky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0c142b"/>
+      <stop offset="1" stop-color="#070b18"/>
+    </linearGradient>
+    <pattern id="bgrid" width="34" height="34" patternUnits="userSpaceOnUse">
+      <path d="M34 0H0V34" fill="none" stroke="#14203d" stroke-width="1"/>
+    </pattern>
+    <marker id="dep" viewBox="0 0 12 12" refX="9" refY="6" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L12 6 L0 12 L3.5 6 Z" fill="#22d3ee"/>
+    </marker>
+    <marker id="impl" viewBox="0 0 12 12" refX="9" refY="6" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L12 6 L0 12 L3.5 6 Z" fill="#f97316"/>
+    </marker>
+  </defs>
+
+  <rect width="1280" height="792" fill="url(#bsky)"/>
+  <rect width="1280" height="792" fill="url(#bgrid)"/>
+  <rect x="0" y="0" width="1280" height="4" fill="#22d3ee"/>
+
+  <text x="56" y="58" fill="#f1f5f9" font-size="32" font-weight="700">백엔드 아키텍처</text>
+  <text x="58" y="84" fill="#5b6b8c" font-size="13.5">component-driven layered architecture · ADR-0002 — 기능 단위 패키징 + Port/Adapter 격리</text>
+
+  <!-- dependency rule banner -->
+  <g>
+    <rect x="56" y="104" width="1168" height="48" rx="10" fill="#101a33" stroke="#1f2d4a"/>
+    <text x="78" y="133" fill="#5b6b8c" font-size="11" font-weight="700">의존 규칙</text>
+    <g font-size="12.5" font-weight="600">
+      <rect x="168" y="116" width="86" height="24" rx="6" fill="#1a2347"/><text x="211" y="132" fill="#a5b4fc" text-anchor="middle">api</text>
+      <rect x="300" y="116" width="100" height="24" rx="6" fill="#1a2347"/><text x="350" y="132" fill="#a5b4fc" text-anchor="middle">service</text>
+      <rect x="446" y="116" width="100" height="24" rx="6" fill="#1a2347"/><text x="496" y="132" fill="#a5b4fc" text-anchor="middle">domain</text>
+      <rect x="592" y="116" width="86" height="24" rx="6" fill="#0e2f3a"/><text x="635" y="132" fill="#67e8f9" text-anchor="middle">port</text>
+      <rect x="724" y="116" width="100" height="24" rx="6" fill="#2a1a0e"/><text x="774" y="132" fill="#fdba74" text-anchor="middle">adapter</text>
+    </g>
+    <g fill="none" stroke="#22d3ee" stroke-width="1.6" marker-end="url(#dep)">
+      <path d="M256 128 H298"/>
+      <path d="M402 128 H444"/>
+      <path d="M548 128 H590"/>
+    </g>
+    <path d="M722 128 H682" fill="none" stroke="#f97316" stroke-width="1.6" marker-end="url(#impl)"/>
+    <text x="900" y="125" fill="#67e8f9" font-size="10.5">→ depends-on</text>
+    <text x="900" y="140" fill="#fdba74" font-size="10.5">→ implements (adapter→port)</text>
+    <text x="1040" y="133" fill="#475569" font-size="10.5">core는 port만 의존</text>
+  </g>
+
+  <!-- ===== ROW 1 : FEATURE COMPONENTS ===== -->
+  <text x="56" y="186" fill="#5b6b8c" font-size="11" font-weight="700" letter-spacing="1.5">기능 컴포넌트  ·  presentation › application › domain</text>
+
+  <!-- ingest -->
+  <g>
+    <rect x="56" y="198" width="330" height="232" rx="13" fill="#10183180" stroke="#818cf8" stroke-width="1.3"/>
+    <rect x="56" y="198" width="330" height="32" rx="13" fill="#1a2347"/>
+    <rect x="56" y="214" width="330" height="16" fill="#1a2347"/>
+    <text x="74" y="219" fill="#c7d2fe" font-size="13" font-weight="700">ingest/</text>
+    <text x="370" y="219" fill="#6366f1" font-size="10.5" text-anchor="end">enqueue</text>
+    <g>
+      <rect x="72" y="244" width="298" height="40" rx="7" fill="#161f3d"/>
+      <text x="84" y="262" fill="#94a3b8" font-size="9.5">api/</text>
+      <text x="84" y="277" fill="#dbe4f3" font-size="10.5">IngressController · dto/*</text>
+    </g>
+    <g>
+      <rect x="72" y="292" width="298" height="40" rx="7" fill="#161f3d"/>
+      <text x="84" y="310" fill="#94a3b8" font-size="9.5">service/</text>
+      <text x="84" y="325" fill="#dbe4f3" font-size="10.5">IdempotencyStore</text>
+    </g>
+    <g>
+      <rect x="72" y="340" width="298" height="40" rx="7" fill="#161f3d"/>
+      <text x="84" y="358" fill="#94a3b8" font-size="9.5">domain/</text>
+      <text x="84" y="373" fill="#dbe4f3" font-size="10.5">IngestJob · DocumentPayload · TargetProfile</text>
+    </g>
+    <g>
+      <rect x="72" y="388" width="298" height="40" rx="7" fill="#161f3d"/>
+      <text x="84" y="406" fill="#94a3b8" font-size="9.5">domain/validation/</text>
+      <text x="84" y="421" fill="#dbe4f3" font-size="10.5">IngestJobValidator · RedactionGuard</text>
+    </g>
+  </g>
+
+  <!-- delivery -->
+  <g>
+    <rect x="409" y="198" width="330" height="232" rx="13" fill="#10183180" stroke="#34d399" stroke-width="1.3"/>
+    <rect x="409" y="198" width="330" height="32" rx="13" fill="#123a31"/>
+    <rect x="409" y="214" width="330" height="16" fill="#123a31"/>
+    <text x="427" y="219" fill="#a7f3d0" font-size="13" font-weight="700">delivery/</text>
+    <text x="723" y="219" fill="#10b981" font-size="10.5" text-anchor="end">worker + target delivery</text>
+    <g>
+      <rect x="425" y="244" width="298" height="52" rx="7" fill="#161f3d"/>
+      <text x="437" y="262" fill="#94a3b8" font-size="9.5">worker/</text>
+      <text x="437" y="277" fill="#dbe4f3" font-size="10.5">IngestWorker</text>
+      <text x="437" y="291" fill="#7c8cae" font-size="9.5">WorkerLoopRunner · pressure gate</text>
+    </g>
+    <g>
+      <rect x="425" y="304" width="298" height="52" rx="7" fill="#161f3d"/>
+      <text x="437" y="322" fill="#94a3b8" font-size="9.5">domain/</text>
+      <text x="437" y="337" fill="#dbe4f3" font-size="10.5">DeliveryDecision · DeliveryResult</text>
+      <text x="437" y="351" fill="#7c8cae" font-size="9.5">TargetPressure</text>
+    </g>
+    <g>
+      <rect x="425" y="364" width="298" height="50" rx="7" fill="#0f1c20" stroke="#1f4a3a" stroke-dasharray="4 3"/>
+      <text x="437" y="383" fill="#34d399" font-size="9.5">fail-closed 정책</text>
+      <text x="437" y="400" fill="#7c8cae" font-size="10">pressure == OPEN 일 때만 신규 delivery</text>
+    </g>
+  </g>
+
+  <!-- status -->
+  <g>
+    <rect x="762" y="198" width="330" height="232" rx="13" fill="#10183180" stroke="#fbbf24" stroke-width="1.3"/>
+    <rect x="762" y="198" width="330" height="32" rx="13" fill="#3a2e0f"/>
+    <rect x="762" y="214" width="330" height="16" fill="#3a2e0f"/>
+    <text x="780" y="219" fill="#fde68a" font-size="13" font-weight="700">status/</text>
+    <text x="1076" y="219" fill="#d97706" font-size="10.5" text-anchor="end">operator observability</text>
+    <g>
+      <rect x="778" y="244" width="298" height="52" rx="7" fill="#161f3d"/>
+      <text x="790" y="262" fill="#94a3b8" font-size="9.5">service/</text>
+      <text x="790" y="277" fill="#dbe4f3" font-size="10.5">StatusService</text>
+      <text x="790" y="291" fill="#7c8cae" font-size="9.5">queue counts + target pressure</text>
+    </g>
+    <g>
+      <rect x="778" y="304" width="298" height="110" rx="7" fill="#0f1726"/>
+      <text x="790" y="324" fill="#94a3b8" font-size="9.5">redacted /status 출력</text>
+      <g font-size="10" fill="#9fb3d1">
+        <text x="790" y="345">queue.pending · inFlight · redelivered</text>
+        <text x="790" y="363">queue.deadLetter</text>
+        <text x="790" y="381">target.pressure  ◦ OPEN/THROTTLED/CLOSED</text>
+        <text x="790" y="399">indexed ≠ authorized — 상태 분리 유지</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- depends-on arrows row1 -> ports -->
+  <g fill="none" stroke="#22d3ee" stroke-width="1.8" marker-end="url(#dep)" opacity="0.9">
+    <path d="M221 430 V486"/>
+    <path d="M574 430 V486"/>
+    <path d="M900 430 C900 458 845 458 845 486"/>
+  </g>
+
+  <!-- ===== ROW 2 : PORTS ===== -->
+  <text x="56" y="468" fill="#5b6b8c" font-size="11" font-weight="700" letter-spacing="1.5">포트  ·  기술 중립 계약 (인터페이스 + 계약 타입)</text>
+  <g>
+    <rect x="56" y="478" width="513" height="118" rx="13" fill="#0c2330" stroke="#22d3ee" stroke-width="1.3"/>
+    <text x="74" y="503" fill="#67e8f9" font-size="12.5" font-weight="700">queue/port/</text>
+    <g font-size="10" fill="#bfe9f2">
+      <text x="74" y="527">IngestPublisher · IngestConsumer</text>
+      <text x="74" y="546">IngestMessage · PublishResult · AcknowledgementHandle</text>
+      <text x="74" y="565">QueueStatusProvider · QueueStatusSnapshot</text>
+    </g>
+    <text x="74" y="585" fill="#3e7a8a" font-size="9.5">큐 엔진을 모른다 — NATS 타입 의존 없음</text>
+  </g>
+  <g>
+    <rect x="585" y="478" width="507" height="118" rx="13" fill="#0c2330" stroke="#22d3ee" stroke-width="1.3"/>
+    <text x="603" y="503" fill="#67e8f9" font-size="12.5" font-weight="700">target/port/</text>
+    <g font-size="10" fill="#bfe9f2">
+      <text x="603" y="527">RagTargetAdapter</text>
+      <text x="603" y="546">TargetStatusSnapshot · TargetPressureSnapshot</text>
+    </g>
+    <text x="603" y="572" fill="#3e7a8a" font-size="9.5">RAG target을 모른다 — RAGFlow 타입 의존 없음</text>
+    <text x="603" y="586" fill="#3e7a8a" font-size="9.5">core가 보는 유일한 delivery 경계</text>
+  </g>
+
+  <!-- implements arrows adapters -> ports -->
+  <g fill="none" stroke="#f97316" stroke-width="1.8" marker-end="url(#impl)" opacity="0.9">
+    <path d="M300 700 V600"/>
+    <path d="M840 700 V600"/>
+  </g>
+
+  <!-- ===== ROW 3 : ADAPTERS ===== -->
+  <text x="56" y="678" fill="#5b6b8c" font-size="11" font-weight="700" letter-spacing="1.5">어댑터  ·  포트 구현체</text>
+  <g>
+    <rect x="56" y="688" width="513" height="86" rx="13" fill="#0e1a2e" stroke="#38bdf8" stroke-width="1.3"/>
+    <text x="74" y="713" fill="#7dd3fc" font-size="12.5" font-weight="700">adapter/infra/nats/</text>
+    <text x="555" y="713" fill="#0ea5e9" font-size="9.5" text-anchor="end">기술 인프라</text>
+    <g font-size="9.7" fill="#aed6ee">
+      <text x="74" y="735">NatsIngestPublisher · NatsIngestConsumer · NatsQueueStatusProvider</text>
+      <text x="74" y="753">JetStream*Gateway · NatsJetStreamProvisioner · SubjectRouter · Codec</text>
+    </g>
+  </g>
+  <g>
+    <rect x="585" y="688" width="507" height="86" rx="13" fill="#1c1626" stroke="#f97316" stroke-width="1.3"/>
+    <text x="603" y="713" fill="#fdba74" font-size="12.5" font-weight="700">adapter/ext/ragflow/</text>
+    <text x="1076" y="713" fill="#ea580c" font-size="9.5" text-anchor="end">외부 서비스</text>
+    <g font-size="9.7" fill="#e7cdb3">
+      <text x="603" y="735">RagFlowTargetAdapter · HttpRagFlowGateway · RagFlowGateway</text>
+      <text x="603" y="753">RagFlowPressurePolicy · RagFlowDocumentRef · RagFlowPressureSnapshot</text>
+    </g>
+  </g>
+
+  <!-- common sidebar -->
+  <g>
+    <rect x="1108" y="198" width="116" height="576" rx="13" fill="#0e1730" stroke="#475569" stroke-width="1.2" stroke-dasharray="6 5"/>
+    <text x="1166" y="222" fill="#cbd5e1" font-size="12" font-weight="700" text-anchor="middle">common/</text>
+    <line x1="1124" y1="234" x2="1208" y2="234" stroke="#1f2d4a"/>
+    <g font-size="9.6" fill="#94a3b8">
+      <text x="1166" y="276" text-anchor="middle">config/</text>
+      <text x="1166" y="293" text-anchor="middle" fill="#64748b">Worker·Nats</text>
+      <text x="1166" y="306" text-anchor="middle" fill="#64748b">Configuration</text>
+      <text x="1166" y="378" text-anchor="middle">logging/</text>
+      <text x="1166" y="395" text-anchor="middle" fill="#64748b">SafeJobSummary</text>
+      <text x="1166" y="480" text-anchor="middle">TargetIndexing</text>
+      <text x="1166" y="494" text-anchor="middle">State</text>
+    </g>
+    <text x="1166" y="700" fill="#475569" font-size="9" text-anchor="middle">공통 인프라</text>
+    <text x="1166" y="714" fill="#475569" font-size="9" text-anchor="middle">조립 루트</text>
+  </g>
+</svg>

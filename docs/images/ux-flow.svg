@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 736" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+  <defs>
+    <linearGradient id="usky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0c142b"/>
+      <stop offset="1" stop-color="#070b18"/>
+    </linearGradient>
+    <pattern id="ugrid" width="34" height="34" patternUnits="userSpaceOnUse">
+      <path d="M34 0H0V34" fill="none" stroke="#14203d" stroke-width="1"/>
+    </pattern>
+    <marker id="uflow" viewBox="0 0 12 12" refX="9" refY="6" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L12 6 L0 12 L3.5 6 Z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <rect width="1280" height="736" fill="url(#usky)"/>
+  <rect width="1280" height="736" fill="url(#ugrid)"/>
+  <rect x="0" y="0" width="1280" height="4" fill="#818cf8"/>
+
+  <text x="56" y="58" fill="#f1f5f9" font-size="32" font-weight="700">전체 UX 시각화</text>
+  <text x="58" y="84" fill="#5b6b8c" font-size="13.5">enqueue 요청 생애주기 — Producer · Queue/Worker · Operator 3개 스윔레인</text>
+
+  <!-- ===== LANE A : PRODUCER ===== -->
+  <rect x="56" y="108" width="1168" height="172" rx="14" fill="#10162c" stroke="#283a5e"/>
+  <rect x="56" y="108" width="112" height="172" rx="14" fill="#171f3f"/>
+  <rect x="156" y="108" width="12" height="172" fill="#171f3f"/>
+  <text x="112" y="186" fill="#a5b4fc" font-size="13" font-weight="700" text-anchor="middle" transform="rotate(-90 112 186)">PRODUCER</text>
+  <circle cx="112" cy="210" r="4" fill="#818cf8"/>
+
+  <g>
+    <rect x="190" y="134" width="232" height="120" rx="11" fill="#161f3d" stroke="#34406a"/>
+    <text x="206" y="160" fill="#818cf8" font-size="13" font-weight="700">① 문서 준비</text>
+    <g font-size="10.3" fill="#9fb3d1">
+      <text x="206" y="184">redacted_rag_ready_document</text>
+      <text x="206" y="203">redactionVersion = redaction.v2</text>
+      <text x="206" y="222">contentHash = sha256:‹64 hex›</text>
+      <text x="206" y="241">producer-side redaction proof</text>
+    </g>
+  </g>
+  <g>
+    <rect x="448" y="134" width="232" height="120" rx="11" fill="#161f3d" stroke="#34406a"/>
+    <text x="464" y="160" fill="#818cf8" font-size="13" font-weight="700">② POST /enqueue</text>
+    <g font-size="10.3" fill="#9fb3d1">
+      <text x="464" y="184">POST /v1/ingest/enqueue</text>
+      <text x="464" y="203">schemaVersion rag_ingress.v1</text>
+      <text x="464" y="222">targetProfile = ragflow-*</text>
+      <text x="464" y="241">idempotencyKey (옵션)</text>
+    </g>
+  </g>
+  <g>
+    <rect x="706" y="134" width="232" height="120" rx="11" fill="#161f3d" stroke="#34406a"/>
+    <text x="722" y="160" fill="#818cf8" font-size="13" font-weight="700">③ 검증 게이트</text>
+    <g font-size="10.3" fill="#9fb3d1">
+      <text x="722" y="184">IngestJobValidator</text>
+      <text x="722" y="203">RedactionGuard 스캔</text>
+      <text x="722" y="222">contentHash 일치 확인</text>
+      <text x="722" y="241">idempotency 조회</text>
+    </g>
+  </g>
+  <g>
+    <rect x="964" y="134" width="242" height="120" rx="11" fill="#0f1726" stroke="#34406a"/>
+    <text x="980" y="160" fill="#818cf8" font-size="13" font-weight="700">④ 동기 응답</text>
+    <g font-size="10.2">
+      <circle cx="987" cy="181" r="5" fill="#34d399"/><text x="999" y="185" fill="#86efc4">202  accepted · jobId · queued</text>
+      <circle cx="987" cy="206" r="5" fill="#f87171"/><text x="999" y="210" fill="#fca5a5">400  검증/redaction 거부</text>
+      <circle cx="987" cy="231" r="5" fill="#fbbf24"/><text x="999" y="235" fill="#fcd34d">503  publish-ack 없음 → 재시도</text>
+    </g>
+  </g>
+
+  <g fill="none" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#uflow)">
+    <path d="M422 194 H446"/>
+    <path d="M680 194 H704"/>
+    <path d="M938 194 H962"/>
+  </g>
+
+  <!-- handoff A -> B -->
+  <path d="M822 254 V300" fill="none" stroke="#22d3ee" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#uflow)"/>
+  <rect x="744" y="268" width="156" height="20" rx="6" fill="#0c142b"/>
+  <text x="822" y="282" fill="#67e8f9" font-size="10" text-anchor="middle">publish + JetStream ack</text>
+
+  <!-- ===== LANE B : QUEUE / WORKER ===== -->
+  <rect x="56" y="306" width="1168" height="206" rx="14" fill="#101c1a" stroke="#1f4a3a"/>
+  <rect x="56" y="306" width="112" height="206" rx="14" fill="#123026"/>
+  <rect x="156" y="306" width="12" height="206" fill="#123026"/>
+  <text x="112" y="410" fill="#6ee7b7" font-size="12" font-weight="700" text-anchor="middle" transform="rotate(-90 112 410)">QUEUE / WORKER</text>
+  <circle cx="112" cy="338" r="4" fill="#34d399"/>
+
+  <g>
+    <rect x="190" y="332" width="232" height="154" rx="11" fill="#13201f" stroke="#2f5a4a"/>
+    <text x="206" y="358" fill="#34d399" font-size="13" font-weight="700">⑤ JetStream</text>
+    <g font-size="10.3" fill="#9fd6bd">
+      <text x="206" y="382">stream RAG_INGRESS_QUEUE</text>
+      <text x="206" y="401">WorkQueuePolicy · file 저장</text>
+      <text x="206" y="420">subject routing</text>
+      <text x="220" y="438">transcript / document</text>
+      <text x="206" y="463">durable 보존 · 재시작 생존</text>
+    </g>
+  </g>
+  <g>
+    <rect x="448" y="332" width="232" height="154" rx="11" fill="#13201f" stroke="#2f5a4a"/>
+    <text x="464" y="358" fill="#34d399" font-size="13" font-weight="700">⑥ 워커 풀</text>
+    <g font-size="10.3" fill="#9fd6bd">
+      <text x="464" y="382">durable pull consumer</text>
+      <text x="464" y="401">bounded batch fetch</text>
+      <text x="464" y="420">WorkerLoopRunner.runOnce()</text>
+      <text x="464" y="439">explicit ack 정책</text>
+      <text x="464" y="463">max_deliver = 5</text>
+    </g>
+  </g>
+  <g>
+    <rect x="706" y="332" width="232" height="154" rx="11" fill="#0f1726" stroke="#2f5a4a"/>
+    <text x="722" y="358" fill="#34d399" font-size="13" font-weight="700">⑦ 압력 게이트</text>
+    <g font-size="10.4">
+      <rect x="722" y="372" width="200" height="30" rx="6" fill="#10241c"/>
+      <circle cx="739" cy="387" r="6" fill="#34d399"/><text x="753" y="391" fill="#86efc4">OPEN → deliver 진행</text>
+      <rect x="722" y="408" width="200" height="30" rx="6" fill="#251f0c"/>
+      <circle cx="739" cy="423" r="6" fill="#fbbf24"/><text x="753" y="427" fill="#fcd34d">THROTTLED → 신규 보류</text>
+      <rect x="722" y="444" width="200" height="30" rx="6" fill="#2a1313"/>
+      <circle cx="739" cy="459" r="6" fill="#f87171"/><text x="753" y="463" fill="#fca5a5">CLOSED → nak · 지연</text>
+    </g>
+  </g>
+  <g>
+    <rect x="964" y="332" width="242" height="154" rx="11" fill="#13201f" stroke="#2f5a4a"/>
+    <text x="980" y="358" fill="#34d399" font-size="13" font-weight="700">⑧ 타깃 전달</text>
+    <g font-size="10.3" fill="#9fd6bd">
+      <text x="980" y="382">RagTargetAdapter.deliver()</text>
+      <text x="980" y="401">upload › metadata › parse</text>
+    </g>
+    <g font-size="10.2">
+      <circle cx="987" cy="421" r="5" fill="#34d399"/><text x="999" y="425" fill="#86efc4">성공 → explicit ack</text>
+      <circle cx="987" cy="444" r="5" fill="#fbbf24"/><text x="999" y="448" fill="#fcd34d">실패 → nak · 재배달</text>
+      <circle cx="987" cy="467" r="5" fill="#f87171"/><text x="999" y="471" fill="#fca5a5">max 초과 → dead-letter</text>
+    </g>
+  </g>
+
+  <g fill="none" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#uflow)">
+    <path d="M422 409 H446"/>
+    <path d="M680 409 H704"/>
+    <path d="M938 409 H962"/>
+  </g>
+
+  <!-- handoff B -> C -->
+  <path d="M640 486 V536" fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#uflow)"/>
+  <rect x="560" y="502" width="172" height="20" rx="6" fill="#0c142b"/>
+  <text x="646" y="516" fill="#fcd34d" font-size="10" text-anchor="middle">redacted 상태 스냅샷</text>
+
+  <!-- ===== LANE C : OPERATOR ===== -->
+  <rect x="56" y="542" width="1168" height="160" rx="14" fill="#1a160a" stroke="#4a3a1f"/>
+  <rect x="56" y="542" width="112" height="160" rx="14" fill="#2e2510"/>
+  <rect x="156" y="542" width="12" height="160" fill="#2e2510"/>
+  <text x="112" y="622" fill="#fcd34d" font-size="13" font-weight="700" text-anchor="middle" transform="rotate(-90 112 622)">OPERATOR</text>
+  <circle cx="112" cy="566" r="4" fill="#fbbf24"/>
+
+  <g>
+    <rect x="190" y="566" width="316" height="112" rx="11" fill="#211b0d" stroke="#4a3a1f"/>
+    <text x="206" y="592" fill="#fbbf24" font-size="13" font-weight="700">GET /healthz</text>
+    <g font-size="10.3" fill="#d6c79f">
+      <text x="206" y="616">{ status: ok, component: ingress-api }</text>
+      <text x="206" y="636">compose readiness probe</text>
+      <text x="206" y="657">네트워크/인증 호출 없음</text>
+    </g>
+  </g>
+  <g>
+    <rect x="530" y="566" width="316" height="112" rx="11" fill="#211b0d" stroke="#4a3a1f"/>
+    <text x="546" y="592" fill="#fbbf24" font-size="13" font-weight="700">GET /status</text>
+    <g font-size="10.3" fill="#d6c79f">
+      <text x="546" y="616">queue: pending · inFlight · redelivered</text>
+      <text x="546" y="636">queue: deadLetter</text>
+      <text x="546" y="657">target: name · pressure (redacted)</text>
+    </g>
+  </g>
+  <g>
+    <rect x="870" y="566" width="336" height="112" rx="11" fill="#211b0d" stroke="#4a3a1f"/>
+    <text x="886" y="592" fill="#fbbf24" font-size="13" font-weight="700">scripts/postcheck.sh</text>
+    <g font-size="10.3" fill="#d6c79f">
+      <text x="886" y="616">/healthz + /status 폴링</text>
+      <text x="886" y="636">redaction denylist 자체 스캔</text>
+      <text x="886" y="657">evidence → build/reports/…/postcheck.json</text>
+    </g>
+  </g>
+
+  <g fill="none" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#uflow)">
+    <path d="M506 622 H528"/>
+    <path d="M846 622 H868"/>
+  </g>
+
+  <!-- footer note -->
+  <text x="56" y="726" fill="#475569" font-size="10.5">◆ 동기 경로(Producer)와 비동기 경로(Worker)는 JetStream publish ack로만 연결된다 — ack는 큐 수용을 뜻하며 RAGFlow indexed를 보장하지 않는다.</text>
+</svg>
