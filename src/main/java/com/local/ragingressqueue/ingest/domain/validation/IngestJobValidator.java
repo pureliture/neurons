@@ -12,15 +12,20 @@ public class IngestJobValidator {
     private static final String REDACTION_VERSION = "redaction.v2";
     private static final Set<String> TARGET_PROFILES = Set.of(
         "ragflow-transcript-memory",
+        "ragflow-session-memory",
         "ragflow-session-summary",
+        "ragflow-project-memory",
         "ragflow-task-summary",
-        "ragflow-approved-memory-card"
+        "ragflow-approved-memory-card",
+        "ragflow-procedural-memory"
     );
     private static final Set<String> DOCUMENT_KINDS = Set.of(
         "conversation_chunk",
         "session_summary",
+        "project_context_snapshot",
         "task_summary",
-        "approved_memory_card"
+        "approved_memory_card",
+        "repo_usage_pattern"
     );
 
     public List<String> validate(IngestJob job) {

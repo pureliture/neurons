@@ -35,9 +35,12 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
         @Value("${rag-ingress.target.ragflow.base-url:}") String baseUrl,
         @Value("${rag-ingress.target.ragflow.api-key:}") String apiKey,
         @Value("${rag-ingress.target-profiles.ragflow-transcript-memory.dataset-id:}") String transcriptMemoryDatasetId,
+        @Value("${rag-ingress.target-profiles.ragflow-session-memory.dataset-id:}") String sessionMemoryDatasetId,
         @Value("${rag-ingress.target-profiles.ragflow-session-summary.dataset-id:}") String sessionSummaryDatasetId,
+        @Value("${rag-ingress.target-profiles.ragflow-project-memory.dataset-id:}") String projectMemoryDatasetId,
         @Value("${rag-ingress.target-profiles.ragflow-task-summary.dataset-id:}") String taskSummaryDatasetId,
         @Value("${rag-ingress.target-profiles.ragflow-approved-memory-card.dataset-id:}") String approvedMemoryCardDatasetId,
+        @Value("${rag-ingress.target-profiles.ragflow-procedural-memory.dataset-id:}") String proceduralMemoryDatasetId,
         @Value("${rag-ingress.target.ragflow.pressure.running-throttle-threshold:20}") int runningThrottleThreshold,
         @Value("${rag-ingress.target.ragflow.pressure.unstart-throttle-threshold:5}") int unstartThrottleThreshold,
         @Value("${rag-ingress.target.ragflow.pressure.running-closed-threshold:100}") int runningClosedThreshold,
@@ -50,9 +53,12 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
             apiKey,
             Map.of(
                 "ragflow-transcript-memory", transcriptMemoryDatasetId,
+                "ragflow-session-memory", firstNonBlank(sessionMemoryDatasetId, sessionSummaryDatasetId),
                 "ragflow-session-summary", sessionSummaryDatasetId,
+                "ragflow-project-memory", projectMemoryDatasetId,
                 "ragflow-task-summary", taskSummaryDatasetId,
-                "ragflow-approved-memory-card", approvedMemoryCardDatasetId
+                "ragflow-approved-memory-card", approvedMemoryCardDatasetId,
+                "ragflow-procedural-memory", proceduralMemoryDatasetId
             ),
             gateway,
             new RagFlowPressurePolicy(
@@ -169,5 +175,10 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
 
     private static String trimToEmpty(String value) {
         return value == null ? "" : value.trim();
+    }
+
+    private static String firstNonBlank(String first, String fallback) {
+        String trimmed = trimToEmpty(first);
+        return trimmed.isEmpty() ? trimToEmpty(fallback) : trimmed;
     }
 }

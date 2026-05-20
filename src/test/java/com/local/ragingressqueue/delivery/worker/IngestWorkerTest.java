@@ -22,47 +22,50 @@ class IngestWorkerTest {
     void openPressureFetchesAndDelivers() {
         FakeConsumer consumer = new FakeConsumer(List.of(new IngestMessage(validJob(), 1)));
         FakeAdapter adapter = new FakeAdapter(TargetPressure.OPEN, DeliveryResult.delivered("target-ref"));
-        IngestWorker worker = new IngestWorker(consumer, adapter, "ragflow-transcript-memory");
+        IngestWorker worker = new IngestWorker(consumer, adapter);
 
         DeliveryDecision decision = worker.runOnce();
 
         assertThat(decision.status()).isEqualTo(DeliveryDecision.Status.DELIVERED);
         assertThat(consumer.fetchCount).isEqualTo(1);
         assertThat(adapter.deliverCount).isEqualTo(1);
+        assertThat(adapter.deliveredTargetProfiles).containsExactly("ragflow-transcript-memory");
         assertThat(consumer.ackCount).isEqualTo(1);
     }
 
     @Test
-    void throttledPressureDoesNotFetchOrDeliver() {
+    void throttledMessageTargetIsNackedAndNotDelivered() {
         FakeConsumer consumer = new FakeConsumer(List.of(new IngestMessage(validJob(), 1)));
         FakeAdapter adapter = new FakeAdapter(TargetPressure.THROTTLED, DeliveryResult.delivered("target-ref"));
-        IngestWorker worker = new IngestWorker(consumer, adapter, "ragflow-transcript-memory");
+        IngestWorker worker = new IngestWorker(consumer, adapter);
 
         DeliveryDecision decision = worker.runOnce();
 
         assertThat(decision.status()).isEqualTo(DeliveryDecision.Status.SKIPPED_PRESSURE);
-        assertThat(consumer.fetchCount).isZero();
+        assertThat(consumer.fetchCount).isEqualTo(1);
         assertThat(adapter.deliverCount).isZero();
+        assertThat(consumer.nakCount).isEqualTo(1);
     }
 
     @Test
-    void closedPressureDoesNotFetchOrDeliver() {
+    void closedMessageTargetIsNackedAndNotDelivered() {
         FakeConsumer consumer = new FakeConsumer(List.of(new IngestMessage(validJob(), 1)));
         FakeAdapter adapter = new FakeAdapter(TargetPressure.CLOSED, DeliveryResult.delivered("target-ref"));
-        IngestWorker worker = new IngestWorker(consumer, adapter, "ragflow-transcript-memory");
+        IngestWorker worker = new IngestWorker(consumer, adapter);
 
         DeliveryDecision decision = worker.runOnce();
 
         assertThat(decision.status()).isEqualTo(DeliveryDecision.Status.SKIPPED_PRESSURE);
-        assertThat(consumer.fetchCount).isZero();
+        assertThat(consumer.fetchCount).isEqualTo(1);
         assertThat(adapter.deliverCount).isZero();
+        assertThat(consumer.nakCount).isEqualTo(1);
     }
 
     @Test
     void failedDeliveryNaksMessage() {
         FakeConsumer consumer = new FakeConsumer(List.of(new IngestMessage(validJob(), 1)));
         FakeAdapter adapter = new FakeAdapter(TargetPressure.OPEN, DeliveryResult.failed("target rejected"));
-        IngestWorker worker = new IngestWorker(consumer, adapter, "ragflow-transcript-memory");
+        IngestWorker worker = new IngestWorker(consumer, adapter);
 
         DeliveryDecision decision = worker.runOnce();
 
@@ -74,7 +77,7 @@ class IngestWorkerTest {
     void maxDeliverExceededMapsToQuarantineCandidate() {
         FakeConsumer consumer = new FakeConsumer(List.of(new IngestMessage(validJob(), 5)));
         FakeAdapter adapter = new FakeAdapter(TargetPressure.OPEN, DeliveryResult.failed("target rejected"));
-        IngestWorker worker = new IngestWorker(consumer, adapter, "ragflow-transcript-memory");
+        IngestWorker worker = new IngestWorker(consumer, adapter);
 
         DeliveryDecision decision = worker.runOnce();
 
@@ -87,7 +90,7 @@ class IngestWorkerTest {
     void invalidQueuedPayloadIsAckedAndNotDelivered() {
         FakeConsumer consumer = new FakeConsumer(List.of(new IngestMessage(invalidPrivateJob(), 1)));
         FakeAdapter adapter = new FakeAdapter(TargetPressure.OPEN, DeliveryResult.delivered("target-ref"));
-        IngestWorker worker = new IngestWorker(consumer, adapter, "ragflow-transcript-memory");
+        IngestWorker worker = new IngestWorker(consumer, adapter);
 
         DeliveryDecision decision = worker.runOnce();
 
@@ -100,6 +103,20 @@ class IngestWorkerTest {
     @Test
     void indexedTargetStateIsNotAuthorization() {
         assertThat(TargetIndexingState.INDEXED.name()).isNotEqualTo("AUTHORIZED");
+    }
+
+    @Test
+    void workerDeliversEachMessageToItsOwnTargetProfile() {
+        FakeConsumer consumer = new FakeConsumer(List.of(new IngestMessage(sessionMemoryJob(), 1)));
+        FakeAdapter adapter = new FakeAdapter(TargetPressure.OPEN, DeliveryResult.delivered("target-ref"));
+        IngestWorker worker = new IngestWorker(consumer, adapter);
+
+        DeliveryDecision decision = worker.runOnce();
+
+        assertThat(decision.status()).isEqualTo(DeliveryDecision.Status.DELIVERED);
+        assertThat(adapter.pressureTargetProfiles).containsExactly("ragflow-session-memory");
+        assertThat(adapter.deliveredTargetProfiles).containsExactly("ragflow-session-memory");
+        assertThat(consumer.ackCount).isEqualTo(1);
     }
 
     private IngestJob validJob() {
@@ -152,6 +169,31 @@ class IngestWorkerTest {
         );
     }
 
+    private IngestJob sessionMemoryJob() {
+        String body = """
+            ---
+            schema_version: agent_knowledge_document.v2
+            result_type: session_summary
+            ---
+            redacted session summary
+            """;
+        return new IngestJob(
+            Map.of("provider", "codex", "project", "workspace-ragflow-advisor"),
+            new DocumentPayload(
+                "redacted_rag_ready_document",
+                "redaction.v2",
+                "session-summary.md",
+                "text/markdown",
+                body,
+                Map.of("schema_version", "agent_knowledge_document.v2", "result_type", "session_summary")
+            ),
+            ContentHashVerifier.sha256Hex(body),
+            "ragflow-session-memory",
+            "session_summary",
+            null
+        );
+    }
+
     private static final class FakeConsumer implements IngestConsumer {
         private final List<IngestMessage> messages;
         private int fetchCount;
@@ -182,6 +224,8 @@ class IngestWorkerTest {
     private static final class FakeAdapter implements RagTargetAdapter {
         private final TargetPressure pressure;
         private final DeliveryResult result;
+        private final java.util.ArrayList<String> pressureTargetProfiles = new java.util.ArrayList<>();
+        private final java.util.ArrayList<String> deliveredTargetProfiles = new java.util.ArrayList<>();
         private int deliverCount;
 
         private FakeAdapter(TargetPressure pressure, DeliveryResult result) {
@@ -191,12 +235,14 @@ class IngestWorkerTest {
 
         @Override
         public com.local.ragingressqueue.target.port.TargetPressureSnapshot pressureSnapshot(String targetProfile) {
+            pressureTargetProfiles.add(targetProfile);
             return new com.local.ragingressqueue.target.port.TargetPressureSnapshot(pressure, 0, 0, 0, null);
         }
 
         @Override
         public DeliveryResult deliver(IngestJob job, String targetProfile) {
             deliverCount++;
+            deliveredTargetProfiles.add(targetProfile);
             return result;
         }
 

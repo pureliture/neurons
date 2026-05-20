@@ -73,6 +73,25 @@ class RagFlowTargetAdapterTest {
     }
 
     @Test
+    void enabledAdapterRoutesSessionMemoryProfileToSessionDataset() {
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-session-memory", "ds_session"),
+            gateway
+        );
+
+        DeliveryResult result = adapter.deliver(sessionMemoryJob(), "ragflow-session-memory");
+
+        assertThat(result.delivered()).isTrue();
+        assertThat(gateway.uploadDatasetId).isEqualTo("ds_session");
+        assertThat(gateway.metadata).containsEntry("target_profile", "ragflow-session-memory");
+        assertThat(gateway.metadata).containsEntry("kind", "session_summary");
+    }
+
+    @Test
     void enabledAdapterThrottlesWhenRagFlowRunningBacklogReachesLimit() {
         FakeRagFlowGateway gateway = new FakeRagFlowGateway();
         gateway.pressureSnapshot = new RagFlowPressureSnapshot(20, 0, 0, 100, 120);
@@ -160,6 +179,31 @@ class RagFlowTargetAdapterTest {
             ContentHashVerifier.sha256Hex(body),
             "ragflow-transcript-memory",
             "conversation_chunk",
+            null
+        );
+    }
+
+    private IngestJob sessionMemoryJob() {
+        String body = """
+            ---
+            schema_version: agent_knowledge_document.v2
+            result_type: session_summary
+            ---
+            redacted session summary
+            """;
+        return new IngestJob(
+            Map.of("provider", "codex", "project", "workspace-ragflow-advisor"),
+            new DocumentPayload(
+                "redacted_rag_ready_document",
+                "redaction.v2",
+                "session-summary.md",
+                "text/markdown",
+                body,
+                Map.of("schema_version", "agent_knowledge_document.v2", "result_type", "session_summary")
+            ),
+            ContentHashVerifier.sha256Hex(body),
+            "ragflow-session-memory",
+            "session_summary",
             null
         );
     }
