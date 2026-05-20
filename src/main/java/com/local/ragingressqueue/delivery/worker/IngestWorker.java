@@ -17,34 +17,26 @@ public class IngestWorker {
 
     private final IngestConsumer consumer;
     private final RagTargetAdapter adapter;
-    private final String targetProfile;
     private final IngestJobValidator validator;
     private final RedactionGuard redactionGuard;
 
-    public IngestWorker(IngestConsumer consumer, RagTargetAdapter adapter, String targetProfile) {
-        this(consumer, adapter, targetProfile, new IngestJobValidator(), new RedactionGuard());
+    public IngestWorker(IngestConsumer consumer, RagTargetAdapter adapter) {
+        this(consumer, adapter, new IngestJobValidator(), new RedactionGuard());
     }
 
     IngestWorker(
         IngestConsumer consumer,
         RagTargetAdapter adapter,
-        String targetProfile,
         IngestJobValidator validator,
         RedactionGuard redactionGuard
     ) {
         this.consumer = consumer;
         this.adapter = adapter;
-        this.targetProfile = targetProfile;
         this.validator = validator;
         this.redactionGuard = redactionGuard;
     }
 
     public DeliveryDecision runOnce() {
-        TargetPressure pressure = adapter.pressureSnapshot(targetProfile).pressure();
-        if (pressure != TargetPressure.OPEN) {
-            return DeliveryDecision.skippedPressure("target pressure is " + pressure);
-        }
-
         List<IngestMessage> messages = consumer.fetch(MAX_BATCH_SIZE);
         if (messages.isEmpty()) {
             return DeliveryDecision.noWork();
@@ -57,7 +49,14 @@ public class IngestWorker {
                 lastDecision = DeliveryDecision.quarantineCandidate("queued payload failed validation");
                 continue;
             }
-            DeliveryResult result = adapter.deliver(message.job(), targetProfile);
+            String messageTargetProfile = message.job().targetProfile();
+            TargetPressure pressure = adapter.pressureSnapshot(messageTargetProfile).pressure();
+            if (pressure != TargetPressure.OPEN) {
+                consumer.nak(message);
+                lastDecision = DeliveryDecision.skippedPressure("target pressure is " + pressure);
+                continue;
+            }
+            DeliveryResult result = adapter.deliver(message.job(), messageTargetProfile);
             if (result.delivered()) {
                 consumer.ack(message);
                 lastDecision = DeliveryDecision.delivered();

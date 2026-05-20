@@ -57,6 +57,17 @@ class IngressControllerTest {
     }
 
     @Test
+    void sessionMemoryTargetProfileIsAccepted() throws Exception {
+        mockMvc.perform(post("/v1/ingest/enqueue")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(validSessionMemoryRequest()))
+            .andExpect(status().isAccepted())
+            .andExpect(jsonPath("$.accepted").value(true));
+
+        assertThat(publisher.publishCount).isEqualTo(1);
+    }
+
+    @Test
     void sameIdempotencyKeyWithDifferentContentHashReturnsConflict() throws Exception {
         String first = validRequest("\"idempotencyKey\":\"stable-key\",");
         String second = validRequestWithBody("\"idempotencyKey\":\"stable-key\",", body() + "\nchanged");
@@ -219,6 +230,35 @@ class IngressControllerTest {
               "contentHash": "%s",
               "targetProfile": "ragflow-transcript-memory",
               "kind": "conversation_chunk"
+            }
+            """.formatted(jsonString(body), contentHash(body));
+    }
+
+    private String validSessionMemoryRequest() {
+        String body = """
+            ---
+            schema_version: agent_knowledge_document.v2
+            result_type: session_summary
+            ---
+            redacted session summary
+            """;
+        return """
+            {
+              "schemaVersion": "rag_ingress_enqueue.v1",
+              "source": {"type":"local_pc","provider":"codex","project":"workspace-ragflow-advisor"},
+              "payload": {
+                "kind": "redacted_rag_ready_document",
+                "redactionVersion": "redaction.v2",
+                "document": {
+                  "filename": "session-summary.md",
+                  "contentType": "text/markdown",
+                  "body": %s,
+                  "metadata": {"schema_version":"agent_knowledge_document.v2","result_type":"session_summary"}
+                }
+              },
+              "contentHash": "%s",
+              "targetProfile": "ragflow-session-memory",
+              "kind": "session_summary"
             }
             """.formatted(jsonString(body), contentHash(body));
     }
