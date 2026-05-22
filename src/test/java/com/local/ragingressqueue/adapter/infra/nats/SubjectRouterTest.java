@@ -16,6 +16,7 @@ class SubjectRouterTest {
     @Test
     void routesDerivedDocumentsToDocumentSubject() {
         assertThat(router.subjectFor("session_summary")).isEqualTo("rag.ingress.document");
+        assertThat(router.subjectFor("project_context_snapshot")).isEqualTo("rag.ingress.document");
         assertThat(router.subjectFor("task_summary")).isEqualTo("rag.ingress.document");
         assertThat(router.subjectFor("approved_memory_card")).isEqualTo("rag.ingress.document");
     }
