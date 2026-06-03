@@ -42,7 +42,7 @@ if [[ "$MODE" == "offline" ]]; then
 }
 JSON
 else
-  API_URL="${RAG_INGRESS_API_URL:-http://127.0.0.1:8080}"
+  API_URL="${RAG_INGRESS_API_URL:-http://127.0.0.1:18080}"
   health="$(curl --max-time "$TIMEOUT_SECONDS" -fsS "$API_URL/healthz")"
   status="$(curl --max-time "$TIMEOUT_SECONDS" -fsS "$API_URL/status")"
   jq -n \

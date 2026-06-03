@@ -21,7 +21,9 @@ public class IngestJobValidator {
     );
     private static final Set<String> DOCUMENT_KINDS = Set.of(
         "conversation_chunk",
+        "tool_evidence_summary",
         "session_summary",
+        "session_recap",
         "project_context_snapshot",
         "task_summary",
         "approved_memory_card",

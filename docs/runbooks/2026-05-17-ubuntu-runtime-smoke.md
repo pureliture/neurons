@@ -17,7 +17,7 @@ docker compose version
 docker compose -f compose.yaml up --build -d
 bash scripts/postcheck.sh --timeout 30 --evidence build/reports/rag-ingress-queue/postcheck.json
 ./scripts/runtime-verify.py --expected-pressure CLOSED --timeout 60 --evidence build/reports/rag-ingress-queue/runtime-pressure-verify-v2.json
-curl -fsS -H 'Content-Type: application/json' --data @/tmp/rag-ingress-enqueue.json http://127.0.0.1:8080/v1/ingest/enqueue
+curl -fsS -H 'Content-Type: application/json' --data @/tmp/rag-ingress-enqueue.json http://127.0.0.1:18080/v1/ingest/enqueue
 ```
 
 ## Evidence

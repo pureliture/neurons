@@ -11,11 +11,13 @@ class SubjectRouterTest {
     @Test
     void routesConversationChunkToTranscriptSubject() {
         assertThat(router.subjectFor("conversation_chunk")).isEqualTo("rag.ingress.transcript");
+        assertThat(router.subjectFor("tool_evidence_summary")).isEqualTo("rag.ingress.transcript");
     }
 
     @Test
     void routesDerivedDocumentsToDocumentSubject() {
         assertThat(router.subjectFor("session_summary")).isEqualTo("rag.ingress.document");
+        assertThat(router.subjectFor("session_recap")).isEqualTo("rag.ingress.document");
         assertThat(router.subjectFor("project_context_snapshot")).isEqualTo("rag.ingress.document");
         assertThat(router.subjectFor("task_summary")).isEqualTo("rag.ingress.document");
         assertThat(router.subjectFor("approved_memory_card")).isEqualTo("rag.ingress.document");
