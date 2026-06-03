@@ -60,16 +60,62 @@ class RagFlowTargetAdapterTest {
             gateway
         );
 
-        DeliveryResult result = adapter.deliver(validJob(), "ragflow-transcript-memory");
+        IngestJob job = validJob();
+        DeliveryResult result = adapter.deliver(job, "ragflow-transcript-memory");
 
+        String expectedFragment = job.contentHash().substring(7, 19);
         assertThat(result.delivered()).isTrue();
         assertThat(result.targetRef()).isEqualTo("redacted");
         assertThat(gateway.uploadDatasetId).isEqualTo("ds_1");
-        assertThat(gateway.uploadFilename).isEqualTo("chunk.md");
+        assertThat(gateway.uploadFilename).isEqualTo("chunk-" + expectedFragment + ".md");
         assertThat(gateway.metadata).containsEntry("project", "workspace-ragflow-advisor");
         assertThat(gateway.metadata).containsEntry("provider", "codex");
         assertThat(gateway.metadata).containsKey("content_hash_prefix");
         assertThat(gateway.parseRequested).isTrue();
+    }
+
+    @Test
+    void secondDeliveryWithSameContentHashIsSkippedAsAlreadyPresent() {
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway
+        );
+
+        IngestJob job = validJob();
+
+        DeliveryResult first = adapter.deliver(job, "ragflow-transcript-memory");
+        assertThat(first.delivered()).isTrue();
+        assertThat(gateway.uploadCount).isEqualTo(1);
+
+        DeliveryResult second = adapter.deliver(job, "ragflow-transcript-memory");
+        assertThat(second.delivered()).isTrue();
+        assertThat(gateway.uploadCount).isEqualTo(1);
+    }
+
+    @Test
+    void twoJobsWithDifferentContentHashesAreBothUploaded() {
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway
+        );
+
+        IngestJob jobA = validJob();
+        IngestJob jobB = jobB();
+
+        DeliveryResult first = adapter.deliver(jobA, "ragflow-transcript-memory");
+        DeliveryResult second = adapter.deliver(jobB, "ragflow-transcript-memory");
+
+        assertThat(first.delivered()).isTrue();
+        assertThat(second.delivered()).isTrue();
+        assertThat(gateway.uploadCount).isEqualTo(2);
     }
 
     @Test
@@ -208,6 +254,31 @@ class RagFlowTargetAdapterTest {
         );
     }
 
+    private IngestJob jobB() {
+        String body = """
+            ---
+            schema_version: agent_knowledge_document.v2
+            result_type: conversation_chunk
+            ---
+            different body content
+            """;
+        return new IngestJob(
+            Map.of("provider", "codex", "project", "workspace-ragflow-advisor"),
+            new DocumentPayload(
+                "redacted_rag_ready_document",
+                "redaction.v2",
+                "chunk.md",
+                "text/markdown",
+                body,
+                Map.of("schema_version", "agent_knowledge_document.v2", "result_type", "conversation_chunk")
+            ),
+            ContentHashVerifier.sha256Hex(body),
+            "ragflow-transcript-memory",
+            "conversation_chunk",
+            null
+        );
+    }
+
     private static final class FakeRagFlowGateway implements RagFlowGateway {
         private boolean failUpload;
         private boolean failPressure;
@@ -216,6 +287,8 @@ class RagFlowTargetAdapterTest {
         private Map<String, String> metadata = new HashMap<>();
         private boolean parseRequested;
         private RagFlowPressureSnapshot pressureSnapshot = new RagFlowPressureSnapshot(0, 0, 0, 100, 100);
+        private int uploadCount;
+        private final java.util.Set<String> uploadedFragments = new java.util.HashSet<>();
 
         @Override
         public RagFlowDocumentRef uploadDocument(
@@ -227,8 +300,10 @@ class RagFlowTargetAdapterTest {
             if (failUpload) {
                 throw new RagFlowDeliveryException("boom");
             }
+            uploadCount++;
             uploadDatasetId = datasetId;
             uploadFilename = payload.filename();
+            recordFragment(payload.filename());
             return new RagFlowDocumentRef("doc_1", "UNSTART");
         }
 
@@ -248,6 +323,22 @@ class RagFlowTargetAdapterTest {
                 throw new RagFlowDeliveryException("boom");
             }
             return pressureSnapshot;
+        }
+
+        @Override
+        public boolean findByContentHash(String baseUrl, String apiKey, String datasetId, String contentHashFragment) {
+            return uploadedFragments.contains(contentHashFragment);
+        }
+
+        private void recordFragment(String filename) {
+            if (filename == null) {
+                return;
+            }
+            int dash = filename.lastIndexOf('-');
+            int dot = filename.lastIndexOf('.');
+            if (dash >= 0 && dot > dash) {
+                uploadedFragments.add(filename.substring(dash + 1, dot));
+            }
         }
     }
 }

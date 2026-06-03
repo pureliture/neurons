@@ -12,4 +12,10 @@ public interface RagFlowGateway {
     void requestParse(String baseUrl, String apiKey, String datasetId, String documentId);
 
     RagFlowPressureSnapshot pressureSnapshot(String baseUrl, String apiKey, String datasetId);
+
+    /**
+     * Returns true if a document whose name contains {@code contentHashFragment} already exists
+     * in the given dataset. Used for content_hash-based delivery dedup.
+     */
+    boolean findByContentHash(String baseUrl, String apiKey, String datasetId, String contentHashFragment);
 }
