@@ -942,7 +942,7 @@ services:
   ingress-api:
     build: .
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:18080:8080"
     environment:
       SPRING_PROFILES_ACTIVE: api
       RAG_INGRESS_NATS_URL: nats://nats-jetstream:4222

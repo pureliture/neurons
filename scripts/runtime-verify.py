@@ -112,7 +112,7 @@ def require(condition, message):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--api-url", default="http://127.0.0.1:8080")
+    parser.add_argument("--api-url", default="http://127.0.0.1:18080")
     parser.add_argument("--nats-host", default="127.0.0.1")
     parser.add_argument("--nats-port", type=int, default=4222)
     parser.add_argument("--timeout", type=int, default=30)

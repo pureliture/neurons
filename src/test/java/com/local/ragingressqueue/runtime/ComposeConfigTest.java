@@ -23,7 +23,7 @@ class ComposeConfigTest {
         assertThat(compose).contains("RAGFLOW_PRESSURE_RUNNING_CLOSED_THRESHOLD");
         assertThat(compose).contains("host.docker.internal:host-gateway");
         assertThat(compose).contains("127.0.0.1:4222:4222");
-        assertThat(compose).contains("127.0.0.1:8080:8080");
+        assertThat(compose).contains("127.0.0.1:18080:8080");
         assertThat(compose).contains("SPRING_MAIN_WEB_APPLICATION_TYPE: none");
         assertThat(compose).doesNotContain("ragflow-server");
         assertThat(compose).doesNotContain("ragflow-redis");

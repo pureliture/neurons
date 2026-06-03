@@ -20,6 +20,30 @@ class IngestJobValidatorTest {
     }
 
     @Test
+    void acceptsSessionRecapForSessionMemoryTarget() {
+        IngestJob job = validJob(
+            "session_recap",
+            "ragflow-session-memory",
+            "session-recap.md",
+            "session_recap"
+        );
+
+        assertThat(validator.validate(job)).isEmpty();
+    }
+
+    @Test
+    void acceptsToolEvidenceSummaryForTranscriptMemoryTarget() {
+        IngestJob job = validJob(
+            "tool_evidence_summary",
+            "ragflow-transcript-memory",
+            "tool-evidence-summary.md",
+            "tool_evidence_summary"
+        );
+
+        assertThat(validator.validate(job)).isEmpty();
+    }
+
+    @Test
     void rejectsRagflowNamedPayloadKindInPublicDto() {
         IngestJob job = validJob().withPayload(validJob().payload().withKind("ragflow_ready_document"));
 
@@ -77,26 +101,30 @@ class IngestJobValidatorTest {
     }
 
     private IngestJob validJob() {
+        return validJob("conversation_chunk", "ragflow-transcript-memory", "chunk.md", "conversation_chunk");
+    }
+
+    private IngestJob validJob(String resultType, String targetProfile, String filename, String kind) {
         String body = """
             ---
             schema_version: agent_knowledge_document.v2
-            result_type: conversation_chunk
+            result_type: %s
             ---
             redacted body
-            """;
+            """.formatted(resultType);
         return new IngestJob(
             Map.of("type", "local_pc", "provider", "codex", "project", "workspace-ragflow-advisor"),
             new DocumentPayload(
                 "redacted_rag_ready_document",
                 "redaction.v2",
-                "chunk.md",
+                filename,
                 "text/markdown",
                 body,
-                Map.of("schema_version", "agent_knowledge_document.v2", "result_type", "conversation_chunk")
+                Map.of("schema_version", "agent_knowledge_document.v2", "result_type", resultType)
             ),
             ContentHashVerifier.sha256Hex(body),
-            "ragflow-transcript-memory",
-            "conversation_chunk",
+            targetProfile,
+            kind,
             null
         );
     }

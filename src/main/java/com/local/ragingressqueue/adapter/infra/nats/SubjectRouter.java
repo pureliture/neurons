@@ -5,7 +5,9 @@ import java.util.Map;
 public class SubjectRouter {
     private static final Map<String, String> SUBJECTS_BY_KIND = Map.of(
         "conversation_chunk", "rag.ingress.transcript",
+        "tool_evidence_summary", "rag.ingress.transcript",
         "session_summary", "rag.ingress.document",
+        "session_recap", "rag.ingress.document",
         "project_context_snapshot", "rag.ingress.document",
         "task_summary", "rag.ingress.document",
         "approved_memory_card", "rag.ingress.document"
