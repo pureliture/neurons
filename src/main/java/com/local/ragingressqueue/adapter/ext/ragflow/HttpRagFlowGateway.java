@@ -79,6 +79,26 @@ class HttpRagFlowGateway implements RagFlowGateway {
     }
 
     @Override
+    public boolean findByContentHash(String baseUrl, String apiKey, String datasetId, String contentHashFragment) {
+        JsonNode data = request(
+            "GET",
+            baseUrl + "/api/v1/datasets/" + path(datasetId) + "/documents?page=1&page_size=1&keywords=" + URLEncoder.encode(contentHashFragment, StandardCharsets.UTF_8),
+            apiKey,
+            "",
+            null
+        );
+        JsonNode docs = data.path("docs");
+        if (!docs.isArray()) {
+            docs = data;
+        }
+        if (docs.isArray() && docs.size() > 0) {
+            return true;
+        }
+        int total = data.path("total").asInt(0);
+        return total > 0;
+    }
+
+    @Override
     public RagFlowPressureSnapshot pressureSnapshot(String baseUrl, String apiKey, String datasetId) {
         RagFlowPressureSnapshot recent = pressureSnapshotForQuery(baseUrl, apiKey, datasetId, "page=1&page_size=" + PRESSURE_SAMPLE_SIZE);
         RagFlowPressureSnapshot running = pressureSnapshotForQuery(baseUrl, apiKey, datasetId, "page=1&page_size=1&run=RUNNING");

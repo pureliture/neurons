@@ -1,5 +1,6 @@
 package com.local.ragingressqueue.adapter.ext.ragflow;
 
+import com.local.ragingressqueue.ingest.domain.DocumentPayload;
 import com.local.ragingressqueue.ingest.domain.IngestJob;
 import com.local.ragingressqueue.common.TargetIndexingState;
 import com.local.ragingressqueue.delivery.domain.TargetPressure;
@@ -119,8 +120,13 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
             return DeliveryResult.failed("ragflow delivery failed");
         }
         String datasetId = datasetId(targetProfile);
+        String contentHashFragment = contentHashFragment(job);
         try {
-            RagFlowDocumentRef ref = gateway.uploadDocument(baseUrl, apiKey, datasetId, job.payload());
+            if (gateway.findByContentHash(baseUrl, apiKey, datasetId, contentHashFragment)) {
+                return DeliveryResult.delivered("redacted");
+            }
+            DocumentPayload payloadWithHash = payloadWithHashInFilename(job.payload(), contentHashFragment);
+            RagFlowDocumentRef ref = gateway.uploadDocument(baseUrl, apiKey, datasetId, payloadWithHash);
             gateway.updateMetadata(baseUrl, apiKey, datasetId, ref.documentId(), metadataFor(job, targetProfile));
             gateway.requestParse(baseUrl, apiKey, datasetId, ref.documentId());
             return DeliveryResult.delivered("redacted");
@@ -138,6 +144,36 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
             targetProfile,
             state,
             "redacted"
+        );
+    }
+
+    private static String contentHashFragment(IngestJob job) {
+        String hash = job.contentHash();
+        if (hash != null && hash.startsWith("sha256:") && hash.length() >= 19) {
+            return hash.substring(7, 19);
+        }
+        return "";
+    }
+
+    private static DocumentPayload payloadWithHashInFilename(DocumentPayload payload, String contentHashFragment) {
+        if (contentHashFragment.isEmpty()) {
+            return payload;
+        }
+        String original = payload.filename();
+        if (original == null || original.isBlank()) {
+            return payload;
+        }
+        int dot = original.lastIndexOf('.');
+        String nameWithHash = dot > 0
+            ? original.substring(0, dot) + "-" + contentHashFragment + original.substring(dot)
+            : original + "-" + contentHashFragment;
+        return new DocumentPayload(
+            payload.kind(),
+            payload.redactionVersion(),
+            nameWithHash,
+            payload.contentType(),
+            payload.body(),
+            payload.metadata()
         );
     }
 
