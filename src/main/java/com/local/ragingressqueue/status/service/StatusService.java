@@ -1,18 +1,31 @@
 package com.local.ragingressqueue.status.service;
 
+import com.local.ragingressqueue.ingest.domain.TargetProfileRegistry;
 import com.local.ragingressqueue.queue.port.QueueStatusProvider;
 import com.local.ragingressqueue.queue.port.QueueStatusSnapshot;
+import com.local.ragingressqueue.target.port.BackendKind;
 import com.local.ragingressqueue.target.port.RagTargetAdapter;
 import com.local.ragingressqueue.target.port.TargetPressureSnapshot;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 
+import java.util.Locale;
 import java.util.Map;
 
 @Service
 @Profile("api")
 public class StatusService {
+    // Operator /status currently surfaces a single representative backend; the profile and backend
+    // name are resolved from the registry rather than hardcoded. Multi-backend aggregation is a
+    // tracked follow-up.
+    private static final TargetProfileRegistry PROFILE_REGISTRY = TargetProfileRegistry.DEFAULT;
+    private static final String PRIMARY_PROFILE = PROFILE_REGISTRY.primaryProfileId();
+    private static final String TARGET_NAME = PROFILE_REGISTRY.backendKind(PRIMARY_PROFILE)
+        .orElse(BackendKind.RAGFLOW)
+        .name()
+        .toLowerCase(Locale.ROOT);
+
     private final RagTargetAdapter adapter;
     private final QueueStatusProvider queueStatusProvider;
 
@@ -53,13 +66,13 @@ public class StatusService {
         if (adapter == null) {
             return TargetPressureSnapshot.closed("not_configured");
         }
-        return adapter.pressureSnapshot("ragflow-transcript-memory");
+        return adapter.pressureSnapshot(PRIMARY_PROFILE);
     }
 
     private Map<String, Object> targetStatus(TargetPressureSnapshot snapshot) {
         if (snapshot.reason() != null) {
             return Map.of(
-                "name", "ragflow",
+                "name", TARGET_NAME,
                 "pressure", snapshot.pressure().name(),
                 "running", snapshot.running(),
                 "unstart", snapshot.unstart(),
@@ -68,7 +81,7 @@ public class StatusService {
             );
         }
         return Map.of(
-            "name", "ragflow",
+            "name", TARGET_NAME,
             "pressure", snapshot.pressure().name(),
             "running", snapshot.running(),
             "unstart", snapshot.unstart(),

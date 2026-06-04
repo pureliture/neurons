@@ -3,7 +3,7 @@ import com.local.ragingressqueue.delivery.domain.DeliveryDecision;
 
 import com.local.ragingressqueue.ingest.domain.DocumentPayload;
 import com.local.ragingressqueue.ingest.domain.IngestJob;
-import com.local.ragingressqueue.common.TargetIndexingState;
+import com.local.ragingressqueue.common.IngestStatus;
 import com.local.ragingressqueue.delivery.domain.TargetPressure;
 import com.local.ragingressqueue.ingest.domain.validation.ContentHashVerifier;
 import com.local.ragingressqueue.queue.port.IngestConsumer;
@@ -102,7 +102,7 @@ class IngestWorkerTest {
 
     @Test
     void indexedTargetStateIsNotAuthorization() {
-        assertThat(TargetIndexingState.INDEXED.name()).isNotEqualTo("AUTHORIZED");
+        assertThat(IngestStatus.INDEXED.name()).isNotEqualTo("AUTHORIZED");
     }
 
     @Test
@@ -252,7 +252,7 @@ class IngestWorkerTest {
                 job.contentHashPrefix(),
                 job.contentHash(),
                 targetProfile,
-                TargetIndexingState.ACCEPTED,
+                IngestStatus.ACCEPTED,
                 "redacted"
             );
         }

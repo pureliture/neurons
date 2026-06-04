@@ -2,7 +2,7 @@ package com.local.ragingressqueue.ingest.domain.validation;
 
 import com.local.ragingressqueue.ingest.domain.DocumentPayload;
 import com.local.ragingressqueue.ingest.domain.IngestJob;
-import com.local.ragingressqueue.common.TargetIndexingState;
+import com.local.ragingressqueue.common.IngestStatus;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -95,7 +95,7 @@ class IngestJobValidatorTest {
 
     @Test
     void targetStatesDoNotIncludeAuthorized() {
-        assertThat(TargetIndexingState.values())
+        assertThat(IngestStatus.values())
             .extracting(Enum::name)
             .doesNotContain("AUTHORIZED");
     }
