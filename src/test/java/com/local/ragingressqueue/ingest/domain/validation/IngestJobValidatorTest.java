@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class IngestJobValidatorTest {
     private final IngestJobValidator validator = new IngestJobValidator();
@@ -17,6 +18,13 @@ class IngestJobValidatorTest {
         IngestJob job = validJob();
 
         assertThat(validator.validate(job)).isEmpty();
+    }
+
+    @Test
+    void constructorRejectsNullTargetProfileRegistry() {
+        assertThatThrownBy(() -> new IngestJobValidator(null))
+            .isInstanceOf(NullPointerException.class)
+            .hasMessageContaining("targetProfileRegistry");
     }
 
     @Test

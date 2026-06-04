@@ -188,6 +188,9 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
     }
 
     private String datasetId(String targetProfile) {
+        if (targetProfile == null) {
+            return "";
+        }
         return trimToEmpty(datasetIds.get(targetProfile));
     }
 

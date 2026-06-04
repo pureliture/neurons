@@ -55,6 +55,21 @@ class RagFlowTargetAdapterTest {
     }
 
     @Test
+    void configuredAdapterFailsClosedForNullTargetProfile() {
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            new FakeRagFlowGateway()
+        );
+
+        assertThat(adapter.pressureSnapshot(null).pressure()).isEqualTo(TargetPressure.CLOSED);
+        assertThat(adapter.getStatus(validJob(), null).status()).isEqualTo(IngestStatus.FAILED);
+        assertThat(adapter.deliver(validJob(), null).delivered()).isFalse();
+    }
+
+    @Test
     void enabledAdapterWithoutDatasetStaysClosed() {
         RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
             true,

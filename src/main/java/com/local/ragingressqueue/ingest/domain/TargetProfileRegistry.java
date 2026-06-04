@@ -24,7 +24,8 @@ public final class TargetProfileRegistry {
     private final Map<String, TargetProfile> profilesById;
 
     public TargetProfileRegistry(Map<String, TargetProfile> profilesById) {
-        this.profilesById = Collections.unmodifiableMap(new LinkedHashMap<>(profilesById));
+        Map<String, TargetProfile> source = profilesById == null ? Collections.emptyMap() : profilesById;
+        this.profilesById = Collections.unmodifiableMap(new LinkedHashMap<>(source));
     }
 
     public boolean isKnown(String targetProfileId) {

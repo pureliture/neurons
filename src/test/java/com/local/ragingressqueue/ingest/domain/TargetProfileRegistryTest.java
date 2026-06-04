@@ -26,6 +26,17 @@ class TargetProfileRegistryTest {
     }
 
     @Test
+    void nullRegistryInputBehavesLikeEmptyRegistry() {
+        TargetProfileRegistry empty = new TargetProfileRegistry(null);
+
+        assertThat(empty.knownProfileIds()).isEmpty();
+        assertThat(empty.isKnown("ragflow-transcript-memory")).isFalse();
+        assertThatThrownBy(empty::primaryProfileId)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("no profiles");
+    }
+
+    @Test
     void knownProfilesRouteToRagflowBackendKind() {
         assertThat(registry.knownProfileIds()).isNotEmpty();
         for (String id : registry.knownProfileIds()) {
