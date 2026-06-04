@@ -6,6 +6,7 @@ import com.local.ragingressqueue.ingest.domain.TargetProfileRegistry;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 public class IngestJobValidator {
@@ -29,7 +30,10 @@ public class IngestJobValidator {
     }
 
     public IngestJobValidator(TargetProfileRegistry targetProfileRegistry) {
-        this.targetProfileRegistry = targetProfileRegistry;
+        this.targetProfileRegistry = Objects.requireNonNull(
+            targetProfileRegistry,
+            "targetProfileRegistry must not be null"
+        );
     }
 
     public List<String> validate(IngestJob job) {
