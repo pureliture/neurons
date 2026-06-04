@@ -509,6 +509,135 @@ class RagFlowTargetAdapterTest {
         );
     }
 
+    @Test
+    void supersedeEnabledReplacesPriorVersionOfSameLogicalDocumentAndTagsFilename() {
+        // With supersede on and a logical id present, a new content version uploads a new document and
+        // retires the prior version of the same logical document; the current version is kept.
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway,
+            true,
+            "logical_document_id"
+        );
+        String logicalFragment = ContentHashVerifier.sha256Hex("L-123").substring(7, 23);
+
+        assertThat(adapter.deliver(supersedeJob("version one", "L-123"), "ragflow-transcript-memory").delivered()).isTrue();
+        assertThat(gateway.uploadFilename).contains("-" + logicalFragment + "-");
+        assertThat(gateway.deletedDocumentIds).isEmpty();
+
+        assertThat(adapter.deliver(supersedeJob("version two", "L-123"), "ragflow-transcript-memory").delivered()).isTrue();
+
+        assertThat(gateway.uploadCount).isEqualTo(2);
+        assertThat(gateway.deletedDocumentIds).containsExactly("doc_1");
+        assertThat(gateway.documentsById).containsKey("doc_2");
+    }
+
+    @Test
+    void supersedeOnlyDeletesPriorVersionsWithTheSameNameNotSiblingsOrForeignDocuments() {
+        // The same logical id may legitimately appear (via reuse or coincidence) on documents with a
+        // different base name, or on documents written by another tool that happen to carry a hex-token
+        // name. Supersede must delete ONLY the prior version whose name matches the current upload
+        // exactly except for the content-hash token.
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway,
+            true,
+            "logical_document_id"
+        );
+        String lid = ContentHashVerifier.sha256Hex("L-123").substring(7, 23);
+        // Pre-existing documents that share the logical-id token but are NOT prior versions of "summary":
+        gateway.documentsById.put("sibling", "othersummary-" + lid + "-aaaaaaaaaaaa.md"); // different base
+        gateway.documentsById.put("foreign", "report-" + lid + "-bbbbbbbbbbbb.pdf");       // foreign tool + ext
+
+        adapter.deliver(supersedeJob("version one", "L-123"), "ragflow-transcript-memory");   // doc_1: summary v1
+        adapter.deliver(supersedeJob("version two", "L-123"), "ragflow-transcript-memory");   // doc_2: summary v2
+
+        // Only the genuine prior version of "summary" is removed; the sibling and foreign docs survive.
+        assertThat(gateway.deletedDocumentIds).containsExactly("doc_1");
+        assertThat(gateway.documentsById).containsKeys("doc_2", "sibling", "foreign");
+    }
+
+    @Test
+    void supersedeEnabledDoesNotDeleteAnythingWhenNoLogicalIdIsPresent() {
+        // Documents without a logical id (e.g. append-only conversation chunks) must never trigger a
+        // delete, even with supersede enabled: two different chunks both stay.
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway,
+            true,
+            "logical_document_id"
+        );
+
+        adapter.deliver(supersedeJob("chunk one", null), "ragflow-transcript-memory");
+        adapter.deliver(supersedeJob("chunk two", null), "ragflow-transcript-memory");
+
+        assertThat(gateway.uploadCount).isEqualTo(2);
+        assertThat(gateway.deletedDocumentIds).isEmpty();
+    }
+
+    @Test
+    void supersedeDisabledByDefaultNeitherTagsTheFilenameNorDeletes() {
+        // The default adapter has supersede off: even with a logical id present, the filename carries no
+        // logical-id token and no prior version is deleted.
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway
+        );
+        String logicalFragment = ContentHashVerifier.sha256Hex("L-123").substring(7, 23);
+
+        adapter.deliver(supersedeJob("version one", "L-123"), "ragflow-transcript-memory");
+        adapter.deliver(supersedeJob("version two", "L-123"), "ragflow-transcript-memory");
+
+        assertThat(gateway.uploadFilename).doesNotContain(logicalFragment);
+        assertThat(gateway.deletedDocumentIds).isEmpty();
+    }
+
+    private IngestJob supersedeJob(String bodyText, String logicalId) {
+        String body = """
+            ---
+            schema_version: agent_knowledge_document.v2
+            result_type: session_summary
+            ---
+            """ + bodyText + "\n";
+        Map<String, String> metadata = new HashMap<>();
+        metadata.put("schema_version", "agent_knowledge_document.v2");
+        metadata.put("result_type", "session_summary");
+        if (logicalId != null) {
+            metadata.put("logical_document_id", logicalId);
+        }
+        return new IngestJob(
+            Map.of("provider", "codex", "project", "workspace-ragflow-advisor"),
+            new DocumentPayload(
+                "redacted_rag_ready_document",
+                "redaction.v2",
+                "summary.md",
+                "text/markdown",
+                body,
+                metadata
+            ),
+            ContentHashVerifier.sha256Hex(body),
+            "ragflow-transcript-memory",
+            "session_summary",
+            null
+        );
+    }
+
     private IngestJob jobB() {
         String body = """
             ---
@@ -551,8 +680,12 @@ class RagFlowTargetAdapterTest {
         private int parseCallCount;
         private RagFlowPressureSnapshot pressureSnapshot = new RagFlowPressureSnapshot(0, 0, 0, 100, 100);
         private int uploadCount;
+        private int documentSeq;
         private final java.util.Set<String> uploadedFragments = new java.util.HashSet<>();
         private final java.util.Set<String> preexistingFragments = new java.util.HashSet<>();
+        // Simulated dataset contents (documentId -> stored name) backing the list/delete operations.
+        private final java.util.LinkedHashMap<String, String> documentsById = new java.util.LinkedHashMap<>();
+        private final java.util.List<String> deletedDocumentIds = new java.util.ArrayList<>();
 
         @Override
         public RagFlowDocumentRef uploadDocument(
@@ -568,7 +701,9 @@ class RagFlowTargetAdapterTest {
             uploadDatasetId = datasetId;
             uploadFilename = payload.filename();
             recordFragment(payload.filename());
-            return new RagFlowDocumentRef("doc_1", "UNSTART");
+            String documentId = "doc_" + (++documentSeq);
+            documentsById.put(documentId, payload.filename());
+            return new RagFlowDocumentRef(documentId, "UNSTART");
         }
 
         @Override
@@ -607,6 +742,30 @@ class RagFlowTargetAdapterTest {
             }
             return uploadedFragments.contains(contentHashFragment)
                 || preexistingFragments.contains(contentHashFragment);
+        }
+
+        @Override
+        public java.util.List<RagFlowDocumentSummary> listDocumentsByKeyword(
+            String baseUrl, String apiKey, String datasetId, String keyword) {
+            java.util.List<RagFlowDocumentSummary> matches = new java.util.ArrayList<>();
+            for (Map.Entry<String, String> entry : documentsById.entrySet()) {
+                if (entry.getValue() != null && entry.getValue().contains(keyword)) {
+                    matches.add(new RagFlowDocumentSummary(entry.getKey(), entry.getValue()));
+                }
+            }
+            return matches;
+        }
+
+        @Override
+        public void deleteDocuments(String baseUrl, String apiKey, String datasetId, java.util.Collection<String> documentIds) {
+            if (documentIds == null) {
+                return;
+            }
+            for (String id : documentIds) {
+                if (documentsById.remove(id) != null) {
+                    deletedDocumentIds.add(id);
+                }
+            }
         }
 
         private void recordFragment(String filename) {
