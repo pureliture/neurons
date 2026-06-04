@@ -19,8 +19,7 @@ public record DeliveryDecision(Status status, String detail) {
     public IngestStatus toIngestStatus() {
         return switch (status) {
             case DELIVERED -> IngestStatus.IN_FLIGHT;
-            case SKIPPED_PRESSURE, NO_WORK -> IngestStatus.QUEUED;
-            case RETRY_SCHEDULED -> IngestStatus.FAILED;
+            case SKIPPED_PRESSURE, NO_WORK, RETRY_SCHEDULED -> IngestStatus.QUEUED;
             case QUARANTINE_CANDIDATE -> IngestStatus.DEAD_LETTER;
         };
     }

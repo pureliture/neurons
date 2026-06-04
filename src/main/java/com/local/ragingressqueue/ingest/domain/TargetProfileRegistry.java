@@ -25,7 +25,20 @@ public final class TargetProfileRegistry {
 
     public TargetProfileRegistry(Map<String, TargetProfile> profilesById) {
         Map<String, TargetProfile> source = profilesById == null ? Collections.emptyMap() : profilesById;
-        this.profilesById = Collections.unmodifiableMap(new LinkedHashMap<>(source));
+        LinkedHashMap<String, TargetProfile> copy = new LinkedHashMap<>();
+        source.forEach((id, profile) -> {
+            if (id == null || id.isBlank()) {
+                throw new IllegalArgumentException("profile id must not be blank");
+            }
+            if (profile == null) {
+                throw new IllegalArgumentException("profile '" + id + "' must not be null");
+            }
+            if (!id.equals(profile.id())) {
+                throw new IllegalArgumentException("profile key must match TargetProfile.id for '" + id + "'");
+            }
+            copy.put(id, profile);
+        });
+        this.profilesById = Collections.unmodifiableMap(copy);
     }
 
     public boolean isKnown(String targetProfileId) {
