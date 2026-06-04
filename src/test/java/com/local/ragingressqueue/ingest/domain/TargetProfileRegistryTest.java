@@ -4,9 +4,8 @@ import com.local.ragingressqueue.target.port.BackendKind;
 import org.junit.jupiter.api.Test;
 import org.yaml.snakeyaml.Yaml;
 
+import java.io.InputStream;
 import java.lang.reflect.RecordComponent;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.Locale;
 import java.util.Map;
 
@@ -56,7 +55,13 @@ class TargetProfileRegistryTest {
     @Test
     @SuppressWarnings("unchecked")
     void registryStaysInParityWithApplicationYmlTargetProfiles() throws Exception {
-        Map<String, Object> root = new Yaml().load(Files.readString(Path.of("src/main/resources/application.yml")));
+        // Load from the classpath (build/resources), not a CWD-relative path, so the test is
+        // robust to the working directory the test runner is launched from.
+        Map<String, Object> root;
+        try (InputStream yml = getClass().getResourceAsStream("/application.yml")) {
+            assertThat(yml).as("application.yml must be on the test classpath").isNotNull();
+            root = new Yaml().load(yml);
+        }
         Map<String, Object> ragIngress = (Map<String, Object>) root.get("rag-ingress");
         Map<String, Object> ymlProfiles = (Map<String, Object>) ragIngress.get("target-profiles");
 
