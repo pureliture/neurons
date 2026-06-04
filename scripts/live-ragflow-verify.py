@@ -118,14 +118,39 @@ def enqueue_payload(body, filename, marker):
     }
 
 
-def find_document(base_url, api_key, dataset_id, filename):
-    query = urllib.parse.urlencode({"page": 1, "page_size": 100, "keywords": filename})
+def filename_with_content_hash_suffix(filename, content_hash):
+    if not content_hash.startswith("sha256:") or len(content_hash) < 19:
+        return filename
+    fragment = content_hash[7:19]
+    stem, suffix = os.path.splitext(filename)
+    if not stem:
+        return filename
+    return f"{stem}-{fragment}{suffix}"
+
+
+def document_name_candidates(filename, content_hash):
+    suffixed = filename_with_content_hash_suffix(filename, content_hash)
+    return list(dict.fromkeys([suffixed, filename]))
+
+
+def document_search_keyword(candidates):
+    shortest = min(candidates, key=len)
+    stem, _suffix = os.path.splitext(shortest)
+    return stem or shortest
+
+
+def find_document(base_url, api_key, dataset_id, filenames):
+    if isinstance(filenames, str):
+        candidates = [filenames]
+    else:
+        candidates = list(filenames)
+    query = urllib.parse.urlencode({"page": 1, "page_size": 100, "keywords": document_search_keyword(candidates)})
     data = ragflow_json(base_url, api_key, f"/api/v1/datasets/{urllib.parse.quote(dataset_id)}/documents?{query}")
     docs = data.get("docs", data) if isinstance(data, dict) else data
     if not isinstance(docs, list):
         raise RuntimeError("ragflow document list response missing docs")
     for doc in docs:
-        if isinstance(doc, dict) and doc.get("name") == filename:
+        if isinstance(doc, dict) and doc.get("name") in candidates:
             return doc
     return None
 
@@ -219,6 +244,41 @@ def redacted_document_ref(document_id):
     return "sha256:" + hashlib.sha256(document_id.encode()).hexdigest()[:16]
 
 
+def authorized_chunks_from(chunks, ledger_path, is_authorized_fn):
+    return [
+        chunk
+        for chunk in chunks
+        if is_authorized_fn(
+            ledger_path,
+            chunk.get("document_id") or chunk.get("doc_id") or "",
+            project="workspace-ragflow-advisor",
+        )
+    ]
+
+
+def retrieve_authorized_chunks(
+    base_url,
+    api_key,
+    dataset_id,
+    marker,
+    ledger_path,
+    *,
+    retrieve_fn=retrieve,
+    is_authorized_fn=is_authorized,
+):
+    chunks = retrieve_fn(base_url, api_key, dataset_id, marker, metadata_filter=True)
+    authorized_chunks = authorized_chunks_from(chunks, ledger_path, is_authorized_fn)
+    if authorized_chunks:
+        return chunks, authorized_chunks, "metadata_filter"
+
+    fallback_chunks = retrieve_fn(base_url, api_key, dataset_id, marker, metadata_filter=False)
+    fallback_authorized_chunks = authorized_chunks_from(fallback_chunks, ledger_path, is_authorized_fn)
+    if fallback_authorized_chunks:
+        return fallback_chunks, fallback_authorized_chunks, "dataset_unfiltered_fallback"
+
+    return chunks, [], "metadata_filter"
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--api-url", default="http://127.0.0.1:18080")
@@ -253,6 +313,8 @@ def main():
         "---\n"
         f"{marker} redacted live RAGFlow write ledger gate recall promote smoke.\n"
     )
+    content_hash = "sha256:" + hashlib.sha256(body.encode()).hexdigest()
+    document_names = document_name_candidates(filename, content_hash)
     ledger_path = init_ledger(args.ledger)
 
     health = wait_until(deadline, lambda: http_json(args.api_url, "/healthz"), "ingress-api health")
@@ -289,13 +351,13 @@ def main():
 
     document = wait_until(
         deadline,
-        lambda: find_document(args.ragflow_url, args.ragflow_api_key, args.dataset_id, filename),
+        lambda: find_document(args.ragflow_url, args.ragflow_api_key, args.dataset_id, document_names),
         "RAGFlow document appearance",
     )
     document_id = document["id"]
 
     def indexed_document():
-        current = find_document(args.ragflow_url, args.ragflow_api_key, args.dataset_id, filename)
+        current = find_document(args.ragflow_url, args.ragflow_api_key, args.dataset_id, document_names)
         if not current:
             return None
         run = current.get("run", "")
@@ -311,7 +373,7 @@ def main():
     except RuntimeError:
         if not args.allow_same_document_chunk_fallback:
             raise
-        indexed = find_document(args.ragflow_url, args.ragflow_api_key, args.dataset_id, filename)
+        indexed = find_document(args.ragflow_url, args.ragflow_api_key, args.dataset_id, document_names)
         if indexed is None:
             raise RuntimeError("RAGFlow document disappeared before fallback")
         add_searchable_chunk(args.ragflow_url, args.ragflow_api_key, args.dataset_id, document_id, marker)
@@ -328,26 +390,21 @@ def main():
         indexed_run=indexed.get("run", ""),
     )
 
-    chunks = wait_until(
-        time.time() + min(args.timeout, 120),
-        lambda: retrieve(
+    def authorized_retrieval():
+        result = retrieve_authorized_chunks(
             args.ragflow_url,
             args.ragflow_api_key,
             args.dataset_id,
             marker,
-            metadata_filter=searchable_chunk_source == "ragflow_parse_done",
-        ),
+            ledger_path,
+        )
+        return result if result[1] else None
+
+    chunks, authorized_chunks, retrieval_mode = wait_until(
+        time.time() + min(args.timeout, 120),
+        authorized_retrieval,
         "RAGFlow retrieval of authorized document",
     )
-    authorized_chunks = [
-        chunk
-        for chunk in chunks
-        if is_authorized(
-            ledger_path,
-            chunk.get("document_id") or chunk.get("doc_id") or "",
-            project="workspace-ragflow-advisor",
-        )
-    ]
     if not authorized_chunks:
         raise RuntimeError("retrieval returned no externally authorized chunks")
 
@@ -374,6 +431,7 @@ def main():
             "indexedRun": indexed.get("run"),
             "progress": indexed.get("progress"),
             "searchableChunkSource": searchable_chunk_source,
+            "matchedName": document.get("name"),
         },
         "externalAuthorization": {
             "preAuthorizationEligible": pre_authorized,
@@ -383,6 +441,7 @@ def main():
         "recallPromote": {
             "retrievalCandidateCount": len(chunks),
             "authorizedResultCount": len(authorized_chunks),
+            "retrievalMode": retrieval_mode,
             "promoteEligible": True,
         },
     }

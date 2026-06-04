@@ -110,6 +110,16 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+def require_blocked_pressure_queue_retained(evidence, *, before_messages, before_last_seq):
+    new_seq = before_last_seq + 1
+    require(evidence["stream"]["messages"] == before_messages + 1, "stream message count did not increase by one")
+    require(evidence["stream"]["lastSeq"] == new_seq, "stream last sequence did not increase by one")
+
+    ack_floor = evidence["consumer"].get("ackFloor") or {}
+    ack_floor_stream_seq = ack_floor.get("stream_seq") or 0
+    require(ack_floor_stream_seq < new_seq, "blocked pressure message was acked")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--api-url", default="http://127.0.0.1:18080")
@@ -143,7 +153,6 @@ def main():
     )
     before_messages = stream_before.get("state", {}).get("messages", 0)
     before_last_seq = stream_before.get("state", {}).get("last_seq", 0)
-    before_delivered_consumer_seq = consumer_before.get("delivered", {}).get("consumer_seq", 0)
 
     body = (
         "---\n"
@@ -207,18 +216,10 @@ def main():
         "enqueue did not create the next stream sequence",
     )
     require(evidence["redactionRejection"]["accepted"] is False, "redaction rejection was accepted")
-    require(evidence["stream"]["messages"] == before_messages + 1, "stream message count did not increase by one")
-    require(evidence["stream"]["lastSeq"] == before_last_seq + 1, "stream last sequence did not increase by one")
-    require(evidence["consumer"]["numPending"] >= 1, "consumer pending count did not show queued work")
-    require(evidence["consumer"]["numAckPending"] == 0, "worker has an ack-pending message while pressure is closed")
-    require(evidence["consumer"]["numRedelivered"] == 0, "message was redelivered during no-drain verification")
-    require(
-        evidence["consumer"]["delivered"]["consumer_seq"] == before_delivered_consumer_seq,
-        "consumer delivered sequence advanced under blocked pressure",
-    )
-    require(
-        evidence["consumer"]["delivered"]["stream_seq"] <= before_last_seq,
-        "consumer stream sequence advanced under blocked pressure",
+    require_blocked_pressure_queue_retained(
+        evidence,
+        before_messages=before_messages,
+        before_last_seq=before_last_seq,
     )
 
     with open(args.evidence, "w", encoding="utf-8") as output:

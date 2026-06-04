@@ -3,7 +3,10 @@ package com.local.ragingressqueue.status.service;
 import com.local.ragingressqueue.queue.port.QueueStatusSnapshot;
 import com.local.ragingressqueue.delivery.domain.DeliveryResult;
 import com.local.ragingressqueue.delivery.domain.TargetPressure;
+import com.local.ragingressqueue.ingest.domain.TargetProfile;
+import com.local.ragingressqueue.ingest.domain.TargetProfileRegistry;
 import com.local.ragingressqueue.ingest.domain.IngestJob;
+import com.local.ragingressqueue.target.port.BackendKind;
 import com.local.ragingressqueue.target.port.RagTargetAdapter;
 import com.local.ragingressqueue.target.port.TargetPressureSnapshot;
 import com.local.ragingressqueue.target.port.TargetStatusSnapshot;
@@ -12,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class StatusServiceTest {
     @Test
@@ -52,6 +56,54 @@ class StatusServiceTest {
     }
 
     @Test
+    void configuredLiveStatusUsesInjectedProfileRegistry() {
+        FakeRagTargetAdapter adapter = new FakeRagTargetAdapter(
+            new TargetPressureSnapshot(TargetPressure.OPEN, 0, 0, 100, null)
+        );
+        TargetProfileRegistry registry = new TargetProfileRegistry(Map.of(
+            "custom-ragflow-profile",
+            new TargetProfile("custom-ragflow-profile", BackendKind.RAGFLOW, "custom-role")
+        ));
+
+        Map<String, Object> status = new StatusService(adapter, null, registry).currentStatus();
+
+        assertThat(adapter.lastTargetProfile).isEqualTo("custom-ragflow-profile");
+        assertThat(status.get("target")).isEqualTo(Map.of(
+            "name", "ragflow",
+            "pressure", "OPEN",
+            "running", 0,
+            "unstart", 0,
+            "sampled", 100
+        ));
+    }
+
+    @Test
+    void configuredLiveStatusRejectsNullProfileRegistry() {
+        FakeRagTargetAdapter adapter = new FakeRagTargetAdapter(
+            new TargetPressureSnapshot(TargetPressure.OPEN, 0, 0, 100, null)
+        );
+
+        assertThatThrownBy(() -> new StatusService(adapter, null, null))
+            .isInstanceOf(NullPointerException.class)
+            .hasMessageContaining("profileRegistry");
+    }
+
+    @Test
+    void configuredLiveStatusRejectsRegistryWithoutBackendKind() {
+        FakeRagTargetAdapter adapter = new FakeRagTargetAdapter(
+            new TargetPressureSnapshot(TargetPressure.OPEN, 0, 0, 100, null)
+        );
+        TargetProfileRegistry registry = new TargetProfileRegistry(Map.of(
+            "custom-ragflow-profile",
+            new TargetProfile("custom-ragflow-profile", null, "custom-role")
+        ));
+
+        assertThatThrownBy(() -> new StatusService(adapter, null, registry))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("primary profile");
+    }
+
+    @Test
     void configuredLiveStatusReportsThrottledWhenRagFlowBacklogIsHigh() {
         FakeRagTargetAdapter adapter = new FakeRagTargetAdapter(
             new TargetPressureSnapshot(TargetPressure.THROTTLED, 20, 2, 100, null)
@@ -88,6 +140,7 @@ class StatusServiceTest {
 
     private static final class FakeRagTargetAdapter implements RagTargetAdapter {
         private final TargetPressureSnapshot snapshot;
+        private String lastTargetProfile;
 
         private FakeRagTargetAdapter(TargetPressureSnapshot snapshot) {
             this.snapshot = snapshot;
@@ -95,6 +148,7 @@ class StatusServiceTest {
 
         @Override
         public TargetPressureSnapshot pressureSnapshot(String targetProfile) {
+            lastTargetProfile = targetProfile;
             return snapshot;
         }
 

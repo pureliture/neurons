@@ -5,6 +5,7 @@ import com.local.ragingressqueue.ingest.domain.IngestJob;
 import com.local.ragingressqueue.delivery.domain.DeliveryResult;
 import com.local.ragingressqueue.delivery.domain.TargetPressure;
 import com.local.ragingressqueue.ingest.domain.validation.ContentHashVerifier;
+import com.local.ragingressqueue.common.IngestStatus;
 import com.local.ragingressqueue.target.port.TargetStatusSnapshot;
 import org.junit.jupiter.api.Test;
 
@@ -28,11 +29,44 @@ class RagFlowTargetAdapterTest {
 
         TargetStatusSnapshot snapshot = adapter.getStatus(validJob(), "ragflow-transcript-memory");
 
+        // Generic backend-neutral status is surfaced on the snapshot; a disabled adapter fails closed.
+        assertThat(snapshot.status()).isEqualTo(IngestStatus.FAILED);
         assertThat(snapshot.redactedTargetRef()).isEqualTo("redacted");
         assertThat(snapshot.toString())
             .doesNotContain("dataset_id")
             .doesNotContain("document_id")
             .doesNotContain("/Users/");
+    }
+
+    @Test
+    void configuredAdapterSurfacesBackendNeutralStatusWithoutLeakingResourceIds() {
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            new FakeRagFlowGateway()
+        );
+
+        TargetStatusSnapshot snapshot = adapter.getStatus(validJob(), "ragflow-transcript-memory");
+
+        assertThat(snapshot.status()).isEqualTo(IngestStatus.ACCEPTED);
+        assertThat(snapshot.toString()).doesNotContain("ds_1").doesNotContain("token");
+    }
+
+    @Test
+    void configuredAdapterFailsClosedForNullTargetProfile() {
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            new FakeRagFlowGateway()
+        );
+
+        assertThat(adapter.pressureSnapshot(null).pressure()).isEqualTo(TargetPressure.CLOSED);
+        assertThat(adapter.getStatus(validJob(), null).status()).isEqualTo(IngestStatus.FAILED);
+        assertThat(adapter.deliver(validJob(), null).delivered()).isFalse();
     }
 
     @Test
