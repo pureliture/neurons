@@ -35,6 +35,18 @@ class HttpRagFlowGatewayMatchTest {
     }
 
     @Test
+    void rejectsFragmentThatMatchesAnInnerDotTokenButNotTheFinalHashSuffix() {
+        // A different document whose own hash suffix is "def" but whose original name happened to
+        // contain "-abc." (e.g. "test-abc.xyz.md" uploaded as "test-abc.xyz-def.md") must NOT be
+        // treated as a match for fragment "abc"; otherwise a genuine new "abc" upload is skipped (data
+        // loss). The hash fragment is always the token immediately before the final extension.
+        JsonNode docs = arrayOfNames("test-abc.xyz-def.md");
+
+        assertThat(HttpRagFlowGateway.matchesContentHashFragment(docs, "abc")).isFalse();
+        assertThat(HttpRagFlowGateway.matchesContentHashFragment(docs, "def")).isTrue();
+    }
+
+    @Test
     void matchesNoExtensionNameEndingWithHashSuffix() {
         JsonNode docs = arrayOfNames("chunk-48daba68a6f6");
 

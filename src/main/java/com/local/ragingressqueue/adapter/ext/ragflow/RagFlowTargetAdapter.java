@@ -164,23 +164,48 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
             // Recent-delivery cache short-circuits before the extra RAGFlow lookup, covering the
             // search-index freshness race (a just-uploaded document may not yet be searchable) and
             // saving one GET per re-delivery.
-            if (recentDeliveryCache.seen(datasetId, contentHashFragment)) {
+            RecentDeliveryCache.Entry cached = recentDeliveryCache.lookup(datasetId, contentHashFragment);
+            if (cached != null && cached.stage() == RecentDeliveryCache.Stage.FINALIZED) {
+                // Fully delivered before (upload + metadata + parse all completed): nothing to do.
                 return DeliveryResult.delivered("redacted");
             }
-            if (gateway.findByContentHash(baseUrl, apiKey, datasetId, contentHashFragment)) {
-                recentDeliveryCache.record(datasetId, contentHashFragment);
+            String documentId;
+            boolean metadataDone;
+            if (cached != null) {
+                // Uploaded on a prior attempt but the post-upload steps did not finish (they threw and
+                // the delivery was retried). Resume with the known document id instead of re-uploading,
+                // and replay only the steps that did not complete, tracked by the cached stage.
+                documentId = cached.documentId();
+                metadataDone = cached.stage() == RecentDeliveryCache.Stage.METADATA_DONE;
+            } else if (gateway.findByContentHash(baseUrl, apiKey, datasetId, contentHashFragment)) {
+                // Already present in RAGFlow from a prior fully-successful delivery: record as finalized
+                // so later re-deliveries skip even this lookup.
+                recentDeliveryCache.markFinalized(datasetId, contentHashFragment, null);
                 return DeliveryResult.delivered("redacted");
+            } else {
+                DocumentPayload payloadWithHash = payloadWithHashInFilename(job.payload(), contentHashFragment);
+                RagFlowDocumentRef ref = gateway.uploadDocument(baseUrl, apiKey, datasetId, payloadWithHash);
+                documentId = ref.documentId();
+                metadataDone = false;
+                // Mark uploaded (metadata/parse pending) before those steps run. If one throws, the
+                // delivery is reported failed and retried; this entry makes the retry resume from the
+                // failed step with the same document id instead of creating a duplicate while RAGFlow's
+                // search index lags.
+                recentDeliveryCache.recordUploaded(datasetId, contentHashFragment, documentId);
             }
-            DocumentPayload payloadWithHash = payloadWithHashInFilename(job.payload(), contentHashFragment);
-            RagFlowDocumentRef ref = gateway.uploadDocument(baseUrl, apiKey, datasetId, payloadWithHash);
-            // Record immediately after a successful upload, before metadata/parse. If a post-upload
-            // step throws, the delivery is reported failed and retried; recording here ensures the
-            // retry deduplicates instead of creating a duplicate while RAGFlow's search index lags.
-            recentDeliveryCache.record(datasetId, contentHashFragment);
-            gateway.updateMetadata(baseUrl, apiKey, datasetId, ref.documentId(), metadataFor(job, targetProfile));
-            gateway.requestParse(baseUrl, apiKey, datasetId, ref.documentId());
+            if (!metadataDone) {
+                gateway.updateMetadata(baseUrl, apiKey, datasetId, documentId, metadataFor(job, targetProfile));
+                // Record metadata completion so a parse-only failure does not replay updateMetadata.
+                recentDeliveryCache.markMetadataDone(datasetId, contentHashFragment, documentId);
+            }
+            gateway.requestParse(baseUrl, apiKey, datasetId, documentId);
+            // Only now is the delivery fully complete; promote the entry so re-deliveries short-circuit.
+            recentDeliveryCache.markFinalized(datasetId, contentHashFragment, documentId);
             return DeliveryResult.delivered("redacted");
-        } catch (RagFlowDeliveryException error) {
+        } catch (RuntimeException error) {
+            // Fail closed on any delivery error (RagFlowDeliveryException and otherwise), matching
+            // pressureSnapshot's handling, so an unexpected unchecked exception does not escape after
+            // the cache has been mutated. The recorded stage lets a retry resume safely.
             return DeliveryResult.failed("ragflow delivery failed");
         }
     }
@@ -213,16 +238,23 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
         }
         String original = payload.filename();
         if (original == null || original.isBlank()) {
-            return payload;
+            // No usable original name: synthesize one carrying the hash suffix so findByContentHash can
+            // still match on re-delivery. Returning the payload unchanged would embed no hash and make
+            // every re-delivery upload a fresh duplicate.
+            return withFilename(payload, "document-" + contentHashFragment);
         }
         int dot = original.lastIndexOf('.');
         String nameWithHash = dot > 0
             ? original.substring(0, dot) + "-" + contentHashFragment + original.substring(dot)
             : original + "-" + contentHashFragment;
+        return withFilename(payload, nameWithHash);
+    }
+
+    private static DocumentPayload withFilename(DocumentPayload payload, String filename) {
         return new DocumentPayload(
             payload.kind(),
             payload.redactionVersion(),
-            nameWithHash,
+            filename,
             payload.contentType(),
             payload.body(),
             payload.metadata()
