@@ -32,12 +32,15 @@ POST /v1/ingest/enqueue
 |---|---|
 | `schemaVersion` | `rag_ingress_enqueue.v1` 고정 |
 | `source` | producer 출처 메타(map). `provider`, `project` 필수 |
-| `payload.kind` | `redacted_rag_ready_document` (target-neutral). `ragflow_*` / `private_locator` 거부 |
+| `payload.kind` | **payload 형식 식별자** — 항상 `redacted_rag_ready_document` (target-neutral). `ragflow_*` / `private_locator` 거부 |
 | `payload.redactionVersion` | `redaction.v2` |
 | `payload.document` | `{ filename, contentType, body, metadata }` — redacted markdown |
 | `contentHash` | `sha256:<64 lowercase hex>` (body와 일치해야 함) |
 | `targetProfile` | **logical routing key** (§3). backend 자원 id 아님 |
-| `kind` | document kind (예: `conversation_chunk`, `session_summary` …) |
+| `kind` (top-level) | **document 종류** (예: `conversation_chunk`, `session_summary` …) |
+
+> 주의: `payload.kind`와 top-level `kind`는 **서로 다른 필드**다. `payload.kind`는 payload 봉투의 형식
+> (항상 `redacted_rag_ready_document`), top-level `kind`는 문서 자체의 종류(`conversation_chunk` 등)다.
 | `idempotencyKey` | optional, producer 제공 (§5) |
 
 > 호환성: 기존 enqueue 스키마와 동일하다. 이번 slice는 이 계약을 **변경하지 않는다.**

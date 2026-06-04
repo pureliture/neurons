@@ -46,6 +46,9 @@ public final class TargetProfileRegistry {
 
     /** Representative profile used by single-target operator surfaces; first declared profile. */
     public String primaryProfileId() {
+        if (profilesById.isEmpty()) {
+            throw new IllegalStateException("TargetProfileRegistry contains no profiles");
+        }
         return profilesById.keySet().iterator().next();
     }
 
