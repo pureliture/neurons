@@ -11,9 +11,20 @@ import java.util.Locale;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TargetProfileRegistryTest {
     private final TargetProfileRegistry registry = TargetProfileRegistry.DEFAULT;
+
+    @Test
+    void emptyRegistryReportsNoPrimaryProfileClearly() {
+        TargetProfileRegistry empty = new TargetProfileRegistry(Map.of());
+
+        assertThat(empty.knownProfileIds()).isEmpty();
+        assertThatThrownBy(empty::primaryProfileId)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("no profiles");
+    }
 
     @Test
     void knownProfilesRouteToRagflowBackendKind() {
