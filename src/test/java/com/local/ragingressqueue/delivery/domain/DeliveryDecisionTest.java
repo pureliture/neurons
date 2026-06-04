@@ -18,8 +18,8 @@ class DeliveryDecisionTest {
     }
 
     @Test
-    void transientDeliveryFailureMapsToFailedAndRetries() {
-        assertThat(DeliveryDecision.retryScheduled("target rejected").toIngestStatus()).isEqualTo(IngestStatus.FAILED);
+    void transientDeliveryFailureRemainsQueuedForRetry() {
+        assertThat(DeliveryDecision.retryScheduled("target rejected").toIngestStatus()).isEqualTo(IngestStatus.QUEUED);
     }
 
     @Test

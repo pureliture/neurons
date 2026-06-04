@@ -89,6 +89,21 @@ class StatusServiceTest {
     }
 
     @Test
+    void configuredLiveStatusRejectsRegistryWithoutBackendKind() {
+        FakeRagTargetAdapter adapter = new FakeRagTargetAdapter(
+            new TargetPressureSnapshot(TargetPressure.OPEN, 0, 0, 100, null)
+        );
+        TargetProfileRegistry registry = new TargetProfileRegistry(Map.of(
+            "custom-ragflow-profile",
+            new TargetProfile("custom-ragflow-profile", null, "custom-role")
+        ));
+
+        assertThatThrownBy(() -> new StatusService(adapter, null, registry))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("primary profile");
+    }
+
+    @Test
     void configuredLiveStatusReportsThrottledWhenRagFlowBacklogIsHigh() {
         FakeRagTargetAdapter adapter = new FakeRagTargetAdapter(
             new TargetPressureSnapshot(TargetPressure.THROTTLED, 20, 2, 100, null)

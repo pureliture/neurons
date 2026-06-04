@@ -46,10 +46,11 @@ public class StatusService {
         this.adapter = adapter;
         this.queueStatusProvider = queueStatusProvider;
         this.primaryProfile = registry.primaryProfileId();
-        this.targetName = registry.backendKind(primaryProfile)
-            .orElse(BackendKind.RAGFLOW)
-            .name()
-            .toLowerCase(Locale.ROOT);
+        BackendKind backendKind = registry.backendKind(primaryProfile)
+            .orElseThrow(() -> new IllegalStateException(
+                "primary profile is missing backend kind: " + primaryProfile
+            ));
+        this.targetName = backendKind.name().toLowerCase(Locale.ROOT);
     }
 
     public Map<String, Object> currentStatus() {

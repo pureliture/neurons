@@ -6,6 +6,7 @@ import org.yaml.snakeyaml.Yaml;
 
 import java.io.InputStream;
 import java.lang.reflect.RecordComponent;
+import java.util.ArrayList;
 import java.util.Locale;
 import java.util.Map;
 
@@ -34,6 +35,26 @@ class TargetProfileRegistryTest {
         assertThatThrownBy(empty::primaryProfileId)
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("no profiles");
+    }
+
+    @Test
+    void rejectsNullProfileValue() {
+        Map<String, TargetProfile> malformed = new java.util.HashMap<>();
+        malformed.put("ragflow-transcript-memory", null);
+
+        assertThatThrownBy(() -> new TargetProfileRegistry(malformed))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("must not be null");
+    }
+
+    @Test
+    void rejectsProfileKeyMismatch() {
+        assertThatThrownBy(() -> new TargetProfileRegistry(Map.of(
+            "ragflow-transcript-memory",
+            new TargetProfile("ragflow-session-memory", BackendKind.RAGFLOW, "transcript-memory")
+        )))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("key must match");
     }
 
     @Test
@@ -76,7 +97,8 @@ class TargetProfileRegistryTest {
         Map<String, Object> ragIngress = (Map<String, Object>) root.get("rag-ingress");
         Map<String, Object> ymlProfiles = (Map<String, Object>) ragIngress.get("target-profiles");
 
-        assertThat(ymlProfiles.keySet()).isEqualTo(registry.knownProfileIds());
+        assertThat(new ArrayList<>(ymlProfiles.keySet())).containsExactlyElementsOf(registry.knownProfileIds());
+        assertThat(registry.primaryProfileId()).isEqualTo(ymlProfiles.keySet().iterator().next());
 
         ymlProfiles.forEach((id, raw) -> {
             Map<String, Object> entry = (Map<String, Object>) raw;
