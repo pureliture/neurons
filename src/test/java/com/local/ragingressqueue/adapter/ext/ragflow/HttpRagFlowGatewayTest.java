@@ -102,6 +102,96 @@ class HttpRagFlowGatewayTest {
     }
 
     @Test
+    void listDocumentsByKeywordReturnsIdAndNameAcrossPages() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicInteger requests = new AtomicInteger();
+        server.createContext("/api/v1/datasets/ds_1/documents", exchange -> {
+            int page = pageOf(exchange.getRequestURI().getQuery());
+            requests.incrementAndGet();
+            // 31 hits over two pages so the loop must fetch page 2 to see the second match.
+            String docs = page == 1
+                ? idNameDocs(30)
+                : "{\"id\":\"doc_final\",\"name\":\"summary-aaaaaaaaaaaa-bbbbbbbbbbbb.md\"}";
+            writeJson(exchange, """
+                {"code": 0, "data": {"total": 31, "docs": [%s]}}
+                """.formatted(docs));
+        });
+        server.start();
+        try {
+            HttpRagFlowGateway gateway = new HttpRagFlowGateway();
+
+            var docs = gateway.listDocumentsByKeyword(
+                "http://127.0.0.1:" + server.getAddress().getPort(), "token", "ds_1", "aaaaaaaaaaaa");
+
+            assertThat(requests).hasValue(2);
+            assertThat(docs).hasSize(31);
+            assertThat(docs.get(30).documentId()).isEqualTo("doc_final");
+            assertThat(docs.get(30).name()).isEqualTo("summary-aaaaaaaaaaaa-bbbbbbbbbbbb.md");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void deleteDocumentsSendsDeleteRequestWithIdsBody() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        StringBuilder capturedMethod = new StringBuilder();
+        StringBuilder capturedBody = new StringBuilder();
+        server.createContext("/api/v1/datasets/ds_1/documents", exchange -> {
+            capturedMethod.append(exchange.getRequestMethod());
+            capturedBody.append(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            writeJson(exchange, """
+                {"code": 0, "data": true}
+                """);
+        });
+        server.start();
+        try {
+            HttpRagFlowGateway gateway = new HttpRagFlowGateway();
+
+            gateway.deleteDocuments(
+                "http://127.0.0.1:" + server.getAddress().getPort(), "token", "ds_1",
+                java.util.List.of("doc_1", "doc_2"));
+
+            assertThat(capturedMethod.toString()).isEqualTo("DELETE");
+            assertThat(capturedBody.toString()).contains("\"ids\"").contains("doc_1").contains("doc_2");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void deleteDocumentsWithNoIdsMakesNoRequest() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicInteger requests = new AtomicInteger();
+        server.createContext("/api/v1/datasets/ds_1/documents", exchange -> {
+            requests.incrementAndGet();
+            writeJson(exchange, "{\"code\":0,\"data\":true}");
+        });
+        server.start();
+        try {
+            HttpRagFlowGateway gateway = new HttpRagFlowGateway();
+
+            gateway.deleteDocuments(
+                "http://127.0.0.1:" + server.getAddress().getPort(), "token", "ds_1", java.util.List.of());
+
+            assertThat(requests).hasValue(0);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    private static String idNameDocs(int count) {
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < count; i++) {
+            if (i > 0) {
+                builder.append(',');
+            }
+            builder.append("{\"id\":\"doc_").append(i).append("\",\"name\":\"noise-").append(i).append(".md\"}");
+        }
+        return builder.toString();
+    }
+
+    @Test
     void pressureSnapshotCountsRagFlowDocumentRunStates() throws Exception {
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         AtomicInteger requests = new AtomicInteger();

@@ -16,7 +16,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -150,6 +153,65 @@ class HttpRagFlowGateway implements RagFlowGateway {
             }
         }
         return false;
+    }
+
+    @Override
+    public List<RagFlowDocumentSummary> listDocumentsByKeyword(String baseUrl, String apiKey, String datasetId, String keyword) {
+        // Keyed by document id so an overlapping/duplicated page from the server cannot surface the same
+        // document twice. Insertion order is preserved for stable, testable results.
+        java.util.LinkedHashMap<String, RagFlowDocumentSummary> matches = new java.util.LinkedHashMap<>();
+        if (keyword == null || keyword.isBlank()) {
+            return new ArrayList<>(matches.values());
+        }
+        // Same bounded, short-page-terminated pagination as findByContentHash so a multi-page keyword
+        // result is fully scanned without relying on the server's reported total.
+        for (int page = 1; page <= CONTENT_HASH_LOOKUP_MAX_PAGES; page++) {
+            JsonNode data = request(
+                "GET",
+                baseUrl + "/api/v1/datasets/" + path(datasetId) + "/documents?page=" + page
+                    + "&page_size=" + CONTENT_HASH_LOOKUP_PAGE_SIZE
+                    + "&keywords=" + URLEncoder.encode(keyword, StandardCharsets.UTF_8),
+                apiKey,
+                "",
+                null
+            );
+            JsonNode docs = data.path("docs");
+            if (!docs.isArray()) {
+                docs = data;
+            }
+            if (!docs.isArray()) {
+                throw new RagFlowDeliveryException("ragflow document list response missing docs");
+            }
+            for (JsonNode doc : docs) {
+                String id = text(doc, "id");
+                if (id.isEmpty()) {
+                    id = text(doc, "document_id");
+                }
+                String name = text(doc, "name");
+                if (!id.isEmpty()) {
+                    matches.putIfAbsent(id, new RagFlowDocumentSummary(id, name));
+                }
+            }
+            if (docs.size() < CONTENT_HASH_LOOKUP_PAGE_SIZE) {
+                return new ArrayList<>(matches.values());
+            }
+        }
+        // The result set is truncated: supersede only sees the first pages, so prior versions beyond the
+        // scan limit will not be retired (stale versions may linger; this is not data loss).
+        LOGGER.warn("RAGFlow keyword document listing hit the {}-page scan limit; results may be incomplete and "
+            + "prior versions beyond the limit will not be superseded", CONTENT_HASH_LOOKUP_MAX_PAGES);
+        return new ArrayList<>(matches.values());
+    }
+
+    @Override
+    public void deleteDocuments(String baseUrl, String apiKey, String datasetId, Collection<String> documentIds) {
+        if (documentIds == null || documentIds.isEmpty()) {
+            return;
+        }
+        // RAGFlow deletes by id list: DELETE /datasets/{id}/documents with {"ids": [...]}. Note this
+        // differs from the parse endpoint, which uses "document_ids".
+        requestJson("DELETE", baseUrl + "/api/v1/datasets/" + path(datasetId) + "/documents", apiKey,
+            Map.of("ids", List.copyOf(documentIds)));
     }
 
     @Override

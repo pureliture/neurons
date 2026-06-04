@@ -2,6 +2,7 @@ package com.local.ragingressqueue.adapter.ext.ragflow;
 
 import com.local.ragingressqueue.ingest.domain.DocumentPayload;
 import com.local.ragingressqueue.ingest.domain.IngestJob;
+import com.local.ragingressqueue.ingest.domain.validation.ContentHashVerifier;
 import com.local.ragingressqueue.common.IngestStatus;
 import com.local.ragingressqueue.delivery.domain.TargetPressure;
 import com.local.ragingressqueue.target.port.RagTargetAdapter;
@@ -17,7 +18,9 @@ import org.springframework.stereotype.Component;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @Component
@@ -26,6 +29,7 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
     private static final Logger LOGGER = LoggerFactory.getLogger(RagFlowTargetAdapter.class);
     private static final Duration DEFAULT_DEDUP_CACHE_TTL = Duration.ofMinutes(10);
     private static final int DEFAULT_DEDUP_CACHE_MAX_SIZE = 10_000;
+    private static final String DEFAULT_SUPERSEDE_LOGICAL_ID_FIELD = "logical_document_id";
 
     private final boolean deliveryEnabled;
     private final String baseUrl;
@@ -34,6 +38,8 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
     private final RagFlowGateway gateway;
     private final RagFlowPressurePolicy pressurePolicy;
     private final RecentDeliveryCache recentDeliveryCache;
+    private final boolean supersedeEnabled;
+    private final String supersedeLogicalIdField;
 
     public RagFlowTargetAdapter(@Value("${rag-ingress.target.ragflow.delivery-enabled:false}") boolean deliveryEnabled) {
         this(deliveryEnabled, "", "", Map.of(), null, RagFlowPressurePolicy.DEFAULT);
@@ -57,6 +63,8 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
         @Value("${rag-ingress.target.ragflow.pressure.unstart-closed-threshold:25}") int unstartClosedThreshold,
         @Value("${rag-ingress.target.ragflow.dedup-cache.ttl-seconds:600}") long dedupCacheTtlSeconds,
         @Value("${rag-ingress.target.ragflow.dedup-cache.max-size:10000}") int dedupCacheMaxSize,
+        @Value("${rag-ingress.target.ragflow.supersede.enabled:false}") boolean supersedeEnabled,
+        @Value("${rag-ingress.target.ragflow.supersede.logical-id-field:logical_document_id}") String supersedeLogicalIdField,
         RagFlowGateway gateway
     ) {
         this(
@@ -79,7 +87,9 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
                 runningClosedThreshold,
                 unstartClosedThreshold
             ),
-            new RecentDeliveryCache(Duration.ofSeconds(dedupCacheTtlSeconds), dedupCacheMaxSize, Clock.systemUTC())
+            new RecentDeliveryCache(Duration.ofSeconds(dedupCacheTtlSeconds), dedupCacheMaxSize, Clock.systemUTC()),
+            supersedeEnabled,
+            supersedeLogicalIdField
         );
     }
 
@@ -121,6 +131,45 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
         RagFlowPressurePolicy pressurePolicy,
         RecentDeliveryCache recentDeliveryCache
     ) {
+        this(deliveryEnabled, baseUrl, apiKey, datasetIds, gateway, pressurePolicy, recentDeliveryCache,
+            false, DEFAULT_SUPERSEDE_LOGICAL_ID_FIELD);
+    }
+
+    // Test/config seam for the version-supersede policy. Uses the default pressure policy and dedup
+    // cache, varying only the supersede configuration.
+    RagFlowTargetAdapter(
+        boolean deliveryEnabled,
+        String baseUrl,
+        String apiKey,
+        Map<String, String> datasetIds,
+        RagFlowGateway gateway,
+        boolean supersedeEnabled,
+        String supersedeLogicalIdField
+    ) {
+        this(
+            deliveryEnabled,
+            baseUrl,
+            apiKey,
+            datasetIds,
+            gateway,
+            RagFlowPressurePolicy.DEFAULT,
+            new RecentDeliveryCache(DEFAULT_DEDUP_CACHE_TTL, DEFAULT_DEDUP_CACHE_MAX_SIZE, Clock.systemUTC()),
+            supersedeEnabled,
+            supersedeLogicalIdField
+        );
+    }
+
+    RagFlowTargetAdapter(
+        boolean deliveryEnabled,
+        String baseUrl,
+        String apiKey,
+        Map<String, String> datasetIds,
+        RagFlowGateway gateway,
+        RagFlowPressurePolicy pressurePolicy,
+        RecentDeliveryCache recentDeliveryCache,
+        boolean supersedeEnabled,
+        String supersedeLogicalIdField
+    ) {
         this.deliveryEnabled = deliveryEnabled;
         this.baseUrl = trimToEmpty(baseUrl);
         this.apiKey = trimToEmpty(apiKey);
@@ -128,6 +177,10 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
         this.gateway = gateway;
         this.pressurePolicy = pressurePolicy;
         this.recentDeliveryCache = recentDeliveryCache;
+        this.supersedeEnabled = supersedeEnabled;
+        this.supersedeLogicalIdField = isBlank(supersedeLogicalIdField)
+            ? DEFAULT_SUPERSEDE_LOGICAL_ID_FIELD
+            : supersedeLogicalIdField.trim();
     }
 
     @Override
@@ -160,6 +213,10 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
             LOGGER.warn("RAGFlow delivery proceeding without content_hash dedup: "
                 + "missing or malformed content hash for target profile {}", targetProfile);
         }
+        // Stable logical-document identifier (hashed) used for version supersede. Empty unless the
+        // producer supplies the configured logical-id field, so naming and supersede are inert for
+        // documents (e.g. append-only chunks) that carry no logical id.
+        String logicalIdFragment = logicalIdFragment(job);
         try {
             // Recent-delivery cache short-circuits before the extra RAGFlow lookup, covering the
             // search-index freshness race (a just-uploaded document may not yet be searchable) and
@@ -183,7 +240,8 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
                 recentDeliveryCache.markFinalized(datasetId, contentHashFragment, null);
                 return DeliveryResult.delivered("redacted");
             } else {
-                DocumentPayload payloadWithHash = payloadWithHashInFilename(job.payload(), contentHashFragment);
+                DocumentPayload payloadWithHash =
+                    payloadWithHashInFilename(job.payload(), contentHashFragment, logicalIdFragment);
                 RagFlowDocumentRef ref = gateway.uploadDocument(baseUrl, apiKey, datasetId, payloadWithHash);
                 documentId = ref.documentId();
                 metadataDone = false;
@@ -201,11 +259,16 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
             gateway.requestParse(baseUrl, apiKey, datasetId, documentId);
             // Only now is the delivery fully complete; promote the entry so re-deliveries short-circuit.
             recentDeliveryCache.markFinalized(datasetId, contentHashFragment, documentId);
+            // The current version is safely in place; retire any prior versions of the same logical
+            // document. Done last and best-effort so a cleanup failure never fails the delivery.
+            supersedePriorVersions(datasetId, job.payload().filename(), contentHashFragment, logicalIdFragment);
             return DeliveryResult.delivered("redacted");
         } catch (RuntimeException error) {
             // Fail closed on any delivery error (RagFlowDeliveryException and otherwise), matching
             // pressureSnapshot's handling, so an unexpected unchecked exception does not escape after
-            // the cache has been mutated. The recorded stage lets a retry resume safely.
+            // the cache has been mutated. The recorded stage lets a retry resume safely. Log the cause
+            // so a programming error is diagnosable rather than hidden behind the generic failure.
+            LOGGER.warn("RAGFlow delivery failed for target profile {}", targetProfile, error);
             return DeliveryResult.failed("ragflow delivery failed");
         }
     }
@@ -232,22 +295,139 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
         return "";
     }
 
-    private static DocumentPayload payloadWithHashInFilename(DocumentPayload payload, String contentHashFragment) {
+    private static DocumentPayload payloadWithHashInFilename(
+        DocumentPayload payload, String contentHashFragment, String logicalIdFragment) {
         if (contentHashFragment.isEmpty()) {
             return payload;
         }
-        String original = payload.filename();
+        return withFilename(payload, hashedFilename(payload.filename(), contentHashFragment, logicalIdFragment));
+    }
+
+    // Canonical uploaded name. The content-hash token is always last (dedup matches the trailing
+    // token); a logical-id token precedes it when present so prior versions of the same logical
+    // document can be found by keyword search and matched exactly for supersede.
+    private static String hashedFilename(String original, String contentHashFragment, String logicalIdFragment) {
+        String suffix = logicalIdFragment.isEmpty()
+            ? "-" + contentHashFragment
+            : "-" + logicalIdFragment + "-" + contentHashFragment;
         if (original == null || original.isBlank()) {
-            // No usable original name: synthesize one carrying the hash suffix so findByContentHash can
-            // still match on re-delivery. Returning the payload unchanged would embed no hash and make
-            // every re-delivery upload a fresh duplicate.
-            return withFilename(payload, "document-" + contentHashFragment);
+            // No usable original name: synthesize one carrying the suffix so findByContentHash can still
+            // match on re-delivery. Returning the original name would embed no hash and make every
+            // re-delivery upload a fresh duplicate.
+            return "document" + suffix;
         }
         int dot = original.lastIndexOf('.');
-        String nameWithHash = dot > 0
-            ? original.substring(0, dot) + "-" + contentHashFragment + original.substring(dot)
-            : original + "-" + contentHashFragment;
-        return withFilename(payload, nameWithHash);
+        return dot > 0
+            ? original.substring(0, dot) + suffix + original.substring(dot)
+            : original + suffix;
+    }
+
+    private String logicalIdFragment(IngestJob job) {
+        if (!supersedeEnabled) {
+            return "";
+        }
+        String raw = logicalIdValue(job);
+        if (isBlank(raw)) {
+            return "";
+        }
+        // Hash the logical id to a fixed-width 16-hex fragment: collision-resistant (64-bit), uniform,
+        // and never exposes the raw logical id in the document name.
+        String hashed = ContentHashVerifier.sha256Hex(raw.trim());
+        return hashed.length() >= 23 ? hashed.substring(7, 23) : "";
+    }
+
+    private String logicalIdValue(IngestJob job) {
+        Map<String, String> metadata = job.payload() == null ? null : job.payload().metadata();
+        String fromMetadata = metadata == null ? null : metadata.get(supersedeLogicalIdField);
+        String fromSource = job.source() == null ? null : job.source().get(supersedeLogicalIdField);
+        if (!isBlank(fromMetadata)) {
+            if (!isBlank(fromSource) && !fromSource.equals(fromMetadata)) {
+                // Both maps carry the field with different values; metadata wins. Surface the discarded
+                // source value (length only) so a producer misconfiguration is visible without leaking it.
+                LOGGER.warn("RAGFlow supersede logical-id field present in both payload metadata and source "
+                    + "with differing values; using the metadata value");
+            }
+            return fromMetadata;
+        }
+        return fromSource;
+    }
+
+    private void supersedePriorVersions(
+        String datasetId, String originalFilename, String contentHashFragment, String logicalIdFragment) {
+        if (!supersedeEnabled || logicalIdFragment.isEmpty() || contentHashFragment.isEmpty()) {
+            return;
+        }
+        // The just-delivered document's canonical name. A prior version is the very same name with only
+        // the content-hash token differing, so unrelated documents (different base name, or written by
+        // another tool) and sibling documents that merely share the logical id under a different name
+        // are never eligible for deletion. Supersede is idempotent on the resume path because the
+        // current version's own hash token is excluded by the inequality check below.
+        String currentName = hashedFilename(originalFilename, contentHashFragment, logicalIdFragment);
+        try {
+            List<String> stale = new ArrayList<>();
+            for (RagFlowDocumentSummary doc : gateway.listDocumentsByKeyword(baseUrl, apiKey, datasetId, logicalIdFragment)) {
+                if (isPriorVersion(doc.name(), currentName, contentHashFragment)) {
+                    stale.add(doc.documentId());
+                }
+            }
+            if (!stale.isEmpty()) {
+                gateway.deleteDocuments(baseUrl, apiKey, datasetId, stale);
+            }
+        } catch (RuntimeException error) {
+            // Cleanup is best-effort: the new version is already delivered. Leave stale versions for a
+            // later delivery to retire rather than failing (and re-queuing) a successful delivery.
+            // Log the cause so a programming error here is diagnosable, not mistaken for a network blip.
+            LOGGER.warn("RAGFlow supersede cleanup failed for a logical document; stale versions may remain", error);
+        }
+    }
+
+    /**
+     * A prior version is a document whose name equals the current upload's name with only the trailing
+     * 12-hex content-hash token replaced by a different one. Requiring an exact match on everything
+     * else (base name, logical-id token, extension) means a document with a different name — an
+     * unrelated upload or a sibling sharing only the logical id — is never deleted.
+     */
+    private static boolean isPriorVersion(String candidateName, String currentName, String contentHashFragment) {
+        if (candidateName == null) {
+            return false;
+        }
+        String currentExt = extensionOf(currentName);
+        String candidateExt = extensionOf(candidateName);
+        if (!currentExt.equals(candidateExt)) {
+            return false;
+        }
+        String currentBase = currentName.substring(0, currentName.length() - currentExt.length());
+        String candidateBase = candidateName.substring(0, candidateName.length() - candidateExt.length());
+        // currentBase ends with "-" + contentHashFragment; everything before that is the shared prefix
+        // (base + logical-id token) that a genuine prior version must reproduce exactly.
+        if (currentBase.length() <= contentHashFragment.length()) {
+            return false;
+        }
+        String prefix = currentBase.substring(0, currentBase.length() - contentHashFragment.length());
+        if (!candidateBase.startsWith(prefix)) {
+            return false;
+        }
+        String hashToken = candidateBase.substring(prefix.length());
+        return isHashFragment(hashToken) && !hashToken.equals(contentHashFragment);
+    }
+
+    private static String extensionOf(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot > 0 ? name.substring(dot) : "";
+    }
+
+    private static boolean isHashFragment(String token) {
+        if (token.length() != 12) {
+            return false;
+        }
+        for (int i = 0; i < token.length(); i++) {
+            char c = token.charAt(i);
+            boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            if (!hex) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static DocumentPayload withFilename(DocumentPayload payload, String filename) {
