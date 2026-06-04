@@ -3,6 +3,8 @@ package com.local.ragingressqueue.adapter.ext.ragflow;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.local.ragingressqueue.ingest.domain.DocumentPayload;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
@@ -14,15 +16,24 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 @Component
 @Profile({"api", "worker"})
 class HttpRagFlowGateway implements RagFlowGateway {
+    private static final Logger LOGGER = LoggerFactory.getLogger(HttpRagFlowGateway.class);
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
     private static final int PRESSURE_SAMPLE_SIZE = 200;
+    private static final int CONTENT_HASH_LOOKUP_PAGE_SIZE = 30;
+    // Safety valve for the keyword-lookup pagination loop. A 12-hex content-hash fragment realistically
+    // yields 0-1 hits, so this bound is never reached in practice; it only prevents an unbounded loop
+    // if RAGFlow ever reports a pathological total. 100 pages * 30 = 3000 candidate documents.
+    private static final int CONTENT_HASH_LOOKUP_MAX_PAGES = 100;
 
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
@@ -80,22 +91,128 @@ class HttpRagFlowGateway implements RagFlowGateway {
 
     @Override
     public boolean findByContentHash(String baseUrl, String apiKey, String datasetId, String contentHashFragment) {
-        JsonNode data = request(
-            "GET",
-            baseUrl + "/api/v1/datasets/" + path(datasetId) + "/documents?page=1&page_size=1&keywords=" + URLEncoder.encode(contentHashFragment, StandardCharsets.UTF_8),
-            apiKey,
-            "",
-            null
-        );
-        JsonNode docs = data.path("docs");
-        if (!docs.isArray()) {
-            docs = data;
+        if (contentHashFragment == null || contentHashFragment.isBlank()) {
+            return false;
         }
-        if (docs.isArray() && docs.size() > 0) {
-            return true;
+        // Page through the keyword result set: the real name match can land beyond the first page when
+        // the fragment yields more hits than one page holds. Stopping at page 1 would falsely report
+        // absent and re-upload a duplicate, breaking the findByContentHash contract. A short (or empty)
+        // page is the end-of-results signal, independent of the server's reported total, so the common
+        // case (0-1 hits) stays a single GET while a miscounted total cannot hide a last-page match.
+        for (int page = 1; page <= CONTENT_HASH_LOOKUP_MAX_PAGES; page++) {
+            JsonNode data = request(
+                "GET",
+                baseUrl + "/api/v1/datasets/" + path(datasetId) + "/documents?page=" + page
+                    + "&page_size=" + CONTENT_HASH_LOOKUP_PAGE_SIZE
+                    + "&keywords=" + URLEncoder.encode(contentHashFragment, StandardCharsets.UTF_8),
+                apiKey,
+                "",
+                null
+            );
+            JsonNode docs = data.path("docs");
+            if (!docs.isArray()) {
+                docs = data;
+            }
+            if (!docs.isArray()) {
+                // A malformed (non-array) document list must not be read as "no match": that would
+                // silently skip dedup. Fail the lookup so the delivery is retried.
+                throw new RagFlowDeliveryException("ragflow document list response missing docs");
+            }
+            if (matchesContentHashFragment(docs, contentHashFragment)) {
+                return true;
+            }
+            if (docs.size() < CONTENT_HASH_LOOKUP_PAGE_SIZE) {
+                return false;
+            }
         }
-        int total = data.path("total").asInt(0);
-        return total > 0;
+        // Safety valve reached without a definitive end-of-results. Returning "not found" here would let
+        // deliver() upload a duplicate when the match may simply be beyond the cap, so fail closed: the
+        // delivery is reported failed and retried, preserving dedup, and the anomaly is surfaced loudly.
+        throw new RagFlowDeliveryException(
+            "ragflow content_hash lookup exceeded the " + CONTENT_HASH_LOOKUP_MAX_PAGES
+                + "-page scan limit before results were exhausted");
+    }
+
+    static boolean matchesContentHashFragment(JsonNode docs, String contentHashFragment) {
+        if (contentHashFragment == null || contentHashFragment.isBlank() || docs == null || !docs.isArray()) {
+            return false;
+        }
+        // The fragment is always written as the token immediately before the final extension (see
+        // RagFlowTargetAdapter#payloadWithHashInFilename), so match the base name's suffix exactly. A
+        // looser contains-check could match the fragment inside an unrelated part of the name (e.g. an
+        // original "-<frag>." earlier in the name) and skip a genuine new upload (data loss).
+        String suffixToken = "-" + contentHashFragment;
+        for (JsonNode doc : docs) {
+            String name = text(doc, "name");
+            if (name.isEmpty()) {
+                continue;
+            }
+            int lastDot = name.lastIndexOf('.');
+            String baseName = lastDot > 0 ? name.substring(0, lastDot) : name;
+            if (baseName.endsWith(suffixToken)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public List<RagFlowDocumentSummary> listDocumentsByKeyword(String baseUrl, String apiKey, String datasetId, String keyword) {
+        // Keyed by document id so an overlapping/duplicated page from the server cannot surface the same
+        // document twice. Insertion order is preserved for stable, testable results.
+        java.util.LinkedHashMap<String, RagFlowDocumentSummary> matches = new java.util.LinkedHashMap<>();
+        if (keyword == null || keyword.isBlank()) {
+            return new ArrayList<>(matches.values());
+        }
+        // Same bounded, short-page-terminated pagination as findByContentHash so a multi-page keyword
+        // result is fully scanned without relying on the server's reported total.
+        for (int page = 1; page <= CONTENT_HASH_LOOKUP_MAX_PAGES; page++) {
+            JsonNode data = request(
+                "GET",
+                baseUrl + "/api/v1/datasets/" + path(datasetId) + "/documents?page=" + page
+                    + "&page_size=" + CONTENT_HASH_LOOKUP_PAGE_SIZE
+                    + "&keywords=" + URLEncoder.encode(keyword, StandardCharsets.UTF_8),
+                apiKey,
+                "",
+                null
+            );
+            JsonNode docs = data.path("docs");
+            if (!docs.isArray()) {
+                docs = data;
+            }
+            if (!docs.isArray()) {
+                throw new RagFlowDeliveryException("ragflow document list response missing docs");
+            }
+            for (JsonNode doc : docs) {
+                String id = text(doc, "id");
+                if (id.isEmpty()) {
+                    id = text(doc, "document_id");
+                }
+                String name = text(doc, "name");
+                if (!id.isEmpty()) {
+                    matches.putIfAbsent(id, new RagFlowDocumentSummary(id, name));
+                }
+            }
+            if (docs.size() < CONTENT_HASH_LOOKUP_PAGE_SIZE) {
+                return new ArrayList<>(matches.values());
+            }
+        }
+        // The result set is truncated: supersede only sees the first pages, so prior versions beyond the
+        // scan limit will not be retired (stale versions may linger; this is not data loss).
+        LOGGER.warn("RAGFlow keyword document listing hit the {}-page scan limit; results may be incomplete and "
+            + "prior versions beyond the limit will not be superseded", CONTENT_HASH_LOOKUP_MAX_PAGES);
+        return new ArrayList<>(matches.values());
+    }
+
+    @Override
+    public void deleteDocuments(String baseUrl, String apiKey, String datasetId, Collection<String> documentIds) {
+        if (documentIds == null || documentIds.isEmpty()) {
+            return;
+        }
+        // RAGFlow deletes by id list: DELETE /datasets/{id}/documents with {"ids": [...]}. Note this
+        // differs from the parse endpoint, which uses "document_ids".
+        requestJson("DELETE", baseUrl + "/api/v1/datasets/" + path(datasetId) + "/documents", apiKey,
+            Map.of("ids", List.copyOf(documentIds)));
     }
 
     @Override
@@ -212,6 +329,13 @@ class HttpRagFlowGateway implements RagFlowGateway {
         if (filename == null || filename.isBlank()) {
             return "rag-ingress-document.md";
         }
+        return sanitizeDocumentName(filename);
+    }
+
+    // Package-private so the adapter can canonicalize a name the same way the multipart upload does.
+    // RAGFlow stores the sanitized name, so supersede's exact-name matching must use this same form,
+    // otherwise a filename containing one of these characters would never match its prior versions.
+    static String sanitizeDocumentName(String filename) {
         return filename.replace('"', '_').replace('\r', '_').replace('\n', '_');
     }
 
