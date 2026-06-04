@@ -2,7 +2,7 @@ package com.local.ragingressqueue.adapter.ext.ragflow;
 
 import com.local.ragingressqueue.ingest.domain.DocumentPayload;
 import com.local.ragingressqueue.ingest.domain.IngestJob;
-import com.local.ragingressqueue.common.TargetIndexingState;
+import com.local.ragingressqueue.common.IngestStatus;
 import com.local.ragingressqueue.delivery.domain.TargetPressure;
 import com.local.ragingressqueue.target.port.RagTargetAdapter;
 import com.local.ragingressqueue.delivery.domain.DeliveryResult;
@@ -137,12 +137,14 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
 
     @Override
     public TargetStatusSnapshot getStatus(IngestJob job, String targetProfile) {
-        TargetIndexingState state = isConfigured(targetProfile) ? TargetIndexingState.ACCEPTED : TargetIndexingState.FAILED;
+        // No live RAGFlow run-state poll in this slice: report a conservative lifecycle status.
+        // When live polling is wired, the backend run state flows through RagFlowStatusMapper.
+        IngestStatus status = isConfigured(targetProfile) ? IngestStatus.ACCEPTED : IngestStatus.FAILED;
         return new TargetStatusSnapshot(
             job.contentHashPrefix(),
             job.contentHash(),
             targetProfile,
-            state,
+            status,
             "redacted"
         );
     }

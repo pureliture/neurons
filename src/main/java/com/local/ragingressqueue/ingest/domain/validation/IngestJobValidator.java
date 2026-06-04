@@ -2,6 +2,7 @@ package com.local.ragingressqueue.ingest.domain.validation;
 
 import com.local.ragingressqueue.ingest.domain.DocumentPayload;
 import com.local.ragingressqueue.ingest.domain.IngestJob;
+import com.local.ragingressqueue.ingest.domain.TargetProfileRegistry;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -10,15 +11,6 @@ import java.util.Set;
 public class IngestJobValidator {
     private static final String INLINE_PAYLOAD_KIND = "redacted_rag_ready_document";
     private static final String REDACTION_VERSION = "redaction.v2";
-    private static final Set<String> TARGET_PROFILES = Set.of(
-        "ragflow-transcript-memory",
-        "ragflow-session-memory",
-        "ragflow-session-summary",
-        "ragflow-project-memory",
-        "ragflow-task-summary",
-        "ragflow-approved-memory-card",
-        "ragflow-procedural-memory"
-    );
     private static final Set<String> DOCUMENT_KINDS = Set.of(
         "conversation_chunk",
         "tool_evidence_summary",
@@ -30,6 +22,16 @@ public class IngestJobValidator {
         "repo_usage_pattern"
     );
 
+    private final TargetProfileRegistry targetProfileRegistry;
+
+    public IngestJobValidator() {
+        this(TargetProfileRegistry.DEFAULT);
+    }
+
+    public IngestJobValidator(TargetProfileRegistry targetProfileRegistry) {
+        this.targetProfileRegistry = targetProfileRegistry;
+    }
+
     public List<String> validate(IngestJob job) {
         List<String> violations = new ArrayList<>();
         if (job == null) {
@@ -39,7 +41,7 @@ public class IngestJobValidator {
         validateSource(job, violations);
         validatePayload(job.payload(), violations);
         validateContentHash(job, violations);
-        if (!TARGET_PROFILES.contains(job.targetProfile())) {
+        if (!targetProfileRegistry.isKnown(job.targetProfile())) {
             violations.add("targetProfile is unknown");
         }
         if (job.kind() == null || job.kind().isBlank()) {
