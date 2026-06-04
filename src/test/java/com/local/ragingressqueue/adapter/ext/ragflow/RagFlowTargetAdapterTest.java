@@ -608,6 +608,74 @@ class RagFlowTargetAdapterTest {
         assertThat(gateway.deletedDocumentIds).isEmpty();
     }
 
+    @Test
+    void uploadedFilenameIsCanonicalizedSoSupersedeMatchesTheStoredName() {
+        // RAGFlow sanitizes quote/CR/LF in stored names; the adapter must produce the same canonical
+        // form, otherwise supersede's exact-name matching would never find prior versions of a document
+        // whose filename contained those characters.
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway,
+            true,
+            "logical_document_id"
+        );
+        String body = "---\nresult_type: session_summary\n---\nbody\n";
+        Map<String, String> metadata = new HashMap<>();
+        metadata.put("result_type", "session_summary");
+        metadata.put("logical_document_id", "L-quote");
+        IngestJob job = new IngestJob(
+            Map.of("provider", "codex", "project", "workspace-ragflow-advisor"),
+            new DocumentPayload("redacted_rag_ready_document", "redaction.v2", "we\"ird\nname.md", "text/markdown", body, metadata),
+            ContentHashVerifier.sha256Hex(body),
+            "ragflow-transcript-memory",
+            "session_summary",
+            null
+        );
+
+        adapter.deliver(job, "ragflow-transcript-memory");
+
+        assertThat(gateway.uploadFilename).doesNotContain("\"").doesNotContain("\n");
+    }
+
+    @Test
+    void persistedLogicalIdUsesTheMetadataValueWhenSourceConflicts() {
+        // logicalIdValue resolves payload metadata over source; the stored metadata must agree, so the
+        // document's recorded logical id matches the fragment embedded in its filename.
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway,
+            true,
+            "logical_document_id"
+        );
+        String body = "---\nresult_type: session_summary\n---\nbody\n";
+        Map<String, String> metadata = new HashMap<>();
+        metadata.put("result_type", "session_summary");
+        metadata.put("logical_document_id", "from-metadata");
+        Map<String, String> source = new HashMap<>();
+        source.put("provider", "codex");
+        source.put("logical_document_id", "from-source");
+        IngestJob job = new IngestJob(
+            source,
+            new DocumentPayload("redacted_rag_ready_document", "redaction.v2", "summary.md", "text/markdown", body, metadata),
+            ContentHashVerifier.sha256Hex(body),
+            "ragflow-transcript-memory",
+            "session_summary",
+            null
+        );
+
+        adapter.deliver(job, "ragflow-transcript-memory");
+
+        assertThat(gateway.metadata).containsEntry("logical_document_id", "from-metadata");
+    }
+
     private IngestJob supersedeJob(String bodyText, String logicalId) {
         String body = """
             ---

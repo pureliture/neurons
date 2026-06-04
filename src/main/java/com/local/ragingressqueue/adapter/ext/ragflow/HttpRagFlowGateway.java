@@ -125,11 +125,12 @@ class HttpRagFlowGateway implements RagFlowGateway {
                 return false;
             }
         }
-        // Safety valve reached without a definitive end-of-results: do not claim "not found", which
-        // would let a duplicate through silently. Surface it so operators can widen the bound.
-        LOGGER.warn("RAGFlow content_hash lookup hit the {}-page scan limit without exhausting results; "
-            + "treating as not found may allow a duplicate upload", CONTENT_HASH_LOOKUP_MAX_PAGES);
-        return false;
+        // Safety valve reached without a definitive end-of-results. Returning "not found" here would let
+        // deliver() upload a duplicate when the match may simply be beyond the cap, so fail closed: the
+        // delivery is reported failed and retried, preserving dedup, and the anomaly is surfaced loudly.
+        throw new RagFlowDeliveryException(
+            "ragflow content_hash lookup exceeded the " + CONTENT_HASH_LOOKUP_MAX_PAGES
+                + "-page scan limit before results were exhausted");
     }
 
     static boolean matchesContentHashFragment(JsonNode docs, String contentHashFragment) {
@@ -328,6 +329,13 @@ class HttpRagFlowGateway implements RagFlowGateway {
         if (filename == null || filename.isBlank()) {
             return "rag-ingress-document.md";
         }
+        return sanitizeDocumentName(filename);
+    }
+
+    // Package-private so the adapter can canonicalize a name the same way the multipart upload does.
+    // RAGFlow stores the sanitized name, so supersede's exact-name matching must use this same form,
+    // otherwise a filename containing one of these characters would never match its prior versions.
+    static String sanitizeDocumentName(String filename) {
         return filename.replace('"', '_').replace('\r', '_').replace('\n', '_');
     }
 
