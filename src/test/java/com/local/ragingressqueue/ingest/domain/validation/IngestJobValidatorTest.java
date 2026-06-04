@@ -2,12 +2,13 @@ package com.local.ragingressqueue.ingest.domain.validation;
 
 import com.local.ragingressqueue.ingest.domain.DocumentPayload;
 import com.local.ragingressqueue.ingest.domain.IngestJob;
-import com.local.ragingressqueue.common.TargetIndexingState;
+import com.local.ragingressqueue.common.IngestStatus;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class IngestJobValidatorTest {
     private final IngestJobValidator validator = new IngestJobValidator();
@@ -17,6 +18,13 @@ class IngestJobValidatorTest {
         IngestJob job = validJob();
 
         assertThat(validator.validate(job)).isEmpty();
+    }
+
+    @Test
+    void constructorRejectsNullTargetProfileRegistry() {
+        assertThatThrownBy(() -> new IngestJobValidator(null))
+            .isInstanceOf(NullPointerException.class)
+            .hasMessageContaining("targetProfileRegistry");
     }
 
     @Test
@@ -95,7 +103,7 @@ class IngestJobValidatorTest {
 
     @Test
     void targetStatesDoNotIncludeAuthorized() {
-        assertThat(TargetIndexingState.values())
+        assertThat(IngestStatus.values())
             .extracting(Enum::name)
             .doesNotContain("AUTHORIZED");
     }

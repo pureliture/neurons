@@ -1,0 +1,112 @@
+package com.local.ragingressqueue.ingest.domain;
+
+import com.local.ragingressqueue.target.port.BackendKind;
+import org.junit.jupiter.api.Test;
+import org.yaml.snakeyaml.Yaml;
+
+import java.io.InputStream;
+import java.lang.reflect.RecordComponent;
+import java.util.ArrayList;
+import java.util.Locale;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+class TargetProfileRegistryTest {
+    private final TargetProfileRegistry registry = TargetProfileRegistry.DEFAULT;
+
+    @Test
+    void emptyRegistryReportsNoPrimaryProfileClearly() {
+        TargetProfileRegistry empty = new TargetProfileRegistry(Map.of());
+
+        assertThat(empty.knownProfileIds()).isEmpty();
+        assertThatThrownBy(empty::primaryProfileId)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("no profiles");
+    }
+
+    @Test
+    void nullRegistryInputBehavesLikeEmptyRegistry() {
+        TargetProfileRegistry empty = new TargetProfileRegistry(null);
+
+        assertThat(empty.knownProfileIds()).isEmpty();
+        assertThat(empty.isKnown("ragflow-transcript-memory")).isFalse();
+        assertThatThrownBy(empty::primaryProfileId)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("no profiles");
+    }
+
+    @Test
+    void rejectsNullProfileValue() {
+        Map<String, TargetProfile> malformed = new java.util.HashMap<>();
+        malformed.put("ragflow-transcript-memory", null);
+
+        assertThatThrownBy(() -> new TargetProfileRegistry(malformed))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("must not be null");
+    }
+
+    @Test
+    void rejectsProfileKeyMismatch() {
+        assertThatThrownBy(() -> new TargetProfileRegistry(Map.of(
+            "ragflow-transcript-memory",
+            new TargetProfile("ragflow-session-memory", BackendKind.RAGFLOW, "transcript-memory")
+        )))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("key must match");
+    }
+
+    @Test
+    void knownProfilesRouteToRagflowBackendKind() {
+        assertThat(registry.knownProfileIds()).isNotEmpty();
+        for (String id : registry.knownProfileIds()) {
+            assertThat(registry.backendKind(id)).contains(BackendKind.RAGFLOW);
+        }
+    }
+
+    @Test
+    void unknownProfileIsNotKnownAndHasNoBackendKind() {
+        assertThat(registry.isKnown("does-not-exist")).isFalse();
+        assertThat(registry.backendKind("does-not-exist")).isEmpty();
+        assertThat(registry.isKnown(null)).isFalse();
+    }
+
+    @Test
+    void exposesLogicalDatasetRoleButNeverPhysicalResourceId() {
+        TargetProfile profile = registry.find("ragflow-transcript-memory").orElseThrow();
+
+        assertThat(profile.datasetRole()).isEqualTo("transcript-memory");
+        assertThat(profile.backendKind()).isEqualTo(BackendKind.RAGFLOW);
+        // The routing value object must not carry any physical backend resource id (dataset id/token).
+        assertThat(TargetProfile.class.getRecordComponents())
+            .extracting(RecordComponent::getName)
+            .containsExactly("id", "backendKind", "datasetRole");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void registryStaysInParityWithApplicationYmlTargetProfiles() throws Exception {
+        // Load from the classpath (build/resources), not a CWD-relative path, so the test is
+        // robust to the working directory the test runner is launched from.
+        Map<String, Object> root;
+        try (InputStream yml = getClass().getResourceAsStream("/application.yml")) {
+            assertThat(yml).as("application.yml must be on the test classpath").isNotNull();
+            root = new Yaml().load(yml);
+        }
+        Map<String, Object> ragIngress = (Map<String, Object>) root.get("rag-ingress");
+        Map<String, Object> ymlProfiles = (Map<String, Object>) ragIngress.get("target-profiles");
+
+        assertThat(new ArrayList<>(ymlProfiles.keySet())).containsExactlyElementsOf(registry.knownProfileIds());
+        assertThat(registry.primaryProfileId()).isEqualTo(ymlProfiles.keySet().iterator().next());
+
+        ymlProfiles.forEach((id, raw) -> {
+            Map<String, Object> entry = (Map<String, Object>) raw;
+            String ymlAdapter = String.valueOf(entry.get("adapter"));
+            String ymlDatasetRole = String.valueOf(entry.get("dataset-role"));
+            TargetProfile profile = registry.find(id).orElseThrow();
+            assertThat(ymlAdapter).isEqualTo(profile.backendKind().name().toLowerCase(Locale.ROOT));
+            assertThat(ymlDatasetRole).isEqualTo(profile.datasetRole());
+        });
+    }
+}
