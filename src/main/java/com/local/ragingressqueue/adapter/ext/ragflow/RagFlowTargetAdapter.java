@@ -8,23 +8,32 @@ import com.local.ragingressqueue.target.port.RagTargetAdapter;
 import com.local.ragingressqueue.delivery.domain.DeliveryResult;
 import com.local.ragingressqueue.target.port.TargetPressureSnapshot;
 import com.local.ragingressqueue.target.port.TargetStatusSnapshot;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 @Component
 @Profile({"api", "worker"})
 public class RagFlowTargetAdapter implements RagTargetAdapter {
+    private static final Logger LOGGER = LoggerFactory.getLogger(RagFlowTargetAdapter.class);
+    private static final Duration DEFAULT_DEDUP_CACHE_TTL = Duration.ofMinutes(10);
+    private static final int DEFAULT_DEDUP_CACHE_MAX_SIZE = 10_000;
+
     private final boolean deliveryEnabled;
     private final String baseUrl;
     private final String apiKey;
     private final Map<String, String> datasetIds;
     private final RagFlowGateway gateway;
     private final RagFlowPressurePolicy pressurePolicy;
+    private final RecentDeliveryCache recentDeliveryCache;
 
     public RagFlowTargetAdapter(@Value("${rag-ingress.target.ragflow.delivery-enabled:false}") boolean deliveryEnabled) {
         this(deliveryEnabled, "", "", Map.of(), null, RagFlowPressurePolicy.DEFAULT);
@@ -46,6 +55,8 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
         @Value("${rag-ingress.target.ragflow.pressure.unstart-throttle-threshold:5}") int unstartThrottleThreshold,
         @Value("${rag-ingress.target.ragflow.pressure.running-closed-threshold:100}") int runningClosedThreshold,
         @Value("${rag-ingress.target.ragflow.pressure.unstart-closed-threshold:25}") int unstartClosedThreshold,
+        @Value("${rag-ingress.target.ragflow.dedup-cache.ttl-seconds:600}") long dedupCacheTtlSeconds,
+        @Value("${rag-ingress.target.ragflow.dedup-cache.max-size:10000}") int dedupCacheMaxSize,
         RagFlowGateway gateway
     ) {
         this(
@@ -67,7 +78,8 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
                 unstartThrottleThreshold,
                 runningClosedThreshold,
                 unstartClosedThreshold
-            )
+            ),
+            new RecentDeliveryCache(Duration.ofSeconds(dedupCacheTtlSeconds), dedupCacheMaxSize, Clock.systemUTC())
         );
     }
 
@@ -89,12 +101,33 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
         RagFlowGateway gateway,
         RagFlowPressurePolicy pressurePolicy
     ) {
+        this(
+            deliveryEnabled,
+            baseUrl,
+            apiKey,
+            datasetIds,
+            gateway,
+            pressurePolicy,
+            new RecentDeliveryCache(DEFAULT_DEDUP_CACHE_TTL, DEFAULT_DEDUP_CACHE_MAX_SIZE, Clock.systemUTC())
+        );
+    }
+
+    RagFlowTargetAdapter(
+        boolean deliveryEnabled,
+        String baseUrl,
+        String apiKey,
+        Map<String, String> datasetIds,
+        RagFlowGateway gateway,
+        RagFlowPressurePolicy pressurePolicy,
+        RecentDeliveryCache recentDeliveryCache
+    ) {
         this.deliveryEnabled = deliveryEnabled;
         this.baseUrl = trimToEmpty(baseUrl);
         this.apiKey = trimToEmpty(apiKey);
         this.datasetIds = datasetIds;
         this.gateway = gateway;
         this.pressurePolicy = pressurePolicy;
+        this.recentDeliveryCache = recentDeliveryCache;
     }
 
     @Override
@@ -121,12 +154,29 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
         }
         String datasetId = datasetId(targetProfile);
         String contentHashFragment = contentHashFragment(job);
+        if (contentHashFragment.isEmpty()) {
+            // A missing or malformed content hash silently disables dedup for this delivery, so a
+            // requeue would upload again. Surface it for operators without leaking document content.
+            LOGGER.warn("RAGFlow delivery proceeding without content_hash dedup: "
+                + "missing or malformed content hash for target profile {}", targetProfile);
+        }
         try {
+            // Recent-delivery cache short-circuits before the extra RAGFlow lookup, covering the
+            // search-index freshness race (a just-uploaded document may not yet be searchable) and
+            // saving one GET per re-delivery.
+            if (recentDeliveryCache.seen(datasetId, contentHashFragment)) {
+                return DeliveryResult.delivered("redacted");
+            }
             if (gateway.findByContentHash(baseUrl, apiKey, datasetId, contentHashFragment)) {
+                recentDeliveryCache.record(datasetId, contentHashFragment);
                 return DeliveryResult.delivered("redacted");
             }
             DocumentPayload payloadWithHash = payloadWithHashInFilename(job.payload(), contentHashFragment);
             RagFlowDocumentRef ref = gateway.uploadDocument(baseUrl, apiKey, datasetId, payloadWithHash);
+            // Record immediately after a successful upload, before metadata/parse. If a post-upload
+            // step throws, the delivery is reported failed and retried; recording here ensures the
+            // retry deduplicates instead of creating a duplicate while RAGFlow's search index lags.
+            recentDeliveryCache.record(datasetId, contentHashFragment);
             gateway.updateMetadata(baseUrl, apiKey, datasetId, ref.documentId(), metadataFor(job, targetProfile));
             gateway.requestParse(baseUrl, apiKey, datasetId, ref.documentId());
             return DeliveryResult.delivered("redacted");

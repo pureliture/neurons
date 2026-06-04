@@ -131,6 +131,115 @@ class RagFlowTargetAdapterTest {
     }
 
     @Test
+    void reDeliverySkipsUploadEvenWhenSearchIndexStillReportsAbsent() {
+        // Freshness race: RAGFlow's document search index may not yet reflect the just-uploaded
+        // document, so findByContentHash reports absent. The recent-delivery cache must still dedup.
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        gateway.alwaysReportAbsent = true;
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway
+        );
+
+        IngestJob job = validJob();
+        assertThat(adapter.deliver(job, "ragflow-transcript-memory").delivered()).isTrue();
+        assertThat(adapter.deliver(job, "ragflow-transcript-memory").delivered()).isTrue();
+
+        assertThat(gateway.uploadCount).isEqualTo(1);
+    }
+
+    @Test
+    void cacheHitSkipsRedundantGatewayLookupOnReDelivery() {
+        // Performance: a cached recent delivery must short-circuit before the extra RAGFlow GET.
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway
+        );
+
+        IngestJob job = validJob();
+        adapter.deliver(job, "ragflow-transcript-memory");
+        adapter.deliver(job, "ragflow-transcript-memory");
+
+        assertThat(gateway.uploadCount).isEqualTo(1);
+        assertThat(gateway.findByContentHashCallCount).isEqualTo(1);
+    }
+
+    @Test
+    void dedupSkipsIdenticalReDeliveryForNonTranscriptKind() {
+        // Dedup is adapter-shared across kinds: an identical session_summary re-delivery is a no-op,
+        // while distinct content still uploads. Content_hash equality, not kind, governs the skip.
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-session-memory", "ds_session"),
+            gateway
+        );
+
+        adapter.deliver(sessionMemoryJob(), "ragflow-session-memory");
+        adapter.deliver(sessionMemoryJob(), "ragflow-session-memory");
+
+        assertThat(gateway.uploadCount).isEqualTo(1);
+    }
+
+    @Test
+    void uploadedDocumentIsNotReUploadedWhenPostUploadMetadataFailsAndIndexLags() {
+        // Partial-success window: the document upload succeeds but a subsequent step (metadata/parse)
+        // throws, so the delivery is reported failed and retried. The recent-delivery cache must still
+        // remember the successful upload so the retry does not create a duplicate while RAGFlow's
+        // search index has not yet caught up (findByContentHash still reports absent).
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        gateway.alwaysReportAbsent = true;
+        gateway.failMetadata = true;
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway
+        );
+
+        IngestJob job = validJob();
+        DeliveryResult first = adapter.deliver(job, "ragflow-transcript-memory");
+        DeliveryResult retry = adapter.deliver(job, "ragflow-transcript-memory");
+
+        assertThat(first.delivered()).isFalse();
+        assertThat(retry.delivered()).isTrue();
+        assertThat(gateway.uploadCount).isEqualTo(1);
+    }
+
+    @Test
+    void existingRagflowDocumentIsRecordedSoLaterReDeliveriesSkipTheLookup() {
+        // First delivery finds the document already present in RAGFlow (no prior cache entry); the
+        // result must be a no-op upload AND the presence must be cached so later re-deliveries skip
+        // even the RAGFlow lookup.
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        IngestJob job = validJob();
+        gateway.preexistingFragments.add(job.contentHash().substring(7, 19));
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway
+        );
+
+        assertThat(adapter.deliver(job, "ragflow-transcript-memory").delivered()).isTrue();
+        assertThat(adapter.deliver(job, "ragflow-transcript-memory").delivered()).isTrue();
+
+        assertThat(gateway.uploadCount).isEqualTo(0);
+        assertThat(gateway.findByContentHashCallCount).isEqualTo(1);
+    }
+
+    @Test
     void twoJobsWithDifferentContentHashesAreBothUploaded() {
         FakeRagFlowGateway gateway = new FakeRagFlowGateway();
         RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
@@ -315,7 +424,10 @@ class RagFlowTargetAdapterTest {
 
     private static final class FakeRagFlowGateway implements RagFlowGateway {
         private boolean failUpload;
+        private boolean failMetadata;
         private boolean failPressure;
+        private boolean alwaysReportAbsent;
+        private int findByContentHashCallCount;
         private String uploadDatasetId;
         private String uploadFilename;
         private Map<String, String> metadata = new HashMap<>();
@@ -323,6 +435,7 @@ class RagFlowTargetAdapterTest {
         private RagFlowPressureSnapshot pressureSnapshot = new RagFlowPressureSnapshot(0, 0, 0, 100, 100);
         private int uploadCount;
         private final java.util.Set<String> uploadedFragments = new java.util.HashSet<>();
+        private final java.util.Set<String> preexistingFragments = new java.util.HashSet<>();
 
         @Override
         public RagFlowDocumentRef uploadDocument(
@@ -343,6 +456,9 @@ class RagFlowTargetAdapterTest {
 
         @Override
         public void updateMetadata(String baseUrl, String apiKey, String datasetId, String documentId, Map<String, String> metadata) {
+            if (failMetadata) {
+                throw new RagFlowDeliveryException("metadata boom");
+            }
             this.metadata = metadata;
         }
 
@@ -361,7 +477,12 @@ class RagFlowTargetAdapterTest {
 
         @Override
         public boolean findByContentHash(String baseUrl, String apiKey, String datasetId, String contentHashFragment) {
-            return uploadedFragments.contains(contentHashFragment);
+            findByContentHashCallCount++;
+            if (alwaysReportAbsent) {
+                return false;
+            }
+            return uploadedFragments.contains(contentHashFragment)
+                || preexistingFragments.contains(contentHashFragment);
         }
 
         private void recordFragment(String filename) {

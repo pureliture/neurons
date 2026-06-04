@@ -33,6 +33,9 @@ rag-ingress:
         unstart-throttle-threshold: ${RAGFLOW_PRESSURE_UNSTART_THROTTLE_THRESHOLD:5}
         running-closed-threshold: ${RAGFLOW_PRESSURE_RUNNING_CLOSED_THRESHOLD:100}
         unstart-closed-threshold: ${RAGFLOW_PRESSURE_UNSTART_CLOSED_THRESHOLD:25}
+      dedup-cache:
+        ttl-seconds: ${RAGFLOW_DEDUP_CACHE_TTL_SECONDS:600}
+        max-size: ${RAGFLOW_DEDUP_CACHE_MAX_SIZE:10000}
   target-profiles:
     ragflow-transcript-memory:
       adapter: ragflow

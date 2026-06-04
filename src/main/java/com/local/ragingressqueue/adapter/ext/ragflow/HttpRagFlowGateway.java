@@ -23,6 +23,7 @@ import java.util.UUID;
 class HttpRagFlowGateway implements RagFlowGateway {
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
     private static final int PRESSURE_SAMPLE_SIZE = 200;
+    private static final int CONTENT_HASH_LOOKUP_PAGE_SIZE = 30;
 
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
@@ -80,9 +81,13 @@ class HttpRagFlowGateway implements RagFlowGateway {
 
     @Override
     public boolean findByContentHash(String baseUrl, String apiKey, String datasetId, String contentHashFragment) {
+        if (contentHashFragment == null || contentHashFragment.isBlank()) {
+            return false;
+        }
         JsonNode data = request(
             "GET",
-            baseUrl + "/api/v1/datasets/" + path(datasetId) + "/documents?page=1&page_size=1&keywords=" + URLEncoder.encode(contentHashFragment, StandardCharsets.UTF_8),
+            baseUrl + "/api/v1/datasets/" + path(datasetId) + "/documents?page=1&page_size=" + CONTENT_HASH_LOOKUP_PAGE_SIZE
+                + "&keywords=" + URLEncoder.encode(contentHashFragment, StandardCharsets.UTF_8),
             apiKey,
             "",
             null
@@ -91,11 +96,25 @@ class HttpRagFlowGateway implements RagFlowGateway {
         if (!docs.isArray()) {
             docs = data;
         }
-        if (docs.isArray() && docs.size() > 0) {
-            return true;
+        // Require the fragment to appear as the delimited hash-suffix token in a document name, not
+        // merely as a keyword hit (which can match the body or a longer token). A false positive here
+        // would skip a genuine new upload, so we match conservatively on the name we ourselves write.
+        return matchesContentHashFragment(docs, contentHashFragment);
+    }
+
+    static boolean matchesContentHashFragment(JsonNode docs, String contentHashFragment) {
+        if (contentHashFragment == null || contentHashFragment.isBlank() || docs == null || !docs.isArray()) {
+            return false;
         }
-        int total = data.path("total").asInt(0);
-        return total > 0;
+        String dotToken = "-" + contentHashFragment + ".";
+        String endToken = "-" + contentHashFragment;
+        for (JsonNode doc : docs) {
+            String name = text(doc, "name");
+            if (name.contains(dotToken) || name.endsWith(endToken)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
