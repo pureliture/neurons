@@ -3,6 +3,8 @@ package com.local.ragingressqueue.adapter.ext.ragflow;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.local.ragingressqueue.ingest.domain.DocumentPayload;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
@@ -21,9 +23,14 @@ import java.util.UUID;
 @Component
 @Profile({"api", "worker"})
 class HttpRagFlowGateway implements RagFlowGateway {
+    private static final Logger LOGGER = LoggerFactory.getLogger(HttpRagFlowGateway.class);
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
     private static final int PRESSURE_SAMPLE_SIZE = 200;
     private static final int CONTENT_HASH_LOOKUP_PAGE_SIZE = 30;
+    // Safety valve for the keyword-lookup pagination loop. A 12-hex content-hash fragment realistically
+    // yields 0-1 hits, so this bound is never reached in practice; it only prevents an unbounded loop
+    // if RAGFlow ever reports a pathological total. 100 pages * 30 = 3000 candidate documents.
+    private static final int CONTENT_HASH_LOOKUP_MAX_PAGES = 100;
 
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
@@ -84,33 +91,61 @@ class HttpRagFlowGateway implements RagFlowGateway {
         if (contentHashFragment == null || contentHashFragment.isBlank()) {
             return false;
         }
-        JsonNode data = request(
-            "GET",
-            baseUrl + "/api/v1/datasets/" + path(datasetId) + "/documents?page=1&page_size=" + CONTENT_HASH_LOOKUP_PAGE_SIZE
-                + "&keywords=" + URLEncoder.encode(contentHashFragment, StandardCharsets.UTF_8),
-            apiKey,
-            "",
-            null
-        );
-        JsonNode docs = data.path("docs");
-        if (!docs.isArray()) {
-            docs = data;
+        // Page through the keyword result set: the real name match can land beyond the first page when
+        // the fragment yields more hits than one page holds. Stopping at page 1 would falsely report
+        // absent and re-upload a duplicate, breaking the findByContentHash contract. A short (or empty)
+        // page is the end-of-results signal, independent of the server's reported total, so the common
+        // case (0-1 hits) stays a single GET while a miscounted total cannot hide a last-page match.
+        for (int page = 1; page <= CONTENT_HASH_LOOKUP_MAX_PAGES; page++) {
+            JsonNode data = request(
+                "GET",
+                baseUrl + "/api/v1/datasets/" + path(datasetId) + "/documents?page=" + page
+                    + "&page_size=" + CONTENT_HASH_LOOKUP_PAGE_SIZE
+                    + "&keywords=" + URLEncoder.encode(contentHashFragment, StandardCharsets.UTF_8),
+                apiKey,
+                "",
+                null
+            );
+            JsonNode docs = data.path("docs");
+            if (!docs.isArray()) {
+                docs = data;
+            }
+            if (!docs.isArray()) {
+                // A malformed (non-array) document list must not be read as "no match": that would
+                // silently skip dedup. Fail the lookup so the delivery is retried.
+                throw new RagFlowDeliveryException("ragflow document list response missing docs");
+            }
+            if (matchesContentHashFragment(docs, contentHashFragment)) {
+                return true;
+            }
+            if (docs.size() < CONTENT_HASH_LOOKUP_PAGE_SIZE) {
+                return false;
+            }
         }
-        // Require the fragment to appear as the delimited hash-suffix token in a document name, not
-        // merely as a keyword hit (which can match the body or a longer token). A false positive here
-        // would skip a genuine new upload, so we match conservatively on the name we ourselves write.
-        return matchesContentHashFragment(docs, contentHashFragment);
+        // Safety valve reached without a definitive end-of-results: do not claim "not found", which
+        // would let a duplicate through silently. Surface it so operators can widen the bound.
+        LOGGER.warn("RAGFlow content_hash lookup hit the {}-page scan limit without exhausting results; "
+            + "treating as not found may allow a duplicate upload", CONTENT_HASH_LOOKUP_MAX_PAGES);
+        return false;
     }
 
     static boolean matchesContentHashFragment(JsonNode docs, String contentHashFragment) {
         if (contentHashFragment == null || contentHashFragment.isBlank() || docs == null || !docs.isArray()) {
             return false;
         }
-        String dotToken = "-" + contentHashFragment + ".";
-        String endToken = "-" + contentHashFragment;
+        // The fragment is always written as the token immediately before the final extension (see
+        // RagFlowTargetAdapter#payloadWithHashInFilename), so match the base name's suffix exactly. A
+        // looser contains-check could match the fragment inside an unrelated part of the name (e.g. an
+        // original "-<frag>." earlier in the name) and skip a genuine new upload (data loss).
+        String suffixToken = "-" + contentHashFragment;
         for (JsonNode doc : docs) {
             String name = text(doc, "name");
-            if (name.contains(dotToken) || name.endsWith(endToken)) {
+            if (name.isEmpty()) {
+                continue;
+            }
+            int lastDot = name.lastIndexOf('.');
+            String baseName = lastDot > 0 ? name.substring(0, lastDot) : name;
+            if (baseName.endsWith(suffixToken)) {
                 return true;
             }
         }

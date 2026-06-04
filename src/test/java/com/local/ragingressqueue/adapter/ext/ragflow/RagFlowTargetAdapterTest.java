@@ -191,11 +191,13 @@ class RagFlowTargetAdapterTest {
     }
 
     @Test
-    void uploadedDocumentIsNotReUploadedWhenPostUploadMetadataFailsAndIndexLags() {
-        // Partial-success window: the document upload succeeds but a subsequent step (metadata/parse)
-        // throws, so the delivery is reported failed and retried. The recent-delivery cache must still
-        // remember the successful upload so the retry does not create a duplicate while RAGFlow's
-        // search index has not yet caught up (findByContentHash still reports absent).
+    void retryAfterPostUploadFailureResumesMetadataAndParseWithoutReUploading() {
+        // Partial-success window: the upload succeeds but a post-upload step (metadata) throws, so the
+        // delivery is reported failed and the message is retried. The retry must (a) NOT create a
+        // duplicate (no re-upload, because the cache remembers the uploaded document) and (b) resume
+        // the still-missing metadata/parse steps against the uploaded document id instead of
+        // short-circuiting to "delivered". Otherwise a document persists without its metadata/parse
+        // side effects and is silently lost. findByContentHash stays absent (search index lag).
         FakeRagFlowGateway gateway = new FakeRagFlowGateway();
         gateway.alwaysReportAbsent = true;
         gateway.failMetadata = true;
@@ -209,11 +211,96 @@ class RagFlowTargetAdapterTest {
 
         IngestJob job = validJob();
         DeliveryResult first = adapter.deliver(job, "ragflow-transcript-memory");
+        assertThat(first.delivered()).isFalse();
+        assertThat(gateway.uploadCount).isEqualTo(1);
+        assertThat(gateway.parseRequested).isFalse();
+
+        // The transient post-upload failure clears before the retry.
+        gateway.failMetadata = false;
         DeliveryResult retry = adapter.deliver(job, "ragflow-transcript-memory");
 
-        assertThat(first.delivered()).isFalse();
         assertThat(retry.delivered()).isTrue();
         assertThat(gateway.uploadCount).isEqualTo(1);
+        assertThat(gateway.metadataDocumentId).isEqualTo("doc_1");
+        assertThat(gateway.parseRequested).isTrue();
+        assertThat(gateway.parseDocumentId).isEqualTo("doc_1");
+    }
+
+    @Test
+    void finalizedReDeliveryShortCircuitsWithoutRepeatingMetadataOrParse() {
+        // Once a delivery has fully completed (upload + metadata + parse), a later re-delivery must
+        // short-circuit on the finalized cache entry without re-running any gateway step.
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway
+        );
+
+        IngestJob job = validJob();
+        assertThat(adapter.deliver(job, "ragflow-transcript-memory").delivered()).isTrue();
+        assertThat(adapter.deliver(job, "ragflow-transcript-memory").delivered()).isTrue();
+
+        assertThat(gateway.uploadCount).isEqualTo(1);
+        assertThat(gateway.metadataCallCount).isEqualTo(1);
+        assertThat(gateway.parseCallCount).isEqualTo(1);
+        assertThat(gateway.findByContentHashCallCount).isEqualTo(1);
+    }
+
+    @Test
+    void retryAfterParseFailureResumesFromParseWithoutReapplyingMetadata() {
+        // If only the parse step failed (metadata already succeeded), the retry must resume from parse
+        // alone: it must not re-upload and must not re-apply metadata. Replaying metadata would be a
+        // redundant RAGFlow call and contradicts resuming only the step that failed.
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        gateway.alwaysReportAbsent = true;
+        gateway.failParse = true;
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway
+        );
+
+        IngestJob job = validJob();
+        DeliveryResult first = adapter.deliver(job, "ragflow-transcript-memory");
+        assertThat(first.delivered()).isFalse();
+        assertThat(gateway.metadataCallCount).isEqualTo(1);
+
+        gateway.failParse = false;
+        DeliveryResult retry = adapter.deliver(job, "ragflow-transcript-memory");
+
+        assertThat(retry.delivered()).isTrue();
+        assertThat(gateway.uploadCount).isEqualTo(1);
+        assertThat(gateway.metadataCallCount).isEqualTo(1);
+        assertThat(gateway.parseCallCount).isEqualTo(2);
+        assertThat(gateway.parseDocumentId).isEqualTo("doc_1");
+    }
+
+    @Test
+    void blankFilenameStillDedupsByEmbeddingTheHashInASynthesizedName() {
+        // A blank original filename must not silently disable dedup: the second identical delivery must
+        // be recognised as already present rather than uploaded again.
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway
+        );
+
+        IngestJob job = blankFilenameJob();
+        String expectedFragment = job.contentHash().substring(7, 19);
+
+        assertThat(adapter.deliver(job, "ragflow-transcript-memory").delivered()).isTrue();
+        assertThat(adapter.deliver(job, "ragflow-transcript-memory").delivered()).isTrue();
+
+        assertThat(gateway.uploadCount).isEqualTo(1);
+        assertThat(gateway.uploadFilename).endsWith("-" + expectedFragment);
     }
 
     @Test
@@ -397,6 +484,31 @@ class RagFlowTargetAdapterTest {
         );
     }
 
+    private IngestJob blankFilenameJob() {
+        String body = """
+            ---
+            schema_version: agent_knowledge_document.v2
+            result_type: conversation_chunk
+            ---
+            body with a blank source filename
+            """;
+        return new IngestJob(
+            Map.of("provider", "codex", "project", "workspace-ragflow-advisor"),
+            new DocumentPayload(
+                "redacted_rag_ready_document",
+                "redaction.v2",
+                "   ",
+                "text/markdown",
+                body,
+                Map.of("schema_version", "agent_knowledge_document.v2", "result_type", "conversation_chunk")
+            ),
+            ContentHashVerifier.sha256Hex(body),
+            "ragflow-transcript-memory",
+            "conversation_chunk",
+            null
+        );
+    }
+
     private IngestJob jobB() {
         String body = """
             ---
@@ -425,13 +537,18 @@ class RagFlowTargetAdapterTest {
     private static final class FakeRagFlowGateway implements RagFlowGateway {
         private boolean failUpload;
         private boolean failMetadata;
+        private boolean failParse;
         private boolean failPressure;
         private boolean alwaysReportAbsent;
         private int findByContentHashCallCount;
         private String uploadDatasetId;
         private String uploadFilename;
         private Map<String, String> metadata = new HashMap<>();
+        private String metadataDocumentId;
+        private int metadataCallCount;
         private boolean parseRequested;
+        private String parseDocumentId;
+        private int parseCallCount;
         private RagFlowPressureSnapshot pressureSnapshot = new RagFlowPressureSnapshot(0, 0, 0, 100, 100);
         private int uploadCount;
         private final java.util.Set<String> uploadedFragments = new java.util.HashSet<>();
@@ -456,15 +573,22 @@ class RagFlowTargetAdapterTest {
 
         @Override
         public void updateMetadata(String baseUrl, String apiKey, String datasetId, String documentId, Map<String, String> metadata) {
+            metadataCallCount++;
             if (failMetadata) {
                 throw new RagFlowDeliveryException("metadata boom");
             }
+            this.metadataDocumentId = documentId;
             this.metadata = metadata;
         }
 
         @Override
         public void requestParse(String baseUrl, String apiKey, String datasetId, String documentId) {
+            parseCallCount++;
+            if (failParse) {
+                throw new RagFlowDeliveryException("parse boom");
+            }
             parseRequested = true;
+            parseDocumentId = documentId;
         }
 
         @Override
@@ -489,10 +613,14 @@ class RagFlowTargetAdapterTest {
             if (filename == null) {
                 return;
             }
-            int dash = filename.lastIndexOf('-');
-            int dot = filename.lastIndexOf('.');
-            if (dash >= 0 && dot > dash) {
-                uploadedFragments.add(filename.substring(dash + 1, dot));
+            // Mirror HttpRagFlowGateway#matchesContentHashFragment: the fragment is the token after the
+            // last '-' in the base name (the name with any final extension stripped), including the
+            // no-extension case.
+            int lastDot = filename.lastIndexOf('.');
+            String baseName = lastDot > 0 ? filename.substring(0, lastDot) : filename;
+            int dash = baseName.lastIndexOf('-');
+            if (dash >= 0) {
+                uploadedFragments.add(baseName.substring(dash + 1));
             }
         }
     }
