@@ -676,6 +676,40 @@ class RagFlowTargetAdapterTest {
         assertThat(gateway.metadata).containsEntry("logical_document_id", "from-metadata");
     }
 
+    @Test
+    void disabledSupersedeLeavesMetadataPrecedenceUnchanged() {
+        // With supersede off (default), the logical-id field must not get special precedence handling:
+        // the normal source-over-metadata overlay stands, so the feature flag does not change the
+        // stored metadata of unrelated deliveries.
+        FakeRagFlowGateway gateway = new FakeRagFlowGateway();
+        RagFlowTargetAdapter adapter = new RagFlowTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            Map.of("ragflow-transcript-memory", "ds_1"),
+            gateway
+        );
+        String body = "---\nresult_type: session_summary\n---\nbody\n";
+        Map<String, String> metadata = new HashMap<>();
+        metadata.put("result_type", "session_summary");
+        metadata.put("logical_document_id", "from-metadata");
+        Map<String, String> source = new HashMap<>();
+        source.put("provider", "codex");
+        source.put("logical_document_id", "from-source");
+        IngestJob job = new IngestJob(
+            source,
+            new DocumentPayload("redacted_rag_ready_document", "redaction.v2", "summary.md", "text/markdown", body, metadata),
+            ContentHashVerifier.sha256Hex(body),
+            "ragflow-transcript-memory",
+            "session_summary",
+            null
+        );
+
+        adapter.deliver(job, "ragflow-transcript-memory");
+
+        assertThat(gateway.metadata).containsEntry("logical_document_id", "from-source");
+    }
+
     private IngestJob supersedeJob(String bodyText, String logicalId) {
         String body = """
             ---

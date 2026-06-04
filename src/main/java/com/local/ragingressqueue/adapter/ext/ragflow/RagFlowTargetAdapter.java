@@ -467,14 +467,17 @@ public class RagFlowTargetAdapter implements RagTargetAdapter {
         if (job.source() != null) {
             metadata.putAll(job.source());
         }
-        // The source overlay above can clobber the logical-id field. Keep the persisted value aligned
-        // with the one that drives the filename/supersede key (payload metadata wins over source), so a
-        // document's stored logical id matches the fragment embedded in its name.
-        String logicalIdFromMetadata = job.payload().metadata() == null
-            ? null
-            : job.payload().metadata().get(supersedeLogicalIdField);
-        if (!isBlank(logicalIdFromMetadata)) {
-            metadata.put(supersedeLogicalIdField, logicalIdFromMetadata);
+        // Only when supersede is active: the source overlay above can clobber the logical-id field, so
+        // keep the persisted value aligned with the one that drives the filename/supersede key (payload
+        // metadata wins over source). Gated by the flag so the default path's metadata precedence is
+        // unchanged when the feature is off.
+        if (supersedeEnabled) {
+            String logicalIdFromMetadata = job.payload().metadata() == null
+                ? null
+                : job.payload().metadata().get(supersedeLogicalIdField);
+            if (!isBlank(logicalIdFromMetadata)) {
+                metadata.put(supersedeLogicalIdField, logicalIdFromMetadata);
+            }
         }
         metadata.put("content_hash", job.contentHash());
         metadata.put("content_hash_prefix", job.contentHashPrefix());
