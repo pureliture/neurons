@@ -33,6 +33,16 @@ rag-ingress:
         unstart-throttle-threshold: ${RAGFLOW_PRESSURE_UNSTART_THROTTLE_THRESHOLD:5}
         running-closed-threshold: ${RAGFLOW_PRESSURE_RUNNING_CLOSED_THRESHOLD:100}
         unstart-closed-threshold: ${RAGFLOW_PRESSURE_UNSTART_CLOSED_THRESHOLD:25}
+      dedup-cache:
+        ttl-seconds: ${RAGFLOW_DEDUP_CACHE_TTL_SECONDS:600}
+        max-size: ${RAGFLOW_DEDUP_CACHE_MAX_SIZE:10000}
+      supersede:
+        # When enabled, a new content version of a logical document (identified by the
+        # logical-id-field below) retires the document's prior versions in the dataset. Inert unless
+        # the producer supplies a per-logical-document-unique value for that field, so append-only
+        # kinds (e.g. conversation_chunk) without it are never affected.
+        enabled: ${RAGFLOW_SUPERSEDE_ENABLED:false}
+        logical-id-field: ${RAGFLOW_SUPERSEDE_LOGICAL_ID_FIELD:logical_document_id}
   target-profiles:
     ragflow-transcript-memory:
       adapter: ragflow
