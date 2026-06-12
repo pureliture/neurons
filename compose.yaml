@@ -47,6 +47,10 @@ services:
       - nats-jetstream
 
   ingress-worker:
+    # G2: Java worker retired — replaced by the Python live worker on RAG_INGRESS_QUEUE
+    # (agent-knowledge compose project rag-ingress-live). Profile-gated so "compose up"
+    # will NOT recreate it (WorkQueue forbids a second consumer). Roll back: drop profile.
+    profiles: ["retired"]
     build: .
     restart: unless-stopped
     labels:
