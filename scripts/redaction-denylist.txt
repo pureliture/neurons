@@ -1,21 +1,19 @@
-Bearer\s+
-\bAuthorization\b
-\bapi[_-]?key[A-Za-z0-9_-]*\b
-\bapiKey[A-Za-z0-9_-]*\b
-# "token" only when adjacent to a secret-shaped value; bare prose mentions of the
-# word "token" are not a leak. Real token leaks remain covered by the Bearer /
-# access_token / api_key patterns above and below.
-\btoken\b["':=\s]{1,4}[A-Za-z0-9._/+\-]{20,}
-\baccess[_-]?token[A-Za-z0-9_-]*\b
-\bdataset_id\b
-\bdatasetId\b
-\bdataset_ids\b
-\bdocument_id\b
-\bdocumentId\b
-\bdocument_ids\b
-/Users/[^\s]+
-~/
-/private/[^\s]+
-/Volumes/[^\s]+
-private_locator
-raw_transcript
+# Ingress-api POST guard — SECRETS-ONLY denylist (G2 2-stage redaction).
+#
+# Under G2 the full public-ingress redaction moved server-side (the Python
+# worker applies redact_public_ingress_text before delivery and fail-closes on
+# any residual leak). The thin client now POSTs conservatively-redacted content
+# (redact_text_v2: secrets/credentials/private-dotdir paths removed) that still
+# contains benign public terms (general /Users paths, dataset_id, document_id,
+# raw_transcript, bare "token"/"api_key" prose). Those are cleaned by the worker,
+# NOT rejected here. This guard only backstops an ACTUAL secret/credential/
+# private-dotdir path that survived the client's conservative redaction.
+#
+# Every pattern below is value-shaped / high-entropy so it matches a RAW secret
+# but never matches redact_text_v2's own placeholders (e.g. "<redacted:secret>",
+# "Bearer <redacted:secret>") — verified against redact_text_v2 output.
+Bearer\s+[A-Za-z0-9][A-Za-z0-9._-]{8,}
+Basic\s+[A-Za-z0-9+/=]{8,}
+\b(?:access[_-]?token|api[_-]?key|token|secret|password|passwd)\b["':=\s]{1,4}[A-Za-z0-9._/+\-]{20,}
+/Users/[^ \n\t'"]+/\.[^/ \n\t'"]+/private/[^ \n\t'"]+
+/Users/[^ \n\t'"]+/\.(claude|gemini|codex)/[^ \n\t'"]+
