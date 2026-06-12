@@ -74,6 +74,16 @@ class RedactionGuardTest {
             .anyMatch(violation -> violation.contains("idempotencyKey"));
     }
 
+    @Test
+    void allowsBenignTokenWordButRejectsTokenSecretAssignment() {
+        // Bare prose mention of the word "token" must not be a false-positive rejection.
+        assertThat(guard.inspect(redactedBody() + "\nthe access token expired and the token limit was reached"))
+            .isEmpty();
+        // A token assigned to a secret-shaped value is still rejected.
+        assertThat(guard.inspect(redactedBody() + "\ntoken: ghp_ABCdef0123456789xyzQQ012345"))
+            .anyMatch(violation -> violation.contains("token"));
+    }
+
     private String redactedBody() {
         return """
             ---
