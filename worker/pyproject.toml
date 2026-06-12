@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Co-located Python delivery worker for rag-ingress-queue.
+# Vendored delivery subset of agent-knowledge (advisor source rev d571800),
+# trimmed to the live consume->redact->deliver path. See README.md.
+name = "rag-ingress-worker"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = ["nats-py>=2.6"]
+
+[project.scripts]
+rag-ingress-worker = "agent_knowledge.rag_ingress.shadow_worker:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["lib"]
+addopts = ["-p", "no:cacheprovider"]
+
+[tool.setuptools]
+package-dir = {"" = "lib"}
+
+[tool.setuptools.packages.find]
+where = ["lib"]
