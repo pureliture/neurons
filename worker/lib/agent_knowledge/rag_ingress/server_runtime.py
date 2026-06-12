@@ -147,6 +147,14 @@ def document_from_ingress_payload(payload: dict) -> RagReadyDocument:
     validate_ingress_payload(payload)
     document = payload["payload"]["document"]
     source = payload.get("source") or {}
+    # M2 multi-client attribution: dedup identity stays provider:kind:contentHash
+    # (host is NOT part of identity). The producing host is recorded as
+    # attribution-only metadata so N clients delivering the same knowledge collapse
+    # to one document while preserving where it came from.
+    metadata = dict(document.get("metadata") or {})
+    source_host = str(source.get("host") or "")
+    if source_host:
+        metadata.setdefault("source_host", source_host)
     return RagReadyDocument(
         target_profile=str(payload["targetProfile"]),
         document_kind=str(payload["kind"]),
@@ -158,7 +166,7 @@ def document_from_ingress_payload(payload: dict) -> RagReadyDocument:
         idempotency_key=str(payload["idempotencyKey"]),
         body=str(document["body"]),
         filename=str(document["filename"]),
-        metadata=dict(document.get("metadata") or {}),
+        metadata=metadata,
         content_type=str(document.get("contentType") or "text/markdown"),
         redaction_version=str(payload["payload"].get("redactionVersion") or "redaction.v2"),
     )
