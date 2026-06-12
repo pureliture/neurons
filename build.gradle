@@ -2,6 +2,7 @@ plugins {
     id 'java'
     id 'org.springframework.boot' version '4.0.6'
     id 'io.spring.dependency-management' version '1.1.7'
+    id 'pmd'
 }
 
 group = 'com.local'
@@ -13,6 +14,25 @@ java {
     }
 }
 
+pmd {
+    toolVersion = '7.3.0'
+    ruleSetFiles = files('config/pmd/ruleset.xml')
+    ruleSets = []
+    ignoreFailures = true
+    consoleOutput = false
+}
+
+tasks.withType(Pmd).configureEach {
+    reports {
+        xml.required = true
+        html.required = false
+    }
+}
+
+configurations {
+    cpd
+}
+
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-webmvc'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
@@ -20,9 +40,33 @@ dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation 'io.nats:jnats:2.25.2'
 
+    cpd 'net.sourceforge.pmd:pmd-cli:7.3.0'
+    cpd 'net.sourceforge.pmd:pmd-java:7.3.0'
+
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.testcontainers:testcontainers:2.0.5'
     testImplementation 'org.testcontainers:testcontainers-junit-jupiter:2.0.5'
+}
+
+tasks.register('cpdCheck', JavaExec) {
+    group = 'verification'
+    description = 'Run PMD CPD duplicate-code analysis for src/main/java'
+    classpath = configurations.cpd
+    mainClass = 'net.sourceforge.pmd.cli.PmdCli'
+    args = [
+        'cpd',
+        '--minimum-tokens', '100',
+        '--language', 'java',
+        '--dir', 'src/main/java',
+        '--format', 'xml',
+    ]
+    ignoreExitValue = true
+
+    doFirst {
+        def reportDir = file("$buildDir/reports/cpd")
+        reportDir.mkdirs()
+        standardOutput = new FileOutputStream(new File(reportDir, 'cpd.xml'))
+    }
 }
 
 tasks.withType(Test).configureEach {
