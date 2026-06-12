@@ -82,5 +82,59 @@ services:
     depends_on:
       - nats-jetstream
 
+  ingress-worker-py:
+    # G2 live delivery worker, co-located (Python). Replaces the retired Java
+    # ingress-worker above. Consumes the live RAG_INGRESS_QUEUE WorkQueue and
+    # delivers to RAGFlow. WorkQueue allows ONE consumer of this durable — do not
+    # run this alongside another consumer of rag_target_delivery_worker (e.g. a
+    # separate live compose project). Live re-deploy is a separate goal.
+    build: ./worker
+    restart: unless-stopped
+    labels:
+      org.opencontainers.image.revision: ${RAG_INGRESS_SOURCE_REVISION:-local}
+      com.local.rag-ingress-queue.runtime: ubuntu-smoke
+    environment:
+      RAG_INGRESS_NATS_URL: nats://nats-jetstream:4222
+      # Live consume/deliver is OPT-IN so a bare `compose up` (this file is the
+      # ubuntu-smoke project) stays safe: it defaults to the isolated shadow
+      # stream with delivery off and never takes over the live WorkQueue durable.
+      # The live deployment supplies these via its env-file:
+      #   RAG_INGRESS_STREAM=RAG_INGRESS_QUEUE  RAG_INGRESS_SUBJECT=rag.ingress.>
+      #   RAG_INGRESS_DURABLE=rag_target_delivery_worker
+      #   RAG_INGRESS_ALLOW_LIVE_QUEUE=1  RAG_INGRESS_DELIVER=1
+      SHADOW_STREAM: ${RAG_INGRESS_STREAM:-RAG_INGRESS_SHADOW}
+      SHADOW_SUBJECT: ${RAG_INGRESS_SUBJECT:-rag.shadow.>}
+      SHADOW_DURABLE: ${RAG_INGRESS_DURABLE:-shadow_python_worker}
+      ALLOW_LIVE_QUEUE: ${RAG_INGRESS_ALLOW_LIVE_QUEUE:-0}
+      SHADOW_DELIVER: ${RAG_INGRESS_DELIVER:-0}
+      # High = ack-drop effectively disabled: a failing message NAKs and is
+      # retried/preserved rather than silently dropped (favours data preservation).
+      MAX_DELIVER: ${RAG_INGRESS_MAX_DELIVER:-100000}
+      INGEST_STATE_DB_PATH: /var/lib/agent-knowledge/ingest-state/ingest-state.sqlite
+      RAGFLOW_BASE_URL: ${RAGFLOW_BASE_URL:-}
+      RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:-}
+      # Reuse the ingress-api's own pressure verdict (single source, fail-open).
+      RAG_INGRESS_PRESSURE_URL: ${RAG_INGRESS_PRESSURE_URL:-http://ingress-api:8080/status}
+      # Per-profile routing via env_profile_dataset_resolver — all 7 target
+      # profiles (parity with TargetProfileRegistry; task-summary +
+      # approved-memory-card were missing from the prior 5-env live worker).
+      RAGFLOW_TRANSCRIPT_MEMORY_DATASET_ID: ${RAGFLOW_TRANSCRIPT_MEMORY_DATASET_ID:-}
+      RAGFLOW_SESSION_MEMORY_DATASET_ID: ${RAGFLOW_SESSION_MEMORY_DATASET_ID:-}
+      RAGFLOW_SESSION_SUMMARY_DATASET_ID: ${RAGFLOW_SESSION_SUMMARY_DATASET_ID:-}
+      RAGFLOW_PROJECT_MEMORY_DATASET_ID: ${RAGFLOW_PROJECT_MEMORY_DATASET_ID:-}
+      RAGFLOW_PROCEDURAL_MEMORY_DATASET_ID: ${RAGFLOW_PROCEDURAL_MEMORY_DATASET_ID:-}
+      RAGFLOW_TASK_SUMMARY_DATASET_ID: ${RAGFLOW_TASK_SUMMARY_DATASET_ID:-}
+      RAGFLOW_APPROVED_MEMORY_CARD_DATASET_ID: ${RAGFLOW_APPROVED_MEMORY_CARD_DATASET_ID:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - rag-ingress-live-state:/var/lib/agent-knowledge/ingest-state
+    depends_on:
+      - nats-jetstream
+      - ingress-api
+
 volumes:
   nats_data:
+  rag-ingress-live-state:
