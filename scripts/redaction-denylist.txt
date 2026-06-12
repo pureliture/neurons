@@ -2,7 +2,10 @@ Bearer\s+
 \bAuthorization\b
 \bapi[_-]?key[A-Za-z0-9_-]*\b
 \bapiKey[A-Za-z0-9_-]*\b
-\btoken\b
+# "token" only when adjacent to a secret-shaped value; bare prose mentions of the
+# word "token" are not a leak. Real token leaks remain covered by the Bearer /
+# access_token / api_key patterns above and below.
+\btoken\b["':=\s]{1,4}[A-Za-z0-9._/+\-]{20,}
 \baccess[_-]?token[A-Za-z0-9_-]*\b
 \bdataset_id\b
 \bdatasetId\b
