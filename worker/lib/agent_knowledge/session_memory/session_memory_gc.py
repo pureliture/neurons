@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -200,3 +202,35 @@ def _resolve_retention_policy(value: str) -> str:
         "ragflow-session-memory": "supersede_or_disable",
     }
     return aliases.get(normalized, normalized)
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    parser = argparse.ArgumentParser(prog="session-memory-gc")
+    parser.add_argument("--ledger", required=True)
+    parser.add_argument("--dataset-id", required=True)
+    parser.add_argument("--ragflow-url", required=True)
+    parser.add_argument("--max-items", type=int, default=25)
+    parser.add_argument("--min-disabled-age-seconds", type=int, default=MIN_DISABLED_AGE_FLOOR_SECONDS)
+    parser.add_argument("--declared-dataset-role", "--dataset-role", dest="declared_dataset_role", default="")
+    parser.add_argument("--declared-retention-policy", "--retention-policy", dest="declared_retention_policy", default="")
+    parser.add_argument("--backup-dir", dest="backup_dir", default="")
+    parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--approval", default="")
+    args = parser.parse_args(raw_argv)
+
+    report = SessionMemoryGcRunner(
+        config=SessionMemoryGcConfig(
+            ledger_path=Path(args.ledger),
+            dataset_id=args.dataset_id,
+            ragflow_url=args.ragflow_url,
+            max_items=args.max_items,
+            min_disabled_age_seconds=args.min_disabled_age_seconds,
+            execute=bool(args.execute),
+            declared_dataset_role=args.declared_dataset_role,
+            declared_retention_policy=args.declared_retention_policy,
+            backup_dir=args.backup_dir,
+        ),
+    ).run()
+    print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
+    return 0 if report.get("status") == "ok" else 1

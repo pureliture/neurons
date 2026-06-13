@@ -1,4 +1,5 @@
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 
 from agent_knowledge.ledger import Ledger, SESSION_MEMORY_REGENERATION_EVIDENCE_STATUS
@@ -6,6 +7,7 @@ from agent_knowledge.session_memory.session_memory_gc import (
     MIN_DISABLED_AGE_FLOOR_SECONDS,
     SessionMemoryGcConfig,
     SessionMemoryGcRunner,
+    main,
 )
 
 
@@ -150,3 +152,45 @@ def test_session_memory_gc_floors_min_disabled_age_to_block_fresh_disable(tmp_pa
     assert report["eligible_count"] == 0
     assert report["min_disabled_age_floor_seconds"] == MIN_DISABLED_AGE_FLOOR_SECONDS
     assert report["effective_min_disabled_age_seconds"] == MIN_DISABLED_AGE_FLOOR_SECONDS
+
+
+def test_session_memory_gc_cli_dry_run_reports_json_without_network(tmp_path, capsys):
+    ledger_path = tmp_path / "ledger.sqlite"
+    Ledger(ledger_path)
+
+    exit_code = main([
+        "--ledger",
+        str(ledger_path),
+        "--dataset-id",
+        DATASET_ID,
+        "--ragflow-url",
+        "http://localhost:9380",
+    ])
+
+    assert exit_code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "ok"
+    assert report["mode"] == "dry_run"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
+
+
+def test_session_memory_gc_cli_execute_is_fail_closed(tmp_path, capsys):
+    ledger_path = tmp_path / "ledger.sqlite"
+    Ledger(ledger_path)
+
+    exit_code = main([
+        "--ledger",
+        str(ledger_path),
+        "--dataset-id",
+        DATASET_ID,
+        "--ragflow-url",
+        "http://localhost:9380",
+        "--execute",
+    ])
+
+    assert exit_code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "blocked_live_execution"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False

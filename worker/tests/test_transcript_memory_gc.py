@@ -1,9 +1,12 @@
 import hashlib
+import json
 
 from agent_knowledge.ledger import Ledger, SESSION_MEMORY_REGENERATION_EVIDENCE_STATUS
 from agent_knowledge.session_memory.transcript_memory_gc import (
+    CANDIDATE_SCOPE_SESSION_SEARCH,
     TranscriptMemoryGcConfig,
     TranscriptMemoryGcRunner,
+    main,
 )
 from agent_knowledge.session_memory.transcript_model import TranscriptChunk
 
@@ -183,3 +186,68 @@ def test_transcript_memory_gc_blocks_without_matching_coverage(tmp_path):
 
     assert report["eligible_count"] == 0
     assert report["disable_selected_count"] == 0
+
+
+def test_transcript_memory_gc_cli_dry_run_reports_json_without_network(tmp_path, capsys):
+    ledger_path = tmp_path / "ledger.sqlite"
+    Ledger(ledger_path)
+
+    exit_code = main([
+        "--ledger",
+        str(ledger_path),
+        "--dataset-id",
+        TRANSCRIPT_DATASET_ID,
+        "--session-memory-dataset-id",
+        SESSION_DATASET_ID,
+        "--ragflow-url",
+        "http://localhost:9380",
+    ])
+
+    assert exit_code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "ok"
+    assert report["mode"] == "dry_run"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
+
+
+def test_transcript_memory_gc_cli_execute_disable_is_fail_closed(tmp_path, capsys):
+    ledger_path = tmp_path / "ledger.sqlite"
+    Ledger(ledger_path)
+
+    exit_code = main([
+        "--ledger",
+        str(ledger_path),
+        "--dataset-id",
+        TRANSCRIPT_DATASET_ID,
+        "--session-memory-dataset-id",
+        SESSION_DATASET_ID,
+        "--ragflow-url",
+        "http://localhost:9380",
+        "--execute-disable",
+    ])
+
+    assert exit_code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "blocked_live_execution"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
+
+
+def test_transcript_memory_gc_cli_requires_search_surface_verification(tmp_path, capsys):
+    ledger_path = tmp_path / "ledger.sqlite"
+    Ledger(ledger_path)
+
+    exit_code = main([
+        "--ledger",
+        str(ledger_path),
+        "--dataset-id",
+        TRANSCRIPT_DATASET_ID,
+        "--candidate-scope",
+        CANDIDATE_SCOPE_SESSION_SEARCH,
+        "--ragflow-url",
+        "http://localhost:9380",
+    ])
+
+    assert exit_code == 2
+    assert "requires --verify-search-surface" in capsys.readouterr().err

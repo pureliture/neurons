@@ -1,4 +1,5 @@
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 
 from agent_knowledge.ledger import Ledger, SESSION_MEMORY_REGENERATION_EVIDENCE_STATUS
@@ -6,6 +7,7 @@ from agent_knowledge.session_memory.transcript_volume_gc import (
     MIN_ACTIVE_AGE_FLOOR_SECONDS,
     TranscriptVolumeGcConfig,
     TranscriptVolumeGcRunner,
+    main,
 )
 
 
@@ -110,3 +112,45 @@ def test_fresh_active_below_floor_not_eligible(tmp_path):
 
     assert report["eligible_count"] == 0
     assert report["deleted_count"] == 0
+
+
+def test_transcript_volume_gc_cli_dry_run_reports_json_without_network(tmp_path, capsys):
+    ledger_path = tmp_path / "l.sqlite"
+    Ledger(ledger_path)
+
+    exit_code = main([
+        "--ledger",
+        str(ledger_path),
+        "--transcript-dataset-id",
+        TX_DS,
+        "--ragflow-url",
+        "http://localhost:9380",
+    ])
+
+    assert exit_code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "ok"
+    assert report["mode"] == "dry_run"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
+
+
+def test_transcript_volume_gc_cli_execute_is_fail_closed(tmp_path, capsys):
+    ledger_path = tmp_path / "l.sqlite"
+    Ledger(ledger_path)
+
+    exit_code = main([
+        "--ledger",
+        str(ledger_path),
+        "--transcript-dataset-id",
+        TX_DS,
+        "--ragflow-url",
+        "http://localhost:9380",
+        "--execute",
+    ])
+
+    assert exit_code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "blocked_live_execution"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False

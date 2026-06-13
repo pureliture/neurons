@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -387,3 +389,45 @@ def _resolve_retention_policy(value: str) -> str:
 
 def _sha256_content(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    parser = argparse.ArgumentParser(prog="transcript-memory-gc")
+    parser.add_argument("--ledger", required=True)
+    parser.add_argument("--dataset-id", required=True)
+    parser.add_argument("--session-memory-dataset-id", default="")
+    parser.add_argument("--candidate-scope", choices=CANDIDATE_SCOPES, default=CANDIDATE_SCOPE_EXACT_COVERAGE)
+    parser.add_argument("--declared-dataset-role", "--dataset-role", dest="declared_dataset_role", default="")
+    parser.add_argument("--declared-retention-policy", "--retention-policy", dest="declared_retention_policy", default="")
+    parser.add_argument("--ragflow-url", required=True)
+    parser.add_argument("--max-items", type=int, default=25)
+    parser.add_argument("--min-indexed-age-seconds", type=int, default=86400)
+    parser.add_argument("--verify-search-surface", action="store_true")
+    parser.add_argument("--retrieval-limit", type=int, default=10)
+    parser.add_argument("--execute-disable", action="store_true")
+    parser.add_argument("--approval", default="")
+    args = parser.parse_args(raw_argv)
+
+    if args.candidate_scope == CANDIDATE_SCOPE_SESSION_SEARCH and not args.verify_search_surface:
+        print("session-search-surface candidate scope requires --verify-search-surface", file=sys.stderr)
+        return 2
+
+    report = TranscriptMemoryGcRunner(
+        config=TranscriptMemoryGcConfig(
+            ledger_path=Path(args.ledger),
+            dataset_id=args.dataset_id,
+            session_memory_dataset_id=args.session_memory_dataset_id,
+            candidate_scope=args.candidate_scope,
+            ragflow_url=args.ragflow_url,
+            max_items=args.max_items,
+            min_indexed_age_seconds=args.min_indexed_age_seconds,
+            execute_disable=bool(args.execute_disable),
+            verify_search_surface=bool(args.verify_search_surface),
+            retrieval_limit=args.retrieval_limit,
+            declared_dataset_role=args.declared_dataset_role,
+            declared_retention_policy=args.declared_retention_policy,
+        ),
+    ).run()
+    print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
+    return 0 if report.get("status") == "ok" else 1
