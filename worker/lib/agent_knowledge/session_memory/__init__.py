@@ -8,7 +8,9 @@ from importlib import import_module
 
 _EXPORT_MODULES = {
     "CurationService": ".curation",
+    "TerminalSkippedQuarantineRunner": ".terminal_skipped_quarantine",
     "TranscriptChunk": ".transcript_model",
+    "ZombieSnapshotRepairRunner": ".zombie_snapshot_repair",
     "build_memory_candidate": ".memory_card",
     "build_memory_card": ".memory_card",
     "validate_memory_card_envelope": ".memory_card",

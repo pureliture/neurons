@@ -91,6 +91,8 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.session_memory.memory_card",
         "agent_knowledge.session_memory.curation",
         "agent_knowledge.session_memory.transcript_model",
+        "agent_knowledge.session_memory.terminal_skipped_quarantine",
+        "agent_knowledge.session_memory.zombie_snapshot_repair",
     ):
         importlib.import_module(included)
 
