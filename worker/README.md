@@ -56,6 +56,12 @@ vendored (`lib/agent_knowledge/`):
   native-memory active-set filtering and local mirror store. RAGFlow access is
   injected and recall-only in this slice; writer/reconcile/regeneration upload
   or disable runners remain out.
+- `session_memory/native_memory_writer.py` / `native_memory_reconcile.py` /
+  `native_memory_write_runner.py` — server-side native-memory mirror write,
+  supersede-sync, and injected RAGFlow message disable reconciliation logic.
+  These modules are vendored with fake-client unit coverage only; the live
+  `native-memory-sync` CLI/approval wiring remains out until the CLI surface is
+  split.
 - `session_memory/memory_promotion.py` / `memory_evaluation.py` /
   `ragflow_projection.py` / `llm_brain_service.py` — LLM-brain MemoryCard
   promotion, auto-policy evaluation gates, projection job building/execution,
@@ -75,10 +81,9 @@ vendored (`lib/agent_knowledge/`):
 - `replay_delivery.py` — 아직 client `outbox_client`, `Ledger` protocol, and
   monolith CLI/test coupling을 포함한다. server delivery backend 기반으로
   split하기 전에는 worker에 가져오지 않는다.
-- `native_memory_writer.py`, `native_memory_write_runner.py`,
-  `native_memory_reconcile.py`, and `memory_regeneration.py` — still include
-  RAGFlow add/disable/upload or private transcript-source surfaces. They require
-  a separate safety-lane split before vendoring.
+- `native-memory-sync` CLI wiring and `memory_regeneration.py` — still include
+  monolith CLI/live approval or RAGFlow upload/private transcript-source
+  surfaces. They require a separate safety-lane split before vendoring.
   → `rag_ingress/__init__.py`는 client/Ledger/import-heavy 모듈을 eager import하지
   않도록 유지한다(패키지 import만으로 Ledger가 끌려오지 않게).
 
