@@ -10,7 +10,11 @@ memory_cards read 는 ledger 가 소유. runner 는 orchestration 만.
 """
 from __future__ import annotations
 
+import argparse
+import json
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..ledger import Ledger
 from .native_memory_mirror import (
@@ -179,3 +183,51 @@ def run_native_memory_sync(
         ).run()
 
     return {"status": "ok", "dry_run": dry_run, "write": write_report, "reconcile": reconcile_report}
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    parser = argparse.ArgumentParser(prog="native-memory-sync")
+    parser.add_argument("--ledger", required=True)
+    parser.add_argument("--native-memory-id", default="")
+    parser.add_argument("--agent-id", default="native-memory-sync")
+    parser.add_argument("--batch-limit", type=int, default=200)
+    parser.add_argument("--reconcile-top-n", type=int, default=50)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--approval", default="")
+    args = parser.parse_args(raw_argv)
+
+    if not args.native_memory_id:
+        print(json.dumps({"status": "not_executed_no_memory_binding"}, sort_keys=True))
+        return 0
+    if args.execute or not args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "status": "blocked_live_execution",
+                    "dry_run": False,
+                    "mutation_performed": False,
+                    "network_used": False,
+                    "raw_ids_printed": False,
+                    "failed_error_class": "live_native_memory_sync_not_vendored",
+                },
+                sort_keys=True,
+            )
+        )
+        return 1
+
+    report = run_native_memory_sync(
+        ledger=Ledger(Path(args.ledger)),
+        ragflow=None,
+        memory_id=args.native_memory_id,
+        agent_id=args.agent_id,
+        batch_limit=args.batch_limit,
+        reconcile_top_n=args.reconcile_top_n,
+        dry_run=True,
+    )
+    report["mutation_performed"] = False
+    report["network_used"] = False
+    report["raw_ids_printed"] = False
+    print(json.dumps(report, sort_keys=True))
+    return 0

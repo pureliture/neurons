@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from agent_knowledge.curation import CurationService
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.memory_card import build_memory_candidate
@@ -12,6 +14,7 @@ from agent_knowledge.session_memory.native_memory_write_runner import (
     NativeMemoryMirrorWriteRunner,
     NativeMemoryWriteConfig,
     adapt_card_to_statement,
+    main,
     run_native_memory_sync,
 )
 
@@ -276,3 +279,52 @@ def test_run_native_memory_sync_dry_run_skips_reconcile_and_mutation(tmp_path):
     assert report["write"]["written"] == 0
     assert len(ragflow.add_calls) == 0
     assert report["reconcile"]["status"] == "skipped_dry_run"
+
+
+def test_native_memory_sync_cli_no_memory_binding_is_noop(tmp_path, capsys):
+    rc = main(["--ledger", str(tmp_path / "ledger.sqlite3")])
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "not_executed_no_memory_binding"}
+
+
+def test_native_memory_sync_cli_dry_run_runs_without_network(tmp_path, capsys):
+    ledger, store, ragflow, runner, service = _setup(tmp_path)
+    _approve(service, "run lint before deploy")
+
+    rc = main([
+        "--ledger",
+        str(ledger.path),
+        "--native-memory-id",
+        "mem_main",
+        "--dry-run",
+    ])
+
+    assert rc == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "ok"
+    assert report["dry_run"] is True
+    assert report["write"]["pending"] == 1
+    assert report["write"]["written"] == 0
+    assert report["reconcile"]["status"] == "skipped_dry_run"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
+    assert len(ragflow.add_calls) == 0
+
+
+def test_native_memory_sync_cli_live_run_is_fail_closed(tmp_path, capsys):
+    ledger_path = tmp_path / "ledger.sqlite3"
+    Ledger(ledger_path)
+
+    rc = main([
+        "--ledger",
+        str(ledger_path),
+        "--native-memory-id",
+        "mem_main",
+    ])
+
+    assert rc == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "blocked_live_execution"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
