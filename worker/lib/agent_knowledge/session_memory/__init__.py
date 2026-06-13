@@ -7,6 +7,7 @@ brain/session-memory surfaces should be added as their ownership slices land.
 from importlib import import_module
 
 _EXPORT_MODULES = {
+    "BrainReadModel": ".brain_query",
     "CurationService": ".curation",
     "FakeMemoryMiner": ".memory_miner",
     "LlmMemoryMiner": ".memory_miner",
@@ -16,6 +17,11 @@ _EXPORT_MODULES = {
     "build_memory_candidate": ".memory_card",
     "build_memory_card": ".memory_card",
     "build_memory_card_candidate_from_source_span": ".memory_miner",
+    "plan_context_query": ".query_planner",
+    "resolve_brain_ids": ".brain_query",
+    "run_brain_query": ".brain_query",
+    "run_brain_query_v2": ".brain_query",
+    "sha256_text": ".query_planner",
     "validate_memory_card_envelope": ".memory_card",
 }
 
