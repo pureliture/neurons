@@ -48,6 +48,10 @@ vendored (`lib/agent_knowledge/`):
 - `session_memory/memory_miner.py` plus top-level compatibility alias —
   injected-completion and source-span MemoryCard candidate mining. It performs
   no ledger write, queue write, RAGFlow dataset write, or raw transcript lookup.
+- `session_memory/brain_query.py` / `query_planner.py` /
+  `native_memory_governance.py` — pure brain query, resolve, query planning,
+  and mirror-governance logic. The ledger/native-memory adapter
+  (`brain_read_model.py`) remains out of this slice.
 - `session_memory/terminal_skipped_quarantine.py` /
   `session_memory/zombie_snapshot_repair.py` — local-ledger-only safety repair
   tools. They do not call RAGFlow, network, delete, disable, or live GC APIs;
