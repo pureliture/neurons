@@ -69,6 +69,9 @@ Not owned here:
 
 Those client responsibilities belong to `dendrite`.
 
+`worker/tests/test_server_boundary.py` guards this direction by rejecting
+Python and Java imports from the `dendrite` client surface.
+
 <!-- ────────────── SECTION DIVIDER ────────────── -->
 <img src="https://capsule-render.vercel.app/api?type=rect&color=0:0e7490,100:2dd4bf&height=3" width="100%" />
 
