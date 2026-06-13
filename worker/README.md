@@ -110,6 +110,11 @@ vendored (`lib/agent_knowledge/`):
   ledger-backed transcript source planning, and injected project-memory enqueue
   sinks. Monolith CLI compatibility and live direct RAGFlow sync remain out of
   this slice.
+- `session_memory/memory_regeneration_cli.py` — dry-run/fail-closed
+  `memory-regeneration` compatibility command for project-memory planning,
+  session-memory build dry-run, and dirty project-memory dry-run. Enqueue,
+  sync, promotion, cleanup, disable, reset, RAGFlow read/write, and scheduler
+  wiring remain excluded.
 - `session_memory/backfill.py` and `session_memory/transcript_quality.py` —
   fixture-only backfill inventory, dry-run classification, quality audit, and
   execute-plan building. This is planning-only: Gate F execute, live RAGFlow
@@ -132,6 +137,9 @@ vendored (`lib/agent_knowledge/`):
   private transcript-source surfaces and remains excluded.
 - Gate F backfill execute/live indexing — approval-gated live RAGFlow mutation
   remains excluded; only fixture planning is present.
+- `memory-regeneration` live approval-execute wiring — the worker exposes only
+  dry-run/read-only planning. Enqueue/sync/promote/cleanup/disable/reset and
+  scheduler wiring remain out.
 - GC restore/upload/parse and live GC execute/disable/delete — approval-gated
   live RAGFlow mutation remains excluded; only dry-run planners and backup store
   are present.
