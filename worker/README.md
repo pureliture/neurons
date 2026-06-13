@@ -91,6 +91,11 @@ vendored (`lib/agent_knowledge/`):
 - `session_memory/gc_backup.py` — recoverable-delete backup record store only:
   private-directory JSON write/read/list and raw RAGFlow document-id hashing.
   Restore/upload/parse CLI behavior remains out of this slice.
+- `session_memory/memory_regeneration.py` — server-owned session/project-memory
+  regeneration core. Current worker tests cover dry-run document packing,
+  ledger-backed transcript source planning, and injected project-memory enqueue
+  sinks. Monolith CLI compatibility and live direct RAGFlow sync remain out of
+  this slice.
 - `redaction.py` — server full public redaction 본체(inline 정규식, denylist 파일 의존 없음)
 - `events.py`, `spool.py`, `ragflow_client.py` — 위 모듈의 폐포 의존
 
@@ -103,10 +108,11 @@ vendored (`lib/agent_knowledge/`):
 - `transcript_ingest.py` monolith module — still mixed. The server-owned
   transcript worker core is present here, but the old HTTP client/outbox,
   direct RAGFlow indexing, and public CLI compatibility wiring remain out.
-- `native-memory-sync` CLI wiring, `memory_regeneration.py`, and GC restore/live
-  GC runners — still include monolith CLI/live approval, RAGFlow upload/disable,
-  or private transcript-source surfaces. They require a separate safety-lane
-  split before vendoring.
+- `native-memory-sync` CLI wiring and GC restore/live GC runners — still include
+  monolith CLI/live approval, RAGFlow upload/disable, or private transcript-source
+  surfaces. They require a separate safety-lane split before vendoring. The
+  memory-regeneration server core is present, but its CLI/live direct-sync
+  wiring remains excluded.
   → `rag_ingress/__init__.py`는 client/Ledger/import-heavy 모듈을 eager import하지
   않도록 유지한다(패키지 import만으로 Ledger가 끌려오지 않게).
 

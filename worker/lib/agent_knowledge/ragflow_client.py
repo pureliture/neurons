@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from urllib.parse import quote, urlencode
@@ -118,6 +119,34 @@ class RagflowHttpClient:
                 return doc
         return None
 
+    def list_document_chunks(self, dataset_id: str, document_id: str, *, page_size: int = 100, max_pages: int = 100) -> list[str]:
+        """Read-only complete content of a document via its parsed chunks."""
+        contents: list[str] = []
+        page = 1
+        size = max(int(page_size), 1)
+        while page <= max_pages:
+            query = urlencode({"page": page, "page_size": size})
+            data = self._request(
+                "GET",
+                f"/api/v1/datasets/{quote(dataset_id)}/documents/{quote(document_id)}/chunks?{query}",
+            )
+            chunks = None
+            if isinstance(data, dict):
+                inner = data.get("data")
+                if isinstance(inner, dict):
+                    chunks = inner.get("chunks")
+                if chunks is None:
+                    chunks = data.get("chunks")
+            if not isinstance(chunks, list) or not chunks:
+                break
+            for chunk in chunks:
+                if isinstance(chunk, dict):
+                    contents.append(str(chunk.get("content") or chunk.get("content_with_weight") or ""))
+            if len(chunks) < size:
+                break
+            page += 1
+        return contents
+
     def list_datasets(
         self,
         *,
@@ -177,6 +206,32 @@ class RagflowHttpClient:
         if not isinstance(chunks, list):
             raise RagflowApiError("retrieval response missing chunks")
         return [chunk for chunk in chunks if isinstance(chunk, dict)]
+
+    def list_transcript_memory_chunks(
+        self,
+        *,
+        project: str | None = None,
+        provider: str | None = None,
+        session_id_hash: str | None = None,
+        dataset_name: str = "transcript-memory",
+        query: str = "conversation chunk",
+        limit: int = 200,
+    ) -> list[dict]:
+        """Read-only transcript-memory chunk enumeration for session-memory builds."""
+        dataset_ids = [
+            str(dataset.get("id") or "")
+            for dataset in self.list_datasets(name=dataset_name)
+            if dataset.get("id")
+        ]
+        return transcript_memory_records_from_ragflow(
+            self,
+            dataset_ids,
+            project=project,
+            provider=provider,
+            session_id_hash=session_id_hash,
+            query=query,
+            limit=limit,
+        )
 
     def chat_completion(self, messages: list[dict], *, llm_id: str = "", stream: bool = False) -> str:
         request = build_chat_completion_request(messages, llm_id=llm_id, stream=stream)
@@ -276,6 +331,155 @@ def _extract_dataset_list(data: dict | list) -> list[dict]:
     if not isinstance(datasets, list):
         raise RagflowApiError("dataset list response missing datasets")
     return [dataset for dataset in datasets if isinstance(dataset, dict)]
+
+
+def transcript_memory_records_from_ragflow(
+    ragflow,
+    dataset_ids,
+    *,
+    project: str | None = None,
+    provider: str | None = None,
+    session_id_hash: str | None = None,
+    query: str = "conversation chunk",
+    limit: int = 200,
+) -> list[dict]:
+    """Enumerate transcript-memory chunks for a session purely from RAGFlow.
+
+    ``list_documents`` supplies candidate document ids and ``meta_fields``;
+    ``list_document_chunks`` supplies full body text. The Mac ledger is never
+    consulted.
+    """
+    ids = [str(dataset_id) for dataset_id in (dataset_ids or []) if dataset_id]
+    if not ids:
+        return []
+
+    fragment = (session_id_hash or "").split(":")[-1][:12]
+    records: list[dict] = []
+    for dataset_id in ids:
+        try:
+            docs = ragflow.list_documents(
+                dataset_id,
+                keywords=fragment,
+                page_size=max(int(limit), 1),
+            )
+        except Exception:  # noqa: BLE001 - read-SoT must fail closed
+            docs = []
+        matched: list[tuple[str, dict]] = []
+        for doc in docs or []:
+            if not isinstance(doc, dict):
+                continue
+            document_id = str(doc.get("id") or doc.get("document_id") or "")
+            if not document_id:
+                continue
+            meta = doc.get("meta_fields") or doc.get("metadata") or {}
+            if not isinstance(meta, dict) or not meta:
+                meta = _transcript_memory_meta_for_document(ragflow, [dataset_id], document_id) or {}
+            if not meta:
+                continue
+            meta_type = meta.get("result_type") or meta.get("type") or meta.get("kind")
+            if meta_type != "conversation_chunk":
+                continue
+            if session_id_hash and str(meta.get("session_id_hash") or "") != session_id_hash:
+                continue
+            if provider and str(meta.get("provider") or "") != provider:
+                continue
+            if project and str(meta.get("project") or "") != project:
+                continue
+            matched.append((document_id, dict(meta)))
+        if not matched:
+            continue
+        contents = _transcript_memory_content_by_document(
+            ragflow, [dataset_id], [document_id for document_id, _ in matched], query, limit
+        )
+        for document_id, meta in matched:
+            content = contents.get(document_id, "")
+            valid_hash = _ensure_sha256_content_hash(meta.get("content_hash"), content)
+            meta["content_hash"] = valid_hash
+            records.append({"metadata": meta, "content": content, "content_hash": valid_hash})
+    return _drop_turn_window_subsumed_records(records)
+
+
+def _drop_turn_window_subsumed_records(records: list[dict]) -> list[dict]:
+    def window(record: dict) -> tuple[int, int]:
+        meta = record.get("metadata") or {}
+        try:
+            return (int(meta.get("turn_start_index") or 0), int(meta.get("turn_end_index") or 0))
+        except (TypeError, ValueError):
+            return (0, 0)
+
+    deduped: list[dict] = []
+    seen: set[tuple] = set()
+    for record in records:
+        key = (window(record), str((record.get("metadata") or {}).get("content_hash") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(record)
+
+    kept: list[dict] = []
+    for index, record in enumerate(deduped):
+        start, end = window(record)
+        contained = False
+        for other_index, other in enumerate(deduped):
+            if other_index == index:
+                continue
+            other_start, other_end = window(other)
+            if (other_start, other_end) == (start, end):
+                continue
+            if other_start <= start and other_end >= end:
+                contained = True
+                break
+        if not contained:
+            kept.append(record)
+    return kept
+
+
+def _transcript_memory_content_by_document(ragflow, dataset_ids, document_ids, query, limit) -> dict[str, str]:
+    by_document: dict[str, str] = {}
+    if hasattr(ragflow, "list_document_chunks"):
+        for dataset_id in dataset_ids:
+            for document_id in document_ids:
+                if by_document.get(document_id):
+                    continue
+                try:
+                    parts = ragflow.list_document_chunks(dataset_id, document_id)
+                except Exception:  # noqa: BLE001 - read-SoT must fail closed
+                    parts = []
+                if parts:
+                    by_document[document_id] = "".join(parts)
+        return by_document
+
+    grouped: dict[str, list[str]] = {}
+    try:
+        hits = ragflow.retrieve(query, dataset_ids, document_ids=list(document_ids), limit=max(len(document_ids) * 4, int(limit)))
+    except Exception:  # noqa: BLE001 - read-SoT must fail closed
+        hits = []
+    for hit in hits or []:
+        if isinstance(hit, dict):
+            document_id = str(hit.get("document_id") or hit.get("doc_id") or "")
+            if document_id:
+                grouped.setdefault(document_id, []).append(str(hit.get("content") or ""))
+    return {document_id: "".join(parts) for document_id, parts in grouped.items()}
+
+
+def _ensure_sha256_content_hash(value: str, content: str) -> str:
+    text = str(value or "")
+    if text.startswith("sha256:") and len(text) > len("sha256:"):
+        return text
+    return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _transcript_memory_meta_for_document(ragflow, dataset_ids, document_id: str) -> dict | None:
+    for dataset_id in dataset_ids:
+        try:
+            doc = ragflow.get_document_meta(dataset_id, document_id)
+        except Exception:  # noqa: BLE001 - read-SoT must fail closed
+            doc = None
+        if isinstance(doc, dict) and doc:
+            meta = doc.get("meta_fields") or doc.get("metadata") or {}
+            if isinstance(meta, dict) and meta:
+                return dict(meta)
+    return None
 
 
 def build_metadata_update_request(dataset_id: str, document_id: str, metadata: dict) -> dict:

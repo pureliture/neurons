@@ -88,6 +88,7 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.rag_ingress.state_sink",
         "agent_knowledge.document_envelope",
         "agent_knowledge.memory_card",
+        "agent_knowledge.memory_regeneration",
         "agent_knowledge.curation",
         "agent_knowledge.memory_miner",
         "agent_knowledge.query_planner",
@@ -104,6 +105,7 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.session_memory.memory_card",
         "agent_knowledge.session_memory.curation",
         "agent_knowledge.session_memory.memory_evaluation",
+        "agent_knowledge.session_memory.memory_regeneration",
         "agent_knowledge.session_memory.memory_miner",
         "agent_knowledge.session_memory.memory_promotion",
         "agent_knowledge.session_memory.native_memory_governance",
@@ -138,6 +140,9 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
     transcript_ingest = importlib.import_module("agent_knowledge.session_memory.transcript_ingest")
     assert not hasattr(transcript_ingest, "IngressQueueClient")
     assert not hasattr(transcript_ingest, "StateDBIngressSink")
+
+    memory_regeneration = importlib.import_module("agent_knowledge.session_memory.memory_regeneration")
+    assert not hasattr(memory_regeneration, "IngressQueueClient")
 
 
 # --- redelivery dedup ------------------------------------------------------
