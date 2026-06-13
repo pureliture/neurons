@@ -50,8 +50,12 @@ vendored (`lib/agent_knowledge/`):
   no ledger write, queue write, RAGFlow dataset write, or raw transcript lookup.
 - `session_memory/brain_query.py` / `query_planner.py` /
   `native_memory_governance.py` — pure brain query, resolve, query planning,
-  and mirror-governance logic. The ledger/native-memory adapter
-  (`brain_read_model.py`) remains out of this slice.
+  and mirror-governance logic.
+- `session_memory/brain_read_model.py` / `native_memory_recall.py` /
+  `native_memory_mirror.py` — server-side ledger read-model adapter plus
+  native-memory active-set filtering and local mirror store. RAGFlow access is
+  injected and recall-only in this slice; writer/reconcile/regeneration upload
+  or disable runners remain out.
 - `session_memory/terminal_skipped_quarantine.py` /
   `session_memory/zombie_snapshot_repair.py` — local-ledger-only safety repair
   tools. They do not call RAGFlow, network, delete, disable, or live GC APIs;
@@ -65,6 +69,10 @@ vendored (`lib/agent_knowledge/`):
 - `replay_delivery.py` — 아직 client `outbox_client`, `Ledger` protocol, and
   monolith CLI/test coupling을 포함한다. server delivery backend 기반으로
   split하기 전에는 worker에 가져오지 않는다.
+- `native_memory_writer.py`, `native_memory_write_runner.py`,
+  `native_memory_reconcile.py`, and `memory_regeneration.py` — still include
+  RAGFlow add/disable/upload or private transcript-source surfaces. They require
+  a separate safety-lane split before vendoring.
   → `rag_ingress/__init__.py`는 client/Ledger/import-heavy 모듈을 eager import하지
   않도록 유지한다(패키지 import만으로 Ledger가 끌려오지 않게).
 
