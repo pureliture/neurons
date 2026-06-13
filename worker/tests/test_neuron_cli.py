@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from agent_knowledge.cli import BOUNDARY, COMMAND_HANDLERS, main
 
 
@@ -41,3 +43,108 @@ def test_neuron_knowledge_delegates_memory_regeneration_help(capsys):
 def test_neuron_knowledge_delegates_session_private_sync_help(capsys):
     assert main(["session-memory-private-sync", "--help"]) == 0
     assert "usage: session-memory-private-sync" in capsys.readouterr().out
+
+
+def test_neuron_knowledge_memory_regeneration_live_args_fail_closed(tmp_path, capsys):
+    rc = main(
+        [
+            "memory-regeneration",
+            "run",
+            "--output",
+            "project-memory",
+            "--ledger",
+            str(tmp_path / "missing-ledger.sqlite3"),
+            "--enqueue",
+            "--ingress-url",
+            "http://127.0.0.1:18080",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked_live_execution"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
+
+
+def test_neuron_knowledge_native_memory_execute_fails_closed(tmp_path, capsys):
+    rc = main(
+        [
+            "native-memory-sync",
+            "--ledger",
+            str(tmp_path / "missing-ledger.sqlite3"),
+            "--native-memory-id",
+            "mem_test",
+            "--execute",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked_live_execution"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
+
+
+def test_neuron_knowledge_session_memory_gc_execute_fails_closed(tmp_path, capsys):
+    rc = main(
+        [
+            "session-memory-gc",
+            "--ledger",
+            str(tmp_path / "ledger.sqlite3"),
+            "--dataset-id",
+            "ds_session",
+            "--ragflow-url",
+            "http://127.0.0.1:19380",
+            "--execute",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked_live_execution"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
+
+
+def test_neuron_knowledge_transcript_memory_gc_execute_disable_fails_closed(tmp_path, capsys):
+    rc = main(
+        [
+            "transcript-memory-gc",
+            "--ledger",
+            str(tmp_path / "ledger.sqlite3"),
+            "--dataset-id",
+            "ds_transcript",
+            "--ragflow-url",
+            "http://127.0.0.1:19380",
+            "--execute-disable",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked_live_execution"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
+    assert report["hard_delete_performed"] is False
+
+
+def test_neuron_knowledge_transcript_volume_gc_execute_fails_closed(tmp_path, capsys):
+    rc = main(
+        [
+            "transcript-volume-gc",
+            "--ledger",
+            str(tmp_path / "ledger.sqlite3"),
+            "--transcript-dataset-id",
+            "ds_transcript",
+            "--ragflow-url",
+            "http://127.0.0.1:19380",
+            "--execute",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked_live_execution"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
