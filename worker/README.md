@@ -16,6 +16,10 @@ G2부터 라이브 delivery는 Java `ingress-worker`가 아니라 이 Python wor
 submit)와 그 의존 폐포만 가져왔다.
 
 vendored (`lib/agent_knowledge/`):
+- `ledger.py` — server/brain-side SQLite state authority for knowledge item
+  lifecycle, transcript/session-memory state, memory cards, RAGFlow projection
+  audit, scheduler/GC evidence, and legacy-retirement gates. This is not a
+  dendrite/client dependency.
 - `rag_ingress/shadow_worker.py` — NATS JetStream pull-consume worker 엔트리포인트
 - `rag_ingress/server_runtime.py` — `apply_server_redaction` / `normalize_ingest_job_payload` / `document_from_ingress_payload` / `public_ingress_leak_violations`
 - `rag_ingress/index_backend.py` — `RAGFlowIndexBackendAdapter` (upload/metadata/parse + `find_by_natural_key`)
