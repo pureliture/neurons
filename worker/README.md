@@ -24,15 +24,15 @@ vendored (`lib/agent_knowledge/`):
   — server-owned durable ingress state primitives and byte-faithful replay
   journal. These are now owned here even when the live worker still uses the
   smaller `shadow_ingest_log` path.
+- `rag_ingress/delivery_executor.py` / `delivery_backend.py` /
+  `delivery_reconcile.py` / `delivery_drain.py` / `backfill.py` /
+  `backfill_apply.py` — approval-gated server delivery/backfill primitives
+  covered by fake-backend tests. These are not wired into the live worker
+  defaults by this slice.
 - `redaction.py` — server full public redaction 본체(inline 정규식, denylist 파일 의존 없음)
 - `events.py`, `spool.py`, `ragflow_client.py` — 위 모듈의 폐포 의존
 
 **의도적으로 제외(가져오지 않음):**
-- `delivery_executor.py` / `delivery_reconcile.py` / `delivery_backend.py`
-  — durable delivery execution/reconcile loops remain out of the live worker
-  path until M3 follow-up tests and operator gates are ready. The state
-  primitives are present; the live runtime still defaults to NATS at-least-once
-  + natural-key dedup.
 - `outbox_client.py` — client(producer) 측 코드. server worker 불필요.
 - `state_store.py` (`LedgerIngestStateStore`) — Ledger 직접 의존. 가져오지 않는다.
   → `rag_ingress/__init__.py`는 client/Ledger/import-heavy 모듈을 eager import하지

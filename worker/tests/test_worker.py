@@ -75,13 +75,16 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.rag_ingress.idempotency",
         "agent_knowledge.rag_ingress.domain_state",
         "agent_knowledge.rag_ingress.ingress_journal",
+        "agent_knowledge.rag_ingress.delivery_executor",
+        "agent_knowledge.rag_ingress.delivery_reconcile",
+        "agent_knowledge.rag_ingress.delivery_backend",
+        "agent_knowledge.rag_ingress.delivery_drain",
+        "agent_knowledge.rag_ingress.backfill",
+        "agent_knowledge.rag_ingress.backfill_apply",
     ):
         importlib.import_module(included)
 
     for excluded in (
-        "agent_knowledge.rag_ingress.delivery_executor",
-        "agent_knowledge.rag_ingress.delivery_reconcile",
-        "agent_knowledge.rag_ingress.delivery_backend",
         "agent_knowledge.rag_ingress.state_store",
         "agent_knowledge.rag_ingress.outbox_client",
     ):
