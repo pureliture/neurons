@@ -13,6 +13,8 @@ dependencies = ["nats-py>=2.6"]
 
 [project.scripts]
 rag-ingress-worker = "agent_knowledge.rag_ingress.shadow_worker:main"
+session-memory-quarantine-terminal-skipped = "agent_knowledge.session_memory.terminal_skipped_quarantine:main"
+session-memory-repair-zombie-snapshots = "agent_knowledge.session_memory.zombie_snapshot_repair:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

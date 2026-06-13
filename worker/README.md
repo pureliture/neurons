@@ -45,6 +45,10 @@ vendored (`lib/agent_knowledge/`):
 - `session_memory/curation.py` plus top-level compatibility alias — core
   ledger-backed MemoryCard candidate approval/reject/disable/supersede
   transitions. CLI/MCP search product surfaces remain out of this slice.
+- `session_memory/terminal_skipped_quarantine.py` /
+  `session_memory/zombie_snapshot_repair.py` — local-ledger-only safety repair
+  tools. They do not call RAGFlow, network, delete, disable, or live GC APIs;
+  heavier GC/delete/disable modules remain out of this slice.
 - `redaction.py` — server full public redaction 본체(inline 정규식, denylist 파일 의존 없음)
 - `events.py`, `spool.py`, `ragflow_client.py` — 위 모듈의 폐포 의존
 
