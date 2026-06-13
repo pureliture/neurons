@@ -92,6 +92,7 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.transcript_model",
         "agent_knowledge.session_memory.brain_query",
         "agent_knowledge.session_memory.brain_read_model",
+        "agent_knowledge.session_memory.gc_backup",
         "agent_knowledge.session_memory.llm_brain_service",
         "agent_knowledge.session_memory.memory_card",
         "agent_knowledge.session_memory.curation",
@@ -111,6 +112,9 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.session_memory.zombie_snapshot_repair",
     ):
         importlib.import_module(included)
+
+    gc_backup = importlib.import_module("agent_knowledge.session_memory.gc_backup")
+    assert not hasattr(gc_backup, "restore_gc_backup")
 
     for excluded in (
         "agent_knowledge.rag_ingress.state_store",

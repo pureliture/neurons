@@ -10,6 +10,7 @@ _EXPORT_MODULES = {
     "BrainReadModel": ".brain_query",
     "CurationService": ".curation",
     "FakeMemoryMiner": ".memory_miner",
+    "GC_BACKUP_SCHEMA_VERSION": ".gc_backup",
     "LegacyLedgerBrainReadModel": ".brain_read_model",
     "LLMBrainMemoryService": ".llm_brain_service",
     "LlmMemoryMiner": ".memory_miner",
@@ -42,12 +43,14 @@ _EXPORT_MODULES = {
     "filter_active_native_memory": ".native_memory_recall",
     "human_approve_memory_card_candidate": ".memory_promotion",
     "human_reject_memory_card_candidate": ".memory_promotion",
+    "list_gc_backups": ".gc_backup",
     "mark_candidate_needs_review": ".memory_promotion",
     "plan_context_query": ".query_planner",
     "projection_idempotency_key": ".ragflow_projection",
     "projection_lag_marker": ".ragflow_projection",
     "recall_active_native_memory": ".native_memory_recall",
     "render_projection_document": ".ragflow_projection",
+    "read_gc_backup": ".gc_backup",
     "resolve_brain_ids": ".brain_query",
     "rollback_auto_policy_candidate": ".memory_evaluation",
     "run_brain_query": ".brain_query",
@@ -60,6 +63,7 @@ _EXPORT_MODULES = {
     "summarize_feedback_patterns": ".memory_evaluation",
     "validate_auto_policy_operation": ".memory_evaluation",
     "validate_memory_card_envelope": ".memory_card",
+    "write_gc_backup": ".gc_backup",
 }
 
 __all__ = sorted(_EXPORT_MODULES)
