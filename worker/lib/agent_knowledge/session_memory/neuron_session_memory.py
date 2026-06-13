@@ -19,6 +19,7 @@ from ..ragflow_client import _transcript_memory_meta_for_document
 TRANSCRIPT_MEMORY_TARGET_PROFILE = "ragflow-transcript-memory"
 SCHEMA_VERSION = "agent_knowledge_neuron_session_memory.v1"
 COMMAND = "neuron-session-memory-build"
+NEURON_SESSION_MEMORY_BUILD_OPERATION = "neuron_session_memory_build"
 
 
 def read_recent_transcript_deliveries(
@@ -107,6 +108,46 @@ def write_watermark(path: str | Path, value: str) -> None:
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(str(value), encoding="utf-8")
     tmp.replace(target)
+
+
+def run_neuron_session_memory_build_once(
+    *,
+    config,
+    token: str,
+    shadow_db_path: str | Path,
+    watermark_path: str | Path,
+    transcript_dataset_name: str = "transcript-memory",
+    log=None,
+) -> dict:
+    """One neuron build cycle: seed dirty from the worker shadow log, then build.
+
+    ``config`` must carry ``transcript_read_source="ragflow_read_sot"`` and a
+    *neuron-local* ``ledger_path`` (build-state only; the Mac ledger is not
+    used). Reuses :class:`DirtySessionMemorySyncRunner` to build + promote the
+    seeded sessions from RAGFlow read-SoT. The watermark advances only after a
+    successful seed scan so deliveries are processed at-least-once.
+    """
+    from ..ragflow_client import RagflowHttpClient
+    from .dirty_session_memory_sync import DirtySessionMemorySyncRunner
+
+    emit = log or (lambda event: None)
+    ragflow = RagflowHttpClient(base_url=config.ragflow_url, bearer_token=token, request_timeout_seconds=30)
+    dataset_ids = [
+        str(dataset.get("id") or "")
+        for dataset in ragflow.list_datasets(name=transcript_dataset_name)
+        if dataset.get("id")
+    ]
+    watermark = read_watermark(watermark_path)
+    deliveries = read_recent_transcript_deliveries(shadow_db_path, since_watermark=watermark)
+    ledger = Ledger(config.ledger_path)
+    seed = seed_dirty_session_memory_from_deliveries(
+        deliveries, ragflow=ragflow, ledger=ledger, dataset_ids=dataset_ids
+    )
+    emit({"event": "neuron_seed", **seed, "scanned": len(deliveries)})
+    build = DirtySessionMemorySyncRunner(config=config, token=token, log=emit).run()
+    if seed["new_watermark"] and seed["new_watermark"] > watermark:
+        write_watermark(watermark_path, seed["new_watermark"])
+    return {"seed": seed, "build": build}
 
 
 def _strip_program(argv: list[str]) -> list[str]:
@@ -198,14 +239,98 @@ def _run_dry_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_live(args: argparse.Namespace, raw_argv: list[str]) -> int:
+    """Approved live build: validate the runtime contract, take a non-blocking
+    flock, then seed+build via the vendored :class:`DirtySessionMemorySyncRunner`
+    (RAGFlow read-SoT). The flock lives in the build entrypoint so cron
+    re-invocations skip instead of piling up -- the prior pileup came from the
+    build path bypassing the lock.
+    """
+    import fcntl
+    import os
+
+    from ..ragflow_client import RagflowHttpClient
+    from .dirty_session_memory_sync import DirtySessionMemorySyncConfig, resolve_dataset_id
+    from .native_memory_sync_approval import ApprovalError, validate_memory_enqueue_approval
+
+    for required in ("ledger", "ragflow_url", "token_env", "runtime_dir", "shadow_db", "watermark_file", "approval"):
+        if not getattr(args, required):
+            print(f"--{required.replace('_', '-')} is required for live build", file=sys.stderr)
+            return 2
+    token = os.environ.get(args.token_env)
+    if not token:
+        print("token env is not set", file=sys.stderr)
+        return 2
+    # Validate the runtime contract before any network so an unapproved or
+    # mismatched invocation fails closed without touching RAGFlow.
+    try:
+        validate_memory_enqueue_approval(
+            args.approval,
+            operation=NEURON_SESSION_MEMORY_BUILD_OPERATION,
+            command_argv=[COMMAND, *raw_argv],
+        )
+    except (ApprovalError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    resolver = RagflowHttpClient(base_url=args.ragflow_url, bearer_token=token, request_timeout_seconds=15)
+    try:
+        dataset_id = resolve_dataset_id(ragflow=resolver, dataset_id=args.dataset_id, dataset_name=args.dataset_name)
+    except Exception as exc:  # noqa: BLE001 - resolution failure must fail closed, not crash
+        print(f"dataset resolution failed: {exc}", file=sys.stderr)
+        return 2
+
+    runtime_dir = Path(args.runtime_dir)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    lock_handle = (runtime_dir / "run.lock").open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        _print_report(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "status": "already_running",
+                "command": COMMAND,
+                "mode": "live",
+                "mutation_performed": False,
+            }
+        )
+        return 0
+
+    config = DirtySessionMemorySyncConfig(
+        ledger_path=Path(args.ledger),
+        dataset_id=dataset_id,
+        ragflow_url=args.ragflow_url,
+        runtime_dir=runtime_dir,
+        batch_size=args.batch_size,
+        max_processed_per_run=args.max_processed_per_run,
+        transcript_read_source="ragflow_read_sot",
+    )
+    report = run_neuron_session_memory_build_once(
+        config=config,
+        token=token,
+        shadow_db_path=args.shadow_db,
+        watermark_path=args.watermark_file,
+    )
+    _print_report(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "status": "ok",
+            "command": COMMAND,
+            "mode": "live",
+            "seed": report["seed"],
+            "build": report["build"],
+        }
+    )
+    return 0 if report["build"].get("status") == "ok" else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_argv = _strip_program(list(sys.argv[1:] if argv is None else argv))
     parser = _build_parser()
     args = parser.parse_args(raw_argv)
     if args.dry_run:
         return _run_dry_run(args)
-    _print_report(_blocked_report("live neuron session-memory build is not vendored without an approved runtime contract"))
-    return 1
+    return _run_live(args, raw_argv)
 
 
 if __name__ == "__main__":
