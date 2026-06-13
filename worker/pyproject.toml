@@ -22,6 +22,7 @@ neuron-session-memory-build = "agent_knowledge.session_memory.neuron_session_mem
 native-memory-sync = "agent_knowledge.session_memory.native_memory_write_runner:main"
 session-memory-gc = "agent_knowledge.session_memory.session_memory_gc:main"
 transcript-memory-gc = "agent_knowledge.session_memory.transcript_memory_gc:main"
+transcript-session-gc = "agent_knowledge.session_memory.transcript_session_gc:main"
 transcript-volume-gc = "agent_knowledge.session_memory.transcript_volume_gc:main"
 session-memory-quarantine-terminal-skipped = "agent_knowledge.session_memory.terminal_skipped_quarantine:main"
 session-memory-repair-zombie-snapshots = "agent_knowledge.session_memory.zombie_snapshot_repair:main"
