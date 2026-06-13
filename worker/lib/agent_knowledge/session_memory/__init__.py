@@ -7,6 +7,7 @@ brain/session-memory surfaces should be added as their ownership slices land.
 from importlib import import_module
 
 _EXPORT_MODULES = {
+    "CurationService": ".curation",
     "TranscriptChunk": ".transcript_model",
     "build_memory_candidate": ".memory_card",
     "build_memory_card": ".memory_card",
