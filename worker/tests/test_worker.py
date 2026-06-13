@@ -86,8 +86,10 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.rag_ingress.retirement_readiness",
         "agent_knowledge.rag_ingress.state_sink",
         "agent_knowledge.memory_card",
+        "agent_knowledge.curation",
         "agent_knowledge.transcript_model",
         "agent_knowledge.session_memory.memory_card",
+        "agent_knowledge.session_memory.curation",
         "agent_knowledge.session_memory.transcript_model",
     ):
         importlib.import_module(included)

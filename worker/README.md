@@ -42,6 +42,9 @@ vendored (`lib/agent_knowledge/`):
 - `session_memory/memory_card.py` / `session_memory/transcript_model.py` plus
   top-level compatibility aliases — server/brain-side MemoryCard candidate,
   envelope validation, redaction, and text-bound helpers used by `ledger.py`.
+- `session_memory/curation.py` plus top-level compatibility alias — core
+  ledger-backed MemoryCard candidate approval/reject/disable/supersede
+  transitions. CLI/MCP search product surfaces remain out of this slice.
 - `redaction.py` — server full public redaction 본체(inline 정규식, denylist 파일 의존 없음)
 - `events.py`, `spool.py`, `ragflow_client.py` — 위 모듈의 폐포 의존
 
