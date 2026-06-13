@@ -147,10 +147,9 @@ def document_from_ingress_payload(payload: dict) -> RagReadyDocument:
     validate_ingress_payload(payload)
     document = payload["payload"]["document"]
     source = payload.get("source") or {}
-    # M2 multi-client attribution: dedup identity stays provider:kind:contentHash
-    # (host is NOT part of identity). The producing host is recorded as
-    # attribution-only metadata so N clients delivering the same knowledge collapse
-    # to one document while preserving where it came from.
+    # Host is optional private provenance, not identity: preserve a producer
+    # supplied redacted/stable host alias for attribution while keeping
+    # dedup/natural-key semantics on content_hash + idempotency_key.
     metadata = dict(document.get("metadata") or {})
     source_host = str(source.get("host") or "")
     if source_host:
