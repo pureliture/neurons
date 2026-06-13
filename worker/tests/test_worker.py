@@ -86,10 +86,14 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.rag_ingress.state_shadow_readiness",
         "agent_knowledge.rag_ingress.retirement_readiness",
         "agent_knowledge.rag_ingress.state_sink",
+        "agent_knowledge.document_envelope",
         "agent_knowledge.memory_card",
         "agent_knowledge.curation",
         "agent_knowledge.memory_miner",
         "agent_knowledge.query_planner",
+        "agent_knowledge.tool_evidence_sync",
+        "agent_knowledge.transcript_packer",
+        "agent_knowledge.transcript_parsers",
         "agent_knowledge.transcript_model",
         "agent_knowledge.session_memory.brain_query",
         "agent_knowledge.session_memory.brain_read_model",
@@ -110,6 +114,9 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.session_memory.ragflow_projection",
         "agent_knowledge.session_memory.transcript_model",
         "agent_knowledge.session_memory.terminal_skipped_quarantine",
+        "agent_knowledge.session_memory.tool_evidence_sync",
+        "agent_knowledge.session_memory.transcript_packer",
+        "agent_knowledge.session_memory.transcript_parsers",
         "agent_knowledge.session_memory.zombie_snapshot_repair",
     ):
         importlib.import_module(included)
@@ -120,6 +127,8 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
     for excluded in (
         "agent_knowledge.rag_ingress.state_store",
         "agent_knowledge.rag_ingress.outbox_client",
+        "agent_knowledge.transcript_ingest",
+        "agent_knowledge.session_memory.transcript_ingest",
     ):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(excluded)
