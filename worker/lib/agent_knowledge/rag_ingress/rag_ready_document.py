@@ -14,10 +14,9 @@ import re
 from dataclasses import dataclass, field
 
 
-# Wire contract identifiers. These intentionally mirror the legacy constants in
-# ``session_memory.transcript_ingest`` so the generic builder produces an
-# identical ``rag_ingress_enqueue.v1`` payload. A drift guard test asserts the
-# values stay equal to the canonical ones (no import coupling here).
+# Wire contract identifiers. These intentionally preserve the shared ingress
+# queue contract so server and client producers speak the same
+# ``rag_ingress_enqueue.v1`` payload without importing each other.
 INGRESS_SCHEMA_VERSION = "rag_ingress_enqueue.v1"
 DEFAULT_INGRESS_PAYLOAD_KIND = "redacted_rag_ready_document"
 DEFAULT_REDACTION_VERSION = "redaction.v2"

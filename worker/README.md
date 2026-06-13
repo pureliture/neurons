@@ -20,16 +20,23 @@ vendored (`lib/agent_knowledge/`):
 - `rag_ingress/server_runtime.py` — `apply_server_redaction` / `normalize_ingest_job_payload` / `document_from_ingress_payload` / `public_ingress_leak_violations`
 - `rag_ingress/index_backend.py` — `RAGFlowIndexBackendAdapter` (upload/metadata/parse + `find_by_natural_key`)
 - `rag_ingress/rag_ready_document.py` — backend-neutral 문서 모델 + content_hash/idempotency_key 빌더
+- `rag_ingress/idempotency.py` / `state_db.py` / `domain_state.py` / `ingress_journal.py`
+  — server-owned durable ingress state primitives and byte-faithful replay
+  journal. These are now owned here even when the live worker still uses the
+  smaller `shadow_ingest_log` path.
 - `redaction.py` — server full public redaction 본체(inline 정규식, denylist 파일 의존 없음)
 - `events.py`, `spool.py`, `ragflow_client.py` — 위 모듈의 폐포 의존
 
 **의도적으로 제외(가져오지 않음):**
-- `state_db.py` / `delivery_executor.py` / `delivery_reconcile.py` / `delivery_backend.py` / `idempotency.py` / `domain_state.py`
-  — durable `delivery_jobs` 상태기계. 2026-06-12 live read-only 재검증 결과
-  **라이브 worker 런타임에서 미사용 dead code**였다(라이브 durable SQLite에는 `shadow_ingest_log` 테이블 하나뿐). worker는 NATS at-least-once + natural-key dedup에 의존하므로 lease 기계를 가져오지 않는다. 근거: `docs/architecture/2026-06-12-nats-at-least-once-vs-lease.md`.
+- `delivery_executor.py` / `delivery_reconcile.py` / `delivery_backend.py`
+  — durable delivery execution/reconcile loops remain out of the live worker
+  path until M3 follow-up tests and operator gates are ready. The state
+  primitives are present; the live runtime still defaults to NATS at-least-once
+  + natural-key dedup.
 - `outbox_client.py` — client(producer) 측 코드. server worker 불필요.
 - `state_store.py` (`LedgerIngestStateStore`) — Ledger 직접 의존. 가져오지 않는다.
-  → `rag_ingress/__init__.py`는 이 둘의 import를 제거하도록 트림했다(패키지 import만으로 Ledger가 끌려오지 않게).
+  → `rag_ingress/__init__.py`는 client/Ledger/import-heavy 모듈을 eager import하지
+  않도록 유지한다(패키지 import만으로 Ledger가 끌려오지 않게).
 
 ## redelivery dedup (under-dedup 갭 수정)
 
