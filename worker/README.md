@@ -99,6 +99,10 @@ vendored (`lib/agent_knowledge/`):
   ledger-backed transcript source planning, and injected project-memory enqueue
   sinks. Monolith CLI compatibility and live direct RAGFlow sync remain out of
   this slice.
+- `session_memory/backfill.py` and `session_memory/transcript_quality.py` —
+  fixture-only backfill inventory, dry-run classification, quality audit, and
+  execute-plan building. This is planning-only: Gate F execute, live RAGFlow
+  upload/parse, and private broad-source scans remain excluded.
 - `redaction.py` — server full public redaction 본체(inline 정규식, denylist 파일 의존 없음)
 - `events.py`, `spool.py`, `ragflow_client.py` — 위 모듈의 폐포 의존
 
@@ -116,6 +120,8 @@ vendored (`lib/agent_knowledge/`):
   private transcript-source surfaces. They require separate safety-lane splits
   before vendoring. The native-memory approval validator is present, but live
   runner execution remains excluded.
+- Gate F backfill execute/live indexing — approval-gated live RAGFlow mutation
+  remains excluded; only fixture planning is present.
   → `rag_ingress/__init__.py`는 client/Ledger/import-heavy 모듈을 eager import하지
   않도록 유지한다(패키지 import만으로 Ledger가 끌려오지 않게).
 
