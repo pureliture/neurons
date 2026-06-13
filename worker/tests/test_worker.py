@@ -82,6 +82,7 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.rag_ingress.backfill",
         "agent_knowledge.rag_ingress.backfill_apply",
         "agent_knowledge.rag_ingress.product_surface_switch_plan",
+        "agent_knowledge.rag_ingress.replay_delivery",
         "agent_knowledge.rag_ingress.state_shadow_readiness",
         "agent_knowledge.rag_ingress.retirement_readiness",
         "agent_knowledge.rag_ingress.state_sink",
@@ -119,7 +120,6 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
     for excluded in (
         "agent_knowledge.rag_ingress.state_store",
         "agent_knowledge.rag_ingress.outbox_client",
-        "agent_knowledge.rag_ingress.replay_delivery",
     ):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(excluded)
