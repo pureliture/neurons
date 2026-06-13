@@ -105,6 +105,11 @@ vendored (`lib/agent_knowledge/`):
   console scripts are exposed as `session-memory-gc`, `transcript-memory-gc`,
   and `transcript-volume-gc` for dry-run planning and blocked-live-execution
   evidence only.
+- `session_memory/transcript_backfill.py` — server/brain-side backlog
+  promotion seed helper. It scans RAGFlow read surfaces for transcript sessions
+  without an active session-memory summary, then marks those sessions dirty in
+  the neuron-local ledger. It performs no RAGFlow write/delete/disable and is
+  exposed as `transcript-backfill` plus `neuron-knowledge transcript-backfill`.
 - `session_memory/memory_regeneration.py` — server-owned session/project-memory
   regeneration core. Current worker tests cover dry-run document packing,
   ledger-backed transcript source planning, and injected project-memory enqueue
