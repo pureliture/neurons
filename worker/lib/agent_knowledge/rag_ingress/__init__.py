@@ -28,12 +28,10 @@ from .rag_ready_document import (  # noqa: F401
     is_known_target_profile,
     redact_secret_like_metadata,
 )
-# Vendored co-locate trim (rag-ingress-queue): the live delivery worker
-# (``shadow_worker``) never imports the client-side outbox (``outbox_client``)
-# nor the Ledger-backed state adapter (``state_store`` -> ``LedgerIngestStateStore``).
-# Those are advisor-only (client capture / Ledger) and are intentionally NOT
-# vendored, so importing the package here must not pull them in. The durable
-# delivery_jobs state machine (state_db / delivery_executor / delivery_reconcile /
-# delivery_backend / idempotency) is likewise excluded: it is dead code in the
-# live worker runtime and the worker relies on NATS at-least-once + natural-key
-# dedup instead (see docs/architecture/*-nats-at-least-once-vs-lease.md).
+# Vendored co-locate trim (neurons): the live delivery worker (``shadow_worker``)
+# never imports the client-side outbox (``outbox_client``) nor the Ledger-backed
+# state adapter (``state_store`` -> ``LedgerIngestStateStore``). Durable server
+# state primitives (``state_db`` / ``idempotency`` / ``ingress_journal``) are
+# present as M3-owned modules, but this package still avoids eager imports so a
+# plain ``import agent_knowledge.rag_ingress`` cannot pull in optional runtime
+# or Ledger-coupled paths.

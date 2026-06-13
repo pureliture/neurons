@@ -2,7 +2,7 @@
 
 Focus: the boundary this co-locate is responsible for —
   - the vendored package imports the live delivery path WITHOUT pulling in the
-    excluded durable/Ledger/outbox wiring;
+    client/Ledger/outbox wiring;
   - the redelivery dedup (under-dedup gap fix) works via both layers;
   - submit_document persists the natural key so the RAGFlow-side probe can match.
 """
@@ -64,18 +64,24 @@ class FakeClient:
 
 # --- vendoring boundary ----------------------------------------------------
 
-def test_excluded_durable_and_ledger_wiring_is_not_vendored():
+def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
     # The live path imports cleanly (and importing the package does not pull in
     # Ledger via the trimmed __init__).
     import agent_knowledge.rag_ingress  # noqa: F401
     import agent_knowledge.rag_ingress.shadow_worker  # noqa: F401
 
-    for excluded in (
+    for included in (
         "agent_knowledge.rag_ingress.state_db",
+        "agent_knowledge.rag_ingress.idempotency",
+        "agent_knowledge.rag_ingress.domain_state",
+        "agent_knowledge.rag_ingress.ingress_journal",
+    ):
+        importlib.import_module(included)
+
+    for excluded in (
         "agent_knowledge.rag_ingress.delivery_executor",
         "agent_knowledge.rag_ingress.delivery_reconcile",
         "agent_knowledge.rag_ingress.delivery_backend",
-        "agent_knowledge.rag_ingress.idempotency",
         "agent_knowledge.rag_ingress.state_store",
         "agent_knowledge.rag_ingress.outbox_client",
     ):
