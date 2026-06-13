@@ -16,8 +16,19 @@ def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
         "neuron-session-memory-build",
         "native-memory-sync",
         "session-memory-gc",
+        "session-entry-recall",
+        "transcript-resources",
+        "transcript-quality",
+        "transcript-retrieval",
+        "transcript-migration",
         "transcript-memory-gc",
         "transcript-volume-gc",
+        "backfill",
+        "memory",
+        "context-for-prompt",
+        "mcp-stdio",
+        "eval",
+        "derived-memory-resources",
         "session-memory-quarantine-terminal-skipped",
         "session-memory-repair-zombie-snapshots",
     ):
@@ -33,6 +44,17 @@ def test_neuron_knowledge_boundary_is_server_owned(capsys):
 def test_neuron_knowledge_rejects_dendrite_command(capsys):
     assert main(["capture", "--help"]) == 2
     assert "unknown neurons command: capture" in capsys.readouterr().err
+
+
+def test_neuron_knowledge_pending_server_command_fails_closed(capsys):
+    assert main(["transcript-resources", "--help"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == "neuron_knowledge_pending_command.v1"
+    assert report["status"] == "blocked_pending_server_extraction"
+    assert report["command"] == "transcript-resources"
+    assert report["destination"] == "neurons"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
 
 
 def test_neuron_knowledge_delegates_memory_regeneration_help(capsys):
