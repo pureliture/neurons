@@ -23,6 +23,7 @@ _EXPORT_MODULES = {
     "NativeMemoryMirrorWriter": ".native_memory_writer",
     "NativeMemoryMirrorWriteRunner": ".native_memory_write_runner",
     "NATIVE_MEMORY_OVERFETCH_THRESHOLD": ".native_memory_recall",
+    "ApprovalError": ".native_memory_sync_approval",
     "NativeMemoryReconcileConfig": ".native_memory_reconcile",
     "NativeMemoryReconcileRunner": ".native_memory_reconcile",
     "NativeMemoryWriteConfig": ".native_memory_write_runner",
@@ -83,6 +84,7 @@ _EXPORT_MODULES = {
     "build_transcript_chunks": ".transcript_chunking",
     "knowledge_id_for_chunk": ".transcript_chunking",
     "validate_auto_policy_operation": ".memory_evaluation",
+    "validate_native_memory_sync_approval": ".native_memory_sync_approval",
     "validate_memory_card_envelope": ".memory_card",
     "write_gc_backup": ".gc_backup",
 }

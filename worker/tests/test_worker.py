@@ -112,6 +112,7 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.session_memory.native_memory_mirror",
         "agent_knowledge.session_memory.native_memory_recall",
         "agent_knowledge.session_memory.native_memory_reconcile",
+        "agent_knowledge.session_memory.native_memory_sync_approval",
         "agent_knowledge.session_memory.native_memory_writer",
         "agent_knowledge.session_memory.native_memory_write_runner",
         "agent_knowledge.session_memory.query_planner",

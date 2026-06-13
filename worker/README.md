@@ -67,6 +67,9 @@ vendored (`lib/agent_knowledge/`):
   These modules are vendored with fake-client unit coverage only; the live
   `native-memory-sync` CLI/approval wiring remains out until the CLI surface is
   split.
+- `session_memory/native_memory_sync_approval.py` — read-only approval-file
+  validator for the future `native-memory-sync` live runner. It does not create
+  clients, read secrets, or execute RAGFlow writes/disables.
 - `document_envelope.py`, `session_memory/transcript_packer.py`,
   `session_memory/transcript_parsers.py`, and
   `session_memory/tool_evidence_sync.py` — server-side tool-evidence extraction,
@@ -108,11 +111,11 @@ vendored (`lib/agent_knowledge/`):
 - `transcript_ingest.py` monolith module — still mixed. The server-owned
   transcript worker core is present here, but the old HTTP client/outbox,
   direct RAGFlow indexing, and public CLI compatibility wiring remain out.
-- `native-memory-sync` CLI wiring and GC restore/live GC runners — still include
-  monolith CLI/live approval, RAGFlow upload/disable, or private transcript-source
-  surfaces. They require a separate safety-lane split before vendoring. The
-  memory-regeneration server core is present, but its CLI/live direct-sync
-  wiring remains excluded.
+- `native-memory-sync` CLI/LaunchAgent wiring and GC restore/live GC runners —
+  still include monolith CLI/runtime exposure, RAGFlow upload/disable, or
+  private transcript-source surfaces. They require separate safety-lane splits
+  before vendoring. The native-memory approval validator is present, but live
+  runner execution remains excluded.
   → `rag_ingress/__init__.py`는 client/Ledger/import-heavy 모듈을 eager import하지
   않도록 유지한다(패키지 import만으로 Ledger가 끌려오지 않게).
 
