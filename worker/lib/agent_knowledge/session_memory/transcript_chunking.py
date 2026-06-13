@@ -199,3 +199,6 @@ def _sha256_content(value: str) -> str:
 
 def knowledge_id_for_chunk(chunk: TranscriptChunk) -> str:
     return "kn_" + chunk.content_hash.split("sha256:", 1)[1][:16]
+
+
+_knowledge_id_for_chunk = knowledge_id_for_chunk

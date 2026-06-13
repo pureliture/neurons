@@ -86,6 +86,7 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.rag_ingress.state_shadow_readiness",
         "agent_knowledge.rag_ingress.retirement_readiness",
         "agent_knowledge.rag_ingress.state_sink",
+        "agent_knowledge.backfill",
         "agent_knowledge.document_envelope",
         "agent_knowledge.memory_card",
         "agent_knowledge.memory_regeneration",
@@ -100,6 +101,7 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.transcript_model",
         "agent_knowledge.session_memory.brain_query",
         "agent_knowledge.session_memory.brain_read_model",
+        "agent_knowledge.session_memory.backfill",
         "agent_knowledge.session_memory.gc_backup",
         "agent_knowledge.session_memory.llm_brain_service",
         "agent_knowledge.session_memory.memory_card",
@@ -124,6 +126,7 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.session_memory.transcript_ingest",
         "agent_knowledge.session_memory.transcript_packer",
         "agent_knowledge.session_memory.transcript_parsers",
+        "agent_knowledge.session_memory.transcript_quality",
         "agent_knowledge.session_memory.zombie_snapshot_repair",
     ):
         importlib.import_module(included)
