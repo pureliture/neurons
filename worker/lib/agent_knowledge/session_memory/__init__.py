@@ -8,11 +8,14 @@ from importlib import import_module
 
 _EXPORT_MODULES = {
     "CurationService": ".curation",
+    "FakeMemoryMiner": ".memory_miner",
+    "LlmMemoryMiner": ".memory_miner",
     "TerminalSkippedQuarantineRunner": ".terminal_skipped_quarantine",
     "TranscriptChunk": ".transcript_model",
     "ZombieSnapshotRepairRunner": ".zombie_snapshot_repair",
     "build_memory_candidate": ".memory_card",
     "build_memory_card": ".memory_card",
+    "build_memory_card_candidate_from_source_span": ".memory_miner",
     "validate_memory_card_envelope": ".memory_card",
 }
 

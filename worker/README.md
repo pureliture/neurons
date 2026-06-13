@@ -45,6 +45,9 @@ vendored (`lib/agent_knowledge/`):
 - `session_memory/curation.py` plus top-level compatibility alias — core
   ledger-backed MemoryCard candidate approval/reject/disable/supersede
   transitions. CLI/MCP search product surfaces remain out of this slice.
+- `session_memory/memory_miner.py` plus top-level compatibility alias —
+  injected-completion and source-span MemoryCard candidate mining. It performs
+  no ledger write, queue write, RAGFlow dataset write, or raw transcript lookup.
 - `session_memory/terminal_skipped_quarantine.py` /
   `session_memory/zombie_snapshot_repair.py` — local-ledger-only safety repair
   tools. They do not call RAGFlow, network, delete, disable, or live GC APIs;
