@@ -97,7 +97,10 @@ vendored (`lib/agent_knowledge/`):
 - `session_memory/session_memory_gc.py`, `transcript_memory_gc.py`, and
   `transcript_volume_gc.py` — dry-run-only GC safety planners. They select
   eligible candidates and report the same redaction/mutation flags, but live
-  execute/disable/delete paths are fail-closed in this worker slice.
+  execute/disable/delete paths are fail-closed in this worker slice. Worker
+  console scripts are exposed as `session-memory-gc`, `transcript-memory-gc`,
+  and `transcript-volume-gc` for dry-run planning and blocked-live-execution
+  evidence only.
 - `session_memory/memory_regeneration.py` — server-owned session/project-memory
   regeneration core. Current worker tests cover dry-run document packing,
   ledger-backed transcript source planning, and injected project-memory enqueue

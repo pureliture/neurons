@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import argparse
+import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -134,3 +137,31 @@ class TranscriptVolumeGcRunner:
             authorized = ledger.authorize_document(active_document_id)
             cache[active_knowledge_id] = bool(authorized and authorized.get("type") == "session_memory")
         return cache[active_knowledge_id]
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    parser = argparse.ArgumentParser(prog="transcript-volume-gc")
+    parser.add_argument("--ledger", required=True)
+    parser.add_argument("--transcript-dataset-id", required=True)
+    parser.add_argument("--ragflow-url", required=True)
+    parser.add_argument("--backup-dir", dest="backup_dir", default="")
+    parser.add_argument("--max-items", type=int, default=25)
+    parser.add_argument("--min-active-age-seconds", type=int, default=MIN_ACTIVE_AGE_FLOOR_SECONDS)
+    parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--approval", default="")
+    args = parser.parse_args(raw_argv)
+
+    report = TranscriptVolumeGcRunner(
+        config=TranscriptVolumeGcConfig(
+            ledger_path=Path(args.ledger),
+            transcript_dataset_id=args.transcript_dataset_id,
+            ragflow_url=args.ragflow_url,
+            backup_dir=args.backup_dir,
+            max_items=args.max_items,
+            min_active_age_seconds=args.min_active_age_seconds,
+            execute=bool(args.execute),
+        ),
+    ).run()
+    print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
+    return 0 if report.get("status") == "ok" else 1
