@@ -56,6 +56,12 @@ vendored (`lib/agent_knowledge/`):
   native-memory active-set filtering and local mirror store. RAGFlow access is
   injected and recall-only in this slice; writer/reconcile/regeneration upload
   or disable runners remain out.
+- `session_memory/memory_promotion.py` / `memory_evaluation.py` /
+  `ragflow_projection.py` / `llm_brain_service.py` — LLM-brain MemoryCard
+  promotion, auto-policy evaluation gates, projection job building/execution,
+  and canonical ledger integration. Projection write requires explicit
+  `allow_write` plus an approval record and is covered here only with fake
+  clients; live RAGFlow projection remains deployment/runtime gated.
 - `session_memory/terminal_skipped_quarantine.py` /
   `session_memory/zombie_snapshot_repair.py` — local-ledger-only safety repair
   tools. They do not call RAGFlow, network, delete, disable, or live GC APIs;
