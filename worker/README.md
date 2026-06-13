@@ -39,6 +39,11 @@ vendored (`lib/agent_knowledge/`):
   server-side readiness and legacy-retirement planning gates. These produce
   dry-run/approval packets only; they do not mutate runtime, RAGFlow, GC, or
   live product config.
+- `rag_ingress/replay_delivery.py` — server-owned replay-requested row
+  selection, convergence-faithful payload reconstruction, byte-faithful journal
+  replay, candidate-set digest gating, and redacted reporting. It uses an
+  injected ingress client plus a local replay payload validator, and deliberately
+  does not import client `outbox_client` or monolith CLI wiring.
 - `session_memory/memory_card.py` / `session_memory/transcript_model.py` plus
   top-level compatibility aliases — server/brain-side MemoryCard candidate,
   envelope validation, redaction, and text-bound helpers used by `ledger.py`.
@@ -81,9 +86,9 @@ vendored (`lib/agent_knowledge/`):
 **의도적으로 제외(가져오지 않음):**
 - `outbox_client.py` — client(producer) 측 코드. server worker 불필요.
 - `state_store.py` (`LedgerIngestStateStore`) — Ledger 직접 의존. 가져오지 않는다.
-- `replay_delivery.py` — 아직 client `outbox_client`, `Ledger` protocol, and
-  monolith CLI/test coupling을 포함한다. server delivery backend 기반으로
-  split하기 전에는 worker에 가져오지 않는다.
+- `rag-ingress-state replay-deliver` monolith CLI wiring — public CLI
+  compatibility surface. The replay core is vendored here; CLI/approval command
+  exposure remains a separate compatibility/shim step.
 - `native-memory-sync` CLI wiring, `memory_regeneration.py`, and GC restore/live
   GC runners — still include monolith CLI/live approval, RAGFlow upload/disable,
   or private transcript-source surfaces. They require a separate safety-lane
