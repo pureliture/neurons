@@ -29,12 +29,20 @@ vendored (`lib/agent_knowledge/`):
   `backfill_apply.py` — approval-gated server delivery/backfill primitives
   covered by fake-backend tests. These are not wired into the live worker
   defaults by this slice.
+- `rag_ingress/product_surface_switch_plan.py` /
+  `state_shadow_readiness.py` / `retirement_readiness.py` — read-only
+  server-side readiness and legacy-retirement planning gates. These produce
+  dry-run/approval packets only; they do not mutate runtime, RAGFlow, GC, or
+  live product config.
 - `redaction.py` — server full public redaction 본체(inline 정규식, denylist 파일 의존 없음)
 - `events.py`, `spool.py`, `ragflow_client.py` — 위 모듈의 폐포 의존
 
 **의도적으로 제외(가져오지 않음):**
 - `outbox_client.py` — client(producer) 측 코드. server worker 불필요.
 - `state_store.py` (`LedgerIngestStateStore`) — Ledger 직접 의존. 가져오지 않는다.
+- `replay_delivery.py` — 아직 client `outbox_client`, `Ledger` protocol, and
+  monolith CLI/test coupling을 포함한다. server delivery backend 기반으로
+  split하기 전에는 worker에 가져오지 않는다.
   → `rag_ingress/__init__.py`는 client/Ledger/import-heavy 모듈을 eager import하지
   않도록 유지한다(패키지 import만으로 Ledger가 끌려오지 않게).
 

@@ -31,7 +31,7 @@ from .rag_ready_document import (  # noqa: F401
 # Vendored co-locate trim (neurons): the live delivery worker (``shadow_worker``)
 # never imports the client-side outbox (``outbox_client``) nor the Ledger-backed
 # state adapter (``state_store`` -> ``LedgerIngestStateStore``). Durable server
-# state and delivery/backfill primitives are present as M3-owned modules, but
-# this package still avoids eager imports so a plain
+# state, delivery/backfill, and read-only readiness primitives are present as
+# M3-owned modules, but this package still avoids eager imports so a plain
 # ``import agent_knowledge.rag_ingress`` cannot pull in optional runtime or
 # Ledger-coupled paths.
