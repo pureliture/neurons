@@ -16,6 +16,7 @@ def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
         "neuron-session-memory-build",
         "native-memory-sync",
         "session-memory-gc",
+        "transcript-backfill",
         "session-entry-recall",
         "transcript-resources",
         "transcript-quality",
@@ -150,6 +151,11 @@ def test_neuron_knowledge_transcript_memory_gc_execute_disable_fails_closed(tmp_
     assert report["mutation_performed"] is False
     assert report["network_used"] is False
     assert report["hard_delete_performed"] is False
+
+
+def test_neuron_knowledge_delegates_transcript_backfill_help(capsys):
+    assert main(["transcript-backfill", "--help"]) == 0
+    assert "usage: transcript-backfill" in capsys.readouterr().out
 
 
 def test_neuron_knowledge_transcript_volume_gc_execute_fails_closed(tmp_path, capsys):
