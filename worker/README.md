@@ -94,6 +94,10 @@ vendored (`lib/agent_knowledge/`):
 - `session_memory/gc_backup.py` — recoverable-delete backup record store only:
   private-directory JSON write/read/list and raw RAGFlow document-id hashing.
   Restore/upload/parse CLI behavior remains out of this slice.
+- `session_memory/session_memory_gc.py`, `transcript_memory_gc.py`, and
+  `transcript_volume_gc.py` — dry-run-only GC safety planners. They select
+  eligible candidates and report the same redaction/mutation flags, but live
+  execute/disable/delete paths are fail-closed in this worker slice.
 - `session_memory/memory_regeneration.py` — server-owned session/project-memory
   regeneration core. Current worker tests cover dry-run document packing,
   ledger-backed transcript source planning, and injected project-memory enqueue
@@ -122,6 +126,9 @@ vendored (`lib/agent_knowledge/`):
   runner execution remains excluded.
 - Gate F backfill execute/live indexing — approval-gated live RAGFlow mutation
   remains excluded; only fixture planning is present.
+- GC restore/upload/parse and live GC execute/disable/delete — approval-gated
+  live RAGFlow mutation remains excluded; only dry-run planners and backup store
+  are present.
   → `rag_ingress/__init__.py`는 client/Ledger/import-heavy 모듈을 eager import하지
   않도록 유지한다(패키지 import만으로 Ledger가 끌려오지 않게).
 

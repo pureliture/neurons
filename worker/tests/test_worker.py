@@ -119,6 +119,7 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.session_memory.native_memory_write_runner",
         "agent_knowledge.session_memory.query_planner",
         "agent_knowledge.session_memory.ragflow_projection",
+        "agent_knowledge.session_memory.session_memory_gc",
         "agent_knowledge.session_memory.transcript_model",
         "agent_knowledge.session_memory.terminal_skipped_quarantine",
         "agent_knowledge.session_memory.tool_evidence_sync",
@@ -127,6 +128,8 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.session_memory.transcript_packer",
         "agent_knowledge.session_memory.transcript_parsers",
         "agent_knowledge.session_memory.transcript_quality",
+        "agent_knowledge.session_memory.transcript_memory_gc",
+        "agent_knowledge.session_memory.transcript_volume_gc",
         "agent_knowledge.session_memory.zombie_snapshot_repair",
     ):
         importlib.import_module(included)
