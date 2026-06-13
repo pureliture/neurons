@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Callable
 
@@ -22,6 +23,43 @@ BOUNDARY = "server worker -> state DB -> brain/session-memory -> GC safety plann
 
 CommandHandler = Callable[[list[str] | None], int]
 
+PENDING_SERVER_COMMANDS = {
+    "backfill",
+    "context-for-prompt",
+    "derived-memory-resources",
+    "eval",
+    "mcp-stdio",
+    "memory",
+    "session-entry-recall",
+    "transcript-migration",
+    "transcript-quality",
+    "transcript-resources",
+    "transcript-retrieval",
+}
+
+
+def _pending_server_command(command: str) -> CommandHandler:
+    def _main(argv: list[str] | None = None) -> int:
+        _ = argv
+        print(
+            json.dumps(
+                {
+                    "schema_version": "neuron_knowledge_pending_command.v1",
+                    "status": "blocked_pending_server_extraction",
+                    "command": command,
+                    "boundary": BOUNDARY,
+                    "destination": "neurons",
+                    "mutation_performed": False,
+                    "network_used": False,
+                },
+                sort_keys=True,
+            )
+        )
+        return 1
+
+    return _main
+
+
 COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "rag-ingress-state": state_cli.main,
     "memory-regeneration": memory_regeneration_cli.main,
@@ -33,6 +71,17 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "transcript-volume-gc": transcript_volume_gc.main,
     "session-memory-quarantine-terminal-skipped": terminal_skipped_quarantine.main,
     "session-memory-repair-zombie-snapshots": zombie_snapshot_repair.main,
+    "backfill": _pending_server_command("backfill"),
+    "context-for-prompt": _pending_server_command("context-for-prompt"),
+    "derived-memory-resources": _pending_server_command("derived-memory-resources"),
+    "eval": _pending_server_command("eval"),
+    "mcp-stdio": _pending_server_command("mcp-stdio"),
+    "memory": _pending_server_command("memory"),
+    "session-entry-recall": _pending_server_command("session-entry-recall"),
+    "transcript-migration": _pending_server_command("transcript-migration"),
+    "transcript-quality": _pending_server_command("transcript-quality"),
+    "transcript-resources": _pending_server_command("transcript-resources"),
+    "transcript-retrieval": _pending_server_command("transcript-retrieval"),
 }
 
 
