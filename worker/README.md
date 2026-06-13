@@ -64,9 +64,9 @@ vendored (`lib/agent_knowledge/`):
 - `session_memory/native_memory_writer.py` / `native_memory_reconcile.py` /
   `native_memory_write_runner.py` — server-side native-memory mirror write,
   supersede-sync, and injected RAGFlow message disable reconciliation logic.
-  These modules are vendored with fake-client unit coverage only; the live
-  `native-memory-sync` CLI/approval wiring remains out until the CLI surface is
-  split.
+  These modules are vendored with fake-client unit coverage only. The worker
+  exposes a dry-run/fail-closed `native-memory-sync` console script; live
+  RAGFlow sync, approval execution, and LaunchAgent wiring remain out.
 - `session_memory/native_memory_sync_approval.py` — read-only approval-file
   validator for the future `native-memory-sync` live runner. It does not create
   clients, read secrets, or execute RAGFlow writes/disables.
@@ -123,10 +123,9 @@ vendored (`lib/agent_knowledge/`):
   transcript worker core is present here, but the old HTTP client/outbox,
   direct RAGFlow indexing, and public CLI compatibility wiring remain out.
 - `native-memory-sync` CLI/LaunchAgent wiring and GC restore/live GC runners —
-  still include monolith CLI/runtime exposure, RAGFlow upload/disable, or
-  private transcript-source surfaces. They require separate safety-lane splits
-  before vendoring. The native-memory approval validator is present, but live
-  runner execution remains excluded.
+  the worker has only dry-run/fail-closed `native-memory-sync`; live
+  approval-execute/LaunchAgent wiring still includes RAGFlow upload/disable or
+  private transcript-source surfaces and remains excluded.
 - Gate F backfill execute/live indexing — approval-gated live RAGFlow mutation
   remains excluded; only fixture planning is present.
 - GC restore/upload/parse and live GC execute/disable/delete — approval-gated
