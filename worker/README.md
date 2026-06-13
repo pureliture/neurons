@@ -44,6 +44,10 @@ vendored (`lib/agent_knowledge/`):
   replay, candidate-set digest gating, and redacted reporting. It uses an
   injected ingress client plus a local replay payload validator, and deliberately
   does not import client `outbox_client` or monolith CLI wiring.
+- `rag_ingress/state_cli.py` — dry-run/fail-closed `rag-ingress-state`
+  compatibility command for replay delivery planning, queue backfill planning,
+  delivery drain dry-run, and delivery reconcile dry-run. Live approval-execute
+  wiring and RAGFlow/ingress POST clients remain excluded.
 - `session_memory/memory_card.py` / `session_memory/transcript_model.py` plus
   top-level compatibility aliases — server/brain-side MemoryCard candidate,
   envelope validation, redaction, and text-bound helpers used by `ledger.py`.
@@ -116,9 +120,9 @@ vendored (`lib/agent_knowledge/`):
 **의도적으로 제외(가져오지 않음):**
 - `outbox_client.py` — client(producer) 측 코드. server worker 불필요.
 - `state_store.py` (`LedgerIngestStateStore`) — Ledger 직접 의존. 가져오지 않는다.
-- `rag-ingress-state replay-deliver` monolith CLI wiring — public CLI
-  compatibility surface. The replay core is vendored here; CLI/approval command
-  exposure remains a separate compatibility/shim step.
+- `rag-ingress-state` live approval-execute wiring — the worker exposes a
+  dry-run/fail-closed compatibility command, but live replay POST, state-DB
+  apply, RAGFlow drain/reconcile, and LaunchAgent/server wiring remain excluded.
 - `transcript_ingest.py` monolith module — still mixed. The server-owned
   transcript worker core is present here, but the old HTTP client/outbox,
   direct RAGFlow indexing, and public CLI compatibility wiring remain out.
