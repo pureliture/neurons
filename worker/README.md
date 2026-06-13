@@ -73,6 +73,11 @@ vendored (`lib/agent_knowledge/`):
   packing, and queue-sync core split from the historical mixed
   `transcript_ingest` module. This slice uses local ledger plus injected ingress
   sink tests only; monolith CLI exposure and direct RAGFlow writes remain out.
+- `session_memory/transcript_chunking.py` and
+  `session_memory/transcript_ingest.py` — server-side transcript chunk build
+  plus injected enqueue/state-sink core. This is not the old mixed monolith
+  worker: it has no `IngressQueueClient`, client `outbox_client`, monolith CLI,
+  or direct RAGFlow upload/parse/status path.
 - `session_memory/memory_promotion.py` / `memory_evaluation.py` /
   `ragflow_projection.py` / `llm_brain_service.py` — LLM-brain MemoryCard
   promotion, auto-policy evaluation gates, projection job building/execution,
@@ -95,9 +100,9 @@ vendored (`lib/agent_knowledge/`):
 - `rag-ingress-state replay-deliver` monolith CLI wiring — public CLI
   compatibility surface. The replay core is vendored here; CLI/approval command
   exposure remains a separate compatibility/shim step.
-- `transcript_ingest.py` monolith module — still mixed. Only the already-split
-  tool-evidence sync core is present here; `TranscriptIngestWorker` remains a
-  separate server-side split.
+- `transcript_ingest.py` monolith module — still mixed. The server-owned
+  transcript worker core is present here, but the old HTTP client/outbox,
+  direct RAGFlow indexing, and public CLI compatibility wiring remain out.
 - `native-memory-sync` CLI wiring, `memory_regeneration.py`, and GC restore/live
   GC runners — still include monolith CLI/live approval, RAGFlow upload/disable,
   or private transcript-source surfaces. They require a separate safety-lane
