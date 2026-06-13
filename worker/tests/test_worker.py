@@ -84,6 +84,7 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.rag_ingress.product_surface_switch_plan",
         "agent_knowledge.rag_ingress.state_shadow_readiness",
         "agent_knowledge.rag_ingress.retirement_readiness",
+        "agent_knowledge.rag_ingress.state_sink",
     ):
         importlib.import_module(included)
 

@@ -30,7 +30,8 @@ vendored (`lib/agent_knowledge/`):
   smaller `shadow_ingest_log` path.
 - `rag_ingress/delivery_executor.py` / `delivery_backend.py` /
   `delivery_reconcile.py` / `delivery_drain.py` / `backfill.py` /
-  `backfill_apply.py` — approval-gated server delivery/backfill primitives
+  `backfill_apply.py` / `state_sink.py` — approval-gated server
+  delivery/backfill primitives plus the state-DB-only ingress accept seam
   covered by fake-backend tests. These are not wired into the live worker
   defaults by this slice.
 - `rag_ingress/product_surface_switch_plan.py` /
