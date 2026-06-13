@@ -162,27 +162,94 @@ def test_neuron_session_memory_build_dry_run_reads_shadow_log_without_ids_or_mut
     assert read_watermark(watermark) == "2026-06-13T00:00:45Z"
 
 
-def test_neuron_session_memory_build_live_invocation_is_blocked(capsys):
-    rc = main([
-        "--ledger",
-        "/tmp/neuron.sqlite",
-        "--shadow-db",
-        "/tmp/ingest.sqlite",
-        "--watermark-file",
-        "/tmp/watermark.txt",
-        "--ragflow-url",
-        "http://127.0.0.1:19380",
-        "--token-env",
-        "RAGFLOW_API_KEY",
-        "--approval",
-        "/tmp/approval.json",
-    ])
+def _live_approval(argv: list[str], *, operation: str = "neuron_session_memory_build") -> dict:
+    return {
+        "schema_version": "agent_knowledge_live_approval.v1",
+        "operation": operation,
+        "operator_approval": {"approved": True},
+        "redaction_required": True,
+        "timeout_seconds": 1800,
+        "rollback_or_abort_criteria": "abort on partial_failed",
+        "command": {"argv": ["neuron-session-memory-build", *argv]},
+    }
 
+
+def _live_argv(tmp_path, *, approval_name: str = "approval.json", runtime: str = "runtime") -> list[str]:
+    return [
+        "--ledger", str(tmp_path / "neuron.sqlite"),
+        "--shadow-db", str(tmp_path / "ingest.sqlite"),
+        "--watermark-file", str(tmp_path / "watermark.txt"),
+        "--ragflow-url", "http://127.0.0.1:19380",
+        "--token-env", "RAGFLOW_API_KEY",
+        "--runtime-dir", str(tmp_path / runtime),
+        "--approval", str(tmp_path / approval_name),
+    ]
+
+
+def test_neuron_session_memory_build_live_requires_valid_approval(tmp_path, capsys, monkeypatch):
+    # 유효 approval record가 없으면 네트워크/뮤테이션 전에 fail-closed.
+    monkeypatch.setenv("RAGFLOW_API_KEY", "test-token")
+    rc = main(_live_argv(tmp_path, approval_name="missing-approval.json"))
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "approval file not found" in captured.err
+
+
+def test_neuron_session_memory_build_live_runs_with_valid_approval(tmp_path, capsys, monkeypatch):
+    # 승인 contract가 맞으면 live build 경로가 실제로 seed+build를 수행한다.
+    import agent_knowledge.session_memory.dirty_session_memory_sync as sync
+    import agent_knowledge.session_memory.neuron_session_memory as nsm
+
+    monkeypatch.setenv("RAGFLOW_API_KEY", "test-token")
+    monkeypatch.setattr(sync, "resolve_dataset_id", lambda **kw: "ds-session-memory")
+    monkeypatch.setattr(
+        nsm,
+        "run_neuron_session_memory_build_once",
+        lambda **kw: {"seed": {"seeded_sessions": 0, "new_watermark": ""}, "build": {"status": "ok", "processed": 2, "deferred": 0}},
+    )
+    argv = _live_argv(tmp_path)
+    (tmp_path / "approval.json").write_text(json.dumps(_live_approval(argv)), encoding="utf-8")
+
+    rc = main(argv)
     report = json.loads(capsys.readouterr().out)
-    assert rc == 1
-    assert report["status"] == "blocked_live_execution"
-    assert report["mutation_performed"] is False
-    assert report["network_used"] is False
+    assert rc == 0
+    assert report["status"] == "ok"
+    assert report["mode"] == "live"
+    assert report["build"]["status"] == "ok"
+
+
+def test_neuron_session_memory_build_live_skips_when_locked(tmp_path, capsys, monkeypatch):
+    # 두 번째 동시 실행은 flock에 막혀 build 없이 skip(=cron pileup 방지 회귀 가드).
+    import fcntl
+
+    import agent_knowledge.session_memory.dirty_session_memory_sync as sync
+    import agent_knowledge.session_memory.neuron_session_memory as nsm
+
+    monkeypatch.setenv("RAGFLOW_API_KEY", "test-token")
+    monkeypatch.setattr(sync, "resolve_dataset_id", lambda **kw: "ds-session-memory")
+    called = {"n": 0}
+
+    def _stub(**kw):
+        called["n"] += 1
+        return {"seed": {"seeded_sessions": 0, "new_watermark": ""}, "build": {"status": "ok"}}
+
+    monkeypatch.setattr(nsm, "run_neuron_session_memory_build_once", _stub)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(parents=True)
+    argv = _live_argv(tmp_path)
+    (tmp_path / "approval.json").write_text(json.dumps(_live_approval(argv)), encoding="utf-8")
+
+    holder = (runtime / "run.lock").open("a+", encoding="utf-8")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        rc = main(argv)
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["status"] == "already_running"
+    assert called["n"] == 0
 
 
 def test_neuron_session_memory_build_dry_run_rejects_live_arguments(tmp_path, capsys):
