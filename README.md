@@ -1,7 +1,7 @@
 <!-- ──────────────── HERO BANNER ──────────────── -->
 <div align="center">
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0b1426,50:0e7490,100:2dd4bf&height=240&section=header&text=rag-ingress-queue&fontSize=56&fontColor=ffffff&animation=fadeIn&fontAlignY=36&desc=Backpressure-gated%20write%20gateway%20in%20front%20of%20RAGFlow&descSize=15&descAlignY=58" alt="banner" width="100%" />
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0b1426,50:0e7490,100:2dd4bf&height=240&section=header&text=neurons&fontSize=56&fontColor=ffffff&animation=fadeIn&fontAlignY=36&desc=Server%20brain%20and%20ingress%20runtime%20behind%20dendrite&descSize=15&descAlignY=58" alt="banner" width="100%" />
 
 <br/>
 
@@ -16,8 +16,8 @@
 
 <!-- Tagline -->
 <h3>
-  Local PC · Mac mini · Ubuntu runner가 만든 <code>redacted RAG-ready document</code>를<br/>
-  downstream RAG target이 <b>감당 가능한 속도로만</b> 전달하는 범용 ingress queue 서버입니다.
+  <code>dendrite</code>가 만든 redacted capture/enqueue payload를 받아<br/>
+  server-side ingress, brain/session-memory, native-memory, GC safety lane을 소유합니다.
 </h3>
 
 <br/>
@@ -45,6 +45,29 @@
 </div>
 
 <br/>
+
+## Neurons Boundary
+
+`neurons`는 LLM-brain의 server/brain repo다. 역사적 `rag-ingress-queue`
+surface는 이 저장소 안의 ingress service/runtime lane으로 남아 있지만, repo
+identity는 Mac thin-client가 아니라 server-side authority다.
+
+Owned here:
+
+- ingress queue/runtime, worker, durable state DB, and RAG target adapters
+- `ledger.py`, transcript ingest worker, replay/reconcile/backfill server state
+- session-memory/project-memory build and read surfaces
+- brain query, MemoryCard, native-memory mirror/sync/reconcile
+- GC safety planners and fail-closed GC command surfaces
+
+Not owned here:
+
+- provider hook installation on Mac
+- locator-only local capture spool/outbox
+- Mac thin shipper ergonomics
+- `POST 18080` client-side enqueue command surface
+
+Those client responsibilities belong to `dendrite`.
 
 <!-- ────────────── SECTION DIVIDER ────────────── -->
 <img src="https://capsule-render.vercel.app/api?type=rect&color=0:0e7490,100:2dd4bf&height=3" width="100%" />
