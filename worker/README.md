@@ -72,6 +72,9 @@ vendored (`lib/agent_knowledge/`):
   `session_memory/zombie_snapshot_repair.py` — local-ledger-only safety repair
   tools. They do not call RAGFlow, network, delete, disable, or live GC APIs;
   heavier GC/delete/disable modules remain out of this slice.
+- `session_memory/gc_backup.py` — recoverable-delete backup record store only:
+  private-directory JSON write/read/list and raw RAGFlow document-id hashing.
+  Restore/upload/parse CLI behavior remains out of this slice.
 - `redaction.py` — server full public redaction 본체(inline 정규식, denylist 파일 의존 없음)
 - `events.py`, `spool.py`, `ragflow_client.py` — 위 모듈의 폐포 의존
 
@@ -81,9 +84,10 @@ vendored (`lib/agent_knowledge/`):
 - `replay_delivery.py` — 아직 client `outbox_client`, `Ledger` protocol, and
   monolith CLI/test coupling을 포함한다. server delivery backend 기반으로
   split하기 전에는 worker에 가져오지 않는다.
-- `native-memory-sync` CLI wiring and `memory_regeneration.py` — still include
-  monolith CLI/live approval or RAGFlow upload/private transcript-source
-  surfaces. They require a separate safety-lane split before vendoring.
+- `native-memory-sync` CLI wiring, `memory_regeneration.py`, and GC restore/live
+  GC runners — still include monolith CLI/live approval, RAGFlow upload/disable,
+  or private transcript-source surfaces. They require a separate safety-lane
+  split before vendoring.
   → `rag_ingress/__init__.py`는 client/Ledger/import-heavy 모듈을 eager import하지
   않도록 유지한다(패키지 import만으로 Ledger가 끌려오지 않게).
 
