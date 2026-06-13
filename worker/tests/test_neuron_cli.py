@@ -22,6 +22,7 @@ def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
         "transcript-retrieval",
         "transcript-migration",
         "transcript-memory-gc",
+        "transcript-session-gc",
         "transcript-volume-gc",
         "backfill",
         "memory",
@@ -161,6 +162,29 @@ def test_neuron_knowledge_transcript_volume_gc_execute_fails_closed(tmp_path, ca
             "ds_transcript",
             "--ragflow-url",
             "http://127.0.0.1:19380",
+            "--execute",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked_live_execution"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
+
+
+def test_neuron_knowledge_transcript_session_gc_execute_fails_closed(tmp_path, capsys):
+    rc = main(
+        [
+            "transcript-session-gc",
+            "--transcript-dataset-id",
+            "ds_transcript",
+            "--session-memory-dataset-id",
+            "ds_session_memory",
+            "--ragflow-url",
+            "http://127.0.0.1:19380",
+            "--backup-dir",
+            str(tmp_path / "backup"),
             "--execute",
         ]
     )

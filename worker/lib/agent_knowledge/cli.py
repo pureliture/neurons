@@ -15,6 +15,7 @@ from .session_memory import (
     session_memory_private_sync_cli,
     terminal_skipped_quarantine,
     transcript_memory_gc,
+    transcript_session_gc,
     transcript_volume_gc,
     zombie_snapshot_repair,
 )
@@ -68,6 +69,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "native-memory-sync": native_memory_write_runner.main,
     "session-memory-gc": session_memory_gc.main,
     "transcript-memory-gc": transcript_memory_gc.main,
+    "transcript-session-gc": transcript_session_gc.main,
     "transcript-volume-gc": transcript_volume_gc.main,
     "session-memory-quarantine-terminal-skipped": terminal_skipped_quarantine.main,
     "session-memory-repair-zombie-snapshots": zombie_snapshot_repair.main,
