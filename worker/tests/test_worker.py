@@ -135,7 +135,10 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         importlib.import_module(included)
 
     gc_backup = importlib.import_module("agent_knowledge.session_memory.gc_backup")
-    assert not hasattr(gc_backup, "restore_gc_backup")
+    # restore_gc_backup is vendored with the GC executors so a mistaken hard delete
+    # is recoverable (re-upload + re-embed) where GC runs; it takes the ragflow
+    # client as an argument, so the slice still has no wired client.
+    assert hasattr(gc_backup, "restore_gc_backup")
 
     for excluded in (
         "agent_knowledge.rag_ingress.state_store",

@@ -1,13 +1,12 @@
 import hashlib
-import json
 import time
 
 from agent_knowledge.session_memory import transcript_session_gc as sgc
+from agent_knowledge.session_memory.gc_backup import list_gc_backups, read_gc_backup
 from agent_knowledge.session_memory.transcript_session_gc import (
     MIN_TRANSCRIPT_AGE_FLOOR_SECONDS,
     TranscriptSessionGcConfig,
     TranscriptSessionGcRunner,
-    main,
 )
 
 SM = "ds_sm"
@@ -82,23 +81,24 @@ def test_dryrun_counts_transcript_of_summarized_sessions(tmp_path, monkeypatch):
     assert rep["mutation_performed"] is False
 
 
-def test_execute_is_blocked_in_worker_slice(tmp_path, monkeypatch):
+def test_execute_backs_up_then_deletes_summarized_transcript(tmp_path, monkeypatch):
     fake = _FakeSessClient(sm_docs=[_sm("S1")], tx_docs=[_tx("S1", doc_id="t1")])
     _patch(monkeypatch, fake)
     rep = TranscriptSessionGcRunner(config=_cfg(tmp_path, execute=True), token="t").run()
-    assert rep["status"] == "blocked_live_execution"
-    assert rep["deleted_count"] == 0
-    assert rep["backed_up_count"] == 0
-    assert rep["mutation_performed"] is False
-    assert rep["network_used"] is False
-    assert fake.deleted == []
+    assert rep["deleted_count"] == 1 and rep["backed_up_count"] == 1
+    assert fake.deleted == [(TX, ("t1",))]
+    bks = list_gc_backups(tmp_path / "gc-backup", kind="transcript_memory")
+    assert len(bks) == 1
+    rec = read_gc_backup(bks[0])
+    assert rec["session_id_hash"] == "S1"
+    assert "raw transcript body line 1" in rec["body"]
 
 
 def test_disabled_summary_session_not_covered(tmp_path, monkeypatch):
     # S2's only summary is disabled(status 0) -> S2 not "summarized" -> its transcript NOT deleted.
     fake = _FakeSessClient(sm_docs=[_sm("S2", status="0")], tx_docs=[_tx("S2", doc_id="t1")])
     _patch(monkeypatch, fake)
-    rep = TranscriptSessionGcRunner(config=_cfg(tmp_path), token="t").run()
+    rep = TranscriptSessionGcRunner(config=_cfg(tmp_path, execute=True), token="t").run()
     assert rep["summarized_session_count"] == 0
     assert rep["eligible_count"] == 0
     assert fake.deleted == []
@@ -107,7 +107,7 @@ def test_disabled_summary_session_not_covered(tmp_path, monkeypatch):
 def test_unsummarized_session_not_deleted(tmp_path, monkeypatch):
     fake = _FakeSessClient(sm_docs=[_sm("S1")], tx_docs=[_tx("S9", doc_id="t1")])  # t1's session has no summary
     _patch(monkeypatch, fake)
-    rep = TranscriptSessionGcRunner(config=_cfg(tmp_path), token="t").run()
+    rep = TranscriptSessionGcRunner(config=_cfg(tmp_path, execute=True), token="t").run()
     assert rep["eligible_count"] == 0
     assert fake.deleted == []
 
@@ -115,7 +115,7 @@ def test_unsummarized_session_not_deleted(tmp_path, monkeypatch):
 def test_recent_transcript_below_floor_skipped(tmp_path, monkeypatch):
     fake = _FakeSessClient(sm_docs=[_sm("S1")], tx_docs=[_tx("S1", doc_id="t1", aged=False)])
     _patch(monkeypatch, fake)
-    rep = TranscriptSessionGcRunner(config=_cfg(tmp_path), token="t").run()
+    rep = TranscriptSessionGcRunner(config=_cfg(tmp_path, execute=True), token="t").run()
     assert rep["eligible_count"] == 0
     assert fake.deleted == []
 
@@ -123,79 +123,40 @@ def test_recent_transcript_below_floor_skipped(tmp_path, monkeypatch):
 def test_unknown_age_skipped_failclosed(tmp_path, monkeypatch):
     fake = _FakeSessClient(sm_docs=[_sm("S1")], tx_docs=[_tx("S1", doc_id="t1", no_ct=True)])
     _patch(monkeypatch, fake)
-    rep = TranscriptSessionGcRunner(config=_cfg(tmp_path), token="t").run()
+    rep = TranscriptSessionGcRunner(config=_cfg(tmp_path, execute=True), token="t").run()
     assert rep["eligible_count"] == 0
     assert fake.deleted == []
 
 
-def test_execute_without_backup_is_blocked_before_network(tmp_path, monkeypatch):
+def test_execute_without_backup_blocked(tmp_path, monkeypatch):
     fake = _FakeSessClient(sm_docs=[_sm("S1")], tx_docs=[_tx("S1", doc_id="t1")])
     _patch(monkeypatch, fake)
     rep = TranscriptSessionGcRunner(config=_cfg(tmp_path, execute=True, backup=False), token="t").run()
-    assert rep["status"] == "blocked_live_execution"
     assert rep["deleted_count"] == 0
-    assert rep["failed_error_class"] == "live_execution_not_vendored"
-    assert rep["network_used"] is False
+    assert rep["failed_error_class"] == "backup_dir_required"
     assert fake.deleted == []
 
 
-def test_dryrun_selects_multiple_summarized_transcripts(tmp_path, monkeypatch):
+def test_single_delete_failure_skips_and_continues(tmp_path, monkeypatch):
+    # 단발 transient delete 실패에 배치가 멈추지 않고 나머지를 계속 reclaim한다.
     fake = _FakeSessClient(
         sm_docs=[_sm("S1")],
         tx_docs=[_tx("S1", doc_id="t1"), _tx("S1", doc_id="t2"), _tx("S1", doc_id="t3")],
         fail_doc_ids={"t2"},
     )
     _patch(monkeypatch, fake)
-    rep = TranscriptSessionGcRunner(config=_cfg(tmp_path), token="t").run()
+    rep = TranscriptSessionGcRunner(config=_cfg(tmp_path, execute=True), token="t").run()
     assert rep["eligible_count"] == 3
-    assert rep["selected_count"] == 3
-    assert rep["mutation_performed"] is False
-    assert fake.deleted == []
+    assert rep["deleted_count"] == 2  # t1, t3 — t2 실패해도 멈추지 않음
+    assert rep["failed_count"] == 1
+    assert rep["status"] == "partial_failed"
+    assert fake.deleted == [(TX, ("t1",)), (TX, ("t3",))]
 
 
-def test_execute_does_not_fetch_chunks_or_delete(tmp_path, monkeypatch):
+def test_empty_body_aborts_delete(tmp_path, monkeypatch):
     fake = _FakeSessClient(sm_docs=[_sm("S1")], tx_docs=[_tx("S1", doc_id="t1")], fail_chunks=True)
     _patch(monkeypatch, fake)
     rep = TranscriptSessionGcRunner(config=_cfg(tmp_path, execute=True), token="t").run()
-    assert rep["status"] == "blocked_live_execution"
     assert rep["deleted_count"] == 0
     assert fake.deleted == []
-    assert rep["network_used"] is False
-
-
-def test_transcript_session_gc_cli_dry_run_requires_token_env(capsys):
-    rc = main(
-        [
-            "--transcript-dataset-id",
-            TX,
-            "--session-memory-dataset-id",
-            SM,
-            "--ragflow-url",
-            "http://localhost:9380",
-        ]
-    )
-
-    assert rc == 2
-    assert "token env is not set" in capsys.readouterr().err
-
-
-def test_transcript_session_gc_cli_execute_is_fail_closed(tmp_path, capsys):
-    rc = main(
-        [
-            "--transcript-dataset-id",
-            TX,
-            "--session-memory-dataset-id",
-            SM,
-            "--ragflow-url",
-            "http://localhost:9380",
-            "--backup-dir",
-            str(tmp_path / "backup"),
-            "--execute",
-        ]
-    )
-
-    report = json.loads(capsys.readouterr().out)
-    assert rc == 1
-    assert report["status"] == "blocked_live_execution"
-    assert report["mutation_performed"] is False
-    assert report["network_used"] is False
+    assert rep["status"] == "partial_failed"

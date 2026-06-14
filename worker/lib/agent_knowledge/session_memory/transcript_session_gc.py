@@ -1,4 +1,4 @@
-"""Session-level transcript volume GC planner (RAGFlow-direct, coverage-by-summary).
+"""Session-level transcript volume GC (RAGFlow-direct, coverage-by-summary).
 
 전제(실측 2026-06-13): transcript 세션의 대다수(~73%)는 이미 session_memory로 요약돼 있다.
 그러나 (a) per-chunk ``session_memory_coverage_edges``는 sparse/유실됐고, (b) 그 요약본들은
@@ -8,16 +8,15 @@ RAGFlow session-memory 데이터셋에 있을 뿐 neuron ledger(33행)엔 없다
 이 GC는 **ledger를 거치지 않고 RAGFlow를 직접** 본다:
   1. session-memory 데이터셋에서 *유효(active=status enabled, run DONE)* 요약본의 session_id_hash를
      모아 "요약된 세션 집합"을 만든다.
-  2. transcript 데이터셋을 훑어, 그 집합에 속한 세션의 chunk를 dry-run 후보로 보고한다.
+  2. transcript 데이터셋을 훑어, 그 집합에 속한 세션의 chunk를 backup 후 hard-delete(볼륨 회수).
 삭제 기준은 age가 아니라 **"세션이 session_memory로 승격됐는가"**다(요약=durable, raw=staging).
 
 안전:
-- 요약(summary)이 *유효*할 때만 그 세션의 transcript를 후보로 본다(disabled/rollback 요약은 제외).
+- 요약(summary)이 *유효*할 때만 그 세션의 transcript를 지운다(disabled/rollback 요약은 제외).
 - transcript chunk가 floor(``min_transcript_age_seconds``)보다 오래됐을 때만(세션이 아직 재요약
   중일 수 있는 갓 들어온 raw 보호). 나이를 못 읽으면 skip(fail-closed).
-- 이 worker slice는 live delete executor를 vendoring하지 않는다. ``--execute``는
-  ``blocked_live_execution``으로 fail closed 한다.
-- dry-run은 bounded(``max_items``) 후보 보고이며 스캔 페이지도 bounded다.
+- backup-before-delete(빈 본문/백업 실패 시 삭제 중단) → ``gc_backup.restore_gc_backup``로 복구.
+- dry-run/--execute+approval-gated, bounded(``max_items``), 스캔 페이지 bounded.
 """
 
 from __future__ import annotations
@@ -27,12 +26,19 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
+from .native_memory_sync_approval import ApprovalError, validate_goal3_live_approval
 from ..ragflow_client import RagflowHttpClient
+from .gc_backup import write_gc_backup
 
+TRANSCRIPT_SESSION_GC_OPERATION = "memory_regeneration_gc_transcript_memory_session_volume_delete"
 TRANSCRIPT_SESSION_GC_SCHEMA_VERSION = "agent_knowledge_transcript_session_gc.v1"
 
 MIN_TRANSCRIPT_AGE_FLOOR_SECONDS = 86400
+
+# circuit breaker: 개별 delete 실패는 skip-and-continue하되, 누적 실패가 이만큼이면 중단.
+TRANSCRIPT_SESSION_GC_MAX_FAILURES = 10
 
 
 @dataclass(frozen=True)
@@ -92,8 +98,6 @@ class TranscriptSessionGcRunner:
         self.token = token
 
     def run(self) -> dict:
-        if self.config.execute:
-            return self._blocked_live_execution_report()
         ragflow = RagflowHttpClient(
             base_url=self.config.ragflow_url,
             bearer_token=self.token,
@@ -102,30 +106,45 @@ class TranscriptSessionGcRunner:
         summarized = self._summarized_sessions(ragflow)
         candidates = self._scan_candidates(ragflow, summarized)
         selected = candidates[: max(int(self.config.max_items), 1)]
-        return self._report(summarized, candidates, selected, 0, 0, 0, 0, "")
-
-    def _blocked_live_execution_report(self) -> dict:
-        return {
-            "schema_version": TRANSCRIPT_SESSION_GC_SCHEMA_VERSION,
-            "status": "blocked_live_execution",
-            "mode": "execute",
-            "coverage": "session_level",
-            "min_transcript_age_floor_seconds": MIN_TRANSCRIPT_AGE_FLOOR_SECONDS,
-            "effective_min_transcript_age_seconds": self.config.effective_min_transcript_age_seconds(),
-            "summarized_session_count": 0,
-            "eligible_count": 0,
-            "selected_count": 0,
-            "attempted_count": 0,
-            "deleted_count": 0,
-            "backed_up_count": 0,
-            "failed_count": 0,
-            "failed_error_class": "live_execution_not_vendored",
-            "backup_enabled": bool(self.config.backup_dir),
-            "mutation_performed": False,
-            "network_used": False,
-            "raw_ids_printed": False,
-            "hard_delete_performed": False,
-        }
+        deleted = backed_up = attempted = failed = 0
+        failed_error_class = ""
+        if self.config.execute and selected and not self.config.backup_dir:
+            return self._report(summarized, candidates, selected, 0, 0, 0, 1, "backup_dir_required")
+        if self.config.execute and selected:
+            for cand in selected:
+                attempted += 1
+                try:
+                    body = "\n".join(ragflow.list_document_chunks(self.config.transcript_dataset_id, cand.document_id))
+                    if not body.strip():
+                        raise ValueError("empty document body; backup would be lossy, aborting delete")
+                    write_gc_backup(
+                        self.config.backup_dir,
+                        kind="transcript_memory",
+                        knowledge_id=cand.content_hash or cand.document_id,
+                        content_hash=cand.content_hash,
+                        session_id_hash=cand.session_id_hash,
+                        provider=cand.provider,
+                        project=cand.project,
+                        dataset_id=self.config.transcript_dataset_id,
+                        ragflow_document_id=cand.document_id,
+                        body=body,
+                        replacement_knowledge_id="",
+                        extra={"coverage": "session_level", "summarized_session": True},
+                    )
+                    backed_up += 1
+                    ragflow.delete_documents(self.config.transcript_dataset_id, [cand.document_id])
+                    deleted += 1
+                except Exception as exc:  # noqa: BLE001
+                    # 단발 transient(RAGFlow CPU-bound 부하 중 delete 실패 등)에 배치 전체가
+                    # 멈추지 않도록 skip-and-continue. 단 실패가 누적되면(systemic) circuit
+                    # breaker로 중단. backup이 됐는데 delete가 실패한 doc은 다음 run에 다시
+                    # eligible → 재시도(self-heal), backup은 content_hash 키라 중복 안 쌓임.
+                    failed_error_class = exc.__class__.__name__
+                    failed += 1
+                    if failed >= TRANSCRIPT_SESSION_GC_MAX_FAILURES:
+                        break
+                    continue
+        return self._report(summarized, candidates, selected, deleted, backed_up, attempted, failed, failed_error_class)
 
     def _report(self, summarized, candidates, selected, deleted, backed_up, attempted, failed, failed_error_class) -> dict:
         return {
@@ -224,12 +243,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(raw_argv)
 
     token = os.environ.get(args.token_env, "")
-    if not token and not args.execute:
+    if not token:
         print("token env is not set", file=sys.stderr)
         return 2
     if args.execute:
         if not args.backup_dir:
             print("--backup-dir is required for --execute (no delete without backup)", file=sys.stderr)
+            return 2
+        try:
+            validate_goal3_live_approval(
+                args.approval,
+                operation=TRANSCRIPT_SESSION_GC_OPERATION,
+                dataset_id=args.transcript_dataset_id,
+                ragflow_base_url=args.ragflow_url,
+                command_argv=["transcript-session-gc", *raw_argv],
+                max_wait_seconds=900,
+            )
+        except ApprovalError as exc:
+            print(str(exc), file=sys.stderr)
             return 2
     config = TranscriptSessionGcConfig(
         transcript_dataset_id=args.transcript_dataset_id,
