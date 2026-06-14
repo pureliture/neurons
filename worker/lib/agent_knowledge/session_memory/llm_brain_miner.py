@@ -39,11 +39,20 @@ class LlmBrainEnvelopeMiner:
         self.max_candidates = max_candidates
 
     def mine_chunk(self, chunk: Mapping[str, Any], *, refresh_watermark: str) -> list[dict]:
-        body = str(chunk.get("redacted_text") or "")
-        project = str(chunk["project"])
-        provider = str(chunk["provider"])
-        knowledge_id = str(chunk["knowledge_id"])
-        content_hash = str(chunk["content_hash"])
+        # Normalize both the flat fixture shape and the real list_transcript_memory_chunks
+        # shape {content, content_hash, metadata{knowledge_id, project, provider, ...}}.
+        metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), Mapping) else {}
+
+        def _field(key: str) -> str:
+            return str(chunk.get(key) or metadata.get(key) or "")
+
+        body = str(chunk.get("redacted_text") or chunk.get("content") or "")
+        project = _field("project")
+        provider = _field("provider")
+        knowledge_id = _field("knowledge_id") or _field("chunk_id") or _field("content_hash")
+        content_hash = _field("content_hash")
+        if not (body and project and content_hash):
+            return []
 
         messages = [
             {"role": "system", "content": _ENVELOPE_EXTRACTION_PROMPT},
