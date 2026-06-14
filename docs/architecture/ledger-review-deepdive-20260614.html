@@ -1,0 +1,1018 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <title>Ledger 아키텍처 컨테이너 분리 검토 보고서</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      .mermaid {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        background-color: #ffffff;
+        border-radius: 0.375rem;
+        padding: 0.5rem;
+        min-height: 180px;
+      }
+    </style>
+  </head>
+  <body class="bg-slate-50 text-slate-900 font-sans leading-relaxed">
+    <header class="bg-slate-900 text-white py-8 px-6 shadow-md mb-10">
+      <div class="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <div>
+          <h1 class="text-3xl font-extrabold tracking-tight">Ledger Architecture Review & Container Separation</h1>
+          <p class="text-slate-400 mt-2 text-sm">저장소: <span class="font-mono text-slate-300">neurons</span> | 분석 기준일: 2026-06-14 | 작성 에이전트: <span class="font-mono text-slate-300">implementer</span></p>
+        </div>
+        <div class="flex flex-wrap gap-2 text-xs">
+          <span class="px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">Target: /tmp/ledger-review-deepdive-20260614114000.html</span>
+          <span class="px-2.5 py-1 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">Code Untouched: Yes</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-6xl px-6 pb-20">
+      
+      <!-- Top Recommendation Section -->
+      <section class="mb-12 bg-gradient-to-br from-emerald-50 to-teal-50 border-2 border-emerald-500/30 rounded-2xl p-6 md:p-8 shadow-sm">
+        <div class="flex items-center gap-2 mb-4">
+          <span class="p-1.5 bg-emerald-600 text-white rounded-lg text-xs font-bold uppercase tracking-wider">Top Recommendation</span>
+          <h2 class="text-2xl font-bold text-slate-900">최우선 권장 아키텍처 과제: Candidate 1</h2>
+        </div>
+        <h3 class="text-xl font-bold text-slate-800 mb-3">GC Safety Lane & Auditing Container 분리</h3>
+        <p class="text-slate-700 mb-6 leading-relaxed">
+          가비지 컬렉션(GC) 작업은 비가역적인 데이터 하드 삭제와 RAGFlow 외부 API 연동이 밀접하게 결합되어 있어, 오작동 시 전체 원장(Monolithic Ledger) 데이터베이스에 미치는 블래스트 래디우스(Blast Radius)가 가장 큽니다. 따라서 GC 감사 로깅(<code class="font-mono">memory_gc_audit</code>) 및 백업 프로세스를 독립된 <strong>GC Safety Lane & Auditing Container</strong>로 격리하는 것을 최우선으로 권장합니다.
+        </p>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+          <div class="bg-white p-4 rounded-xl border border-emerald-100 shadow-sm">
+            <span class="font-bold text-slate-900 block mb-1">핵심 타겟</span>
+            <span class="text-slate-600 text-xs">GC 실행 이력 격리 및 비가역 삭제 안정성 보장</span>
+          </div>
+          <div class="bg-white p-4 rounded-xl border border-emerald-100 shadow-sm">
+            <span class="font-bold text-slate-900 block mb-1">분리 난이도 & 비용</span>
+            <span class="text-orange-600 font-semibold text-xs">Medium</span> <span class="text-slate-500 text-xs">(RAGFlow API 및 백업 경로 결합)</span>
+          </div>
+          <div class="bg-white p-4 rounded-xl border border-emerald-100 shadow-sm">
+            <span class="font-bold text-slate-900 block mb-1">기대 효과</span>
+            <span class="text-slate-600 text-xs">원장 메인 트랜잭션과 GC 잠금 분리로 동시성 성능 향상</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ledger.py Responsibility Map Section -->
+      <section class="mb-16">
+        <h2 class="text-2xl font-bold text-slate-900 mb-8 border-b-2 border-slate-100 pb-4">ledger.py 내부 책임 지도 (ledger.py Responsibility Map)</h2>
+        
+        <p class="text-slate-700 mb-6 leading-relaxed">
+          <code class="font-mono text-emerald-600">ledger.py</code>는 SQLite 영속 데이터베이스를 활용하여 neurons 서버가 소유한 지식 아이템(Knowledge Items), 트랜스크립트 세션 및 턴, GC 감사 기록, 네이티브 메모리 미러링 등 전체 원장의 상태와 트랜잭션을 관리합니다. 내부 책임은 크게 다음 4가지 영역으로 나뉩니다.
+        </p>
+
+        <!-- Responsibility Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-10">
+          
+          <!-- Area A Card -->
+          <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-6 flex flex-col justify-between">
+            <div>
+              <div class="flex items-center gap-2 mb-3">
+                <span class="px-2 py-1 bg-blue-100 text-blue-800 text-xs font-bold rounded text-center">Area A</span>
+                <h3 class="text-lg font-bold text-slate-900">Ingress Status Tracking & Queue Management</h3>
+              </div>
+              <p class="text-slate-600 text-xs leading-relaxed mb-4">
+                수집된 트랜스크립트 청크(<code class="font-mono text-[10px]">conversation_chunk</code>) 및 문서의 수집 상태(<code class="font-mono text-[10px]">prepared</code>, <code class="font-mono text-[10px]">queued</code>, <code class="font-mono text-[10px]">indexing</code>, <code class="font-mono text-[10px]">indexed</code>, <code class="font-mono text-[10px]">parse_failed</code>, <code class="font-mono text-[10px]">quarantined</code>, <code class="font-mono text-[10px]">replay_requested</code>, <code class="font-mono text-[10px]">deduped</code>)를 추적하고, CAS(Compare-And-Swap) 패턴을 통해 상태 전환의 원자성을 보장합니다.
+              </p>
+            </div>
+            <div class="border-t border-slate-100 pt-4 space-y-3">
+              <div>
+                <span class="text-[10px] font-bold text-slate-400 block uppercase">Monospace Caller Paths</span>
+                <div class="font-mono text-[10px] text-slate-500 bg-slate-50 p-2 rounded mt-1 overflow-x-auto space-y-1">
+                  <div>worker/lib/agent_knowledge/rag_ingress/__init__.py</div>
+                  <div>worker/lib/agent_knowledge/rag_ingress/state_cli.py</div>
+                  <div>worker/lib/agent_knowledge/session_memory/transcript_ingest.py</div>
+                </div>
+              </div>
+              <div>
+                <span class="text-[10px] font-bold text-slate-400 block uppercase">External Resource Dependencies</span>
+                <div class="text-[11px] text-slate-600 mt-1">
+                  SQLite 영속 파일 (<code class="font-mono text-[10px]">agent_knowledge_ledger.db</code> 등)
+                </div>
+              </div>
+              <div class="bg-orange-50/50 border border-orange-100 p-2.5 rounded-lg text-xs">
+                <span class="font-semibold text-orange-800 block">Deletion Test 평가: 호출자에게 복잡도 전가 (Push to callers)</span>
+                <p class="text-slate-600 text-[11px] mt-1">
+                  이 책임을 삭제하면 각 Ingress 수집 및 Replay 워커가 상태 업데이트 로직과 CAS 조건검증 쿼리를 직접 작성해야 합니다. 또한, 동시성 제어가 분산되어 상태 일관성이 깨질 위험이 극도로 높아집니다.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Area B Card -->
+          <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-6 flex flex-col justify-between">
+            <div>
+              <div class="flex items-center gap-2 mb-3">
+                <span class="px-2 py-1 bg-emerald-100 text-emerald-800 text-xs font-bold rounded text-center">Area B</span>
+                <h3 class="text-lg font-bold text-slate-900">GC Planning & Auditing (GC Safety Lane)</h3>
+              </div>
+              <p class="text-slate-600 text-xs leading-relaxed mb-4">
+                비가역적인 하드 삭제 및 비활성화(GC) 작업을 처리하기 위한 영속 감사 로그(<code class="font-mono text-[10px]">memory_gc_audit</code> 테이블)를 기록하고, <code class="font-mono text-[10px]">mark_disabled</code> / <code class="font-mono text-[10px]">mark_enabled</code> 등의 메서드를 통해 파싱/삭제 대상 리소스를 선별 및 제어합니다.
+              </p>
+            </div>
+            <div class="border-t border-slate-100 pt-4 space-y-3">
+              <div>
+                <span class="text-[10px] font-bold text-slate-400 block uppercase">Monospace Caller Paths</span>
+                <div class="font-mono text-[10px] text-slate-500 bg-slate-50 p-2 rounded mt-1 overflow-x-auto space-y-1">
+                  <div>worker/lib/agent_knowledge/session_memory/session_memory_gc.py</div>
+                  <div>worker/lib/agent_knowledge/session_memory/transcript_memory_gc.py</div>
+                  <div>worker/lib/agent_knowledge/session_memory/transcript_volume_gc.py</div>
+                  <div>worker/lib/agent_knowledge/session_memory/zombie_snapshot_repair.py</div>
+                  <div>worker/lib/agent_knowledge/session_memory/terminal_skipped_quarantine.py</div>
+                </div>
+              </div>
+              <div>
+                <span class="text-[10px] font-bold text-slate-400 block uppercase">External Resource Dependencies</span>
+                <div class="text-[11px] text-slate-600 mt-1">
+                  SQLite 영속 파일, RAGFlow HTTP API (GC 실행 시 문서를 물리적으로 제거하기 위해 간접 연동)
+                </div>
+              </div>
+              <div class="bg-orange-50/50 border border-orange-100 p-2.5 rounded-lg text-xs">
+                <span class="font-semibold text-orange-800 block">Deletion Test 평가: 호출자에게 복잡도 전가 (Push to callers)</span>
+                <p class="text-slate-600 text-[11px] mt-1">
+                  GC 감사 로그 저장 및 타겟 상태 변경 책임을 제거하면, GC 스크립트 실행 이력을 추적할 수 없어 데이터 파손 발생 시 복구 및 원인 규명이 불가능해집니다. 각 GC 모듈들이 자체 감사 로깅이나 파일 백업 로직을 직접 복잡하게 구현해야 합니다.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Area C Card -->
+          <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-6 flex flex-col justify-between">
+            <div>
+              <div class="flex items-center gap-2 mb-3">
+                <span class="px-2 py-1 bg-amber-100 text-amber-800 text-xs font-bold rounded text-center">Area C</span>
+                <h3 class="text-lg font-bold text-slate-900">Session & Project Memory Promotion State Machine</h3>
+              </div>
+              <p class="text-slate-600 text-xs leading-relaxed mb-4">
+                세션 및 프로젝트 메모리가 신규 청크 유입 등으로 인해 변경되었을 때 "더티(dirty)" 상태로 트래킹하고, 빌더에 의해 재생성된 메모리 스냅샷이 일관성(커버리지 100% 매칭 등) 검증을 통과하면 이를 활성 스냅샷(<code class="font-mono text-[10px]">active_snapshots</code>)으로 승격(promote) 및 교체하는 상태 기계를 관리합니다.
+              </p>
+            </div>
+            <div class="border-t border-slate-100 pt-4 space-y-3">
+              <div>
+                <span class="text-[10px] font-bold text-slate-400 block uppercase">Monospace Caller Paths</span>
+                <div class="font-mono text-[10px] text-slate-500 bg-slate-50 p-2 rounded mt-1 overflow-x-auto space-y-1">
+                  <div>worker/lib/agent_knowledge/session_memory/dirty_session_memory_sync.py</div>
+                  <div>worker/lib/agent_knowledge/session_memory/memory_regeneration.py</div>
+                  <div>worker/lib/agent_knowledge/session_memory/neuron_session_memory.py</div>
+                </div>
+              </div>
+              <div>
+                <span class="text-[10px] font-bold text-slate-400 block uppercase">External Resource Dependencies</span>
+                <div class="text-[11px] text-slate-600 mt-1">
+                  SQLite 영속 파일
+                </div>
+              </div>
+              <div class="bg-orange-50/50 border border-orange-100 p-2.5 rounded-lg text-xs">
+                <span class="font-semibold text-orange-800 block">Deletion Test 평가: 호출자에게 복잡도 전가 (Push to callers)</span>
+                <p class="text-slate-600 text-[11px] mt-1">
+                  승격 상태 기계가 없어지면 메모리 빌드 동기화 흐름을 관리할 영속 상태가 상실됩니다. 여러 빌드 프로세스 간 동시 승격 경쟁이나 중복 빌드를 방지할 수 없으므로, 호출자들이 분산 락(distributed lock)과 상태 전이 로직을 수동으로 재현해야 합니다.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Area D Card -->
+          <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-6 flex flex-col justify-between">
+            <div>
+              <div class="flex items-center gap-2 mb-3">
+                <span class="px-2 py-1 bg-purple-100 text-purple-800 text-xs font-bold rounded text-center">Area D</span>
+                <h3 class="text-lg font-bold text-slate-900">Native Memory & Memory Cards Synchronization</h3>
+              </div>
+              <p class="text-slate-600 text-xs leading-relaxed mb-4">
+                LLM Brain에서 사용 승인한 메모리 카드의 동기화 제어 및 검색/조회용 문서 인가 처리(<code class="font-mono text-[10px]">authorize_document</code>)를 수행하며, RAGFlow 백엔드의 네이티브 메모리와의 동기화 상태(<code class="font-mono text-[10px]">native_memory_mirror</code>)를 관리합니다.
+              </p>
+            </div>
+            <div class="border-t border-slate-100 pt-4 space-y-3">
+              <div>
+                <span class="text-[10px] font-bold text-slate-400 block uppercase">Monospace Caller Paths</span>
+                <div class="font-mono text-[10px] text-slate-500 bg-slate-50 p-2 rounded mt-1 overflow-x-auto space-y-1">
+                  <div>worker/lib/agent_knowledge/session_memory/brain_query.py</div>
+                  <div>worker/lib/agent_knowledge/session_memory/brain_read_model.py</div>
+                  <div>worker/lib/agent_knowledge/session_memory/native_memory_mirror.py</div>
+                  <div>worker/lib/agent_knowledge/session_memory/native_memory_write_runner.py</div>
+                  <div>worker/lib/agent_knowledge/mcp_server.py</div>
+                </div>
+              </div>
+              <div>
+                <span class="text-[10px] font-bold text-slate-400 block uppercase">External Resource Dependencies</span>
+                <div class="text-[11px] text-slate-600 mt-1">
+                  SQLite 영속 파일, RAGFlow HTTP API, <code class="font-mono text-[10px]">RAGFLOW_API_KEY</code> 환경 변수
+                </div>
+              </div>
+              <div class="bg-orange-50/50 border border-orange-100 p-2.5 rounded-lg text-xs">
+                <span class="font-semibold text-orange-800 block">Deletion Test 평가: 호출자에게 복잡도 전가 (Push to callers)</span>
+                <p class="text-slate-600 text-[11px] mt-1">
+                  이 기능을 삭제하면 MCP 서버 등의 검색 레이어가 retrieval 요청을 처리할 때마다 만료 시간 검사, 데이터셋 활성화 여부 검사, 스냅샷 승인 여부 검사 등 복잡한 인가 로직을 매번 RAGFlow 쿼리 전후로 수동 수행해야 합니다.
+                </p>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- 33 DB Tables Mapping Subsection -->
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 md:p-8">
+          <h3 class="text-xl font-bold text-slate-900 mb-4">DB 테이블 책임 영역 매핑 (33 Tables Map)</h3>
+          <p class="text-slate-600 text-sm mb-6">
+            <code class="font-mono text-emerald-600">ledger.py</code>의 초기화 메서드(<code class="font-mono">_initialize</code>)에서 생성되는 총 33개의 테이블 스키마가 위의 4대 책임 영역에 기여하는 매핑 현황입니다.
+          </p>
+          
+          <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr class="bg-slate-50 border-b border-slate-200 text-slate-700">
+                  <th class="p-3 font-semibold w-12 text-center">번호</th>
+                  <th class="p-3 font-semibold">테이블명</th>
+                  <th class="p-3 font-semibold">담당 책임 영역</th>
+                  <th class="p-3 font-semibold">역할 설명</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-100 text-slate-600">
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">1</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">knowledge_items</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full text-[10px] font-semibold">Area A</span></td>
+                  <td class="p-3">수집된 지식 아이템 메타데이터 및 상태</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">2</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">ingest_attempts</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full text-[10px] font-semibold">Area A</span></td>
+                  <td class="p-3">각 수집 시도에 대한 이력 및 결과</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">3</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">ragflow_datasets</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
+                  <td class="p-3">RAGFlow 데이터셋 ID 및 상태 정보</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">4</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">transcript_sessions</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full text-[10px] font-semibold">Area A</span></td>
+                  <td class="p-3">트랜스크립트 세션의 세션 정보</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">5</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">transcript_turns</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full text-[10px] font-semibold">Area A</span></td>
+                  <td class="p-3">세션 내 개별 대화 턴 메타데이터</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">6</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">transcript_tool_events</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full text-[10px] font-semibold">Area A</span></td>
+                  <td class="p-3">트랜스크립트 내 실행된 도구 이벤트</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">7</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">transcript_chunks</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full text-[10px] font-semibold">Area A</span></td>
+                  <td class="p-3">대화 트랜스크립트 텍스트 분할 청크</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">8</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">transcript_validation_files</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full text-[10px] font-semibold">Area A</span></td>
+                  <td class="p-3">검증 목적으로 저장된 트랜스크립트 파일</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">9</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">provider_source_contracts</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full text-[10px] font-semibold">Area A</span></td>
+                  <td class="p-3">제공 소스 데이터에 대한 계약 정보</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">10</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">backfill_sources</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full text-[10px] font-semibold">Area A</span></td>
+                  <td class="p-3">과거 트랜스크립트 백필을 위한 소스</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">11</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">scheduler_runs</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full text-[10px] font-semibold">Area A</span></td>
+                  <td class="p-3">백필 및 수집 스케줄러 실행 정보</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">12</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">memory_candidates</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full text-[10px] font-semibold">Area C</span></td>
+                  <td class="p-3">새로 추출되어 승격을 기다리는 메모리 후보군</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">13</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">memory_cards</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
+                  <td class="p-3">추출 완료 및 정제된 개별 메모리 카드</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">14</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">memory_card_evidence</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
+                  <td class="p-3">메모리 카드 생성에 기반이 된 트랙스크립트 증거</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">15</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">llm_brain_memory_cards</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
+                  <td class="p-3">LLM 브레인에서 관리 및 인가하는 메모리 카드</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">16</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">llm_brain_feedback_records</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
+                  <td class="p-3">메모리 카드 사용성에 대한 LLM 피드백 로그</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">17</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">llm_brain_projection_jobs</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
+                  <td class="p-3">메모리 프로젝션 작업 상태 관리</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">18</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">profile_facts</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
+                  <td class="p-3">세션 기반 프로필 및 사용자/에이전트 팩트</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">19</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">context_packs</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
+                  <td class="p-3">검색을 위해 묶은 컨텍스트 팩 메타데이터</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">20</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">context_pack_items</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
+                  <td class="p-3">컨테이너 팩 내 개별 아이템 결합 테이블</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">21</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">retrieval_audit</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-full text-[10px] font-semibold">Area B</span></td>
+                  <td class="p-3">메모리 검색/조회 실행 감사 로그</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">22</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">auto_recall_audit</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-full text-[10px] font-semibold">Area B</span></td>
+                  <td class="p-3">자동 메모리 리콜 수행 감사 로그</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">23</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">eval_queries</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
+                  <td class="p-3">메모리 검색 평가를 위한 쿼리 셋</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">24</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">eval_runs</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
+                  <td class="p-3">평가 수행 실행 결과 및 스코어 로그</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">25</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">dirty_session_memory</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full text-[10px] font-semibold">Area C</span></td>
+                  <td class="p-3">빌드/재생성이 필요한 변경된(Dirty) 세션 메모리</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">26</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">session_memory_terminal_skipped_audit</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-full text-[10px] font-semibold">Area B</span></td>
+                  <td class="p-3">GC 과정에서 제외되거나 강제 스킵된 세션 감사 로그</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">27</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">session_memory_active_snapshots</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full text-[10px] font-semibold">Area C</span></td>
+                  <td class="p-3">현재 인가되어 활성화된 세션 메모리 스냅샷</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">28</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">session_memory_coverage_edges</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full text-[10px] font-semibold">Area C</span></td>
+                  <td class="p-3">스냅샷의 커버리지 정합성(100% 매칭) 검증용 에지 관계</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">29</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">dirty_project_memory</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full text-[10px] font-semibold">Area C</span></td>
+                  <td class="p-3">재생성이 필요한 변경된(Dirty) 프로젝트 메모리</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">30</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">project_memory_active_snapshots</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full text-[10px] font-semibold">Area C</span></td>
+                  <td class="p-3">현재 활성화된 프로젝트 메모리 스냅샷</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">31</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">tool_evidence_summaries</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
+                  <td class="p-3">MCP/도구 활용 증거의 요약 데이터</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">32</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">native_memory_mirror</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
+                  <td class="p-3">RAGFlow 원격 데이터와 로컬 메모리 미러 동기화 상태</td>
+                </tr>
+                <tr class="hover:bg-slate-50/80">
+                  <td class="p-3 text-center">33</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">memory_gc_audit</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-full text-[10px] font-semibold">Area B</span></td>
+                  <td class="p-3">가비지 컬렉션(하드 삭제/비활성화) 감사 로그</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Candidate Grid -->
+      <section class="mb-16">
+        <h2 class="text-2xl font-bold text-slate-900 mb-8 border-b-2 border-slate-100 pb-4">컨테이너 분리 후보군 (Deepening Candidates)</h2>
+        <div class="grid grid-cols-1 gap-12">
+          
+          <!-- Candidate 1 Card -->
+          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 md:p-8 flex flex-col gap-6">
+            <div class="flex flex-wrap justify-between items-start gap-4">
+              <div>
+                <span class="text-xs font-bold text-slate-400 tracking-widest uppercase">Candidate 1</span>
+                <h3 class="text-2xl font-bold text-slate-900 mt-1">GC Safety Lane & Auditing Container</h3>
+              </div>
+              <div class="flex gap-2">
+                <span class="px-2.5 py-1 rounded bg-emerald-100 text-emerald-800 text-xs font-semibold">Strong</span>
+                <span class="px-2.5 py-1 rounded bg-amber-100 text-amber-800 text-xs font-semibold">requires decision</span>
+              </div>
+            </div>
+
+            <!-- Monospace Files -->
+            <div>
+              <h4 class="text-xs font-bold text-slate-500 uppercase mb-2">Files Involved</h4>
+              <div class="bg-slate-50 rounded-lg p-3 border border-slate-100 max-h-32 overflow-y-auto">
+                <ul class="font-mono text-xs text-slate-600 space-y-1">
+                  <li>worker/lib/agent_knowledge/ledger.py</li>
+                  <li>worker/lib/agent_knowledge/session_memory/session_memory_gc.py</li>
+                  <li>worker/lib/agent_knowledge/session_memory/transcript_memory_gc.py</li>
+                  <li>worker/lib/agent_knowledge/session_memory/transcript_volume_gc.py</li>
+                  <li>worker/lib/agent_knowledge/session_memory/zombie_snapshot_repair.py</li>
+                  <li>worker/lib/agent_knowledge/session_memory/terminal_skipped_quarantine.py</li>
+                </ul>
+              </div>
+            </div>
+
+            <!-- Problem & Deepening -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm text-slate-700">
+              <div class="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                <span class="font-bold text-slate-900 block mb-1">현상 및 문제점 (Problem)</span>
+                ledger.py 내부의 33개 테이블 스키마 중 GC 이력 감사(memory_gc_audit)와 비가역적인 하드 삭제가 모놀리식 원장과 물리적으로 같은 SQLite 파일 및 커넥션 내에서 결합되어 작동하므로 결함 시 원장 손상 위험이 있습니다.
+              </div>
+              <div class="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                <span class="font-bold text-slate-900 block mb-1">제안 방향 (Proposed Deepening)</span>
+                GC 가비지 컬렉터의 실행 상태, 감사 로그 로깅, RAGFlow 백업 및 삭제 트리거 역할을 하는 독자적인 감사 컨테이너 프로세스로 분리합니다.
+              </div>
+            </div>
+
+            <!-- Before/After Mermaid Diagrams -->
+            <div>
+              <h4 class="text-xs font-bold text-slate-500 uppercase mb-3">Before / After Architecture Diagram</h4>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="bg-stone-50 p-4 rounded-xl border border-stone-200">
+                  <span class="text-xs font-semibold text-slate-500 block mb-2 text-center">Before (AS-IS)</span>
+                  <div class="mermaid">
+                    graph TD
+                      classDef default fill:#f9f9f9,stroke:#333,stroke-width:1px;
+                      classDef leak fill:#fee2e2,stroke:#ef4444,stroke-width:2px;
+                      Callers[GC Scripts / CLI] -->|Direct Call| Ledger[Monolithic Ledger]
+                      Ledger -->|Direct Access| DB[(SQLite DB)]
+                      Ledger -->|Direct Delete| RAG[RAGFlow API]
+                      class Ledger leak;
+                  </div>
+                </div>
+                <div class="bg-emerald-50/30 p-4 rounded-xl border border-emerald-200/50">
+                  <span class="text-xs font-semibold text-slate-600 block mb-2 text-center">After (TO-BE)</span>
+                  <div class="mermaid">
+                    graph TD
+                      classDef default fill:#f9f9f9,stroke:#333,stroke-width:1px;
+                      classDef safe fill:#e6f8f9,stroke:#0d9488,stroke-width:2px;
+                      Callers[GC Scripts / CLI] -->|Invoke| GCC[GC Safety Container]
+                      GCC -->|REST/gRPC| API[Ledger Core API]
+                      GCC -->|API Delete & Backup| RAG[RAGFlow API & Backup Store]
+                      API -->|Exclusive Access| DB[(PostgreSQL)]
+                      class GCC,API safe;
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Wins & Cost & Risk -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 text-sm">
+              <div class="bg-emerald-50/20 p-4 rounded-xl border border-emerald-100/50">
+                <h4 class="font-bold text-emerald-800 mb-2">아키텍처 개선 효과 (Wins)</h4>
+                <ul class="list-disc pl-4 space-y-1 text-slate-700 text-xs">
+                  <li><strong>Locality</strong>: GC 스케줄러 실행 및 감사 로그, 삭제 전 백업 로직이 독립적인 모듈에 격리되어 모놀리식 원장의 blast radius가 제한됩니다.</li>
+                  <li><strong>Leverage</strong>: RAGFlow 삭제 API의 일시 장애 대처 능력 및 재시도 메커니즘을 원장 트랜잭션과 독립적으로 구축하여 결함 감내가 향상됩니다.</li>
+                  <li><strong>Interface/Seam</strong>: SQLite 직접 쿼리 대신 REST/gRPC API Seam을 두어 결합도를 낮추고 결함 전파를 차단합니다.</li>
+                  <li><strong>Tests</strong>: 원장의 실제 DB 잠금 경합을 방지하고 GC 삭제 과정의 dry-run 및 validation을 독립적인 테스트 스위트로 집중 커버 가능합니다.</li>
+                </ul>
+              </div>
+              <div class="bg-orange-50/20 p-4 rounded-xl border border-orange-100/50">
+                <h4 class="font-bold text-orange-800 mb-2">컨테이너 분리 비용 (Separation Cost)</h4>
+                <div class="flex items-center gap-2 mb-2">
+                  <span class="px-2 py-0.5 rounded bg-orange-100 text-orange-800 font-bold text-xs">Medium</span>
+                </div>
+                <p class="text-slate-700 text-xs leading-relaxed">
+                  RAGFlow API 및 로컬/원격 백업 디렉토리 경로에 대한 결합이 있고, 원장의 마킹 처리를 위해 Ledger Core API와의 네트워크 통신 흐름이 신설되어야 하기 때문입니다.
+                </p>
+              </div>
+              <div class="bg-rose-50/20 p-4 rounded-xl border border-rose-100/50">
+                <h4 class="font-bold text-rose-800 mb-2">위험성 및 ADR 갈등 요소 (Risks)</h4>
+                <p class="text-slate-700 text-xs leading-relaxed">
+                  GC 삭제 상태 기록과 원장의 활성 상태 간 일시적 불일치(Eventual Consistency)가 발생할 수 있어, API 타임아웃 및 정족수 검증 등의 재시도 로직이 추가적으로 요구됩니다.
+                </p>
+              </div>
+            </div>
+            <!-- Interface & Adapter Design Section for Candidate 1 -->
+            <div class="border-t border-slate-100 pt-6 mt-4">
+              <h4 class="text-sm font-bold text-slate-800 mb-3 flex items-center gap-1.5">
+                <span class="w-1.5 h-3.5 bg-emerald-500 rounded-sm"></span>
+                Interface & Adapter Design
+              </h4>
+              <p class="text-xs text-slate-600 mb-4 leading-relaxed">
+                GC 스케줄러와 물리 삭제 흐름에서 결함을 격리하고 비가역성 문제를 감내하기 위해 감사 로그 저장을 전담하는 추상 인터페이스를 설계합니다.
+              </p>
+              <div class="bg-slate-900 rounded-xl p-4 overflow-x-auto border border-slate-800 mb-4 shadow-inner">
+                <pre class="text-emerald-400 font-mono text-[11px] leading-normal"><code>class IGCSafetyAuditor(ABC):
+                @abstractmethod
+                def log_gc_start(self, gc_kind: str, knowledge_id: str, document_id: str) -> str:
+                    """GC 감사 시작 로깅 및 고유 audit_id 발행"""
+                    pass
+
+                @abstractmethod
+                def log_gc_success(self, audit_id: str, replacement_id: str = "") -> None:
+                    """물리 삭제 성공 시 감사 로그에 완료 기록"""
+                    pass
+
+                @abstractmethod
+                def log_gc_failure(self, audit_id: str, error_msg: str) -> None:
+                    """에러 로깅 및 결함 상태 복구 트리거"""
+                    pass</code></pre>
+              </div>
+              <div class="bg-emerald-50/30 border border-emerald-100/50 rounded-xl p-3.5 text-xs text-slate-700">
+                <span class="font-bold text-emerald-800 block mb-1">Test Survival Strategy</span>
+                <p class="text-[11px] leading-relaxed">
+                  단위 테스트 시 <code class="font-mono text-emerald-700 bg-white px-1 py-0.5 rounded border border-emerald-100">MockGCSafetyAuditor</code>를 주입하여 실제 RAGFlow API의 HTTP 통신을 우회하고 감사 상태 전이 일관성만 고속으로 검증합니다.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Candidate 2 Card -->
+          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 md:p-8 flex flex-col gap-6">
+            <div class="flex flex-wrap justify-between items-start gap-4">
+              <div>
+                <span class="text-xs font-bold text-slate-400 tracking-widest uppercase">Candidate 2</span>
+                <h3 class="text-2xl font-bold text-slate-900 mt-1">Ledger Core Read/Write API Container</h3>
+              </div>
+              <div class="flex gap-2">
+                <span class="px-2.5 py-1 rounded bg-emerald-100 text-emerald-800 text-xs font-semibold">Strong</span>
+                <span class="px-2.5 py-1 rounded bg-amber-100 text-amber-800 text-xs font-semibold">requires decision</span>
+              </div>
+            </div>
+
+            <!-- Monospace Files -->
+            <div>
+              <h4 class="text-xs font-bold text-slate-500 uppercase mb-2">Files Involved</h4>
+              <div class="bg-slate-50 rounded-lg p-3 border border-slate-100 max-h-32 overflow-y-auto">
+                <ul class="font-mono text-xs text-slate-600 space-y-1">
+                  <li>worker/lib/agent_knowledge/ledger.py</li>
+                  <li>worker/lib/agent_knowledge/session_memory/dirty_session_memory_sync.py</li>
+                  <li>그 외 ledger.py를 import하여 SQLite에 접근하는 모든 python 모듈들</li>
+                </ul>
+              </div>
+            </div>
+
+            <!-- Problem & Deepening -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm text-slate-700">
+              <div class="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                <span class="font-bold text-slate-900 block mb-1">현상 및 문제점 (Problem)</span>
+                서비스 전체가 ledger.py를 직접 호출하고 SQLite 커넥션을 열어 로컬 쿼리를 실행하고 있어 DB 잠금 경합이 심해지고 아키텍처 결합도가 높습니다.
+              </div>
+              <div class="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                <span class="font-bold text-slate-900 block mb-1">제안 방향 (Proposed Deepening)</span>
+                영속 SQLite 파일에 직접 접근하는 유일한 단일 진입점으로서 gRPC 또는 REST API 엔드포인트를 제공하는 프록시 서비스를 설계합니다.
+              </div>
+            </div>
+
+            <!-- Before/After Mermaid Diagrams -->
+            <div>
+              <h4 class="text-xs font-bold text-slate-500 uppercase mb-3">Before / After Architecture Diagram</h4>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="bg-stone-50 p-4 rounded-xl border border-stone-200">
+                  <span class="text-xs font-semibold text-slate-500 block mb-2 text-center">Before (AS-IS)</span>
+                  <div class="mermaid">
+                    graph TD
+                      classDef default fill:#f9f9f9,stroke:#333,stroke-width:1px;
+                      classDef leak fill:#fee2e2,stroke:#ef4444,stroke-width:2px;
+                      Client1[dirty_session_memory_sync] -->|Direct SQLite Conn| Ledger[Monolithic Ledger]
+                      Client2[TranscriptIngestWorker] -->|Direct SQLite Conn| Ledger
+                      Client3[GC Scripts] -->|Direct SQLite Conn| Ledger
+                      Ledger -->|Direct Read/Write| DB[(SQLite DB)]
+                      Ledger -->|Direct Read/Write| DB[(SQLite DB)]
+                      class Ledger leak;
+                  </div>
+                </div>
+                <div class="bg-emerald-50/30 p-4 rounded-xl border border-emerald-200/50">
+                  <span class="text-xs font-semibold text-slate-600 block mb-2 text-center">After (TO-BE)</span>
+                  <div class="mermaid">
+                    graph TD
+                      classDef default fill:#f9f9f9,stroke:#333,stroke-width:1px;
+                      classDef safe fill:#e6f8f9,stroke:#0d9488,stroke-width:2px;
+                      Client1[dirty_session_memory_sync] -->|gRPC/REST| API[Ledger Core API]
+                      Client2[TranscriptIngestWorker] -->|gRPC/REST| API
+                      Client3[GC Safety Container] -->|gRPC/REST| API
+                      API -->|Exclusive Access| DB[(PostgreSQL)]
+                      class API safe;
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Wins & Cost & Risk -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 text-sm">
+              <div class="bg-emerald-50/20 p-4 rounded-xl border border-emerald-100/50">
+                <h4 class="font-bold text-emerald-800 mb-2">아키텍처 개선 효과 (Wins)</h4>
+                <ul class="list-disc pl-4 space-y-1 text-slate-700 text-xs">
+                  <li><strong>Locality</strong>: 영속 SQLite 파일 및 스키마 마이그레이션 책임을 하나의 API 프록시 내에 가둬 스키마 변경 시 영향도를 격리합니다.</li>
+                  <li><strong>Leverage</strong>: 다중 워커 프로세스가 접근해도 SQLite Busy Lock 경합을 중앙 집중식 큐잉 및 트랜잭션으로 제어하여 처리량을 극대화합니다.</li>
+                  <li><strong>Interface/Seam</strong>: 복잡한 SQL 쿼리와 커넥션 풀을 API Seam 뒤에 숨겨 데이터 스토어 교체가 용이해집니다.</li>
+                  <li><strong>Tests</strong>: DB 물리 커넥션을 목킹할 필요 없이 API 클라이언트 목킹만으로 비즈니스 로직 테스트 격리가 용이해집니다.</li>
+                </ul>
+              </div>
+              <div class="bg-red-50/20 p-4 rounded-xl border border-red-100/50">
+                <h4 class="font-bold text-red-800 mb-2">컨테이너 분리 비용 (Separation Cost)</h4>
+                <div class="flex items-center gap-2 mb-2">
+                  <span class="px-2 py-0.5 rounded bg-red-100 text-red-800 font-bold text-xs">High</span>
+                </div>
+                <p class="text-slate-700 text-xs leading-relaxed">
+                  기존 코드베이스 전반에서 Ledger 클래스를 통해 직접 SQLite 커넥션을 맺고 수행하는 쿼리가 33개 테이블에 걸쳐 있어, 이를 API 클라이언트로 대체하는 데 드는 리팩토링 범위와 리스크가 매우 큽니다.
+                </p>
+              </div>
+              <div class="bg-rose-50/20 p-4 rounded-xl border border-rose-100/50">
+                <h4 class="font-bold text-rose-800 mb-2">위험성 및 ADR 갈등 요소 (Risks)</h4>
+                <p class="text-slate-700 text-xs leading-relaxed">
+                  데이터 액세스 레이어의 단일 장애점(SPOF)이 될 수 있으며 로컬 호출 대비 네트워크 레이턴시가 발생할 수 있어, 적절한 커넥션 풀링과 응답 타임아웃 튜닝이 필수적입니다.
+                </p>
+              </div>
+            </div>
+            <!-- Interface & Adapter Design Section for Candidate 2 -->
+            <div class="border-t border-slate-100 pt-6 mt-4">
+              <h4 class="text-sm font-bold text-slate-800 mb-3 flex items-center gap-1.5">
+                <span class="w-1.5 h-3.5 bg-blue-500 rounded-sm"></span>
+                Interface & Adapter Design
+              </h4>
+              <p class="text-xs text-slate-600 mb-4 leading-relaxed">
+                SQLite와 PostgreSQL의 SQL Dialect 차이(예: ON CONFLICT 등) 및 커넥션 풀 동작을 투명하게 포장하는 R/W 기저 데이터베이스 어댑터 사양입니다.
+              </p>
+              <div class="bg-slate-900 rounded-xl p-4 overflow-x-auto border border-slate-800 mb-4 shadow-inner">
+                <pre class="text-emerald-400 font-mono text-[11px] leading-normal"><code>class ILedgerCoreDbAdapter(ABC):
+                @abstractmethod
+                def execute_query(self, sql: str, params: tuple = ()) -> List[dict]:
+                    """Dialect를 자동 번역하여 쿼리를 실행하고 dict 형태의 Row를 반환"""
+                    pass
+
+                @abstractmethod
+                def transaction(self) -> IDbTransaction:
+                    """트랜잭션 컨텍스트 매니저 반환"""
+                    pass</code></pre>
+              </div>
+              <div class="bg-blue-50/30 border border-blue-100/50 rounded-xl p-3.5 text-xs text-slate-700">
+                <span class="font-bold text-blue-800 block mb-1">Test Survival Strategy</span>
+                <p class="text-[11px] leading-relaxed">
+                  테스트 헬퍼 함수는 <code class="font-mono text-blue-700 bg-white px-1 py-0.5 rounded border border-blue-100">SqliteAdapter</code>를 기본 바인딩하도록 고수하여 기존 478개 테스트의 SQLite 파일 격리 상태를 변경 없이 그대로 유지 보존합니다.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Candidate 3 Card -->
+          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 md:p-8 flex flex-col gap-6">
+            <div class="flex flex-wrap justify-between items-start gap-4">
+              <div>
+                <span class="text-xs font-bold text-slate-400 tracking-widest uppercase">Candidate 3</span>
+                <h3 class="text-2xl font-bold text-slate-900 mt-1">Ingress Status Machine & Queue Manager Container</h3>
+              </div>
+              <div class="flex gap-2">
+                <span class="px-2.5 py-1 rounded bg-blue-100 text-blue-800 text-xs font-semibold">Worth exploring</span>
+                <span class="px-2.5 py-1 rounded bg-slate-100 text-slate-800 text-xs font-semibold">docs-aligned</span>
+              </div>
+            </div>
+
+            <!-- Monospace Files -->
+            <div>
+              <h4 class="text-xs font-bold text-slate-500 uppercase mb-2">Files Involved</h4>
+              <div class="bg-slate-50 rounded-lg p-3 border border-slate-100 max-h-32 overflow-y-auto">
+                <ul class="font-mono text-xs text-slate-600 space-y-1">
+                  <li>worker/lib/agent_knowledge/ledger.py</li>
+                  <li>worker/lib/agent_knowledge/rag_ingress/__init__.py</li>
+                  <li>worker/lib/agent_knowledge/rag_ingress/state_cli.py</li>
+                  <li>worker/lib/agent_knowledge/session_memory/transcript_ingest.py</li>
+                </ul>
+              </div>
+            </div>
+
+            <!-- Problem & Deepening -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm text-slate-700">
+              <div class="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                <span class="font-bold text-slate-900 block mb-1">현상 및 문제점 (Problem)</span>
+                수집 데이터의 인입 상태 전이(queued -> indexing -> indexed)와 CAS 조건검증 로직이 원장 DB 쿼리와 복잡하게 결합되어 가독성과 책임 분리가 미흡합니다.
+              </div>
+              <div class="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                <span class="font-bold text-slate-900 block mb-1">제안 방향 (Proposed Deepening)</span>
+                Ingest Worker의 라이프사이클을 전담하며 트랜스크립트 청크의 상태 전이를 구동하는 독립적인 대기열 상태 기계 및 매니저 서비스를 구성합니다.
+              </div>
+            </div>
+
+            <!-- Before/After Mermaid Diagrams -->
+            <div>
+              <h4 class="text-xs font-bold text-slate-500 uppercase mb-3">Before / After Architecture Diagram</h4>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="bg-stone-50 p-4 rounded-xl border border-stone-200">
+                  <span class="text-xs font-semibold text-slate-500 block mb-2 text-center">Before (AS-IS)</span>
+                  <div class="mermaid">
+                    graph TD
+                      classDef default fill:#f9f9f9,stroke:#333,stroke-width:1px;
+                      classDef leak fill:#fee2e2,stroke:#ef4444,stroke-width:2px;
+                      Ingest[TranscriptIngestWorker] -->|Direct Call| Ledger[Monolithic Ledger]
+                      Ledger -->|CAS state query| DB[(SQLite DB)]
+                      class Ledger leak;
+                  </div>
+                </div>
+                <div class="bg-emerald-50/30 p-4 rounded-xl border border-emerald-200/50">
+                  <span class="text-xs font-semibold text-slate-600 block mb-2 text-center">After (TO-BE)</span>
+                  <div class="mermaid">
+                    graph TD
+                      classDef default fill:#f9f9f9,stroke:#333,stroke-width:1px;
+                      classDef safe fill:#e6f8f9,stroke:#0d9488,stroke-width:2px;
+                      Ingest[TranscriptIngestWorker] -->|State Event| QM[Queue Manager Container]
+                      QM -->|Update State API| API[Ledger Core API]
+                      API -->|Exclusive Access| DB[(PostgreSQL)]
+                      class QM,API safe;
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Wins & Cost & Risk -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 text-sm">
+              <div class="bg-emerald-50/20 p-4 rounded-xl border border-emerald-100/50">
+                <h4 class="font-bold text-emerald-800 mb-2">아키텍처 개선 효과 (Wins)</h4>
+                <ul class="list-disc pl-4 space-y-1 text-slate-700 text-xs">
+                  <li><strong>Locality</strong>: 트랜스크립트 수집 파이프라인의 인입/상태 전환 로직과 일반 원장 쿼리 기능의 관심사가 완전 격리됩니다.</li>
+                  <li><strong>Leverage</strong>: Ingress 상태 전이 메서드가 이미 명확한 API(mark_enqueued 등)로 고립되어 있어 원격 큐 관리자로의 이관이 손쉽습니다.</li>
+                  <li><strong>Interface/Seam</strong>: CAS 패턴 기반 상태 업데이트 전이를 API 경계 뒤로 캡슐화합니다.</li>
+                  <li><strong>Tests</strong>: 복잡한 인입 예외 케이스(parse fail 등) 상태 머신 테스트를 실제 원장 파일 생성 없이 메모리 목 기반으로 고속 수행 가능합니다.</li>
+                </ul>
+              </div>
+              <div class="bg-green-50/20 p-4 rounded-xl border border-green-100/50">
+                <h4 class="font-bold text-green-800 mb-2">컨테이너 분리 비용 (Separation Cost)</h4>
+                <div class="flex items-center gap-2 mb-2">
+                  <span class="px-2 py-0.5 rounded bg-green-100 text-green-800 font-bold text-xs">Low</span>
+                </div>
+                <p class="text-slate-700 text-xs leading-relaxed">
+                  인입 데이터 상태 변경 및 작업 큐 처리 위주이므로, DB 직접 액세스 대신 Ledger Core API를 간접 호출하도록 하여 가볍게 격리할 수 있기 때문입니다.
+                </p>
+              </div>
+              <div class="bg-rose-50/20 p-4 rounded-xl border border-rose-100/50">
+                <h4 class="font-bold text-rose-800 mb-2">위험성 및 ADR 갈등 요소 (Risks)</h4>
+                <p class="text-slate-700 text-xs leading-relaxed">
+                  대량 청크 인입 시 순간적 큐 부하로 상태 전이 정합성이 흔들릴 수 있으므로 분산 락킹이나 FIFO 보장 큐와의 결합 설계를 병행해야 합니다.
+                </p>
+              </div>
+            </div>
+            <!-- Interface & Adapter Design Section for Candidate 3 -->
+            <div class="border-t border-slate-100 pt-6 mt-4">
+              <h4 class="text-sm font-bold text-slate-800 mb-3 flex items-center gap-1.5">
+                <span class="w-1.5 h-3.5 bg-purple-500 rounded-sm"></span>
+                Interface & Adapter Design (LLM Brain / Native Mirroring)
+              </h4>
+              <p class="text-xs text-slate-600 mb-4 leading-relaxed">
+                검색 시 세션/프로젝트 영역의 경계를 보장하는 테넌트 인가 확인 및 RAGFlow 미러링 동기화를 안전하게 수행하기 위한 게이트웨이 인터페이스입니다.
+              </p>
+              <div class="bg-slate-900 rounded-xl p-4 overflow-x-auto border border-slate-800 mb-4 shadow-inner">
+                <pre class="text-emerald-400 font-mono text-[11px] leading-normal"><code>class INativeMemoryMirroring(ABC):
+                @abstractmethod
+                def authorize_retrieval(self, brain_id: str, project: str, session_id_hash: str) -> bool:
+                    """세션 및 프로젝트 단위의 접근 인가 검증"""
+                    pass
+
+                @abstractmethod
+                def mirror_state(self, statement_id: str, brain_id: str, original_hash: str) -> dict:
+                    """로컬-RAGFlow 간 네이티브 메모리 미러 정보 실시간 동기화"""
+                    pass</code></pre>
+              </div>
+              <div class="bg-purple-50/30 border border-purple-100/50 rounded-xl p-3.5 text-xs text-slate-700">
+                <span class="font-bold text-purple-800 block mb-1">Test Survival Strategy</span>
+                <p class="text-[11px] leading-relaxed">
+                  단위 테스트 내에 <code class="font-mono text-purple-700 bg-white px-1 py-0.5 rounded border border-purple-100">MockRAGFlowClient</code>와 가상 인 메모리 맵을 제공하여 외부 API 연동 없이 신속하고 격리된 인가 시나리오 테스트를 수행합니다.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Candidate 4 Card -->
+          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 md:p-8 flex flex-col gap-6">
+            <div class="flex flex-wrap justify-between items-start gap-4">
+              <div>
+                <span class="text-xs font-bold text-slate-400 tracking-widest uppercase">Candidate 4</span>
+                <h3 class="text-2xl font-bold text-slate-900 mt-1">Memory Promotion State Machine Container</h3>
+              </div>
+              <div class="flex gap-2">
+                <span class="px-2.5 py-1 rounded bg-blue-100 text-blue-800 text-xs font-semibold">Worth exploring</span>
+                <span class="px-2.5 py-1 rounded bg-slate-100 text-slate-800 text-xs font-semibold">docs-aligned</span>
+              </div>
+            </div>
+
+            <!-- Monospace Files -->
+            <div>
+              <h4 class="text-xs font-bold text-slate-500 uppercase mb-2">Files Involved</h4>
+              <div class="bg-slate-50 rounded-lg p-3 border border-slate-100 max-h-32 overflow-y-auto">
+                <ul class="font-mono text-xs text-slate-600 space-y-1">
+                  <li>worker/lib/agent_knowledge/ledger.py</li>
+                  <li>worker/lib/agent_knowledge/session_memory/dirty_session_memory_sync.py</li>
+                  <li>worker/lib/agent_knowledge/session_memory/memory_regeneration.py</li>
+                  <li>worker/lib/agent_knowledge/session_memory/neuron_session_memory.py</li>
+                </ul>
+              </div>
+            </div>
+
+            <!-- Problem & Deepening -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm text-slate-700">
+              <div class="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                <span class="font-bold text-slate-900 block mb-1">현상 및 문제점 (Problem)</span>
+                메모리 빌드 재생성 후 active snapshot으로의 승격(promotion) 여부를 판정하기 위한 검증 SQL 로직이 원장 레이어와 물리적으로 강하게 밀결합되어 있습니다.
+              </div>
+              <div class="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                <span class="font-bold text-slate-900 block mb-1">제안 방향 (Proposed Deepening)</span>
+                메모리 스냅샷 빌드 및 100% 매칭 검증을 독립적으로 관리하며 최종 승격 이벤트를 발행하는 상태 관리 엔진을 분리합니다.
+              </div>
+            </div>
+
+            <!-- Before/After Mermaid Diagrams -->
+            <div>
+              <h4 class="text-xs font-bold text-slate-500 uppercase mb-3">Before / After Architecture Diagram</h4>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="bg-stone-50 p-4 rounded-xl border border-stone-200">
+                  <span class="text-xs font-semibold text-slate-500 block mb-2 text-center">Before (AS-IS)</span>
+                  <div class="mermaid">
+                    graph TD
+                      classDef default fill:#f9f9f9,stroke:#333,stroke-width:1px;
+                      classDef leak fill:#fee2e2,stroke:#ef4444,stroke-width:2px;
+                      Sync[dirty_session_memory_sync] -->|Direct Complex SQL JOIN| Ledger[Monolithic Ledger]
+                      Ledger -->|Write snap & Promotion| DB[(SQLite DB)]
+                      class Ledger leak;
+                  </div>
+                </div>
+                <div class="bg-emerald-50/30 p-4 rounded-xl border border-emerald-200/50">
+                  <span class="text-xs font-semibold text-slate-600 block mb-2 text-center">After (TO-BE)</span>
+                  <div class="mermaid">
+                    graph TD
+                      classDef default fill:#f9f9f9,stroke:#333,stroke-width:1px;
+                      classDef safe fill:#e6f8f9,stroke:#0d9488,stroke-width:2px;
+                      Sync[dirty_session_memory_sync] -->|Build Done| MPE[Memory Promotion Engine]
+                      MPE -->|Verify Coverage & Snap| API[Ledger Core API]
+                      API -->|Exclusive Access| DB[(PostgreSQL)]
+                      class MPE,API safe;
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Wins & Cost & Risk -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 text-sm">
+              <div class="bg-emerald-50/20 p-4 rounded-xl border border-emerald-100/50">
+                <h4 class="font-bold text-emerald-800 mb-2">아키텍처 개선 효과 (Wins)</h4>
+                <ul class="list-disc pl-4 space-y-1 text-slate-700 text-xs">
+                  <li><strong>Locality</strong>: 신규 메모리 재생성 로직과 영속화 승격 승인 상태 기계의 흐름이 중앙 빌더 엔진 프로세스 내로 응집됩니다.</li>
+                  <li><strong>Leverage</strong>: RAGFlow로의 업로드 및 상태 업데이트 경쟁을 원격 API 레벨에서 중재하여 빌드 충돌과 중복 승격을 원천 차단합니다.</li>
+                  <li><strong>Interface/Seam</strong>: 복잡한 조인 쿼리를 동반한 데이터 정합성 검사(edge complete 등)를 API Seam 내부 비즈니스 로직으로 감춥니다.</li>
+                  <li><strong>Tests</strong>: 빌드 결과물 업로드 실패 및 검증 미통과 edge case에 대한 승격 보류 상태 전이를 격리된 가상 환경에서 명확히 검증 가능합니다.</li>
+                </ul>
+              </div>
+              <div class="bg-orange-50/20 p-4 rounded-xl border border-orange-100/50">
+                <h4 class="font-bold text-orange-800 mb-2">컨테이너 분리 비용 (Separation Cost)</h4>
+                <div class="flex items-center gap-2 mb-2">
+                  <span class="px-2 py-0.5 rounded bg-orange-100 text-orange-800 font-bold text-xs">Medium</span>
+                </div>
+                <p class="text-slate-700 text-xs leading-relaxed">
+                  빌드가 완료된 메모리를 RAGFlow API에 등록하고 원장 DB에 반영하는 양방향 외부 API 의존성이 존재하기 때문입니다.
+                </p>
+              </div>
+              <div class="bg-rose-50/20 p-4 rounded-xl border border-rose-100/50">
+                <h4 class="font-bold text-rose-800 mb-2">위험성 및 ADR 갈등 요소 (Risks)</h4>
+                <p class="text-slate-700 text-xs leading-relaxed">
+                  비동기 빌드 과정에서 일시적으로 dirty 상태 추적과 실제 승격 시점 간 시차가 발생하므로, 락킹 타임아웃 튜닝이 필수적입니다.
+                </p>
+              </div>
+            </div>
+            <!-- Interface & Adapter Design Section for Candidate 4 -->
+            <div class="border-t border-slate-100 pt-6 mt-4">
+              <h4 class="text-sm font-bold text-slate-800 mb-3 flex items-center gap-1.5">
+                <span class="w-1.5 h-3.5 bg-amber-500 rounded-sm"></span>
+                Interface & Adapter Design (Memory Promotion)
+              </h4>
+              <p class="text-xs text-slate-600 mb-4 leading-relaxed">
+                다중 빌드 워커 간의 동시성 승격 경쟁(Race Condition)을 원천 차단하고 원자적 커버리지 매칭 검증을 동기화하기 위한 락 및 승격 엔진 명세입니다.
+              </p>
+              <div class="bg-slate-900 rounded-xl p-4 overflow-x-auto border border-slate-800 mb-4 shadow-inner">
+                <pre class="text-emerald-400 font-mono text-[11px] leading-normal"><code>class IMemoryPromotionSync(ABC):
+                @abstractmethod
+                def acquire_promotion_lock(self, session_id_hash: str) -> bool:
+                    """승격 상호 배제를 위한 분산 락 획득"""
+                    pass
+
+                @abstractmethod
+                def verify_and_promote(self, session_id_hash: str, new_knowledge_id: str, edges: List[dict]) -> bool:
+                    """정합성 커버리지 확인 후 active snapshot 승격 완료 처리"""
+                    pass</code></pre>
+              </div>
+              <div class="bg-amber-50/30 border border-amber-100/50 rounded-xl p-3.5 text-xs text-slate-700">
+                <span class="font-bold text-amber-800 block mb-1">Test Survival Strategy</span>
+                <p class="text-[11px] leading-relaxed">
+                  테스트 환경에는 별도의 PostgreSQL/Redis 인프라 락킹 대신 파이썬의 표준 <code class="font-mono text-amber-700 bg-white px-1 py-0.5 rounded border border-amber-100">threading.Lock</code> 기반 로컬 어댑터를 주입해 격리된 동시성 통과를 달성합니다.
+                </p>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- Roadmap Section -->
+      <section class="border-t border-slate-200 pt-12">
+        <h2 class="text-2xl font-bold text-slate-900 mb-6">컨테이너 분리 로드맵 (Container Separation Roadmap)</h2>
+        <div class="relative pl-6 border-l-2 border-slate-200 space-y-8">
+          
+          <!-- Step 1 -->
+          <div class="relative">
+            <span class="absolute -left-[31px] top-1.5 w-4 h-4 rounded-full bg-slate-900 border-4 border-slate-50"></span>
+            <span class="text-xs font-bold text-slate-400 block uppercase">1단계: API Seam 설계 및 마이그레이션 준비</span>
+            <h4 class="text-lg font-bold text-slate-900 mt-1">인터페이스 경계(Seam) 획정 및 API 클라이언트 개발</h4>
+            <p class="text-slate-600 text-sm mt-1 leading-relaxed">
+              ledger.py에 산재한 SQLite 커넥션 호출을 DB Access Client 및 API 구조로 캡슐화하기 위한 Seam을 설계합니다. 기존 단위 테스트를 보존하면서 DB에 직접 접근하는 쿼리 로직을 격리합니다.
+            </p>
+          </div>
+
+          <!-- Step 2 -->
+          <div class="relative">
+            <span class="absolute -left-[31px] top-1.5 w-4 h-4 rounded-full bg-emerald-500 border-4 border-slate-50"></span>
+            <span class="text-xs font-bold text-emerald-500 block uppercase">2단계: GC Safety Lane & Auditing Container 분리</span>
+            <h4 class="text-lg font-bold text-slate-900 mt-1">비가역 삭제 및 로깅 기능 격리 적용 (최우선)</h4>
+            <p class="text-slate-600 text-sm mt-1 leading-relaxed">
+              GC 스케줄러 실행 및 감사 로그, 삭제 전 백업 로직을 독립적인 프로세스/컨테이너로 전환합니다. 로컬 원장의 비활성화 마킹 업데이트를 위해 REST/gRPC API를 신설하여 결함 블래스트 래디우스를 차단합니다.
+            </p>
+          </div>
+
+          <!-- Step 3 -->
+          <div class="relative">
+            <span class="absolute -left-[31px] top-1.5 w-4 h-4 rounded-full bg-slate-900 border-4 border-slate-50"></span>
+            <span class="text-xs font-bold text-slate-400 block uppercase">3단계: Ledger Core API 컨테이너 구현</span>
+            <h4 class="text-lg font-bold text-slate-900 mt-1">독점적 DB 액세스를 위한 API 게이트웨이 전환</h4>
+            <p class="text-slate-600 text-sm mt-1 leading-relaxed">
+              SQLite DB 파일에 직접 액세스하는 단일 프록시 서비스를 띄우고, 각 워커 및 메모리 재생성 엔진이 REST/gRPC 호출을 통해서만 데이터 입출력을 처리하도록 Ledger Core API 서비스로 완전 전환합니다.
+            </p>
+          </div>
+
+          <!-- Step 4 -->
+          <div class="relative">
+            <span class="absolute -left-[31px] top-1.5 w-4 h-4 rounded-full bg-slate-900 border-4 border-slate-50"></span>
+            <span class="text-xs font-bold text-slate-400 block uppercase">4단계: Memory Promotion & Ingress State Machine 통합 완료</span>
+            <h4 class="text-lg font-bold text-slate-900 mt-1">분산 이벤트 기반 아키텍처 완성 및 원장 완벽 격리</h4>
+            <p class="text-slate-600 text-sm mt-1 leading-relaxed">
+              Ingress 상태 머신 및 메모리 빌드 승격 처리를 API 레벨 및 메시지 이벤트 큐 방식으로 최종 전환하여, 로컬 DB 파일 잠금 경합을 방지하고 분산 환경에서의 고가용성을 달성합니다.
+            </p>
+          </div>
+
+        </div>
+      </section>
+
+    </main>
+
+    <footer class="bg-slate-100 border-t border-slate-200 py-8 text-center text-xs text-slate-500">
+      <p>© 2026 Neurons Team. All rights reserved. | Confidential Architecture Review Report</p>
+    </footer>
+  </body>
+</html>
