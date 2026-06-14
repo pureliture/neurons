@@ -4,7 +4,23 @@ import json
 
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.memory_miner import build_memory_card_candidate_from_source_span
-from agent_knowledge.session_memory.autopilot_cli import main, run_autopilot_command
+from agent_knowledge.session_memory.autopilot_cli import (
+    main,
+    mine_live_candidates,
+    run_autopilot_command,
+)
+
+
+class _FakeRagflow:
+    def __init__(self, chunks, completion):
+        self._chunks = chunks
+        self._completion = completion
+
+    def list_transcript_memory_chunks(self, *, project, query="", limit=200, **_):
+        return [dict(c, project=project) for c in self._chunks]
+
+    def chat_completion(self, messages, *, llm_id=""):
+        return self._completion
 
 
 PROJECT = "neurons"
@@ -53,6 +69,33 @@ def test_run_autopilot_command_populates_ledger_and_returns_recall_snapshot(tmp_
     assert result["cycle"]["accepted_count"] == 2
     assert result["cycle"]["needs_review_count"] == 0
     assert result["recall"]["current_count"] == 2
+
+
+_ENVELOPE_COMPLETION = (
+    '[{"card_type": "decision", "title": "auth method", "statement": "Auth now uses OAuth.", '
+    '"typed_payload": {"decision": "use OAuth", "rationale": "broader support", '
+    '"alternatives": ["JWT"], "consequence": "migration", "authority_ref": "adr-auth"}}]'
+)
+
+
+def test_mine_live_candidates_then_run_command_end_to_end(tmp_path):
+    ragflow = _FakeRagflow(
+        chunks=[{"redacted_text": "auth switched to OAuth", "knowledge_id": "k1", "content_hash": "sha256:c1", "provider": "codex"}],
+        completion=_ENVELOPE_COMPLETION,
+    )
+
+    candidates = mine_live_candidates(ragflow=ragflow, project=PROJECT)
+    assert len(candidates) == 1
+    assert candidates[0]["card_type"] == "decision"
+    assert candidates[0]["lifecycle_state"] == "candidate"
+    assert candidates[0].get("memory_id")
+
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    result = run_autopilot_command(
+        ledger=ledger, candidates=candidates, project=PROJECT, refresh_watermark="live"
+    )
+    assert result["cycle"]["accepted_count"] == 1
+    assert result["recall"]["current_count"] == 1
 
 
 def test_main_reads_candidates_json_and_writes_ledger(tmp_path, capsys):
