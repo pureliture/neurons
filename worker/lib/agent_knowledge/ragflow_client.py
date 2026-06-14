@@ -437,16 +437,25 @@ def _drop_turn_window_subsumed_records(records: list[dict]) -> list[dict]:
 def _transcript_memory_content_by_document(ragflow, dataset_ids, document_ids, query, limit) -> dict[str, str]:
     by_document: dict[str, str] = {}
     if hasattr(ragflow, "list_document_chunks"):
-        for dataset_id in dataset_ids:
-            for document_id in document_ids:
-                if by_document.get(document_id):
-                    continue
-                try:
-                    parts = ragflow.list_document_chunks(dataset_id, document_id)
-                except Exception:  # noqa: BLE001 - read-SoT must fail closed
-                    parts = []
-                if parts:
-                    by_document[document_id] = "".join(parts)
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _fetch(task):
+            dataset_id, document_id = task
+            try:
+                parts = ragflow.list_document_chunks(dataset_id, document_id)
+            except Exception:  # noqa: BLE001 - read-SoT must fail closed
+                parts = []
+            return document_id, ("".join(parts) if parts else "")
+
+        # RAGFlow has no batch chunks endpoint, so the per-document fan-out is the
+        # dominant build wall-clock. Reads are stateless; run them concurrently and
+        # merge first-non-empty-per-id (preserves the prior sequential semantics).
+        tasks = [(dataset_id, document_id) for dataset_id in dataset_ids for document_id in document_ids]
+        if tasks:
+            with ThreadPoolExecutor(max_workers=min(8, len(tasks))) as executor:
+                for document_id, content in executor.map(_fetch, tasks):
+                    if content and not by_document.get(document_id):
+                        by_document[document_id] = content
         return by_document
 
     grouped: dict[str, list[str]] = {}

@@ -59,18 +59,37 @@ def seed_dirty_session_memory_from_deliveries(
     ledger: Ledger,
     dataset_ids,
 ) -> dict:
-    """Seed neuron-local dirty session-memory rows behind delivered documents."""
+    """Seed neuron-local dirty session-memory rows behind delivered documents.
+
+    Per-document meta lookups dominate the seed wall-clock (one RAGFlow query
+    each, no batch endpoint). They are stateless reads, so fetch them
+    concurrently; ledger writes stay serial in delivery order with the same
+    session dedup, so the result is identical to the prior sequential scan.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    items = [
+        (str(d.get("document_ref") or ""), str(d.get("updated_at") or ""))
+        for d in (deliveries or [])
+    ]
+    new_watermark = max((updated_at for _, updated_at in items), default="")
+    refs = list(dict.fromkeys(ref for ref, _ in items if ref))  # unique, order-preserving
+
+    def _meta(ref: str):
+        return ref, _transcript_memory_meta_for_document(ragflow, dataset_ids, ref)
+
+    meta_by_ref: dict[str, dict | None] = {}
+    if refs:
+        with ThreadPoolExecutor(max_workers=min(8, len(refs))) as executor:
+            for ref, meta in executor.map(_meta, refs):
+                meta_by_ref[ref] = meta
+
     seen_sessions: set[str] = set()
-    new_watermark = ""
     seeded = 0
-    for delivery in deliveries or []:
-        updated_at = str(delivery.get("updated_at") or "")
-        if updated_at > new_watermark:
-            new_watermark = updated_at
-        document_ref = str(delivery.get("document_ref") or "")
+    for document_ref, _updated_at in items:
         if not document_ref:
             continue
-        meta = _transcript_memory_meta_for_document(ragflow, dataset_ids, document_ref)
+        meta = meta_by_ref.get(document_ref)
         if not meta:
             continue
         meta_type = meta.get("result_type") or meta.get("type") or meta.get("kind")
