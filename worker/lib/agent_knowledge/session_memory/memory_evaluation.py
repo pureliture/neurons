@@ -216,6 +216,27 @@ def _readiness_failure_reason(summary: Mapping[str, Any], policy: Mapping[str, A
     return ""
 
 
+def classify_candidate_block_reason(candidate: Mapping[str, Any]) -> str:
+    """Structural-safety block reason for the autopilot human-approval accept path.
+
+    This is the B-core subset that must hold even at cold start (0 feedback): it
+    refuses structurally-unsafe candidates (conflict, missing source, high-severity
+    drift) WITHOUT the feedback-gated auto-policy maturity checks (governance tier,
+    card-type allowlist, confidence floor, accepted-evidence) used by
+    _forced_review_reason. Returns "" when the candidate is safe to auto-accept.
+    """
+    if not candidate.get("source_refs"):
+        return "missing_source_refs"
+    if candidate.get("conflicts"):
+        return "conflict"
+    if candidate.get("currentness") == "conflicted":
+        return "conflict"
+    payload = candidate.get("typed_payload") or {}
+    if candidate.get("card_type") == "drift" and payload.get("severity") == "high":
+        return "high_severity_drift"
+    return ""
+
+
 def _forced_review_reason(card: Mapping[str, Any], policy: Mapping[str, Any]) -> str:
     if not card.get("source_refs"):
         return "missing_source_refs"

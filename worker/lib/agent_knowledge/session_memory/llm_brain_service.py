@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .memory_evaluation import apply_auto_acceptance_plan
-from .memory_promotion import human_approve_memory_card_candidate
+from .memory_evaluation import apply_auto_acceptance_plan, classify_candidate_block_reason
+from .memory_promotion import commit_supersession, human_approve_memory_card_candidate
 from .ragflow_projection import build_projection_job, execute_projection_job
 
 
@@ -23,6 +23,9 @@ class LLMBrainMemoryService:
         user_reason: str | None = None,
         timestamp: str | None = None,
     ) -> dict:
+        block_reason = classify_candidate_block_reason(candidate)
+        if block_reason:
+            raise ValueError(f"candidate blocked from auto-accept: {block_reason}")
         promotion = human_approve_memory_card_candidate(
             candidate,
             approved_by=approved_by,
@@ -67,6 +70,43 @@ class LLMBrainMemoryService:
             "canonical_write_performed": True,
             "accepted_card": accepted_card,
             "application": application,
+        }
+
+    def supersede_accepted_card(
+        self,
+        *,
+        old_card: Mapping[str, Any],
+        new_candidate: Mapping[str, Any],
+        approved_by: str,
+        decision_id: str,
+        timestamp: str | None = None,
+    ) -> dict:
+        """Accept a new current card and atomically demote the old card it replaces.
+
+        The new candidate is accepted via the human-approval path (the only accept
+        primitive that runs at cold start), then the old card is re-written to
+        currentness=superseded so it leaves both current and accepted recall lanes.
+        """
+        promotion = human_approve_memory_card_candidate(
+            new_candidate,
+            approved_by=approved_by,
+            decision_id=decision_id,
+            timestamp=timestamp,
+        )
+        new_card = self.ledger.upsert_llm_brain_memory_card(promotion["accepted_card"])
+        feedback_record = self.ledger.upsert_llm_brain_feedback_record(promotion["feedback_record"])
+        demoted = commit_supersession(
+            old_card,
+            superseded_by=new_card["memory_id"],
+            timestamp=timestamp,
+        )
+        superseded_card = self.ledger.upsert_llm_brain_memory_card(demoted)
+        return {
+            "schema_version": "llm_brain_supersession_commit.v1",
+            "canonical_write_performed": True,
+            "new_card": new_card,
+            "superseded_card": superseded_card,
+            "feedback_record": feedback_record,
         }
 
     def enqueue_projection_for_card(self, card: Mapping[str, Any]) -> dict:

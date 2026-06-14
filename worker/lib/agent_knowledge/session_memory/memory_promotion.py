@@ -214,6 +214,35 @@ def suggest_superseded_classification(
     }
 
 
+def commit_supersession(
+    old_card: Mapping[str, Any],
+    *,
+    superseded_by: str,
+    timestamp: str | None = None,
+) -> dict:
+    """Demote an accepted card to superseded current-truth (committing, not suggested).
+
+    Unlike suggest_superseded_classification (which only proposes), this re-writes the
+    old card so it leaves the current lane. lifecycle_state stays human_accepted/auto_accepted
+    (the card was genuinely accepted); currentness flips to superseded so recall excludes it
+    from current AND accepted lanes. superseded_by satisfies the state invariant.
+    """
+
+    source = validate_memory_card_envelope(old_card)
+    if not superseded_by:
+        raise ValueError("commit_supersession requires a superseded_by memory_id")
+    demoted = deepcopy(source)
+    demoted.update(
+        {
+            "currentness": "superseded",
+            "freshness": "historical",
+            "superseded_by": [superseded_by],
+        }
+    )
+    validate_memory_card_envelope(demoted)
+    return demoted
+
+
 def mark_candidate_needs_review(
     candidate: Mapping[str, Any],
     *,
