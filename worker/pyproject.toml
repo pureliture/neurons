@@ -30,7 +30,7 @@ session-memory-repair-zombie-snapshots = "agent_knowledge.session_memory.zombie_
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["lib"]
+pythonpath = ["lib", "eval"]
 addopts = ["-p", "no:cacheprovider"]
 
 [tool.setuptools]
