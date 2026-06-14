@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 _GRADED_LANES = ("current", "accepted", "archive", "conflicts")
@@ -34,30 +34,74 @@ def load_golden(path: str) -> list[dict]:
     return golden
 
 
-def _lanes_present_by_statement(recall: Mapping[str, Any]) -> dict[str, set[str]]:
-    present: dict[str, set[str]] = {}
-    for lane in _GRADED_LANES:
-        for item in recall.get(lane) or []:
-            if not isinstance(item, Mapping):
-                continue
-            key = _norm(item.get("summary") or item.get("render_text") or item.get("title"))
-            if key:
-                present.setdefault(key, set()).add(lane)
-    return present
+def _item_text(item: Mapping[str, Any]) -> str:
+    return str(item.get("summary") or item.get("render_text") or item.get("title") or "")
+
+
+def _default_match(statement: Any, item: Mapping[str, Any]) -> bool:
+    return bool(_norm(statement)) and _norm(statement) == _norm(_item_text(item))
+
+
+def _cosine(a: list, b: list) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def build_cosine_match_fn(
+    embed_fn: Callable[[str], list],
+    *,
+    threshold: float = 0.8,
+) -> Callable[[Any, Mapping[str, Any]], bool]:
+    """Semantic match: cosine(embed(golden statement), embed(recall item text)) >= threshold.
+
+    Credits LLM-paraphrased recall that exact normalized match would miss. Embeddings are
+    cached per text. Used live with build_vertex_embedding_fn; unit-tested with a fake embed_fn.
+    """
+    cache: dict[str, list] = {}
+
+    def _embed(text: str) -> list:
+        key = _norm(text)
+        if key not in cache:
+            cache[key] = embed_fn(text)
+        return cache[key]
+
+    def match(statement: Any, item: Mapping[str, Any]) -> bool:
+        text = _item_text(item)
+        if not _norm(statement) or not _norm(text):
+            return False
+        return _cosine(_embed(str(statement)), _embed(text)) >= threshold
+
+    return match
+
+
+def _lane_items(recall: Mapping[str, Any]) -> dict[str, list]:
+    return {
+        lane: [it for it in (recall.get(lane) or []) if isinstance(it, Mapping)]
+        for lane in _GRADED_LANES
+    }
 
 
 def grade_recall_against_golden(
     *,
     recall: Mapping[str, Any],
     golden: Sequence[Mapping[str, Any]],
+    match_fn: Callable[[Any, Mapping[str, Any]], bool] | None = None,
 ) -> dict:
-    present = _lanes_present_by_statement(recall)
+    match = match_fn or _default_match
+    lane_items = _lane_items(recall)
     silent_lies: list[dict] = []
     current_expected = 0
     current_found = 0
 
     for entry in golden:
-        appeared = present.get(_norm(entry.get("canonical_statement")), set())
+        statement = entry.get("canonical_statement")
+        appeared = {
+            lane for lane, items in lane_items.items() if any(match(statement, it) for it in items)
+        }
         for forbidden_lane in entry.get("must_not_appear_in") or []:
             if forbidden_lane in appeared:
                 silent_lies.append(
