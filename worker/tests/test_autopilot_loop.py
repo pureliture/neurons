@@ -56,6 +56,47 @@ def test_cycle_accepts_clean_and_routes_blocked_to_review(tmp_path):
     assert [c["memory_id"] for c in stored_current] == [clean["memory_id"]]
 
 
+def test_cycle_projects_accepted_and_superseded_cards_to_mirror(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+
+    old_card = run_autopilot_cycle(
+        candidates=[_candidate()], ledger=ledger, refresh_watermark="w1"
+    )["accepted"][0]
+
+    calls: list[str] = []
+
+    class FakeProjectionClient:
+        def upsert_memory_card(self, payload, *, idempotency_key):
+            calls.append(payload["memory_id"])
+            return {"document_id": "doc_" + payload["memory_id"][:6]}
+
+    new_candidate = _candidate(
+        source_ref={"source_id": "src_new"},
+        span_ref={"span_id": "span_new"},
+        content_hash="sha256:new",
+        redacted_summary="Auth now uses OAuth.",
+    )
+    result = run_autopilot_cycle(
+        candidates=[new_candidate],
+        ledger=ledger,
+        refresh_watermark="w2",
+        supersede_detector=lambda c, _l: old_card,
+        projection_client=FakeProjectionClient(),
+    )
+
+    new_id = result["accepted"][0]["memory_id"]
+    # both the new current card and the demoted old card are projected to the mirror
+    assert new_id in calls
+    assert old_card["memory_id"] in calls
+    assert result["projected_count"] == 2
+
+
+def test_cycle_skips_projection_when_no_client(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    result = run_autopilot_cycle(candidates=[_candidate()], ledger=ledger, refresh_watermark="wm")
+    assert result["projected_count"] == 0
+
+
 def test_cycle_supersedes_when_detector_returns_old_card(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite")
 
