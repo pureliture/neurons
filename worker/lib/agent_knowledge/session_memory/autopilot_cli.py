@@ -78,6 +78,7 @@ def run_autopilot_command(
     project: str,
     refresh_watermark: str,
     supersede_detector: Any | None = None,
+    projection_client: Any | None = None,
     timestamp: str | None = None,
 ) -> dict:
     cycle = run_autopilot_cycle(
@@ -85,6 +86,7 @@ def run_autopilot_command(
         ledger=ledger,
         refresh_watermark=refresh_watermark,
         supersede_detector=supersede_detector,
+        projection_client=projection_client,
         timestamp=timestamp,
     )
     recall = run_brain_query_v2(
@@ -101,6 +103,7 @@ def run_autopilot_command(
             "accepted_count": len(cycle["accepted"]),
             "needs_review_count": len(cycle["needs_review"]),
             "superseded_count": len(cycle["superseded"]),
+            "projected_count": cycle.get("projected_count", 0),
         },
         "recall": {
             "current_count": len(recall.get("current") or []),
@@ -136,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ledger = Ledger(args.ledger)
     supersede_detector = None
+    projection_client = None
 
     if args.candidates_json:
         with open(args.candidates_json, encoding="utf-8") as handle:
@@ -158,11 +162,16 @@ def main(argv: list[str] | None = None) -> int:
             max_candidates=args.max_candidates,
         )
         if args.derived_dataset_id:
+            from .ragflow_projection import RagflowMemoryCardProjectionClient
+
             supersede_detector = build_supersede_detector(
                 ragflow=ragflow,
                 judge_fn=build_ragflow_judge_fn(ragflow, llm_id=args.llm_id),
                 dataset_id=args.derived_dataset_id,
                 project=args.project,
+            )
+            projection_client = RagflowMemoryCardProjectionClient(
+                ragflow=ragflow, dataset_id=args.derived_dataset_id
             )
 
     result = run_autopilot_command(
@@ -171,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         project=args.project,
         refresh_watermark=args.refresh_watermark,
         supersede_detector=supersede_detector,
+        projection_client=projection_client,
     )
     print(json.dumps(result, sort_keys=True))
     return 0
