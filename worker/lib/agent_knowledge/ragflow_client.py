@@ -66,6 +66,39 @@ class RagflowHttpClient:
             raise RagflowApiError("upload response missing document id")
         return {"document_id": document_id, "run": document.get("run", "UNSTART")}
 
+    def upload_file(self, dataset_id: str, file_bytes: bytes, *, filename: str, content_type: str = "application/octet-stream") -> dict:
+        """Upload a raw file (PDF/PPTX/DOCX/...) for RAGFlow native parsing.
+
+        Unlike ``upload_document`` (which uploads UTF-8 text), this forwards the
+        original file bytes unchanged so RAGFlow parses the real document. RAGFlow
+        dispatches its parser by the filename extension, so ``filename`` must keep
+        the source extension."""
+        boundary = "agentknowledge-" + uuid.uuid4().hex
+        safe_filename = filename.replace('"', "_").replace("\r", "_").replace("\n", "_")
+        body = b"".join(
+            [
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="file"; filename="{safe_filename}"\r\n'.encode(),
+                f"Content-Type: {content_type}\r\n\r\n".encode(),
+                file_bytes,
+                b"\r\n",
+                f"--{boundary}--\r\n".encode(),
+            ]
+        )
+        data = self._request(
+            "POST",
+            f"/api/v1/datasets/{quote(dataset_id)}/documents",
+            body=body,
+            content_type=f"multipart/form-data; boundary={boundary}",
+        )
+        document = data[0] if isinstance(data, list) else data
+        if not isinstance(document, dict):
+            raise RagflowApiError("upload response missing document")
+        document_id = document.get("id") or document.get("document_id")
+        if not document_id:
+            raise RagflowApiError("upload response missing document id")
+        return {"document_id": document_id, "run": document.get("run", "UNSTART")}
+
     def update_metadata(self, dataset_id: str, document_id: str, metadata: dict) -> None:
         request = build_metadata_update_request(dataset_id, document_id, metadata)
         self._request(request["method"], request["path"], json_body=request["json"])
