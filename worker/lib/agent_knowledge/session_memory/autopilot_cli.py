@@ -33,10 +33,10 @@ import json
 from typing import Any, Mapping, Sequence
 
 from ..ledger import Ledger
-from ..memory_miner import build_ragflow_completion_fn
 from .autopilot_loop import run_autopilot_cycle
 from .brain_query import run_brain_query_v2
 from .brain_read_model import LegacyLedgerBrainReadModel
+from .extraction_llm import build_vertex_wrapper_completion_fn
 from .llm_brain_miner import LlmBrainEnvelopeMiner
 
 # Standing pre-approval flag for the autopilot operating mode (user-set 2026-06-14).
@@ -49,22 +49,22 @@ def mine_live_candidates(
     ragflow: Any,
     project: str,
     refresh_watermark: str = "live",
-    llm_id: str = "",
+    completion_fn: Any | None = None,
     max_candidates: int = 5,
     query: str = "conversation chunk",
     limit: int = 200,
 ) -> list[dict]:
     """Blind mine cycle-ready MemoryCard candidates from transcript-memory (Option B).
 
-    Reads redacted transcript-memory chunks for the project and runs the envelope miner,
-    which prompts the RAGFlow chat model to emit 6-type MemoryCard envelopes directly.
+    Reads redacted transcript-memory chunks via RAGFlow, then runs the envelope miner with
+    an instruction-following completion_fn (default: keyless vertex-wrapper — the RAGFlow chat
+    assistant is a conversational/RAG surface and does not follow strict-JSON extraction).
     The miner never sees the golden; output is directly consumable by run_autopilot_cycle.
     """
+    if completion_fn is None:
+        completion_fn = build_vertex_wrapper_completion_fn()
     chunks = ragflow.list_transcript_memory_chunks(project=project, query=query, limit=limit)
-    miner = LlmBrainEnvelopeMiner(
-        completion_fn=build_ragflow_completion_fn(ragflow, llm_id=llm_id),
-        max_candidates=max_candidates,
-    )
+    miner = LlmBrainEnvelopeMiner(completion_fn=completion_fn, max_candidates=max_candidates)
     candidates: list[dict] = []
     for chunk in chunks:
         candidates.extend(miner.mine_chunk(chunk, refresh_watermark=refresh_watermark))
@@ -154,7 +154,6 @@ def main(argv: list[str] | None = None) -> int:
             ragflow=ragflow,
             project=args.project,
             refresh_watermark=args.refresh_watermark,
-            llm_id=args.llm_id,
             limit=args.limit,
             max_candidates=args.max_candidates,
         )
