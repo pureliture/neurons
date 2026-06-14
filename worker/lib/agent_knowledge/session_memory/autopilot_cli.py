@@ -2,10 +2,28 @@
 
 This un-stubs the ``memory`` server command. The testable core ``run_autopilot_command``
 runs a cycle over already-mined candidates and returns a recall snapshot taken through
-the real product read-path (run_brain_query_v2). ``main`` loads candidates from a JSON
-file so a scheduler/operator can drive cycles without a live LLM in this process; the
-transcript-memory LLM mining provider is a separate live integration that produces the
-candidates JSON.
+the real product read-path (run_brain_query_v2). ``main`` either loads candidates from a
+JSON file or blind-mines them live from transcript-memory via RAGFlow.
+
+AUTOPILOT MODE — GOAL AND STANDING AUTHORIZATION
+================================================
+GOAL (working goal_state, user-set 2026-06-14):
+  On the neurons project, live blind mine -> cycle -> recall must pass the golden finish
+  gate: SILENT-LIE == 0 AND false_current == 0, over 3 consecutive FINAL-slice cohorts,
+  with per-lane F1 >= 0.85.
+
+STANDING PRE-APPROVAL (user, 2026-06-14):
+  All autopilot approval gates are pre-approved and run unattended — candidate auto-accept
+  (human_approval path with approved_by='autopilot') and RAGFlow projection writes (the loop
+  self-mints the projection approval_record). No per-cycle human confirmation is required.
+
+BOUNDARY (unchanged by the pre-approval — these are NOT covered by it):
+  The forbidden operations stay HARD-BLOCKED regardless of authorization: memory delete,
+  live GC execute, RAGFlow dataset delete/disable, raw transcript/secret exposure, runtime
+  mutation (see FORBIDDEN_AUTO_POLICY_OPERATIONS + CLAUDE.md). Pre-approval removes the
+  "ask first" gate, not the safety mechanics: live writes still run bounded with exact argv,
+  timeout, redaction, postcheck, and rollback, and the readiness/conflict tripwire still
+  freezes + rolls back a poisoned cohort.
 """
 
 from __future__ import annotations
@@ -20,6 +38,10 @@ from .autopilot_loop import run_autopilot_cycle
 from .brain_query import run_brain_query_v2
 from .brain_read_model import LegacyLedgerBrainReadModel
 from .llm_brain_miner import LlmBrainEnvelopeMiner
+
+# Standing pre-approval flag for the autopilot operating mode (user-set 2026-06-14).
+# Scope = candidate accept + RAGFlow projection write only. Forbidden ops remain blocked.
+AUTOPILOT_PREAPPROVED = True
 
 
 def mine_live_candidates(
@@ -107,6 +129,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--policy-proxy-url", default="")
     parser.add_argument("--derived-dataset-id", default="", help="dataset id for supersede candidate recall")
     parser.add_argument("--llm-id", default="")
+    # Canary bounds — required even under standing pre-approval (safety mechanic, not a gate).
+    parser.add_argument("--limit", type=int, default=200, help="max transcript chunks to mine this cycle")
+    parser.add_argument("--max-candidates", type=int, default=5, help="max candidates extracted per chunk")
     args = parser.parse_args(argv)
 
     ledger = Ledger(args.ledger)
@@ -130,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
             project=args.project,
             refresh_watermark=args.refresh_watermark,
             llm_id=args.llm_id,
+            limit=args.limit,
+            max_candidates=args.max_candidates,
         )
         if args.derived_dataset_id:
             supersede_detector = build_supersede_detector(
