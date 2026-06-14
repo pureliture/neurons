@@ -84,7 +84,9 @@ def test_mine_live_candidates_then_run_command_end_to_end(tmp_path):
         completion=_ENVELOPE_COMPLETION,
     )
 
-    candidates = mine_live_candidates(ragflow=ragflow, project=PROJECT)
+    candidates = mine_live_candidates(
+        ragflow=ragflow, project=PROJECT, completion_fn=lambda messages: _ENVELOPE_COMPLETION
+    )
     assert len(candidates) == 1
     assert candidates[0]["card_type"] == "decision"
     assert candidates[0]["lifecycle_state"] == "candidate"
