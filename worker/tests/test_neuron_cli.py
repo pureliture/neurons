@@ -110,7 +110,9 @@ def test_neuron_knowledge_native_memory_execute_fails_closed(tmp_path, capsys):
     assert report["network_used"] is False
 
 
-def test_neuron_knowledge_session_memory_gc_execute_fails_closed(tmp_path, capsys):
+def test_neuron_knowledge_session_memory_gc_execute_requires_approval(tmp_path, capsys):
+    # GC executor는 벤더링됐지만 live --execute는 approval 게이트 뒤다. 유효 approval
+    # 없이 --execute하면 네트워크/뮤테이션 전에 fail closed(approval error, rc!=0).
     rc = main(
         [
             "session-memory-gc",
@@ -124,11 +126,9 @@ def test_neuron_knowledge_session_memory_gc_execute_fails_closed(tmp_path, capsy
         ]
     )
 
-    report = json.loads(capsys.readouterr().out)
-    assert rc == 1
-    assert report["status"] == "blocked_live_execution"
-    assert report["mutation_performed"] is False
-    assert report["network_used"] is False
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert not captured.out  # fails closed: no GC report emitted without the full live contract (token+approval)
 
 
 def test_neuron_knowledge_transcript_memory_gc_execute_disable_fails_closed(tmp_path, capsys):
@@ -158,7 +158,7 @@ def test_neuron_knowledge_delegates_transcript_backfill_help(capsys):
     assert "usage: transcript-backfill" in capsys.readouterr().out
 
 
-def test_neuron_knowledge_transcript_volume_gc_execute_fails_closed(tmp_path, capsys):
+def test_neuron_knowledge_transcript_volume_gc_execute_requires_approval(tmp_path, capsys):
     rc = main(
         [
             "transcript-volume-gc",
@@ -172,14 +172,12 @@ def test_neuron_knowledge_transcript_volume_gc_execute_fails_closed(tmp_path, ca
         ]
     )
 
-    report = json.loads(capsys.readouterr().out)
-    assert rc == 1
-    assert report["status"] == "blocked_live_execution"
-    assert report["mutation_performed"] is False
-    assert report["network_used"] is False
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert not captured.out  # fails closed: no GC report emitted without the full live contract (token+approval)
 
 
-def test_neuron_knowledge_transcript_session_gc_execute_fails_closed(tmp_path, capsys):
+def test_neuron_knowledge_transcript_session_gc_execute_requires_approval(tmp_path, capsys):
     rc = main(
         [
             "transcript-session-gc",
@@ -195,8 +193,6 @@ def test_neuron_knowledge_transcript_session_gc_execute_fails_closed(tmp_path, c
         ]
     )
 
-    report = json.loads(capsys.readouterr().out)
-    assert rc == 1
-    assert report["status"] == "blocked_live_execution"
-    assert report["mutation_performed"] is False
-    assert report["network_used"] is False
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert not captured.out  # fails closed: no GC report emitted without the full live contract (token+approval)
