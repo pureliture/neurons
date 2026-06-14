@@ -58,6 +58,9 @@ Owned here:
 - `ledger.py`, transcript ingest worker, replay/reconcile/backfill server state
 - session-memory/project-memory build and read surfaces
 - brain query, MemoryCard, native-memory mirror/sync/reconcile
+- user-level MCP stdio read surface:
+  `neuron-knowledge mcp-stdio` exposes `knowledge.search`, `brain.query`, and
+  `brain.resolve`
 - GC safety planners and fail-closed GC command surfaces:
   `session-memory-gc`, `transcript-memory-gc`, `transcript-session-gc`,
   `transcript-volume-gc`, `session-memory-quarantine-terminal-skipped`, and

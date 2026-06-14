@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Callable
 
+from .ledger import Ledger
+from .mcp_server import KnowledgeSearchService, build_ragflow_client, run_stdio_server
 from .rag_ingress import state_cli
 from .session_memory import (
     memory_regeneration_cli,
@@ -30,7 +33,6 @@ PENDING_SERVER_COMMANDS = {
     "context-for-prompt",
     "derived-memory-resources",
     "eval",
-    "mcp-stdio",
     "memory",
     "session-entry-recall",
     "transcript-migration",
@@ -79,7 +81,6 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "context-for-prompt": _pending_server_command("context-for-prompt"),
     "derived-memory-resources": _pending_server_command("derived-memory-resources"),
     "eval": _pending_server_command("eval"),
-    "mcp-stdio": _pending_server_command("mcp-stdio"),
     "memory": _pending_server_command("memory"),
     "session-entry-recall": _pending_server_command("session-entry-recall"),
     "transcript-migration": _pending_server_command("transcript-migration"),
@@ -87,6 +88,48 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "transcript-resources": _pending_server_command("transcript-resources"),
     "transcript-retrieval": _pending_server_command("transcript-retrieval"),
 }
+
+
+def _mcp_stdio_main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="neuron-knowledge mcp-stdio")
+    parser.add_argument("--ledger", required=True)
+    parser.add_argument("--dataset-id", action="append", default=[])
+    parser.add_argument("--ragflow-url", default="")
+    parser.add_argument("--token-env", default="")
+    parser.add_argument("--policy-proxy-url", default="")
+    parser.add_argument("--allow-private-results", action="store_true")
+    parser.add_argument("--native-memory-id", default="")
+    parser.add_argument("--state-db-recall", default="")
+    parser.add_argument("--ragflow-direct-recall", action="store_true")
+    args = parser.parse_args(argv)
+    _ = args.state_db_recall
+    _ = args.ragflow_direct_recall
+    try:
+        ledger = Ledger.open_read_only(args.ledger)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    token = os.environ.get(args.token_env, "") if args.token_env else ""
+    ragflow = build_ragflow_client(
+        ragflow_url=args.ragflow_url,
+        token=token,
+        policy_proxy_url=args.policy_proxy_url,
+    )
+    run_stdio_server(
+        KnowledgeSearchService(
+            ledger=ledger,
+            ragflow=ragflow,
+            dataset_ids=list(args.dataset_id or []),
+            allow_private_results=bool(args.allow_private_results),
+            native_memory_id=args.native_memory_id or os.environ.get("RAGFLOW_NATIVE_MEMORY_ID", ""),
+        )
+    )
+    return 0
+
+
+COMMAND_HANDLERS["mcp-stdio"] = _mcp_stdio_main
 
 
 def _print_help() -> None:
