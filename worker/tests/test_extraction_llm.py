@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 
-from agent_knowledge.session_memory.extraction_llm import build_openai_compat_completion_fn
+from agent_knowledge.session_memory.extraction_llm import (
+    build_openai_compat_completion_fn,
+    build_openai_compat_embedding_fn,
+)
 
 
 def test_openai_compat_completion_fn_posts_chat_completions_and_returns_content():
@@ -30,6 +33,22 @@ def test_openai_compat_completion_fn_returns_empty_on_bad_response():
         "http://x/v1", "m", post_fn=lambda url, *, headers, body: "not json"
     )
     assert fn([{"role": "user", "content": "hi"}]) == ""
+
+
+def test_openai_compat_embedding_fn_posts_and_returns_vector():
+    captured = {}
+
+    def fake_post(url, *, headers, body):
+        captured["url"] = url
+        captured["body"] = json.loads(body)
+        return json.dumps({"data": [{"embedding": [0.1, 0.2, 0.3]}]})
+
+    fn = build_openai_compat_embedding_fn("http://x/v1", "gemini-embedding-001", post_fn=fake_post)
+    vec = fn("hello")
+
+    assert vec == [0.1, 0.2, 0.3]
+    assert captured["url"] == "http://x/v1/embeddings"
+    assert captured["body"]["input"] == "hello"
 
 
 def test_openai_compat_no_auth_header_without_key():

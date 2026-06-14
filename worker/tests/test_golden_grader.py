@@ -8,7 +8,7 @@ from agent_knowledge.session_memory.autopilot_loop import run_autopilot_cycle
 from agent_knowledge.session_memory.brain_query import run_brain_query_v2
 from agent_knowledge.session_memory.brain_read_model import LegacyLedgerBrainReadModel
 
-from golden_grader import grade_recall_against_golden
+from golden_grader import build_cosine_match_fn, grade_recall_against_golden
 
 
 PROJECT = "neurons"
@@ -90,6 +90,46 @@ def test_grader_catches_silent_lie_when_superseded_leaks_into_current():
     scorecard = grade_recall_against_golden(recall=recall, golden=golden)
     assert scorecard["false_current_count"] > 0
     assert scorecard["silent_lie_rate"] > 0.0
+
+
+def test_grader_credits_semantic_paraphrase_via_match_fn():
+    recall = {
+        "current": [{"memory_id": "m1", "summary": "authentication was moved to OAuth"}],
+        "accepted": [{"memory_id": "m1", "summary": "authentication was moved to OAuth"}],
+        "archive": [],
+        "conflicts": [],
+    }
+    golden = [
+        {"subject_key": "auth", "expected_lane": "current", "canonical_statement": "Auth now uses OAuth.", "must_not_appear_in": []},
+    ]
+
+    # exact normalized match misses the paraphrase
+    exact = grade_recall_against_golden(recall=recall, golden=golden)
+    assert exact["current_lane_recall"] == 0.0
+
+    # an injected semantic match_fn credits it
+    def fake_semantic(statement, item):
+        return "oauth" in statement.lower() and "oauth" in str(item.get("summary") or "").lower()
+
+    fuzzy = grade_recall_against_golden(recall=recall, golden=golden, match_fn=fake_semantic)
+    assert fuzzy["current_lane_recall"] == 1.0
+
+
+def test_cosine_match_fn_credits_close_embeddings_only():
+    vecs = {
+        "auth now uses oauth.": [1.0, 0.0],
+        "authentication was moved to oauth": [0.96, 0.28],  # ~cos 0.96 to golden
+        "unrelated ci pipeline fix": [0.0, 1.0],
+    }
+
+    def fake_embed(text):
+        import re as _re
+        return vecs[_re.sub(r"\s+", " ", text.strip().lower())]
+
+    match = build_cosine_match_fn(fake_embed, threshold=0.8)
+    golden_stmt = "Auth now uses OAuth."
+    assert match(golden_stmt, {"summary": "authentication was moved to OAuth"}) is True
+    assert match(golden_stmt, {"summary": "unrelated CI pipeline fix"}) is False
 
 
 def test_no_product_module_imports_the_golden_grader():
