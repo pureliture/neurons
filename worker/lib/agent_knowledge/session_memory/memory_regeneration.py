@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Protocol
 
-from ..document_envelope import build_document_filename
+from ..document_envelope import build_agent_id, build_document_filename
 from ..ledger import Ledger, SESSION_MEMORY_REGENERATION_EVIDENCE_STATUS
 from ..redaction import redact_public_ingress_text
 from .transcript_model import MAX_PACKED_TRANSCRIPT_BODY_CHARS, REDACTION_VERSION, bound_text
@@ -1825,7 +1825,7 @@ def _session_memory_metadata(
         "knowledge_id": knowledge_id,
         "provider": group.provider,
         "project": group.project,
-        "agent_id": "ragflow-advisor",
+        "agent_id": build_agent_id(provider=group.provider, producer="memory-regeneration"),
         "session_id_hash": group.session_id_hash,
         "source_locator_hash": "derived-from-ragflow-transcript-memory",
         "chunk_id": f"session_memory_{_hash_fragment(group.session_id_hash, 16)}",
@@ -1866,7 +1866,7 @@ def _session_recap_metadata(group: SessionChunkGroup, knowledge_id: str) -> dict
         "knowledge_id": knowledge_id,
         "provider": group.provider,
         "project": group.project,
-        "agent_id": "ragflow-advisor",
+        "agent_id": build_agent_id(provider=group.provider, producer="session-recap"),
         "session_id_hash": group.session_id_hash,
         "source_locator_hash": "derived-from-ragflow-transcript-memory",
         "chunk_id": f"recap_{_hash_fragment(group.session_id_hash, 16)}",
@@ -1913,7 +1913,7 @@ def _project_memory_metadata(group: ProjectChunkGroup, knowledge_id: str) -> dic
         "knowledge_id": knowledge_id,
         "provider": group.provider,
         "project": group.project,
-        "agent_id": "ragflow-advisor",
+        "agent_id": build_agent_id(provider=group.provider, producer="project-memory"),
         "project_key_hash": _sha256_content("|".join([group.provider, group.project])),
         "source_locator_hash": "derived-from-session-memory-and-transcript-memory",
         "chunk_id": f"project_{_hash_fragment(group.project, 16)}",
