@@ -196,7 +196,8 @@ def build_brain_query_response_v2(
             ledger_by_memory_id[memory_id] = normalized
         if normalized.get("currentness") == "current":
             response["current"].append(normalized)
-        response["accepted"].append(normalized)
+        if normalized.get("currentness") not in ("superseded", "conflicted"):
+            response["accepted"].append(normalized)
 
     for mirror_item in ragflow_results or []:
         memory_id = _mirror_memory_id(mirror_item)
