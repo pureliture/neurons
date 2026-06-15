@@ -1,109 +1,114 @@
-# Ledger Refactor Autopilot — 설계 (spec)
+# Ledger Refactor Autopilot — 설계 (spec) · rev2
 
-- 작성일: 2026-06-15
-- 브랜치/worktree: `claude/ledger-autopilot` (`.worktrees/ledger-autopilot`)
-- 통합 브랜치: `claude/ledger-autopilot` (autopilot이 phase별로 무인 auto-merge하는 대상; `main` 불가촉)
-- 입력 근거: `docs/architecture/ledger-review-deepdive-20260614.html`(개정판 = `/tmp` 원본 + audit override), `docs/architecture/ledger-review-initial-20260614.html`, 그리고 현재 main 코드 검증 결과.
+- 작성일: 2026-06-15 (rev2 = 멀티에이전트 리뷰 게이트 self-correct 반영)
+- worktree: `.worktrees/ledger-autopilot` (work 브랜치 베이스)
+- 통합 브랜치: `claude/ledger-autopilot-integration` (autopilot이 phase별 무인 auto-merge 대상). work는 step별 `claude/ledger-autopilot-aN` → 통합 브랜치로 merge. `main` 불가촉.
+- 입력 근거: `docs/architecture/ledger-review-deepdive-20260614.html`(개정판), `architecture_audit_report.md`, 현재 main 코드 검증 + rev1 spec에 대한 4-렌즈 적대적 리뷰(2026-06-15).
 
 ## 1. 목표
 
-`worker/lib/agent_knowledge/ledger.py`를 중심으로 한 결합을, **에이전틱 Workflow 피드백 루프 autopilot**으로 점진 리팩토링한다. autopilot은 과거 llm-brain RAG curation autopilot의 *계약*(blind-propose → gate → grade → iterate → finish-gate, standing 안전 기제, forbidden ops hard-block)을 재사용하되, 메모리 도메인 코드가 아니라 코드 리팩토링을 구동한다. 유한 작업이므로 finish-gate 충족 시 정지한다(영구 cron 데몬 아님).
-
-최종 운영 목표(사용자 명시): 운영 서비스에 부적합한 raw SQLite를 **PostgreSQL로 이관**(phase C). 단 이관을 안전하게 하려면 DB 접근을 어댑터 seam 뒤로 먼저 넣어야 하므로(phase B), in-process 리팩토링이 DB 이관의 *전제조건*이다.
+`ledger.py` 중심 결합을 **에이전틱 Workflow 피드백 루프 autopilot**으로 점진 리팩토링. 유한 작업이므로 finish-gate 충족 시 정지. 최종 운영 목표: raw SQLite → PostgreSQL 이관(phase C), 단 B(어댑터 seam)가 *필요조건*.
 
 ## 2. 현재 아키텍처 (검증된 토폴로지, 3층)
 
-main 코드 검증 결과(2026-06-15):
+- **프로세스 층 — 이미 분리됨**: `worker/pyproject.toml [project.scripts]` **15개** entry-point가 각자 프로세스. `neuron-knowledge`(CLI + `mcp_server.run_stdio_server`), `rag-ingress-queue`(`server_runtime` = `ThreadingHTTPServer`, 상주), `rag-ingress-worker`, GC CLI 다수, memory build/regen/sync CLI. 모놀리스는 프로세스가 아니다.
+- **코드 결합 층 — 모놀리식**: **22개 비-테스트 모듈**(`worker/eval/` 2개 제외 시 20개)이 `from ..ledger import Ledger` 직접 결합. `Ledger`는 raw `sqlite3`(4178줄, `_initialize` 34 `CREATE TABLE` = 도메인 33 + `schema_migrations`). 유일 부분 seam: `brain_query.py`의 `BrainReadModel` Protocol + `brain_read_model.py`의 `LegacyLedgerBrainReadModel`. **주의**: 이 어댑터조차 `self._ledger._connect()` + raw SQLite SQL(`brain_read_model.py:35`)로 dialect를 누수 — engine-agnostic 아님.
+- **데이터 층 — 공유 raw-sqlite3**: 3 DB 클래스 — `Ledger`(ledger.py), `RAGIngressStateDB`(state_db.py), `IngestStateStore`(shadow_worker.py) + 외부 RAGFlow HTTP API. WAL 다중 프로세스 협조. SQLite 종속 구문 규모: ledger.py에 `INSERT OR IGNORE/REPLACE` ×22, `ON CONFLICT` ×22, `PRAGMA` ×6, raw `execute/executemany` ×142; 나머지 2 DB에 ~24개 추가.
 
-- **프로세스 층 — 이미 분리됨**: `worker/pyproject.toml`의 13개 entry-point가 각자 프로세스로 실행. `neuron-knowledge`(CLI + `mcp_server.run_stdio_server`), `rag-ingress-queue`(`server_runtime` = `ThreadingHTTPServer`, 상주), `rag-ingress-worker`(`shadow_worker`), 5개 GC CLI, memory build/regen/sync CLI 등. 즉 모놀리스는 프로세스가 아니다.
-- **코드 결합 층 — 모놀리식**: 20개 모듈이 `from ..ledger import Ledger`로 직접 결합. `Ledger`는 raw `sqlite3`(4178줄, `_initialize`가 34개 `CREATE TABLE`, 그중 `schema_migrations` 1개는 인프라). 인터페이스 seam 없음. 유일 예외: `brain_query.py`가 `BrainReadModel` Protocol로 부분 격리(ledger phase-out 제약 2026-06-11), `brain_read_model.py`의 `LegacyLedgerBrainReadModel`이 유일 어댑터.
-- **데이터 층 — 공유 raw-sqlite3**: 3개 SQLite DB 클래스 — `Ledger`(ledger.py), `RAGIngressStateDB`(rag_ingress/state_db.py), `IngestStateStore`(rag_ingress/shadow_worker.py) — + 외부 RAGFlow HTTP API. WAL로 다중 프로세스 협조.
+## 3. 비가역 GC 표면 (phase A의 근거, 정확 인벤토리)
 
-GC 결합(phase A 타깃)의 구체상: GC 감사(`memory_gc_audit`), 비가역 hard-delete(`_mark_gc_deleted`, `mark_disabled`/`mark_enabled`), RAGFlow `delete_documents`가 단일 `Ledger` 클래스 + 5개 GC 스크립트에 inline 결합. `session_memory_gc.py`/`transcript_volume_gc.py`는 같은 for-loop 안에서 RAGFlow delete ↔ ledger audit write를 호출(seam 0).
+rev1의 결함은 비가역 op 인벤토리가 틀렸던 것. 정정:
 
-## 3. 범위 결정 (fork 정리)
+- **진짜 비가역 op = `ragflow.delete_documents`(네트워크 하드 삭제)**. 호출 3곳: `session_memory_gc.py:115`, `transcript_session_gc.py:135`, `transcript_volume_gc.py:113`. 모두 `if config.execute` 블록 안.
+- **co-located 부수효과**: `_mark_gc_deleted`(스크립트-로컬, `session_memory_gc.py:324`, raw `UPDATE knowledge_items`), `_backup_before_delete`, `record_memory_gc_audit`(ledger.py:1719). **현재 audit는 삭제 성공 *후* 기록**(session_memory_gc.py:115-122).
+- **`record_memory_gc_audit`는 keyword-only 14 params**(`dataset_id`, `replacement_knowledge_id`, `dirty_at`, `snapshot_updated_at`, `approval_operation`, `age_gate_seconds`, `mutated` 등) — A2/E3 reconstructability 필수.
+- **misfit(삭제 아님, phase A에서 제외)**: `zombie_snapshot_repair.py`(requeue 마커, delete·audit 없음), `terminal_skipped_quarantine.py`(자기 테이블 raw INSERT, document_id 없음). 가역 작업이라 별도 seam.
+- **추가 확인 대상**: `transcript_memory_gc.py`(live는 `blocked_live_execution` 반환, `:159`), `gc_backup.py`. phase A 착수 step 0에서 `session_memory/` 트리 전수 grep로 delete/ledger-GC-method 호출 사이트를 **완전 열거**하고 allowlist 고정.
 
-- **분리 깊이**: in-process 모듈 seam (A/B/D). 물리 네트워크 분리(REST/gRPC Ledger 서비스)는 **범위 밖** — 프로세스는 이미 분리됐고 단일 호스트 규모에 분산 트랜잭션·SPOF 비용이 큼. C 이후 필요해지면 별도 검토.
-- **DB 엔진 이관(C)**: 범위 안, 운영 목표. 단 B(어댑터) 완료가 전제. C는 SQLAlchemy(Core 우선) 또는 단일 엔진 통일로 PostgreSQL 이관 — 상세 설계는 C 도달 시 별도 spec.
-- **phase 우선순위(fork 2)**: autopilot 런타임 gate 분석에 위임, 기본값 phase A.
-- **이 spec 범위**: autopilot harness + Phase A. B/D/C는 §6 로드맵으로 기록하고 각자 독립 spec→plan→autopilot 사이클.
+## 4. 범위 결정
 
-## 4. Autopilot 설계 (에이전틱 Workflow 피드백 루프)
+- 분리 깊이: **in-process 모듈 seam**(A/B/D). 물리 네트워크 분리(REST/gRPC) 범위 밖.
+- **Phase A 타깃 = 진짜 audit-then-irreversible-delete 3 스크립트**: `session_memory_gc.py`, `transcript_volume_gc.py`, `transcript_session_gc.py`. zombie/terminal/gc_backup은 별도(後).
+- DB 엔진 이관(C): 범위 안, 운영 목표. B 완료가 필요조건이나 **충분조건 아님**(§7).
+- 이 spec 범위: autopilot harness + Phase A. B/D/C는 §7 로드맵, 각자 독립 spec.
 
-### 4.1 루프 골격 (phase당)
+## 5. Autopilot 설계 (에이전틱 Workflow 피드백 루프)
 
-- **Phase 0 (1회, setup)**: worktree/통합 브랜치 확인. **baseline 오라클 동결** — 편집 전 현 코드에서 풀 gate 통과 확인 + `brain.query` recall 스냅샷 + GC dry-run 출력을 regression 기준으로 캡처해 동결. implementer agent는 이 오라클을 재생성할 수 없다("자기가 안 진 기준으로 채점" 규율).
-- **step 루프**: phase를 bounded step backlog로 분해(A는 ~5 step). 각 step:
-  1. `apply` (agent, **opus** — 구현/변경 책임): worktree에 bounded 편집.
-  2. `gate` (결정론): §4.2.
-  3. `review` (멀티에이전트): §4.3.
-  4. pass(결정론 gate green ∧ 리뷰 패널 blocking 0) → 커밋 + 통합 브랜치 merge. fail → self-correct(finding 환류) **최대 3 라운드** → red 지속 시 **freeze**(중단, 브랜치 보존, 보고).
-- **finish-gate**: step backlog 소진 ∧ 풀 gate green ∧ recall regression=0 ∧ dry-run pre==post → **정지 + 알림**. main ff·origin push는 보류(사람 행위).
+### 5.1 루프 골격 (phase당)
 
-### 4.2 결정론 gate (= "refactor golden")
+- **Phase 0 (1회)**: delete-site 전수 열거 + allowlist 고정. **baseline 특성화(characterization) 동결** — §5.3의 행동 트레이스 baseline을 편집 전 캡처·동결. work 브랜치 생성.
+- **step 루프**: phase를 bounded step으로 분해. step별 work 브랜치 `claude/ledger-autopilot-aN`. 각 step: `apply`(opus) → `gate`(§5.2, 결정론) → `review`(§5.4, 멀티에이전트) → pass면 work→**통합 브랜치** merge(no-op 아님) / fail면 self-correct ≤3 라운드 → red 지속 freeze.
+- **finish-gate**: step 소진 ∧ §5.2 전 항목 green ∧ §5.3 특성화 트레이스 일치 → **통합 브랜치에서 정지 + 알림**.
 
-- 기존 테스트 green: `JAVA_HOME=... gradle test`, `cd worker && uv run pytest -q`(현 504), `cd worker && uv run neuron-knowledge --show-boundary`.
-- 구조 불변식 lint(신규, `worker/eval/ledger_seam_invariants.py`): phase별 정의. phase A 예 — (i) GC 스크립트가 ledger GC 메서드(`record_memory_gc_audit`/`mark_disabled`/`_mark_gc_deleted`) 직접 호출 0, (ii) 비가역 delete는 seam 경유만 도달 가능, (iii) `--show-boundary` 출력 불변.
-- recall regression=0(baseline 스냅샷 대비), GC dry-run pre==post.
-- **seam 경로 커버리지 증명**: 변경한 비가역 경로가 테스트로 실제 실행됨을 단언(audit→delete 순서, audit 없이 delete 도달 불가). 현재 GC live 경로는 테스트에서 `blocked_live_execution`이라 "green이 hollow"일 위험이 있어 이 증명이 사람 리뷰를 대체한다.
+### 5.2 결정론 gate
 
-### 4.3 멀티에이전트 리뷰 게이트 (사람 승인 대체)
+- 기존 테스트 green: `gradle test`, `cd worker && uv run pytest -q`, `neuron-knowledge --show-boundary`.
+- **구조 불변식 lint**(`worker/eval/ledger_seam_invariants.py`), **`ragflow.delete_documents` 호출 사이트를 키로**(ledger-method 이름이 아니라): (i) §3 열거된 모든 delete 사이트가 `IGCSafetyAuditor` seam 경유만 도달, (ii) phase별 shrinking allowlist 밖에서 직접 호출 0, (iii) `--show-boundary` 불변.
+- §5.3 특성화 트레이스 일치(behavior-preserving 핵심 오라클).
+- **삭제된 오라클**: recall regression=0 / dry-run pre==post는 **phase A 행동 보존 오라클에서 제외** — 검증 결과 둘 다 GC 비가역 경로에 구조적으로 눈멈(recall은 active snapshot만 읽어 disjoint; dry-run은 `if execute` 블록 전체 skip). 회귀 보조 신호로만 유지.
 
-결정론 gate green 후 발화. opus 패널 4 렌즈(적대적):
-1. correctness / behavior-preservation
-2. seam 완전성 vs spec (비가역 op이 실제로 격리됐나)
-3. security / irreversibility (seam 우회 delete 가능? secret 노출?)
-4. test adequacy (gate가 바뀐 경로를 실제로 덮나)
+### 5.3 특성화 테스트 게이트 (사람 리뷰 대체 — 구체·falsifiable)
 
-**fail-closed**: 한 명이라도 blocking finding이면 merge 차단. finding은 self-correct 루프로 환류(implementer가 수정 → re-gate → re-review), 최대 3 라운드 후 freeze.
+rev1의 "seam 커버리지 증명"은 fake 상대 통과라 무의미했다. 대체:
 
-### 4.4 자율성 / merge 착지
+- **recording-fake 하니스**: `execute=True` 경로를 seam 통해 구동, **순서화된 부수효과 트레이스 단언**: `backup → delete → tombstone(_mark_gc_deleted) → audit(audit_id 연결)`. 편집 전 baseline 동결.
+- **음성 불변식**: 성공한 backup 없이 delete 도달 불가; 모든 delete에 paired audit(루프 중간 exception/break로 삭제 후 audit 누락되는 `session_memory_gc.py:124-127` 경로 포함); `_still_qualifies` 재확인 호출됨.
+- **계약 테스트**: `RagflowHttpClient.delete_documents` 시그니처(args·예외) 고정 → fake가 real에서 drift 못 함.
+- **mutation 체크**: delete↔audit 순서 바꾸거나 backup 제거하면 테스트가 **반드시 fail**. 안 그러면 증명이 unfalsifiable → merge 금지.
+- **audit 동등성**: 픽스처 GC run의 `memory_gc_audit` row 필드가 pre/post **byte-identical**(성공·실패 경로 모두). dry-run stdout 일치로 대체 불가.
 
-- 사람 diff-승인 게이트 0. 무인 → 통합 브랜치 `claude/ledger-autopilot` auto-merge(green일 때만).
-- finish-gate green이면 **통합 브랜치에서 정지 + 알림**. `main` ff는 사람이 green 확인 후 수행. `origin` push는 무인 보류(머신 밖 출구 = 유일한 사람 행위).
-- 모든 쓰기 worktree 한정, `main` 불가촉. 로컬 브랜치라 reset/revert로 가역.
+### 5.4 멀티에이전트 리뷰 게이트 (사람 승인 대체)
 
-### 4.5 안전 envelope
+결정론 gate green 후 발화. opus 패널 4 렌즈(적대적): correctness/behavior-preservation, seam 완전성 vs §3 인벤토리, security/irreversibility, gate-completeness(green이 hollow인가). fail-closed — blocking 1개면 merge 차단, finding은 self-correct로 환류 ≤3 라운드.
 
-- forbidden ops hard-block(standing pre-approval 무관): live GC execute, RAGFlow dataset delete/disable, secret/raw transcript 노출, runtime mutation. 리팩토링은 순수 코드 재구조화 — live 삭제 0, dry-run만.
-- tripwire freeze: red gate = 자동 중단 + 브랜치 보존.
-- baseline 오라클 편집 전 동결.
-- C(엔진 이관)는 위 게이트 위에 데이터 안전 추가: 백업 + rollback 증명 + DB 복제본 dry-run + old/new 엔진 parity 검증.
+### 5.5 자율성 / merge 착지
 
-## 5. Phase A 상세 (첫 타깃)
+- 사람 diff-승인 0. 무인 work→통합 브랜치 auto-merge(green만). finish-gate green이면 통합 브랜치 정지 + 알림.
+- **`main`/`master` 무인 쓰기·merge 절대 금지** — main ff는 사람 수동 post-finish. tripwire: autopilot이 main checkout/merge 시도하면 freeze. (rev1의 "로컬 main 자동 ff"는 안전 리뷰로 철회 — §6 참조. 데이터는 git-가역 아님.)
+- origin push 무인 보류.
 
-- **인터페이스**: `IGCSafetyAuditor`(ABC) — `log_gc_start(gc_kind, knowledge_id, document_id) -> audit_id`, `log_gc_success(audit_id, replacement_id="")`, `log_gc_failure(audit_id, error_msg)`.
-- **어댑터**: `LedgerGCSafetyAuditor(ledger)` — 기존 `record_memory_gc_audit`/`mark_disabled`/`mark_enabled`/`_mark_gc_deleted` 래핑.
-- **전환 대상 5 스크립트**: `session_memory_gc.py`, `transcript_memory_gc.py`, `transcript_volume_gc.py`, `zombie_snapshot_repair.py`, `terminal_skipped_quarantine.py` — 주입된 `IGCSafetyAuditor` 의존으로 전환. delete 호출과 audit write를 seam 뒤에 co-locate(audit 없이 delete 불가).
-- **동작 보존**: 모든 변경은 behavior-preserving. dry-run 출력 동일이 gate.
-- step 분해(예): 인터페이스 정의 → 어댑터 구현 → 스크립트 전환 ×N → seam 불변식 lint + 커버리지 테스트 추가.
+### 5.6 안전 envelope (런타임 강제 — prose 아님)
 
-## 6. 로드맵 (B → D → C, 확정)
+rev1의 "forbidden ops hard-block"은 memory-card 문자열 분류기(`memory_evaluation.py:19-44`)일 뿐 agent tool 호출을 못 막았다. 실 런타임 강제 추가:
 
-순차 무인. 각 phase 독립 spec→plan→gate→통합 merge.
+- **deny-by-default tool/permission 정책**(apply·gate agent): live-mutating CLI argv hard-block(`session_memory_gc`/`transcript_volume_gc`/`transcript_session_gc`/`transcript_memory_gc`/`zombie_snapshot_repair`/`terminal_skipped_quarantine` + `--execute`), worktree 밖 쓰기 차단.
+- **gate 네트워크 격리/무자격**: gate는 RAGFLOW 토큰 env 미설정 + base_url을 loopback/forbidden sink로 + egress 차단 환경에서 실행 → 버그가 live 삭제 경로에 도달해도 connection/credential error로 **fail-closed**.
+- **불변식**: "gate 중 live `RagflowHttpClient` 인스턴스화 0"을 `ledger_seam_invariants.py` 결정론 불변식으로.
+- forbidden ops(live GC execute, dataset delete/disable, secret 노출, runtime mutation)는 hard-block. `FORBIDDEN_AUTO_POLICY_OPERATIONS`는 memory-card 데이터 가드일 뿐 tool 호출 미커버임을 명시.
+- tripwire freeze(red gate, main 접근). baseline 동결.
+- Phase 0 pre-flight: live RAGFlow dataset이 autopilot gate/apply 환경에서 **도달 불가**임을 단언.
 
-- **B — Ledger Core 어댑터** (`ILedgerCoreDbAdapter`): 20곳 직접 결합 → 어댑터 경유. `brain_query`/`brain_read_model`의 Protocol 패턴 확장. **C의 전제조건**(엔진 교체 지점 확보). 위험 중–고.
-- **D — 4-area 모듈 경계**: area 간 import lint 강제. 위험 중.
-- **C — 엔진 이관 → PostgreSQL** (운영 목표): 어댑터 뒤 엔진 교체. 3개 DB × SQLite 종속 구문(`INSERT OR IGNORE`/`ON CONFLICT`/`PRAGMA`) 이관. 데이터 안전 게이트(§4.5). 위험 높음. 상세는 별도 spec.
+## 6. 데이터 가역성 vs 코드 가역성 (no-human-gate 근거)
 
-## 7. 기존 autopilot 머신 재사용 (도메인 중립 seam)
+- 코드/git: 가역(work 브랜치, reset/revert).
+- 데이터/RAGFlow+ledger: **git로 불가역**. 우발적 live `delete_documents` 1회는 `git reset`으로 복구 안 됨(GC backup 자체도 `--backup-dir`/`--execute` 배선에 의존, 그걸 동시에 리팩토링 중).
+- 따라서 사람-게이트 제거 결정은 오직 §5.6 데이터-뮤테이션 envelope가 강제될 때만 성립. main 무인 merge는 안 함(§5.5).
 
-llm-brain autopilot에서 포팅 가능한 중립 구성요소: 루프 골격(`run_autopilot_cycle` DI 구조), accept guard(`classify_candidate_block_reason`), golden grader harness(`worker/eval/golden_grader.py`의 격리 패턴), approval gate(`_projection_write_gate_error`), self-mint approval, fail-closed supersede 구조. 단 RAGFlow/MemoryCard 하드와이어 4점(retrieve/chat_completion/upsert_memory_card/list_*chunks)은 코드-리팩토링 I/O(diff 읽기/patch apply/test gate)로 대체. 주의: 기존 autopilot의 "3 cohort finish-gate"·per-lane F1·tripwire는 **docstring만 있고 코드 미구현**이므로 이 autopilot에서 새로 구현한다(Workflow 루프가 그 역할).
+## 7. 로드맵 (B → D → C, 확정) + 재사용 현실
+
+순차 무인, 각 phase 독립 spec.
+
+- **B — Ledger Core 어댑터**(`ILedgerCoreDbAdapter`): 22 결합 → 어댑터. **C의 필요조건이나 충분조건 아님**. C는 추가로 (a) 어댑터 경계 넘는 raw-SQL/`_connect()` 누수 제거(brain_read_model 포함), (b) 3 DB의 SQLite 종속 DML/DDL 이관, (c) SQLAlchemy-Core vs 단일엔진 결정 필요. **phase-B exit 기준**: 어댑터 경계를 넘는 raw-SQL/`_connect()` 접근 0 — 안 되면 C 불가. `architecture_audit_report.md:42`의 "런타임 dialect 변환 = 거대한 버그의 온상" 경고를 C 설계 제약으로.
+- **D — 4-area 모듈 경계**: import lint 강제.
+- **C — 엔진 이관 → PostgreSQL**(운영 목표): 어댑터 뒤 교체 + §7-B (a)(b)(c). 데이터 안전 게이트(백업·복제본·old/new parity). 상세 별도 spec.
+
+**재사용 현실**(rev1 과장 정정): `run_autopilot_cycle`은 **118줄 단일-pass 분류기** — step 루프·결정론 gate·멀티에이전트 리뷰·self-correct·freeze·finish-gate **전부 없음**. 즉 피드백-루프 제어면은 **전량 신규 코드**. 진짜 포팅 가능: accept guard(`classify_candidate_block_reason`), golden_grader 격리 패턴, self-mint approval 형태. `_projection_write_gate_error`·`mine_live_candidates`는 RAGFlow-하드와이어라 비재사용.
 
 ## 8. 산출물
 
-- Workflow 오케스트레이션 스크립트(주 deliverable).
-- 프로덕션 코드: `IGCSafetyAuditor` + `LedgerGCSafetyAuditor` + 전환된 5 GC 스크립트.
-- `worker/eval/ledger_seam_invariants.py`(구조 불변식 lint).
-- baseline 오라클 캡처 스크립트 + seam 커버리지 테스트.
+- Workflow 오케스트레이션 스크립트(제어면 신규).
+- 프로덕션 코드: `IGCSafetyAuditor`(전체 audit payload 보유 — 14-field `record_memory_gc_audit` 손실 없게 typed `AuditContext`) + 어댑터 + 전환된 3 스크립트. **`_mark_gc_deleted` 소유권 먼저 해결**(Ledger로 승격 or 어댑터가 소유) 후 co-location.
+- `worker/eval/ledger_seam_invariants.py`(delete-site 키 불변식 + "gate 중 live client 0").
+- §5.3 특성화 하니스 + 계약 테스트 + mutation 체크.
 
 ## 9. 권한 / 경계
 
-- 이 task 한정 명시 승인(코드 mutation 무인 + 통합 브랜치 auto-merge). standing pre-approval은 코드 mutation 미포함이므로 별개. main ff·origin push는 사람.
-- CLAUDE.md guardrails 준수: `RAGFLOW_API_KEY` 단일, live write/delete/disable·live GC·runtime mutation 금지(리팩토링은 이를 트리거하지 않음).
+- 이 task 한정 명시 승인(코드 mutation 무인 + 통합 브랜치 auto-merge). main 무인 금지(§5.5). standing pre-approval은 코드 mutation 미포함.
+- CLAUDE.md guardrails: `RAGFLOW_API_KEY` 단일, live write/delete/disable·live GC·runtime mutation 금지 — §5.6 런타임 envelope로 강제.
 
 ## 10. 리스크 / 미해결
 
-- "green이 hollow": GC live 경로 테스트 커버리지 약함 → §4.2 seam 커버리지 증명으로 완화.
-- 정본 보고서 내부 불일치: override 배너는 in-process 모듈인데 본문 다이어그램은 REST/gRPC+PostgreSQL → 본 spec은 배너 의도(in-process) 채택, 물리 분리 범위 밖.
-- C 마이그레이션 parity 검증의 구체 기준(데이터 동등성 oracle)은 C 도달 시 spec에서 확정.
+- **behavior-preserving 정의**: `IGCSafetyAuditor`의 자연스런 사용(start-before/success-after)은 현재(삭제 성공 후 audit) 대비 audit 타이밍 변경 = 행동 변경. §5.3이 타이밍·내용·실패경로를 byte-identical로 고정해 방지.
+- C parity oracle(데이터 동등성) 구체 기준은 C spec.
+- 정본 보고서 내부 불일치(배너=in-process, 본문 다이어그램=REST/gRPC) → 본 spec은 in-process 채택.
+- **사용자 결정 역전 1건**: rev1의 "로컬 main 자동 ff"를 안전 리뷰(데이터 비가역) 근거로 "main 무인 금지"로 변경. 사용자 재확인 필요.
