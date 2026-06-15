@@ -67,7 +67,7 @@ class BackendStatusDetail:
 # never requires it; it stays None for the simple submit path.
 StepHook = Optional[Callable[..., None]]
 NATURAL_KEY_PAGE_SIZE = 100
-NATURAL_KEY_MAX_PAGES = 20
+NATURAL_KEY_BROAD_SCAN_MAX_PAGES = 0
 
 
 @runtime_checkable
@@ -105,9 +105,10 @@ class RAGFlowIndexBackendAdapter:
     ``meta_fields`` without further RAGFlow-shaped flattening here.
     """
 
-    def __init__(self, *, client, resolve_dataset_id: Callable[[str], str]):
+    def __init__(self, *, client, resolve_dataset_id: Callable[[str], str], broad_scan_pages: int = 0):
         self._client = client
         self._resolve_dataset_id = resolve_dataset_id
+        self._broad_scan_pages = max(int(broad_scan_pages), 0)
 
     def submit_document(
         self, document: RagReadyDocument, *, on_step_complete: StepHook = None
@@ -149,7 +150,12 @@ class RAGFlowIndexBackendAdapter:
         if not payload_hash or not idempotency_key:
             return None
         dataset_id = self._resolve_dataset_id(target_profile)
-        for doc in _iter_natural_key_candidates(self._client, dataset_id=dataset_id, keywords=payload_hash):
+        for doc in _iter_natural_key_candidates(
+            self._client,
+            dataset_id=dataset_id,
+            payload_hash=payload_hash,
+            broad_scan_pages=self._broad_scan_pages,
+        ):
             if _document_matches_natural_key(doc, idempotency_key=idempotency_key, payload_hash=payload_hash):
                 document_ref = str(doc.get("id") or doc.get("document_id") or "")
                 if document_ref:
@@ -179,19 +185,28 @@ def _notify_step(hook: StepHook, step: str, **fields) -> None:
         hook(step, **fields)
 
 
-def _iter_natural_key_candidates(client, *, dataset_id: str, keywords: str):
+def _iter_natural_key_candidates(
+    client,
+    *,
+    dataset_id: str,
+    payload_hash: str,
+    broad_scan_pages: int = NATURAL_KEY_BROAD_SCAN_MAX_PAGES,
+):
     seen: set[str] = set()
-    for doc in client.list_documents(
-        dataset_id,
-        page=1,
-        page_size=NATURAL_KEY_PAGE_SIZE,
-        keywords=keywords,
-    ):
-        doc_id = str(doc.get("id") or doc.get("document_id") or "")
-        if doc_id:
-            seen.add(doc_id)
-        yield doc
-    for page in range(1, NATURAL_KEY_MAX_PAGES + 1):
+    for keywords in _natural_key_keywords(payload_hash):
+        for doc in client.list_documents(
+            dataset_id,
+            page=1,
+            page_size=NATURAL_KEY_PAGE_SIZE,
+            keywords=keywords,
+        ):
+            doc_id = str(doc.get("id") or doc.get("document_id") or "")
+            if doc_id and doc_id in seen:
+                continue
+            if doc_id:
+                seen.add(doc_id)
+            yield doc
+    for page in range(1, max(int(broad_scan_pages), 0) + 1):
         docs = client.list_documents(
             dataset_id,
             page=page,
@@ -207,6 +222,20 @@ def _iter_natural_key_candidates(client, *, dataset_id: str, keywords: str):
             if doc_id:
                 seen.add(doc_id)
             yield doc
+
+
+def _natural_key_keywords(payload_hash: str) -> list[str]:
+    keywords: list[str] = []
+    for candidate in (payload_hash, _content_hash_fragment(payload_hash)):
+        if candidate and candidate not in keywords:
+            keywords.append(candidate)
+    return keywords
+
+
+def _content_hash_fragment(payload_hash: str) -> str:
+    if payload_hash.startswith("sha256:") and len(payload_hash) >= 19:
+        return payload_hash[7:19]
+    return ""
 
 
 def _document_matches_natural_key(doc: dict, *, idempotency_key: str, payload_hash: str) -> bool:

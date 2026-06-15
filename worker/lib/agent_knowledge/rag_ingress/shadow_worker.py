@@ -135,12 +135,17 @@ class IngestStateStore:
 
 def build_backend(*, ragflow_base_url: str, ragflow_api_key: str,
                   dataset_id: str | None = None,
-                  resolve_dataset_id: Callable[[str], str] | None = None) -> RAGFlowIndexBackendAdapter:
+                  resolve_dataset_id: Callable[[str], str] | None = None,
+                  broad_scan_pages: int = 0) -> RAGFlowIndexBackendAdapter:
     client = RagflowHttpClient(base_url=ragflow_base_url, bearer_token=ragflow_api_key)
     if resolve_dataset_id is None:
         # smoke/dry-run: resolve every profile to one configured dataset.
         resolve_dataset_id = lambda _profile: dataset_id
-    return RAGFlowIndexBackendAdapter(client=client, resolve_dataset_id=resolve_dataset_id)
+    return RAGFlowIndexBackendAdapter(
+        client=client,
+        resolve_dataset_id=resolve_dataset_id,
+        broad_scan_pages=broad_scan_pages,
+    )
 
 
 def env_profile_dataset_resolver(getenv: Callable[[str], str | None]) -> Callable[[str], str]:
@@ -444,6 +449,7 @@ def main() -> int:
         raise SystemExit("refusing: set ALLOW_LIVE_QUEUE=1 to consume the live RAG_INGRESS_QUEUE")
     store = IngestStateStore(os.environ["INGEST_STATE_DB_PATH"])
     deliver = os.environ.get("SHADOW_DELIVER", "0") == "1"
+    broad_scan_pages = int(os.environ.get("NATURAL_KEY_BROAD_SCAN_PAGES", "0"))
     backend = None
     if deliver:
         single = os.environ.get("RAGFLOW_DATASET_ID", "")
@@ -454,6 +460,7 @@ def main() -> int:
             ragflow_api_key=os.environ["RAGFLOW_API_KEY"],
             dataset_id=single or None,
             resolve_dataset_id=resolver,
+            broad_scan_pages=broad_scan_pages,
         )
     nats_url = os.environ.get("RAG_INGRESS_NATS_URL", "nats://127.0.0.1:4222")
     subject = os.environ.get("SHADOW_SUBJECT", "rag.shadow.>")
