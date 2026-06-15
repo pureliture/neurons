@@ -51,19 +51,24 @@ def mine_live_candidates(
     refresh_watermark: str = "live",
     completion_fn: Any | None = None,
     max_candidates: int = 5,
-    query: str = "conversation chunk",
+    source: str = "session-memory",
+    provider: str = "",
     limit: int = 200,
 ) -> list[dict]:
-    """Blind mine cycle-ready MemoryCard candidates from transcript-memory (Option B).
+    """Blind mine cycle-ready MemoryCard candidates from the durable SoT (Option B).
 
-    Reads redacted transcript-memory chunks via RAGFlow, then runs the envelope miner with
-    an instruction-following completion_fn (default: keyless vertex-wrapper — the RAGFlow chat
-    assistant is a conversational/RAG surface and does not follow strict-JSON extraction).
+    Default source is session-memory — the durable, lossless aggregate of conversations
+    (transcript-memory is transient raw chunks GC'd after conversion). Reads docs via RAGFlow,
+    then runs the envelope miner with an instruction-following completion_fn (default: keyless
+    vertex-wrapper; the RAGFlow chat assistant is conversational and won't emit strict JSON).
     The miner never sees the golden; output is directly consumable by run_autopilot_cycle.
     """
     if completion_fn is None:
         completion_fn = build_vertex_wrapper_completion_fn()
-    chunks = ragflow.list_transcript_memory_chunks(project=project, query=query, limit=limit)
+    if source == "transcript-memory":
+        chunks = ragflow.list_transcript_memory_chunks(project=project, limit=limit)
+    else:
+        chunks = ragflow.list_session_memory_chunks(project=project, provider=provider, limit=limit)
     miner = LlmBrainEnvelopeMiner(completion_fn=completion_fn, max_candidates=max_candidates)
     candidates: list[dict] = []
     for chunk in chunks:
