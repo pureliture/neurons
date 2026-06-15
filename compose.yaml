@@ -110,6 +110,8 @@ services:
       # High = ack-drop effectively disabled: a failing message NAKs and is
       # retried/preserved rather than silently dropped (favours data preservation).
       MAX_DELIVER: ${RAG_INGRESS_MAX_DELIVER:-100000}
+      WORKER_FETCH_BATCH: ${RAG_INGRESS_WORKER_FETCH_BATCH:-1}
+      WORKER_CONCURRENCY: ${RAG_INGRESS_WORKER_CONCURRENCY:-1}
       INGEST_STATE_DB_PATH: /var/lib/agent-knowledge/ingest-state/ingest-state.sqlite
       RAGFLOW_BASE_URL: ${RAGFLOW_BASE_URL:-}
       RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:-}
