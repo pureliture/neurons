@@ -11,6 +11,7 @@ from .ledger import Ledger
 from .mcp_server import KnowledgeSearchService, build_ragflow_client, run_stdio_server
 from .rag_ingress import state_cli
 from .session_memory import (
+    autopilot_cli,
     memory_regeneration_cli,
     native_memory_write_runner,
     neuron_session_memory,
@@ -33,7 +34,6 @@ PENDING_SERVER_COMMANDS = {
     "context-for-prompt",
     "derived-memory-resources",
     "eval",
-    "memory",
     "session-entry-recall",
     "transcript-migration",
     "transcript-quality",
@@ -81,7 +81,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "context-for-prompt": _pending_server_command("context-for-prompt"),
     "derived-memory-resources": _pending_server_command("derived-memory-resources"),
     "eval": _pending_server_command("eval"),
-    "memory": _pending_server_command("memory"),
+    "memory": autopilot_cli.main,
     "session-entry-recall": _pending_server_command("session-entry-recall"),
     "transcript-migration": _pending_server_command("transcript-migration"),
     "transcript-quality": _pending_server_command("transcript-quality"),
