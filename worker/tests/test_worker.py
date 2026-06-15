@@ -278,3 +278,60 @@ def test_find_by_natural_key_empty_inputs_fail_closed():
     adapter = RAGFlowIndexBackendAdapter(client=BoomClient(), resolve_dataset_id=lambda _p: "ds")
     assert adapter.find_by_natural_key(target_profile="p", idempotency_key="", payload_hash="sha256:x") is None
     assert adapter.find_by_natural_key(target_profile="p", idempotency_key="k", payload_hash="") is None
+
+
+def test_find_by_natural_key_does_not_broad_scan_by_default():
+    from agent_knowledge.rag_ingress.index_backend import RAGFlowIndexBackendAdapter
+
+    payload_hash = "sha256:" + "abcdef123456" + ("0" * 52)
+
+    class RecordingClient:
+        def __init__(self):
+            self.calls = []
+
+        def list_documents(self, dataset_id, *, page=1, page_size=100, keywords=""):
+            self.calls.append({"page": page, "page_size": page_size, "keywords": keywords})
+            return []
+
+    client = RecordingClient()
+    adapter = RAGFlowIndexBackendAdapter(client=client, resolve_dataset_id=lambda _p: "ds")
+
+    assert adapter.find_by_natural_key(
+        target_profile="p", idempotency_key="ik", payload_hash=payload_hash
+    ) is None
+    assert [call["keywords"] for call in client.calls] == [payload_hash, "abcdef123456"]
+
+
+def test_find_by_natural_key_checks_content_hash_fragment_keyword():
+    from agent_knowledge.rag_ingress.index_backend import RAGFlowIndexBackendAdapter
+
+    payload_hash = "sha256:" + "abcdef123456" + ("0" * 52)
+    idempotency_key = "ik"
+
+    class FragmentClient:
+        def __init__(self):
+            self.calls = []
+
+        def list_documents(self, dataset_id, *, page=1, page_size=100, keywords=""):
+            self.calls.append(keywords)
+            if keywords == "abcdef123456":
+                return [
+                    {
+                        "id": "doc_fragment_match",
+                        "meta_fields": {
+                            "content_hash": payload_hash,
+                            "idempotency_key": idempotency_key,
+                        },
+                    }
+                ]
+            return []
+
+    client = FragmentClient()
+    adapter = RAGFlowIndexBackendAdapter(client=client, resolve_dataset_id=lambda _p: "ds")
+
+    handle = adapter.find_by_natural_key(
+        target_profile="p", idempotency_key=idempotency_key, payload_hash=payload_hash
+    )
+
+    assert handle == BackendDocumentHandle(dataset_ref="ds", document_ref="doc_fragment_match")
+    assert client.calls == [payload_hash, "abcdef123456"]
