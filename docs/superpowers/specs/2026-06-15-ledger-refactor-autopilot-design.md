@@ -1,6 +1,6 @@
-# Ledger Refactor Autopilot — 설계 (spec) · rev5
+# Ledger Refactor Autopilot — 설계 (spec) · rev6
 
-- 작성일: 2026-06-15 (rev5 = 리뷰 라운드4 수렴 fix; S0 사람 게이트화 + A1 오라클 non-vacuous + 실외부경계 + 주입 seam 우선)
+- 작성일: 2026-06-15 (rev6 = 라운드5 수렴: egress 목적지 allowlist + real-wire 계약 게이트 + kill-switch pin + production ordering 불변식 + 인용/카운트 정정)
 - worktree: `.worktrees/ledger-autopilot`. 통합 브랜치 `claude/ledger-autopilot-integration`. step별 work `claude/ledger-autopilot-aN`. **`main`/`master` 무인 쓰기·merge 금지**.
 - 리뷰 이력: rev1~4, 4-렌즈 적대적 게이트 4라운드. rev4에서 soundness PASS; 잔여 blocker는 전부 "오라클 정밀화 + 외부 root-of-trust"로 수렴(전제 불가능 아님). rev5가 그 수렴 fix 확정본.
 
@@ -12,7 +12,7 @@
 
 - 프로세스 층: `pyproject.toml [project.scripts]` 15 entry-point, 이미 분리.
 - 코드 결합 층: **20 production 모듈**(+ `worker/eval/` 2 = 비-테스트 22)이 `from ..ledger import Ledger` 직접. `Ledger`=raw sqlite3(4178줄/131 def/34 테이블). `brain_query`/`brain_read_model`은 유일 Protocol-매개 READ seam이나 engine-agnostic 아님(`brain_read_model.py:35` `_connect`+raw SQL). raw `_connect()` dialect 누수 광범위(~9 모듈).
-- 데이터 층: 3 DB + RAGFlow HTTP. SQLite 종속 구문 `INSERT OR IGNORE/REPLACE`×22, `ON CONFLICT`×22, `PRAGMA`×6, raw execute×142.
+- 데이터 층: 3 DB + RAGFlow HTTP. SQLite 종속 구문 광범위(근사: `INSERT OR IGNORE/REPLACE`×22, `ON CONFLICT`≈25, `PRAGMA`≈19, raw execute×142) — 정확 카운트는 S1 live grep으로 재산출(§2 수치는 근사, freeze 금지).
 - **raw urllib 직접 호출 존재**(`extraction_llm.py:13-21`, `shadow_worker.py:474-482`) — RagflowHttpClient 우회 가능 → egress 차단은 메서드-키잉이 아니라 프로세스 레벨이어야(§5.0-2).
 
 ## 3. 비가역 live 표면 + Phase A 분할
@@ -28,7 +28,7 @@
 
 ## 4. 범위 / 결정
 
-- in-process 모듈 seam(A/B/D). **[결정 D-1]** 네트워크 분리는 배너(:46)+`architecture_audit_report.md:42`가 오버엔지니어링으로 기각(본문 다이어그램 :529/545/633/661-663 모순) → 본 spec·모든 B/D/C spec in-process 채택, 재도입엔 새 결정.
+- in-process 모듈 seam(A/B/D). **[결정 D-1]** 네트워크 분리(4-container/queue-manager split)는 `architecture_audit_report.md:54-78`이 오버엔지니어링으로 기각 → 본 spec·모든 B/D/C spec in-process 채택, 재도입엔 새 결정. (보고서의 dialect/isolation 리스크는 :42/:46.)
 - 이 spec 범위: autopilot harness + Phase A.
 
 ## 5. Autopilot 설계
@@ -38,12 +38,12 @@
 **S0는 A1 풀무인에서 제외 — 사람 게이트**: envelope 전체가 오늘 레포에 없고(`AUTOPILOT_LIVE_OK` 0 hits, `.claude/settings.json` 없음, `ragflow_client.py:36` 무조건 생성자) autopilot이 직접 짓는다. autopilot이 자기 우리를 자기 검증하는 순환을 끊기 위해, **S0 산출 envelope를 사람이 사인오프한 뒤에야** A1 무인 가동 시작. root-of-trust hash는 **사람 승인 hash**에 pin(self-authored hash 아님).
 
 envelope 구성:
-1. **egress default-deny(단일 필수 기제)**: apply·gate agent의 outbound를 프로세스/네트워크 레벨에서 전면 차단, loopback만 허용. self-test가 **임의 raw-urllib egress가 실패함**을 증명(메서드-키잉 우회 차단). 이것이 비가역-삭제 blast의 *주* 방벽.
+1. **egress 목적지 allowlist(단일 필수 기제)**: apply·gate agent outbound를 프로세스/네트워크 레벨 default-deny, **모델-API host:port(vertex-wrapper `127.0.0.1:8930`)만 허용** — 다른 모든 목적지(원격 + **다른 loopback 포트의 RAGFlow/policy-proxy 포함**) deny. blanket 'loopback 허용' 금지(RAGFlow가 loopback이면 삭제가 방벽 통과; `mcp_server.py:33` 빈-토큰 proxy 경로 포함). 이것이 비가역-삭제 blast의 *주* 방벽.
 2. **PreToolUse deny hook**(`.claude/settings.json`): live-mutating CLI 名 + `--execute`, `agent_knowledge_live_approval.v1` 승인파일 쓰기, worktree 밖 쓰기 차단(보조층).
 3. **코드 kill-switch**: `RagflowHttpClient.__init__`가 env `AUTOPILOT_LIVE_OK`(agent 미주입) 없으면 **live 생성만** 거부 — **주입된 fake/transport는 허용**(§5.3 게이트와 충돌 방지). 토큰은 live 경로에서만 검사.
-4. **main 실경계(prevention)**: apply/gate agent는 origin/main이 **read-only mirror**인 clone/worktree에서 실행, 또는 통합은 non-main ref로만 push(in-force server-side hook). 로컬 best-effort hook + 사후 watchdog은 보조. "reflog 가역" 주장 격하(내구 백업 아님).
-5. **orchestrator root-of-trust**: 가드레일·`ledger_seam_invariants.py`·동결 baseline을 **사람 승인 hash로 pin**, 부모 orchestrator(agent 밖)가 매 gate·merge 전 재검증, 변하면 abort. baseline/invariant 편집으로 green된 gate는 fail. apply/self-correct agent는 이 파일군 수정 금지.
-6. **harness self-test**: (a) synthetic `--execute` argv 차단, (b) **프로그램적 `Runner(config=execute=True).run()` repro가 egress-deny로 fail-closed**, (c) 임의 raw-urllib egress 실패, (d) main ref 쓰기 거부 — 단언. 실패/부재면 시작 거부.
+4. **main 실경계(prevention, in-force 필수)**: origin/main이 **read-only mirror**인 clone/worktree에서 실행 **AND/또는** 통합을 non-main ref로만 push(in-force server-side hook) — **둘 중 최소 하나의 in-force 경계 필수**(로컬 best-effort hook만으로는 불가). 사후 watchdog은 보조. reflog-가역 주장 격하(내구 백업 아님).
+5. **orchestrator root-of-trust**: 가드레일·`ledger_seam_invariants.py`·동결 baseline·**`ragflow_client.py`(kill-switch 생성자 가드)**를 **사람 승인 hash로 pin**, 부모 orchestrator(agent 밖)가 매 gate·merge 전 재검증, 변하면 abort. baseline/invariant/kill-switch 편집으로 green된 gate는 fail. apply/self-correct agent는 이 파일군 수정 금지.
+6. **harness self-test**: (a) synthetic `--execute` argv 차단, (b) 프로그램적 `Runner(config=execute=True).run()` repro fail-closed, (c) 임의 원격 raw-urllib egress 실패, (d) **`RagflowHttpClient.delete_documents()`가 설정 RAGFlow base_url AND loopback proxy 주소 양쪽에 fail-closed**(allowlist 검증) + `bearer_token==""`/policy-proxy 경로 client가 gate 중 생성 불가, (e) main ref 쓰기 거부 — 단언. **S0 사인오프는 (d) loopback-delete-blocked 통과가 전제.** 실패/부재면 시작 거부.
 
 ### 5.1 루프 골격
 
@@ -51,7 +51,7 @@ step별 work 브랜치. 각 step: apply(opus) → gate(§5.2) → review(§5.4) 
 
 ### 5.2 결정론 gate (모든 step full)
 
-`gradle test` + `cd worker && uv run pytest -q` + `neuron-knowledge --show-boundary` — **S2/S3 포함 모든 step full**(Ledger·공유 모듈 touch). 구조 불변식 lint: (i) §3 사이트 allowlist 밖 직접 도달 0, (ii) **gate 중 live `RagflowHttpClient`가 real network sink 도달 0**(§5.0-1 egress-deny로 강제; constructor-count 아님), (iii) `--show-boundary` 불변, (iv) **client 주입점 pin**(어댑터가 생성 위치/방식 바꾸면 monkeypatch 대상이 이동해 오라클이 코드와 분리됨 → 주입점을 불변식으로). recall/dry-run은 보조 신호만.
+`gradle test` + `cd worker && uv run pytest -q` + `neuron-knowledge --show-boundary` — **S2/S3 포함 모든 step full**(Ledger·공유 모듈 touch). 구조 불변식 lint: (i) §3 사이트 allowlist 밖 직접 도달 0, (ii) **gate 중 live `RagflowHttpClient`가 real network sink 도달 0**(§5.0-1 egress-deny로 강제; constructor-count 아님), (iii) `--show-boundary` 불변, (iv) **client 주입점 pin**(어댑터가 생성 위치/방식 바꾸면 monkeypatch 대상 이동 → 주입점 불변식), (v) **kill-switch 가드 존재·미우회 단언**(`AUTOPILOT_LIVE_OK` 검사 생성자가 `ragflow_client.py`에 존재, diff 시 orchestrator-abort). recall/dry-run은 보조 신호만.
 
 ### 5.3 per-script 특성화 게이트 (A1 오라클 non-vacuous — 라운드4 핵심)
 
@@ -60,7 +60,7 @@ step별 work 브랜치. 각 step: apply(opus) → gate(§5.2) → review(§5.4) 
 - **AuditContext 14필드**: fixture가 각 필드(특히 runtime-derived `replacement_knowledge_id`/`dirty_at`/`snapshot_updated_at`)를 **distinct non-masked sentinel**로 바인딩, seam 경계(pre-INSERT) AuditContext 전체를 per-field 동등 단언 → typed-carrier 필드 drop/rename fail.
 - **read-scan baseline 시나리오(필수 열거)**: ≥2 page 스캔, page 간 중복 hash(dedup), over-`max_items`(early-return 경계), 0-match·multi-match resolver — happy-path 1-doc fixture 금지.
 - **트랜잭션 경계 단언**: `_mark_gc_deleted`/`record_memory_gc_audit` per-call connection identity·commit count 기록, 어댑터(S3)가 공유 트랜잭션으로 합치거나 auto-commit 의미 바꾸면 fail. **A1 durability 모델(tombstone·audit 독립 commit)을 동결 불변식**으로 → A2 orphan 게이트가 A1이 실제 ship한 모델을 시험.
-- `session_memory_gc`만 paired-audit. **non-introduction**: transcript 2종에 audit/tombstone 추가 시 fail. per-script 실패경로 mutation(continue↔break, circuit-breaker threshold, 재-eligibility). 계약 테스트: `delete_documents`+`list_document_chunks`+`disable_*` 시그니처·반환·예외 핀.
+- `session_memory_gc`만 paired-audit. **non-introduction**: transcript 2종에 audit/tombstone 추가 시 fail. per-script 실패경로 mutation(continue↔break, circuit-breaker threshold, 재-eligibility). 계약 테스트: `delete_documents`+`list_document_chunks`+`disable_*` 시그니처·반환·예외 핀. **real-wire 계약 게이트**: fake 심볼 교체 대신 **real `RagflowHttpClient`에 recording transport 주입**해 delete/disable wire shape(method, escaped path, `{'ids':[...]}` body, `ragflow_client.py:297`) 단언 — fake-bound 오라클이 wire 회귀 못 잡는 구멍 차단. **production ordering/atomicity 불변식**: execute=True 경로 per-row 관측 순서 backup(list_document_chunks)→delete→`_mark_gc_deleted`→audit 단언(egress-deny는 gate-run만 무해화, production 순서 보장 아님).
 
 ### 5.4 멀티에이전트 리뷰 게이트
 
