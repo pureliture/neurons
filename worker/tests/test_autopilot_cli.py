@@ -19,6 +19,9 @@ class _FakeRagflow:
     def list_transcript_memory_chunks(self, *, project, query="", limit=200, **_):
         return [dict(c, project=project) for c in self._chunks]
 
+    def list_session_memory_chunks(self, *, project, provider="", limit=200, **_):
+        return [dict(c, project=project) for c in self._chunks]
+
     def chat_completion(self, messages, *, llm_id=""):
         return self._completion
 

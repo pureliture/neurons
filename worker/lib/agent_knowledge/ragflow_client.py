@@ -266,6 +266,24 @@ class RagflowHttpClient:
             limit=limit,
         )
 
+    def list_session_memory_chunks(
+        self,
+        *,
+        project: str | None = None,
+        provider: str = "",
+        dataset_name: str = "session-memory",
+        limit: int = 200,
+    ) -> list[dict]:
+        """Read-only session-memory (durable SoT) enumeration for autopilot mining."""
+        dataset_ids = [
+            str(dataset.get("id") or "")
+            for dataset in self.list_datasets(name=dataset_name)
+            if dataset.get("id")
+        ]
+        return session_memory_records_from_ragflow(
+            self, dataset_ids, project=project, provider=provider, limit=limit
+        )
+
     def chat_completion(self, messages: list[dict], *, llm_id: str = "", stream: bool = False) -> str:
         request = build_chat_completion_request(messages, llm_id=llm_id, stream=stream)
         data = self._request(request["method"], request["path"], json_body=request["json"])
@@ -430,6 +448,73 @@ def transcript_memory_records_from_ragflow(
             meta["content_hash"] = valid_hash
             records.append({"metadata": meta, "content": content, "content_hash": valid_hash})
     return _drop_turn_window_subsumed_records(records)
+
+
+def session_memory_records_from_ragflow(
+    ragflow,
+    dataset_ids,
+    *,
+    project: str | None = None,
+    provider: str = "",
+    limit: int = 200,
+) -> list[dict]:
+    """Read durable session-memory docs (the lossless SoT) as mineable records.
+
+    Unlike transcript-memory (transient conversation_chunk docs with rich meta_fields),
+    session-memory docs (``ak-session-memory-<provider>-<project>-<hash>``) carry no
+    meta_fields — provider/project live in the document name — so we filter by name and
+    fetch body via list_document_chunks. Output shape matches the transcript reader so the
+    envelope miner consumes it unchanged.
+    """
+    ids = [str(dataset_id) for dataset_id in (dataset_ids or []) if dataset_id]
+    page_size = max(int(limit), 1)
+    records: list[dict] = []
+    for dataset_id in ids:
+        page = 1
+        while len(records) < limit:
+            try:
+                docs = ragflow.list_documents(dataset_id, page=page, page_size=page_size)
+            except Exception:  # noqa: BLE001 - read-SoT must fail closed
+                docs = []
+            if not docs:
+                break
+            for doc in docs:
+                if len(records) >= limit:
+                    break
+                if not isinstance(doc, dict):
+                    continue
+                document_id = str(doc.get("id") or doc.get("document_id") or "")
+                name = str(doc.get("name") or "")
+                if not document_id or not name:
+                    continue
+                if provider and f"session-memory-{provider}-" not in name:
+                    continue
+                if project and f"-{project}-" not in name:
+                    continue
+                try:
+                    parts = ragflow.list_document_chunks(dataset_id, document_id)
+                except Exception:  # noqa: BLE001
+                    parts = []
+                content = "".join(parts) if isinstance(parts, list) else str(parts or "")
+                if not content:
+                    continue
+                content_hash = _ensure_sha256_content_hash(doc.get("content_hash"), content)
+                records.append(
+                    {
+                        "metadata": {
+                            "project": project or "",
+                            "provider": provider,
+                            "knowledge_id": document_id,
+                            "result_type": "session_memory",
+                        },
+                        "content": content,
+                        "content_hash": content_hash,
+                    }
+                )
+            if len(docs) < page_size:
+                break
+            page += 1
+    return records
 
 
 def _drop_turn_window_subsumed_records(records: list[dict]) -> list[dict]:
