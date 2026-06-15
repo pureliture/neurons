@@ -249,6 +249,7 @@ async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
                       store: IngestStateStore, backend: RAGFlowIndexBackendAdapter | None,
                       deliver: bool, max_messages: int | None, idle_timeout: float = 5.0,
                       allow_live: bool = False, max_deliver: int = 5,
+                      fetch_batch: int = 1, concurrency: int = 1,
                       pressure_open: Callable[[], bool] | None = None,
                       log: Callable[[str], None] = print) -> dict:
     """Async JetStream pull-consume loop.
@@ -286,35 +287,46 @@ async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
     sub = await js.pull_subscribe(subject, durable=durable, stream=stream)
     processed = 0
     results: list[str] = []
+    fetch_batch = max(int(fetch_batch), 1)
+    concurrency = max(int(concurrency), 1)
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def handle_msg(msg) -> str:
+        async with semaphore:
+            try:
+                payload = json.loads(msg.data.decode("utf-8"))
+                res = await asyncio.to_thread(
+                    process_payload, payload, store=store, backend=backend, deliver=deliver
+                )
+                await msg.ack()
+                log(f"worker processed status={res.status} delivered={res.delivered}")
+                return res.status
+            except Exception as exc:  # noqa: BLE001
+                attempts = _num_delivered(msg)
+                if attempts >= max_deliver:
+                    await msg.ack()  # drop: matches Java quarantineCandidate("max deliver exceeded")
+                    _record_poison(store, msg, attempts)
+                    log(f"worker quarantine(max_deliver={attempts}) error={type(exc).__name__}")
+                    return "quarantined_max_deliver"
+                await msg.nak()
+                log(f"worker nak(attempt={attempts}) error={type(exc).__name__}")
+                return "nak"
+
     while max_messages is None or processed < max_messages:
         if pressure_open is not None and not pressure_open():
             log("worker paused: target pressure not OPEN")
             await asyncio.sleep(idle_timeout)
             continue
         try:
-            msgs = await sub.fetch(1, timeout=idle_timeout)
+            remaining = fetch_batch if max_messages is None else min(fetch_batch, max_messages - processed)
+            msgs = await sub.fetch(max(remaining, 1), timeout=idle_timeout)
         except Exception:
             if max_messages is not None:
                 break
             continue  # idle fetch timeout on a long-running live loop: keep polling
-        for msg in msgs:
-            try:
-                payload = json.loads(msg.data.decode("utf-8"))
-                res = process_payload(payload, store=store, backend=backend, deliver=deliver)
-                results.append(res.status)
-                await msg.ack()
-                processed += 1
-                log(f"worker processed status={res.status} delivered={res.delivered}")
-            except Exception as exc:  # noqa: BLE001
-                attempts = _num_delivered(msg)
-                if attempts >= max_deliver:
-                    await msg.ack()  # drop: matches Java quarantineCandidate("max deliver exceeded")
-                    _record_poison(store, msg, attempts)
-                    results.append("quarantined_max_deliver")
-                    log(f"worker quarantine(max_deliver={attempts}) error={type(exc).__name__}")
-                else:
-                    await msg.nak()
-                    log(f"worker nak(attempt={attempts}) error={type(exc).__name__}")
+        statuses = await asyncio.gather(*(handle_msg(msg) for msg in msgs))
+        results.extend(statuses)
+        processed += sum(1 for status in statuses if status != "nak")
     await nc.drain()
     return {"processed": processed, "statuses": results, "store_counts": store.counts()}
 
@@ -447,6 +459,8 @@ def main() -> int:
     subject = os.environ.get("SHADOW_SUBJECT", "rag.shadow.>")
     durable = os.environ.get("SHADOW_DURABLE", "shadow_python_worker")
     max_deliver = int(os.environ.get("MAX_DELIVER", "5"))
+    fetch_batch = int(os.environ.get("WORKER_FETCH_BATCH", "1"))
+    concurrency = int(os.environ.get("WORKER_CONCURRENCY", "1"))
     pressure_url = os.environ.get("RAG_INGRESS_PRESSURE_URL", "")
     pressure_open = build_pressure_check(pressure_url) if pressure_url else None
     if args.mode == "smoke":
@@ -459,7 +473,9 @@ def main() -> int:
             nats_url=nats_url, stream=stream, subject=subject, durable=durable,
             store=store, backend=backend, deliver=deliver,
             max_messages=args.max_messages, idle_timeout=args.idle_timeout,
-            allow_live=allow_live, max_deliver=max_deliver, pressure_open=pressure_open,
+            allow_live=allow_live, max_deliver=max_deliver,
+            fetch_batch=fetch_batch, concurrency=concurrency,
+            pressure_open=pressure_open,
         ))
     print(json.dumps(result, sort_keys=True))
     return 0
