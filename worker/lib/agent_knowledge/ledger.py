@@ -550,39 +550,39 @@ class Ledger:
                     applied_at TEXT NOT NULL
                 );
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_ledger.v2', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_ledger.v2', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_ledger.v3', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_ledger.v3', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_scheduler_runs.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_scheduler_runs.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_memory_cards.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_memory_cards.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_context_packs.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_context_packs.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_auto_recall_audit.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_auto_recall_audit.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_backfill_sources.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_backfill_sources.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_eval.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_eval.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_ingress_queue.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_ingress_queue.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_session_memory_state_machine.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_session_memory_state_machine.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_project_memory_state_machine.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_project_memory_state_machine.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_transcript_lookup_indexes.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_transcript_lookup_indexes.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_session_memory_sot.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_session_memory_sot.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_session_memory_terminology.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_session_memory_terminology.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_tool_evidence_summary.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_tool_evidence_summary.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_native_memory_mirror.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_native_memory_mirror.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_memory_gc_audit.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_memory_gc_audit.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 UPDATE knowledge_items SET type = 'session_memory' WHERE type = 'session_memory_sot';
                 """
             )
