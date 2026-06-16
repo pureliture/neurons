@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -62,9 +63,22 @@ class _Candidate:
 
 
 class TranscriptVolumeGcRunner:
-    def __init__(self, *, config: TranscriptVolumeGcConfig, token: str = ""):
+    def __init__(
+        self,
+        *,
+        config: TranscriptVolumeGcConfig,
+        token: str = "",
+        ragflow_client=None,
+        now_fn: Callable[[], datetime] | None = None,
+    ):
         self.config = config
         self.token = token
+        # S0a 주입 seam(기본 None=기존 동작, behavior-preserving).
+        self._ragflow_client = ragflow_client
+        self._now_fn = now_fn
+
+    def _now(self) -> datetime:
+        return self._now_fn() if self._now_fn is not None else datetime.now(timezone.utc)
 
     def run(self) -> dict:
         ledger = Ledger(self.config.ledger_path)
@@ -80,7 +94,7 @@ class TranscriptVolumeGcRunner:
             # G-8: 볼륨 회수 hard delete는 백업 없이 실행하지 않는다.
             return self._report(candidates, selected, 0, 0, 0, 0, 1, "backup_dir_required")
         if self.config.execute and selected:
-            ragflow = RagflowHttpClient(
+            ragflow = self._ragflow_client if self._ragflow_client is not None else RagflowHttpClient(
                 base_url=self.config.ragflow_url,
                 bearer_token=self.token,
                 request_timeout_seconds=45,
@@ -142,7 +156,7 @@ class TranscriptVolumeGcRunner:
 
     def _list_candidates(self, ledger: Ledger) -> list[_Candidate]:
         cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=self.config.effective_min_active_age_seconds())
+            self._now() - timedelta(seconds=self.config.effective_min_active_age_seconds())
         ).isoformat()
         with ledger._connect() as connection:
             rows = connection.execute(
