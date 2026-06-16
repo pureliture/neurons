@@ -46,7 +46,7 @@ def _sm(ledger, kid, doc):
         summary=kid,
         evidence_status=SESSION_MEMORY_REGENERATION_EVIDENCE_STATUS,
         coverage_status="complete",
-        source_manifest_hash=_sha("|".join(sorted([src, win]))),
+        source_manifest_hash=_sha(f"{src}|{win}"),
         source_chunk_count=1,
     )
     ledger.record_session_memory_coverage(
