@@ -10,23 +10,20 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from .db_adapter import ClosingSqliteConnection, SqliteLedgerDbAdapter
+
 
 SESSION_MEMORY_REGENERATION_EVIDENCE_STATUS = "regenerated-from-indexed-transcript"
 SQLITE_BUSY_TIMEOUT_MS = 60000
 
 
-class ClosingSqliteConnection(sqlite3.Connection):
-    def __exit__(self, exc_type, exc_value, traceback):
-        result = super().__exit__(exc_type, exc_value, traceback)
-        self.close()
-        return result
-
-
 class Ledger:
-    def __init__(self, path: Path | str, *, read_only: bool = False):
+    def __init__(self, path: Path | str, *, read_only: bool = False, db_adapter=None):
         self.path = Path(path)
         self.read_only = bool(read_only)
         self._temp_dir: Path | None = None
+        # B: DB 엔진 접근 seam. None이면 현행 SQLite 어댑터를 lazy 생성(behavior-preserving).
+        self._db_adapter = db_adapter
         if not self.read_only:
             self._prepare_parent_directory()
             self._initialize()
@@ -74,34 +71,11 @@ class Ledger:
             raise ValueError("ledger parent must be private")
 
     def _connect(self, *, configure_journal: bool = False) -> sqlite3.Connection:
-        if self.read_only:
-            connection = sqlite3.connect(
-                f"file:{self.path}?mode=ro",
-                uri=True,
-                timeout=SQLITE_BUSY_TIMEOUT_MS / 1000,
-                factory=ClosingSqliteConnection,
-            )
-            connection.row_factory = sqlite3.Row
-            connection.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS};")
-            connection.execute("PRAGMA query_only=ON;")
-            return connection
-        connection = sqlite3.connect(
-            self.path,
-            timeout=SQLITE_BUSY_TIMEOUT_MS / 1000,
-            factory=ClosingSqliteConnection,
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS};")
-        if configure_journal:
-            connection.execute("PRAGMA journal_mode=WAL;")
-        connection.execute("PRAGMA synchronous=NORMAL;")
-        # Harden WAL/SHM sidecar permissions dynamically after connection
-        for p in self.path.parent.glob(f"{self.path.name}*"):
-            try:
-                os.chmod(p, 0o600)
-            except OSError:
-                pass
-        return connection
+        # B: 연결 생성을 ILedgerCoreDbAdapter 경계 뒤로. 기본은 현행 SQLite 어댑터(동작
+        # 동일). C에서 PostgreSQL 어댑터를 주입하면 이 한 점에서 엔진이 바뀐다.
+        if self._db_adapter is None:
+            self._db_adapter = SqliteLedgerDbAdapter(self.path, read_only=self.read_only)
+        return self._db_adapter.connect(configure_journal=configure_journal)
 
     def _initialize(self) -> None:
         with self._connect(configure_journal=True) as connection:
