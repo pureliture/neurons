@@ -549,40 +549,40 @@ class Ledger:
                     version TEXT PRIMARY KEY,
                     applied_at TEXT NOT NULL
                 );
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_ledger.v2', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_ledger.v3', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_scheduler_runs.v1', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_memory_cards.v1', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_context_packs.v1', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_auto_recall_audit.v1', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_backfill_sources.v1', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_eval.v1', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_ingress_queue.v1', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_session_memory_state_machine.v1', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_project_memory_state_machine.v1', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_transcript_lookup_indexes.v1', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_session_memory_sot.v1', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_session_memory_terminology.v1', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_tool_evidence_summary.v1', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_native_memory_mirror.v1', datetime('now'));
-                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_memory_gc_audit.v1', datetime('now'));
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_ledger.v2', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_ledger.v3', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_scheduler_runs.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_memory_cards.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_context_packs.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_auto_recall_audit.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_backfill_sources.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_eval.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_ingress_queue.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_session_memory_state_machine.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_project_memory_state_machine.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_transcript_lookup_indexes.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_session_memory_sot.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_session_memory_terminology.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_tool_evidence_summary.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_native_memory_mirror.v1', datetime('now')) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_memory_gc_audit.v1', datetime('now')) ON CONFLICT DO NOTHING;
                 UPDATE knowledge_items SET type = 'session_memory' WHERE type = 'session_memory_sot';
                 """
             )
@@ -621,7 +621,7 @@ class Ledger:
                 _ensure_column(connection, "session_memory_sot_coverage_edges", "turn_end_index", "INTEGER DEFAULT 0")
                 connection.execute(
                     """
-                    INSERT OR IGNORE INTO session_memory_coverage_edges (
+                    INSERT INTO session_memory_coverage_edges (
                         active_knowledge_id,
                         source_content_hash,
                         source_window_hash,
@@ -641,12 +641,13 @@ class Ledger:
                         turn_start_index,
                         turn_end_index
                     FROM session_memory_sot_coverage_edges
+                    ON CONFLICT DO NOTHING
                     """
                 )
             if _table_exists(connection, "session_memory_sot_active_snapshots"):
                 connection.execute(
                     """
-                    INSERT OR IGNORE INTO session_memory_active_snapshots (
+                    INSERT INTO session_memory_active_snapshots (
                         session_id_hash,
                         active_knowledge_id,
                         active_content_hash,
@@ -662,6 +663,7 @@ class Ledger:
                         activated_at,
                         updated_at
                     FROM session_memory_sot_active_snapshots
+                    ON CONFLICT DO NOTHING
                     """
                 )
 
@@ -1113,8 +1115,9 @@ class Ledger:
             for ref in evidence_refs:
                 connection.execute(
                     """
-                    INSERT OR IGNORE INTO memory_card_evidence (memory_id, knowledge_id, content_hash)
+                    INSERT INTO memory_card_evidence (memory_id, knowledge_id, content_hash)
                     VALUES (?, ?, ?)
+                    ON CONFLICT DO NOTHING
                     """,
                     (memory_id, ref["knowledge_id"], ref["content_hash"]),
                 )
@@ -1577,8 +1580,9 @@ class Ledger:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT OR IGNORE INTO context_packs (pack_id, prompt_hash, filters_json, item_count, created_at)
+                INSERT INTO context_packs (pack_id, prompt_hash, filters_json, item_count, created_at)
                 VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
                 """,
                 (pack["pack_id"], pack["prompt_hash"], filters_json, len(pack.get("items", [])), created_at),
             )
@@ -1586,9 +1590,16 @@ class Ledger:
                 reference_id = item.get("memory_id") or item.get("knowledge_id") or ""
                 connection.execute(
                     """
-                    INSERT OR REPLACE INTO context_pack_items (
+                    INSERT INTO context_pack_items (
                         pack_id, item_index, kind, reference_id, title, summary, score, metadata_json
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(pack_id, item_index) DO UPDATE SET
+                        kind=excluded.kind,
+                        reference_id=excluded.reference_id,
+                        title=excluded.title,
+                        summary=excluded.summary,
+                        score=excluded.score,
+                        metadata_json=excluded.metadata_json
                     """,
                     (
                         pack["pack_id"],
