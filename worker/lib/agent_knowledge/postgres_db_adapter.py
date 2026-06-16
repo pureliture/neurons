@@ -15,10 +15,51 @@ from __future__ import annotations
 import re
 
 import psycopg
-from psycopg.rows import dict_row
 
 from .db_adapter import ILedgerCoreDbAdapter
 from .pg_paramstyle import qmark_to_pyformat
+
+
+class _PgRow:
+    """sqlite3.Row 호환 row. caller가 위치(``row[0]``)·이름(``row['c']``)·``row.get``·
+    ``keys()``·``dict(row)`` 를 sqlite3.Row와 동일하게 쓰도록 한다. psycopg 기본 dict_row는
+    이름 접근만 돼 ``row[0]`` 위치 접근(count 쿼리 등)에서 ``KeyError: 0`` 을 낸다."""
+
+    __slots__ = ("_v", "_c")
+
+    def __init__(self, values, columns):
+        self._v = values
+        self._c = columns
+
+    def __getitem__(self, key):
+        if isinstance(key, (int, slice)):
+            return self._v[key]
+        return self._v[self._c.index(key)]
+
+    def get(self, key, default=None):
+        try:
+            return self._v[self._c.index(key)]
+        except (ValueError, IndexError):
+            return default
+
+    def keys(self):  # dict(row) 가 mapping 프로토콜로 인식
+        return list(self._c)
+
+    def __iter__(self):  # sqlite3.Row 처럼 값 순회(tuple(row))
+        return iter(self._v)
+
+    def __len__(self):
+        return len(self._v)
+
+
+def _pg_row_factory(cursor):
+    desc = cursor.description
+    cols = [c.name for c in desc] if desc else []
+
+    def make_row(values):
+        return _PgRow(tuple(values), cols)
+
+    return make_row
 
 # SQLite 연결-튜닝 PRAGMA(``PRAGMA busy_timeout=…`` / ``journal_mode=WAL`` /
 # ``synchronous=NORMAL`` / ``foreign_keys=ON`` / ``query_only=ON`` 등 assignment 형태)는
@@ -81,8 +122,8 @@ class _PgConnection:
     dialect = "postgres"
 
     def __init__(self, dsn: str):
-        self._conn = psycopg.connect(dsn, row_factory=dict_row)
-        self.row_factory = None  # 호환용: callers가 sqlite3.Row를 set해도 무시(dict_row 고정)
+        self._conn = psycopg.connect(dsn, row_factory=_pg_row_factory)
+        self.row_factory = None  # 호환용: callers가 sqlite3.Row를 set해도 무시(_PgRow 고정)
         self._ensure_compat_functions()
 
     def _ensure_compat_functions(self) -> None:
