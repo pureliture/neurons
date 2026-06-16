@@ -20,4 +20,5 @@ python -m agent_knowledge.session_memory.neuron_session_memory \
   --watermark-file state/wm.txt \
   --batch-size 10 \
   --max-processed-per-run 10 \
+  --limit 50 \
   --approval state/neuron-build-approval.json
