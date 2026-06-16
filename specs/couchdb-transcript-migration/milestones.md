@@ -16,20 +16,25 @@ are NOT performed inside this loop. Code + tests are built with fixtures/fakes.
   target), idempotent in-memory store seam.
 
 ## M2 Historical import + project authority resolver
-- status: done (all 5 lanes incl. agy)
+- status: done (4 provider lanes: codex, claude, antigravity, gemini)
 - evidence: `couchdb_source/{project_authority,historical_import}.py` +
-  `tests/test_couchdb_{project_authority,historical_import}.py`. 16 new tests
-  pass; full suite 565/2. Hierarchy resolver (capture metadata > path/cwd/marker
-  > server inference) with ambiguity + RAGFlow-mismatch reporting; import
-  orchestrator parses via existing `parse_transcript_source`, applies the
-  stricter public-ingress redaction at the store boundary, writes
-  transcript_session + conversation_chunk + coverage_manifest, fail-closed on
-  unreadable source / leak / unsupported lane.
-- agy resolved (user, 2026-06-17): agy shares the Antigravity transcript format.
-  `_parse_antigravity_native_jsonl` + `extract_antigravity_tool_evidence`
-  parameterized with a `provider` label (default unchanged); `agy` added to the
-  parse + tool-evidence dispatch and to `PROVIDER_LANES` (live_allowed=True);
-  stored under the distinct `agy` provider label. agy import/live tests updated.
+  `tests/test_couchdb_{project_authority,historical_import}.py`. Hierarchy
+  resolver (capture metadata > path/cwd/marker > server inference) with ambiguity
+  + RAGFlow-mismatch reporting; import orchestrator parses via existing
+  `parse_transcript_source`, applies the stricter public-ingress redaction at the
+  store boundary, writes transcript_session + conversation_chunk +
+  coverage_manifest, fail-closed on unreadable source / leak / unsupported lane.
+- agy resolved (user + dendrite evidence, 2026-06-17): agy is NOT a separate
+  provider -- it is Antigravity's headless CLI. dendrite captures it as
+  provider `antigravity` (`agy_headless_capture` ->
+  `normalize_provider_capture_request("antigravity", ...)`;
+  `SUPPORTED_TRANSCRIPT_PROVIDERS = {claude,gemini,codex,antigravity}`), and the
+  prior extraction inventory `extracted_sessions.json` has 4 keys
+  (antigravity/codex/claude/gemini). So the earlier distinct-agy-lane was wrong:
+  `transcript_parsers.py` reverted to its pre-agy original (zero agy footprint),
+  the separate agy lane removed from `PROVIDER_LANES` and `LIVE_CUTOVER_PROVIDERS`;
+  agy sessions import under the antigravity lane. spec's "5 tools" = 4 providers
+  (agy = Antigravity CLI). full suite 594/2.
 - divergence (invariant 2, replanned in-loop, NOT an SoT change): reused
   `conversation_chunk` doc id keyed on content-addressed `chunk_id` (M1
   refinement) since chunks share part_index=1.

@@ -12,11 +12,14 @@ that excludes the affected coverage from irreversible retirement.
 
 Provider lanes
 --------------
-All five lanes route to ``parse_transcript_source``. ``gemini`` is
-historical-import-only (no live lane). ``agy`` shares the Antigravity transcript
-format and is parsed under its own provider label so the two stay distinct
-migration lanes. A lane registered with ``parser=None`` would be marked
-``parser_unavailable`` (and excluded from retirement) rather than guessing.
+Four provider lanes route to ``parse_transcript_source``: codex, claude,
+antigravity, gemini. ``gemini`` is historical-import-only (no live lane). There
+is no separate ``agy`` lane: ``agy`` is Antigravity's headless CLI, and dendrite
+captures it as provider ``antigravity`` (``agy_headless_capture`` ->
+``normalize_provider_capture_request("antigravity", ...)``), so agy sessions are
+imported under the ``antigravity`` lane. A lane registered with ``parser=None``
+would be marked ``parser_unavailable`` (and excluded from retirement) rather than
+guessing a format.
 """
 
 from __future__ import annotations
@@ -49,9 +52,8 @@ class ProviderLane:
 PROVIDER_LANES: dict[str, ProviderLane] = {
     "codex": ProviderLane("codex", live_allowed=True, parser=parse_transcript_source),
     "claude": ProviderLane("claude", live_allowed=True, parser=parse_transcript_source),
+    # antigravity covers its headless CLI (agy), which dendrite captures as antigravity.
     "antigravity": ProviderLane("antigravity", live_allowed=True, parser=parse_transcript_source),
-    # agy shares the Antigravity transcript format (distinct provider label).
-    "agy": ProviderLane("agy", live_allowed=True, parser=parse_transcript_source),
     "gemini": ProviderLane("gemini", live_allowed=False, parser=parse_transcript_source),
 }
 

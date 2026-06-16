@@ -71,25 +71,25 @@ def test_gemini_live_event_is_scope_violation(tmp_path):
     assert sink.calls == []
 
 
-def test_agy_live_event_imports_under_agy_label(tmp_path):
+def test_agy_live_event_is_not_a_separate_provider(tmp_path):
+    # agy is Antigravity's CLI (captured as antigravity); it is not a live provider.
     store = InMemoryCouchDBSourceStore()
     coord = ShadowCoordinator(store=store, comparison_sink=RecordingComparisonSink())
     obs = coord.ingest_live_event(_loc(tmp_path, "agy", "a1", "neurons"))
-    assert obs.status == ImportStatus.IMPORTED
-    assert obs.provider == "agy"
-    assert obs.couch_written is True
+    assert obs.status == ImportStatus.UNKNOWN_PROVIDER
+    assert obs.couch_written is False
 
 
 def test_switch_blocked_until_all_required_lanes_covered(tmp_path):
     store = InMemoryCouchDBSourceStore()
     coord = ShadowCoordinator(store=store, comparison_sink=RecordingComparisonSink())
     coord.ingest_live_event(_loc(tmp_path, "codex", "s1", "neurons"))
-    # default required set includes agy -> never ready
+    # default required set (codex, claude, antigravity) -> claude/antigravity uncovered
     with pytest.raises(CutoverNotReady):
         coord.switch_to_couchdb_only()
     verdict = coord.stability_verdict()
-    assert "agy" in verdict["uncovered_providers"]
     assert "claude" in verdict["uncovered_providers"]
+    assert "antigravity" in verdict["uncovered_providers"]
     assert verdict["per_provider"]["codex"]["covered"] is True
 
 

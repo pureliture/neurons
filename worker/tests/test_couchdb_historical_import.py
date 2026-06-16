@@ -72,38 +72,46 @@ def test_import_is_idempotent(tmp_path):
     assert session_doc["_rev"].startswith("1-")
 
 
-def _write_agy_fixture(tmp_path, *, session_id="agy-1"):
-    # agy reuses the Antigravity transcript format under the agy provider label.
+def _write_antigravity_fixture(tmp_path, *, session_id="ag-1"):
     payload = {
-        "provider": "agy",
+        "provider": "antigravity",
         "schema_version": "provider_transcript_fixture.v1",
         "session_id": session_id,
         "started_at": "2026-06-17T01:00:00Z",
         "turns": [
-            {"role": "user", "text": "run agy task", "timestamp": "2026-06-17T01:00:01Z"},
-            {"role": "assistant", "text": "agy done", "timestamp": "2026-06-17T01:00:02Z"},
+            {"role": "user", "text": "run task", "timestamp": "2026-06-17T01:00:01Z"},
+            {"role": "assistant", "text": "done", "timestamp": "2026-06-17T01:00:02Z"},
         ],
     }
-    path = tmp_path / f"agy-{session_id}.json"
+    path = tmp_path / f"antigravity-{session_id}.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return str(path)
 
 
-def test_agy_lane_imports_with_antigravity_format(tmp_path):
+def test_antigravity_lane_imports(tmp_path):
+    # agy is Antigravity's CLI and is captured as provider=antigravity, so the
+    # antigravity lane covers it; there is no separate agy provider.
     store = InMemoryCouchDBSourceStore()
     result = import_historical_source(
         locator=SourceLocator(
-            provider="agy", source_path=_write_agy_fixture(tmp_path), capture_metadata_project="neurons"
+            provider="antigravity",
+            source_path=_write_antigravity_fixture(tmp_path),
+            capture_metadata_project="neurons",
         ),
         store=store,
     )
     assert result.status == ImportStatus.IMPORTED
-    assert result.provider == "agy"
-    # stored under the agy provider label, distinct from antigravity
-    session = store.find_by_session(
-        session_id_hash=result.session_id_hash, doc_type=dm.SourceDocType.TRANSCRIPT_SESSION
-    )[0]
-    assert session["provider"] == "agy"
+    assert result.provider == "antigravity"
+
+
+def test_agy_is_not_a_separate_provider(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    result = import_historical_source(
+        locator=SourceLocator(provider="agy", source_path=str(tmp_path / "agy.json")),
+        store=store,
+    )
+    assert result.status == ImportStatus.UNKNOWN_PROVIDER
+    assert store.all_docs() == []
 
 
 def test_gemini_live_scope_is_violation(tmp_path):
