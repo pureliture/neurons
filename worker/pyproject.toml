@@ -9,7 +9,11 @@ build-backend = "setuptools.build_meta"
 name = "rag-ingress-worker"
 version = "0.1.0"
 requires-python = ">=3.13"
-dependencies = ["nats-py>=2.6"]
+dependencies = [
+    "nats-py>=2.6",
+    "psycopg[binary]>=3.3.4",
+    "sqlalchemy>=2.0.51",
+]
 
 [project.scripts]
 neuron-knowledge = "agent_knowledge.cli:main"
