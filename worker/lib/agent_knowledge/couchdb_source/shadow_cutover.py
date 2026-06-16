@@ -8,9 +8,9 @@ Models the staged cutover (design "Live Cutover") as a small state machine:
 
 The transition SHADOW -> COUCHDB_ONLY is gated on a stability verdict: every live
 provider must have proven CouchDB coverage across a mixed provider/project
-window. ``gemini`` is historical-only and is rejected on the live path; ``agy``
-has no parser yet, so its live events stay ``parser_unavailable`` and it cannot
-reach proven coverage until the parser is vendored.
+window. ``gemini`` is historical-only and is rejected on the live path. ``agy`` is
+Antigravity's CLI and is captured as provider ``antigravity``, so it is covered by
+the antigravity lane (not a separate live provider).
 
 This module contains orchestration logic only. The actual live event stream and
 the real RAGFlow transcript-memory comparison write are injected seams; running
@@ -25,8 +25,9 @@ from typing import Protocol, runtime_checkable
 from .historical_import import ImportStatus, SourceLocator, import_historical_source
 from .source_store import CouchDBSourceStore
 
-# gemini excluded (historical-only); these are the live-pipeline lanes.
-LIVE_CUTOVER_PROVIDERS = ("codex", "claude", "antigravity", "agy")
+# gemini excluded (historical-only); these are the live-pipeline lanes. agy is
+# Antigravity's CLI and is captured as antigravity, so it is covered by that lane.
+LIVE_CUTOVER_PROVIDERS = ("codex", "claude", "antigravity")
 
 
 class CutoverPhase:
@@ -118,9 +119,8 @@ class ShadowCoordinator:
     ) -> dict:
         """Per-live-provider CouchDB coverage over the observed window.
 
-        ``required_providers`` defaults to all live lanes (incl. agy). An operator
-        may narrow it to cut over the currently-parseable lanes while agy's parser
-        is still pending.
+        ``required_providers`` defaults to the live lanes (codex, claude,
+        antigravity). An operator may narrow it to cut over a subset.
         """
 
         per_provider: dict[str, dict] = {}
