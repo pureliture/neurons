@@ -201,3 +201,46 @@ def test_fresh_active_below_floor_not_eligible(tmp_path, monkeypatch):
     report = TranscriptVolumeGcRunner(config=_cfg(tmp_path, ledger_path, execute=True), token="t").run()
     assert report["eligible_count"] == 0
     assert report["deleted_count"] == 0
+
+
+class _RecordingVolClient:
+    """S0a 주입 seam용 recording client: resolve→backup→delete 순서를 기록한다."""
+
+    def __init__(self, *, docs_by_hash):
+        self.docs_by_hash = dict(docs_by_hash)
+        self.calls: list = []
+
+    def list_documents(self, dataset_id, *, keywords="", page=1, page_size=100):
+        self.calls.append(("list_documents", keywords))
+        return [{"id": did, "meta_fields": {"content_hash": h}} for h, did in self.docs_by_hash.items()]
+
+    def list_document_chunks(self, dataset_id, document_id, **kwargs):
+        self.calls.append(("list_document_chunks", document_id))
+        return ["raw transcript body line 1", "line 2"]
+
+    def delete_documents(self, dataset_id, document_ids):
+        self.calls.append(("delete_documents", (dataset_id, tuple(document_ids))))
+
+
+def test_transcript_volume_gc_characterization_order_and_no_audit(tmp_path):
+    # 특성화: transcript_volume_gc 계약 = resolve(list_documents)→backup(list_document_chunks)
+    # →delete만. session_memory_gc와 달리 tombstone/audit는 없다(non-introduction). seam 주입
+    # 으로 순서를 고정하고, A2가 seam 라우팅으로 이 계약을 바꾸지 않았음을 단언한다.
+    src = _sha("covered-source-1")
+    ledger_path = tmp_path / "l.sqlite"
+    ledger = Ledger(ledger_path)
+    _active_sm_covering(ledger, kid="kn_sm5", doc="doc_sm5", source_hash=src, aged=True)
+    rec = _RecordingVolClient(docs_by_hash={src: "doc_tx_RAW_1"})
+
+    report = TranscriptVolumeGcRunner(
+        config=_cfg(tmp_path, ledger_path, execute=True), token="t", ragflow_client=rec
+    ).run()
+
+    assert report["deleted_count"] == 1
+    assert rec.calls == [
+        ("list_documents", "vol-sess"),
+        ("list_document_chunks", "doc_tx_RAW_1"),
+        ("delete_documents", (TX_DS, ("doc_tx_RAW_1",))),
+    ]
+    # non-introduction: 이 스크립트는 audit/tombstone을 쓰지 않는다
+    assert ledger.list_memory_gc_audit() == []

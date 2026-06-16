@@ -160,3 +160,44 @@ def test_empty_body_aborts_delete(tmp_path, monkeypatch):
     assert rep["deleted_count"] == 0
     assert fake.deleted == []
     assert rep["status"] == "partial_failed"
+
+
+class _RecordingSessClient:
+    """S0a 주입 seam용 recording client: SM스캔/TX스캔/backup/delete 순서를 기록한다."""
+
+    def __init__(self, *, sm_docs, tx_docs):
+        self.sm_docs = list(sm_docs)
+        self.tx_docs = list(tx_docs)
+        self.calls: list = []
+
+    def list_documents(self, dataset_id, *, page=1, page_size=100, keywords=""):
+        self.calls.append(("list_documents", dataset_id, page))
+        docs = self.sm_docs if dataset_id == SM else (self.tx_docs if dataset_id == TX else [])
+        start = (page - 1) * page_size
+        return docs[start : start + page_size]
+
+    def list_document_chunks(self, dataset_id, document_id, **kw):
+        self.calls.append(("list_document_chunks", document_id))
+        return ["raw transcript body line 1", "line 2"]
+
+    def delete_documents(self, dataset_id, document_ids):
+        self.calls.append(("delete_documents", (dataset_id, tuple(document_ids))))
+
+
+def test_transcript_session_gc_characterization_order(tmp_path):
+    # 특성화: 계약 = SM(summarized) 스캔 → TX 스캔 → backup → delete. Ledger 미사용이라
+    # audit/tombstone 없음(non-introduction). seam 주입으로 순서 고정 → A2 라우팅이
+    # backup-before-delete와 스캔 순서를 바꾸지 않았음을 단언.
+    rec = _RecordingSessClient(sm_docs=[_sm("S1")], tx_docs=[_tx("S1", doc_id="t1")])
+
+    report = TranscriptSessionGcRunner(
+        config=_cfg(tmp_path, execute=True), token="t", ragflow_client=rec
+    ).run()
+
+    assert report["deleted_count"] == 1
+    bi = [c[0] for c in rec.calls].index("list_document_chunks")
+    assert rec.calls[bi] == ("list_document_chunks", "t1")
+    assert rec.calls[bi + 1] == ("delete_documents", (TX, ("t1",)))
+    sm_first = next(i for i, c in enumerate(rec.calls) if c[0] == "list_documents" and c[1] == SM)
+    tx_first = next(i for i, c in enumerate(rec.calls) if c[0] == "list_documents" and c[1] == TX)
+    assert sm_first < tx_first
