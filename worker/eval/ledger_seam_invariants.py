@@ -22,10 +22,14 @@ FORBIDDEN_RAGFLOW_MUTATIONS = frozenset(
 # 비가역/forbidden RAGFlow mutation 직접 호출 사이트의 frozen allowlist.
 # 키 = agent_knowledge 기준 상대 경로, 값 = 그 파일에서 호출되는 메서드 집합.
 # ragflow_client.py(정의)는 스캔에서 제외한다.
+#
+# A2 shrink: GC 3 스크립트의 ``delete_documents`` 직접 호출이 GC Safety Lane seam
+# (``gc_safety_auditor.hard_delete_documents``) 경유로 라우팅됐다. 이제 비가역 RAGFlow
+# 삭제의 직접 호출은 **seam 모듈 한 곳**에만 존재한다. GC 스크립트에 delete_documents가
+# 다시 나타나면 allowlist 밖 위반으로 잡힌다(seam 우회 금지). sync_roundtrip/
+# native_memory_reconcile의 disable_*는 Phase A 밖(envelope 안)이라 allowlist 유지.
 FROZEN_DELETE_ALLOWLIST: dict[str, frozenset[str]] = {
-    "session_memory/session_memory_gc.py": frozenset({"delete_documents"}),
-    "session_memory/transcript_volume_gc.py": frozenset({"delete_documents"}),
-    "session_memory/transcript_session_gc.py": frozenset({"delete_documents"}),
+    "session_memory/gc_safety_auditor.py": frozenset({"delete_documents"}),
     "session_memory/sync_roundtrip.py": frozenset({"disable_document"}),
     "session_memory/native_memory_reconcile.py": frozenset({"disable_message"}),
 }

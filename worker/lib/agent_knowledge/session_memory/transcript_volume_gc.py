@@ -31,6 +31,7 @@ from ..ledger import Ledger, SESSION_MEMORY_REGENERATION_EVIDENCE_STATUS
 from .native_memory_sync_approval import ApprovalError, validate_goal3_live_approval
 from ..ragflow_client import RagflowHttpClient
 from .gc_backup import write_gc_backup
+from .gc_safety_auditor import hard_delete_documents
 
 TRANSCRIPT_VOLUME_GC_OPERATION = "memory_regeneration_gc_transcript_memory_volume_delete"
 TRANSCRIPT_VOLUME_GC_SCHEMA_VERSION = "agent_knowledge_transcript_volume_gc.v1"
@@ -124,7 +125,7 @@ class TranscriptVolumeGcRunner:
                         replacement_knowledge_id=cand.active_knowledge_id,
                     )
                     backed_up_count += 1
-                    ragflow.delete_documents(self.config.transcript_dataset_id, [doc_id])
+                    hard_delete_documents(ragflow, self.config.transcript_dataset_id, [doc_id])
                     deleted_count += 1
                 except Exception as exc:  # noqa: BLE001
                     failed_error_class = exc.__class__.__name__

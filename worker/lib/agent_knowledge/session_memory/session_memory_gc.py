@@ -13,7 +13,7 @@ from ..ledger import Ledger
 from .native_memory_sync_approval import ApprovalError, validate_goal3_live_approval
 from ..ragflow_client import RagflowHttpClient
 from .gc_backup import write_gc_backup
-from .gc_safety_auditor import LedgerGCSafetyAuditor
+from .gc_safety_auditor import AuditContext, LedgerGCSafetyAuditor, hard_delete_documents
 
 
 SESSION_MEMORY_GC_OPERATION = "memory_regeneration_gc_dead_session_memory"
@@ -129,7 +129,7 @@ class SessionMemoryGcRunner:
                         # G-8: 백업이 성공해야만 삭제로 진행(백업 실패 시 예외→delete 안 함).
                         self._backup_before_delete(ledger, ragflow, row, document_id=document_id, knowledge_id=knowledge_id, session_id_hash=session_id_hash)
                         backed_up_count += 1
-                    ragflow.delete_documents(self.config.dataset_id, [document_id])
+                    hard_delete_documents(ragflow, self.config.dataset_id, [document_id])
                     self._mark_gc_deleted(ledger, knowledge_id)
                     self._record_audit(
                         ledger,
@@ -322,20 +322,23 @@ class SessionMemoryGcRunner:
         the session's dirty row (dirty_at, E3). Only the doc-id hash is stored."""
         snapshot = ledger.get_session_memory_active_snapshot(session_id_hash) or {}
         dirty = ledger.get_dirty_session_memory(session_id_hash) or {}
-        ledger.record_memory_gc_audit(
-            gc_kind="session_memory",
-            operation=SESSION_MEMORY_GC_OPERATION,
-            schema_version=SESSION_MEMORY_GC_SCHEMA_VERSION,
-            mode="execute" if self.config.execute else "dry_run",
-            knowledge_id=knowledge_id,
-            ragflow_document_id=document_id,
-            dataset_id=self.config.dataset_id,
-            replacement_knowledge_id=str(snapshot.get("active_knowledge_id") or ""),
-            dirty_at=str(dirty.get("dirty_at") or ""),
-            snapshot_updated_at=str(snapshot.get("updated_at") or ""),
-            approval_operation=SESSION_MEMORY_GC_OPERATION,
-            age_gate_seconds=self.config.effective_min_disabled_age_seconds(),
-            mutated=True,
+        # A2: audit도 GC Safety Lane seam 경유로 라우팅(typed AuditContext, 14-field 무손실).
+        LedgerGCSafetyAuditor(ledger).record_gc_audit(
+            AuditContext(
+                gc_kind="session_memory",
+                operation=SESSION_MEMORY_GC_OPERATION,
+                schema_version=SESSION_MEMORY_GC_SCHEMA_VERSION,
+                mode="execute" if self.config.execute else "dry_run",
+                knowledge_id=knowledge_id,
+                ragflow_document_id=document_id,
+                dataset_id=self.config.dataset_id,
+                replacement_knowledge_id=str(snapshot.get("active_knowledge_id") or ""),
+                dirty_at=str(dirty.get("dirty_at") or ""),
+                snapshot_updated_at=str(snapshot.get("updated_at") or ""),
+                approval_operation=SESSION_MEMORY_GC_OPERATION,
+                age_gate_seconds=self.config.effective_min_disabled_age_seconds(),
+                mutated=True,
+            )
         )
 
     def _mark_gc_deleted(self, ledger: Ledger, knowledge_id: str) -> None:

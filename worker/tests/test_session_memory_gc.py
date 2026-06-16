@@ -805,3 +805,42 @@ def test_session_memory_gc_characterization_trace_frozen(tmp_path):
     assert a["dirty_at"] and a["snapshot_updated_at"]  # bound epoch markers wired
     assert a["audit_id"] and a["created_at"]  # volatile: presence only
     assert a["ragflow_document_id_hash"] and "doc_ch_old" not in a["ragflow_document_id_hash"]
+
+
+def test_session_memory_gc_orphan_delete_when_audit_raises(tmp_path, monkeypatch):
+    # A2 orphan-injection 오라클: delete 성공 *후* audit가 raise하면 RAGFlow doc은 이미
+    # 삭제됐는데(비가역) audit row가 없는 orphan 상태가 된다. 이 partial-failure 동작을
+    # 특성화로 고정한다(seam 라우팅이 순서/실패경로를 바꾸면 이 테스트가 깨진다).
+    frozen = datetime(2026, 6, 16, 0, 0, 0, tzinfo=timezone.utc)
+    ledger_path = tmp_path / "ledger.sqlite"
+    ledger = Ledger(ledger_path)
+    _bk_eligible_setup(
+        ledger, old_kid="kn_orph_old", old_doc="doc_orph_old", active_kid="kn_orph_active", active_doc="doc_orph_active"
+    )
+    rec = _RecordingGcClient()
+
+    def _raise_audit(self, ctx):
+        raise RuntimeError("audit write failed")
+
+    monkeypatch.setattr(gc_module.LedgerGCSafetyAuditor, "record_gc_audit", _raise_audit)
+
+    report = SessionMemoryGcRunner(
+        config=SessionMemoryGcConfig(
+            ledger_path=ledger_path,
+            dataset_id="ds_session_memory",
+            ragflow_url="http://localhost:9380",
+            backup_dir=str(tmp_path / "gc-backup"),
+            execute=True,
+        ),
+        token="test-token",
+        ragflow_client=rec,
+        now_fn=lambda: frozen,
+    ).run()
+
+    # 비가역 delete는 이미 일어났다(orphan) — backup → delete까지 갔고 audit에서 터짐
+    assert ("delete_documents", ("ds_session_memory", ("doc_orph_old",))) in rec.calls
+    assert report["failed_count"] == 1
+    assert report["deleted_count"] == 0  # audit 전 실패라 deleted 카운트되지 않음
+    assert report["status"] == "partial_failed"
+    # audit row 없음 = orphan delete (이 위험이 코드에 존재함을 명시 고정)
+    assert Ledger(ledger_path).list_memory_gc_audit() == []

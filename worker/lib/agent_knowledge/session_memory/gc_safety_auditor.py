@@ -16,6 +16,17 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 
+def hard_delete_documents(ragflow, dataset_id: str, document_ids: list[str]) -> None:
+    """GC Safety Lane의 단일 비가역 삭제 chokepoint (A2 co-location).
+
+    모든 GC 스크립트는 ``ragflow.delete_documents``를 직접 호출하지 않고 이 함수를 경유한다.
+    그러면 비가역 삭제 사이트가 seam 한 곳으로 모여 enforcement(kill-switch)·audit·구조
+    불변식 lint가 단일 지점에만 걸린다. ledger를 요구하지 않으므로 ledger 없는 GC 스크립트
+    (transcript_session_gc)도 동일 chokepoint를 쓴다.
+    """
+    ragflow.delete_documents(dataset_id, document_ids)
+
+
 @dataclass(frozen=True)
 class AuditContext:
     """비가역 GC 한 건의 전체 audit payload.
