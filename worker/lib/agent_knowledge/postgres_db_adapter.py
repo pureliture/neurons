@@ -34,6 +34,28 @@ def _is_noop_pragma(sql: str) -> bool:
     return bool(_NOOP_PRAGMA.match(sql))
 
 
+# SQLite ``julianday(t)`` 호환 shim. caller(GC/dirty-sync)가 age-gate 델타 비교에 쓰는
+# ``julianday(replace(col,'Z','+00:00'))`` / ``julianday('now')`` 를 SQL 무수정으로 PG에서
+# 동작시킨다. Julian Day Number = epoch초/86400 + 2440587.5(Unix epoch=JD 2440587.5). 모든
+# 사용처가 델타(a-b, a>=b)라 절대값보다 단조성·일관성이 핵심. 빈/무효 입력은 SQLite처럼 NULL
+# 반환(plpgsql 예외처리) — caller가 nullif로 거르지만 방어적으로.
+_JULIANDAY_SHIM = """
+CREATE OR REPLACE FUNCTION julianday(t text) RETURNS double precision AS $JD$
+DECLARE ts timestamptz;
+BEGIN
+  IF t IS NULL THEN RETURN NULL; END IF;
+  IF t = 'now' THEN RETURN extract(epoch FROM now()) / 86400.0 + 2440587.5; END IF;
+  BEGIN
+    ts := t::timestamptz;
+  EXCEPTION WHEN others THEN
+    RETURN NULL;
+  END;
+  RETURN extract(epoch FROM ts) / 86400.0 + 2440587.5;
+END;
+$JD$ LANGUAGE plpgsql STABLE;
+"""
+
+
 class _PgResult:
     """psycopg cursor를 sqlite3 cursor처럼(fetchall/fetchone) 노출. dict_row라 row는
     ``dict(row)``·``row['col']`` 모두 가능 — sqlite3.Row와 호환."""
@@ -61,6 +83,13 @@ class _PgConnection:
     def __init__(self, dsn: str):
         self._conn = psycopg.connect(dsn, row_factory=dict_row)
         self.row_factory = None  # 호환용: callers가 sqlite3.Row를 set해도 무시(dict_row 고정)
+        self._ensure_compat_functions()
+
+    def _ensure_compat_functions(self) -> None:
+        # SQLite 호환 함수(julianday) 보장 — idempotent CREATE OR REPLACE, 연결당 1회.
+        with self._conn.cursor() as cursor:
+            cursor.execute(_JULIANDAY_SHIM)
+        self._conn.commit()
 
     def execute(self, sql: str, params=None) -> _PgResult:
         if _is_noop_pragma(sql):

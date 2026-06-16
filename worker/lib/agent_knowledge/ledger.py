@@ -2890,7 +2890,7 @@ class Ledger:
                 """
                 SELECT * FROM knowledge_items
                 WHERE type = 'session_memory' AND session_id_hash = ?
-                ORDER BY rowid DESC LIMIT 1
+                ORDER BY ingested_at DESC, knowledge_id DESC LIMIT 1
                 """,
                 (session_id_hash,),
             ).fetchone()
