@@ -7,6 +7,7 @@ from pathlib import Path
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.neuron_session_memory import (
     main,
+    probe_transcript_delivery_meta,
     read_recent_transcript_deliveries,
     read_watermark,
     seed_dirty_session_memory_from_deliveries,
@@ -35,6 +36,11 @@ class _FakeRagflow:
     def get_document_meta(self, dataset_id, document_id):
         self.meta_calls.append((dataset_id, document_id))
         return self._docs.get(document_id)
+
+
+class _FakeProbeRagflow(_FakeRagflow):
+    def list_datasets(self, *, name="", **_kwargs):
+        return [{"name": name, "id": "ds_1"}]
 
 
 def _shadow_db(tmp_path: Path) -> Path:
@@ -120,6 +126,52 @@ def test_seed_empty_deliveries_is_noop(tmp_path):
     assert ragflow.meta_calls == []
 
 
+def test_probe_transcript_delivery_meta_reports_counts_without_raw_ids():
+    ragflow = _FakeProbeRagflow(
+        docs={
+            "doc_a": {"id": "doc_a", "meta_fields": _meta(session_id_hash="sha256:s1", knowledge_id="kn_a")},
+            "doc_b": {
+                "id": "doc_b",
+                "meta_fields": _meta(
+                    session_id_hash="sha256:s2",
+                    knowledge_id="kn_b",
+                    project="dendrite",
+                    provider="antigravity",
+                ),
+            },
+            "doc_other": {
+                "id": "doc_other",
+                "meta_fields": _meta(type="project_memory", result_type="project_memory"),
+            },
+        }
+    )
+    deliveries = [
+        {"document_ref": "doc_a", "updated_at": "2026-06-13T00:01:00Z"},
+        {"document_ref": "doc_b", "updated_at": "2026-06-13T00:02:00Z"},
+        {"document_ref": "doc_b", "updated_at": "2026-06-13T00:03:00Z"},
+        {"document_ref": "doc_other", "updated_at": "2026-06-13T00:04:00Z"},
+        {"document_ref": "doc_missing", "updated_at": "2026-06-13T00:05:00Z"},
+    ]
+
+    report = probe_transcript_delivery_meta(deliveries, ragflow=ragflow, dataset_ids=["ds_1"])
+
+    assert report["counts"]["deliveries_seen"] == 5
+    assert report["counts"]["unique_document_refs"] == 4
+    assert report["counts"]["conversation_chunk_meta"] == 2
+    assert report["counts"]["non_conversation_meta"] == 1
+    assert report["counts"]["missing_meta"] == 1
+    assert {
+        "project": "dendrite",
+        "provider": "antigravity",
+        "documents": 1,
+        "sessions": 1,
+    } in report["project_provider_buckets"]
+    dumped = json.dumps(report)
+    assert "doc_a" not in dumped
+    assert "sha256:s1" not in dumped
+    assert report["raw_ids_printed"] is False
+
+
 def test_watermark_roundtrip_and_missing_is_empty(tmp_path):
     path = tmp_path / "state" / "watermark.txt"
     assert read_watermark(path) == ""
@@ -158,6 +210,52 @@ def test_neuron_session_memory_build_dry_run_reads_shadow_log_without_ids_or_mut
     assert report["planned_new_watermark"] == "2026-06-13T00:02:00Z"
     assert report["mutation_performed"] is False
     assert report["network_used"] is False
+    assert "doc1" not in json.dumps(report)
+    assert read_watermark(watermark) == "2026-06-13T00:00:45Z"
+
+
+def test_neuron_session_memory_build_probe_meta_is_read_only(tmp_path, capsys, monkeypatch):
+    import agent_knowledge.ragflow_client as ragflow_client
+
+    db = _shadow_db(tmp_path)
+    watermark = tmp_path / "state" / "watermark.txt"
+    write_watermark(watermark, "2026-06-13T00:00:45Z")
+    fake = _FakeProbeRagflow(
+        docs={
+            "doc1": {"id": "doc1", "meta_fields": _meta(project="neurons")},
+            "doc2": {
+                "id": "doc2",
+                "meta_fields": _meta(project="dendrite", provider="antigravity"),
+            },
+        }
+    )
+    monkeypatch.setenv("RAGFLOW_API_KEY", "test-token")
+    monkeypatch.setattr(ragflow_client, "RagflowHttpClient", lambda **_kwargs: fake)
+
+    rc = main(
+        [
+            "neuron-session-memory-build",
+            "--dry-run",
+            "--probe-meta",
+            "--shadow-db",
+            str(db),
+            "--watermark-file",
+            str(watermark),
+            "--ragflow-url",
+            "http://127.0.0.1:19380",
+            "--token-env",
+            "RAGFLOW_API_KEY",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["status"] == "dry_run_complete"
+    assert report["network_used"] is True
+    assert report["mutation_performed"] is False
+    assert report["ragflow_write_performed"] is False
+    assert report["meta_probe"]["counts"]["conversation_chunk_meta"] == 2
+    assert report["meta_probe"]["counts"]["sessions_seen"] == 1
     assert "doc1" not in json.dumps(report)
     assert read_watermark(watermark) == "2026-06-13T00:00:45Z"
 

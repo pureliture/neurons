@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 from ..ledger import Ledger
@@ -114,6 +116,75 @@ def seed_dirty_session_memory_from_deliveries(
     }
 
 
+def probe_transcript_delivery_meta(deliveries, *, ragflow, dataset_ids) -> dict:
+    """Read transcript-memory metadata for delivered docs without ledger writes.
+
+    The report intentionally returns only counts and project/provider buckets.
+    Raw document refs and session hashes stay out of stdout.
+    """
+    refs = list(
+        dict.fromkeys(
+            str(delivery.get("document_ref") or "")
+            for delivery in (deliveries or [])
+        )
+    )
+    refs = [ref for ref in refs if ref]
+    counts = {
+        "deliveries_seen": len(deliveries or []),
+        "unique_document_refs": len(refs),
+        "meta_found": 0,
+        "missing_meta": 0,
+        "conversation_chunk_meta": 0,
+        "non_conversation_meta": 0,
+        "sessions_seen": 0,
+    }
+    project_provider_sessions: dict[tuple[str, str], set[str]] = defaultdict(set)
+    project_provider_documents: dict[tuple[str, str], int] = defaultdict(int)
+    for ref in refs:
+        meta = _transcript_memory_meta_for_document(ragflow, dataset_ids, ref)
+        if not meta:
+            counts["missing_meta"] += 1
+            continue
+        counts["meta_found"] += 1
+        meta_type = meta.get("result_type") or meta.get("type") or meta.get("kind")
+        if meta_type != "conversation_chunk":
+            counts["non_conversation_meta"] += 1
+            continue
+        counts["conversation_chunk_meta"] += 1
+        project = str(meta.get("project") or "")
+        provider = str(meta.get("provider") or "")
+        session_id_hash = str(meta.get("session_id_hash") or "")
+        bucket = (project, provider)
+        project_provider_documents[bucket] += 1
+        if session_id_hash:
+            project_provider_sessions[bucket].add(session_id_hash)
+    counts["sessions_seen"] = len(
+        {
+            session
+            for sessions in project_provider_sessions.values()
+            for session in sessions
+        }
+    )
+    buckets = []
+    for project, provider in sorted(
+        set(project_provider_documents) | set(project_provider_sessions)
+    ):
+        buckets.append(
+            {
+                "project": project,
+                "provider": provider,
+                "documents": project_provider_documents[(project, provider)],
+                "sessions": len(project_provider_sessions[(project, provider)]),
+            }
+        )
+    return {
+        "counts": counts,
+        "project_provider_buckets": buckets,
+        "raw_ids_printed": False,
+        "raw_paths_printed": False,
+    }
+
+
 def read_watermark(path: str | Path) -> str:
     try:
         return Path(path).read_text(encoding="utf-8").strip()
@@ -178,6 +249,7 @@ def _strip_program(argv: list[str]) -> list[str]:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=COMMAND)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--probe-meta", action="store_true")
     parser.add_argument("--shadow-db")
     parser.add_argument("--watermark-file")
     parser.add_argument("--target-profile", default=TRANSCRIPT_MEMORY_TARGET_PROFILE)
@@ -218,15 +290,41 @@ def _blocked_report(reason: str) -> dict:
 
 
 def _has_live_args(args: argparse.Namespace) -> bool:
-    return any([args.ledger, args.dataset_id, args.ragflow_url, args.token_env, args.runtime_dir, args.approval])
+    return any(
+        [
+            args.ledger,
+            args.dataset_id,
+            args.ragflow_url,
+            args.token_env,
+            args.runtime_dir,
+            args.approval,
+        ]
+    )
+
+
+def _has_live_write_args(args: argparse.Namespace) -> bool:
+    return any([args.ledger, args.dataset_id, args.runtime_dir, args.approval])
 
 
 def _run_dry_run(args: argparse.Namespace) -> int:
     if not args.shadow_db or not args.watermark_file:
         print("--shadow-db and --watermark-file are required for dry-run", file=sys.stderr)
         return 2
-    if _has_live_args(args):
-        _print_report(_blocked_report("legacy live build arguments are not accepted in dry-run mode"))
+    if args.probe_meta:
+        if _has_live_write_args(args):
+            _print_report(
+                _blocked_report(
+                    "live write arguments are not accepted in probe-meta dry-run mode"
+                )
+            )
+            return 1
+        if not args.ragflow_url or not args.token_env:
+            print("--ragflow-url and --token-env are required with --probe-meta", file=sys.stderr)
+            return 2
+    elif _has_live_args(args):
+        _print_report(
+            _blocked_report("legacy live build arguments are not accepted in dry-run mode")
+        )
         return 1
 
     watermark = read_watermark(args.watermark_file)
@@ -236,15 +334,42 @@ def _run_dry_run(args: argparse.Namespace) -> int:
         target_profile=args.target_profile,
         limit=args.limit,
     )
-    new_watermark = max((str(item.get("updated_at") or "") for item in deliveries), default=watermark)
+    new_watermark = max(
+        (str(item.get("updated_at") or "") for item in deliveries),
+        default=watermark,
+    )
+    meta_probe = None
+    if args.probe_meta:
+        from ..ragflow_client import RagflowHttpClient
+
+        token = os.environ.get(args.token_env, "")
+        if not token:
+            print("token env is not set", file=sys.stderr)
+            return 2
+        ragflow = RagflowHttpClient(
+            base_url=args.ragflow_url,
+            bearer_token=token,
+            request_timeout_seconds=30,
+        )
+        dataset_ids = [
+            str(dataset.get("id") or "")
+            for dataset in ragflow.list_datasets(name=args.transcript_dataset_name)
+            if dataset.get("id")
+        ]
+        meta_probe = probe_transcript_delivery_meta(
+            deliveries,
+            ragflow=ragflow,
+            dataset_ids=dataset_ids,
+        )
     _print_report(
         {
             "schema_version": SCHEMA_VERSION,
             "status": "dry_run_complete",
             "command": COMMAND,
             "mode": "dry_run",
+            "meta_probe": meta_probe,
             "mutation_performed": False,
-            "network_used": False,
+            "network_used": bool(args.probe_meta),
             "ragflow_write_performed": False,
             "raw_ids_printed": False,
             "raw_paths_printed": False,

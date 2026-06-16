@@ -17,6 +17,8 @@
 
 3. Session-memory canary
    - corrected `transcript-memory`가 `DONE` coverage를 가진 뒤에만 수행한다.
+   - 먼저 shadow-log meta probe로 canary source가 어느 project/provider에 있는지
+     확인한다.
    - 먼저 dry-run으로 session 1건을 빌드한다.
    - sync/live write는 별도 approval record가 있을 때만 수행한다.
 
@@ -41,6 +43,23 @@ RAGFLOW_API_KEY=... uv run neuron-knowledge cleanup-readiness \
 ```
 
 Session-memory canary dry-run:
+
+```bash
+RAGFLOW_API_KEY=... uv run neuron-knowledge neuron-session-memory-build \
+  --dry-run \
+  --probe-meta \
+  --shadow-db <private-shadow-snapshot-db> \
+  --watermark-file <private-watermark-file> \
+  --ragflow-url http://127.0.0.1:19380 \
+  --token-env RAGFLOW_API_KEY \
+  --limit 50
+```
+
+If the meta probe finds corrected `neurons`/`dendrite` conversation chunks but
+`memory-regeneration build-session-memory --all-sessions` reports
+`sessions_available=0`, the blocker is source-lane mismatch: the delivered
+transcript source is present in shadow/RAGFlow read-SoT, but the ledger
+`transcript_chunks` source used by the legacy dry-run builder is empty.
 
 ```bash
 uv run neuron-knowledge memory-regeneration build-session-memory \
@@ -88,5 +107,8 @@ RAGFLOW_API_KEY=... uv run neuron-knowledge session-memory-gc \
 
 - `corrected_session_memory_done_coverage_missing`
 - `corrected_transcript_memory_has_non_done_runs`
+- `memory-regeneration build-session-memory --all-sessions` can return
+  `sessions_available=0` while shadow/RAGFlow read-SoT still has corrected
+  `neurons`/`dendrite` conversation chunks.
 
 이 blocker가 남아 있으면 disable/delete 실행은 금지한다.
