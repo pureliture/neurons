@@ -18,11 +18,18 @@
 - **B — Ledger Core 어댑터**: `db_adapter.py`(`ILedgerCoreDbAdapter`/
   `SqliteLedgerDbAdapter`) + 표준 SQL 이식(`INSERT OR …`→`ON CONFLICT`,
   `datetime('now')`→`CURRENT_TIMESTAMP`).
-- **C — SQLite→PostgreSQL**: `postgres_db_adapter.py`(psycopg) + `pg_paramstyle.py` +
-  dialect-aware schema 헬퍼 + `ledger_pg_migrate.py` + `NEURON_LEDGER_PG_DSN` flip.
-  live PG16 parity + **production-data dry-run(read-only)** 증거
-  → `docs/architecture/ledger-pg-cutover-dryrun-evidence.md`. 남은 것 = live cutover
-  본체(worker 정지·Postgres 설치·flip·origin push)뿐, 전부 사용자 승인 게이트.
+- **C — SQLite→PostgreSQL (라이브 가동 완료)**: `postgres_db_adapter.py`(psycopg) +
+  `pg_paramstyle.py` + dialect-aware schema 헬퍼 + `ledger_pg_migrate.py` +
+  `NEURON_LEDGER_PG_DSN` flip. **2026-06-16 Ubuntu brain-server에서 라이브 cutover 완료 —
+  시스템이 PostgreSQL 16 위에서 가동 중**(builder cron tick PG에서 `status: ok`, GC dry-run
+  PG에서 status ok). 토폴로지: worker는 cron 배치, 코드배포 tgz, Postgres는 RAGFlow와 분리된
+  `~/ledger-pg` docker compose(`127.0.0.1:5432`), flip은 공유 `.env`의 1줄. 1차 시도에서
+  full-runtime dialect 누수 3건을 builder smoke로 포착·수정: ① 연결-튜닝 PRAGMA no-op
+  (`50bad86`) ② `julianday` PG shim + `rowid`→`ingested_at`(`4b81f2f`) ③ row를
+  sqlite3.Row 호환 `_PgRow`로 위치접근 지원(`969d42c`). rollback = `.env` 1줄 제거(원본
+  SQLite 무변) + `lib.bak-cutover2-*` 복원. **남은 것 = origin push만**(서버는 tgz 배포라
+  cutover에 불요, 대외 경계로 별도 사용자 판단). 증거:
+  `docs/architecture/ledger-pg-cutover-dryrun-evidence.md`.
 - **D — 4-area 경계**: audit override(Modular Monolith)대로 물리 분리 대신 in-process 경계.
   `ledger_areas.py`(deepdive 책임 지도 34테이블→4영역+core manifest) +
   `eval/ledger_area_boundaries.py` lint(전수·배타 + cross-area 메서드 frozen allowlist 9개).
