@@ -8,6 +8,7 @@ from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.neuron_session_memory import (
     main,
     probe_transcript_delivery_meta,
+    public_seed_report,
     read_recent_transcript_deliveries,
     read_watermark,
     seed_dirty_session_memory_from_deliveries,
@@ -172,6 +173,22 @@ def test_probe_transcript_delivery_meta_reports_counts_without_raw_ids():
     assert report["raw_ids_printed"] is False
 
 
+def test_public_seed_report_redacts_session_hashes():
+    seed = {
+        "seeded_sessions": 2,
+        "new_watermark": "2026-06-13T00:03:00Z",
+        "session_id_hashes": ["sha256:s1", "sha256:s2"],
+    }
+
+    report = public_seed_report(seed, scanned=3)
+
+    dumped = json.dumps(report)
+    assert report["seeded_sessions"] == 2
+    assert report["scanned"] == 3
+    assert report["raw_ids_printed"] is False
+    assert "sha256:s1" not in dumped
+
+
 def test_watermark_roundtrip_and_missing_is_empty(tmp_path):
     path = tmp_path / "state" / "watermark.txt"
     assert read_watermark(path) == ""
@@ -300,12 +317,17 @@ def test_neuron_session_memory_build_live_runs_with_valid_approval(tmp_path, cap
 
     monkeypatch.setenv("RAGFLOW_API_KEY", "test-token")
     monkeypatch.setattr(sync, "resolve_dataset_id", lambda **kw: "ds-session-memory")
-    monkeypatch.setattr(
-        nsm,
-        "run_neuron_session_memory_build_once",
-        lambda **kw: {"seed": {"seeded_sessions": 0, "new_watermark": ""}, "build": {"status": "ok", "processed": 2, "deferred": 0}},
-    )
     argv = _live_argv(tmp_path)
+    argv.extend(["--limit", "50"])
+
+    def _stub(**kw):
+        assert kw["delivery_limit"] == 50
+        return {
+            "seed": {"seeded_sessions": 0, "new_watermark": ""},
+            "build": {"status": "ok", "processed": 2, "deferred": 0},
+        }
+
+    monkeypatch.setattr(nsm, "run_neuron_session_memory_build_once", _stub)
     (tmp_path / "approval.json").write_text(json.dumps(_live_approval(argv)), encoding="utf-8")
 
     rc = main(argv)

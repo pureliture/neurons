@@ -8,9 +8,9 @@ JSON file or blind-mines them live from transcript-memory via RAGFlow.
 AUTOPILOT MODE — GOAL AND STANDING AUTHORIZATION
 ================================================
 GOAL (working goal_state, user-set 2026-06-14):
-  On the workspace-ragflow-advisor project (where live transcript-memory sessions are
-  tagged), live blind mine -> cycle -> recall must pass the golden finish gate: SILENT-LIE
-  == 0 AND false_current == 0, over 3 consecutive FINAL-slice cohorts, per-lane F1 >= 0.85.
+  On the active neurons-owned project lane, live blind mine -> cycle -> recall must pass
+  the golden finish gate: SILENT-LIE == 0 AND false_current == 0, over 3 consecutive
+  FINAL-slice cohorts, per-lane F1 >= 0.85.
 
 STANDING PRE-APPROVAL (user, 2026-06-14):
   All autopilot approval gates are pre-approved and run unattended — candidate auto-accept

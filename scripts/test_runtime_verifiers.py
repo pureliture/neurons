@@ -71,12 +71,13 @@ class LiveRagFlowVerifyContractTest(unittest.TestCase):
     def test_authorized_retrieval_falls_back_to_unfiltered_dataset_query(self):
         calls = []
 
-        def fake_retrieve(_base_url, _api_key, _dataset_id, _marker, *, metadata_filter=True):
+        def fake_retrieve(_base_url, _api_key, _dataset_id, _marker, *, project, metadata_filter=True):
+            self.assertEqual(project, "neurons")
             calls.append(metadata_filter)
             return [] if metadata_filter else [{"document_id": "doc_1"}]
 
         def fake_is_authorized(_ledger_path, document_id, *, project):
-            return document_id == "doc_1" and project == "workspace-ragflow-advisor"
+            return document_id == "doc_1" and project == "neurons"
 
         chunks, authorized_chunks, mode = live_verify.retrieve_authorized_chunks(
             "http://ragflow",
@@ -84,6 +85,7 @@ class LiveRagFlowVerifyContractTest(unittest.TestCase):
             "dataset",
             "marker",
             "ledger.sqlite",
+            project="neurons",
             retrieve_fn=fake_retrieve,
             is_authorized_fn=fake_is_authorized,
         )

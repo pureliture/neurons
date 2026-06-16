@@ -22,7 +22,7 @@ from agent_knowledge.session_memory.extraction_llm import build_vertex_embedding
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 from golden_grader import build_cosine_match_fn, grade_recall_against_golden, load_golden
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = os.environ.get("GATE_PROJECT", "neurons")
 LIMIT = int(os.environ.get("GATE_LIMIT", "15"))
 THRESHOLD = float(os.environ.get("GATE_THRESHOLD", "0.78"))
 
