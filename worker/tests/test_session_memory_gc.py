@@ -721,3 +721,87 @@ def test_session_memory_gc_empty_body_aborts_delete(tmp_path, monkeypatch):
     assert report["deleted_count"] == 0
     assert report["backed_up_count"] == 0
     assert report["status"] == "partial_failed"
+
+
+class _RecordingGcClient:
+    """S0a 주입 seam용 recording client: 모든 호출을 순서대로 기록해 비가역 경로의
+    부수효과 시퀀스(backup→delete)를 결정적으로 단언한다. delete는 success를 반환하므로
+    tombstone+audit 경로가 실제 실행된다(vacuous-green 방지)."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, tuple]] = []
+        self.chunks_body = ["redacted body A", "redacted body B"]
+
+    def list_document_chunks(self, dataset_id, document_id, **kwargs):
+        self.calls.append(("list_document_chunks", (dataset_id, document_id)))
+        return list(self.chunks_body)
+
+    def delete_documents(self, dataset_id, document_ids):
+        self.calls.append(("delete_documents", (dataset_id, tuple(document_ids))))
+
+
+def test_session_memory_gc_characterization_trace_frozen(tmp_path):
+    # S0a/S1 특성화 baseline (게이트의 non-vacuous A1 오라클): 주입 seam(recording
+    # client + frozen clock)으로 비가역 경로의 순서화된 부수효과 + audit 행 형태를
+    # 고정한다. S2/S3가 _mark_gc_deleted/audit를 seam 뒤로 옮긴 뒤에도 이 트레이스가
+    # (volatile audit_id/created_at 제외) byte-identical해야 한다.
+    frozen = datetime(2026, 6, 16, 0, 0, 0, tzinfo=timezone.utc)
+    ledger_path = tmp_path / "ledger.sqlite"
+    ledger = Ledger(ledger_path)
+    old, active = _bk_eligible_setup(
+        ledger, old_kid="kn_ch_old", old_doc="doc_ch_old", active_kid="kn_ch_active", active_doc="doc_ch_active"
+    )
+    rec = _RecordingGcClient()
+
+    report = SessionMemoryGcRunner(
+        config=SessionMemoryGcConfig(
+            ledger_path=ledger_path,
+            dataset_id="ds_session_memory",
+            ragflow_url="http://localhost:9380",
+            backup_dir=str(tmp_path / "gc-backup"),
+            execute=True,
+        ),
+        token="test-token",
+        ragflow_client=rec,
+        now_fn=lambda: frozen,
+    ).run()
+
+    # 1) 순서화된 부수효과: backup(list_document_chunks) → delete
+    assert rec.calls == [
+        ("list_document_chunks", ("ds_session_memory", "doc_ch_old")),
+        ("delete_documents", ("ds_session_memory", ("doc_ch_old",))),
+    ]
+    assert report["deleted_count"] == 1
+    # 2) tombstone: deleted_at == frozen (now_fn 주입 증명) + status deleted
+    tombstone = json.loads(
+        Ledger(ledger_path).get_by_knowledge_id(old["knowledge_id"])["metadata_json"]
+    )["session_memory_gc"]
+    assert tombstone["status"] == "deleted"
+    assert tombstone["deleted_at"] == frozen.isoformat()
+    # 3) audit: 1 row, deterministic 필드 고정 / volatile은 존재만 / raw doc id 미저장
+    audits = Ledger(ledger_path).list_memory_gc_audit()
+    assert len(audits) == 1
+    a = audits[0]
+    deterministic = {
+        k: a[k]
+        for k in (
+            "gc_kind", "operation", "schema_version", "mode", "knowledge_id",
+            "dataset_id", "replacement_knowledge_id", "approval_operation",
+            "age_gate_seconds", "mutated",
+        )
+    }
+    assert deterministic == {
+        "gc_kind": "session_memory",
+        "operation": gc_module.SESSION_MEMORY_GC_OPERATION,
+        "schema_version": gc_module.SESSION_MEMORY_GC_SCHEMA_VERSION,
+        "mode": "execute",
+        "knowledge_id": old["knowledge_id"],
+        "dataset_id": "ds_session_memory",
+        "replacement_knowledge_id": active["knowledge_id"],
+        "approval_operation": gc_module.SESSION_MEMORY_GC_OPERATION,
+        "age_gate_seconds": MIN_DISABLED_AGE_FLOOR_SECONDS,
+        "mutated": 1,
+    }
+    assert a["dirty_at"] and a["snapshot_updated_at"]  # bound epoch markers wired
+    assert a["audit_id"] and a["created_at"]  # volatile: presence only
+    assert a["ragflow_document_id_hash"] and "doc_ch_old" not in a["ragflow_document_id_hash"]

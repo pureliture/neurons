@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -59,9 +60,24 @@ class SessionMemoryGcConfig:
 
 
 class SessionMemoryGcRunner:
-    def __init__(self, *, config: SessionMemoryGcConfig, token: str = ""):
+    def __init__(
+        self,
+        *,
+        config: SessionMemoryGcConfig,
+        token: str = "",
+        ragflow_client=None,
+        now_fn: Callable[[], datetime] | None = None,
+    ):
         self.config = config
         self.token = token
+        # S0a 주입 seam: 기본 None이면 기존 동작(런타임에 RagflowHttpClient 생성 +
+        # 실시간 clock). 특성화/테스트는 recording transport를 단 real client와 frozen
+        # clock을 주입해 wire shape·순서를 결정적으로 고정한다(behavior-preserving).
+        self._ragflow_client = ragflow_client
+        self._now_fn = now_fn
+
+    def _now(self) -> datetime:
+        return self._now_fn() if self._now_fn is not None else datetime.now(timezone.utc)
 
     def run(self) -> dict:
         declared = self.config.declared_policy_input()
@@ -84,7 +100,7 @@ class SessionMemoryGcRunner:
         backed_up_count = 0
         failed_error_class = ""
         if self.config.execute and selected:
-            ragflow = RagflowHttpClient(
+            ragflow = self._ragflow_client if self._ragflow_client is not None else RagflowHttpClient(
                 base_url=self.config.ragflow_url,
                 bearer_token=self.token,
                 request_timeout_seconds=45,
@@ -237,7 +253,7 @@ class SessionMemoryGcRunner:
 
     def _list_candidates(self, ledger: Ledger) -> list[dict]:
         cutoff = (
-            datetime.now(timezone.utc)
+            self._now()
             - timedelta(seconds=self.config.effective_min_disabled_age_seconds())
         ).isoformat()
         with ledger._connect() as connection:
@@ -326,9 +342,10 @@ class SessionMemoryGcRunner:
         if not row:
             return
         metadata = _metadata_dict(row)
+        now_iso = self._now().isoformat()
         metadata["session_memory_gc"] = {
             "status": "deleted",
-            "deleted_at": datetime.now(timezone.utc).isoformat(),
+            "deleted_at": now_iso,
             "operation": SESSION_MEMORY_GC_OPERATION,
         }
         with ledger._connect() as connection:
@@ -336,7 +353,7 @@ class SessionMemoryGcRunner:
                 "UPDATE knowledge_items SET metadata_json = ?, updated_at = ? WHERE knowledge_id = ?",
                 (
                     json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                    datetime.now(timezone.utc).isoformat(),
+                    now_iso,
                     knowledge_id,
                 ),
             )
