@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 import socket
 import subprocess
 import time
@@ -75,14 +76,14 @@ def wait_for_health(base_url, timeout_seconds):
     raise RuntimeError(f"healthz did not become ready: {last_error}")
 
 
-def valid_enqueue_payload(body):
+def valid_enqueue_payload(body, *, project):
     marker = "runtime-verify-" + uuid.uuid4().hex[:12]
     return {
         "schemaVersion": "rag_ingress_enqueue.v1",
         "source": {
             "type": "local_pc",
             "provider": "codex",
-            "project": "workspace-ragflow-advisor",
+            "project": project,
         },
         "payload": {
             "kind": "redacted_rag_ready_document",
@@ -128,6 +129,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--evidence", default="build/reports/rag-ingress-queue/runtime-verify.json")
     parser.add_argument("--expected-pressure", default="CLOSED", choices=["CLOSED", "THROTTLED"])
+    parser.add_argument("--project", default=os.environ.get("RAG_INGRESS_VERIFY_PROJECT", "neurons"))
     args = parser.parse_args()
 
     health = wait_for_health(args.api_url, args.timeout)
@@ -161,10 +163,10 @@ def main():
         "---\n"
         "redacted ubuntu runtime verification body " + uuid.uuid4().hex[:12] + "\n"
     )
-    enqueue = http_json(args.api_url, "/v1/ingest/enqueue", valid_enqueue_payload(body), 202)
+    enqueue = http_json(args.api_url, "/v1/ingest/enqueue", valid_enqueue_payload(body, project=args.project), 202)
 
     bad_body = body + "Bearer abc.def.ghi\n"
-    rejected = http_json(args.api_url, "/v1/ingest/enqueue", valid_enqueue_payload(bad_body), 400)
+    rejected = http_json(args.api_url, "/v1/ingest/enqueue", valid_enqueue_payload(bad_body, project=args.project), 400)
     if "abc.def.ghi" in json.dumps(rejected):
         raise RuntimeError("redaction rejection echoed token")
 

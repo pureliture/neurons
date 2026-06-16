@@ -116,6 +116,15 @@ def seed_dirty_session_memory_from_deliveries(
     }
 
 
+def public_seed_report(seed: dict, *, scanned: int) -> dict:
+    return {
+        "seeded_sessions": int(seed.get("seeded_sessions") or 0),
+        "new_watermark": str(seed.get("new_watermark") or ""),
+        "scanned": int(scanned),
+        "raw_ids_printed": False,
+    }
+
+
 def probe_transcript_delivery_meta(deliveries, *, ragflow, dataset_ids) -> dict:
     """Read transcript-memory metadata for delivered docs without ledger writes.
 
@@ -207,6 +216,7 @@ def run_neuron_session_memory_build_once(
     shadow_db_path: str | Path,
     watermark_path: str | Path,
     transcript_dataset_name: str = "transcript-memory",
+    delivery_limit: int = 500,
     log=None,
 ) -> dict:
     """One neuron build cycle: seed dirty from the worker shadow log, then build.
@@ -228,16 +238,21 @@ def run_neuron_session_memory_build_once(
         if dataset.get("id")
     ]
     watermark = read_watermark(watermark_path)
-    deliveries = read_recent_transcript_deliveries(shadow_db_path, since_watermark=watermark)
+    deliveries = read_recent_transcript_deliveries(
+        shadow_db_path,
+        since_watermark=watermark,
+        limit=delivery_limit,
+    )
     ledger = Ledger(config.ledger_path)
     seed = seed_dirty_session_memory_from_deliveries(
         deliveries, ragflow=ragflow, ledger=ledger, dataset_ids=dataset_ids
     )
-    emit({"event": "neuron_seed", **seed, "scanned": len(deliveries)})
+    public_seed = public_seed_report(seed, scanned=len(deliveries))
+    emit({"event": "neuron_seed", **public_seed})
     build = DirtySessionMemorySyncRunner(config=config, token=token, log=emit).run()
     if seed["new_watermark"] and seed["new_watermark"] > watermark:
         write_watermark(watermark_path, seed["new_watermark"])
-    return {"seed": seed, "build": build}
+    return {"seed": public_seed, "build": build}
 
 
 def _strip_program(argv: list[str]) -> list[str]:
@@ -454,6 +469,7 @@ def _run_live(args: argparse.Namespace, raw_argv: list[str]) -> int:
         token=token,
         shadow_db_path=args.shadow_db,
         watermark_path=args.watermark_file,
+        delivery_limit=args.limit,
     )
     _print_report(
         {

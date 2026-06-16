@@ -109,4 +109,4 @@ def test_fresh_succeeded_projection_is_pending_approval_not_cutover():
 
     assert report["cutover_status"] == "migration_ready_pending_approval"
     assert report["blockers"] == []
-    assert report["rollback_owner"] == "ragflow-advisor"
+    assert report["rollback_owner"] == "neurons"

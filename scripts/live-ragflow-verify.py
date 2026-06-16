@@ -87,13 +87,13 @@ def wait_until(deadline, action, description):
     raise RuntimeError(f"timeout waiting for {description}: {last_error}")
 
 
-def enqueue_payload(body, filename, marker):
+def enqueue_payload(body, filename, marker, *, project):
     return {
         "schemaVersion": "rag_ingress_enqueue.v1",
         "source": {
             "type": "ubuntu_live_smoke",
             "provider": "codex",
-            "project": "workspace-ragflow-advisor",
+            "project": project,
         },
         "payload": {
             "kind": "redacted_rag_ready_document",
@@ -105,7 +105,7 @@ def enqueue_payload(body, filename, marker):
                 "metadata": {
                     "schema_version": "agent_knowledge_document.v2",
                     "result_type": "conversation_chunk",
-                    "project": "workspace-ragflow-advisor",
+                    "project": project,
                     "provider": "codex",
                     "live_verify_marker": marker,
                 },
@@ -155,7 +155,7 @@ def find_document(base_url, api_key, dataset_id, filenames):
     return None
 
 
-def retrieve(base_url, api_key, dataset_id, marker, *, metadata_filter=True):
+def retrieve(base_url, api_key, dataset_id, marker, *, project, metadata_filter=True):
     payload = {
         "question": marker,
         "dataset_ids": [dataset_id],
@@ -169,7 +169,7 @@ def retrieve(base_url, api_key, dataset_id, marker, *, metadata_filter=True):
         payload["metadata_condition"] = {
             "logic": "and",
             "conditions": [
-                {"name": "project", "comparison_operator": "=", "value": "workspace-ragflow-advisor"},
+                {"name": "project", "comparison_operator": "=", "value": project},
                 {"name": "live_verify_marker", "comparison_operator": "=", "value": marker},
             ],
         }
@@ -244,14 +244,14 @@ def redacted_document_ref(document_id):
     return "sha256:" + hashlib.sha256(document_id.encode()).hexdigest()[:16]
 
 
-def authorized_chunks_from(chunks, ledger_path, is_authorized_fn):
+def authorized_chunks_from(chunks, ledger_path, is_authorized_fn, *, project):
     return [
         chunk
         for chunk in chunks
         if is_authorized_fn(
             ledger_path,
             chunk.get("document_id") or chunk.get("doc_id") or "",
-            project="workspace-ragflow-advisor",
+            project=project,
         )
     ]
 
@@ -263,16 +263,17 @@ def retrieve_authorized_chunks(
     marker,
     ledger_path,
     *,
+    project,
     retrieve_fn=retrieve,
     is_authorized_fn=is_authorized,
 ):
-    chunks = retrieve_fn(base_url, api_key, dataset_id, marker, metadata_filter=True)
-    authorized_chunks = authorized_chunks_from(chunks, ledger_path, is_authorized_fn)
+    chunks = retrieve_fn(base_url, api_key, dataset_id, marker, project=project, metadata_filter=True)
+    authorized_chunks = authorized_chunks_from(chunks, ledger_path, is_authorized_fn, project=project)
     if authorized_chunks:
         return chunks, authorized_chunks, "metadata_filter"
 
-    fallback_chunks = retrieve_fn(base_url, api_key, dataset_id, marker, metadata_filter=False)
-    fallback_authorized_chunks = authorized_chunks_from(fallback_chunks, ledger_path, is_authorized_fn)
+    fallback_chunks = retrieve_fn(base_url, api_key, dataset_id, marker, project=project, metadata_filter=False)
+    fallback_authorized_chunks = authorized_chunks_from(fallback_chunks, ledger_path, is_authorized_fn, project=project)
     if fallback_authorized_chunks:
         return fallback_chunks, fallback_authorized_chunks, "dataset_unfiltered_fallback"
 
@@ -290,6 +291,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--ledger", default="build/private-live-ledger/ledger.sqlite")
     parser.add_argument("--evidence", default="build/reports/rag-ingress-queue/live-ragflow-verify.json")
+    parser.add_argument("--project", default=os.environ.get("RAG_INGRESS_VERIFY_PROJECT", "neurons"))
     parser.add_argument("--existing-filename", default="")
     parser.add_argument("--allow-same-document-chunk-fallback", action="store_true")
     parser.add_argument("--allow-preauthorized-existing-document", action="store_true")
@@ -303,7 +305,11 @@ def main():
         raise RuntimeError("RAGFLOW_TRANSCRIPT_MEMORY_DATASET_ID is required")
 
     deadline = time.time() + args.timeout
-    marker = args.existing_filename.removesuffix(".md") if args.existing_filename else "rag_ingress_live_verify_" + uuid.uuid4().hex[:12]
+    marker = (
+        args.existing_filename.removesuffix(".md")
+        if args.existing_filename
+        else "rag_ingress_live_verify_" + uuid.uuid4().hex[:12]
+    )
     filename = args.existing_filename or marker + ".md"
     body = (
         "---\n"
@@ -338,7 +344,12 @@ def main():
     if args.existing_filename:
         enqueue = {"accepted": True, "status": "preexisting_live_document"}
     else:
-        enqueue = http_json(args.api_url, "/v1/ingest/enqueue", enqueue_payload(body, filename, marker), 202)
+        enqueue = http_json(
+            args.api_url,
+            "/v1/ingest/enqueue",
+            enqueue_payload(body, filename, marker, project=args.project),
+            202,
+        )
         wait_until(
             deadline,
             lambda: jetstream_request(
@@ -378,7 +389,7 @@ def main():
             raise RuntimeError("RAGFlow document disappeared before fallback")
         add_searchable_chunk(args.ragflow_url, args.ragflow_api_key, args.dataset_id, document_id, marker)
         searchable_chunk_source = "ragflow_chunk_api_same_live_document"
-    pre_authorized = is_authorized(ledger_path, document_id, project="workspace-ragflow-advisor")
+    pre_authorized = is_authorized(ledger_path, document_id, project=args.project)
     if pre_authorized and not (args.existing_filename and args.allow_preauthorized_existing_document):
         raise RuntimeError("document was authorized before external authorization pass")
 
@@ -386,7 +397,7 @@ def main():
         ledger_path,
         document_id=document_id,
         dataset_id=args.dataset_id,
-        project="workspace-ragflow-advisor",
+        project=args.project,
         indexed_run=indexed.get("run", ""),
     )
 
@@ -397,6 +408,7 @@ def main():
             args.dataset_id,
             marker,
             ledger_path,
+            project=args.project,
         )
         return result if result[1] else None
 

@@ -174,7 +174,7 @@ def build_readiness_report(
     replay: list[dict],
     blockers: list[dict],
     required_evidence: list[str],
-    rollback_owner: str = "ragflow-advisor",
+    rollback_owner: str = "neurons",
 ) -> dict:
     return {
         "cutover_status": "cutover_blocked" if blockers else "migration_ready_pending_approval",
