@@ -32,6 +32,7 @@ from pathlib import Path
 from .native_memory_sync_approval import ApprovalError, validate_goal3_live_approval
 from ..ragflow_client import RagflowHttpClient
 from .gc_backup import write_gc_backup
+from .gc_safety_auditor import hard_delete_documents
 
 TRANSCRIPT_SESSION_GC_OPERATION = "memory_regeneration_gc_transcript_memory_session_volume_delete"
 TRANSCRIPT_SESSION_GC_SCHEMA_VERSION = "agent_knowledge_transcript_session_gc.v1"
@@ -150,7 +151,7 @@ class TranscriptSessionGcRunner:
                         extra={"coverage": "session_level", "summarized_session": True},
                     )
                     backed_up += 1
-                    ragflow.delete_documents(self.config.transcript_dataset_id, [cand.document_id])
+                    hard_delete_documents(ragflow, self.config.transcript_dataset_id, [cand.document_id])
                     deleted += 1
                 except Exception as exc:  # noqa: BLE001
                     # 단발 transient(RAGFlow CPU-bound 부하 중 delete 실패 등)에 배치 전체가
