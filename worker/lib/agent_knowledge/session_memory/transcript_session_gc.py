@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -71,8 +72,10 @@ def _now_epoch() -> float:
     return time.time()
 
 
-def _doc_age_seconds(doc: dict) -> float | None:
-    """문서 나이(초). create_time(epoch s 또는 ms)을 우선 사용. 못 읽으면 None → fail-closed skip."""
+def _doc_age_seconds(doc: dict, now_epoch: float | None = None) -> float | None:
+    """문서 나이(초). create_time(epoch s 또는 ms)을 우선 사용. 못 읽으면 None → fail-closed skip.
+
+    now_epoch가 주어지면(S0a 주입 seam) 그 시각 기준으로 나이를 계산해 결정적으로 만든다."""
     raw = doc.get("create_time")
     try:
         value = float(raw)
@@ -82,7 +85,8 @@ def _doc_age_seconds(doc: dict) -> float | None:
         return None
     if value > 1e12:  # epoch milliseconds
         value = value / 1000.0
-    return max(0.0, _now_epoch() - value)
+    base = now_epoch if now_epoch is not None else _now_epoch()
+    return max(0.0, base - value)
 
 
 def _doc_is_active_summary(doc: dict) -> bool:
@@ -93,12 +97,26 @@ def _doc_is_active_summary(doc: dict) -> bool:
 
 
 class TranscriptSessionGcRunner:
-    def __init__(self, *, config: TranscriptSessionGcConfig, token: str = ""):
+    def __init__(
+        self,
+        *,
+        config: TranscriptSessionGcConfig,
+        token: str = "",
+        ragflow_client=None,
+        now_epoch_fn: Callable[[], float] | None = None,
+    ):
         self.config = config
         self.token = token
+        # S0a 주입 seam(기본 None=기존 동작, behavior-preserving). client는 read-scan용으로
+        # 무조건 생성되므로 주입점을 명시해 특성화/테스트가 fake를 단다.
+        self._ragflow_client = ragflow_client
+        self._now_epoch_fn = now_epoch_fn
+
+    def _now_epoch(self) -> float:
+        return self._now_epoch_fn() if self._now_epoch_fn is not None else _now_epoch()
 
     def run(self) -> dict:
-        ragflow = RagflowHttpClient(
+        ragflow = self._ragflow_client if self._ragflow_client is not None else RagflowHttpClient(
             base_url=self.config.ragflow_url,
             bearer_token=self.token,
             request_timeout_seconds=45,
@@ -206,7 +224,7 @@ class TranscriptSessionGcRunner:
                 sid = str(meta.get("session_id_hash") or "")
                 if not sid or sid not in summarized:
                     continue
-                age = _doc_age_seconds(doc)
+                age = _doc_age_seconds(doc, self._now_epoch())
                 if age is None or age < floor:  # 나이 불명/최근 → fail-closed skip
                     continue
                 doc_id = str(doc.get("id") or doc.get("document_id") or "")

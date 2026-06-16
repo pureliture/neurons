@@ -13,6 +13,7 @@ from ..ledger import Ledger
 from .native_memory_sync_approval import ApprovalError, validate_goal3_live_approval
 from ..ragflow_client import RagflowHttpClient
 from .gc_backup import write_gc_backup
+from .gc_safety_auditor import LedgerGCSafetyAuditor
 
 
 SESSION_MEMORY_GC_OPERATION = "memory_regeneration_gc_dead_session_memory"
@@ -338,25 +339,13 @@ class SessionMemoryGcRunner:
         )
 
     def _mark_gc_deleted(self, ledger: Ledger, knowledge_id: str) -> None:
-        row = ledger.get_by_knowledge_id(knowledge_id)
-        if not row:
-            return
-        metadata = _metadata_dict(row)
-        now_iso = self._now().isoformat()
-        metadata["session_memory_gc"] = {
-            "status": "deleted",
-            "deleted_at": now_iso,
-            "operation": SESSION_MEMORY_GC_OPERATION,
-        }
-        with ledger._connect() as connection:
-            connection.execute(
-                "UPDATE knowledge_items SET metadata_json = ?, updated_at = ? WHERE knowledge_id = ?",
-                (
-                    json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                    now_iso,
-                    knowledge_id,
-                ),
-            )
+        # S2: tombstone 쓰기 소유권을 GC Safety Lane seam(LedgerGCSafetyAuditor)으로 이동.
+        # 동작 보존 — now_iso는 runner의 결정적 clock에서 온다.
+        LedgerGCSafetyAuditor(ledger).mark_session_memory_deleted(
+            knowledge_id,
+            now_iso=self._now().isoformat(),
+            operation=SESSION_MEMORY_GC_OPERATION,
+        )
 
 
 def _metadata_dict(row: dict) -> dict:
