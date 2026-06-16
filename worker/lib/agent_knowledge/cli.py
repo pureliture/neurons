@@ -12,6 +12,7 @@ from .mcp_server import KnowledgeSearchService, build_ragflow_client, run_stdio_
 from .rag_ingress import state_cli
 from .session_memory import (
     autopilot_cli,
+    cleanup_readiness,
     memory_regeneration_cli,
     native_memory_write_runner,
     neuron_session_memory,
@@ -67,6 +68,7 @@ def _pending_server_command(command: str) -> CommandHandler:
 COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "rag-ingress-state": state_cli.main,
     "memory-regeneration": memory_regeneration_cli.main,
+    "cleanup-readiness": cleanup_readiness.main,
     "session-memory-private-sync": session_memory_private_sync_cli.main,
     "neuron-session-memory-build": neuron_session_memory.main,
     "native-memory-sync": native_memory_write_runner.main,
