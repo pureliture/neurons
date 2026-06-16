@@ -27,12 +27,26 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from agent_knowledge.ledger_areas import (  # noqa: E402
+    AREA_A,
+    AREA_B,
+    AREA_C,
+    AREA_D,
     AREAS,
     AREA_TABLES,
     CORE,
     all_mapped_tables,
     table_to_area,
 )
+
+# god-class 분할 결과 area mixin: 모듈 파일명 -> area. 각 mixin 메서드는 자기 area(또는
+# core 테이블)만 만져야 한다. ledger.py에서 분할된 단일-area 메서드가 다른 area를 침범하면
+# (또는 cross-area인데 mixin에 들어가면) 위반. mixin 미존재(미분할 상태)면 스킵.
+MIXIN_AREAS = {
+    "ledger_ingress_mixin": AREA_A,
+    "ledger_gc_safety_mixin": AREA_B,
+    "ledger_memory_promotion_mixin": AREA_C,
+    "ledger_native_memory_mixin": AREA_D,
+}
 
 # 두 비-core 영역 이상을 정당하게 가로지르는 Ledger 메서드의 frozen allowlist.
 # 값 = 그 메서드가 닿는 비-core 영역 집합(현재 실측, 동결). 신규 cross-area 메서드는
@@ -107,6 +121,33 @@ def classify_methods(source: str, tree: ast.AST) -> dict[str, dict]:
     return out
 
 
+def _check_mixins(ledger_path: Path) -> list[str]:
+    """분할된 area mixin 각 메서드가 자기 area(+core 테이블)만 만지는지 검증."""
+    t2a = table_to_area()
+    all_tables = all_mapped_tables()
+    violations: list[str] = []
+    for module, area in MIXIN_AREAS.items():
+        mpath = ledger_path.with_name(f"{module}.py")
+        if not mpath.is_file():
+            continue  # 미분할 상태(예: 원복) — 스킵
+        msrc = mpath.read_text(encoding="utf-8")
+        mtree = ast.parse(msrc)
+        for node in ast.walk(mtree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for item in node.body:
+                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                hit = _method_tables(msrc, item, all_tables)
+                non_core = {t2a[t] for t in hit if t2a[t] != CORE}
+                stray = non_core - {area}
+                if stray:
+                    violations.append(
+                        f"{module}.{item.name}: area {area!r} mixin인데 {sorted(stray)} 테이블 침범(경계 위반)"
+                    )
+    return violations
+
+
 def check_area_boundaries(ledger_path: Path | None = None) -> list[str]:
     """위반 목록을 반환한다(빈 리스트 = 통과)."""
     path = ledger_path or _ledger_path()
@@ -140,6 +181,9 @@ def check_area_boundaries(ledger_path: Path | None = None) -> list[str]:
             )
     for name in sorted(set(FROZEN_CROSS_AREA) - set(cross_now)):
         violations.append(f"메서드 {name!r} 가 allowlist엔 있으나 더는 cross-area 아님(stale)")
+
+    # 3) 분할된 mixin 각 메서드가 자기 area 경계 안인지.
+    violations.extend(_check_mixins(path))
     return violations
 
 
