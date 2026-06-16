@@ -165,6 +165,31 @@ def test_dirty_actionable_query_executes_on_postgres(tmp_path):
     )
 
 
+def test_pg_row_positional_and_named_access(tmp_path):
+    # sqlite3.Row 호환: 위치(row[0])·이름(row['c'])·.get·dict(row). cutover builder가
+    # count 쿼리 row[0]에서 KeyError:0 으로 깨졌던 회귀 가드.
+    _reset_pg(PG_DSN)
+    sqlite_path = tmp_path / "l.sqlite"
+    sl = Ledger(sqlite_path)
+    _run_sequence(sl)
+    migrate_sqlite_to_postgres = __import__(
+        "agent_knowledge.ledger_pg_migrate", fromlist=["migrate_sqlite_to_postgres"]
+    ).migrate_sqlite_to_postgres
+    migrate_sqlite_to_postgres(sqlite_path, PG_DSN)
+    pg = Ledger("pg", db_adapter=PostgresLedgerDbAdapter(PG_DSN))
+
+    with pg._connect() as connection:
+        count_row = connection.execute("SELECT count(*) FROM knowledge_items").fetchone()
+        assert count_row[0] == 2  # 위치 접근
+        row = connection.execute(
+            "SELECT knowledge_id, status FROM knowledge_items ORDER BY knowledge_id LIMIT 1"
+        ).fetchone()
+        assert row[0] == row["knowledge_id"]  # 위치 == 이름
+        assert row.get("status") is not None
+        assert row.get("missing", "d") == "d"
+        assert set(dict(row).keys()) == {"knowledge_id", "status"}
+
+
 def test_env_switch_routes_ledger_to_postgres(monkeypatch):
     # cutover flip: NEURON_LEDGER_PG_DSN 설정 시 명시 어댑터 없이도 Ledger(path)가 Postgres 사용.
     _reset_pg(PG_DSN)
