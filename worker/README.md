@@ -85,6 +85,11 @@ vendored (`lib/agent_knowledge/`):
   plus injected enqueue/state-sink core. This is not the old mixed monolith
   worker: it has no `IngressQueueClient`, client `outbox_client`, monolith CLI,
   or direct RAGFlow upload/parse/status path.
+- `session_memory/neuron_session_memory.py` — neuron-local session-memory build
+  entrypoint. Dry-run mode reads only the worker shadow log; `--probe-meta`
+  additionally performs RAGFlow metadata reads to count project/provider source
+  coverage without ledger writes, RAGFlow writes, raw ids, or raw paths. Live
+  build remains approval-gated and fail-closed.
 - `session_memory/memory_promotion.py` / `memory_evaluation.py` /
   `ragflow_projection.py` / `llm_brain_service.py` — LLM-brain MemoryCard
   promotion, auto-policy evaluation gates, projection job building/execution,
