@@ -12,11 +12,26 @@ ledger.py), (4) file-backed 아님(Ledger.__init__ 분기) 뿐이다.
 
 from __future__ import annotations
 
+import re
+
 import psycopg
 from psycopg.rows import dict_row
 
 from .db_adapter import ILedgerCoreDbAdapter
 from .pg_paramstyle import qmark_to_pyformat
+
+# SQLite 연결-튜닝 PRAGMA(``PRAGMA busy_timeout=…`` / ``journal_mode=WAL`` /
+# ``synchronous=NORMAL`` / ``foreign_keys=ON`` / ``query_only=ON`` 등 assignment 형태)는
+# PostgreSQL에 대응이 없다. caller 모듈들이 ``_connect()`` 로 받은 연결에 직접 이 PRAGMA를
+# 발행하므로(SQLite 가정), 단일 chokepoint인 어댑터 execute에서 no-op 처리한다. introspection
+# PRAGMA(``PRAGMA table_info(...)`` — ``=`` 없음)는 통과시켜, dialect 미라우팅 시 조용히 빈
+# 결과를 주는 대신 시끄럽게 실패하도록 둔다(스키마 헬퍼는 PG에서 information_schema 사용).
+_NOOP_PRAGMA = re.compile(r"^\s*PRAGMA\s+\w+\s*=", re.IGNORECASE)
+
+
+def _is_noop_pragma(sql: str) -> bool:
+    """PostgreSQL에서 무시해야 하는 SQLite 연결-튜닝 PRAGMA인가."""
+    return bool(_NOOP_PRAGMA.match(sql))
 
 
 class _PgResult:
@@ -24,17 +39,17 @@ class _PgResult:
     ``dict(row)``·``row['col']`` 모두 가능 — sqlite3.Row와 호환."""
 
     def __init__(self, cursor):
-        self._cursor = cursor
+        self._cursor = cursor  # None = no-op(예: PG에서 무시된 PRAGMA)
 
     def fetchall(self):
-        return self._cursor.fetchall()
+        return [] if self._cursor is None else self._cursor.fetchall()
 
     def fetchone(self):
-        return self._cursor.fetchone()
+        return None if self._cursor is None else self._cursor.fetchone()
 
     @property
     def rowcount(self):
-        return self._cursor.rowcount
+        return -1 if self._cursor is None else self._cursor.rowcount
 
 
 class _PgConnection:
@@ -48,6 +63,8 @@ class _PgConnection:
         self.row_factory = None  # 호환용: callers가 sqlite3.Row를 set해도 무시(dict_row 고정)
 
     def execute(self, sql: str, params=None) -> _PgResult:
+        if _is_noop_pragma(sql):
+            return _PgResult(None)  # SQLite 연결-튜닝 PRAGMA — PG no-op
         cursor = self._conn.cursor()
         if params:
             cursor.execute(qmark_to_pyformat(sql), tuple(params))
