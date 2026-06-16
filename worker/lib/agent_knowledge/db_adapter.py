@@ -20,6 +20,8 @@ SQLITE_BUSY_TIMEOUT_MS = 60000
 
 
 class ClosingSqliteConnection(sqlite3.Connection):
+    dialect = "sqlite"
+
     def __exit__(self, exc_type, exc_value, traceback):
         result = super().__exit__(exc_type, exc_value, traceback)
         self.close()
@@ -28,6 +30,10 @@ class ClosingSqliteConnection(sqlite3.Connection):
 
 class ILedgerCoreDbAdapter(ABC):
     """Ledger의 DB 엔진 접근을 격리하는 seam."""
+
+    # SQLite 등 파일 기반 엔진은 True. Postgres처럼 서버형이면 False(Ledger가 파일 권한
+    # 준비/스냅샷 같은 file-specific 단계를 건너뛴다).
+    is_file_backed: bool = True
 
     @abstractmethod
     def connect(self, *, configure_journal: bool = False):

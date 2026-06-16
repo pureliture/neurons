@@ -24,14 +24,18 @@ class Ledger:
         self._temp_dir: Path | None = None
         # B: DB 엔진 접근 seam. None이면 현행 SQLite 어댑터를 lazy 생성(behavior-preserving).
         self._db_adapter = db_adapter
+        # C: 파일 기반 엔진(SQLite)만 파일 권한 준비/하드닝을 한다. 서버형(Postgres)은 skip.
+        file_backed = True if db_adapter is None else getattr(db_adapter, "is_file_backed", True)
         if not self.read_only:
-            self._prepare_parent_directory()
+            if file_backed:
+                self._prepare_parent_directory()
             self._initialize()
-            for p in self.path.parent.glob(f"{self.path.name}*"):
-                try:
-                    os.chmod(p, 0o600)
-                except OSError:
-                    pass
+            if file_backed:
+                for p in self.path.parent.glob(f"{self.path.name}*"):
+                    try:
+                        os.chmod(p, 0o600)
+                    except OSError:
+                        pass
             return
         self.path = self._snapshot_read_only_copy(self.path)
 
@@ -1959,7 +1963,9 @@ class Ledger:
                     source_manifest_hash,
                     source_chunk_count,
                     metadata_json,
-                    1 if metadata is None else 0,
+                    # CASE WHEN ? (boolean): metadata가 없으면 기존 metadata_json 보존.
+                    # Python bool로 바인딩 — SQLite(truthy)·PostgreSQL(boolean) 양쪽 호환.
+                    metadata is None,
                 ),
             )
         return self.get_by_knowledge_id(knowledge_id)
@@ -4067,11 +4073,17 @@ def _project_key_hash(provider: str, project: str) -> str:
     return "sha256:" + hashlib.sha256(f"{provider}|{project}".encode("utf-8")).hexdigest()
 
 
-def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
-    row = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (table,),
-    ).fetchone()
+def _table_exists(connection, table: str) -> bool:
+    if getattr(connection, "dialect", "sqlite") == "postgres":
+        row = connection.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?",
+            (table,),
+        ).fetchone()
+    else:
+        row = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
     return row is not None
 
 
@@ -4123,9 +4135,18 @@ def _queued_document_projection(row: dict, transcript_chunk: dict | None = None)
     }
 
 
-def _ensure_column(connection: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
-    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
-    if column in {row["name"] for row in rows}:
+def _ensure_column(connection, table: str, column: str, declaration: str) -> None:
+    if getattr(connection, "dialect", "sqlite") == "postgres":
+        rows = connection.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = ?",
+            (table,),
+        ).fetchall()
+        existing = {row["column_name"] for row in rows}
+    else:
+        rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {row["name"] for row in rows}
+    if column in existing:
         return
     connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
