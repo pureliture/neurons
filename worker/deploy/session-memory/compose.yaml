@@ -1,0 +1,34 @@
+# session-memory / ledger worker — RAGFlow와 분리된 별도 compose project
+# (requirements.md §6). ledger-pg compose와도 분리. RAGFlow/PG와는 host-published
+# endpoint(host.docker.internal)로 통신 — RAGFlow compose 파일 미수정 원칙 준수.
+name: session-memory-worker
+
+services:
+  session-memory-worker:
+    build:
+      context: ../..            # worker/ (pyproject.toml, lib, deploy)
+      dockerfile: Dockerfile.session-memory
+    image: session-memory-worker:local
+    container_name: session-memory-worker
+    restart: unless-stopped
+    # host networking: 컨테이너가 호스트 loopback 공유 → RAGFlow(127.0.0.1:9380)·
+    # ledger-pg(127.0.0.1:5432) 모두 호스트와 동일 endpoint로 도달. approval argv도
+    # 호스트와 동일(127.0.0.1)하게 유지돼 contract 일치. 호스트-cron과 동일 동작.
+    network_mode: host
+    environment:
+      RUN_MODE: ${RUN_MODE:-cron}
+      RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:-}
+      RAGFLOW_BASE_URL: ${RAGFLOW_BASE_URL:-http://127.0.0.1:9380}
+      NEURON_LEDGER_PG_DSN: ${NEURON_LEDGER_PG_DSN:-}
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      # 영속 state(approval/watermark/gc-backup). SM_STATE_DIR로 호스트 state 디렉터리를
+      # bind-mount → 호스트-cron과 단일 state 공유, rollback(컨테이너 정지+cron 재개) 단순.
+      - ${SM_STATE_DIR:-./state}:/app/state
+      # dirty signal source: rag-ingress worker의 ingest-state(읽기전용).
+      - rag-ingress-live_rag-ingress-live-state:/shadow:ro
+
+volumes:
+  rag-ingress-live_rag-ingress-live-state:
+    external: true
