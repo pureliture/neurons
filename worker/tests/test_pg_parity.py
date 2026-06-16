@@ -104,3 +104,18 @@ def test_sqlite_postgres_parity(tmp_path):
     sqlite_result = _run_sequence(Ledger(tmp_path / "l.sqlite"))
     pg_result = _run_sequence(Ledger("pg", db_adapter=PostgresLedgerDbAdapter(PG_DSN)))
     assert sqlite_result == pg_result, f"\nsqlite={sqlite_result}\npg={pg_result}"
+
+
+def test_env_switch_routes_ledger_to_postgres(monkeypatch):
+    # cutover flip: NEURON_LEDGER_PG_DSN 설정 시 명시 어댑터 없이도 Ledger(path)가 Postgres 사용.
+    _reset_pg(PG_DSN)
+    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", PG_DSN)
+    ledger = Ledger("ignored-when-pg")
+    assert isinstance(ledger._db_adapter, PostgresLedgerDbAdapter)
+    ledger.record_memory_gc_audit(
+        gc_kind="session_memory", operation="env_op", schema_version="v1", mode="execute",
+        knowledge_id="k", ragflow_document_id="d", dataset_id="ds",
+        replacement_knowledge_id="r", age_gate_seconds=1, mutated=True,
+    )
+    audits = ledger.list_memory_gc_audit()
+    assert len(audits) == 1 and audits[0]["operation"] == "env_op"

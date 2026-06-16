@@ -24,8 +24,18 @@ class Ledger:
         self._temp_dir: Path | None = None
         # B: DB 엔진 접근 seam. None이면 현행 SQLite 어댑터를 lazy 생성(behavior-preserving).
         self._db_adapter = db_adapter
+        # C cutover switch: 명시 어댑터가 없고 NEURON_LEDGER_PG_DSN 이 설정돼 있으면 PostgreSQL
+        # 엔진을 기본으로 쓴다(엔진 flip = 환경변수 하나). 미설정이면 SQLite(기존 동작 그대로).
+        if self._db_adapter is None:
+            _pg_dsn = os.environ.get("NEURON_LEDGER_PG_DSN", "")
+            if _pg_dsn:
+                from .postgres_db_adapter import PostgresLedgerDbAdapter
+
+                self._db_adapter = PostgresLedgerDbAdapter(_pg_dsn)
         # C: 파일 기반 엔진(SQLite)만 파일 권한 준비/하드닝을 한다. 서버형(Postgres)은 skip.
-        file_backed = True if db_adapter is None else getattr(db_adapter, "is_file_backed", True)
+        file_backed = (
+            True if self._db_adapter is None else getattr(self._db_adapter, "is_file_backed", True)
+        )
         if not self.read_only:
             if file_backed:
                 self._prepare_parent_directory()
