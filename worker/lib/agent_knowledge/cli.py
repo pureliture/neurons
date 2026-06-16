@@ -7,6 +7,7 @@ import os
 import sys
 from collections.abc import Callable
 
+from .couchdb_source import migration_cli
 from .ledger import Ledger
 from .mcp_server import KnowledgeSearchService, build_ragflow_client, run_stdio_server
 from .rag_ingress import state_cli
@@ -36,7 +37,6 @@ PENDING_SERVER_COMMANDS = {
     "derived-memory-resources",
     "eval",
     "session-entry-recall",
-    "transcript-migration",
     "transcript-quality",
     "transcript-resources",
     "transcript-retrieval",
@@ -85,7 +85,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "eval": _pending_server_command("eval"),
     "memory": autopilot_cli.main,
     "session-entry-recall": _pending_server_command("session-entry-recall"),
-    "transcript-migration": _pending_server_command("transcript-migration"),
+    "transcript-migration": migration_cli.main,
     "transcript-quality": _pending_server_command("transcript-quality"),
     "transcript-resources": _pending_server_command("transcript-resources"),
     "transcript-retrieval": _pending_server_command("transcript-retrieval"),
