@@ -38,7 +38,7 @@ def parse_transcript_source(
     project: str,
     source_locator_hash: str,
 ) -> ParsedTranscript:
-    if provider not in {"claude", "gemini", "codex", "antigravity"}:
+    if provider not in {"claude", "gemini", "codex", "antigravity", "agy"}:
         raise ValueError(f"unsupported provider: {provider}")
     path = Path(source_path)
     if provider == "claude" and path.suffix.lower() == ".jsonl":
@@ -47,8 +47,12 @@ def parse_transcript_source(
         return _parse_gemini_native_jsonl(path, project=project, source_locator_hash=source_locator_hash)
     if provider == "codex" and path.suffix.lower() == ".jsonl":
         return _parse_codex_native_jsonl(path, project=project, source_locator_hash=source_locator_hash)
-    if provider == "antigravity" and path.suffix.lower() == ".jsonl":
-        return _parse_antigravity_native_jsonl(path, project=project, source_locator_hash=source_locator_hash)
+    # agy shares the Antigravity native transcript format; only the provider label
+    # differs so the two tools stay distinct migration lanes.
+    if provider in {"antigravity", "agy"} and path.suffix.lower() == ".jsonl":
+        return _parse_antigravity_native_jsonl(
+            path, project=project, source_locator_hash=source_locator_hash, provider=provider
+        )
     payload = _load_json_source(path)
     if payload.get("provider") != provider:
         raise ValueError("source_parse_failed: provider mismatch")
@@ -353,10 +357,11 @@ def _parse_antigravity_native_jsonl(
     *,
     project: str,
     source_locator_hash: str,
+    provider: str = "antigravity",
 ) -> ParsedTranscript:
     records = _load_jsonl_source(path)
     session_id = _antigravity_session_id_from_path(path)
-    session_hash = _sha256(f"antigravity:{session_id}")
+    session_hash = _sha256(f"{provider}:{session_id}")
     turns: list[TranscriptTurn] = []
     tool_events: list[TranscriptToolEvent] = []
     started_at = ""
@@ -365,7 +370,7 @@ def _parse_antigravity_native_jsonl(
     for record in records:
         if not session_id:
             session_id = str(record.get("conversationId") or record.get("conversation_id") or record.get("session_id") or "")
-            session_hash = _sha256(f"antigravity:{session_id}")
+            session_hash = _sha256(f"{provider}:{session_id}")
         text = str(record.get("content") or "")
         raw_tool_calls = record.get("tool_calls")
         tool_calls = raw_tool_calls if isinstance(raw_tool_calls, list) else []
@@ -412,7 +417,7 @@ def _parse_antigravity_native_jsonl(
 
     session = TranscriptSession(
         session_id_hash=session_hash,
-        provider="antigravity",
+        provider=provider,
         project=project,
         started_at=started_at,
         ended_at=ended_at,
@@ -949,12 +954,14 @@ def extract_antigravity_tool_evidence(
     *,
     project: str,
     source_locator_hash: str,
+    provider: str = "antigravity",
 ) -> list[ToolEvidenceSummaryRecord]:
     """Extract tool evidence from a raw Antigravity transcript.
 
     Antigravity steps are typed (RUN_COMMAND / CODE_ACTION / VIEW_FILE / ...);
     the shell command lives in ``tool_calls[].args.CommandLine`` and the result in
-    the step ``content`` / ``error`` with a step ``status``.
+    the step ``content`` / ``error`` with a step ``status``. ``agy`` shares this
+    format and only differs by provider label.
     """
     path = Path(source_path)
     records = _load_jsonl_source(path)
@@ -987,7 +994,19 @@ def extract_antigravity_tool_evidence(
     if not session_id:
         raise ValueError("source_parse_failed: missing session_id")
 
-    return _build_evidence_records(raw_items, session_hash=_sha256(f"antigravity:{session_id}"), provider="antigravity", project=project)
+    return _build_evidence_records(raw_items, session_hash=_sha256(f"{provider}:{session_id}"), provider=provider, project=project)
+
+
+def extract_agy_tool_evidence(
+    source_path: Path | str,
+    *,
+    project: str,
+    source_locator_hash: str,
+) -> list[ToolEvidenceSummaryRecord]:
+    """agy reuses the Antigravity transcript format under the ``agy`` label."""
+    return extract_antigravity_tool_evidence(
+        source_path, project=project, source_locator_hash=source_locator_hash, provider="agy"
+    )
 
 
 _TOOL_EVIDENCE_EXTRACTORS = {
@@ -995,6 +1014,7 @@ _TOOL_EVIDENCE_EXTRACTORS = {
     "claude": extract_claude_tool_evidence,
     "gemini": extract_gemini_tool_evidence,
     "antigravity": extract_antigravity_tool_evidence,
+    "agy": extract_agy_tool_evidence,
 }
 
 

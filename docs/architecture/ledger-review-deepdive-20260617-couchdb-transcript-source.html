@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ledger Deepdive Update: CouchDB Transcript Source Migration</title>
+    <style>
+      body { margin: 0; background: #f8fafc; color: #172033; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.58; }
+      header { background: #0f172a; color: white; padding: 34px 28px; }
+      main { max-width: 1060px; margin: 0 auto; padding: 34px 28px 72px; background: white; min-height: 100vh; box-sizing: border-box; }
+      .wrap { max-width: 1060px; margin: 0 auto; }
+      .eyebrow { color: #93c5fd; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 8px; }
+      .lead { color: #cbd5e1; max-width: 880px; margin: 10px 0 0; }
+      .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+      .chip { border: 1px solid rgba(148,163,184,.35); color: #dbeafe; border-radius: 999px; padding: 5px 10px; font-size: 12px; background: rgba(15,23,42,.6); }
+      h1 { font-size: 34px; line-height: 1.18; margin: 0; }
+      h2 { font-size: 23px; margin: 36px 0 14px; padding-top: 16px; border-top: 1px solid #e2e8f0; }
+      h3 { font-size: 18px; margin: 24px 0 10px; color: #243044; }
+      p { margin: 8px 0 14px; }
+      ul { margin: 8px 0 18px 22px; padding: 0; }
+      li { margin: 5px 0; }
+      code { background: #eef2f7; border: 1px solid #dde5ef; border-radius: 5px; padding: 1px 5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+      pre { overflow-x: auto; background: #0f172a; color: #d1fae5; padding: 18px; border-radius: 8px; font-size: 13px; line-height: 1.45; }
+      pre code { background: transparent; border: 0; padding: 0; color: inherit; }
+      .notice { border: 1px solid #bae6fd; background: #f0f9ff; border-radius: 8px; padding: 14px 16px; margin: 20px 0 4px; color: #075985; }
+      .warning { border: 1px solid #fecaca; background: #fff1f2; border-radius: 8px; padding: 14px 16px; margin: 20px 0 4px; color: #9f1239; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="wrap">
+        <p class="eyebrow">Ledger deepdive update</p>
+        <h1>CouchDB Transcript Source Migration</h1>
+        <p class="lead">원본 ledger deepdive HTML은 보존하고, RAGFlow transcript-memory 완전 은퇴와 CouchDB source/evidence store 전환 기준을 별도 갱신본으로 정리한다.</p>
+        <div class="chips">
+          <span class="chip">Original preserved: docs/architecture/ledger-review-deepdive-20260614.html</span>
+          <span class="chip">Generated: 2026-06-17</span>
+          <span class="chip">RAGFlow target: session-memory only</span>
+          <span class="chip">CouchDB: transcript/tool evidence source</span>
+        </div>
+      </div>
+    </header>
+    <main>
+      <div class="notice"><strong>Source of truth:</strong> specs/couchdb-transcript-migration/design.md. This HTML is an operator-facing generated architecture artifact.</div>
+      <div class="warning"><strong>Preservation rule:</strong> this file does not overwrite the original 2026-06-14 ledger deepdive. It is the CouchDB transcript-source migration update.</div>
+      <h1>CouchDB Transcript Source Migration Design Spec</h1>
+<h2>Overview</h2>
+<p><code>transcript-memory</code>를 RAGFlow dataset에서 CouchDB-backed source/evidence store로 이전한다. RAGFlow는 normal brain path에서 <code>session-memory</code>만 제공하며, CouchDB는 transcript/tool evidence의 rebuild, audit, rollback source로 남는다.</p>
+<h2>Requirements Reference</h2>
+<ul>
+<li>Phase 1 source: <code>requirements.md</code></li>
+<li>Preview companion: <code>requirements.html</code></li>
+<li>Existing architecture HTML preserved: <code>docs/architecture/ledger-review-deepdive-20260614.html</code></li>
+<li>Updated architecture artifact: <code>docs/architecture/ledger-review-deepdive-20260617-couchdb-transcript-source.html</code></li>
+<li>핵심 요구사항:</li>
+</ul>
+<p>  - RAGFlow <code>transcript-memory</code> 신규 write/read 의존을 완전히 제거한다.</p>
+<p>  - Provider 원본 transcript를 기준 source로 삼고 RAGFlow/ledger는 coverage 검증에 쓴다.</p>
+<p>  - RAGFlow에는 <code>session-memory</code>만 남긴다.</p>
+<p>  - <code>tool_evidence_summary</code>는 bounded bundle로 CouchDB에 보존하고, <code>session-memory</code>에는 충분히 materialize한다.</p>
+<p>  - Codex, Claude Code, Gemini CLI, agy, Antigravity를 migration 대상으로 한다.</p>
+<p>  - Gemini CLI는 historical import only이고, Codex/Claude Code/agy/Antigravity는 live pipeline cutover까지 완료 기준에 포함한다.</p>
+<h2>Approach Proposal</h2>
+<h3>Recommended: CouchDB Source Store + RAGFlow Session Ontology</h3>
+<p>Provider 원본 transcript를 다시 parse/redact/rebuild해 CouchDB에 source/evidence document로 저장한다. <code>session-memory</code> builder는 CouchDB source를 읽어 tool evidence를 충분히 materialize한 session-memory document를 만들고, RAGFlow에는 이 derived <code>session-memory</code>만 project한다.</p>
+<p>장점은 RAGFlow가 Palantir Ontology처럼 brain-facing recall surface로 유지되고, CouchDB가 noisy source/evidence lifecycle을 전담한다는 점이다. 단점은 migration 동안 CouchDB source model, coverage verifier, RAGFlow projection gate를 함께 도입해야 한다는 점이다.</p>
+<h3>Alternative: RAGFlow Metadata Repair First</h3>
+<p>기존 RAGFlow <code>transcript-memory</code>의 project metadata를 보정한 뒤 CouchDB로 옮긴다. 초기 구현은 줄지만, 이미 오염된 RAGFlow metadata를 migration source로 재사용하는 위험이 크다.</p>
+<h3>Alternative: Long-Term Dual Store</h3>
+<p>CouchDB와 RAGFlow <code>transcript-memory</code>를 계속 병행한다. rollback은 쉽지만, RAGFlow <code>session-memory</code> only 목표와 맞지 않고 운영/검색 의미가 계속 겹친다.</p>
+<h2>Architecture</h2>
+<pre><code>Provider transcript sources on PC
+  - Codex
+  - Claude Code
+  - Gemini CLI historical import only
+  - agy
+  - Antigravity
+        |
+        v
+Transcript Source Rebuilder
+  parse -&gt; server redaction/leak check -&gt; project authority resolver
+        |
+        v
+CouchDB Transcript Source Store
+  conversation_chunk docs
+  tool_evidence_bundle docs
+  coverage_manifest docs
+  projection_state docs
+        |
+        +----------------------+
+        |                      |
+        v                      v
+Cold Full Redacted Archive   Session-Memory Materializer
+                              full tool evidence summary materialization
+                                      |
+                                      v
+                              RAGFlow session-memory
+                              brain-facing recall surface</code></pre>
+<p>RAGFlow <code>transcript-memory</code> remains only as a temporary comparison input during migration. It is not a source of truth and is not part of the final runtime path.</p>
+<h2>Data Flow</h2>
+<h3>Historical Import</h3>
+<p>1. Enumerate source transcript files for the 5 provider/tool lanes.</p>
+<p>2. Parse and redact provider transcript sources server-side.</p>
+<p>3. Resolve <code>project</code> through hierarchy authority: capture metadata, provider source path/workspace marker, then server inference.</p>
+<p>4. Write conversation chunks and tool evidence bundles into CouchDB.</p>
+<p>5. Compare CouchDB coverage with RAGFlow and ledger/ingress state without trusting RAGFlow project metadata.</p>
+<p>6. Build <code>session-memory</code> from CouchDB source.</p>
+<p>7. Project only <code>session-memory</code> to RAGFlow.</p>
+<p>8. Run coverage, rebuild, and representative recall smoke before retirement.</p>
+<h3>Live Cutover</h3>
+<p>1. Start CouchDB shadow write for Codex, Claude Code, agy, and Antigravity live lanes.</p>
+<p>2. Keep existing RAGFlow <code>transcript-memory</code> write only as a short-lived comparison path.</p>
+<p>3. Observe a short stability window with mixed provider/project traffic.</p>
+<p>4. Switch live writes to CouchDB-only.</p>
+<p>5. Remove RAGFlow <code>transcript-memory</code> write and read dependencies.</p>
+<h3>Normal Recall</h3>
+<p>1. LLM or brain query reads RAGFlow <code>session-memory</code>.</p>
+<p>2. RAGFlow <code>session-memory</code> contains sufficient tool evidence summary materialization.</p>
+<p>3. Normal recall does not fetch CouchDB evidence refs.</p>
+<p>4. CouchDB refs remain for provenance, audit, rollback, and debug.</p>
+<h2>Component Details</h2>
+<h3>Provider Source Enumerator</h3>
+<ul>
+<li>Input: provider/tool name, source root, historical/live scope.</li>
+<li>Output: redacted-safe source locator records.</li>
+<li>Dependencies: provider-specific source layout knowledge.</li>
+<li>Notes: Gemini CLI is historical import only; no live pipeline is required for that lane.</li>
+</ul>
+<h3>Transcript Source Rebuilder</h3>
+<ul>
+<li>Input: source locator records.</li>
+<li>Output: normalized conversation chunks and raw-to-redacted coverage metadata.</li>
+<li>Dependencies: existing provider parsers and server-side redaction/leak checks.</li>
+<li>Failure mode: fail closed if parsing or redaction confidence is insufficient.</li>
+</ul>
+<h3>Project Authority Resolver</h3>
+<ul>
+<li>Input: capture metadata, provider source path, cwd/workspace marker, session context.</li>
+<li>Output: canonical project plus ambiguity state.</li>
+<li>Dependencies: no RAGFlow project metadata as single authority.</li>
+<li>Failure mode: ambiguous project requires explicit ambiguity marker and is excluded from irreversible retirement proof.</li>
+</ul>
+<h3>CouchDB Transcript Source Store</h3>
+<ul>
+<li>Input: conversation chunks, tool evidence bundles, coverage manifests, projection state.</li>
+<li>Output: document revisions and queryable coverage state.</li>
+<li>Dependencies: CouchDB container owned by neurons, not RAGFlow internal DB/Redis/MinIO/Elasticsearch.</li>
+<li>Expected document families:</li>
+</ul>
+<p>  - <code>transcript_session</code></p>
+<p>  - <code>conversation_chunk</code></p>
+<p>  - <code>tool_evidence_bundle</code></p>
+<p>  - <code>coverage_manifest</code></p>
+<p>  - <code>projection_state</code></p>
+<p>  - <code>retention_manifest</code></p>
+<h3>Tool Evidence Bundler</h3>
+<ul>
+<li>Input: redacted tool evidence items for a session.</li>
+<li>Output: bounded <code>tool_evidence_bundle</code> documents with evidence index ranges and content/coverage hashes.</li>
+<li>Dependencies: existing tool evidence extraction logic.</li>
+<li>Constraint: smaller than session-level, larger than item-level.</li>
+</ul>
+<h3>Session-Memory Materializer</h3>
+<ul>
+<li>Input: CouchDB conversation chunks and tool evidence bundles.</li>
+<li>Output: derived <code>session-memory</code> documents.</li>
+<li>Dependencies: existing session-memory builder behavior.</li>
+<li>Constraint: materialize enough tool evidence summary for RAGFlow-only normal recall.</li>
+</ul>
+<h3>RAGFlow Session Projection</h3>
+<ul>
+<li>Input: derived <code>session-memory</code> documents.</li>
+<li>Output: RAGFlow <code>session-memory</code> documents.</li>
+<li>Dependencies: RAGFlow adapter and dataset resolution.</li>
+<li>Constraint: no <code>transcript-memory</code> projection after cutover.</li>
+</ul>
+<h3>Coverage And Retirement Verifier</h3>
+<ul>
+<li>Input: CouchDB coverage manifests, ledger/ingress state, RAGFlow comparison data, session-memory rebuild outputs, recall smoke outputs.</li>
+<li>Output: retirement readiness report.</li>
+<li>Gate:</li>
+</ul>
+<p>  - coverage pass</p>
+<p>  - rebuild pass</p>
+<p>  - representative recall smoke pass</p>
+<h3>Retention Manager</h3>
+<ul>
+<li>Input: source age, coverage state, cold archive state, session-memory projection state.</li>
+<li>Output: hot-store full retention, hot-store manifest-only retention, or cold archive references.</li>
+<li>Constraint: hot query path stays small; full redacted source archive remains available outside CouchDB hot queries.</li>
+</ul>
+<h2>Error Handling</h2>
+<ul>
+<li>RAGFlow project metadata mismatch: ignore as authority, record as comparison mismatch, and resolve via hierarchy authority.</li>
+<li>Provider source missing on PC: mark source unavailable and block irreversible retirement for affected coverage.</li>
+<li>Raw leak detection: reject write, record redacted failure metadata only, and do not project to RAGFlow.</li>
+<li>CouchDB revision conflict: retry idempotent upsert using deterministic document id and content hash.</li>
+<li>Tool evidence bundle overflow: split deterministically and preserve evidence index ranges.</li>
+<li>Session-memory materialization loss: fail retirement gate if any source chunk or tool evidence bundle is dropped.</li>
+<li>RAGFlow projection failure: keep CouchDB source intact and mark projection state failed.</li>
+<li>Recall smoke failure: block RAGFlow <code>transcript-memory</code> retirement until rebuild or materialization is corrected.</li>
+<li>Gemini CLI live event detected: treat as scope violation unless separately approved.</li>
+</ul>
+<h2>Testing Strategy</h2>
+<ul>
+<li>Unit tests:</li>
+</ul>
+<p>  - project authority resolver conflict cases</p>
+<p>  - deterministic CouchDB document ids</p>
+<p>  - tool evidence bundle splitting</p>
+<p>  - retention state transitions</p>
+<ul>
+<li>Integration tests:</li>
+</ul>
+<p>  - historical import from provider source fixtures</p>
+<p>  - CouchDB write/read coverage queries</p>
+<p>  - session-memory materialization from CouchDB source</p>
+<p>  - RAGFlow session-memory projection using fake/recording adapter</p>
+<ul>
+<li>Migration verification:</li>
+</ul>
+<p>  - coverage comparison against ledger/ingress and RAGFlow candidate set</p>
+<p>  - rebuild no-loss checks for conversation chunks and tool evidence bundles</p>
+<p>  - representative recall smoke on RAGFlow <code>session-memory</code></p>
+<ul>
+<li>Live cutover checks:</li>
+</ul>
+<p>  - short shadow window across Codex, Claude Code, agy, and Antigravity</p>
+<p>  - Gemini CLI historical import only check</p>
+<p>  - no new RAGFlow <code>transcript-memory</code> writes after CouchDB-only switch</p>
+<h2>Milestones</h2>
+<ul>
+<li>M1: Source model and CouchDB ownership contract - document families, deterministic ids, redaction boundaries, and ownership rules are testable.</li>
+<li>M2: Historical import and project authority - provider source rebuild covers Codex, Claude Code, Gemini CLI, agy, and Antigravity historical data with project mismatch reporting.</li>
+<li>M3: Tool evidence and session-memory materialization - bounded bundles are stored in CouchDB and fully materialized into RAGFlow <code>session-memory</code> for normal recall.</li>
+<li>M4: Shadow live cutover - Codex, Claude Code, agy, and Antigravity shadow writes prove CouchDB coverage during a short stability window.</li>
+<li>M5: RAGFlow transcript-memory retirement - coverage, rebuild, and recall smoke gates pass; new writes and reads no longer depend on RAGFlow <code>transcript-memory</code>.</li>
+<li>M6: Retention and archive - hot CouchDB source compacts old data to manifests while cold full redacted archive remains available for audit/rollback.</li>
+</ul>
+<h2>Updated Architecture Artifact</h2>
+<p>The existing HTML design artifact remains unchanged.</p>
+<p>The existing HTML design artifact remains unchanged:</p>
+<ul>
+<li><code>docs/architecture/ledger-review-deepdive-20260614.html</code></li>
+</ul>
+<p>The updated CouchDB transcript-source migration artifact is generated separately:</p>
+<ul>
+<li><code>docs/architecture/ledger-review-deepdive-20260617-couchdb-transcript-source.html</code></li>
+</ul>
+<h2>Open Questions</h2>
+<ul>
+<li>None for Phase 2 design approval. Implementation may still discover SoT changes; those must return to grill-to-spec rather than changing this design silently.</li>
+</ul>
+    </main>
+  </body>
+</html>
