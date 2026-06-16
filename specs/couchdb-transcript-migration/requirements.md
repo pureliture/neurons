@@ -1,0 +1,170 @@
+# CouchDB Transcript Source Migration Requirements
+
+## 승인 대상
+
+- Source of truth: `requirements.md`
+- Preview companion: `requirements.html`
+
+## 질문-답변 흐름
+
+### Q: 이 마이그레이션이 끝났다고 말하는 완료 상태는 어디까지인가?
+
+완료 상태는 `완전 은퇴`다.
+
+- `RAGFlow transcript-memory` 신규 write 의존을 제거한다.
+- `RAGFlow transcript-memory` read 의존을 제거한다.
+- RAGFlow에는 `session-memory`만 남긴다.
+- 기존 `RAGFlow transcript-memory`는 신뢰 가능한 source of truth로 보지 않는다.
+- 주요 이유는 기존 데이터 중 `project` 컬럼 오매핑이 상당하기 때문이다.
+
+### Q: 기존 `RAGFlow transcript-memory` 데이터를 CouchDB로 옮길 때 source truth를 무엇으로 삼을 것인가?
+
+source truth 전략은 `혼합 검증`이다.
+
+- provider 원본 transcript 파일을 기준 source로 삼아 다시 parse/redact/rebuild한다.
+- RAGFlow와 ledger/ingress state는 coverage 검증과 누락 탐지에 사용한다.
+- RAGFlow의 오염된 `project` metadata를 새 CouchDB source store로 그대로 복제하지 않는다.
+
+### Q: CouchDB로 옮긴 transcript/tool evidence source는 얼마나 오래 보존할 것인가?
+
+retention 전략은 `수정된 계층형 보존`이다.
+
+- CouchDB hot store는 최근 source를 full document로 보존한다.
+- 오래된 source는 evidence manifest, coverage hash, session linkage 중심으로 축소한다.
+- full redacted source archive는 CouchDB hot store와 분리된 cold backup으로 보존한다.
+- 조회 성능, 운영 비용, 감사/rollback 가능성을 함께 만족해야 한다.
+
+### Q: `tool_evidence_summary`는 CouchDB에서 어떤 단위로 저장할 것인가?
+
+`tool_evidence_summary` 저장 단위는 `chunked bundle`이다.
+
+- 한 session 안의 tool evidence를 bounded bundle로 나눠 저장한다.
+- session 단위 저장보다 partial 검증과 재처리가 쉬워야 한다.
+- item 단위 저장보다 문서 수와 index 부담을 낮춰야 한다.
+- bundle은 session linkage, evidence index range, content hash 또는 coverage hash를 가져야 한다.
+
+### Q: RAGFlow transcript-memory 은퇴 전 no-loss 검증은 무엇을 통과해야 하는가?
+
+은퇴 전 no-loss 검증은 `다층 검증`이다.
+
+- coverage 검증: source session, conversation chunk, tool evidence bundle의 개수와 hash coverage를 확인한다.
+- rebuild 검증: CouchDB source에서 session-memory를 다시 만들고 기존/기대 session-memory와 비교한다.
+- recall smoke 검증: 대표 query 또는 retrieval 시나리오에서 session-memory recall surface가 기대 결과를 반환하는지 확인한다.
+- 단일 검증만으로는 RAGFlow transcript-memory read/write 완전 은퇴를 승인하지 않는다.
+
+### Q: 잘못된 `project` 매핑은 어떤 authority로 보정할 것인가?
+
+`project` 보정 authority는 `hierarchy authority`다.
+
+- capture metadata를 우선한다.
+- capture metadata가 없거나 불확실하면 provider 원본 경로, cwd, workspace marker를 확인한다.
+- 여전히 충돌하면 server inference로 검증하고 ambiguity를 명시한다.
+- RAGFlow의 기존 `project` metadata는 오염 가능성이 있으므로 단독 authority로 쓰지 않는다.
+
+### Q: 새 transcript/tool evidence write path는 언제 CouchDB로 전환할 것인가?
+
+신규 write 전환은 `staged cutover`다.
+
+- 먼저 CouchDB write를 shadow로 검증한다.
+- shadow 검증 중 기존 RAGFlow transcript-memory write 의존은 비교 대상으로만 유지한다.
+- coverage와 no-loss 기준을 통과한 뒤 신규 write를 CouchDB-only로 전환한다.
+- 최종 상태에서는 RAGFlow transcript-memory 신규 write가 없어야 한다.
+
+### Q: `tool_evidence_summary`는 session-memory에 어떻게 반영되어야 하는가?
+
+`tool_evidence_summary`는 session-memory rebuild 시 항상 충분히 materialize한다.
+
+- RAGFlow `session-memory`는 Palantir Ontology처럼 brain-facing recall surface 역할을 해야 한다.
+- normal recall path는 RAGFlow `session-memory`만으로 판단, 근거, 작업 맥락을 회수할 수 있어야 한다.
+- normal recall path가 CouchDB evidence refs를 따라 추가 fetch해야 하는 구조는 피한다.
+- CouchDB refs는 provenance, audit, rollback, debug 용도로 남길 수 있지만 normal brain path 의존은 금지한다.
+
+### Q: CouchDB-only 신규 write로 전환하기 전 shadow 검증은 어느 정도 볼 것인가?
+
+shadow 검증은 `짧은 안정 window`로 한다.
+
+- 여러 provider와 project가 섞인 신규 ingest를 관측하되, 병행 기간은 최대한 짧게 유지한다.
+- provider 원본 transcript 데이터가 PC에 남아 있으므로, RAGFlow transcript-memory 병행을 오래 유지하지 않는다.
+- shadow window는 CouchDB write, coverage, rebuild, representative recall smoke가 정상 동작함을 확인하는 데 필요한 최소 기간이어야 한다.
+- shadow 검증 통과 후 신규 write는 CouchDB-only로 전환한다.
+
+### Q: migration 대상 provider/tool 범위는 무엇인가?
+
+migration 대상은 총 5개 도구다.
+
+- Codex
+- Claude Code
+- Gemini CLI
+- agy
+- Antigravity
+
+Gemini CLI는 예전 데이터를 가져오는 historical import 범위이며, live pipeline 범위는 아니다.
+agy와 Antigravity는 live pipeline 범위에 포함된다.
+
+### Q: provider/tool별 migration done 정의는 어떻게 나눌 것인가?
+
+provider/tool별 migration done 정의는 `historical/live 분리`다.
+
+- Gemini CLI는 historical import coverage만 완료 기준으로 본다.
+- Codex, Claude Code, agy, Antigravity는 historical import와 live pipeline 전환까지 완료 기준으로 본다.
+- live pipeline 대상 도구는 신규 source가 CouchDB로 들어가고 RAGFlow transcript-memory 신규 write가 없어야 한다.
+- 모든 도구는 CouchDB source coverage, session-memory rebuild, representative recall smoke의 관련 범위를 통과해야 한다.
+
+## 기능 요구사항
+
+- `transcript-memory` 역할을 RAGFlow dataset에서 CouchDB-backed transcript source store로 이전한다.
+- `tool_evidence_summary`는 conversation chunk와 함께 source/evidence layer로 보존한다.
+- `tool_evidence_summary`는 session 내부 bounded chunked bundle 단위로 저장한다.
+- RAGFlow에는 derived `session-memory` recall surface만 남긴다.
+- `session-memory`는 tool evidence 요약을 충분히 materialize해 RAGFlow-only normal recall을 지원해야 한다.
+- normal recall path는 CouchDB evidence fetch에 의존하지 않아야 한다.
+- migration은 기존 RAGFlow metadata 오염을 새 source store로 전파하지 않아야 한다.
+- migration은 source coverage와 no-loss 검증을 포함해야 한다.
+- RAGFlow transcript-memory 은퇴 gate는 coverage, rebuild, recall smoke를 모두 포함해야 한다.
+- `project` 보정은 capture metadata, provider 원본 경로, server inference의 hierarchy authority를 따른다.
+- 신규 transcript/tool evidence write path는 staged cutover로 CouchDB-only에 도달해야 한다.
+- shadow 검증 window는 원본 PC 데이터를 rollback/rebuild source로 둘 수 있다는 전제 아래 최대한 짧게 유지한다.
+- migration 대상 provider/tool 범위는 Codex, Claude Code, Gemini CLI, agy, Antigravity의 5개로 한다.
+- Gemini CLI는 historical import only로 취급하고 live pipeline 요구사항에 포함하지 않는다.
+- agy와 Antigravity는 live pipeline 요구사항에 포함한다.
+- provider/tool별 완료 기준은 historical import only와 live pipeline 대상 도구를 분리한다.
+- CouchDB hot store는 계층형 retention을 지원해야 한다.
+- full redacted source archive는 hot query path와 분리되어야 한다.
+
+## 비기능 요구사항
+
+| 항목 | 요구값 |
+| --- | --- |
+| Safety | raw secret, raw token, raw RAGFlow document id, raw private transcript body를 출력하지 않는다. |
+| Source of truth | provider 원본 transcript와 server-side redacted rebuild 결과를 우선한다. |
+| Reversibility | RAGFlow transcript-memory 은퇴 전 coverage 증거와 rollback 판단 기준을 남긴다. |
+| Retention | 최근 source는 CouchDB hot store에 full로 두고, 오래된 source는 축소하며, full archive는 cold backup으로 분리한다. |
+| Tool evidence granularity | session보다 작고 item보다 큰 bounded bundle 단위를 사용한다. |
+| Retirement gate | coverage + rebuild + representative recall smoke를 모두 통과해야 한다. |
+| Project authority | capture metadata를 우선하고, provider 원본 경로와 server inference로 검증한다. |
+| Cutover | shadow 검증 후 CouchDB-only 신규 write로 전환한다. |
+| Shadow window | 여러 provider/project가 섞인 최소 안정 window를 보되 병행 기간은 짧게 유지한다. |
+| Provider/tool scope | Codex, Claude Code, Gemini CLI, agy, Antigravity를 migration 대상으로 한다. |
+| Live pipeline scope | Gemini CLI는 historical import only이며, agy와 Antigravity는 live pipeline에 포함한다. |
+| Provider acceptance | Gemini CLI는 historical import 기준, 나머지 live 대상 도구는 live pipeline 전환 기준을 적용한다. |
+| Brain surface | RAGFlow `session-memory`만으로 normal recall이 가능해야 한다. |
+| Scope control | 요구사항 승인 전에는 구현 코드나 locked architecture를 작성하지 않는다. |
+
+## 사용자 시나리오
+
+- 운영자는 RAGFlow transcript-memory의 `project` 오매핑을 새 저장소로 복제하지 않고 transcript source를 재구축한다.
+- 운영자는 CouchDB source store와 RAGFlow/ledger coverage를 비교해 누락 또는 불일치를 확인한다.
+- 운영자는 검증 후 RAGFlow transcript-memory write/read 의존을 제거하고 RAGFlow에는 session-memory만 유지한다.
+- 운영자는 오래된 source를 hot query path에서 축소하면서도 cold backup으로 감사/rollback 가능성을 유지한다.
+- 운영자는 특정 session의 tool evidence bundle coverage를 검증하고 필요한 bundle만 재처리할 수 있다.
+- 운영자는 RAGFlow transcript-memory를 완전히 은퇴하기 전에 coverage, rebuild, recall smoke 증거를 확인한다.
+- 운영자는 RAGFlow의 오염된 project metadata 대신 hierarchy authority로 project를 보정한다.
+- 운영자는 신규 write path를 shadow 검증 후 CouchDB-only로 전환한다.
+- 운영자는 RAGFlow `session-memory`를 brain-facing ontology surface로 사용하고, normal recall에서 CouchDB 추가 fetch에 의존하지 않는다.
+- 운영자는 원본 transcript가 PC에 남아 있음을 rollback/rebuild 전제로 삼고 RAGFlow transcript-memory 병행 기간을 짧게 유지한다.
+- 운영자는 Gemini CLI는 historical import로만 처리하고, agy와 Antigravity는 live ingest path까지 검증한다.
+- 운영자는 provider/tool별로 historical import only와 live pipeline done 기준을 분리해 완료 여부를 판단한다.
+
+## 미결정 항목
+
+- 없음.
