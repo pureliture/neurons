@@ -53,6 +53,12 @@ from .source_store import (  # noqa: F401
     InMemoryCouchDBSourceStore,
     SourceStoreError,
     StoredRevision,
+    payload_hash,
+    validate_for_write,
+)
+from .couchdb_http_store import (  # noqa: F401
+    CouchDBError,
+    CouchDBHttpSourceStore,
 )
 from .project_authority import (  # noqa: F401
     ProjectAuthorityInput,

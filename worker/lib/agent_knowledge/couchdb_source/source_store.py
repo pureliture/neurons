@@ -51,24 +51,25 @@ class CouchDBSourceStore(Protocol):
     def delete(self, doc_id: str) -> bool: ...
 
 
-def _payload_hash(document: dict) -> str:
+def payload_hash(document: dict) -> str:
     """The natural payload identity used for idempotency.
 
     Conversation chunks and bundles carry a ``content_hash``; coverage manifests
     carry a ``coverage_hash``; the remaining families hash their public-safe
-    body. The result is never raw text.
+    body. The result is never raw text. Shared by the in-memory and HTTP stores
+    so their dedup behavior is identical.
     """
 
     for key in ("content_hash", "coverage_hash"):
         value = document.get(key)
         if value:
             return str(value)
-    payload = {k: v for k, v in document.items() if k not in ("_id", "_rev")}
+    payload = {k: v for k, v in document.items() if k not in ("_id", "_rev", "idempotency_key", "payload_hash")}
     blob = repr(sorted(payload.items()))
     return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def _validate_for_write(document: dict) -> None:
+def validate_for_write(document: dict) -> None:
     doc_id = document.get("_id")
     if not doc_id:
         raise SourceStoreError("document is missing a deterministic _id")
@@ -89,9 +90,9 @@ class InMemoryCouchDBSourceStore:
         self._docs: dict[str, dict] = {}
 
     def put(self, document: dict) -> StoredRevision:
-        _validate_for_write(document)
+        validate_for_write(document)
         doc_id = str(document["_id"])
-        incoming_hash = _payload_hash(document)
+        incoming_hash = payload_hash(document)
         existing = self._docs.get(doc_id)
 
         decision = classify_idempotency(
@@ -145,4 +146,6 @@ __all__ = [
     "InMemoryCouchDBSourceStore",
     "SourceStoreError",
     "StoredRevision",
+    "payload_hash",
+    "validate_for_write",
 ]
