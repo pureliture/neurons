@@ -29,6 +29,9 @@ from .couchdb_http_store import CouchDBHttpSourceStore
 from .historical_import import ImportStatus, SourceLocator, import_historical_source
 from .session_memory_materializer import update_coverage_with_tool_evidence
 from .source_store import InMemoryCouchDBSourceStore
+from .tool_evidence_bundler import store_tool_evidence_bundles
+from .document_model import build_source_locator_hash
+from ..session_memory.transcript_parsers import extract_tool_evidence
 
 MIGRATION_PROVIDERS = ("codex", "claude", "gemini", "antigravity")
 _CWD_SCAN_MAX_LINES = 50
@@ -225,6 +228,47 @@ def run_migration(
     return report
 
 
+def run_tool_evidence(
+    *,
+    store,
+    roots: dict[str, Path] | None = None,
+    providers: list[str] | None = None,
+    limit: int | None = None,
+    runtime_dir: Path | None = None,
+) -> dict:
+    """Second pass: extract tool_evidence_summary per session file and store it as
+    bounded tool_evidence_bundle docs in CouchDB. Idempotent (deterministic ids)."""
+    roots = roots if roots is not None else default_source_roots()
+    providers = providers or list(MIGRATION_PROVIDERS)
+    runtime_dir = runtime_dir or (Path.home() / ".config" / "neurons" / "gemini-normalized")
+    report: dict = {"by_provider": {}, "bundles": 0, "sessions_with_evidence": 0, "errors": 0}
+    for provider in providers:
+        root = roots.get(provider)
+        files = enumerate_provider_files(provider, Path(root)) if root else []
+        if limit is not None:
+            files = files[: max(limit, 0)]
+        prov = {"found": len(files), "bundles": 0, "sessions": 0, "errors": 0}
+        for path in files:
+            try:
+                source_path = path
+                if provider == "gemini" and path.suffix == ".json":
+                    source_path = convert_gemini_json_to_fixture(path, runtime_dir)
+                slh = build_source_locator_hash(str(source_path))
+                records = extract_tool_evidence(provider, str(source_path), project="", source_locator_hash=slh)
+                if not records:
+                    continue
+                revs = store_tool_evidence_bundles(records, store=store)
+                prov["bundles"] += len(revs)
+                prov["sessions"] += 1
+            except Exception:  # noqa: BLE001 - per-file fail-soft
+                prov["errors"] += 1
+        report["by_provider"][provider] = prov
+        report["bundles"] += prov["bundles"]
+        report["sessions_with_evidence"] += prov["sessions"]
+        report["errors"] += prov["errors"]
+    return report
+
+
 def reconcile_coverage(store) -> dict:
     """Recompute every session's coverage_manifest from the chunks/bundles actually
     in the store. Multi-file sessions (same session_id_hash across several provider
@@ -248,7 +292,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-root", action="append", help="provider=/path override; repeatable")
     parser.add_argument("--runtime-dir")
     parser.add_argument("--reconcile-coverage", action="store_true", help="recompute coverage manifests from stored chunks and exit")
+    parser.add_argument("--tool-evidence", action="store_true", help="second pass: store tool_evidence_bundle docs and exit")
     args = parser.parse_args(argv if argv is not None else None)
+
+    roots_override: dict[str, Path] = {}
+    for raw in args.source_root or []:
+        if "=" in raw:
+            prov, _, p = raw.partition("=")
+            roots_override[prov.strip()] = Path(p.strip()).expanduser()
+
+    if args.tool_evidence:
+        store = InMemoryCouchDBSourceStore() if args.dry_run else build_store_from_env()
+        roots = default_source_roots()
+        roots.update(roots_override)
+        report = run_tool_evidence(
+            store=store, roots=roots, providers=args.provider, limit=args.limit,
+            runtime_dir=Path(args.runtime_dir) if args.runtime_dir else None,
+        )
+        report["status"] = "ok"
+        print(json.dumps(report, sort_keys=True))
+        return 0
 
     if args.reconcile_coverage:
         store = InMemoryCouchDBSourceStore() if args.dry_run else build_store_from_env()
