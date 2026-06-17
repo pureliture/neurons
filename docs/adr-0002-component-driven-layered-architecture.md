@@ -286,6 +286,42 @@ Cons:
 
 ---
 
+## Status Update — 구현 현실 (2026-06-17)
+
+> 이 ADR의 Decision/Done Criteria는 **목표 설계도**로 유지한다(Accepted 결정 본문은 재작성하지 않음).
+> 아래는 현재 코드(`main` HEAD)와 위 설계의 차이, 그리고 그에 대한 결정을 기록한다.
+
+### 닫힌 격차 — ArchUnit 강제 (2026-06-17)
+
+- ArchUnit(`com.tngtech.archunit:archunit-junit5:1.4.2`)을 추가하고 「계층 의존성 규칙」을
+  `src/test/java/com/local/ragingressqueue/architecture/ArchitectureRulesTest.java`에 5개 규칙으로 코드화했다.
+  `gradle test`가 이를 강제한다 → **Done Criteria #2의 "ArchUnit 규칙 포함"이 충족됐다.**
+- Rule 1(service↛api)·Rule 2(domain↛adapter)·Rule 3(port↛adapter)·Rule 4(port 구현체는 adapter)는
+  현 코드 그대로 통과한다.
+
+### 인정된 편차 (Accepted deviations)
+
+리팩터 리스크 대비 가치가 낮아, 아래는 코드를 ADR에 맞추지 않고 **편차로 인정**한다(필요 시 추후 ADR로 닫는다).
+
+- **Rule 5(common 순수성) 범위 정련.** 원안("common이 기능 패키지를 의존하면 실패")을 그대로 쓰면 현 코드가 위반한다:
+  합성 루트 `common.config`(Spring bean 조립)는 본질적으로 feature/adapter를 참조하고
+  (`WorkerConfiguration`→`delivery.worker`, `NatsJetStreamConfiguration`→`adapter.infra.nats`),
+  `common.logging.SafeJobSummary`는 `ingest.domain` value-type을 참조한다. 따라서 강제 규칙은
+  **합성 루트(`common.config`) 면제 + feature domain value-type 공유 허용**으로 정련하고, feature의
+  **service/api/worker 로직** 역참조만 금지한다. 합성 루트를 `common` 밖으로 옮기는 일은 별도 과제다.
+- **`status/api/StatusController.java` 미생성.** `/status`·`/healthz`는 현재 `ingest/api/IngressController`가
+  서빙하고 `StatusService`(status/service)에 위임한다. 전용 컨트롤러 분리는 현 규모에서 보류한다.
+- **`common/exception/*` + `GlobalExceptionHandler` 미추출.** enqueue 에러는 `IngressController` 안에서
+  inline `ResponseEntity.status(400/409/422/503)`로 처리된다. 예외 계층화는 보류한다.
+- **`delivery/service/DeliveryService.java` 미생성.** targetProfile 라우팅은 별도 service로 추출돼 있지 않다.
+- **`common/web/CorrelationIdFilter.java` 미구현.**
+
+### 일치하는 골격
+
+기능 단위 패키징(`ingest/`·`delivery/`·`status/`), Port 분리(`queue/port/`·`target/port/`),
+어댑터 분류(`adapter/infra/nats/`·`adapter/ext/ragflow/`), 공통 계층(`common/config/`·`common/logging/`).
+component-driven + Port/Adapter 방향성은 코드에 반영돼 있고 이제 ArchUnit으로 강제된다.
+
 ## References
 
 - sidebeam-backend: `com.sidebeam.bookmark.*`, `com.sidebeam.common.*`, `com.sidebeam.external.gitlab.*` 패턴
