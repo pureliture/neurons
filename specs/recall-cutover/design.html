@@ -1,0 +1,127 @@
+<!doctype html><meta charset=utf-8><title>recall-cutover</title>
+<style>body{font:15px/1.6 -apple-system,sans-serif;max-width:860px;margin:2rem auto;padding:0 1rem;color:#222}
+h1,h2,h3{border-bottom:1px solid #eee;padding-bottom:.2em}h1{color:#7b2d8e}code,pre{background:#f6f6f6}
+pre{padding:.8em;overflow:auto;border-radius:6px}table{border-collapse:collapse;width:100%}td{border:1px solid #ddd;padding:.4em .6em}
+tr:first-child td{background:#f6f0fa;font-weight:600}li{margin:.2em 0}</style><h1>Recall Cutover Design Spec (transcript-memory → session-memory)</h1>
+<br>
+<h2>Overview</h2>
+<br>
+<p>RAGFlow `transcript-memory`를 은퇴(삭제)하기 위해, 라이브 recall을 CouchDB</p>
+<p>source에서 재생성한 RAGFlow `session-memory` surface로 무회귀 컷오버한다. 데이터</p>
+<p>이관/검증은 이미 완료(3567 세션); 본 spec은 recall surface 전환과 파괴적 삭제의</p>
+<p>안전 순서를 다룬다.</p>
+<br>
+<h2>Requirements Reference</h2>
+<br>
+<li>Phase 1 source: `requirements.md`</li>
+<li>Preview companion: `requirements.html`</li>
+<li>핵심: session-memory를 동작하는 recall surface로 만들고(재생성+parse), recall</li>
+<p>  smoke 무회귀 검증, recall 재배선, write 컷오버, 백업 후 transcript-memory 삭제.</p>
+<br>
+<h2>Approach Proposal</h2>
+<br>
+<h3>Recommended: Rebuild session-memory + staged recall cutover</h3>
+<br>
+<p>CouchDB source에서 M3 materializer로 session-memory 문서를 생성해 RAGFlow</p>
+<p>`session-memory` dataset에 live projection + parse하고, recall을 거기로 재배선한</p>
+<p>뒤, 백업하고 transcript-memory를 삭제한다. 이미 구현된 M3(materializer/projection</p>
+<p>seam)를 재사용한다.</p>
+<br>
+<h3>Alternative A: CouchDB-direct recall</h3>
+<br>
+<p>recall이 CouchDB를 직접 읽음. design 계약(“normal recall은 session-memory만,</p>
+<p>CouchDB evidence 비의존”) 위반 + 새 recall 경로 신설 비용. 기각.</p>
+<br>
+<h3>Alternative B: transcript-memory 유지 + write만 중단</h3>
+<br>
+<p>삭제(은퇴) 목표 미달성. 기각.</p>
+<br>
+<h2>Architecture</h2>
+<br>
+<pre>
+CouchDB transcript-source (3567 sessions)
+        | M3 materialize_session_memory (embed tool evidence)
+        v
+SessionMemoryRebuilder ── live projector ──► RAGFlow session-memory (f6c55b)
+        |                                          | parse/index
+        v                                          v
+RecallSmoke (session-memory vs transcript-memory) ─ verdict(no-regression)
+        | pass
+        v
+RecallRepointer (recall dataset → session-memory) ─ observe window
+        v
+WriteCutover (stop transcript-memory delivery)
+        v
+TranscriptMemoryBackup (70k docs → durable) ─ rollback source (14 leak-blocked 포함)
+        v
+TranscriptMemoryRetirer (delete dataset) ── 비가역, 마지막
+</pre>
+<br>
+<h2>Data Flow</h2>
+<br>
+<li>진단: session-memory 0-hits 근인 확인(parse status / 내용 부재 / recall 경로).</li>
+<li>재생성: 각 CouchDB 세션 → materialize_session_memory → session-memory doc →</li>
+<p>   RAGFlow session-memory upload + parse. 결정적 id로 idempotent.</p>
+<li>recall smoke: 대표 쿼리 ≥8을 session-memory와 transcript-memory에 retrieval,</li>
+<p>   hits/유사도 비교 → 무회귀 verdict.</p>
+<li>재배선: recall 진입점 dataset → session-memory. 실행 중 recall이 session-memory</li>
+<p>   를 읽는지 증거 확인. 짧은 안정 window 관측.</p>
+<li>write 컷오버: transcript-memory delivery 비활성, 신규 ingest는 CouchDB +</li>
+<p>   session-memory로만.</p>
+<li>백업: transcript-memory dataset export → durable file.</li>
+<li>삭제: transcript-memory dataset 삭제(게이트 통과 후).</li>
+<br>
+<h2>Component Details</h2>
+<br>
+<li>**SessionMemoryRebuilder**: 입력 CouchDB source(conversation chunk + tool</li>
+<p>  evidence bundle); 출력 RAGFlow session-memory docs(parsed). 의존 M3</p>
+<p>  materializer + RAGFlow upload/parse. 실패 시 부분 진행 + 재실행 안전.</p>
+<li>**RecallSmoke**: 입력 대표 쿼리 + 두 dataset; 출력 per-query hits/유사도 +</li>
+<p>  무회귀 verdict. 의존 RAGFlow retrieval API.</p>
+<li>**RecallRepointer**: 입력 recall 설정; 출력 session-memory를 읽는 recall. 의존</li>
+<p>  mcp-stdio 런치/서버 설정. 가역(되돌리기).</p>
+<li>**WriteCutover**: 입력 delivery 설정; 출력 transcript-memory write 0. 의존</li>
+<p>  RAGFLOW_DELIVERY/dataset 설정.</p>
+<li>**TranscriptMemoryBackup**: 입력 dataset; 출력 durable 백업(14 포함). rollback</li>
+<p>  source.</p>
+<li>**TranscriptMemoryRetirer**: 입력 dataset id + 게이트 verdict; 출력 dataset</li>
+<p>  삭제. 비가역, backup 선행 필수.</p>
+<br>
+<h2>Error Handling</h2>
+<br>
+<li>session-memory 재생성 실패/부분: 재실행(idempotent), 미완 세션은 삭제 게이트에서</li>
+<p>  제외.</p>
+<li>recall smoke 회귀: 컷오버 중단, recall 유지(transcript-memory).</li>
+<li>재배선 후 recall 이상: recall 되돌리기(가역).</li>
+<li>백업 실패: 삭제 차단(백업 없는 삭제 금지).</li>
+<li>삭제 후 회귀: 백업에서 복원.</li>
+<li>leak 잔존 세션: CouchDB 저장 금지(fail-closed), 백업으로만 보존.</li>
+<br>
+<h2>Testing Strategy</h2>
+<br>
+<li>단위: RecallSmoke verdict 로직, SessionMemoryRebuilder doc 생성(fake projector),</li>
+<p>  WriteCutover 설정 전이 — fake/in-memory로.</p>
+<li>통합: 소량 세션 재생성 → RAGFlow parse → retrieval hit 확인(라이브 소규모).</li>
+<li>라이브 게이트: recall smoke 무회귀, 재배선 후 recall 출처 확인, 백업 무결성,</li>
+<p>  삭제 후 recall 지속.</p>
+<br>
+<h2>Milestones</h2>
+<br>
+<li>RC1: session-memory 0-hits 진단 + CouchDB에서 session-memory 재생성 → RAGFlow</li>
+<p>  parse 완료, retrieval에서 hit 발생. (done: 대표 쿼리에서 session-memory hits&gt;0)</p>
+<li>RC2: recall smoke 무회귀 — 대표 쿼리 ≥8에서 session-memory가 transcript-memory</li>
+<p>  대비 동등. (done: smoke verdict pass)</p>
+<li>RC3: recall 재배선 → session-memory + 안정 window 관측. (done: 실행 recall이</li>
+<p>  session-memory를 읽고 정상 결과)</p>
+<li>RC4: write 컷오버 — transcript-memory 신규 write 0. (done: 신규 ingest가 CouchDB+</li>
+<p>  session-memory로만)</p>
+<li>RC5: transcript-memory 백업(70k, 14 포함). (done: durable 백업 + 무결성 확인)</li>
+<li>RC6: transcript-memory dataset 삭제. (done: dataset 부재 + recall 지속 + rollback</li>
+<p>  근거 보존)</p>
+<br>
+<h2>Open Questions</h2>
+<br>
+<li>recall 재배선의 운영 지점(Mac 런치 설정 vs 서버 설정) 확정은 RC3 착수 시 라이브</li>
+<p>  확인으로 결정.</p>
+<li>recall smoke 정량 임계 최종값은 RC2에서 TM 기준선 측정 후 고정.</li>
+<br>

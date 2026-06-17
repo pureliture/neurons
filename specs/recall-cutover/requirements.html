@@ -1,0 +1,152 @@
+<!doctype html><meta charset=utf-8><title>recall-cutover</title>
+<style>body{font:15px/1.6 -apple-system,sans-serif;max-width:860px;margin:2rem auto;padding:0 1rem;color:#222}
+h1,h2,h3{border-bottom:1px solid #eee;padding-bottom:.2em}h1{color:#7b2d8e}code,pre{background:#f6f6f6}
+pre{padding:.8em;overflow:auto;border-radius:6px}table{border-collapse:collapse;width:100%}td{border:1px solid #ddd;padding:.4em .6em}
+tr:first-child td{background:#f6f0fa;font-weight:600}li{margin:.2em 0}</style><h1>Recall Cutover Requirements (transcript-memory → session-memory)</h1>
+<br>
+<h2>승인 대상</h2>
+<br>
+<li>Source of truth: `requirements.md`</li>
+<li>Preview companion: `requirements.html`</li>
+<li>진행 방식: 자문자답(self-Q&amp;A) grilling. 사용자 위임으로 자체 도출 후</li>
+<p>  `/agentic-execution`으로 실행한다.</p>
+<br>
+<h2>배경 (라이브 증거)</h2>
+<br>
+<li>실행 중 recall은 `neuron-knowledge mcp-stdio --ragflow-direct-recall</li>
+<p>  --dataset-id &lt;transcript-memory&gt;` 로 **transcript-memory(cca3d0)를 직접** 읽는다.</p>
+<li>session-memory(f6c55b, 6668 docs)는 RAGFlow retrieval에서 대표 쿼리 4개 모두</li>
+<p>  **0 hits** (현재 recall surface로 동작 안 함).</p>
+<li>CouchDB transcript-source에는 3567 세션(clean 3326 + ragflow_fallback 241)이</li>
+<p>  적재·검증 완료. 14 세션은 leak-blocked로 저장 불가(백업 전용).</p>
+<li>transcript-memory write(delivery)는 `RAGFLOW_DELIVERY_ENABLED=true`로 활성.</li>
+<li>결론: transcript-memory를 안전하게 삭제(은퇴)하려면, recall을 **동작하는</li>
+<p>  session-memory surface로 컷오버**하는 것이 선결이다.</p>
+<br>
+<h2>질문-답변 흐름 (자문자답)</h2>
+<br>
+<h3>Q1: 컷오버 후 normal recall의 권위 surface는 무엇인가?</h3>
+<br>
+<p>RAGFlow `session-memory`(f6c55b)다.</p>
+<br>
+<li>design.md 계약: RAGFlow `session-memory`가 brain-facing recall surface이고</li>
+<p>  CouchDB는 source/evidence 전용이다. normal recall은 CouchDB evidence fetch에</p>
+<p>  의존하지 않아야 한다.</p>
+<li>따라서 CouchDB-direct recall이나 transcript-memory 유지가 아니라, CouchDB</li>
+<p>  source에서 **derived session-memory**를 RAGFlow에 구축해 recall을 받는다.</p>
+<br>
+<h3>Q2: session-memory가 지금 0 hits인 원인 가설과, 컷오버가 보장해야 하는 상태는?</h3>
+<br>
+<p>원인은 session-memory가 CouchDB 3567 세션에 대해 **충분히 materialize·parse되어</p>
+<p>있지 않기 때문**으로 본다(기존 6668 docs는 구 파이프라인 파생물, 신규 CouchDB</p>
+<p>source 미반영 + retrieval 미동작).</p>
+<br>
+<li>컷오버 done 상태: session-memory가 CouchDB source(conversation + tool evidence</li>
+<p>  요약)에서 재생성되어 **RAGFlow retrieval로 hit가 나오는** 상태여야 한다.</p>
+<li>단일 docs 수가 아니라 recall smoke 통과가 기준이다.</li>
+<br>
+<h3>Q3: recall 품질 성공 기준(no-regression)은 어떻게 정의하나?</h3>
+<br>
+<p>`recall smoke`: 대표 쿼리 집합에 대해 session-memory가 transcript-memory 대비</p>
+<p>**동등 수준의 관련 결과**를 반환한다.</p>
+<br>
+<li>대표 쿼리 집합(최소 8개): 최근/오래된 세션, 여러 provider/project를 섞어 구성.</li>
+<li>통과 기준: 각 쿼리에서 session-memory hits ≥ 1 이고, 관련 top 결과의</li>
+<p>  유사도가 transcript-memory 대비 합리적 범위(예: top similarity가 TM의 70%</p>
+<p>  이상이거나 사람이 관련성 확인). 단일 검증이 아니라 쿼리 셋 전체로 판정한다.</p>
+<li>회귀가 보이면 컷오버/삭제를 중단하고 recall을 transcript-memory로 되돌린다.</li>
+<br>
+<h3>Q4: recall은 어떻게 재배선하나?</h3>
+<br>
+<p>recall 진입점의 dataset 타깃을 transcript-memory → session-memory로 바꾼다.</p>
+<br>
+<li>Mac 측: `mcp-stdio` recall 실행 인자/런치 설정의 `--dataset-id`를</li>
+<p>  session-memory로 전환(또는 recall이 읽는 dataset 해석을 session-memory로).</p>
+<li>서버 측: brain.query/recall이 dataset을 환경/설정에서 해석한다면 그 설정도</li>
+<p>  session-memory로 정렬한다.</p>
+<li>재배선 후 실제 실행 중 recall이 session-memory를 읽는지 증거로 확인한다.</li>
+<br>
+<h3>Q5: write(신규 ingest)는 어떻게 처리하나?</h3>
+<br>
+<p>신규 transcript는 transcript-memory에 더 이상 write하지 않고 CouchDB source +</p>
+<p>session-memory projection 경로로만 흐른다.</p>
+<br>
+<li>`RAGFLOW_DELIVERY`의 transcript-memory 타깃을 비활성/제거한다.</li>
+<li>신규 세션이 CouchDB로 들어가고 session-memory가 갱신되는지 확인한다(M4 shadow</li>
+<p>  로직 재사용 가능).</p>
+<li>최종 상태에서 transcript-memory 신규 write가 0이어야 한다.</li>
+<br>
+<h3>Q6: 삭제 전 백업과 롤백 기준은?</h3>
+<br>
+<p>transcript-memory(70k docs, 14 leak-blocked 포함)를 삭제 전에 **durable backup**</p>
+<p>한다.</p>
+<br>
+<li>백업은 rollback source이며, 14 leak-blocked 세션의 유일한 보존처다.</li>
+<li>롤백 트리거: 컷오버 후 recall 회귀 발견 시. 삭제 전이면 recall을</li>
+<p>  transcript-memory로 되돌리고, 삭제 후면 백업에서 복원한다.</p>
+<br>
+<h3>Q7: 삭제까지의 단계 순서(staged cutover)는?</h3>
+<br>
+<p>다음 순서를 강제한다. 각 단계는 증거 게이트를 통과해야 다음으로 간다.</p>
+<br>
+<li>session-memory를 CouchDB source에서 재생성·parse.</li>
+<li>recall smoke 통과(Q3).</li>
+<li>recall 재배선(Q4) + 짧은 안정 window 관측(recall이 session-memory에서 정상).</li>
+<li>신규 write 컷오버(Q5).</li>
+<li>transcript-memory 백업(Q6).</li>
+<li>transcript-memory dataset 삭제(파괴적, 마지막).</li>
+<br>
+<p>3까지는 가역(recall 되돌리기), 6은 비가역(백업이 rollback).</p>
+<br>
+<h3>Q8: 범위 밖(YAGNI)은?</h3>
+<br>
+<li>redaction 로직 변경, 재migration, project-memory/procedural-memory dataset 변경,</li>
+<p>  CouchDB-direct recall 경로 신설은 범위 밖.</p>
+<li>14 leak-blocked 세션의 CouchDB 저장 시도는 범위 밖(안전상 불가, 백업만).</li>
+<br>
+<h2>기능 요구사항</h2>
+<br>
+<li>CouchDB source(3567 세션)에서 RAGFlow `session-memory`를 재생성하고 retrieval</li>
+<p>  가능 상태(parse 완료)로 만든다.</p>
+<li>recall smoke(대표 쿼리 ≥8)로 session-memory recall이 transcript-memory 대비</li>
+<p>  무회귀임을 검증한다.</p>
+<li>실행 중 recall 진입점을 transcript-memory → session-memory로 재배선한다.</li>
+<li>신규 ingest의 transcript-memory write를 중단하고 CouchDB + session-memory로만</li>
+<p>  흐르게 한다.</p>
+<li>삭제 전 transcript-memory 전체를 durable backup한다(14 leak-blocked 포함).</li>
+<li>위 게이트(재생성·smoke·재배선·안정관측·write컷오버·백업) 통과 후에만</li>
+<p>  transcript-memory dataset을 삭제한다.</p>
+<li>각 단계는 dry-run/증거/rollback 기준을 분리해 보고한다.</li>
+<br>
+<h2>비기능 요구사항</h2>
+<br>
+<table>
+<tr><td>항목</td><td>요구값</td></tr>
+<tr><td>Recall no-regression</td><td>session-memory recall이 대표 쿼리 셋에서 transcript-memory 대비 동등 수준</td></tr>
+<tr><td>Reversibility</td><td>삭제 전 단계는 가역(recall 되돌리기), 삭제는 백업으로 rollback</td></tr>
+<tr><td>Safety</td><td>leak-blocked 본문은 CouchDB 저장 금지(fail-closed 유지), 백업으로만 보존</td></tr>
+<tr><td>Backup</td><td>삭제 전 transcript-memory 70k docs 백업 필수(rollback 증거)</td></tr>
+<tr><td>Staged order</td><td>재생성→smoke→재배선→안정관측→write컷오버→백업→삭제 순서 강제</td></tr>
+<tr><td>Authority</td><td>normal recall은 session-memory만, CouchDB evidence fetch 비의존</td></tr>
+<tr><td>Idempotency</td><td>session-memory 재생성/projection은 결정적·재실행 안전</td></tr>
+<tr><td>Approval</td><td>파괴적 삭제는 사전승인(오토파일럿) + 증거 분리 보고 후 실행</td></tr>
+</table>
+<br>
+<h2>사용자 시나리오</h2>
+<br>
+<li>운영자는 CouchDB source에서 session-memory를 재생성하고, recall smoke로</li>
+<p>  session-memory가 transcript-memory만큼 회수하는지 확인한다.</p>
+<li>운영자는 recall을 session-memory로 재배선하고 짧은 window 동안 정상 동작을</li>
+<p>  관측한다.</p>
+<li>운영자는 신규 ingest가 transcript-memory에 더는 쓰지 않음을 확인한다.</li>
+<li>운영자는 transcript-memory를 백업한 뒤(14 leak-blocked 포함) dataset을</li>
+<p>  삭제하고, recall은 session-memory에서 계속 동작한다.</p>
+<li>recall 회귀가 보이면 운영자는 recall을 되돌리거나 백업에서 복원한다.</li>
+<br>
+<h2>미결정 항목</h2>
+<br>
+<li>session-memory 0-hits의 정확한 근인(미parse vs 내용 부재 vs 다른 recall 경로):</li>
+<p>  Phase 2/실행 초기에 진단해 재생성 방식을 확정한다.</p>
+<li>recall smoke의 정량 임계(유사도 비율 vs 사람 확인)의 최종 수치.</li>
+<li>recall 재배선의 정확한 지점(Mac mcp-stdio 런치 설정 vs 서버 설정)의 운영 방식.</li>
+<br>
