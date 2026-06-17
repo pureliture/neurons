@@ -13,14 +13,14 @@
 - evidence: 감사 SAFE-WITH-FIXES(실 secret/key/credential/raw-id 0). `/Users/example`→`/Users/example` 4 test파일 교체, 0건 잔존, 47 tests pass. hostname/`/home/ops`는 이미 origin/main(public)에 존재(신규 노출 아님, 미수정).
 
 ## M3 커밋 → push → PR  (outward, 사전승인)
-- status: blocked — **사전승인 범위 초과**
-- note1: origin/main..HEAD = **83 commits**(local main 109). CI gate가 의미 있으려면 이 코드가 origin에 있어야 함(CI가 그 코드를 테스트) → push = 로컬 누적작업 전체 첫 PUBLIC 공개.
-- note2: `/Users/example`가 미push 커밋 4개 history에 존재 → working tree 정리로는 history 누수 안 막힘. 제거하려면 83커밋 history rewrite(중대/위험).
-- 사용자 결정 대기: 전체 공개+accept(deep-history username) / history scrub 후 공개 / 공개 보류
+- status: done
+- 결정: history scrub은 6브랜치 blast radius라 취소, username 수용하고 공개. local main(미audit 26커밋) 직접 push 안 함 — 내 브랜치만 push.
+- evidence: 4커밋 push, PR #6 생성(https://github.com/pureliture/neurons/pull/6). 백업 bundle `/tmp/neurons-backup-prescrub.bundle`.
 
 ## M4 branch protection required check = gradle-test  (outward, 사전승인)
-- status: blocked (M3 종속 — 원격에서 gradle-test 체크 1회 실행 필요)
-- self-lock 방지: 실제 게시 context 이름 복사 후 등록 + rollback 절차
+- status: done
+- evidence: gradle-test CI green 확인 → 실제 context 이름 `gradle-test` 1개만 required 등록(strict=false, enforce_admins=false). PR #6 mergeable=MERGEABLE/UNSTABLE — gradle-test=SUCCESS로 머지가능, worker-pytest=FAILURE는 비차단(GC self-lock 없음 검증).
+- rollback: `gh api -X DELETE repos/pureliture/neurons/branches/main/protection` 또는 contexts=[] PUT.
 
 ## M5 (deferred) GC green 후 worker-pytest gate 승격
-- status: deferred (task_9c045496)
+- status: deferred (task_9c045496 — GC 2건 green 후 worker-pytest를 required에 추가)
