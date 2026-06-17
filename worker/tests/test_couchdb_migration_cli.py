@@ -80,6 +80,19 @@ def test_run_migration_resolves_project_from_cwd(tmp_path):
     assert projects == {"neurons", "dendrite"}
 
 
+def test_gemini_project_from_tmp_path_segment(tmp_path):
+    # gemini transcripts carry no cwd; project must come from ~/.gemini/tmp/<proj>/chats
+    chats = tmp_path / "tmp" / "ai-cli-orch-wrapper" / "chats"
+    chats.mkdir(parents=True)
+    p = chats / "session-x.jsonl"
+    p.write_text(json.dumps({"sessionId": "gx", "type": "user", "content": [{"text": "hi"}]}) + "\n", encoding="utf-8")
+    store = InMemoryCouchDBSourceStore()
+    run_migration(store=store, roots={"gemini": tmp_path / "tmp"}, providers=["gemini"])
+    cov = [d for d in store.all_docs() if d.get("doc_type") == dm.SourceDocType.COVERAGE_MANIFEST]
+    assert cov and all(c["project"] == "ai-cli-orch-wrapper" for c in cov)
+    assert all(c["project_authority"]["ambiguous"] is False for c in cov)
+
+
 def test_run_migration_writes_source_families(tmp_path):
     root = tmp_path / "codex"
     _codex_session(root, "s1", "/Users/x/Projects/neurons")
