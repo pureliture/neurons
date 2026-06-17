@@ -140,6 +140,14 @@ class InMemoryCouchDBSourceStore:
     def all_docs(self) -> list[dict]:
         return [copy.deepcopy(doc) for doc in self._docs.values()]
 
+    def find_by_type(self, doc_type: str, *, fields: list[str] | None = None) -> list[dict]:
+        out = []
+        for doc in self._docs.values():
+            if doc.get("doc_type") != doc_type:
+                continue
+            out.append(copy.deepcopy(doc) if not fields else {k: doc.get(k) for k in fields})
+        return out
+
 
 __all__ = [
     "CouchDBSourceStore",

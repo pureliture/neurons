@@ -149,6 +149,15 @@ class CouchDBHttpSourceStore:
             raise CouchDBError(f"PUT {doc_id} failed: HTTP {status}")
         return str(payload.get("rev", ""))
 
+    def find_by_type(self, doc_type: str, *, fields: list[str] | None = None) -> list[dict]:
+        body: dict = {"selector": {"doc_type": doc_type}, "limit": 200000}
+        if fields:
+            body["fields"] = fields
+        status, payload = self._request("POST", f"/{self.db}/_find", json_body=body)
+        if status != 200:
+            raise CouchDBError(f"_find by type failed: HTTP {status}")
+        return payload.get("docs", [])
+
     def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]:
         selector: dict = {"session_id_hash": session_id_hash}
         if doc_type:
