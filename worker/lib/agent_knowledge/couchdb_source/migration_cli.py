@@ -27,6 +27,7 @@ from pathlib import Path
 
 from .couchdb_http_store import CouchDBHttpSourceStore
 from .historical_import import ImportStatus, SourceLocator, import_historical_source
+from .session_memory_materializer import update_coverage_with_tool_evidence
 from .source_store import InMemoryCouchDBSourceStore
 
 MIGRATION_PROVIDERS = ("codex", "claude", "gemini", "antigravity")
@@ -224,6 +225,21 @@ def run_migration(
     return report
 
 
+def reconcile_coverage(store) -> dict:
+    """Recompute every session's coverage_manifest from the chunks/bundles actually
+    in the store. Multi-file sessions (same session_id_hash across several provider
+    files) write per-file coverage that overwrites; this rebuilds authoritative
+    coverage from the accumulated store so counts/hashes match reality.
+    """
+    sessions = store.find_by_type("transcript_session", fields=["session_id_hash"])
+    sids = sorted({s["session_id_hash"] for s in sessions if s.get("session_id_hash")})
+    reconciled = 0
+    for sid in sids:
+        update_coverage_with_tool_evidence(session_id_hash=sid, store=store)
+        reconciled += 1
+    return {"status": "ok", "reconciled": reconciled}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="neuron-knowledge transcript-migration")
     parser.add_argument("--provider", action="append", choices=list(MIGRATION_PROVIDERS))
@@ -231,7 +247,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--source-root", action="append", help="provider=/path override; repeatable")
     parser.add_argument("--runtime-dir")
+    parser.add_argument("--reconcile-coverage", action="store_true", help="recompute coverage manifests from stored chunks and exit")
     args = parser.parse_args(argv if argv is not None else None)
+
+    if args.reconcile_coverage:
+        store = InMemoryCouchDBSourceStore() if args.dry_run else build_store_from_env()
+        report = reconcile_coverage(store)
+        print(json.dumps(report, sort_keys=True))
+        return 0
 
     roots = default_source_roots()
     for raw in args.source_root or []:

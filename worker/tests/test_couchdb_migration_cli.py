@@ -8,6 +8,7 @@ from agent_knowledge.couchdb_source.migration_cli import (
     convert_gemini_json_to_fixture,
     enumerate_provider_files,
     extract_cwd,
+    reconcile_coverage,
     run_migration,
 )
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
@@ -91,6 +92,35 @@ def test_gemini_project_from_tmp_path_segment(tmp_path):
     cov = [d for d in store.all_docs() if d.get("doc_type") == dm.SourceDocType.COVERAGE_MANIFEST]
     assert cov and all(c["project"] == "ai-cli-orch-wrapper" for c in cov)
     assert all(c["project_authority"]["ambiguous"] is False for c in cov)
+
+
+def test_reconcile_fixes_stale_coverage_count(tmp_path):
+    # simulate a multi-file session: chunks accumulate but coverage was overwritten stale
+    from agent_knowledge.session_memory.transcript_model import TranscriptChunk, TranscriptSession
+
+    store = InMemoryCouchDBSourceStore()
+    sid = dm.build_session_id_hash("codex", "multi")
+    store.put(dm.build_transcript_session_document(
+        session=TranscriptSession(session_id_hash=sid, provider="codex", project="neurons", started_at="2026-06-17T01:00:00Z")))
+    hashes = []
+    for i, text in enumerate(("turn one", "turn two", "turn three")):
+        ch = TranscriptChunk.from_text(chunk_id=f"chunk_{i}", session_id_hash=sid, provider="codex",
+                                       project="neurons", turn_start_index=i, turn_end_index=i, text=text)
+        doc = dm.build_conversation_chunk_document(chunk=ch)
+        store.put(doc)
+        hashes.append(doc["content_hash"])
+    # stale coverage: claims only 1 chunk (as if overwritten by the last file)
+    store.put(dm.build_coverage_manifest_document(
+        session_id_hash=sid, provider="codex", project="neurons",
+        conversation_chunk_count=1, tool_evidence_bundle_count=0,
+        conversation_content_hashes=hashes[:1], tool_evidence_coverage_hashes=[],
+        project_authority={"project": "neurons", "ambiguous": False, "eligible_for_retirement": True}))
+
+    report = reconcile_coverage(store)
+    assert report["reconciled"] == 1
+    cov = store.get(dm.coverage_manifest_doc_id(sid))
+    assert cov["conversation_chunk_count"] == 3  # now matches actual stored chunks
+    assert cov["project_authority"]["project"] == "neurons"  # preserved
 
 
 def test_run_migration_writes_source_families(tmp_path):
