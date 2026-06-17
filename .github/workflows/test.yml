@@ -1,0 +1,59 @@
+name: Tests
+
+# 워크플로 파일 자체는 차단력이 없다 — green/red status만 게시한다.
+# gate는 오직 branch protection의 required status check 지정으로 발생한다.
+#   - gradle-test : required check(gate)로 지정 (ADR-0002 ArchUnit 포함)
+#   - worker-pytest: advisory(비차단). GC 2건 green 후 required로 승격(M5).
+# required check 이름 = 이 파일의 job name(`gradle-test`)과 정확히 일치해야 self-lock이 안 난다.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gradle-test:
+    name: gradle-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.1"
+
+      - name: gradle test (unit · API · worker-config · ArchUnit)
+        run: gradle test --no-daemon --console=plain
+
+  worker-pytest:
+    name: worker pytest (uv)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run worker pytest
+        working-directory: worker
+        # live Postgres parity 테스트는 LEDGER_PG_DSN 미설정 시 skipif로 자동 skip된다.
+        run: uv run pytest -q
