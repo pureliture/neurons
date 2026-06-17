@@ -26,7 +26,7 @@ def test_reconstruct_flags_ragflow_fallback_and_writes_clean():
     sid = dm.build_session_id_hash("claude", "gone-1")
     reader = _FakeReader(
         sid_docs={sid: ["d1", "d2"]},
-        sid_meta={sid: ("claude", "-Users-ddalkak-Projects-neurons")},  # polluted slug
+        sid_meta={sid: ("claude", "-Users-exampleuser-Projects-neurons")},  # polluted slug
         bodies={"d1": "user asked about retirement", "d2": "assistant explained the gate"},
     )
     store = InMemoryCouchDBSourceStore()
