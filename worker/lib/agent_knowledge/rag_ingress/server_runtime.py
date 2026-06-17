@@ -154,6 +154,13 @@ def document_from_ingress_payload(payload: dict) -> RagReadyDocument:
     source_host = str(source.get("host") or "")
     if source_host:
         metadata.setdefault("source_host", source_host)
+    # Preserve the capture-time project into metadata when a client sent it only
+    # in ``source`` (dendrite --project lands in source.project). Without this the
+    # CouchDB index/delivery path resolves project="" for those payloads, breaking
+    # project-id mapping. metadata wins if already present.
+    source_project = str(source.get("project") or "")
+    if source_project:
+        metadata.setdefault("project", source_project)
     return RagReadyDocument(
         target_profile=str(payload["targetProfile"]),
         document_kind=str(payload["kind"]),
