@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Co-located Python delivery worker for rag-ingress-queue.
+# Vendored delivery subset of agent-knowledge (advisor source rev d571800),
+# trimmed to the live consume->redact->deliver path. See README.md.
+name = "rag-ingress-worker"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "nats-py>=2.6",
+    "psycopg[binary]>=3.3.4",
+    "sqlalchemy>=2.0.51",
+]
+
+[dependency-groups]
+# 테스트 러너는 런타임 의존성이 아니라 dev group으로 선언한다. CI의 clean
+# `uv run --group dev pytest`가 pytest를 결정적으로 설치하도록 하기 위함이다.
+# (이게 없으면 `uv run pytest`는 PATH의 우연한 전역 pytest에 의존하게 되고,
+# 전역 pytest가 없는 러너에서 `Failed to spawn: pytest`로 깨진다.)
+dev = [
+    "pytest>=8",
+]
+
+[project.scripts]
+neuron-knowledge = "agent_knowledge.cli:main"
+rag-ingress-queue = "agent_knowledge.rag_ingress.server_runtime:main"
+rag-ingress-worker = "agent_knowledge.rag_ingress.shadow_worker:main"
+rag-ingress-state = "agent_knowledge.rag_ingress.state_cli:main"
+memory-regeneration = "agent_knowledge.session_memory.memory_regeneration_cli:main"
+session-memory-private-sync = "agent_knowledge.session_memory.session_memory_private_sync_cli:main"
+neuron-session-memory-build = "agent_knowledge.session_memory.neuron_session_memory:main"
+native-memory-sync = "agent_knowledge.session_memory.native_memory_write_runner:main"
+session-memory-gc = "agent_knowledge.session_memory.session_memory_gc:main"
+transcript-backfill = "agent_knowledge.session_memory.transcript_backfill:main"
+transcript-memory-gc = "agent_knowledge.session_memory.transcript_memory_gc:main"
+transcript-session-gc = "agent_knowledge.session_memory.transcript_session_gc:main"
+transcript-volume-gc = "agent_knowledge.session_memory.transcript_volume_gc:main"
+session-memory-quarantine-terminal-skipped = "agent_knowledge.session_memory.terminal_skipped_quarantine:main"
+session-memory-repair-zombie-snapshots = "agent_knowledge.session_memory.zombie_snapshot_repair:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["lib", "eval"]
+addopts = ["-p", "no:cacheprovider"]
+
+[tool.setuptools]
+package-dir = {"" = "lib"}
+
+[tool.setuptools.packages.find]
+where = ["lib"]
