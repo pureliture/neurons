@@ -59,7 +59,7 @@ def test_approved_memory_card_uses_deterministic_memory_id_without_raw_evidence_
 def test_memory_candidate_redacts_secret_and_private_path_before_storage():
     candidate = build_memory_candidate(
         candidate_type="procedural_rule",
-        statement="Rule: use RAGFLOW_TOKEN=live-secret from /Users/ddalkak/.openclaw/" + "private/runtime/x",
+        statement="Rule: use RAGFLOW_TOKEN=live-secret from /Users/example/.openclaw/" + "private/runtime/x",
         project=PROJECT,
         provider="claude",
         evidence_refs=[{"knowledge_id": "kn_secret", "content_hash": "sha256:secret"}],

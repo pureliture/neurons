@@ -180,7 +180,7 @@ def test_needs_review_path_preserves_review_reason_and_feedback():
 
 def test_feedback_record_capture_rejects_private_source_material():
     candidate = _candidate()
-    candidate["source_refs"] = [{"path": "/Users/ddalkak/.codex/transcripts/raw.jsonl"}]
+    candidate["source_refs"] = [{"path": "/Users/example/.codex/transcripts/raw.jsonl"}]
 
     with pytest.raises(ValueError, match="opaque|forbidden"):
         build_feedback_record(

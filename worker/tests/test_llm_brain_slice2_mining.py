@@ -105,7 +105,7 @@ def test_candidate_mining_rejects_raw_transcript_copy_and_private_locator():
         )
     with pytest.raises(ValueError, match="opaque|forbidden"):
         build_memory_card_candidate_from_source_span(
-            _source_span(source_ref={"path": "/Users/ddalkak/.codex/transcripts/raw.jsonl"}),
+            _source_span(source_ref={"path": "/Users/example/.codex/transcripts/raw.jsonl"}),
             refresh_watermark="w",
         )
     with pytest.raises(ValueError, match="forbidden"):

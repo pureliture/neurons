@@ -199,10 +199,10 @@ def test_summary_is_redacted_and_bounded():
     # strict redactor(redact_and_bound_evidence_text)는 일반 /Users/ 경로를 마스킹한다.
     # 입력을 MAX_TRANSCRIPT_SNIPPET_CHARS 초과로 만들어 절사도 실증한다.
     env = build_card_envelope(
-        brain_id="/project/p", card=_card(summary="path /Users/ddalkak/secret " + "x" * 1100),
+        brain_id="/project/p", card=_card(summary="path /Users/example/secret " + "x" * 1100),
         why="w", demote=False,
     )
-    assert "/Users/ddalkak" not in env["summary"]
+    assert "/Users/example" not in env["summary"]
     assert len(env["summary"]) <= MAX_TRANSCRIPT_SNIPPET_CHARS
     assert TRUNCATED_TEXT_MARKER in env["summary"]
 
