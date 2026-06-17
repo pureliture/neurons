@@ -15,6 +15,15 @@ dependencies = [
     "sqlalchemy>=2.0.51",
 ]
 
+[dependency-groups]
+# 테스트 러너는 런타임 의존성이 아니라 dev group으로 선언한다. CI의 clean
+# `uv run --group dev pytest`가 pytest를 결정적으로 설치하도록 하기 위함이다.
+# (이게 없으면 `uv run pytest`는 PATH의 우연한 전역 pytest에 의존하게 되고,
+# 전역 pytest가 없는 러너에서 `Failed to spawn: pytest`로 깨진다.)
+dev = [
+    "pytest>=8",
+]
+
 [project.scripts]
 neuron-knowledge = "agent_knowledge.cli:main"
 rag-ingress-queue = "agent_knowledge.rag_ingress.server_runtime:main"
