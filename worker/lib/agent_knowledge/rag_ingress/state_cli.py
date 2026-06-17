@@ -1,9 +1,27 @@
-"""Dry-run/fail-closed CLI surface for server-owned RAG ingress state tools."""
+"""Dry-run/fail-closed CLI surface for server-owned RAG ingress state tools.
+
+Backend selection (live drain only)
+------------------------------------
+Set ``INGRESS_DELIVERY_BACKEND`` in the environment to choose the live delivery
+backend.  Accepted values:
+
+``ragflow`` (default)
+    Uses :class:`RagflowDeliveryBackend` against the RAGFlow dataset specified
+    by ``--ragflow-url`` / ``--dataset-id``.
+
+``couchdb``
+    Uses :class:`CouchDBDeliveryBackend`.  Requires the following env vars:
+    ``COUCHDB_URL``, ``COUCHDB_USER``, ``COUCHDB_PASSWORD``, ``COUCHDB_DB``.
+
+The switch is read only when ``--dry-run`` is NOT set (live drain path).
+Dry-run always short-circuits before constructing a backend.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from ..ledger import Ledger
@@ -14,6 +32,11 @@ from .replay_delivery import replay_deliver_dispositions
 from .state_db import RAGIngressStateDB
 
 DEFAULT_TRANSCRIPT_TARGET_PROFILE = "ragflow-transcript-memory"
+
+# Env var that selects the live delivery backend.
+_BACKEND_ENV_VAR = "INGRESS_DELIVERY_BACKEND"
+_BACKEND_RAGFLOW = "ragflow"
+_BACKEND_COUCHDB = "couchdb"
 
 
 class _DryRunReplayIngressClient:
@@ -60,8 +83,14 @@ def _build_parser() -> argparse.ArgumentParser:
     drain.add_argument("--redact-paths", action="store_true")
     drain.add_argument("--dry-run", action="store_true")
     drain.add_argument("--approval")
+    # RAGFlow backend args (default backend)
     drain.add_argument("--ragflow-url")
     drain.add_argument("--dataset-id")
+    # CouchDB backend args (INGRESS_DELIVERY_BACKEND=couchdb)
+    drain.add_argument("--couchdb-url", default=os.environ.get("COUCHDB_URL", ""))
+    drain.add_argument("--couchdb-user", default=os.environ.get("COUCHDB_USER", ""))
+    drain.add_argument("--couchdb-password", default=os.environ.get("COUCHDB_PASSWORD", ""))
+    drain.add_argument("--couchdb-db", default=os.environ.get("COUCHDB_DB", "neurons_transcript_source"))
     drain.add_argument("--max-runtime-seconds", type=float, default=300.0)
 
     reconcile = subparsers.add_parser("reconcile-deliveries")
@@ -144,11 +173,77 @@ def _run_backfill_apply(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_live_backend(args: argparse.Namespace, state_db: RAGIngressStateDB):
+    """Construct the live DeliveryBackend selected by INGRESS_DELIVERY_BACKEND.
+
+    Returns None (and prints an error) if the selection is unknown or the
+    required env vars are missing for the chosen backend.  Keeping RAGFlow
+    imports here avoids touching the couchdb path's import surface.
+    """
+    backend_name = os.environ.get(_BACKEND_ENV_VAR, _BACKEND_RAGFLOW).strip().lower()
+
+    if backend_name == _BACKEND_COUCHDB:
+        couchdb_url = getattr(args, "couchdb_url", "") or os.environ.get("COUCHDB_URL", "")
+        couchdb_user = getattr(args, "couchdb_user", "") or os.environ.get("COUCHDB_USER", "")
+        couchdb_password = getattr(args, "couchdb_password", "") or os.environ.get("COUCHDB_PASSWORD", "")
+        couchdb_db = getattr(args, "couchdb_db", "") or os.environ.get("COUCHDB_DB", "neurons_transcript_source")
+        missing = [v for v, k in [(couchdb_url, "COUCHDB_URL"), (couchdb_user, "COUCHDB_USER"), (couchdb_password, "COUCHDB_PASSWORD")] if not v]
+        if missing:
+            print(
+                f"drain-deliveries: INGRESS_DELIVERY_BACKEND=couchdb requires "
+                f"COUCHDB_URL, COUCHDB_USER, COUCHDB_PASSWORD env vars (missing: {missing})",
+                file=sys.stderr,
+            )
+            return None
+        from .couchdb_delivery_backend import build_couchdb_delivery_backend
+        return build_couchdb_delivery_backend(
+            state_db=state_db,
+            couchdb_url=couchdb_url,
+            couchdb_user=couchdb_user,
+            couchdb_password=couchdb_password,
+            couchdb_db=couchdb_db,
+        )
+
+    if backend_name == _BACKEND_RAGFLOW:
+        # RAGFlow backend -- existing live path (remains blocked in CLI until vendored).
+        return None  # caller will fall through to _print_live_blocked
+
+    print(
+        f"drain-deliveries: unknown INGRESS_DELIVERY_BACKEND={backend_name!r}; "
+        f"accepted values: ragflow, couchdb",
+        file=sys.stderr,
+    )
+    return None
+
+
 def _run_drain_deliveries(args: argparse.Namespace) -> int:
     if not _require_redaction("drain-deliveries", bool(args.redact_paths)):
         return 2
     if not args.dry_run:
-        return _print_live_blocked("drain-deliveries")
+        # Live path: select backend via INGRESS_DELIVERY_BACKEND env var.
+        backend_name = os.environ.get(_BACKEND_ENV_VAR, _BACKEND_RAGFLOW).strip().lower()
+        if backend_name != _BACKEND_COUCHDB:
+            # RAGFlow and unknown names keep the existing live-blocked gate.
+            return _print_live_blocked("drain-deliveries")
+        try:
+            state_db = RAGIngressStateDB(args.state_db)
+            backend = _build_live_backend(args, state_db)
+            if backend is None:
+                return 2
+            result = drain_pending_deliveries(
+                state_db=state_db,
+                backend=backend,
+                lease_owner=args.lease_owner,
+                limit=args.limit,
+                dry_run=False,
+                max_attempts=args.max_attempts,
+                max_runtime_seconds=args.max_runtime_seconds,
+            )
+        except (ValueError, OSError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(json.dumps(result, sort_keys=True))
+        return 0
     try:
         state_db = RAGIngressStateDB(args.state_db)
         result = drain_pending_deliveries(
