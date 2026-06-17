@@ -111,15 +111,17 @@ class IngressControllerTest {
 
     @Test
     void forbiddenMetadataReturnsBadRequestWithoutEcho() throws Exception {
+        // G2 secrets-only POST guard: an actual secret in metadata is still rejected
+        // (benign public terms like documentId are now cleaned by the worker, not here).
         String response = mockMvc.perform(post("/v1/ingest/enqueue")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null).replace("\"result_type\":\"conversation_chunk\"", "\"documentId\":\"raw-document-123\"")))
+                .content(validRequest(null).replace("\"result_type\":\"conversation_chunk\"", "\"authHeader\":\"Bearer ghp_ABCdef0123456789xyzQQ\"")))
             .andExpect(status().isBadRequest())
             .andReturn()
             .getResponse()
             .getContentAsString();
 
-        assertThat(response).doesNotContain("raw-document-123");
+        assertThat(response).doesNotContain("ghp_ABCdef0123456789xyzQQ");
     }
 
     @Test

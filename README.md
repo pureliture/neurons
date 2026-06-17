@@ -1,7 +1,7 @@
 <!-- ──────────────── HERO BANNER ──────────────── -->
 <div align="center">
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0b1426,50:0e7490,100:2dd4bf&height=240&section=header&text=rag-ingress-queue&fontSize=56&fontColor=ffffff&animation=fadeIn&fontAlignY=36&desc=Backpressure-gated%20write%20gateway%20in%20front%20of%20RAGFlow&descSize=15&descAlignY=58" alt="banner" width="100%" />
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0b1426,50:0e7490,100:2dd4bf&height=240&section=header&text=neurons&fontSize=56&fontColor=ffffff&animation=fadeIn&fontAlignY=36&desc=Server%20brain%20and%20ingress%20runtime%20behind%20dendrite&descSize=15&descAlignY=58" alt="banner" width="100%" />
 
 <br/>
 
@@ -12,12 +12,19 @@
 <img src="https://img.shields.io/badge/Virtual_Threads-enabled-2dd4bf?style=for-the-badge" alt="virtual threads" />
 <img src="https://img.shields.io/badge/MVP-runtime_verified-10b981?style=for-the-badge" alt="status" />
 
+<br/>
+
+<!-- CI status (동적) — gradle-test는 gate, pmd는 advisory. pmd 배지는 pmd.yml이 main에 머지된 뒤 resolve. -->
+<a href="https://github.com/pureliture/neurons/actions/workflows/test.yml"><img src="https://github.com/pureliture/neurons/actions/workflows/test.yml/badge.svg?branch=main" alt="tests" /></a>
+<a href="https://github.com/pureliture/neurons/actions/workflows/pmd.yml"><img src="https://github.com/pureliture/neurons/actions/workflows/pmd.yml/badge.svg?branch=main" alt="pmd" /></a>
+
 <br/><br/>
 
 <!-- Tagline -->
 <h3>
-  Local PC · Mac mini · Ubuntu runner가 만든 <code>redacted RAG-ready document</code>를<br/>
-  downstream RAG target이 <b>감당 가능한 속도로만</b> 전달하는 범용 ingress queue 서버입니다.
+  <code>neurons</code>는 LLM-brain의 <b>server-side authority</b>다.<br/>
+  ledger · session/native-memory · brain query · GC safety lane을 소유하고,<br/>
+  <code>dendrite</code>가 보낸 redacted payload를 ingress lane으로 받는다.
 </h3>
 
 <br/>
@@ -45,6 +52,44 @@
 </div>
 
 <br/>
+
+## Neurons Boundary
+
+`neurons`는 LLM-brain의 server/brain repo다. 역사적 `rag-ingress-queue`
+surface는 이 저장소 안의 ingress service/runtime lane으로 남아 있지만, repo
+identity는 Mac thin-client가 아니라 server-side authority다.
+
+Owned here:
+
+- ingress queue/runtime, worker, durable state DB, and RAG target adapters
+- `ledger.py`, transcript ingest worker, replay/reconcile/backfill server state
+- session-memory/project-memory build and read surfaces
+- brain query, MemoryCard, native-memory mirror/sync/reconcile
+- user-level MCP stdio read surface:
+  `neuron-knowledge mcp-stdio` exposes `knowledge.search`, `brain.query`, and
+  `brain.resolve`
+- GC safety planners and fail-closed GC command surfaces:
+  `session-memory-gc`, `transcript-memory-gc`, `transcript-session-gc`,
+  `transcript-volume-gc`, `session-memory-quarantine-terminal-skipped`, and
+  `session-memory-repair-zombie-snapshots`
+
+Not owned here:
+
+- provider hook installation on Mac
+- locator-only local capture spool/outbox
+- Mac thin shipper ergonomics
+- `POST 18080` client-side enqueue command surface
+
+Those client responsibilities belong to `dendrite`.
+
+`worker/tests/test_server_boundary.py` guards this direction by rejecting
+Python and Java imports from the `dendrite` client surface.
+`neuron-knowledge` also owns fail-closed pending server commands for monolith
+subcommands whose full implementation is still being extracted.
+
+> 📖 **이 README의 범위.** 아래 아키텍처 · 빠른 시작 · API 심화는 **ingress lane
+> (`rag-ingress-queue`)** 을 기준으로 한다. ledger · brain query · session/native-memory ·
+> GC safety surface는 위 Boundary 목록과 코드(`worker/`, `neuron-knowledge`)를 1차 출처로 본다.
 
 <!-- ────────────── SECTION DIVIDER ────────────── -->
 <img src="https://capsule-render.vercel.app/api?type=rect&color=0:0e7490,100:2dd4bf&height=3" width="100%" />
@@ -445,14 +490,21 @@ queue counts·target pressure가 redacted 형태로 노출
 
 ### 🎯 Target Profiles
 
-| targetProfile | RAGFlow dataset | document kind |
-|---|---|---|
-| `ragflow-transcript-memory` | `transcript-memory` | `conversation_chunk` |
-| `ragflow-session-summary` | `session-summary` | `session_summary` |
-| `ragflow-task-summary` | `task-summary` | `task_summary` |
-| `ragflow-approved-memory-card` | `approved-memory-card` | `approved_memory_card` |
+`TargetProfileRegistry`가 유효 `targetProfile`의 SSOT다 — 현재 **7개**. 각 profile은 logical
+`datasetRole`로 매핑되고, **물리 RAGFlow dataset id는 adapter-private config**에만 존재한다.
+
+| targetProfile | datasetRole (logical) |
+|---|---|
+| `ragflow-transcript-memory` | `transcript-memory` |
+| `ragflow-session-memory` | `session-memory` |
+| `ragflow-session-summary` | `session-summary` |
+| `ragflow-project-memory` | `project-memory` |
+| `ragflow-task-summary` | `task-summary` |
+| `ragflow-approved-memory-card` | `approved-memory-card` |
+| `ragflow-procedural-memory` | `procedural-memory` |
 
 > raw dataset ID는 adapter-private이며 generic API 출력·log·docs 예시에 나타나지 않는다.
+> 전체 계약(status enum · idempotency · DLQ 포함)은 [ingress-contract.md](docs/contracts/ingress-contract.md) §3을 SSOT로 본다.
 
 <br/>
 
@@ -471,6 +523,8 @@ queue counts·target pressure가 redacted 형태로 노출
 - [요구사항](docs/requirements.md)
 - [ADR-0001 · architecture](docs/adr-0001-rag-ingress-queue.md)
 - [ADR-0002 · layered architecture](docs/adr-0002-component-driven-layered-architecture.md)
+- [ADR-0003 · ledger engine seam + PG cutover](docs/adr-0003-ledger-engine-seam-postgres-cutover.md)
+- [Ingress contract (profile SSOT)](docs/contracts/ingress-contract.md)
 - [MVP spec](docs/superpowers/specs/2026-05-17-rag-ingress-queue-mvp-spec.md)
 - [MVP implementation plan](docs/superpowers/plans/2026-05-17-rag-ingress-queue-mvp.md)
 

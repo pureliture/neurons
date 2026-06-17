@@ -249,6 +249,11 @@ Initial target profiles:
 | `ragflow-task-summary` | `task-summary` | `task_summary` |
 | `ragflow-approved-memory-card` | `approved-memory-card` | `approved_memory_card` |
 
+> 📌 위 표는 2026-05-17 draft 시점의 **초기 4개** profile이다. 현재 구현된 `TargetProfileRegistry`는
+> **7개**(추가: `ragflow-session-memory`·`ragflow-project-memory`·`ragflow-procedural-memory`)이며,
+> 유효 profile의 단일 진실 공급원(SSOT)은 [docs/contracts/ingress-contract.md](contracts/ingress-contract.md) §3이다.
+> 이 요구사항 문서는 점-인-타임 기록이므로 표는 그대로 둔다.
+
 RAGFlow partitioning is dataset-first. Metadata `result_type` remains useful for trace/filter inside each dataset, but must not be the primary partitioning strategy for all memory data in a single dataset.
 
 Response shape:

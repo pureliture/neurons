@@ -7,6 +7,15 @@ Date: 2026-05-17
 
 `rag-ingress-queue`는 redacted RAG-ready document ingest 요청을 받아 NATS JetStream을 거쳐 target adapter로 전달하는 write gateway다. RAGFlow는 첫 adapter일 뿐이며, core API/worker는 raw target ID나 token을 노출하지 않는다.
 
+## Runtime Worker (G2 이후)
+
+이 runbook 초안(2026-05-17) 이후 G2 cutover에서 live delivery worker가 바뀌었다. 현재 `compose.yaml` 기준:
+
+- Java `ingress-worker`는 은퇴했고 `profiles: ["retired"]`로 게이트되어 일반 `docker compose up`에서는 기동되지 않는다.
+- live delivery는 co-located Python worker `ingress-worker-py`(`build: ./worker`)가 수행하며, `RAG_INGRESS_QUEUE` WorkQueue durable `rag_target_delivery_worker`의 단일 consumer다. 상세는 `worker/README.md`를 본다.
+- `gradle test`는 여전히 Java API/worker/compose-file 단위 테스트를 증명한다(아래 Local Build And Tests). live delivery 경로 자체는 Python worker가 소유한다.
+- WorkQueue는 consumer를 하나만 허용하므로 은퇴한 Java worker와 `ingress-worker-py`를 동시에 같은 durable에 붙이지 않는다.
+
 ## Prerequisites
 
 - Amazon Corretto 25
@@ -96,7 +105,7 @@ Live RAGFlow smoke proves sanitized upload/status behavior only. It does not pro
 
 Owner: local operator.
 
-1. Stop `ingress-worker` first.
+1. Stop the live delivery worker first (현재 `ingress-worker-py`; 은퇴한 Java `ingress-worker`는 `retired` profile이라 기동돼 있지 않다).
 2. Keep NATS volume intact until queue state is inspected.
 3. Restore previous API/worker image or config.
 4. Verify RAGFlow compose project, volumes, and direct write paths were not modified.
