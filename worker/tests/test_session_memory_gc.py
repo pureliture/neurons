@@ -15,8 +15,19 @@ PROJECT = "workspace-ragflow-advisor"
 SESSION_ID_HASH = "sha256:session-memory-gc-target"
 
 
-def _backdate_disabled_at(ledger: Ledger, knowledge_id: str, *, seconds_ago: int) -> None:
-    stamp = (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+def _backdate_disabled_at(
+    ledger: Ledger,
+    knowledge_id: str,
+    *,
+    seconds_ago: int,
+    now: datetime | None = None,
+) -> None:
+    # ``now``를 명시하면 그 기준 시각에서 backdate한다. 기본값(None)은 실 wall clock을
+    # 쓴다. runner에 frozen ``now_fn``을 주입하는 테스트는 반드시 같은 frozen 기준을
+    # 넘겨야 한다 — 그렇지 않으면 disabled_at(실시각)과 cutoff(frozen-FLOOR)의 비교가
+    # 실행 날짜에 따라 흔들려 candidate SQL의 age gate에 걸리거나 걸리지 않는다.
+    reference = now if now is not None else datetime.now(timezone.utc)
+    stamp = (reference - timedelta(seconds=seconds_ago)).isoformat()
     with ledger._connect() as connection:
         connection.execute(
             "UPDATE knowledge_items SET disabled_at = ? WHERE knowledge_id = ?",
@@ -624,11 +635,13 @@ def test_session_memory_gc_cli_allows_declared_role_dry_run(tmp_path, monkeypatc
     assert report["network_used"] is False
 
 
-def _bk_eligible_setup(ledger, *, old_kid, old_doc, active_kid, active_doc):
+def _bk_eligible_setup(ledger, *, old_kid, old_doc, active_kid, active_doc, now: datetime | None = None):
+    # ``now``: runner에 frozen clock을 주입하는 테스트용 기준 시각. disabled_at backdate를
+    # 같은 기준으로 맞춰 age gate가 실행 날짜와 무관하게 결정적이게 한다(stale fixture 방지).
     old = _session_memory(ledger, knowledge_id=old_kid, document_id=old_doc)
     active = _session_memory(ledger, knowledge_id=active_kid, document_id=active_doc)
     ledger.mark_disabled(old["knowledge_id"])
-    _backdate_disabled_at(ledger, old["knowledge_id"], seconds_ago=2 * MIN_DISABLED_AGE_FLOOR_SECONDS)
+    _backdate_disabled_at(ledger, old["knowledge_id"], seconds_ago=2 * MIN_DISABLED_AGE_FLOOR_SECONDS, now=now)
     ledger.promote_session_memory(active["knowledge_id"])
     ledger.mark_session_memory_dirty(session_id_hash=SESSION_ID_HASH, provider="codex", project=PROJECT, reason="bk")
     ledger.mark_dirty_session_memory_promoted(session_id_hash=SESSION_ID_HASH, summary_knowledge_id=active["knowledge_id"])
@@ -749,7 +762,7 @@ def test_session_memory_gc_characterization_trace_frozen(tmp_path):
     ledger_path = tmp_path / "ledger.sqlite"
     ledger = Ledger(ledger_path)
     old, active = _bk_eligible_setup(
-        ledger, old_kid="kn_ch_old", old_doc="doc_ch_old", active_kid="kn_ch_active", active_doc="doc_ch_active"
+        ledger, old_kid="kn_ch_old", old_doc="doc_ch_old", active_kid="kn_ch_active", active_doc="doc_ch_active", now=frozen
     )
     rec = _RecordingGcClient()
 
@@ -815,7 +828,7 @@ def test_session_memory_gc_orphan_delete_when_audit_raises(tmp_path, monkeypatch
     ledger_path = tmp_path / "ledger.sqlite"
     ledger = Ledger(ledger_path)
     _bk_eligible_setup(
-        ledger, old_kid="kn_orph_old", old_doc="doc_orph_old", active_kid="kn_orph_active", active_doc="doc_orph_active"
+        ledger, old_kid="kn_orph_old", old_doc="doc_orph_old", active_kid="kn_orph_active", active_doc="doc_orph_active", now=frozen
     )
     rec = _RecordingGcClient()
 
