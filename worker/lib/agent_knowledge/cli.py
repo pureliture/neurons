@@ -7,6 +7,7 @@ import os
 import sys
 from collections.abc import Callable
 
+from .couchdb_source import build_cli as couchdb_build_cli
 from .couchdb_source import migration_cli
 from .ledger import Ledger
 from .mcp_server import KnowledgeSearchService, build_ragflow_client, run_stdio_server
@@ -85,6 +86,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "eval": _pending_server_command("eval"),
     "memory": autopilot_cli.main,
     "session-entry-recall": _pending_server_command("session-entry-recall"),
+    "couchdb-session-memory-build": couchdb_build_cli.main,
     "transcript-migration": migration_cli.main,
     "transcript-quality": _pending_server_command("transcript-quality"),
     "transcript-resources": _pending_server_command("transcript-resources"),
