@@ -452,16 +452,29 @@ def main() -> int:
     broad_scan_pages = int(os.environ.get("NATURAL_KEY_BROAD_SCAN_PAGES", "0"))
     backend = None
     if deliver:
-        single = os.environ.get("RAGFLOW_DATASET_ID", "")
-        # live (no single dataset): route per target profile like the Java worker.
-        resolver = None if single else env_profile_dataset_resolver(os.environ.get)
-        backend = build_backend(
-            ragflow_base_url=os.environ["RAGFLOW_BASE_URL"],
-            ragflow_api_key=os.environ["RAGFLOW_API_KEY"],
-            dataset_id=single or None,
-            resolve_dataset_id=resolver,
-            broad_scan_pages=broad_scan_pages,
-        )
+        _delivery_backend = os.environ.get("INGRESS_DELIVERY_BACKEND", "ragflow").strip().lower()
+        if _delivery_backend == "couchdb":
+            # CouchDB sink: construct CouchDBIndexBackendAdapter.
+            # ragflow_client is NOT imported for this path.
+            from .couchdb_index_backend import build_couchdb_index_backend
+            backend = build_couchdb_index_backend(
+                couchdb_url=os.environ["COUCHDB_URL"],
+                couchdb_user=os.environ["COUCHDB_USER"],
+                couchdb_password=os.environ["COUCHDB_PASSWORD"],
+                couchdb_db=os.environ["COUCHDB_DB"],
+            )
+        else:
+            # Default RAGFlow sink (ragflow or any unrecognised value).
+            single = os.environ.get("RAGFLOW_DATASET_ID", "")
+            # live (no single dataset): route per target profile like the Java worker.
+            resolver = None if single else env_profile_dataset_resolver(os.environ.get)
+            backend = build_backend(
+                ragflow_base_url=os.environ["RAGFLOW_BASE_URL"],
+                ragflow_api_key=os.environ["RAGFLOW_API_KEY"],
+                dataset_id=single or None,
+                resolve_dataset_id=resolver,
+                broad_scan_pages=broad_scan_pages,
+            )
     nats_url = os.environ.get("RAG_INGRESS_NATS_URL", "nats://127.0.0.1:4222")
     subject = os.environ.get("SHADOW_SUBJECT", "rag.shadow.>")
     durable = os.environ.get("SHADOW_DURABLE", "shadow_python_worker")
