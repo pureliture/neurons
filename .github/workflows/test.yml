@@ -56,4 +56,6 @@ jobs:
       - name: Run worker pytest
         working-directory: worker
         # live Postgres parity 테스트는 LEDGER_PG_DSN 미설정 시 skipif로 자동 skip된다.
-        run: uv run pytest -q
+        # --group dev: pytest는 dev dependency group으로 선언돼 있어 명시적으로 설치해야
+        # clean 러너(전역 pytest 없음)에서 `Failed to spawn: pytest`가 나지 않는다.
+        run: uv run --group dev pytest -q
