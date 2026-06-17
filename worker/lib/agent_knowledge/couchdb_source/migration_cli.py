@@ -185,10 +185,12 @@ def run_migration(
         for path in files:
             try:
                 source_path = path
-                gemini_project = ""
+                # gemini transcripts carry no cwd; the readable project is the
+                # ~/.gemini/tmp/<project>/chats/ path segment (for both .jsonl and
+                # .json). Derive it from the ORIGINAL path before any conversion.
+                gemini_project = _gemini_project_from_path(path) if provider == "gemini" else ""
                 if provider == "gemini" and path.suffix == ".json":
                     source_path = convert_gemini_json_to_fixture(path, runtime_dir)
-                    gemini_project = _gemini_project_from_path(path)
                 cwd = extract_cwd(provider, path)
                 # The session's own cwd is the authoritative project signal (the
                 # capture-metadata tier). Codex session paths are date-based (no
