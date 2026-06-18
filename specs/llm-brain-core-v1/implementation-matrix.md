@@ -15,7 +15,7 @@ back to grill-to-spec instead of editing the SoT silently.
 | Implement v1 in `neurons`, not a new repo | implemented | `worker/lib/agent_knowledge/llm_brain_core/` exists and `neuron-knowledge brain-context-resolve` routes to it | Later extraction remains deferred after graph-core stabilization |
 | Keep `dendrite`/`neurons` collection pipeline | implemented | Existing ingress/session-memory tests remain in worker suite | Dendrite SourceRef producer contract still needs cross-repo validation |
 | Keep CouchDB as AI session raw store | implemented | `materialize_artifact_from_couchdb_source` reads CouchDB source docs without copying raw bodies | Live CouchDB adapter smoke remains separate from local tests |
-| Keep NATS/ledger replay source | partial | `BrainEventEnvelope` and `BrainEventReplayStore` cover idempotency/tombstone/conflict rules | Central rebuild-to-episode shadow fixture still needed |
+| Keep NATS/ledger replay source | implemented for v1 shadow | `BrainEventEnvelope`, `BrainEventReplayStore`, and `CentralBrainShadowRebuilder` cover idempotency/tombstone/conflict/rebuild rules | Production transport remains deferred |
 | `neurons` owns session-memory artifact and graph projection | partial | `LedgerSessionMemoryArtifactStore` stores artifacts; `GraphProjectionWorker` projects MemoryCards to a graph adapter | Live Graphiti/Neo4j smoke pending because local Docker Compose plugin is unavailable |
 | Extract Task/Decision/Incident/PersonaFact candidates | partial | Existing MemoryCard miner/read-model reused by `BrainReadService` | Extraction pipeline into typed ontology episodes needs broader fixtures |
 | Build latest-work ContextPack | implemented | `test_llm_brain_core_ragflow_disabled.py`, `test_llm_brain_core_runtime_integration.py` | Local graph-enhanced ranking still pending M6c |
@@ -23,8 +23,8 @@ back to grill-to-spec instead of editing the SoT silently.
 | Time-aware drift explanation | implemented from cards | `BrainReadService.brain_drift_explain`; runtime drift test passes | Graph-backed temporal relation smoke pending M6c |
 | PersonaFact check states | implemented | `BrainReadService.brain_persona_check`; tests cover aligned/conflict/drift/insufficient evidence | More evidence/confidence lifecycle cases can be added after graph integration |
 | SourceRef/SpanRef redaction | implemented | `test_source_ref_policy_resolution.py`; `test_contextpack_no_raw_source_refs.py` | Dendrite same-device resolver action remains cross-repo contract work |
-| Per-PC local brain and optional central brain | partial | Local ledger-backed service works offline; `BrainEvent` envelope exists | Compose profiles/export-import/central shadow runtime missing |
-| Event/episode central sync, no graph DB file sync | partial | Replay model prevents duplicate/out-of-order/tombstone drift | Central rebuild fixture and runbook pending |
+| Per-PC local brain and optional central brain | partial | Local ledger-backed service works offline; `BrainEvent` envelope and central shadow rebuild exist | Export/import scripts and production transport remain pending |
+| Event/episode central sync, no graph DB file sync | implemented for v1 shadow | `test_central_sync_shadow_rebuild.py` rebuilds derived graph state from BrainEvents | Production transport/runbook remains deferred |
 | RAGFlow bridge only, not core dependency | implemented for core path | Core tests pass with disabled bridge; MCP core tools do not instantiate RAGFlow | M9 bridge labeling compatibility test pending |
 | Agent-facing read API | implemented for stdio surface | `mcp-stdio` exposes `brain_context_resolve`, `brain_memory_search`, `brain_incident_search`, `brain_drift_explain`, `brain_persona_get`, `brain_persona_check`, `brain_evidence_get` | HTTP adapter remains optional/deferred |
 | Autopilot safety guard | implemented for pre-M9 path | `test_autopilot_no_ragflow_client_before_m9.py` | Review gate and full suite evidence still needed for final close |
@@ -35,14 +35,14 @@ back to grill-to-spec instead of editing the SoT silently.
 | --- | --- | --- | --- |
 | M0 Design freeze and safety baseline | done | SoT files present; RAGFlow demotion documented | Keep SoT unchanged unless grill-to-spec is re-entered |
 | M1 Core contracts and safety guards | done | Core models/service/null graph tests pass | Maintain backward compatibility |
-| M2 RAGFlow-free artifact and replay store | done | Artifact/replay tests pass without RAGFlow | Add central rebuild fixture in M7 |
+| M2 RAGFlow-free artifact and replay store | done | Artifact/replay tests pass without RAGFlow | Maintain replay compatibility |
 | M3 SourceRef resolver contract | done | SourceRef golden state tests pass | Add dendrite producer/resolve contract later |
 | M4 ContextPack builder | done | RAGFlow-disabled ContextPack tests pass | Add graph-enhanced ranking after M6c |
 | M5 Incident, drift, persona | done with fake graph/cards | Incident/drift/persona tests pass | Add real graph backend smoke |
 | M6a Graph adapter interface and fake backend | done | `FakeGraphMemoryAdapter` contract tests pass | Keep fake as deterministic contract backend |
 | M6b Graphiti/Neo4j dependency approval gate | approved by goal envelope | User gave hardgate preapproval; destructive live ops still stop | Add dependency/compose proposal as code/docs before local integration |
 | M6c Graphiti/Neo4j local integration | partial | `GraphitiNeo4jGraphMemoryAdapter`, `GraphProjectionWorker`, and `llm-brain-neo4j` compose profile exist; fake Graphiti contract tests pass | Live `docker compose --profile llm-brain-graph config/up` smoke pending on a host with Compose plugin |
-| M7 Central sync shadow | partial | `BrainEventReplayStore` exists | Add deterministic central rebuild from event fixture |
+| M7 Central sync shadow | done for v1 shadow | `CentralBrainShadowRebuilder` deterministically rebuilds derived graph projection from replayed current payloads | Production transport remains outside v1 local milestone |
 | M8 Thin MCP/stdio surface | done | `uv run pytest -q tests/test_neuron_mcp_stdio.py ...` passed | Keep tools read-oriented and backend-neutral |
 | M9 RAGFlow bridge compatibility | partial | Legacy RAGFlow search remains optional; core path disabled bridge works | Add explicit bridge status/precedence tests |
 
@@ -77,6 +77,22 @@ Result:
 
 ```text
 20 passed, 1 warning
+```
+
+Latest central sync shadow check:
+
+```bash
+cd worker
+uv run pytest -q tests/test_central_sync_shadow_rebuild.py \
+  tests/test_brain_event_replay_idempotency.py \
+  tests/test_graph_projection_worker.py \
+  tests/test_graphiti_neo4j_adapter.py
+```
+
+Result:
+
+```text
+9 passed, 1 warning
 ```
 
 Compose profile static check:
