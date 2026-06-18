@@ -13,7 +13,7 @@ back to grill-to-spec instead of editing the SoT silently.
 | Requirement | Status | Evidence | Remaining Work |
 | --- | --- | --- | --- |
 | Implement v1 in `neurons`, not a new repo | implemented | `worker/lib/agent_knowledge/llm_brain_core/` exists and `neuron-knowledge brain-context-resolve` routes to it | Later extraction remains deferred after graph-core stabilization |
-| Keep `dendrite`/`neurons` collection pipeline | implemented | Existing ingress/session-memory tests remain in worker suite; dendrite `codex/source-ref-catalog` adds SourceRef scan/resolve contract | Merge dendrite branch when review is clean |
+| Keep `dendrite`/`neurons` collection pipeline | implemented | Existing ingress/session-memory tests remain in worker suite; dendrite `codex/source-ref-catalog` adds SourceRef scan/resolve contract through `e48f159` | Merge dendrite branch when PR is ready |
 | Keep CouchDB as AI session raw store | implemented | `materialize_artifact_from_couchdb_source` reads CouchDB source docs without copying raw bodies | Live CouchDB adapter smoke remains separate from local tests |
 | Keep NATS/ledger replay source | implemented for v1 shadow | `BrainEventEnvelope`, `BrainEventReplayStore`, and `CentralBrainShadowRebuilder` cover idempotency/tombstone/conflict/rebuild rules | Production transport remains deferred |
 | `neurons` owns session-memory artifact and graph projection | partial | `LedgerSessionMemoryArtifactStore` stores artifacts; `GraphProjectionWorker` projects MemoryCards to a graph adapter | Live Graphiti/Neo4j smoke pending because local Docker Compose plugin is unavailable |
@@ -22,7 +22,7 @@ back to grill-to-spec instead of editing the SoT silently.
 | Incident/troubleshooting search | implemented with fake graph | `BrainReadService.brain_incident_search`; runtime incident test passes | Real graph backend search and replay smoke pending M6c |
 | Time-aware drift explanation | implemented from cards | `BrainReadService.brain_drift_explain`; runtime drift test passes | Graph-backed temporal relation smoke pending M6c |
 | PersonaFact check states | implemented | `BrainReadService.brain_persona_check`; tests cover aligned/conflict/drift/insufficient evidence | More evidence/confidence lifecycle cases can be added after graph integration |
-| SourceRef/SpanRef redaction | implemented across neurons+dendrite branches | `test_source_ref_policy_resolution.py`; `test_contextpack_no_raw_source_refs.py`; dendrite `test_source_catalog.py` | Merge dendrite branch when review is clean |
+| SourceRef/SpanRef redaction | implemented across neurons+dendrite branches | `test_source_ref_policy_resolution.py`; `test_contextpack_no_raw_source_refs.py`; dendrite `test_source_catalog.py`; CodeRabbit follow-up `findings: 0` | Merge dendrite branch when PR is ready |
 | Per-PC local brain and optional central brain | partial | Local ledger-backed service works offline; `BrainEvent` envelope, central shadow rebuild, and portable export/import exist | Production transport remains pending |
 | Event/episode central sync, no graph DB file sync | implemented for v1 shadow | `test_central_sync_shadow_rebuild.py` rebuilds derived graph state from BrainEvents | Production transport/runbook remains deferred |
 | RAGFlow bridge only, not core dependency | implemented for bridge contract | Core tests pass with disabled bridge; M9 `document_bridge.py` labels RAGFlow as external read-only evidence and does not override canonical memory | Live RAGFlow smoke remains outside core acceptance |
@@ -144,6 +144,14 @@ Result:
 
 ```text
 84 passed
+```
+
+Dendrite review:
+
+```text
+CodeRabbit light review on codex/source-ref-catalog found 1 valid major finding.
+Fix commit: e48f159 SourceRef resolve bounded read 보강.
+Follow-up CodeRabbit light review: findings 0.
 ```
 
 Compose profile static check:
