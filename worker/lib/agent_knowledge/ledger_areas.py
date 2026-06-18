@@ -67,6 +67,8 @@ AREA_TABLES: dict[str, frozenset[str]] = {
         "llm_brain_memory_cards",
         "llm_brain_feedback_records",
         "llm_brain_projection_jobs",
+        "llm_brain_session_memory_artifacts",
+        "llm_brain_source_refs",
         "profile_facts",
         "context_packs",
         "context_pack_items",

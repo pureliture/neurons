@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM-Brain Core v1 Requirements</title>
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #202124; background: #f7f7f4; line-height: 1.5; }
+    header { padding: 32px 44px 20px; background: #fbfbf8; border-bottom: 1px solid #d8d7d0; }
+    main { padding: 28px 44px 56px; max-width: 1180px; }
+    h1 { margin: 0 0 10px; font-size: 40px; letter-spacing: 0; }
+    h2 { margin: 30px 0 10px; font-size: 24px; letter-spacing: 0; }
+    p, li, td, th { font-size: 15px; }
+    code { background: #eef0f2; border-radius: 4px; padding: 2px 5px; }
+    .note { border-left: 5px solid #2563eb; background: #eff6ff; padding: 14px 16px; border-radius: 8px; margin: 16px 0; }
+    .warn { border-left: 5px solid #b45309; background: #fffbeb; padding: 14px 16px; border-radius: 8px; margin: 16px 0; }
+    table { border-collapse: collapse; width: 100%; background: white; border: 1px solid #d8d7d0; border-radius: 8px; overflow: hidden; margin: 12px 0 20px; }
+    th, td { border-bottom: 1px solid #d8d7d0; padding: 10px 12px; text-align: left; vertical-align: top; }
+    th { background: #eef0f2; font-size: 13px; }
+    tr:last-child td { border-bottom: 0; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+    .card { background: white; border: 1px solid #d8d7d0; border-radius: 8px; padding: 14px; }
+    .card strong { display: block; margin-bottom: 6px; }
+    @media (max-width: 840px) { header, main { padding-left: 18px; padding-right: 18px; } .grid { grid-template-columns: 1fr; } h1 { font-size: 30px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LLM-Brain Core v1 Requirements</h1>
+    <p>승인 대상은 <code>requirements.md</code>다. 이 HTML은 generated preview companion이다.</p>
+  </header>
+  <main>
+    <section class="note">
+      <strong>핵심 범위</strong>
+      <p><code>neurons</code> 안에 LLM-Brain Core v1을 설계한다. 기존 <code>dendrite</code>/<code>neurons</code> pipeline은 유지하고, RAGFlow는 core가 아니라 external document bridge로 격하한다.</p>
+    </section>
+    <h2>자문자답 결론</h2>
+    <div class="grid">
+      <div class="card"><strong>무엇을 만드는가</strong>문서 검색기가 아니라 작업 기억 시스템.</div>
+      <div class="card"><strong>어디에 구현하는가</strong>v1은 새 repo가 아니라 <code>neurons</code>.</div>
+      <div class="card"><strong>RAGFlow 위치</strong>기존 것은 보존. core dependency 아님.</div>
+      <div class="card"><strong>session-memory</strong>raw SoT, event SoT, artifact, graph index를 분리.</div>
+      <div class="card"><strong>파일 참조</strong><code>SourceRef</code>/<code>SpanRef</code>/hash/permission/sync policy.</div>
+      <div class="card"><strong>autopilot</strong>승인된 design milestones만 소비. SoT 변경은 상류 회귀.</div>
+    </div>
+    <h2>Acceptance Gates</h2>
+    <ul>
+      <li>RAGFlow disabled 상태에서 latest work ContextPack test 통과.</li>
+      <li>RAGFlow disabled 상태에서 Decision drift timeline test 통과.</li>
+      <li>RAGFlow disabled 상태에서 Incident search/replay test 통과.</li>
+      <li>RAGFlow disabled 상태에서 PersonaFact candidate/check test 통과.</li>
+      <li><code>SourceRef</code> raw private path/body redaction test 통과.</li>
+      <li>기존 <code>dendrite</code> client boundary와 <code>neurons</code> server authority guard 유지.</li>
+    </ul>
+    <section class="warn">
+      <strong>승인 상태</strong>
+      <p>사용자가 hard gate를 사전 승인했으므로 Phase 2 <code>design.md</code> 작성으로 진행한다.</p>
+    </section>
+  </main>
+</body>
+</html>
