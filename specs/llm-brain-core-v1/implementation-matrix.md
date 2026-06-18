@@ -16,9 +16,9 @@ back to grill-to-spec instead of editing the SoT silently.
 | Keep `dendrite`/`neurons` collection pipeline | implemented | Existing ingress/session-memory tests remain in worker suite; dendrite `codex/source-ref-catalog` adds SourceRef scan/resolve contract through `e48f159` | Merge dendrite branch when PR is ready |
 | Keep CouchDB as AI session raw store | implemented | `materialize_artifact_from_couchdb_source` reads CouchDB source docs without copying raw bodies | Live CouchDB adapter smoke remains separate from local tests |
 | Keep NATS/ledger replay source | implemented for v1 shadow | `BrainEventEnvelope`, `BrainEventReplayStore`, and `CentralBrainShadowRebuilder` cover idempotency/tombstone/conflict/rebuild rules | Production transport remains deferred |
-| `neurons` owns session-memory artifact and graph projection | partial | `LedgerSessionMemoryArtifactStore` stores artifacts; `GraphProjectionWorker` projects MemoryCards to a graph adapter | Live Graphiti/Neo4j smoke pending because local Docker Compose plugin is unavailable |
-| Extract Task/Decision/Incident/PersonaFact candidates | partial | Existing MemoryCard miner/read-model reused by `BrainReadService` | Extraction pipeline into typed ontology episodes needs broader fixtures |
-| Build latest-work ContextPack | implemented | `test_llm_brain_core_ragflow_disabled.py`, `test_llm_brain_core_runtime_integration.py` | Local graph-enhanced ranking still pending M6c |
+| `neurons` owns session-memory artifact and graph projection | partial | `LedgerSessionMemoryArtifactStore` stores artifacts; `GraphProjectionWorker` projects artifacts, MemoryCards, and SourceRefs to a graph adapter | Live Graphiti/Neo4j smoke pending because local Docker Compose plugin is unavailable |
+| Extract Task/Decision/Incident/PersonaFact candidates | implemented for accepted MemoryCard ontology projection | Existing MemoryCard miner/read-model reused by `BrainReadService`; `build_ontology_episode_batch` maps Session/Task/Decision/SourceRef fixtures | Broader LLM extraction quality is future evaluator work |
+| Build latest-work ContextPack | implemented | `test_llm_brain_core_ragflow_disabled.py`, `test_llm_brain_core_runtime_integration.py`, `test_ontology_episode_batch.py` | Live graph backend ranking smoke pending M6c |
 | Incident/troubleshooting search | implemented with fake graph | `BrainReadService.brain_incident_search`; runtime incident test passes | Real graph backend search and replay smoke pending M6c |
 | Time-aware drift explanation | implemented from cards | `BrainReadService.brain_drift_explain`; runtime drift test passes | Graph-backed temporal relation smoke pending M6c |
 | PersonaFact check states | implemented | `BrainReadService.brain_persona_check`; tests cover aligned/conflict/drift/insufficient evidence | More evidence/confidence lifecycle cases can be added after graph integration |
@@ -38,7 +38,7 @@ back to grill-to-spec instead of editing the SoT silently.
 | M1 Core contracts and safety guards | done | Core models/service/null graph tests pass | Maintain backward compatibility |
 | M2 RAGFlow-free artifact and replay store | done | Artifact/replay tests pass without RAGFlow | Maintain replay compatibility |
 | M3 SourceRef resolver contract | done | SourceRef golden state tests pass | Add dendrite producer/resolve contract later |
-| M4 ContextPack builder | done | RAGFlow-disabled ContextPack tests pass | Add graph-enhanced ranking after M6c |
+| M4 ContextPack builder | done | RAGFlow-disabled ContextPack tests pass; graph-only task fallback is covered | Maintain graph-disabled degradation |
 | M5 Incident, drift, persona | done with fake graph/cards | Incident/drift/persona tests pass | Add real graph backend smoke |
 | M6a Graph adapter interface and fake backend | done | `FakeGraphMemoryAdapter` contract tests pass | Keep fake as deterministic contract backend |
 | M6b Graphiti/Neo4j dependency approval gate | approved by goal envelope | User gave hardgate preapproval; destructive live ops still stop | Add dependency/compose proposal as code/docs before local integration |
@@ -78,6 +78,22 @@ Result:
 
 ```text
 20 passed, 1 warning
+```
+
+Latest ontology batch / graph-ranking check:
+
+```bash
+cd worker
+uv run pytest -q tests/test_ontology_episode_batch.py \
+  tests/test_graph_projection_worker.py \
+  tests/test_llm_brain_core_ragflow_disabled.py \
+  tests/test_contextpack_no_raw_source_refs.py
+```
+
+Result:
+
+```text
+7 passed
 ```
 
 Latest central sync shadow check:
