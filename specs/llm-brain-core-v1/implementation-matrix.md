@@ -16,7 +16,7 @@ back to grill-to-spec instead of editing the SoT silently.
 | Keep `dendrite`/`neurons` collection pipeline | implemented | Existing ingress/session-memory tests remain in worker suite | Dendrite SourceRef producer contract still needs cross-repo validation |
 | Keep CouchDB as AI session raw store | implemented | `materialize_artifact_from_couchdb_source` reads CouchDB source docs without copying raw bodies | Live CouchDB adapter smoke remains separate from local tests |
 | Keep NATS/ledger replay source | partial | `BrainEventEnvelope` and `BrainEventReplayStore` cover idempotency/tombstone/conflict rules | Central rebuild-to-episode shadow fixture still needed |
-| `neurons` owns session-memory artifact and graph projection | partial | `LedgerSessionMemoryArtifactStore` stores artifacts; graph seam exists | Real Graphiti/Neo4j projection worker missing |
+| `neurons` owns session-memory artifact and graph projection | partial | `LedgerSessionMemoryArtifactStore` stores artifacts; `GraphProjectionWorker` projects MemoryCards to a graph adapter | Live Graphiti/Neo4j smoke pending because local Docker Compose plugin is unavailable |
 | Extract Task/Decision/Incident/PersonaFact candidates | partial | Existing MemoryCard miner/read-model reused by `BrainReadService` | Extraction pipeline into typed ontology episodes needs broader fixtures |
 | Build latest-work ContextPack | implemented | `test_llm_brain_core_ragflow_disabled.py`, `test_llm_brain_core_runtime_integration.py` | Local graph-enhanced ranking still pending M6c |
 | Incident/troubleshooting search | implemented with fake graph | `BrainReadService.brain_incident_search`; runtime incident test passes | Real graph backend search and replay smoke pending M6c |
@@ -41,7 +41,7 @@ back to grill-to-spec instead of editing the SoT silently.
 | M5 Incident, drift, persona | done with fake graph/cards | Incident/drift/persona tests pass | Add real graph backend smoke |
 | M6a Graph adapter interface and fake backend | done | `FakeGraphMemoryAdapter` contract tests pass | Keep fake as deterministic contract backend |
 | M6b Graphiti/Neo4j dependency approval gate | approved by goal envelope | User gave hardgate preapproval; destructive live ops still stop | Add dependency/compose proposal as code/docs before local integration |
-| M6c Graphiti/Neo4j local integration | pending | No `GraphitiNeo4jGraphMemoryAdapter` exists | Implement adapter and local smoke, while graph-disabled path stays green |
+| M6c Graphiti/Neo4j local integration | partial | `GraphitiNeo4jGraphMemoryAdapter`, `GraphProjectionWorker`, and `llm-brain-neo4j` compose profile exist; fake Graphiti contract tests pass | Live `docker compose --profile llm-brain-graph config/up` smoke pending on a host with Compose plugin |
 | M7 Central sync shadow | partial | `BrainEventReplayStore` exists | Add deterministic central rebuild from event fixture |
 | M8 Thin MCP/stdio surface | done | `uv run pytest -q tests/test_neuron_mcp_stdio.py ...` passed | Keep tools read-oriented and backend-neutral |
 | M9 RAGFlow bridge compatibility | partial | Legacy RAGFlow search remains optional; core path disabled bridge works | Add explicit bridge status/precedence tests |
@@ -61,6 +61,41 @@ Result:
 
 ```text
 16 passed
+```
+
+Latest graph adapter check:
+
+```bash
+cd worker
+uv run pytest -q tests/test_graphiti_neo4j_adapter.py \
+  tests/test_graph_projection_worker.py \
+  tests/test_neuron_mcp_stdio.py \
+  tests/test_llm_brain_core_runtime_integration.py
+```
+
+Result:
+
+```text
+20 passed, 1 warning
+```
+
+Compose profile static check:
+
+```bash
+ruby -ryaml -e 'data=YAML.load_file("compose.yaml"); svc=data.fetch("services").fetch("llm-brain-neo4j"); raise "profile" unless svc.fetch("profiles") == ["llm-brain-graph"]; vols=data.fetch("volumes"); raise "data volume" unless vols.key?("llm-brain-neo4j-data"); raise "logs volume" unless vols.key?("llm-brain-neo4j-logs"); puts "compose yaml static check ok"'
+```
+
+Result:
+
+```text
+compose yaml static check ok
+```
+
+Current environment limitation:
+
+```text
+docker compose version -> docker: unknown command: docker compose
+docker-compose version -> command not found
 ```
 
 ## Hard Stop Gates
