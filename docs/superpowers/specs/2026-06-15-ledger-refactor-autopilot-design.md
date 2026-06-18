@@ -4,6 +4,39 @@
 - worktree: `.worktrees/ledger-autopilot`. 통합 브랜치 `claude/ledger-autopilot-integration`. step별 work `claude/ledger-autopilot-aN`. **`main`/`master` 무인 쓰기·merge 금지**.
 - 리뷰 이력: rev1~4, 4-렌즈 적대적 게이트 4라운드. rev4에서 soundness PASS; 잔여 blocker는 전부 "오라클 정밀화 + 외부 root-of-trust"로 수렴(전제 불가능 아님). rev5가 그 수렴 fix 확정본.
 
+## 0. 구현 결과 (as-built, 2026-06-16) — 정본
+
+본 spec(§5~)은 게이트 달린 autopilot **harness 설계**다. 실제 실행은 사용자 지시("리뷰는
+없다, 완성본을 가져와")로 **메인 세션이 직접 구현**했다(harness 미발동). 따라서 spec의
+사람 게이트(S0 envelope 사인오프 / A2 delete merge)와 멀티에이전트 적대 게이트는 **이번
+실행 경로에선 미발동**이며, spec은 설계 기록으로 보존하되 실제 형상의 정본은 본 §0이다.
+
+- **Phase A·B·C·D 전부 구현·게이트 통과.** worktree `claude/ledger-autopilot`.
+- **A — GC Safety Lane**: `session_memory/gc_safety_auditor.py`(`IGCSafetyAuditor`/
+  `AuditContext`/`hard_delete_documents` 단일 chokepoint). 3 GC 스크립트 delete가 seam
+  경유. lint `eval/ledger_seam_invariants.py`(비가역 호출 사이트 frozen allowlist).
+- **B — Ledger Core 어댑터**: `db_adapter.py`(`ILedgerCoreDbAdapter`/
+  `SqliteLedgerDbAdapter`) + 표준 SQL 이식(`INSERT OR …`→`ON CONFLICT`,
+  `datetime('now')`→`CURRENT_TIMESTAMP`).
+- **C — SQLite→PostgreSQL (라이브 가동 완료)**: `postgres_db_adapter.py`(psycopg) +
+  `pg_paramstyle.py` + dialect-aware schema 헬퍼 + `ledger_pg_migrate.py` +
+  `NEURON_LEDGER_PG_DSN` flip. **2026-06-16 Ubuntu brain-server에서 라이브 cutover 완료 —
+  시스템이 PostgreSQL 16 위에서 가동 중**(builder cron tick PG에서 `status: ok`, GC dry-run
+  PG에서 status ok). 토폴로지: worker는 cron 배치, 코드배포 tgz, Postgres는 RAGFlow와 분리된
+  `~/ledger-pg` docker compose(`127.0.0.1:5432`), flip은 공유 `.env`의 1줄. 1차 시도에서
+  full-runtime dialect 누수 3건을 builder smoke로 포착·수정: ① 연결-튜닝 PRAGMA no-op
+  (`50bad86`) ② `julianday` PG shim + `rowid`→`ingested_at`(`4b81f2f`) ③ row를
+  sqlite3.Row 호환 `_PgRow`로 위치접근 지원(`969d42c`). rollback = `.env` 1줄 제거(원본
+  SQLite 무변) + `lib.bak-cutover2-*` 복원. **남은 것 = origin push만**(서버는 tgz 배포라
+  cutover에 불요, 대외 경계로 별도 사용자 판단). 증거:
+  `docs/architecture/ledger-pg-cutover-dryrun-evidence.md`.
+- **D — 4-area 경계**: audit override(Modular Monolith)대로 물리 분리 대신 in-process 경계.
+  `ledger_areas.py`(deepdive 책임 지도 34테이블→4영역+core manifest) +
+  `eval/ledger_area_boundaries.py` lint(전수·배타 + cross-area 메서드 frozen allowlist 9개).
+  `[결정 D-1]`(§4) 그대로 = 네트워크 분리 아님.
+- **게이트(매 증분)**: `gradle test` + `cd worker && uv run pytest -q` + `--show-boundary`
+  불변 + seam/area 구조 lint. behavior-preserving(특성화 테스트 + parity).
+
 ## 1. 목표
 
 `ledger.py` 결합을 에이전틱 Workflow 피드백 루프 autopilot으로 점진 리팩토링. 유한 작업. 최종: SQLite → PostgreSQL(C); B(어댑터)가 필요조건.
