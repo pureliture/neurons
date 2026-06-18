@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import asdict
 from typing import Any
 
@@ -53,32 +54,42 @@ class LedgerSessionMemoryArtifactStore:
         return "inserted"
 
     def get(self, artifact_id: str) -> SessionMemoryArtifact | None:
-        with self._ledger._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT artifact_json
-                FROM llm_brain_session_memory_artifacts
-                WHERE artifact_id = ?
-                """,
-                (artifact_id,),
-            ).fetchone()
+        try:
+            with self._ledger._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT artifact_json
+                    FROM llm_brain_session_memory_artifacts
+                    WHERE artifact_id = ?
+                    """,
+                    (artifact_id,),
+                ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if _missing_table(exc, "llm_brain_session_memory_artifacts"):
+                return None
+            raise
         if not row:
             return None
         return _artifact_from_json(str(row["artifact_json"]))
 
     def list_recent(self, *, project: str, limit: int = 10) -> list[SessionMemoryArtifact]:
         bounded = max(1, min(int(limit), 100))
-        with self._ledger._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT artifact_json
-                FROM llm_brain_session_memory_artifacts
-                WHERE project = ?
-                ORDER BY created_at DESC, artifact_id DESC
-                LIMIT ?
-                """,
-                (project, bounded),
-            ).fetchall()
+        try:
+            with self._ledger._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT artifact_json
+                    FROM llm_brain_session_memory_artifacts
+                    WHERE project = ?
+                    ORDER BY created_at DESC, artifact_id DESC
+                    LIMIT ?
+                    """,
+                    (project, bounded),
+                ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if _missing_table(exc, "llm_brain_session_memory_artifacts"):
+                return []
+            raise
         return [_artifact_from_json(str(row["artifact_json"])) for row in rows]
 
     def _ensure_schema(self) -> None:
@@ -128,28 +139,38 @@ class LedgerSourceRefCatalog:
             )
 
     def get(self, source_ref_id: str) -> SourceRefRecord | None:
-        with self._ledger._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT record_json
-                FROM llm_brain_source_refs
-                WHERE source_ref_id = ?
-                """,
-                (source_ref_id,),
-            ).fetchone()
+        try:
+            with self._ledger._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT record_json
+                    FROM llm_brain_source_refs
+                    WHERE source_ref_id = ?
+                    """,
+                    (source_ref_id,),
+                ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if _missing_table(exc, "llm_brain_source_refs"):
+                return None
+            raise
         if not row:
             return None
         return _source_ref_from_json(str(row["record_json"]))
 
     def list_all(self) -> list[SourceRefRecord]:
-        with self._ledger._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT record_json
-                FROM llm_brain_source_refs
-                ORDER BY last_seen_at DESC, source_ref_id
-                """
-            ).fetchall()
+        try:
+            with self._ledger._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT record_json
+                    FROM llm_brain_source_refs
+                    ORDER BY last_seen_at DESC, source_ref_id
+                    """
+                ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if _missing_table(exc, "llm_brain_source_refs"):
+                return []
+            raise
         return [_source_ref_from_json(str(row["record_json"])) for row in rows]
 
     def resolver(self) -> SourceRefResolver:
@@ -239,3 +260,7 @@ def _source_ref_from_json(value: str) -> SourceRefRecord:
         derived_summary=str(parsed.get("derived_summary") or ""),
         redacted_content=str(parsed.get("redacted_content") or ""),
     )
+
+
+def _missing_table(exc: sqlite3.OperationalError, table_name: str) -> bool:
+    return f"no such table: {table_name}" in str(exc)
