@@ -9,6 +9,7 @@ from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 from ._util import hash_payload, public_safe_text, require_non_empty, require_sha256, short_hash, utc_now_iso
 from .artifact_store import SessionMemoryArtifactStore
 from .context import BrainReadService
+from .document_bridge import DocumentBridge
 from .event_replay import BrainEventReplayStore
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
 from .models import BrainEventEnvelope, OntologyEpisode, SessionMemoryArtifact, SourceRefRecord
@@ -175,6 +176,7 @@ def build_runtime_brain_service(
     read_model: Any | None = None,
     source_catalog: SourceRefCatalog | Any | None = None,
     graph_adapter: GraphMemoryAdapter | None = None,
+    document_bridge: DocumentBridge | None = None,
     card_limit: int = 100,
 ) -> BrainReadService:
     cards = []
@@ -187,6 +189,7 @@ def build_runtime_brain_service(
         memory_cards=cards,
         graph_adapter=graph,
         source_resolver=resolver,
+        document_bridge=document_bridge,
     )
 
 

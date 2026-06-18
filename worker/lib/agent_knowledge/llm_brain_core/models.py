@@ -398,6 +398,7 @@ class ContextPack:
     memory_status: dict[str, Any]
     graph_status: dict[str, Any]
     bridge_status: dict[str, Any]
+    bridge_evidence: tuple[dict[str, Any], ...] = ()
     gaps: tuple[str, ...] = ()
     audit: dict[str, Any] = field(default_factory=dict)
 
@@ -412,6 +413,7 @@ class ContextPack:
             "similar_incidents",
             "persona_constraints",
             "source_refs",
+            "bridge_evidence",
             "gaps",
         ):
             data[key] = list(data[key])

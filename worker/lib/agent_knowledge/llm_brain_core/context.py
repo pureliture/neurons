@@ -6,6 +6,7 @@ from typing import Any
 
 from ._util import ensure_public_safe, public_safe_text, short_hash
 from .artifact_store import InMemorySessionMemoryArtifactStore, SessionMemoryArtifactStore
+from .document_bridge import DisabledDocumentBridge, DocumentBridge
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
 from .models import ContextPack, EvidenceRequest, GraphMemoryResult
 from .source_ref import SourceRefResolver
@@ -26,11 +27,13 @@ class BrainReadService:
         memory_cards: list[Mapping[str, Any]] | None = None,
         graph_adapter: GraphMemoryAdapter | None = None,
         source_resolver: SourceRefResolver | None = None,
+        document_bridge: DocumentBridge | None = None,
     ) -> None:
         self.artifact_store = artifact_store or InMemorySessionMemoryArtifactStore()
         self.memory_cards = [dict(card) for card in memory_cards or [] if _is_accepted_card(card)]
         self.graph_adapter = graph_adapter or NullGraphMemoryAdapter()
         self.source_resolver = source_resolver or SourceRefResolver()
+        self.document_bridge = document_bridge or DisabledDocumentBridge()
 
     def brain_context_resolve(
         self,
@@ -51,6 +54,11 @@ class BrainReadService:
             brain_id=brain_id,
             query=query,
             entity_types=["Task", "Decision", "Incident", "PersonaFact", "File"],
+            limit=limit,
+        )
+        bridge_result = self.document_bridge.search_documents(
+            query=current_request,
+            project=project_name,
             limit=limit,
         )
         task_card = _select_current_task(cards, current_request)
@@ -89,10 +97,11 @@ class BrainReadService:
                 "details": list(graph_result.details),
             },
             bridge_status={
-                "status": "disabled",
-                "authority": "external_document_bridge",
-                "details": ["not_part_of_core_read_path"],
+                "status": bridge_result.status,
+                "authority": bridge_result.authority,
+                "details": list(bridge_result.details),
             },
+            bridge_evidence=bridge_result.evidence,
             gaps=tuple(gaps),
             audit={
                 "request_hash": short_hash([repository, branch, current_files, current_request]),
