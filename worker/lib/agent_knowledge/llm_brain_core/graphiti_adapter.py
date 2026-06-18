@@ -201,12 +201,14 @@ def _run_async(factory: Callable[[], Any]) -> Any:
     def _target() -> None:
         try:
             result["value"] = asyncio.run(factory())
-        except BaseException as exc:  # pragma: no cover - defensive thread bridge
+        except Exception as exc:  # pragma: no cover - defensive thread bridge
             result["error"] = exc
 
     thread = threading.Thread(target=_target, daemon=True)
     thread.start()
-    thread.join()
+    thread.join(timeout=300)
+    if thread.is_alive():
+        raise TimeoutError("graphiti async operation timed out")
     if "error" in result:
         raise result["error"]
     return result.get("value")

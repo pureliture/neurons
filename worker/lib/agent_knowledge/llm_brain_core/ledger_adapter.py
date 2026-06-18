@@ -21,24 +21,13 @@ class LedgerSessionMemoryArtifactStore:
         _reject_external_index_fields(artifact.to_dict())
         payload = json.dumps(artifact.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         with self._ledger._connect() as connection:
-            existing = connection.execute(
-                """
-                SELECT content_hash
-                FROM llm_brain_session_memory_artifacts
-                WHERE artifact_id = ?
-                """,
-                (artifact.artifact_id,),
-            ).fetchone()
-            if existing is not None:
-                if str(existing["content_hash"]) != artifact.content_hash:
-                    raise ValueError("artifact id collision with different content_hash")
-                return "duplicate"
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT INTO llm_brain_session_memory_artifacts (
                     artifact_id, session_id_hash, project, provider,
                     content_hash, artifact_json, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(artifact_id) DO NOTHING
                 """,
                 (
                     artifact.artifact_id,
@@ -51,7 +40,19 @@ class LedgerSessionMemoryArtifactStore:
                     artifact.created_at,
                 ),
             )
-        return "inserted"
+            if cursor.rowcount == 1:
+                return "inserted"
+            existing = connection.execute(
+                """
+                SELECT content_hash
+                FROM llm_brain_session_memory_artifacts
+                WHERE artifact_id = ?
+                """,
+                (artifact.artifact_id,),
+            ).fetchone()
+            if existing is not None and str(existing["content_hash"]) == artifact.content_hash:
+                return "duplicate"
+            raise ValueError("artifact id collision with different content_hash")
 
     def get(self, artifact_id: str) -> SessionMemoryArtifact | None:
         try:
