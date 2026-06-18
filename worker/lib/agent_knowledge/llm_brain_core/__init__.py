@@ -2,6 +2,7 @@
 
 from .artifact_store import InMemorySessionMemoryArtifactStore
 from .context import BrainReadService
+from .document_bridge import DisabledDocumentBridge, DocumentBridgeResult
 from .event_replay import BrainEventReplayStore
 from .graph import FakeGraphMemoryAdapter, NullGraphMemoryAdapter
 from .graphiti_adapter import GraphitiNeo4jConfig, GraphitiNeo4jGraphMemoryAdapter
@@ -27,6 +28,8 @@ __all__ = [
     "CentralBrainShadowRebuilder",
     "CentralShadowRebuildReport",
     "ContextPack",
+    "DisabledDocumentBridge",
+    "DocumentBridgeResult",
     "EvidenceRequest",
     "EvidenceResponse",
     "FakeGraphMemoryAdapter",
