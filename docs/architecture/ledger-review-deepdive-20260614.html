@@ -86,6 +86,10 @@
         <p class="text-slate-700 mb-6 leading-relaxed">
           <code class="font-mono text-emerald-600">ledger.py</code>는 SQLite 영속 데이터베이스를 활용하여 neurons 서버가 소유한 지식 아이템(Knowledge Items), 트랜스크립트 세션 및 턴, GC 감사 기록, 네이티브 메모리 미러링 등 전체 원장의 상태와 트랜잭션을 관리합니다. 내부 책임은 크게 다음 4가지 영역으로 나뉩니다.
         </p>
+        <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-4 mb-6 text-sm">
+          <span class="font-bold text-emerald-800">As-built (2026-06-16):</span>
+          <span class="text-slate-700"> 이 4-area 경계는 audit override(Modular Monolith)대로 물리 분리 대신 in-process 경계로 구현됨 — <code class="font-mono text-xs">worker/lib/agent_knowledge/ledger_areas.py</code>(34테이블→4영역+core manifest) + <code class="font-mono text-xs">worker/eval/ledger_area_boundaries.py</code> lint(전수·배타 + cross-area 메서드 frozen allowlist). 정본은 spec <code class="font-mono text-xs">docs/superpowers/specs/2026-06-15-ledger-refactor-autopilot-design.md §0</code>.</span>
+        </div>
 
         <!-- Responsibility Cards -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-10">

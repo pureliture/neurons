@@ -106,6 +106,90 @@ def test_sqlite_postgres_parity(tmp_path):
     assert sqlite_result == pg_result, f"\nsqlite={sqlite_result}\npg={pg_result}"
 
 
+def test_julianday_shim_matches_sqlite(tmp_path):
+    # 1차 cutover를 깨뜨린 julianday: GC/dirty-sync age-gate가 쓰는 정확한 패턴
+    # ``julianday(replace(ts,'Z','+00:00'))`` 의 ``>=`` 비교가 양 엔진 동일해야 한다.
+    # 고정 리터럴(실시간·해상도 의존 없음) → 결정적.
+    _reset_pg(PG_DSN)
+    sl = Ledger(tmp_path / "l.sqlite")
+    migrate_sqlite_to_postgres = __import__(
+        "agent_knowledge.ledger_pg_migrate", fromlist=["migrate_sqlite_to_postgres"]
+    ).migrate_sqlite_to_postgres
+    migrate_sqlite_to_postgres(tmp_path / "l.sqlite", PG_DSN)
+    pg = Ledger("pg", db_adapter=PostgresLedgerDbAdapter(PG_DSN))
+
+    cases = [
+        ("2026-01-01T00:00:00Z", "2026-06-01T00:00:00Z"),  # a < b
+        ("2026-06-01T00:00:00Z", "2026-06-01T00:00:00Z"),  # a == b (>= True)
+        ("2026-06-02T00:00:00Z", "2026-06-01T00:00:00Z"),  # a > b
+    ]
+
+    def ge(ledger, a, b):
+        q = (
+            f"SELECT julianday(replace('{a}','Z','+00:00')) "
+            f">= julianday(replace('{b}','Z','+00:00')) AS r"
+        )
+        with ledger._connect() as connection:
+            return bool(connection.execute(q).fetchone()["r"])
+
+    for a, b in cases:
+        assert ge(sl, a, b) == ge(pg, a, b), (a, b)
+    # a==b 는 양쪽 True 여야(>= 의미 보존)
+    assert ge(sl, cases[1][0], cases[1][1]) is True
+    assert ge(pg, cases[1][0], cases[1][1]) is True
+
+
+def test_dirty_actionable_query_executes_on_postgres(tmp_path):
+    # builder가 매 사이클 실행하는 actionable 쿼리(julianday 포함)가 PG에서 에러 없이 실행 —
+    # 1차 cutover는 여기서 "function julianday does not exist"로 깨졌다. shim 회귀 가드.
+    from agent_knowledge.session_memory.dirty_session_memory_sync import (
+        DirtySessionMemorySyncRunner,
+    )
+
+    _reset_pg(PG_DSN)
+    sl = Ledger(tmp_path / "l.sqlite")
+    _run_sequence(sl)
+    migrate_sqlite_to_postgres = __import__(
+        "agent_knowledge.ledger_pg_migrate", fromlist=["migrate_sqlite_to_postgres"]
+    ).migrate_sqlite_to_postgres
+    migrate_sqlite_to_postgres(tmp_path / "l.sqlite", PG_DSN)
+    pg = Ledger("pg", db_adapter=PostgresLedgerDbAdapter(PG_DSN))
+
+    sql = DirtySessionMemorySyncRunner._actionable_rows_sql()
+    with pg._connect() as connection:
+        connection.execute(sql).fetchall()  # 예외 없으면 통과(julianday shim 존재)
+
+    # rowid→ingested_at 이식: PG에서 최신 session_memory 조회가 에러 없이 동작.
+    assert (pg.get_session_memory_by_session_id_hash(SID) is None) == (
+        sl.get_session_memory_by_session_id_hash(SID) is None
+    )
+
+
+def test_pg_row_positional_and_named_access(tmp_path):
+    # sqlite3.Row 호환: 위치(row[0])·이름(row['c'])·.get·dict(row). cutover builder가
+    # count 쿼리 row[0]에서 KeyError:0 으로 깨졌던 회귀 가드.
+    _reset_pg(PG_DSN)
+    sqlite_path = tmp_path / "l.sqlite"
+    sl = Ledger(sqlite_path)
+    _run_sequence(sl)
+    migrate_sqlite_to_postgres = __import__(
+        "agent_knowledge.ledger_pg_migrate", fromlist=["migrate_sqlite_to_postgres"]
+    ).migrate_sqlite_to_postgres
+    migrate_sqlite_to_postgres(sqlite_path, PG_DSN)
+    pg = Ledger("pg", db_adapter=PostgresLedgerDbAdapter(PG_DSN))
+
+    with pg._connect() as connection:
+        count_row = connection.execute("SELECT count(*) FROM knowledge_items").fetchone()
+        assert count_row[0] == 2  # 위치 접근
+        row = connection.execute(
+            "SELECT knowledge_id, status FROM knowledge_items ORDER BY knowledge_id LIMIT 1"
+        ).fetchone()
+        assert row[0] == row["knowledge_id"]  # 위치 == 이름
+        assert row.get("status") is not None
+        assert row.get("missing", "d") == "d"
+        assert set(dict(row).keys()) == {"knowledge_id", "status"}
+
+
 def test_env_switch_routes_ledger_to_postgres(monkeypatch):
     # cutover flip: NEURON_LEDGER_PG_DSN 설정 시 명시 어댑터 없이도 Ledger(path)가 Postgres 사용.
     _reset_pg(PG_DSN)
