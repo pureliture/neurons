@@ -16,20 +16,20 @@ back to grill-to-spec instead of editing the SoT silently.
 | Keep `dendrite`/`neurons` collection pipeline | implemented | Existing ingress/session-memory tests remain in worker suite; dendrite `codex/source-ref-catalog` adds SourceRef scan/resolve contract through `e48f159` | Merge dendrite branch when PR is ready |
 | Keep CouchDB as AI session raw store | implemented | `materialize_artifact_from_couchdb_source` reads CouchDB source docs without copying raw bodies | Live CouchDB adapter smoke remains separate from local tests |
 | Keep NATS/ledger replay source | implemented for v1 shadow | `BrainEventEnvelope`, `BrainEventReplayStore`, and `CentralBrainShadowRebuilder` cover idempotency/tombstone/conflict/rebuild rules | Production transport remains deferred |
-| `neurons` owns session-memory artifact and graph projection | partial | `LedgerSessionMemoryArtifactStore` stores artifacts; `GraphProjectionWorker` projects artifacts, MemoryCards, and SourceRefs to a graph adapter | Live Graphiti/Neo4j smoke pending because local Docker Compose plugin is unavailable |
+| `neurons` owns session-memory artifact and graph projection | implemented with live-smoke deferral proof | `LedgerSessionMemoryArtifactStore` stores artifacts; `GraphProjectionWorker` projects artifacts, MemoryCards, and SourceRefs to `GraphMemoryAdapter`; Graphiti adapter contract tests pass | Live Graphiti/Neo4j smoke deferred: local Docker daemon and Compose plugin are unavailable |
 | Extract Task/Decision/Incident/PersonaFact candidates | implemented for accepted MemoryCard ontology projection | Existing MemoryCard miner/read-model reused by `BrainReadService`; `build_ontology_episode_batch` maps Session/Task/Decision/SourceRef fixtures | Broader LLM extraction quality is future evaluator work |
 | Build latest-work ContextPack | implemented | `test_llm_brain_core_ragflow_disabled.py`, `test_llm_brain_core_runtime_integration.py`, `test_ontology_episode_batch.py` | Live graph backend ranking smoke pending M6c |
 | Incident/troubleshooting search | implemented with fake graph | `BrainReadService.brain_incident_search`; runtime incident test passes | Real graph backend search and replay smoke pending M6c |
 | Time-aware drift explanation | implemented from cards | `BrainReadService.brain_drift_explain`; runtime drift test passes | Graph-backed temporal relation smoke pending M6c |
 | PersonaFact check states | implemented | `BrainReadService.brain_persona_check`; tests cover aligned/conflict/drift/insufficient evidence | More evidence/confidence lifecycle cases can be added after graph integration |
 | SourceRef/SpanRef redaction | implemented across neurons+dendrite branches | `test_source_ref_policy_resolution.py`; `test_contextpack_no_raw_source_refs.py`; dendrite `test_source_catalog.py`; CodeRabbit follow-up `findings: 0` | Merge dendrite branch when PR is ready |
-| Per-PC local brain and optional central brain | partial | Local ledger-backed service works offline; `BrainEvent` envelope, central shadow rebuild, and portable export/import exist | Production transport remains pending |
+| Per-PC local brain and optional central brain | implemented for v1 local + central shadow | Local ledger-backed service works offline; `BrainEvent` envelope, central shadow rebuild, and portable export/import exist | Production transport is deferred outside v1 local milestone |
 | Event/episode central sync, no graph DB file sync | implemented for v1 shadow | `test_central_sync_shadow_rebuild.py` rebuilds derived graph state from BrainEvents | Production transport/runbook remains deferred |
 | RAGFlow bridge only, not core dependency | implemented for bridge contract | Core tests pass with disabled bridge; M9 `document_bridge.py` labels RAGFlow as external read-only evidence and does not override canonical memory | Live RAGFlow smoke remains outside core acceptance |
 | Agent-facing read API | implemented for stdio surface | `mcp-stdio` exposes `brain_context_resolve`, `brain_memory_search`, `brain_incident_search`, `brain_drift_explain`, `brain_persona_get`, `brain_persona_check`, `brain_evidence_get` | HTTP adapter remains optional/deferred |
 | Portable Git/Compose/export-import | implemented for LLM-Brain data archive | `brain-export`/`brain-import` export allowlisted LLM-Brain JSONL tables and specs, excluding raw transcript tables and graph DB files | Neo4j `.dump` backup remains ops/runbook work once live graph exists |
 | Docs/runbooks | implemented | `docs/runbooks/LLM_BRAIN_CORE_V1_LOCAL_OPS.md` documents local tests, MCP smoke, export/import, graph smoke conditions, SourceRef scan/resolve, and review gate | Update after live Neo4j smoke or PR merge |
-| Autopilot safety guard | implemented for pre-M9 path | `test_autopilot_no_ragflow_client_before_m9.py` | Review gate and full suite evidence still needed for final close |
+| Autopilot safety guard | implemented | `test_autopilot_no_ragflow_client_before_m9.py`; full worker suite and CodeRabbit follow-up review are clean | Maintain gate in future M9+ changes |
 
 ## Milestone Status
 
@@ -43,7 +43,7 @@ back to grill-to-spec instead of editing the SoT silently.
 | M5 Incident, drift, persona | done with fake graph/cards | Incident/drift/persona tests pass | Add real graph backend smoke |
 | M6a Graph adapter interface and fake backend | done | `FakeGraphMemoryAdapter` contract tests pass | Keep fake as deterministic contract backend |
 | M6b Graphiti/Neo4j dependency approval gate | approved by goal envelope | User gave hardgate preapproval; destructive live ops still stop | Add dependency/compose proposal as code/docs before local integration |
-| M6c Graphiti/Neo4j local integration | partial | `GraphitiNeo4jGraphMemoryAdapter`, `GraphProjectionWorker`, and `llm-brain-neo4j` compose profile exist; fake Graphiti contract tests pass | Live `docker compose --profile llm-brain-graph config/up` smoke pending on a host with Compose plugin |
+| M6c Graphiti/Neo4j local integration | implemented with live-smoke deferral proof | `GraphitiNeo4jGraphMemoryAdapter`, `GraphProjectionWorker`, and `llm-brain-neo4j` compose profile exist; fake Graphiti contract tests pass; compose YAML static check passes | Live `docker compose --profile llm-brain-graph config/up` smoke deferred until Docker daemon and Compose plugin are available |
 | M7 Central sync shadow | done for v1 shadow | `CentralBrainShadowRebuilder` deterministically rebuilds derived graph projection from replayed current payloads | Production transport remains outside v1 local milestone |
 | M8 Thin MCP/stdio surface | done | `uv run pytest -q tests/test_neuron_mcp_stdio.py ...` passed | Keep tools read-oriented and backend-neutral |
 | M9 RAGFlow bridge compatibility | done for read-only bridge contract | `test_ragflow_bridge_compatibility.py` proves bridge hit is external evidence and bridge outage does not fail ContextPack | Live RAGFlow corpus smoke remains optional ops work |
@@ -94,7 +94,7 @@ uv run pytest -q tests/test_ontology_episode_batch.py \
 Result:
 
 ```text
-7 passed
+8 passed
 ```
 
 Latest central sync shadow check:
@@ -163,12 +163,33 @@ Result:
 84 passed
 ```
 
+Latest full worker check:
+
+```bash
+cd worker
+uv run pytest -q
+```
+
+Result:
+
+```text
+754 passed, 7 skipped, 1 warning
+```
+
 Dendrite review:
 
 ```text
 CodeRabbit light review on codex/source-ref-catalog found 1 valid major finding.
 Fix commit: e48f159 SourceRef resolve bounded read 보강.
 Follow-up CodeRabbit light review: findings 0.
+```
+
+Neurons review:
+
+```text
+CodeRabbit light review on worker/lib/agent_knowledge/llm_brain_core found valid findings.
+Fix commits: 310427c, 7dd2b07.
+Follow-up CodeRabbit light review after cooldown: findings 0.
 ```
 
 Compose profile static check:
