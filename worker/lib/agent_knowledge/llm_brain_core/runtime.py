@@ -6,7 +6,7 @@ from typing import Any
 from agent_knowledge.couchdb_source.document_model import SourceDocType
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 
-from ._util import hash_payload, public_safe_text, require_sha256, short_hash, utc_now_iso
+from ._util import hash_payload, public_safe_text, require_non_empty, require_sha256, short_hash, utc_now_iso
 from .artifact_store import SessionMemoryArtifactStore
 from .context import BrainReadService
 from .event_replay import BrainEventReplayStore
@@ -41,6 +41,7 @@ def materialize_artifact_from_couchdb_source(
         raise ValueError("session source docs are required")
     provider = str((sessions[0] if sessions else chunks[0]).get("provider") or "")
     project = str((sessions[0] if sessions else chunks[0]).get("project") or "")
+    _validate_session_doc_scope(sessions + chunks + evidence, provider=provider, project=project)
     chunks = sorted(chunks, key=lambda doc: (doc.get("turn_start_index", 0), doc.get("_id", "")))
     evidence = sorted(evidence, key=lambda doc: (doc.get("part_index", 0), doc.get("_id", "")))
     summary = public_safe_text(
@@ -129,7 +130,7 @@ def source_ref_from_catalog_event(event: Mapping[str, Any]) -> SourceRefRecord:
         relative_path_hash=relative_path_hash,
         content_hash=content_hash,
         mtime=str(event.get("mtime") or event.get("modifiedAt") or ""),
-        size=int(event.get("size") or 0),
+        size=_safe_size(event.get("size")),
         sync_policy=event.get("sync_policy") or event.get("syncPolicy") or "metadata_only",
         permission_scope=str(event.get("permission_scope") or event.get("permissionScope") or "project"),
         last_seen_at=str(event.get("last_seen_at") or event.get("lastSeenAt") or utc_now_iso()),
@@ -148,7 +149,9 @@ def episode_from_memory_card(card: Mapping[str, Any]) -> OntologyEpisode:
         "summary": public_safe_text(str(card.get("summary") or ""), max_chars=512),
         "typed_payload": dict(card.get("typed_payload") or {}),
     }
-    natural_id = f"{payload['card_type']}:{payload['memory_id']}"
+    memory_id = require_non_empty(payload["memory_id"], "memory_id")
+    card_type = require_non_empty(payload["card_type"], "card_type")
+    natural_id = f"{card_type}:{memory_id}"
     entity_type = _entity_type_for_card(payload["card_type"])
     return OntologyEpisode.from_payload(
         event_id=f"evt:{short_hash([natural_id, card.get('content_hash', '')])}",
@@ -157,7 +160,7 @@ def episode_from_memory_card(card: Mapping[str, Any]) -> OntologyEpisode:
         payload=payload,
         lifecycle_state=str(card.get("lifecycle_state") or "accepted"),
         currentness=str(card.get("currentness") or "unknown"),
-        source_event_ids=tuple(str(ref) for ref in card.get("derived_from") or ()),
+        source_event_ids=tuple(str(ref) for ref in _list_or_empty(card.get("derived_from"))),
         source_ref_ids=tuple(_source_ref_ids(card)),
         observed_at=str(card.get("approved_at") or card.get("accepted_at") or card.get("updated_at") or utc_now_iso()),
         ontology_version=str(card.get("ontology_version") or "1.0.0"),
@@ -208,6 +211,34 @@ def _latest_evidence_hint(evidence: list[dict]) -> str:
         return "no tool evidence bundles."
     latest = evidence[-1]
     return f"latest_tool_evidence_ref={latest.get('_id', '')}."
+
+
+def _validate_session_doc_scope(docs: list[Mapping[str, Any]], *, provider: str, project: str) -> None:
+    require_non_empty(provider, "provider")
+    require_non_empty(project, "project")
+    for doc in docs:
+        doc_provider = str(doc.get("provider") or "")
+        doc_project = str(doc.get("project") or "")
+        if doc_provider and doc_provider != provider:
+            raise ValueError("session source docs have inconsistent provider")
+        if doc_project and doc_project != project:
+            raise ValueError("session source docs have inconsistent project")
+
+
+def _safe_size(value: Any) -> int:
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return 0
+
+
+def _list_or_empty(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, (list, tuple)) else []
 
 
 def _source_event_id(doc: Mapping[str, Any]) -> str:

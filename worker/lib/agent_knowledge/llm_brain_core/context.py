@@ -264,7 +264,7 @@ def _is_accepted_card(card: Mapping[str, Any]) -> bool:
 
 
 def _project_cards(cards: list[dict[str, Any]], project: str) -> list[dict[str, Any]]:
-    return [card for card in cards if str(card.get("project") or project) == project]
+    return [card for card in cards if str(card.get("project") or "") == project]
 
 
 def _select_current_task(cards: list[dict[str, Any]], request: str) -> dict[str, Any] | None:
