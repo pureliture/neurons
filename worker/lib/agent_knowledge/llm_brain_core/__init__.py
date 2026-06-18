@@ -18,11 +18,14 @@ from .models import (
 )
 from .projection import GraphProjectionReport, GraphProjectionWorker
 from .source_ref import SourceRefResolver
+from .sync_shadow import CentralBrainShadowRebuilder, CentralShadowRebuildReport
 
 __all__ = [
     "BrainEventEnvelope",
     "BrainEventReplayStore",
     "BrainReadService",
+    "CentralBrainShadowRebuilder",
+    "CentralShadowRebuildReport",
     "ContextPack",
     "EvidenceRequest",
     "EvidenceResponse",
