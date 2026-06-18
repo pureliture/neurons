@@ -5,7 +5,7 @@ from typing import Any
 
 from .graph import GraphMemoryAdapter
 from .models import OntologyEpisode, SessionMemoryArtifact, SourceRefRecord
-from .ontology import build_ontology_episode_batch
+from .ontology import build_ontology_episode_batch_report
 from .runtime import episode_from_memory_card
 
 
@@ -64,12 +64,26 @@ class GraphProjectionWorker:
         memory_cards: list[dict[str, Any]] | None = None,
         source_refs: list[SourceRefRecord] | None = None,
     ) -> GraphProjectionReport:
-        episodes = build_ontology_episode_batch(
+        batch = build_ontology_episode_batch_report(
             artifacts=artifacts or [],
             memory_cards=memory_cards or [],
             source_refs=source_refs or [],
         )
-        return self.project_episodes(episodes)
+        report = self.project_episodes(list(batch.episodes))
+        failures = tuple([*batch.failures, *report.failures])
+        failed = len(failures)
+        projected_or_duplicate = report.projected or report.duplicates
+        status = "succeeded" if failed == 0 else ("partial" if projected_or_duplicate else "failed")
+        return GraphProjectionReport(
+            status=status,
+            attempted=len(artifacts or []) + len(memory_cards or []) + len(source_refs or []),
+            projected=report.projected,
+            duplicates=report.duplicates,
+            failed=failed,
+            episode_ids=report.episode_ids,
+            failures=failures,
+            details=tuple([*report.details, "ontology_batch_projection"]),
+        )
 
     def project_episodes(self, episodes: list[OntologyEpisode]) -> GraphProjectionReport:
         projected = 0
