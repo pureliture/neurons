@@ -65,7 +65,11 @@ class BrainReadService:
         current_task = _task_title(task_card)
         if not current_task and artifacts:
             current_task = artifacts[0].summary
+        if not current_task:
+            current_task = _graph_task_title(graph_result)
         last_stopped_at = _last_stop(task_card, artifacts)
+        if not last_stopped_at:
+            last_stopped_at = _graph_task_stop(graph_result)
         decisions = tuple(_decision_view(card) for card in cards if card.get("card_type") == "decision")
         incidents = tuple(self.brain_incident_search(symptom=current_request, project=project_name, limit=3)["reusable_fixes"])
         persona = tuple(_persona_view(card) for card in cards if card.get("card_type") == "preference")
@@ -306,6 +310,44 @@ def _last_stop(task_card: Mapping[str, Any] | None, artifacts: list[Any]) -> str
         return public_safe_text(str(payload.get("next_action") or payload.get("blocker") or task_card.get("summary") or ""), max_chars=320)
     if artifacts:
         return public_safe_text(artifacts[0].summary, max_chars=320)
+    return ""
+
+
+def _graph_task_title(graph: GraphMemoryResult) -> str:
+    for episode in graph.episodes:
+        if episode.entity_type != "Task":
+            continue
+        payload = episode.payload
+        typed_payload = payload.get("typed_payload") if isinstance(payload.get("typed_payload"), Mapping) else {}
+        value = (
+            payload.get("task_state")
+            or payload.get("task")
+            or typed_payload.get("task_state")
+            or payload.get("title")
+            or payload.get("summary")
+        )
+        text = public_safe_text(str(value or ""), max_chars=240)
+        if text:
+            return text
+    return ""
+
+
+def _graph_task_stop(graph: GraphMemoryResult) -> str:
+    for episode in graph.episodes:
+        if episode.entity_type != "Task":
+            continue
+        payload = episode.payload
+        typed_payload = payload.get("typed_payload") if isinstance(payload.get("typed_payload"), Mapping) else {}
+        value = (
+            payload.get("next_action")
+            or payload.get("blocker")
+            or typed_payload.get("next_action")
+            or typed_payload.get("blocker")
+            or payload.get("summary")
+        )
+        text = public_safe_text(str(value or ""), max_chars=320)
+        if text:
+            return text
     return ""
 
 

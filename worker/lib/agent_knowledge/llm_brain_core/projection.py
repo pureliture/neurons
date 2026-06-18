@@ -4,7 +4,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .graph import GraphMemoryAdapter
-from .models import OntologyEpisode
+from .models import OntologyEpisode, SessionMemoryArtifact, SourceRefRecord
+from .ontology import build_ontology_episode_batch
 from .runtime import episode_from_memory_card
 
 
@@ -55,6 +56,20 @@ class GraphProjectionWorker:
             failures=merged_failures,
             details=report.details,
         )
+
+    def project_batch(
+        self,
+        *,
+        artifacts: list[SessionMemoryArtifact] | None = None,
+        memory_cards: list[dict[str, Any]] | None = None,
+        source_refs: list[SourceRefRecord] | None = None,
+    ) -> GraphProjectionReport:
+        episodes = build_ontology_episode_batch(
+            artifacts=artifacts or [],
+            memory_cards=memory_cards or [],
+            source_refs=source_refs or [],
+        )
+        return self.project_episodes(episodes)
 
     def project_episodes(self, episodes: list[OntologyEpisode]) -> GraphProjectionReport:
         projected = 0
