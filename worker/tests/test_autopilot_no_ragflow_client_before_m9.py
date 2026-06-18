@@ -16,7 +16,7 @@ def test_m1_to_m5_core_package_has_no_document_corpus_client_binding():
 
     scanned = []
     for path in package_root.rglob("*.py"):
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         scanned.append(path.name)
         lowered = text.lower()
         for needle in forbidden_needles:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agent_knowledge.cli import main as neuron_main
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
@@ -15,6 +17,7 @@ from agent_knowledge.llm_brain_core import (
 from agent_knowledge.llm_brain_core.runtime import (
     brain_event_from_ingress_payload,
     build_runtime_brain_service,
+    episode_from_memory_card,
     materialize_artifact_from_couchdb_source,
     replay_ingress_events,
     source_ref_from_catalog_event,
@@ -226,6 +229,99 @@ def test_brain_event_mapping_accepts_existing_queue_shape():
     }
 
 
+def test_runtime_rejects_inconsistent_couchdb_session_scope():
+    source_store = InMemoryCouchDBSourceStore()
+    session_id_hash = _seed_couchdb_source(source_store)
+    chunk = TranscriptChunk.from_text(
+        chunk_id="chunk_wrong_project",
+        session_id_hash=session_id_hash,
+        provider=PROVIDER,
+        project="other-project",
+        turn_start_index=2,
+        turn_end_index=2,
+        text="wrong project",
+    )
+    source_store.put(dm.build_conversation_chunk_document(chunk=chunk))
+
+    with pytest.raises(ValueError, match="inconsistent project"):
+        materialize_artifact_from_couchdb_source(
+            session_id_hash=session_id_hash,
+            source_store=source_store,
+        )
+
+
+def test_runtime_source_ref_event_bounds_invalid_size():
+    record = source_ref_from_catalog_event(
+        {
+            "source_ref_id": "src_bad_size",
+            "device_id_hash": _h("device-a"),
+            "root_id": "project-root",
+            "relative_path_hash": _h("docs/design.md"),
+            "content_hash": _h("source-content"),
+            "size": "not-a-number",
+            "sync_policy": "metadata_only",
+        }
+    )
+
+    assert record.size == 0
+
+
+def test_runtime_episode_from_memory_card_rejects_malformed_identity_and_tolerates_scalar_derived_from():
+    card = _card(
+        "mem_scalar_derived_from",
+        "task",
+        "Scalar derived_from should not crash",
+        {
+            "task_state": "Scalar derived_from should not crash",
+            "next_action": "Keep source_event_ids empty",
+            "blocker": "",
+            "owner_hint": "neurons",
+            "status": "open",
+        },
+    )
+    card["derived_from"] = "evt_scalar"
+    episode = episode_from_memory_card(card)
+    assert episode.source_event_ids == ()
+
+    malformed = dict(card)
+    malformed["memory_id"] = ""
+    with pytest.raises(ValueError, match="memory_id"):
+        episode_from_memory_card(malformed)
+
+
+def test_context_project_filter_does_not_treat_missing_project_as_wildcard():
+    from agent_knowledge.llm_brain_core import BrainReadService, InMemorySessionMemoryArtifactStore
+
+    card = _card(
+        "mem_missing_project",
+        "task",
+        "Wrong project task",
+        {
+            "task_state": "Wrong project task",
+            "next_action": "Should not appear",
+            "blocker": "",
+            "owner_hint": "other",
+            "status": "open",
+        },
+    )
+    card.pop("project")
+    service = BrainReadService(
+        artifact_store=InMemorySessionMemoryArtifactStore(),
+        memory_cards=[card],
+    )
+
+    pack = service.brain_context_resolve(
+        repository="neurons",
+        branch="main",
+        current_files=[],
+        current_request="anything",
+        project=PROJECT,
+    ).to_dict()
+
+    assert pack["current_task"] == ""
+    assert pack["memory_status"]["card_count"] == 0
+
+
 def _seed_couchdb_source(store: InMemoryCouchDBSourceStore) -> str:
     session = TranscriptSession(
         session_id_hash=_sid(),
@@ -347,7 +443,7 @@ def _upsert_runtime_cards(ledger: Ledger) -> None:
             {
                 "preference": "User prefers architecture before implementation.",
                 "explicitness": "explicit",
-                "repeated_count": 1.0,
+                "repeated_count": 1,
                 "confirmation_status": "confirmed",
                 "applies_to": "global",
             },
