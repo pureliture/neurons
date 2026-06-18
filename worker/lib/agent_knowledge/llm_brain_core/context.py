@@ -119,18 +119,19 @@ class BrainReadService:
         card_types: list[str] | None = None,
         limit: int = 8,
     ) -> dict[str, Any]:
+        bounded = max(1, min(int(limit), 100))
         wanted = set(card_types or [])
         terms = _terms(query)
         cards = [
             _card_view(card)
             for card in _project_cards(self.memory_cards, project)
             if (not wanted or str(card.get("card_type")) in wanted) and _matches_terms(card, terms)
-        ][:limit]
+        ][:bounded]
         graph = self.graph_adapter.search_context(
             brain_id=f"/project/{project}",
             query=query,
             entity_types=card_types,
-            limit=limit,
+            limit=bounded,
         )
         result = {
             "memory_status": {"status": "available", "authority": "canonical_card", "count": len(cards)},
