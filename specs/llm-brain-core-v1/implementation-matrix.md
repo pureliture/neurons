@@ -23,10 +23,11 @@ back to grill-to-spec instead of editing the SoT silently.
 | Time-aware drift explanation | implemented from cards | `BrainReadService.brain_drift_explain`; runtime drift test passes | Graph-backed temporal relation smoke pending M6c |
 | PersonaFact check states | implemented | `BrainReadService.brain_persona_check`; tests cover aligned/conflict/drift/insufficient evidence | More evidence/confidence lifecycle cases can be added after graph integration |
 | SourceRef/SpanRef redaction | implemented | `test_source_ref_policy_resolution.py`; `test_contextpack_no_raw_source_refs.py` | Dendrite same-device resolver action remains cross-repo contract work |
-| Per-PC local brain and optional central brain | partial | Local ledger-backed service works offline; `BrainEvent` envelope and central shadow rebuild exist | Export/import scripts and production transport remain pending |
+| Per-PC local brain and optional central brain | partial | Local ledger-backed service works offline; `BrainEvent` envelope, central shadow rebuild, and portable export/import exist | Production transport remains pending |
 | Event/episode central sync, no graph DB file sync | implemented for v1 shadow | `test_central_sync_shadow_rebuild.py` rebuilds derived graph state from BrainEvents | Production transport/runbook remains deferred |
 | RAGFlow bridge only, not core dependency | implemented for bridge contract | Core tests pass with disabled bridge; M9 `document_bridge.py` labels RAGFlow as external read-only evidence and does not override canonical memory | Live RAGFlow smoke remains outside core acceptance |
 | Agent-facing read API | implemented for stdio surface | `mcp-stdio` exposes `brain_context_resolve`, `brain_memory_search`, `brain_incident_search`, `brain_drift_explain`, `brain_persona_get`, `brain_persona_check`, `brain_evidence_get` | HTTP adapter remains optional/deferred |
+| Portable Git/Compose/export-import | implemented for LLM-Brain data archive | `brain-export`/`brain-import` export allowlisted LLM-Brain JSONL tables and specs, excluding raw transcript tables and graph DB files | Neo4j `.dump` backup remains ops/runbook work once live graph exists |
 | Autopilot safety guard | implemented for pre-M9 path | `test_autopilot_no_ragflow_client_before_m9.py` | Review gate and full suite evidence still needed for final close |
 
 ## Milestone Status
@@ -109,6 +110,27 @@ Result:
 
 ```text
 6 passed
+```
+
+Latest portable archive check:
+
+```bash
+cd worker
+uv run pytest -q tests/test_llm_brain_portable_archive.py \
+  tests/test_llm_brain_core_runtime_integration.py
+```
+
+Result:
+
+```text
+11 passed
+```
+
+Script smoke:
+
+```bash
+./scripts/brain-export --help
+./scripts/brain-import --help
 ```
 
 Compose profile static check:
