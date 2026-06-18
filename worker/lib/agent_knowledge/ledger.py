@@ -343,6 +343,35 @@ class Ledger(
                     job_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS llm_brain_session_memory_artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    session_id_hash TEXT NOT NULL,
+                    project TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    artifact_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_llm_brain_artifacts_project_created
+                    ON llm_brain_session_memory_artifacts(project, created_at);
+                CREATE INDEX IF NOT EXISTS idx_llm_brain_artifacts_session
+                    ON llm_brain_session_memory_artifacts(session_id_hash);
+                CREATE TABLE IF NOT EXISTS llm_brain_source_refs (
+                    source_ref_id TEXT PRIMARY KEY,
+                    device_id_hash TEXT NOT NULL,
+                    root_id TEXT NOT NULL,
+                    relative_path_hash TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    sync_policy TEXT NOT NULL,
+                    record_json TEXT NOT NULL,
+                    last_seen_at TEXT DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_llm_brain_source_refs_device_root
+                    ON llm_brain_source_refs(device_id_hash, root_id);
+                CREATE INDEX IF NOT EXISTS idx_llm_brain_source_refs_content_hash
+                    ON llm_brain_source_refs(content_hash);
                 CREATE TABLE IF NOT EXISTS profile_facts (
                     memory_id TEXT PRIMARY KEY,
                     project TEXT NOT NULL,
@@ -1508,7 +1537,6 @@ class Ledger(
                 (data["evidence_id_hash"],),
             ).fetchone()
         return dict(row) if row is not None else {}
-
 
 
 
