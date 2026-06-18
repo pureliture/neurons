@@ -11,6 +11,9 @@ from agent_knowledge.ledger import Ledger
 from agent_knowledge.mcp_server import (
     BRAIN_QUERY_TOOL_NAME,
     BRAIN_RESOLVE_TOOL_NAME,
+    BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+    BRAIN_EVIDENCE_GET_TOOL_NAME,
+    BRAIN_PERSONA_CHECK_TOOL_NAME,
     TOOL_NAME,
     DisabledRagflowClient,
     KnowledgeSearchService,
@@ -19,6 +22,8 @@ from agent_knowledge.mcp_server import (
 )
 from agent_knowledge.memory_card import build_memory_candidate
 from agent_knowledge.memory_miner import build_memory_card_candidate_from_source_span
+from agent_knowledge.llm_brain_core.ledger_adapter import LedgerSourceRefCatalog
+from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
 from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
 
 PROJECT = "workspace-ragflow-advisor"
@@ -59,6 +64,21 @@ def _source_span(**overrides):
 
 def _service(tmp_path: Path) -> KnowledgeSearchService:
     ledger = _ledger(tmp_path)
+    LedgerSourceRefCatalog(ledger).register(
+        source_ref_from_catalog_event(
+            {
+                "source_ref_id": "src_neuron_mcp",
+                "device_id_hash": _h("device-a"),
+                "root_id": "project-root",
+                "relative_path_hash": _h("docs/design.md"),
+                "content_hash": _h("mcp-source"),
+                "mtime": "2026-06-19T00:00:00Z",
+                "size": 100,
+                "sync_policy": "derived_only",
+                "derived_summary": "MCP SourceRef policy evidence is available.",
+            }
+        )
+    )
     curation = CurationService(ledger)
     candidate = curation.add_candidate(
         build_memory_candidate(
@@ -90,7 +110,12 @@ def _service(tmp_path: Path) -> KnowledgeSearchService:
 def test_mcp_tool_list_exposes_neuron_owned_tools():
     names = [tool["name"] for tool in list_tools()]
 
-    assert names == [TOOL_NAME, BRAIN_QUERY_TOOL_NAME, BRAIN_RESOLVE_TOOL_NAME]
+    assert TOOL_NAME in names
+    assert BRAIN_QUERY_TOOL_NAME in names
+    assert BRAIN_RESOLVE_TOOL_NAME in names
+    assert BRAIN_CONTEXT_RESOLVE_TOOL_NAME in names
+    assert BRAIN_PERSONA_CHECK_TOOL_NAME in names
+    assert BRAIN_EVIDENCE_GET_TOOL_NAME in names
 
 
 def test_mcp_brain_query_roundtrip(tmp_path: Path):
@@ -130,6 +155,79 @@ def test_mcp_brain_resolve_roundtrip(tmp_path: Path):
     assert candidates[0]["brain_id"] == f"/project/{PROJECT}"
 
 
+def test_mcp_brain_context_resolve_roundtrip_uses_core_without_ragflow(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+                "arguments": {
+                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
+                    "branch": "codex/llm-brain-core-design",
+                    "current_request": "언어 선호 확인",
+                    "current_files": ["docs/design.md"],
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["memory_status"]["authority"] == "canonical_artifact_and_card"
+    assert result["bridge_status"]["status"] == "disabled"
+    assert result["graph_status"]["authority"] == "derived_index"
+    assert json.loads(response["result"]["content"][0]["text"]) == result
+    assert "/Users/" not in json.dumps(result, sort_keys=True)
+
+
+def test_mcp_brain_persona_check_roundtrip(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_PERSONA_CHECK_TOOL_NAME,
+                "arguments": {"plan": "한국어 응답 정책을 유지한다", "project": PROJECT},
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["status"] == "aligned"
+    assert result["facts"][0]["preference"] == "한국어로 응답한다"
+
+
+def test_mcp_brain_evidence_get_roundtrip_respects_source_ref_policy(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_EVIDENCE_GET_TOOL_NAME,
+                "arguments": {
+                    "source_ref_id": "src_neuron_mcp",
+                    "requesting_device_id_hash": _h("device-a"),
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["resolution_state"] == "derived_only"
+    assert result["reason_code"] == "policy_derived_only"
+    assert result["content"] == "MCP SourceRef policy evidence is available."
+
+
 def test_mcp_stdio_cli_serves_tools_list_without_ragflow_token(tmp_path: Path, monkeypatch, capsys):
     ledger = _ledger(tmp_path)
     request = {"jsonrpc": "2.0", "id": 3, "method": "tools/list"}
@@ -139,8 +237,14 @@ def test_mcp_stdio_cli_serves_tools_list_without_ragflow_token(tmp_path: Path, m
 
     response = json.loads(capsys.readouterr().out)
     assert response["id"] == 3
-    assert [tool["name"] for tool in response["result"]["tools"]] == [
-        TOOL_NAME,
-        BRAIN_QUERY_TOOL_NAME,
-        BRAIN_RESOLVE_TOOL_NAME,
-    ]
+    names = [tool["name"] for tool in response["result"]["tools"]]
+    assert TOOL_NAME in names
+    assert BRAIN_QUERY_TOOL_NAME in names
+    assert BRAIN_RESOLVE_TOOL_NAME in names
+    assert BRAIN_CONTEXT_RESOLVE_TOOL_NAME in names
+
+
+def _h(value):
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(value.encode()).hexdigest()
