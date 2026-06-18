@@ -359,7 +359,7 @@ def test_submit_redacts_private_path_from_couchdb_body(tmp_path):
 def test_submit_quarantines_payload_with_unredactable_private_path(tmp_path):
     """apply_server_redaction 후에도 leak이 남아 있으면 quarantined를 반환한다.
 
-    실제 /Users/ddalkak/... 형태의 경로가 body에 그대로 남아 있을 경우
+    실제 /Users/example/... 형태의 경로가 body에 그대로 남아 있을 경우
     public_ingress_leak_violations가 감지하여 quarantine으로 처리한다.
     """
     import re as _re
