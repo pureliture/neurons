@@ -6,6 +6,7 @@ from agent_knowledge.llm_brain_core import (
     GraphProjectionWorker,
     SourceRefRecord,
     build_ontology_episode_batch,
+    build_ontology_episode_batch_report,
 )
 from agent_knowledge.llm_brain_core.models import SessionMemoryArtifact
 
@@ -115,6 +116,32 @@ def test_projection_worker_projects_full_ontology_batch_and_context_uses_graph_t
     assert pack["current_task"] == "Restore latest task from graph"
     assert pack["last_stopped_at"] == "Use graph task when canonical card store is empty"
     assert pack["graph_status"]["status"] == "available"
+
+
+def test_ontology_batch_reports_bad_card_and_projects_valid_items():
+    graph = FakeGraphMemoryAdapter()
+    worker = GraphProjectionWorker(graph)
+    valid = _card(
+        "mem_valid_task",
+        "task",
+        "Valid task",
+        {
+            "task_state": "Valid task",
+            "next_action": "Continue after malformed card",
+            "status": "open",
+        },
+    )
+    invalid = {"memory_id": "", "card_type": "task"}
+
+    batch = build_ontology_episode_batch_report(memory_cards=[valid, invalid]).to_dict()
+    report = worker.project_batch(memory_cards=[valid, invalid]).to_dict()
+
+    assert len(batch["episodes"]) == 1
+    assert batch["failures"][0]["item_type"] == "memory_card"
+    assert report["status"] == "partial"
+    assert report["attempted"] == 2
+    assert report["projected"] == 1
+    assert report["failed"] == 1
 
 
 def _card(memory_id, card_type, summary, typed_payload):

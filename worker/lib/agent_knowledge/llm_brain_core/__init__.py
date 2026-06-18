@@ -17,7 +17,13 @@ from .models import (
     SessionMemoryArtifact,
     SourceRefRecord,
 )
-from .ontology import build_ontology_episode_batch, episode_from_session_artifact, episode_from_source_ref
+from .ontology import (
+    OntologyEpisodeBatch,
+    build_ontology_episode_batch,
+    build_ontology_episode_batch_report,
+    episode_from_session_artifact,
+    episode_from_source_ref,
+)
 from .projection import GraphProjectionReport, GraphProjectionWorker
 from .source_ref import SourceRefResolver
 from .sync_shadow import CentralBrainShadowRebuilder, CentralShadowRebuildReport
@@ -44,10 +50,12 @@ __all__ = [
     "LedgerSourceRefCatalog",
     "NullGraphMemoryAdapter",
     "OntologyEpisode",
+    "OntologyEpisodeBatch",
     "SessionMemoryArtifact",
     "SourceRefRecord",
     "SourceRefResolver",
     "build_ontology_episode_batch",
+    "build_ontology_episode_batch_report",
     "episode_from_session_artifact",
     "episode_from_source_ref",
 ]

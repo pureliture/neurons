@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from ._util import public_safe_text
 from .models import OntologyEpisode, SessionMemoryArtifact, SourceRefRecord
 from .runtime import episode_from_memory_card
+
+
+@dataclass(frozen=True)
+class OntologyEpisodeBatch:
+    episodes: tuple[OntologyEpisode, ...]
+    failures: tuple[dict[str, Any], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["episodes"] = [episode.to_dict() for episode in self.episodes]
+        data["failures"] = [dict(item) for item in self.failures]
+        return data
 
 
 def episode_from_session_artifact(artifact: SessionMemoryArtifact) -> OntologyEpisode:
@@ -67,11 +80,42 @@ def build_ontology_episode_batch(
     memory_cards: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] = (),
     source_refs: list[SourceRefRecord] | tuple[SourceRefRecord, ...] = (),
 ) -> list[OntologyEpisode]:
+    return list(build_ontology_episode_batch_report(
+        artifacts=artifacts,
+        memory_cards=memory_cards,
+        source_refs=source_refs,
+    ).episodes)
+
+
+def build_ontology_episode_batch_report(
+    *,
+    artifacts: list[SessionMemoryArtifact] | tuple[SessionMemoryArtifact, ...] = (),
+    memory_cards: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] = (),
+    source_refs: list[SourceRefRecord] | tuple[SourceRefRecord, ...] = (),
+) -> OntologyEpisodeBatch:
     episodes: list[OntologyEpisode] = []
+    failures: list[dict[str, Any]] = []
     for artifact in artifacts:
-        episodes.append(episode_from_session_artifact(artifact))
+        try:
+            episodes.append(episode_from_session_artifact(artifact))
+        except Exception as exc:
+            failures.append(_failure("artifact", getattr(artifact, "artifact_id", ""), exc))
     for card in memory_cards:
-        episodes.append(episode_from_memory_card(card))
+        try:
+            episodes.append(episode_from_memory_card(card))
+        except Exception as exc:
+            failures.append(_failure("memory_card", str(card.get("memory_id") or ""), exc))
     for source_ref in source_refs:
-        episodes.append(episode_from_source_ref(source_ref))
-    return episodes
+        try:
+            episodes.append(episode_from_source_ref(source_ref))
+        except Exception as exc:
+            failures.append(_failure("source_ref", getattr(source_ref, "source_ref_id", ""), exc))
+    return OntologyEpisodeBatch(episodes=tuple(episodes), failures=tuple(failures))
+
+
+def _failure(item_type: str, item_id: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "item_type": item_type,
+        "item_id": str(item_id or ""),
+        "reason_code": type(exc).__name__,
+    }
