@@ -10,6 +10,8 @@ from collections.abc import Callable
 from .couchdb_source import build_cli as couchdb_build_cli
 from .couchdb_source import migration_cli
 from .ledger import Ledger
+from .llm_brain_core import cli as llm_brain_core_cli
+from .llm_brain_core import portable_cli as llm_brain_portable_cli
 from .mcp_server import KnowledgeSearchService, build_ragflow_client, run_stdio_server
 from .rag_ingress import state_cli
 from .session_memory import (
@@ -80,6 +82,9 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "transcript-volume-gc": transcript_volume_gc.main,
     "session-memory-quarantine-terminal-skipped": terminal_skipped_quarantine.main,
     "session-memory-repair-zombie-snapshots": zombie_snapshot_repair.main,
+    "brain-context-resolve": llm_brain_core_cli.main,
+    "brain-export": llm_brain_portable_cli.export_main,
+    "brain-import": llm_brain_portable_cli.import_main,
     "backfill": _pending_server_command("backfill"),
     "context-for-prompt": _pending_server_command("context-for-prompt"),
     "derived-memory-resources": _pending_server_command("derived-memory-resources"),

@@ -5,6 +5,10 @@ import sys
 from typing import TextIO
 
 from .ledger import Ledger
+from .llm_brain_core.document_bridge import RagFlowDocumentBridge
+from .llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
+from .llm_brain_core.models import EvidenceRequest
+from .llm_brain_core.runtime import build_runtime_brain_service
 from .ragflow_client import RagflowHttpClient
 from .session_memory.brain_query import resolve_brain_ids, run_brain_query_v2
 from .session_memory.brain_read_model import LegacyLedgerBrainReadModel, build_semantic_recall
@@ -13,6 +17,13 @@ from .session_memory.transcript_model import MAX_TRANSCRIPT_SNIPPET_CHARS, redac
 TOOL_NAME = "knowledge.search"
 BRAIN_QUERY_TOOL_NAME = "brain.query"
 BRAIN_RESOLVE_TOOL_NAME = "brain.resolve"
+BRAIN_CONTEXT_RESOLVE_TOOL_NAME = "brain_context_resolve"
+BRAIN_MEMORY_SEARCH_TOOL_NAME = "brain_memory_search"
+BRAIN_INCIDENT_SEARCH_TOOL_NAME = "brain_incident_search"
+BRAIN_DRIFT_EXPLAIN_TOOL_NAME = "brain_drift_explain"
+BRAIN_PERSONA_GET_TOOL_NAME = "brain_persona_get"
+BRAIN_PERSONA_CHECK_TOOL_NAME = "brain_persona_check"
+BRAIN_EVIDENCE_GET_TOOL_NAME = "brain_evidence_get"
 
 
 class DisabledRagflowClient:
@@ -77,6 +88,108 @@ def list_tools() -> list[dict]:
                 "additionalProperties": False,
             },
         },
+        {
+            "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+            "description": "Resolve the current LLM-Brain ContextPack from canonical artifacts/cards plus derived graph status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repository": {"type": "string"},
+                    "branch": {"type": "string"},
+                    "current_files": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "current_request": {"type": "string"},
+                    "project": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
+                },
+                "required": ["repository", "branch", "current_request"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_MEMORY_SEARCH_TOOL_NAME,
+            "description": "Search accepted/current LLM-Brain memory with derived graph results labeled separately.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "project": {"type": "string"},
+                    "card_types": {"type": "array", "items": {"type": "string"}},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
+                },
+                "required": ["query", "project"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_INCIDENT_SEARCH_TOOL_NAME,
+            "description": "Search prior incidents, attempts, fixes, verifications, and do-not-apply cases.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symptom": {"type": "string"},
+                    "project": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+                },
+                "required": ["symptom", "project"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_DRIFT_EXPLAIN_TOOL_NAME,
+            "description": "Explain design, persona, or project assumption drift from canonical memory cards.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "project": {"type": "string"},
+                },
+                "required": ["subject", "project"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_PERSONA_GET_TOOL_NAME,
+            "description": "Return persona facts from accepted/current LLM-Brain memory.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string"},
+                    "scope": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_PERSONA_CHECK_TOOL_NAME,
+            "description": "Check a plan against accepted persona facts and return aligned/conflict/drift status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "plan": {"type": "string"},
+                    "project": {"type": "string"},
+                },
+                "required": ["plan"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_EVIDENCE_GET_TOOL_NAME,
+            "description": "Resolve a SourceRef/SpanRef through the LLM-Brain evidence policy without exposing raw private paths.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_ref_id": {"type": "string"},
+                    "requesting_device_id_hash": {"type": "string"},
+                    "span_ref_id": {"type": "string"},
+                    "approval_ref": {"type": "string"},
+                    "expected_content_hash": {"type": "string"},
+                    "max_bytes": {"type": "integer", "minimum": 1, "maximum": 65536, "default": 4096},
+                    "redaction_profile": {"type": "string", "default": "public_safe"},
+                },
+                "required": ["source_ref_id", "requesting_device_id_hash"],
+                "additionalProperties": False,
+            },
+        },
     ]
 
 
@@ -95,6 +208,16 @@ class KnowledgeSearchService:
         self.dataset_ids = dataset_ids
         self.allow_private_results = bool(allow_private_results)
         self.native_memory_id = native_memory_id
+
+    def core_brain(self, *, project: str = ""):
+        read_model = LegacyLedgerBrainReadModel(self.ledger)
+        return build_runtime_brain_service(
+            project=project,
+            artifact_store=LedgerSessionMemoryArtifactStore(self.ledger),
+            read_model=read_model,
+            source_catalog=LedgerSourceRefCatalog(self.ledger),
+            document_bridge=RagFlowDocumentBridge(ragflow=self.ragflow, dataset_ids=self.dataset_ids),
+        )
 
     def search(
         self,
@@ -271,14 +394,79 @@ def run_stdio_server(
 def _call_tool(params: dict, service: KnowledgeSearchService) -> dict:
     tool_name = params.get("name")
     arguments = params.get("arguments") or {}
+    if tool_name == BRAIN_CONTEXT_RESOLVE_TOOL_NAME:
+        current_files = arguments.get("current_files") or []
+        if not isinstance(current_files, list):
+            raise ValueError("current_files must be an array")
+        project = _project_arg(arguments)
+        result = service.core_brain(project=project).brain_context_resolve(
+            repository=str(arguments.get("repository") or ""),
+            branch=str(arguments.get("branch") or ""),
+            current_files=[str(item) for item in current_files],
+            current_request=str(arguments.get("current_request") or ""),
+            project=project or None,
+            limit=_bounded_limit(arguments.get("limit"), default=8, maximum=20),
+        ).to_dict()
+        return _tool_result(result)
+    if tool_name == BRAIN_MEMORY_SEARCH_TOOL_NAME:
+        card_types = arguments.get("card_types")
+        if card_types is not None and not isinstance(card_types, list):
+            raise ValueError("card_types must be an array")
+        project = _project_arg(arguments)
+        result = service.core_brain(project=project).brain_memory_search(
+            query=str(arguments.get("query") or ""),
+            project=project,
+            card_types=[str(item) for item in card_types] if isinstance(card_types, list) else None,
+            limit=_bounded_limit(arguments.get("limit"), default=8, maximum=20),
+        )
+        return _tool_result(result)
+    if tool_name == BRAIN_INCIDENT_SEARCH_TOOL_NAME:
+        project = _project_arg(arguments)
+        result = service.core_brain(project=project).brain_incident_search(
+            symptom=str(arguments.get("symptom") or ""),
+            project=project,
+            limit=_bounded_limit(arguments.get("limit"), default=5, maximum=20),
+        )
+        return _tool_result(result)
+    if tool_name == BRAIN_DRIFT_EXPLAIN_TOOL_NAME:
+        project = _project_arg(arguments)
+        result = service.core_brain(project=project).brain_drift_explain(
+            subject=str(arguments.get("subject") or ""),
+            project=project,
+        )
+        return _tool_result(result)
+    if tool_name == BRAIN_PERSONA_GET_TOOL_NAME:
+        project = _project_arg(arguments)
+        result = service.core_brain(project=project).brain_persona_get(
+            project=project or None,
+            scope=str(arguments.get("scope") or "") or None,
+        )
+        return _tool_result(result)
+    if tool_name == BRAIN_PERSONA_CHECK_TOOL_NAME:
+        project = _project_arg(arguments)
+        result = service.core_brain(project=project).brain_persona_check(
+            plan=str(arguments.get("plan") or ""),
+            project=project or None,
+        )
+        return _tool_result(result)
+    if tool_name == BRAIN_EVIDENCE_GET_TOOL_NAME:
+        result = service.core_brain().brain_evidence_get(
+            EvidenceRequest(
+                source_ref_id=str(arguments.get("source_ref_id") or ""),
+                requesting_device_id_hash=str(arguments.get("requesting_device_id_hash") or ""),
+                span_ref_id=str(arguments.get("span_ref_id") or ""),
+                approval_ref=str(arguments.get("approval_ref") or ""),
+                expected_content_hash=str(arguments.get("expected_content_hash") or ""),
+                max_bytes=_bounded_limit(arguments.get("max_bytes"), default=4096, maximum=65536),
+                redaction_profile=str(arguments.get("redaction_profile") or "public_safe"),
+            )
+        )
+        return _tool_result(result)
     if tool_name == BRAIN_QUERY_TOOL_NAME:
-        raw_limit = arguments.get("limit", 8)
-        if isinstance(raw_limit, bool) or not isinstance(raw_limit, (int, float)):
-            raw_limit = 8
         result = service.brain_query(
             brain_id=str(arguments.get("brain_id") or ""),
             query=str(arguments.get("query") or ""),
-            limit=int(raw_limit),
+            limit=_bounded_limit(arguments.get("limit"), default=8, maximum=10),
         )
         return _tool_result(result)
     if tool_name == BRAIN_RESOLVE_TOOL_NAME:
@@ -299,6 +487,22 @@ def _call_tool(params: dict, service: KnowledgeSearchService) -> dict:
         include_private=bool(arguments.get("include_private", False)),
     )
     return _tool_result(result)
+
+
+def _bounded_limit(value, *, default: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return max(1, min(maximum, int(value)))
+
+
+def _project_arg(arguments: dict) -> str:
+    explicit = str(arguments.get("project") or "").strip()
+    if explicit:
+        return explicit
+    repository = str(arguments.get("repository") or "").strip().rstrip("/\\")
+    if not repository:
+        return ""
+    return repository.replace("\\", "/").split("/")[-1]
 
 
 def _tool_result(result: dict) -> dict:

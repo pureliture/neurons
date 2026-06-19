@@ -25,6 +25,10 @@ class ComposeConfigTest {
         assertThat(compose).contains("127.0.0.1:4222:4222");
         assertThat(compose).contains("127.0.0.1:18080:8080");
         assertThat(compose).contains("SPRING_MAIN_WEB_APPLICATION_TYPE: none");
+        assertThat(compose).contains("llm-brain-neo4j:");
+        assertThat(compose).contains("NEO4J_AUTH: ${LLM_BRAIN_NEO4J_USER:-neo4j}/${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}");
+        assertThat(compose).contains("LLM_BRAIN_NEO4J_URI: ${LLM_BRAIN_NEO4J_URI:-bolt://llm-brain-neo4j:7687}");
+        assertThat(compose).doesNotContain("\n      NEO4J_USER:");
         assertThat(compose).doesNotContain("ragflow-server");
         assertThat(compose).doesNotContain("ragflow-redis");
         assertThat(compose).doesNotContain("ragflow-mysql");

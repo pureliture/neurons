@@ -138,6 +138,35 @@ services:
       - nats-jetstream
       - ingress-api
 
+  llm-brain-neo4j:
+    profiles: ["llm-brain-graph"]
+    image: neo4j:5.26-community
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${LLM_BRAIN_NEO4J_USER:-neo4j}/${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}
+      # Adapter/client-facing env uses LLM_BRAIN_* keys; avoid unsupported
+      # NEO4J_USER/NEO4J_PASSWORD container config keys.
+      LLM_BRAIN_NEO4J_URI: ${LLM_BRAIN_NEO4J_URI:-bolt://llm-brain-neo4j:7687}
+      LLM_BRAIN_NEO4J_USER: ${LLM_BRAIN_NEO4J_USER:-neo4j}
+      LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}
+      NEO4J_server_memory_heap_initial__size: ${LLM_BRAIN_NEO4J_HEAP_INITIAL:-512m}
+      NEO4J_server_memory_heap_max__size: ${LLM_BRAIN_NEO4J_HEAP_MAX:-1g}
+      NEO4J_server_memory_pagecache_size: ${LLM_BRAIN_NEO4J_PAGECACHE:-512m}
+      NEO4J_dbms_security_procedures_unrestricted: ${LLM_BRAIN_NEO4J_UNRESTRICTED_PROCEDURES:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:7474 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "127.0.0.1:${LLM_BRAIN_NEO4J_HTTP_PORT:-17474}:7474"
+      - "127.0.0.1:${LLM_BRAIN_NEO4J_BOLT_PORT:-17687}:7687"
+    volumes:
+      - llm-brain-neo4j-data:/data
+      - llm-brain-neo4j-logs:/logs
+
 volumes:
   nats_data:
   rag-ingress-live-state:
+  llm-brain-neo4j-data:
+  llm-brain-neo4j-logs:
