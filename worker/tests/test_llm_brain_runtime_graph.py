@@ -17,6 +17,13 @@ def test_graph_env_enabled_reads_explicit_switch():
     assert graph_env_enabled({}) is False
 
 
+def test_graph_env_enabled_respects_explicit_empty_environment(monkeypatch):
+    monkeypatch.setenv("LLM_BRAIN_GRAPH_ENABLED", "true")
+
+    assert graph_env_enabled({}) is False
+    assert isinstance(build_graph_adapter_from_env({}, required=False), NullGraphMemoryAdapter)
+
+
 def test_graph_adapter_required_but_disabled_fails_before_backend_initialization():
     with pytest.raises(ValueError, match="graph is required but not enabled"):
         build_graph_adapter_from_env({}, enabled=False, required=True)

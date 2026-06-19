@@ -393,6 +393,22 @@ def test_mcp_stdio_cli_serves_tools_list_without_ragflow_token(tmp_path: Path, m
     assert BRAIN_CONTEXT_RESOLVE_TOOL_NAME in names
 
 
+def test_mcp_stdio_graph_initialization_error_does_not_print_raw_details(tmp_path: Path, monkeypatch, capsys):
+    ledger = _ledger(tmp_path)
+    monkeypatch.setattr(
+        "agent_knowledge.cli.build_graph_adapter_from_env",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("/Users/example/private TOKEN=secret")),
+    )
+
+    rc = main(["mcp-stdio", "--ledger", str(ledger.path), "--enable-graph", "--graph-required"])
+    output = capsys.readouterr()
+
+    assert rc == 1
+    assert "graph adapter unavailable: RuntimeError" in output.err
+    assert "/Users/" not in output.err
+    assert "TOKEN" not in output.err
+
+
 @pytest.mark.parametrize("agent_name", ["codex", "claude-code"])
 def test_mcp_stdio_cli_serves_contextpack_for_codex_and_claude_code_agents(
     tmp_path: Path,
