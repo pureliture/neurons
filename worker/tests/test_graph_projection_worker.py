@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent_knowledge.llm_brain_core import FakeGraphMemoryAdapter, GraphProjectionWorker
+from agent_knowledge.llm_brain_core import FakeGraphMemoryAdapter, GraphProjectionWorker, NullGraphMemoryAdapter
 
 
 def test_graph_projection_worker_projects_memory_cards_to_derived_graph():
@@ -57,13 +57,74 @@ def test_graph_projection_worker_reports_mapping_failures_without_throwing():
     assert report["failures"][0]["phase"] == "map"
 
 
-def _card(memory_id, card_type, summary, typed_payload):
+def test_graph_projection_worker_treats_duplicate_only_projection_as_success():
+    graph = FakeGraphMemoryAdapter()
+    worker = GraphProjectionWorker(graph)
+    card = _card(
+        "mem_graph_duplicate",
+        "task",
+        "Duplicate graph task",
+        {"task_state": "Duplicate graph task"},
+    )
+
+    worker.project_memory_cards([card])
+    report = worker.project_memory_cards([card]).to_dict()
+
+    assert report["status"] == "succeeded"
+    assert report["projected"] == 0
+    assert report["duplicates"] == 1
+    assert report["failed"] == 0
+
+
+def test_graph_projection_worker_does_not_count_unavailable_graph_as_projected():
+    worker = GraphProjectionWorker(NullGraphMemoryAdapter())
+
+    report = worker.project_memory_cards(
+        [
+            _card(
+                "mem_graph_unavailable",
+                "task",
+                "Unavailable graph task",
+                {"task_state": "Unavailable graph task"},
+            )
+        ]
+    ).to_dict()
+
+    assert report["status"] == "failed"
+    assert report["projected"] == 0
+    assert report["failed"] == 1
+    assert report["failures"][0]["reason_code"] == "unavailable"
+
+
+def test_fake_graph_memory_adapter_filters_by_brain_id():
+    graph = FakeGraphMemoryAdapter()
+    worker = GraphProjectionWorker(graph)
+    worker.project_memory_cards(
+        [
+            _card("mem_graph_neurons", "task", "Neurons graph task", {"task_state": "Neurons graph task"}),
+            _card(
+                "mem_graph_other",
+                "task",
+                "Neurons graph task from other brain",
+                {"task_state": "Neurons graph task from other brain"},
+                brain_id="/project/other",
+                project="other",
+            ),
+        ]
+    )
+
+    result = graph.search_context(brain_id="/project/neurons", query="Neurons graph task", limit=10)
+
+    assert [episode.payload["brain_id"] for episode in result.episodes] == ["/project/neurons"]
+
+
+def _card(memory_id, card_type, summary, typed_payload, *, brain_id="/project/neurons", project="neurons"):
     return {
         "memory_id": memory_id,
-        "brain_id": "/project/neurons",
+        "brain_id": brain_id,
         "card_type": card_type,
         "scope": "project",
-        "project": "neurons",
+        "project": project,
         "provider": "codex",
         "title": summary,
         "summary": summary,

@@ -137,6 +137,8 @@ def test_persona_check_states():
 
 
 def _episode(entity_type, natural_id, payload):
+    payload = dict(payload)
+    payload.setdefault("brain_id", "/project/neurons")
     return OntologyEpisode.from_payload(
         event_id=f"evt_{natural_id.replace(':', '_')}",
         entity_type=entity_type,

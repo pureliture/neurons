@@ -76,7 +76,7 @@ uv run pytest -q
 Result:
 
 ```text
-763 passed, 7 skipped, 1 warning
+773 passed, 7 skipped, 1 warning
 ```
 
 Ubuntu CouchDB read-only adapter smoke:
@@ -210,7 +210,7 @@ uv run pytest -q
 Result:
 
 ```text
-754 passed, 7 skipped, 1 warning
+773 passed, 7 skipped, 1 warning
 ```
 
 Dendrite review:

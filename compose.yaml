@@ -143,7 +143,12 @@ services:
     image: neo4j:5.26-community
     restart: unless-stopped
     environment:
-      NEO4J_AUTH: ${LLM_BRAIN_NEO4J_AUTH:-neo4j/llmbrain}
+      NEO4J_AUTH: ${LLM_BRAIN_NEO4J_USER:-neo4j}/${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}
+      # Adapter/client-facing env uses LLM_BRAIN_* keys; avoid unsupported
+      # NEO4J_USER/NEO4J_PASSWORD container config keys.
+      LLM_BRAIN_NEO4J_URI: ${LLM_BRAIN_NEO4J_URI:-bolt://llm-brain-neo4j:7687}
+      LLM_BRAIN_NEO4J_USER: ${LLM_BRAIN_NEO4J_USER:-neo4j}
+      LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}
       NEO4J_server_memory_heap_initial__size: ${LLM_BRAIN_NEO4J_HEAP_INITIAL:-512m}
       NEO4J_server_memory_heap_max__size: ${LLM_BRAIN_NEO4J_HEAP_MAX:-1g}
       NEO4J_server_memory_pagecache_size: ${LLM_BRAIN_NEO4J_PAGECACHE:-512m}

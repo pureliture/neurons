@@ -543,6 +543,8 @@ def _card(memory_id, card_type, summary, typed_payload, currentness="current", s
 def _episode(entity_type, natural_id, payload):
     from agent_knowledge.llm_brain_core.models import OntologyEpisode
 
+    payload = dict(payload)
+    payload.setdefault("brain_id", f"/project/{PROJECT}")
     return OntologyEpisode.from_payload(
         event_id=f"evt_{natural_id.replace(':', '_')}",
         entity_type=entity_type,

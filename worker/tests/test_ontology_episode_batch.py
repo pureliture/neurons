@@ -144,6 +144,15 @@ def test_ontology_batch_reports_bad_card_and_projects_valid_items():
     assert report["failed"] == 1
 
 
+def test_ontology_batch_reports_non_mapping_memory_card_without_crashing():
+    batch = build_ontology_episode_batch_report(memory_cards=[object()]).to_dict()
+
+    assert batch["episodes"] == []
+    assert batch["failures"][0]["item_type"] == "memory_card"
+    assert batch["failures"][0]["item_id"] == ""
+    assert batch["failures"][0]["reason_code"] in {"AttributeError", "TypeError"}
+
+
 def _card(memory_id, card_type, summary, typed_payload):
     return {
         "memory_id": memory_id,

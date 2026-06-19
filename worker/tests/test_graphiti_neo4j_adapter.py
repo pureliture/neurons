@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from agent_knowledge.llm_brain_core.graphiti_adapter import (
     GraphitiNeo4jConfig,
     GraphitiNeo4jGraphMemoryAdapter,
+    _datetime_to_iso,
+    _episode_node_to_ontology,
 )
 from agent_knowledge.llm_brain_core.models import OntologyEpisode
 
@@ -105,6 +107,17 @@ def test_graphiti_adapters_share_single_async_loop_runner():
     second = GraphitiNeo4jGraphMemoryAdapter(_FakeGraphiti())
 
     assert first._runner is second._runner
+
+
+def test_graphiti_episode_rehydration_rejects_missing_required_fields():
+    malformed = SimpleNamespace(content=json.dumps({"episode_id": "episode:partial"}))
+
+    assert _episode_node_to_ontology(malformed) is None
+
+
+def test_graphiti_datetime_conversion_does_not_fabricate_missing_times():
+    assert _datetime_to_iso(None) == ""
+    assert _datetime_to_iso("not-a-datetime") == ""
 
 
 class _FakeGraphiti:

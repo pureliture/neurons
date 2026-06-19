@@ -13,6 +13,7 @@ from agent_knowledge.mcp_server import (
     BRAIN_RESOLVE_TOOL_NAME,
     BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
     BRAIN_EVIDENCE_GET_TOOL_NAME,
+    BRAIN_MEMORY_SEARCH_TOOL_NAME,
     BRAIN_PERSONA_CHECK_TOOL_NAME,
     TOOL_NAME,
     DisabledRagflowClient,
@@ -209,6 +210,59 @@ def test_mcp_brain_context_resolve_derives_project_when_omitted(tmp_path: Path):
     assert result["persona_constraints"][0]["preference"] == "한국어로 응답한다"
 
 
+def test_mcp_brain_context_resolve_includes_configured_read_only_bridge(tmp_path: Path):
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        ragflow=_FakeBridgeRagflow(),
+        dataset_ids=["ds_docs"],
+        allow_private_results=True,
+    )
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+                "arguments": {
+                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
+                    "current_request": "RAGFlow bridge citation",
+                    "current_files": [],
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["bridge_status"]["status"] == "available"
+    assert result["bridge_evidence"][0]["authority"] == "external_document_bridge"
+    assert result["bridge_evidence"][0]["title"] == "Bridge citation"
+
+
+def test_mcp_brain_memory_search_derives_project_from_repository(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_MEMORY_SEARCH_TOOL_NAME,
+                "arguments": {
+                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
+                    "query": "한국어 응답",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["memory_status"]["count"] == 1
+    assert result["results"][0]["summary"] == "한국어로 응답한다"
+
+
 def test_mcp_brain_persona_check_roundtrip(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -293,3 +347,18 @@ def _h(value):
     import hashlib
 
     return "sha256:" + hashlib.sha256(value.encode()).hexdigest()
+
+
+class _FakeBridgeRagflow:
+    def retrieve(self, query, dataset_ids, filters=None, limit=10):
+        assert "RAGFlow bridge" in query
+        assert dataset_ids == ["ds_docs"]
+        assert filters == {"project": PROJECT}
+        return [
+            {
+                "title": "Bridge citation",
+                "summary": "RAGFlow bridge remains read only.",
+                "score": 0.91,
+                "source_ref_id": "src_bridge_citation",
+            }
+        ][:limit]

@@ -5,6 +5,7 @@ import sys
 from typing import TextIO
 
 from .ledger import Ledger
+from .llm_brain_core.document_bridge import RagFlowDocumentBridge
 from .llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
 from .llm_brain_core.models import EvidenceRequest
 from .llm_brain_core.runtime import build_runtime_brain_service
@@ -215,6 +216,7 @@ class KnowledgeSearchService:
             artifact_store=LedgerSessionMemoryArtifactStore(self.ledger),
             read_model=read_model,
             source_catalog=LedgerSourceRefCatalog(self.ledger),
+            document_bridge=RagFlowDocumentBridge(ragflow=self.ragflow, dataset_ids=self.dataset_ids),
         )
 
     def search(
@@ -396,7 +398,7 @@ def _call_tool(params: dict, service: KnowledgeSearchService) -> dict:
         current_files = arguments.get("current_files") or []
         if not isinstance(current_files, list):
             raise ValueError("current_files must be an array")
-        project = str(arguments.get("project") or "")
+        project = _project_arg(arguments)
         result = service.core_brain(project=project).brain_context_resolve(
             repository=str(arguments.get("repository") or ""),
             branch=str(arguments.get("branch") or ""),
@@ -410,36 +412,41 @@ def _call_tool(params: dict, service: KnowledgeSearchService) -> dict:
         card_types = arguments.get("card_types")
         if card_types is not None and not isinstance(card_types, list):
             raise ValueError("card_types must be an array")
-        result = service.core_brain(project=str(arguments.get("project") or "")).brain_memory_search(
+        project = _project_arg(arguments)
+        result = service.core_brain(project=project).brain_memory_search(
             query=str(arguments.get("query") or ""),
-            project=str(arguments.get("project") or ""),
+            project=project,
             card_types=[str(item) for item in card_types] if isinstance(card_types, list) else None,
             limit=_bounded_limit(arguments.get("limit"), default=8, maximum=20),
         )
         return _tool_result(result)
     if tool_name == BRAIN_INCIDENT_SEARCH_TOOL_NAME:
-        result = service.core_brain(project=str(arguments.get("project") or "")).brain_incident_search(
+        project = _project_arg(arguments)
+        result = service.core_brain(project=project).brain_incident_search(
             symptom=str(arguments.get("symptom") or ""),
-            project=str(arguments.get("project") or ""),
+            project=project,
             limit=_bounded_limit(arguments.get("limit"), default=5, maximum=20),
         )
         return _tool_result(result)
     if tool_name == BRAIN_DRIFT_EXPLAIN_TOOL_NAME:
-        result = service.core_brain(project=str(arguments.get("project") or "")).brain_drift_explain(
+        project = _project_arg(arguments)
+        result = service.core_brain(project=project).brain_drift_explain(
             subject=str(arguments.get("subject") or ""),
-            project=str(arguments.get("project") or ""),
+            project=project,
         )
         return _tool_result(result)
     if tool_name == BRAIN_PERSONA_GET_TOOL_NAME:
-        result = service.core_brain(project=str(arguments.get("project") or "")).brain_persona_get(
-            project=str(arguments.get("project") or "") or None,
+        project = _project_arg(arguments)
+        result = service.core_brain(project=project).brain_persona_get(
+            project=project or None,
             scope=str(arguments.get("scope") or "") or None,
         )
         return _tool_result(result)
     if tool_name == BRAIN_PERSONA_CHECK_TOOL_NAME:
-        result = service.core_brain(project=str(arguments.get("project") or "")).brain_persona_check(
+        project = _project_arg(arguments)
+        result = service.core_brain(project=project).brain_persona_check(
             plan=str(arguments.get("plan") or ""),
-            project=str(arguments.get("project") or "") or None,
+            project=project or None,
         )
         return _tool_result(result)
     if tool_name == BRAIN_EVIDENCE_GET_TOOL_NAME:
@@ -486,6 +493,16 @@ def _bounded_limit(value, *, default: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return default
     return max(1, min(maximum, int(value)))
+
+
+def _project_arg(arguments: dict) -> str:
+    explicit = str(arguments.get("project") or "").strip()
+    if explicit:
+        return explicit
+    repository = str(arguments.get("repository") or "").strip().rstrip("/\\")
+    if not repository:
+        return ""
+    return repository.replace("\\", "/").split("/")[-1]
 
 
 def _tool_result(result: dict) -> dict:
