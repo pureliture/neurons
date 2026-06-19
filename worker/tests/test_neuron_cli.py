@@ -33,6 +33,7 @@ def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
         "derived-memory-resources",
         "session-memory-quarantine-terminal-skipped",
         "session-memory-repair-zombie-snapshots",
+        "brain-context-resolve",
     ):
         assert command in COMMAND_HANDLERS
         assert command in output
