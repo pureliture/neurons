@@ -327,6 +327,8 @@ that referenced `GRAPH_ENABLED` were incorrect.
 | `LLM_BRAIN_EMBEDDING_DIM` | — | `1024` | Embedding dimension (int). |
 | `LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT` | — | `true` | Store raw episode content. |
 | `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES` | — | `false` | Entity extraction; production default is episode-only. |
+| `LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS` | — | `30` | Per-call wait (s) for graph reads; past it a read degrades to `status="error"`. |
+| `LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS` | — | `300` | Per-call wait (s) for graph writes (longer for entity-extraction LLM); past it the upsert fails. |
 
 The operational copy of this table, with degrade handling and the public-output
 checklist, lives in `docs/runbooks/LLM_BRAIN_CORE_V1_LOCAL_OPS.md`. The

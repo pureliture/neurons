@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -9,8 +11,11 @@ import pytest
 
 from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
 from agent_knowledge.llm_brain_core.graphiti_adapter import (
+    DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
+    DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS,
     GraphitiNeo4jConfig,
     GraphitiNeo4jGraphMemoryAdapter,
+    _AsyncLoopRunner,
     _datetime_to_iso,
     _episode_node_to_ontology,
 )
@@ -169,6 +174,106 @@ def test_graphiti_adapters_share_single_async_loop_runner():
     assert first._runner is second._runner
 
 
+def test_async_loop_runner_times_out_and_cancels_pending_call():
+    # Deterministic timeout path: a coroutine that never finishes within the
+    # tiny bound must raise a TimeoutError and have its future cancelled, so a
+    # hung backend call does not block the shared loop forever.
+    runner = _AsyncLoopRunner(default_timeout=5.0)
+    started = asyncio.Event()
+
+    async def _never_returns():
+        started.set()
+        await asyncio.sleep(60)
+
+    try:
+        with pytest.raises(FuturesTimeoutError):
+            runner.run(_never_returns, timeout=0.05)
+    finally:
+        runner.shutdown()
+
+
+def test_async_loop_runner_uses_default_timeout_when_unspecified():
+    runner = _AsyncLoopRunner(default_timeout=0.05)
+
+    async def _slow():
+        await asyncio.sleep(60)
+
+    try:
+        with pytest.raises(FuturesTimeoutError):
+            runner.run(_slow)
+    finally:
+        runner.shutdown()
+
+
+def test_async_loop_runner_shutdown_is_idempotent():
+    runner = _AsyncLoopRunner(default_timeout=1.0)
+    runner.shutdown()
+    # A second shutdown must not raise even though the loop is already closed.
+    runner.shutdown()
+
+
+def test_search_context_read_timeout_degrades_to_error_status():
+    # A read that exceeds the read timeout must surface as status='error', never
+    # as a false 'available' empty read.
+    runner = _AsyncLoopRunner(default_timeout=5.0)
+    graphiti = _SlowGraphiti(delay=60)
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        read_timeout_seconds=0.05,
+        runner=runner,
+    )
+    try:
+        result = adapter.search_context(brain_id="/project/neurons", query="slow", limit=5)
+    finally:
+        runner.shutdown()
+
+    assert result.status == "error"
+    assert result.details == ("TimeoutError",)
+
+
+def test_upsert_episode_write_timeout_propagates_as_timeout_error():
+    runner = _AsyncLoopRunner(default_timeout=5.0)
+    graphiti = _SlowGraphiti(delay=60)
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        write_timeout_seconds=0.05,
+        runner=runner,
+    )
+    episode = _episode("Task", "task:slow-write", {"brain_id": "/project/neurons", "task": "slow"})
+    try:
+        with pytest.raises(FuturesTimeoutError):
+            adapter.upsert_episode(episode)
+    finally:
+        runner.shutdown()
+
+
+def test_graphiti_config_reads_split_read_write_timeouts_from_env():
+    config = GraphitiNeo4jConfig.from_env(
+        {
+            "LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS": "12.5",
+            "LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS": "600",
+        }
+    )
+
+    assert config.read_timeout_seconds == 12.5
+    assert config.write_timeout_seconds == 600.0
+
+
+def test_graphiti_config_falls_back_to_default_timeouts_on_bad_env():
+    config = GraphitiNeo4jConfig.from_env(
+        {
+            "LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS": "not-a-number",
+            "LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS": "-1",
+        }
+    )
+
+    assert config.read_timeout_seconds == DEFAULT_GRAPH_READ_TIMEOUT_SECONDS
+    assert config.write_timeout_seconds == DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS
+
+
 def test_graphiti_episode_rehydration_rejects_missing_required_fields():
     malformed = SimpleNamespace(content=json.dumps({"episode_id": "episode:partial"}))
 
@@ -302,6 +407,26 @@ class _FakeGraphiti:
         _ = reference_time
         _ = group_ids
         return list(self.episodes[-last_n:])
+
+
+class _SlowGraphiti:
+    """Graphiti stand-in whose async calls sleep past the configured timeout."""
+
+    def __init__(self, *, delay: float) -> None:
+        self._delay = float(delay)
+        self.driver = _FakeDriver()
+
+    async def add_episode(self, **kwargs):
+        await asyncio.sleep(self._delay)
+        return SimpleNamespace(uuid="never")
+
+    async def search(self, query, *, group_ids=None, num_results=10):
+        await asyncio.sleep(self._delay)
+        return []
+
+    async def retrieve_episodes(self, *, reference_time, last_n=3, group_ids=None):
+        await asyncio.sleep(self._delay)
+        return []
 
 
 def _episode(entity_type: str, natural_id: str, payload: dict) -> OntologyEpisode:

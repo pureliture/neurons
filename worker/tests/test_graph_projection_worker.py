@@ -122,6 +122,67 @@ def test_graph_projection_worker_counts_unavailable_backend_as_failed():
     assert report["failures"][0]["reason_code"] == "failed"
 
 
+def test_resume_skips_already_projected_episodes_without_upsert_round_trip():
+    # A re-run with the prior run's episode_ids must skip those episodes entirely
+    # (no upsert call), counted as skipped_resumed, not duplicate.
+    counting = _CountingUpsertAdapter()
+    worker = GraphProjectionWorker(counting)
+    card = _card(
+        "mem_resume",
+        "task",
+        "Resume graph task",
+        {"task_state": "Resume graph task", "next_action": "resume"},
+    )
+
+    first = worker.project_memory_cards([card]).to_dict()
+    projected_id = first["episode_ids"][0]
+    counting.calls = 0
+
+    resumed = worker.project_memory_cards(
+        [card], resume_projected_ids={projected_id}
+    ).to_dict()
+
+    assert first["projected"] == 1
+    assert resumed["skipped_resumed"] == 1
+    assert resumed["projected"] == 0
+    assert resumed["duplicates"] == 0
+    assert resumed["status"] == "succeeded"
+    # No upsert round-trip happened on the resumed run.
+    assert counting.calls == 0
+
+
+def test_resume_only_skips_listed_ids_and_projects_the_rest():
+    graph = FakeGraphMemoryAdapter()
+    worker = GraphProjectionWorker(graph)
+    done = _card("mem_done", "task", "Done task", {"task_state": "Done task"})
+    new = _card("mem_new", "task", "New task", {"task_state": "New task"})
+
+    seed = worker.project_memory_cards([done]).to_dict()
+    done_id = seed["episode_ids"][0]
+
+    report = worker.project_memory_cards(
+        [done, new], resume_projected_ids={done_id}
+    ).to_dict()
+
+    assert report["skipped_resumed"] == 1
+    assert report["projected"] == 1
+    assert report["attempted"] == 2
+
+
+class _CountingUpsertAdapter:
+    def __init__(self):
+        self.calls = 0
+
+    def upsert_episode(self, episode):
+        self.calls += 1
+        return "inserted"
+
+    def search_context(self, *, brain_id, query, entity_types=None, limit=10):
+        from agent_knowledge.llm_brain_core.models import GraphMemoryResult
+
+        return GraphMemoryResult(status="available")
+
+
 def test_fake_graph_memory_adapter_filters_by_brain_id():
     graph = FakeGraphMemoryAdapter()
     worker = GraphProjectionWorker(graph)
