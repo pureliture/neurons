@@ -64,11 +64,13 @@ class GraphProjectionWorker:
         artifacts: list[SessionMemoryArtifact] | None = None,
         memory_cards: list[dict[str, Any]] | None = None,
         source_refs: list[SourceRefRecord] | None = None,
+        project: str = "",
     ) -> GraphProjectionReport:
         batch = build_ontology_episode_batch_report(
             artifacts=artifacts or [],
             memory_cards=memory_cards or [],
             source_refs=source_refs or [],
+            project=project,
         )
         report = self.project_episodes(list(batch.episodes))
         failures = tuple([*batch.failures, *report.failures])
