@@ -74,6 +74,30 @@ def test_graphiti_adapter_search_rehydrates_domain_episode_and_graph_fact():
     assert "/" not in graphiti.search_calls[0]["group_ids"][0]
 
 
+def test_graphiti_adapter_keeps_episode_retrieval_when_edge_index_is_missing():
+    graphiti = _FakeGraphiti()
+    graphiti.raise_on_search = RuntimeError("missing edge index")
+    task = _episode("Task", "task:episode-only", {"brain_id": "/project/neurons", "task": "Episode-only search"})
+    graphiti.episodes.append(
+        SimpleNamespace(
+            content=json.dumps(task.to_dict(), ensure_ascii=True, sort_keys=True),
+            valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        )
+    )
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+
+    result = adapter.search_context(
+        brain_id="/project/neurons",
+        query="Episode-only search",
+        entity_types=["Task"],
+        limit=5,
+    )
+
+    assert result.status == "available"
+    assert [episode.natural_id for episode in result.episodes] == ["task:episode-only"]
+    assert result.details == ("graphiti_neo4j", "edge_search:RuntimeError")
+
+
 def test_graphiti_config_from_env_supports_ollama_openai_compatible_defaults():
     config = GraphitiNeo4jConfig.from_env(
         {
@@ -126,6 +150,7 @@ class _FakeGraphiti:
         self.edges: list[SimpleNamespace] = []
         self.episodes: list[SimpleNamespace] = []
         self.search_calls: list[dict] = []
+        self.raise_on_search: Exception | None = None
 
     async def add_episode(self, **kwargs):
         self.added.append(dict(kwargs, source=kwargs["source"].value))
@@ -134,6 +159,8 @@ class _FakeGraphiti:
 
     async def search(self, query, *, group_ids=None, num_results=10):
         self.search_calls.append({"query": query, "group_ids": group_ids, "num_results": num_results})
+        if self.raise_on_search is not None:
+            raise self.raise_on_search
         return list(self.edges[:num_results])
 
     async def retrieve_episodes(self, *, reference_time, last_n=3, group_ids=None):
