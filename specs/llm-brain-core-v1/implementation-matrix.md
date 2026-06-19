@@ -76,7 +76,7 @@ uv run pytest -q
 Result:
 
 ```text
-755 passed, 7 skipped, 1 warning
+763 passed, 7 skipped, 1 warning
 ```
 
 Ubuntu CouchDB read-only adapter smoke:
@@ -254,5 +254,5 @@ tests, thin-client capture code, and SSH control-plane commands.
   ids, or backend-private ids.
 - RAGFlow write/delete/disable is required.
 - Docker volume deletion, credential edit, firewall/systemd/package mutation,
-  production K3s deployment, or central server mutation is required.
+  production K3s/Nomad deployment, or central server mutation is required.
 - A required change contradicts `requirements.md` or `design.md`.
