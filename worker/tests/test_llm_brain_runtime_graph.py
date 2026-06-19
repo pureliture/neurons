@@ -8,7 +8,13 @@ from agent_knowledge.llm_brain_core.runtime_graph import build_graph_adapter_fro
 
 def test_graph_env_enabled_reads_explicit_switch():
     assert graph_env_enabled({"LLM_BRAIN_GRAPH_ENABLED": "true"}) is True
+    assert graph_env_enabled({"LLM_BRAIN_GRAPH_ENABLED": "1"}) is True
+    assert graph_env_enabled({"LLM_BRAIN_GRAPH_ENABLED": "True"}) is True
     assert graph_env_enabled({"LLM_BRAIN_GRAPH_ENABLED": "0"}) is False
+    assert graph_env_enabled({"LLM_BRAIN_GRAPH_ENABLED": "false"}) is False
+    assert graph_env_enabled({"LLM_BRAIN_GRAPH_ENABLED": "False"}) is False
+    assert graph_env_enabled({"LLM_BRAIN_GRAPH_ENABLED": ""}) is False
+    assert graph_env_enabled({}) is False
 
 
 def test_graph_adapter_required_but_disabled_fails_before_backend_initialization():
