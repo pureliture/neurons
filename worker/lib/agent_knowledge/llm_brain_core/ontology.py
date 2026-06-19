@@ -109,7 +109,7 @@ def build_ontology_episode_batch_report(
             failures.append(_failure("artifact", getattr(artifact, "artifact_id", ""), exc))
     for card in memory_cards:
         try:
-            episodes.append(episode_from_memory_card(card))
+            episodes.append(episode_from_memory_card(card, project=project))
         except Exception as exc:
             item_id = str(card.get("memory_id") or "") if isinstance(card, Mapping) else ""
             failures.append(_failure("memory_card", item_id, exc))

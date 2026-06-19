@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from ._util import public_safe_text, short_hash
+from .graph import UpsertEpisodeResult
 from .models import GraphMemoryResult, OntologyEpisode
 
 _GRAPHITI_GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -65,11 +66,22 @@ class GraphitiNeo4jGraphMemoryAdapter:
     public-safe `OntologyEpisode` JSON, never raw transcripts or raw file paths.
     """
 
-    def __init__(self, graphiti: Any, *, default_group_id: str = "", extract_entities: bool = False) -> None:
+    def __init__(
+        self,
+        graphiti: Any,
+        *,
+        default_group_id: str = "",
+        extract_entities: bool = False,
+        episode_exists: Callable[[Any, str], Any] | None = None,
+    ) -> None:
         self._graphiti = graphiti
         self._default_group_id = default_group_id
         self._extract_entities = extract_entities
         self._runner = _AsyncLoopRunner.get_instance()
+        # Existence probe for episode_id MERGE idempotency. Injectable so tests
+        # can simulate a pre-existing episode without a live Neo4j. Defaults to
+        # Graphiti's EpisodicNode.get_by_uuid (async), which raises when absent.
+        self._episode_exists = episode_exists or _default_episode_exists
 
     @classmethod
     def from_config(cls, config: GraphitiNeo4jConfig) -> "GraphitiNeo4jGraphMemoryAdapter":
@@ -83,14 +95,21 @@ class GraphitiNeo4jGraphMemoryAdapter:
     def from_env(cls, environ: dict[str, str] | None = None) -> "GraphitiNeo4jGraphMemoryAdapter":
         return cls.from_config(GraphitiNeo4jConfig.from_env(environ))
 
-    def upsert_episode(self, episode: OntologyEpisode) -> str:
+    def upsert_episode(self, episode: OntologyEpisode) -> UpsertEpisodeResult:
         body = json.dumps(episode.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         group_id = _graphiti_group_id(_group_id_for_episode(episode, self._default_group_id))
 
-        async def _call():
+        async def _call() -> UpsertEpisodeResult:
             if not self._extract_entities:
                 from graphiti_core.nodes import EpisodicNode
 
+                # episode_id MERGE idempotency: an episode_id already encodes the
+                # content_hash (see OntologyEpisode.from_payload), so a node with
+                # the same uuid is the same content. Treat a re-upsert as a
+                # `duplicate` to stay symmetric with FakeGraphMemoryAdapter, not a
+                # second projected row.
+                if await self._episode_exists(self._graphiti.driver, episode.episode_id):
+                    return "duplicate"
                 graphiti_episode = EpisodicNode(
                     uuid=episode.episode_id,
                     name=episode.episode_id,
@@ -103,9 +122,9 @@ class GraphitiNeo4jGraphMemoryAdapter:
                     valid_at=_parse_datetime(episode.reference_time),
                 )
                 await graphiti_episode.save(self._graphiti.driver)
-                return graphiti_episode
+                return "inserted"
 
-            return await self._graphiti.add_episode(
+            await self._graphiti.add_episode(
                 name=episode.episode_id,
                 episode_body=body,
                 source_description=f"llm_brain_core:{episode.entity_type}:{episode.natural_id}",
@@ -113,10 +132,9 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 source=_episode_type_json(),
                 group_id=group_id or None,
             )
+            return "inserted"
 
-        result = self._runner.run(_call)
-        graph_uuid = getattr(result, "uuid", "") or getattr(getattr(result, "episode", None), "uuid", "")
-        return public_safe_text(str(graph_uuid or episode.episode_id), max_chars=240)
+        return self._runner.run(_call)
 
     def search_context(
         self,
@@ -188,6 +206,25 @@ class GraphitiNeo4jGraphMemoryAdapter:
             episodes=tuple(converted[:bounded]),
             details=tuple(details),
         )
+
+
+async def _default_episode_exists(driver: Any, episode_id: str) -> bool:
+    """Return True when an EpisodicNode with ``episode_id`` already exists.
+
+    Used by the production-default (extract_entities=False) path to detect a
+    re-upsert of the same episode_id as a `duplicate`. Graphiti's
+    ``EpisodicNode.get_by_uuid`` raises ``NodeNotFoundError`` when the node is
+    absent; any lookup error is treated as "not present" so a transient read
+    failure degrades to an insert attempt rather than masking a real write.
+    """
+
+    from graphiti_core.nodes import EpisodicNode
+
+    try:
+        node = await EpisodicNode.get_by_uuid(driver, episode_id)
+    except Exception:
+        return False
+    return node is not None
 
 
 def probe_graphiti_connectivity(adapter: Any) -> None:

@@ -213,15 +213,31 @@ uv run neuron-knowledge brain-project \
   --graph-required
 ```
 
-`brain-project` does all of the following in one production bootstrap pass:
+`brain-project` does all of the following in one production pass:
 
 ```text
-1. register SourceRef records in the Ledger-backed source catalog
-2. read recent SessionMemoryArtifact rows for the project
-3. read accepted MemoryCards for the project
+1. register the SourceRef records imported from the supplied JSONL
+2. read the most recent SessionMemoryArtifact rows for the project (LIMIT)
+3. read the most recent accepted MemoryCards for the project (LIMIT)
 4. project artifacts, MemoryCards, and SourceRefs into Graphiti/Neo4j
-5. return projected/duplicate/failed counts without raw paths
+5. return inserted/duplicate/failed counts without raw paths
 ```
+
+Scope and idempotency (important — this is not a "bootstrap import only" pass):
+
+- SourceRefs projected = exactly the records imported from `--source-ref-jsonl`
+  on this run.
+- Artifacts and MemoryCards projected = the project's **most recent `--limit`
+  rows** (newest-first), re-read from the Ledger on every run, not just the
+  rows produced by this import. Re-running is idempotent: episode_id MERGEs on
+  identical content, so unchanged rows come back as `duplicate`, not a second
+  insert.
+- Because steps 2-3 are bounded by `--limit`, a project with more than `--limit`
+  artifacts or accepted cards re-projects only the newest window; older rows are
+  not visited on this run. When a source returns at its bound, the report sets
+  `truncated.<source> = true` so a partial-window run is visible instead of
+  being mistaken for full coverage. Raise `--limit` (artifacts are capped at
+  100) to widen the window.
 
 Successful output shape:
 
@@ -230,6 +246,12 @@ Successful output shape:
   "schema_version": "llm_brain_projection.v1",
   "status": "ok",
   "source_refs_imported": 1,
+  "limit": 100,
+  "truncated": {
+    "any": false,
+    "artifacts": false,
+    "memory_cards": false
+  },
   "raw_paths_printed": false,
   "projection": {
     "status": "succeeded",
@@ -240,7 +262,9 @@ Successful output shape:
 
 If any SourceRef line is malformed or graph projection fails, the command exits
 non-zero and prints `status: failed`; do not treat partial graph population as a
-completed bootstrap.
+completed bootstrap. A `truncated.any: true` result is **not** a failure, but it
+means the run covered only the newest `--limit` window — widen `--limit` (or
+page) before treating the projection as full-project coverage.
 
 ## Portable Export/Import
 

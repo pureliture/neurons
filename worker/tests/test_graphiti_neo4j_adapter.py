@@ -24,7 +24,9 @@ def test_graphiti_adapter_upserts_public_safe_json_episode():
 
     result = adapter.upsert_episode(episode)
 
-    assert result == f"graph:{episode.episode_id}"
+    # Typed UpsertEpisodeResult (symmetric with FakeGraphMemoryAdapter), not a
+    # raw graph uuid string that projection would always count as `projected`.
+    assert result == "inserted"
     assert graphiti.added[0]["name"] == episode.episode_id
     assert graphiti.added[0]["source"] == "json"
     assert graphiti.added[0]["group_id"].startswith("brain_")
@@ -34,6 +36,34 @@ def test_graphiti_adapter_upserts_public_safe_json_episode():
     assert body["entity_type"] == "Task"
     assert body["payload"]["task"] == "Graphiti adapter"
     assert "/Users/" not in graphiti.added[0]["episode_body"]
+
+
+def test_graphiti_adapter_default_path_inserts_then_reports_duplicate_on_reupsert():
+    # Production default (extract_entities=False) MERGEs on episode_id. The first
+    # upsert saves a node; a second upsert of the same episode_id is a duplicate,
+    # symmetric with FakeGraphMemoryAdapter -- not a second `inserted` row.
+    graphiti = _FakeGraphiti()
+    seen: set[str] = set()
+
+    async def _episode_exists(driver, episode_id):
+        _ = driver
+        return episode_id in seen
+
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        episode_exists=_episode_exists,
+    )
+    episode = _episode("Task", "task:dup", {"brain_id": "/project/neurons", "task": "merge"})
+
+    first = adapter.upsert_episode(episode)
+    seen.add(episode.episode_id)
+    second = adapter.upsert_episode(episode)
+
+    assert first == "inserted"
+    assert second == "duplicate"
+    # The duplicate short-circuits before any second node save attempt.
+    assert graphiti.saved_uuids == [episode.episode_id]
 
 
 def test_graphiti_adapter_search_rehydrates_domain_episode_and_graph_fact():
@@ -224,6 +254,26 @@ def test_graphiti_neo4j_round_trip_against_live_backend():
     assert search.status in {"available", "degraded"}
 
 
+class _FakeDriver:
+    """Minimal async driver stand-in for EpisodicNode.save() in tests.
+
+    EpisodicNode.save() issues a single execute_query MERGE; record the saved
+    uuid so the default-path upsert test can assert exactly one node was written.
+    """
+
+    provider = None
+    graph_operations_interface = None
+
+    def __init__(self) -> None:
+        self.saved_uuids: list[str] = []
+
+    async def execute_query(self, query, **params):
+        uuid = params.get("uuid") or params.get("episode_uuid")
+        if uuid:
+            self.saved_uuids.append(str(uuid))
+        return ([], None, None)
+
+
 class _FakeGraphiti:
     def __init__(self) -> None:
         self.added: list[dict] = []
@@ -231,6 +281,11 @@ class _FakeGraphiti:
         self.episodes: list[SimpleNamespace] = []
         self.search_calls: list[dict] = []
         self.raise_on_search: Exception | None = None
+        self.driver = _FakeDriver()
+
+    @property
+    def saved_uuids(self) -> list[str]:
+        return self.driver.saved_uuids
 
     async def add_episode(self, **kwargs):
         self.added.append(dict(kwargs, source=kwargs["source"].value))
