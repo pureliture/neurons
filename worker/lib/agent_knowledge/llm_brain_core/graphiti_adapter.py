@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -10,6 +11,8 @@ from typing import Any, Callable
 
 from ._util import public_safe_text, short_hash
 from .models import GraphMemoryResult, OntologyEpisode
+
+_GRAPHITI_GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,7 @@ class GraphitiNeo4jConfig:
     embedding_api_key: str = ""
     embedding_dim: int = 1024
     store_raw_episode_content: bool = True
+    extract_entities: bool = False
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "GraphitiNeo4jConfig":
@@ -49,6 +53,7 @@ class GraphitiNeo4jConfig:
             embedding_dim=_int_env(env.get("LLM_BRAIN_EMBEDDING_DIM", ""), default=1024),
             store_raw_episode_content=env.get("LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT", "true").lower()
             not in {"0", "false", "no"},
+            extract_entities=env.get("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES", "false").lower() in {"1", "true", "yes"},
         )
 
 
@@ -60,13 +65,19 @@ class GraphitiNeo4jGraphMemoryAdapter:
     public-safe `OntologyEpisode` JSON, never raw transcripts or raw file paths.
     """
 
-    def __init__(self, graphiti: Any, *, default_group_id: str = "") -> None:
+    def __init__(self, graphiti: Any, *, default_group_id: str = "", extract_entities: bool = False) -> None:
         self._graphiti = graphiti
         self._default_group_id = default_group_id
+        self._extract_entities = extract_entities
+        self._runner = _AsyncLoopRunner()
 
     @classmethod
     def from_config(cls, config: GraphitiNeo4jConfig) -> "GraphitiNeo4jGraphMemoryAdapter":
-        return cls(_build_graphiti(config), default_group_id=config.default_group_id)
+        return cls(
+            _build_graphiti(config),
+            default_group_id=config.default_group_id,
+            extract_entities=config.extract_entities,
+        )
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "GraphitiNeo4jGraphMemoryAdapter":
@@ -74,9 +85,26 @@ class GraphitiNeo4jGraphMemoryAdapter:
 
     def upsert_episode(self, episode: OntologyEpisode) -> str:
         body = json.dumps(episode.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-        group_id = _group_id_for_episode(episode, self._default_group_id)
+        group_id = _graphiti_group_id(_group_id_for_episode(episode, self._default_group_id))
 
         async def _call():
+            if not self._extract_entities:
+                from graphiti_core.nodes import EpisodicNode
+
+                graphiti_episode = EpisodicNode(
+                    uuid=episode.episode_id,
+                    name=episode.episode_id,
+                    group_id=group_id or _graphiti_group_id("llm_brain_default"),
+                    labels=[],
+                    source=_episode_type_json(),
+                    content=body,
+                    source_description=f"llm_brain_core:{episode.entity_type}:{episode.natural_id}",
+                    created_at=datetime.now(timezone.utc),
+                    valid_at=_parse_datetime(episode.reference_time),
+                )
+                await graphiti_episode.save(self._graphiti.driver)
+                return graphiti_episode
+
             return await self._graphiti.add_episode(
                 name=episode.episode_id,
                 episode_body=body,
@@ -84,10 +112,9 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 reference_time=_parse_datetime(episode.reference_time),
                 source=_episode_type_json(),
                 group_id=group_id or None,
-                uuid=episode.episode_id,
             )
 
-        result = _run_async(_call)
+        result = self._runner.run(_call)
         graph_uuid = getattr(result, "uuid", "") or getattr(getattr(result, "episode", None), "uuid", "")
         return public_safe_text(str(graph_uuid or episode.episode_id), max_chars=240)
 
@@ -100,7 +127,8 @@ class GraphitiNeo4jGraphMemoryAdapter:
         limit: int = 10,
     ) -> GraphMemoryResult:
         bounded = max(1, min(int(limit), 100))
-        group_ids = [brain_id] if brain_id else ([self._default_group_id] if self._default_group_id else None)
+        group_id = _graphiti_group_id(brain_id or self._default_group_id)
+        group_ids = [group_id] if group_id else None
 
         async def _call() -> tuple[list[Any], list[Any]]:
             edges = await self._graphiti.search(
@@ -116,7 +144,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
             return list(edges or []), list(episodes or [])
 
         try:
-            edges, episodes = _run_async(_call)
+            edges, episodes = self._runner.run(_call)
         except Exception as exc:
             return GraphMemoryResult(status="error", details=(type(exc).__name__,))
 
@@ -190,28 +218,22 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
     )
 
 
-def _run_async(factory: Callable[[], Any]) -> Any:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(factory())
+class _AsyncLoopRunner:
+    def __init__(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
 
-    result: dict[str, Any] = {}
+    def run(self, factory: Callable[[], Any]) -> Any:
+        async def _invoke():
+            return await factory()
 
-    def _target() -> None:
-        try:
-            result["value"] = asyncio.run(factory())
-        except Exception as exc:  # pragma: no cover - defensive thread bridge
-            result["error"] = exc
+        future = asyncio.run_coroutine_threadsafe(_invoke(), self._loop)
+        return future.result(timeout=300)
 
-    thread = threading.Thread(target=_target, daemon=True)
-    thread.start()
-    thread.join(timeout=300)
-    if thread.is_alive():
-        raise TimeoutError("graphiti async operation timed out")
-    if "error" in result:
-        raise result["error"]
-    return result.get("value")
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
 
 
 def _episode_type_json():
@@ -281,6 +303,15 @@ def _group_id_for_episode(episode: OntologyEpisode, default_group_id: str) -> st
     if payload_brain_id:
         return public_safe_text(str(payload_brain_id), max_chars=200)
     return default_group_id
+
+
+def _graphiti_group_id(value: str) -> str:
+    text = public_safe_text(str(value or ""), max_chars=200)
+    if not text:
+        return ""
+    if _GRAPHITI_GROUP_ID_RE.fullmatch(text):
+        return text
+    return f"brain_{short_hash(text)}"
 
 
 def _parse_datetime(value: str) -> datetime:

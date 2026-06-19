@@ -483,7 +483,7 @@ uv run pytest -q
 | Investment | Add graph adapter seam | `GraphMemoryAdapter` + null/fake tests exist. |
 | Investment | Add ContextPack builder | RAGFlow-disabled latest-work acceptance test passes. |
 | Investment | Add SourceRef contract | metadata-only evidence path and redaction tests pass. |
-| Watch | LinkML/TerminusDB schema governance | Deferred until ontology migrations become a bottleneck. |
+| Watch | LinkML/TerminusDB schema governance | Activate only if ontology migrations become a governance bottleneck. |
 
 ## Milestones
 
@@ -571,11 +571,11 @@ Done:
 - exact dependency and compose changes listed.
 - stop for explicit approval before lockfile or Docker mutation.
 
-### M6c: Graphiti/Neo4j Local Integration
+### M6c: Graphiti/Neo4j Ubuntu Integration
 
 Scope:
 - implement `GraphitiNeo4jGraphMemoryAdapter`;
-- run local integration only after dependency/Docker approval.
+- run integration against the Ubuntu container deployment target only after dependency/Docker approval.
 
 Done:
 - episode upsert/search works.
@@ -639,11 +639,11 @@ Stop conditions:
 - Docker/systemd/firewall/package/credential mutation is needed;
 - existing boundary tests fail for reasons outside the milestone.
 
-## Open Questions
+## Resolved V1 Boundaries
 
-- Neo4j is the v1 default recommendation, but final graph backend package/runtime details are M6b/M6c scope.
-- Whether graph core package later moves out of `neurons` is intentionally deferred until after M6c.
-- Central sync production transport is deferred; v1 owns only `BrainEvent` envelope and replay shadow.
+- Neo4j is the v1 default graph backend recommendation for the Ubuntu container deployment target.
+- Graph core stays in `neurons` for v1. Moving it to a separate repo is not part of the v1 contract.
+- Central sync v1 owns `BrainEvent` envelope, idempotent replay, and rebuild shadow. Production transport is a separate interface and is not part of v1.
 
 ## Review Fixes Applied
 
@@ -652,7 +652,7 @@ Stop conditions:
 - Replaced direct Graphiti leakage with backend-neutral `OntologyEpisode` and `GraphMemoryResult`.
 - Made SourceRef opaque and delegated same-device content fetch to `dendrite`.
 - Added `BrainEvent` envelope, ordering, tombstone, duplicate, and conflict rules.
-- Split graph integration milestone into interface, dependency approval, and local integration stages.
+- Split graph integration milestone into interface, dependency approval, and Ubuntu integration stages.
 - Added negative tests and stop conditions for RAGFlow-coupling regression.
 
 ## Self-Review
@@ -661,4 +661,4 @@ Stop conditions:
 - RAGFlow is not required for core acceptance.
 - Raw SoT, artifact store, MemoryCard ledger, graph index, and bridge roles are separated.
 - Milestones are independently testable and autopilot-friendly.
-- Open questions are deferred only where they do not block M1-M5.
+- V1 non-goals are explicit boundaries, not hidden acceptance gaps.

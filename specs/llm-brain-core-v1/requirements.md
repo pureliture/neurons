@@ -112,7 +112,7 @@
 | 2 | Graph-backed memory adapter seam 부재 | Design/architecture | `session_memory/*` | Graphiti/Neo4j 도입 시 RAGFlow path를 우회하기 어려움 | 5 | 4 | 3 | 27 |
 | 2 | SourceRef catalog가 dendrite/neurons contract로 아직 고정되지 않음 | Design/architecture | `dendrite`, `neurons` boundary | PC file evidence 연결이 ad-hoc으로 흐를 수 있음 | 4 | 4 | 3 | 24 |
 | 2 | per-PC/central sync state model 부재 | Operational/infra | new core area | 나중에 graph DB file sync 같은 위험한 설계로 회귀 가능 | 4 | 4 | 4 | 16 |
-| 3 | LinkML/TerminusDB governance 부재 | Dependency/platform | deferred | schema governance가 커질 때 migration cost 발생 | 2 | 2 | 4 | 8 |
+| 3 | LinkML/TerminusDB governance 부재 | Dependency/platform | watch | schema governance가 커질 때 migration cost 발생 | 2 | 2 | 4 | 8 |
 
 ## Architecture Decision Seed
 
