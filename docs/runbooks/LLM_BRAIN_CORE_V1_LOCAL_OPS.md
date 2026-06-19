@@ -225,6 +225,21 @@ Live graph smoke requires:
 - `graphiti_core` and the `neo4j` Python driver available in the smoke runner;
 - no volume deletion or reuse of production volumes.
 
+If reusing a stopped verification Neo4j volume, confirm the baseline before
+writing a smoke episode:
+
+```text
+container status: exited or created, not running
+container/volume prefix: llm-brain-verify-*
+production volume names: not mounted
+existing Episodic count: recorded before the smoke
+smoke natural_id/event_id: unique for the current run
+```
+
+Do not call a reused verification volume "clean". Treat it as a continuity
+fixture and prove only the current smoke's unique episode plus the restored node
+count.
+
 Expected verification shape:
 
 ```text
