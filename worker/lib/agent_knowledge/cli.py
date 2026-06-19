@@ -137,7 +137,7 @@ def _mcp_stdio_main(argv: list[str] | None = None) -> int:
             required=bool(args.graph_required),
         )
     except Exception as exc:
-        print(f"graph adapter unavailable: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"graph adapter unavailable: {type(exc).__name__}", file=sys.stderr)
         return 1
     run_stdio_server(
         KnowledgeSearchService(

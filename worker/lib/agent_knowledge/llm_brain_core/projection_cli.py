@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
                     "schema_version": "llm_brain_projection.v1",
                     "status": "failed",
                     "error_class": type(exc).__name__,
-                    "message": str(exc),
+                    "message": "projection failed",
                 },
                 sort_keys=True,
             ),

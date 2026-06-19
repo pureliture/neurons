@@ -171,6 +171,37 @@ def test_brain_project_reports_unreadable_source_ref_file_without_crashing(
     assert report["projection"]["attempted"] == 0
 
 
+def test_brain_project_failure_output_does_not_print_raw_exception_details(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    def _raise(**kwargs):
+        _ = kwargs
+        raise RuntimeError("/Users/example/private TOKEN=secret")
+
+    monkeypatch.setattr("agent_knowledge.llm_brain_core.projection_cli.run_projection", _raise)
+
+    rc = neuron_main(
+        [
+            "brain-project",
+            "--ledger",
+            str(tmp_path / "ledger.sqlite3"),
+            "--project",
+            PROJECT,
+            "--enable-graph",
+        ]
+    )
+    stderr = capsys.readouterr().err
+    report = json.loads(stderr)
+
+    assert rc == 1
+    assert report["error_class"] == "RuntimeError"
+    assert report["message"] == "projection failed"
+    assert "/Users/" not in stderr
+    assert "TOKEN" not in stderr
+
+
 def _h(value: str) -> str:
     import hashlib
 
