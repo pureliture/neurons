@@ -76,8 +76,32 @@ def test_graph_projection_worker_treats_duplicate_only_projection_as_success():
     assert report["failed"] == 0
 
 
-def test_graph_projection_worker_does_not_count_unavailable_graph_as_projected():
+def test_graph_projection_worker_counts_disabled_graph_as_skipped_not_failed():
     worker = GraphProjectionWorker(NullGraphMemoryAdapter())
+
+    report = worker.project_memory_cards(
+        [
+            _card(
+                "mem_graph_disabled",
+                "task",
+                "Disabled graph task",
+                {"task_state": "Disabled graph task"},
+            )
+        ]
+    ).to_dict()
+
+    # Graph intentionally disabled is a clean skip, never a failure or exit-1.
+    assert report["status"] == "succeeded"
+    assert report["projected"] == 0
+    assert report["skipped_disabled"] == 1
+    assert report["failed"] == 0
+    assert report["failures"] == []
+
+
+def test_graph_projection_worker_counts_unavailable_backend_as_failed():
+    from agent_knowledge.llm_brain_core import UnavailableGraphMemoryAdapter
+
+    worker = GraphProjectionWorker(UnavailableGraphMemoryAdapter("ConnectionError"))
 
     report = worker.project_memory_cards(
         [
@@ -90,10 +114,12 @@ def test_graph_projection_worker_does_not_count_unavailable_graph_as_projected()
         ]
     ).to_dict()
 
+    # A graph that was requested but unreachable is a real failure.
     assert report["status"] == "failed"
     assert report["projected"] == 0
+    assert report["skipped_disabled"] == 0
     assert report["failed"] == 1
-    assert report["failures"][0]["reason_code"] == "unavailable"
+    assert report["failures"][0]["reason_code"] == "failed"
 
 
 def test_fake_graph_memory_adapter_filters_by_brain_id():

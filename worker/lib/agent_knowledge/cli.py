@@ -133,8 +133,8 @@ def _mcp_stdio_main(argv: list[str] | None = None) -> int:
     )
     try:
         graph_adapter = build_graph_adapter_from_env(
-            enabled=True if args.enable_graph else None,
-            required=bool(args.graph_required),
+            enable_flag=True if args.enable_graph else None,
+            required_flag=bool(args.graph_required),
         )
     except Exception as exc:
         print(f"graph adapter unavailable: {type(exc).__name__}", file=sys.stderr)

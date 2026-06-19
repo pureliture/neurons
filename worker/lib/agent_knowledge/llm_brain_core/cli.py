@@ -36,8 +36,8 @@ def main(argv: list[str] | None = None) -> int:
             read_model=read_model,
             source_catalog=source_catalog,
             graph_adapter=build_graph_adapter_from_env(
-                enabled=True if args.enable_graph else None,
-                required=bool(args.graph_required),
+                enable_flag=True if args.enable_graph else None,
+                required_flag=bool(args.graph_required),
             ),
         )
         pack = service.brain_context_resolve(
@@ -55,7 +55,10 @@ def main(argv: list[str] | None = None) -> int:
                     "schema_version": "llm_brain_context_resolve.v1",
                     "status": "failed",
                     "error_class": type(exc).__name__,
-                    "message": str(exc),
+                    # Do not echo raw exception text: it can carry private paths,
+                    # tokens, or backend ids. Mirror the other entrypoints and
+                    # emit only the exception class plus a static public message.
+                    "message": "context resolve failed",
                 },
                 sort_keys=True,
             ),
