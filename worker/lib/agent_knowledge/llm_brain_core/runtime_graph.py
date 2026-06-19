@@ -22,7 +22,9 @@ def build_graph_adapter_from_env(
 ) -> GraphMemoryAdapter:
     env = dict(environ or os.environ)
     should_enable = graph_env_enabled(env) if enabled is None else bool(enabled)
-    if not should_enable and not required:
+    if not should_enable:
+        if required:
+            raise ValueError("graph is required but not enabled")
         return NullGraphMemoryAdapter()
     try:
         return GraphitiNeo4jGraphMemoryAdapter.from_env(env)

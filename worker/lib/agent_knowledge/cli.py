@@ -133,7 +133,7 @@ def _mcp_stdio_main(argv: list[str] | None = None) -> int:
     )
     try:
         graph_adapter = build_graph_adapter_from_env(
-            enabled=bool(args.enable_graph),
+            enabled=True if args.enable_graph else None,
             required=bool(args.graph_required),
         )
     except Exception as exc:
