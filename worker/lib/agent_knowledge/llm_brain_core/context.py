@@ -53,7 +53,7 @@ class BrainReadService:
         graph_result = self.graph_adapter.search_context(
             brain_id=brain_id,
             query=query,
-            entity_types=["Task", "Decision", "Incident", "PersonaFact", "File"],
+            entity_types=["Task", "Decision", "Incident", "PersonaFact", "File", "SourceRef"],
             limit=limit,
         )
         bridge_result = self.document_bridge.search_documents(
