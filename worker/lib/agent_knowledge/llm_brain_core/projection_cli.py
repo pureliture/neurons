@@ -74,16 +74,41 @@ def run_projection(
     ledger = Ledger(ledger_path)
     artifact_store = LedgerSessionMemoryArtifactStore(ledger)
     source_catalog = LedgerSourceRefCatalog(ledger)
-    imported, import_failures = _import_source_refs(source_catalog, source_ref_jsonl)
+    imported, import_failures, imported_records = _import_source_refs(source_catalog, source_ref_jsonl)
+    if import_failures:
+        return {
+            "schema_version": "llm_brain_projection.v1",
+            "status": "failed",
+            "project": project,
+            "source_refs_imported": imported,
+            "source_ref_import_failures": import_failures,
+            "canonical_counts": {
+                "artifacts": 0,
+                "memory_cards": 0,
+                "source_refs": 0,
+            },
+            "graph_enabled": enable_graph,
+            "projection": {
+                "status": "failed",
+                "attempted": 0,
+                "projected": 0,
+                "duplicates": 0,
+                "failed": 0,
+                "episode_ids": [],
+                "failures": [],
+                "details": ["source_ref_import_failed"],
+            },
+            "raw_paths_printed": False,
+        }
     artifacts = artifact_store.list_recent(project=project, limit=limit) if include_artifacts else []
     cards = (
         LegacyLedgerBrainReadModel(ledger).list_accepted_cards(project=project, limit=limit)
         if include_memory_cards
         else []
     )
-    source_refs = source_catalog.list_all() if include_source_refs else []
+    source_refs = imported_records if include_source_refs else []
     graph_adapter = build_graph_adapter_from_env(
-        enabled=enable_graph,
+        enabled=True if enable_graph else None,
         required=graph_required or enable_graph,
     )
     projection = GraphProjectionWorker(graph_adapter).project_batch(
@@ -111,9 +136,13 @@ def run_projection(
     }
 
 
-def _import_source_refs(catalog: LedgerSourceRefCatalog, paths: list[Path]) -> tuple[int, list[dict[str, Any]]]:
+def _import_source_refs(
+    catalog: LedgerSourceRefCatalog,
+    paths: list[Path],
+) -> tuple[int, list[dict[str, Any]], list[Any]]:
     imported = 0
     failures: list[dict[str, Any]] = []
+    records: list[Any] = []
     for path in paths:
         try:
             handle = path.open("r", encoding="utf-8")
@@ -129,7 +158,9 @@ def _import_source_refs(catalog: LedgerSourceRefCatalog, paths: list[Path]) -> t
                     parsed = json.loads(text)
                     if not isinstance(parsed, dict):
                         raise ValueError("source ref line must decode to an object")
-                    catalog.register(source_ref_from_catalog_event(parsed))
+                    record = source_ref_from_catalog_event(parsed)
+                    catalog.register(record)
+                    records.append(record)
                     imported += 1
                 except Exception as exc:
                     failures.append(
@@ -139,4 +170,4 @@ def _import_source_refs(catalog: LedgerSourceRefCatalog, paths: list[Path]) -> t
                             "reason_code": type(exc).__name__,
                         }
                     )
-    return imported, failures
+    return imported, failures, records

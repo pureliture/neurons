@@ -7,6 +7,7 @@ from agent_knowledge.cli import main as neuron_main
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.llm_brain_core import BrainReadService, FakeGraphMemoryAdapter
 from agent_knowledge.llm_brain_core.ledger_adapter import LedgerSourceRefCatalog
+from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
 
 
 PROJECT = "neurons"
@@ -40,6 +41,21 @@ def test_brain_project_imports_dendrite_source_refs_projects_graph_and_contextpa
         encoding="utf-8",
     )
     graph = FakeGraphMemoryAdapter()
+    LedgerSourceRefCatalog(Ledger(ledger_path)).register(
+        source_ref_from_catalog_event(
+            {
+                "source_ref_id": "src_other_project_preexisting",
+                "device_id_hash": _h("device-a"),
+                "root_id": "documents",
+                "relative_path_hash": _h("other/project.md"),
+                "content_hash": _h("other-source-content"),
+                "mtime": "2026-06-19T00:00:00+00:00",
+                "size": 64,
+                "sync_policy": "derived_only",
+                "derived_summary": "Other project SourceRef must not be projected into neurons.",
+            }
+        )
+    )
     monkeypatch.setattr("agent_knowledge.llm_brain_core.projection_cli.build_graph_adapter_from_env", lambda **kwargs: graph)
 
     rc = neuron_main(
@@ -79,6 +95,11 @@ def test_brain_project_imports_dendrite_source_refs_projects_graph_and_contextpa
 
     assert pack["graph_status"]["status"] == "available"
     assert pack["source_refs"] == [{"source_ref_id": "src_dendrite_projects_bootstrap"}]
+    assert graph.search_context(
+        brain_id="/project/neurons",
+        query="Other documents",
+        entity_types=["SourceRef"],
+    ).episodes == ()
     assert "/Users/" not in json.dumps(report | {"pack": pack}, sort_keys=True)
 
 
@@ -111,6 +132,7 @@ def test_brain_project_reports_source_ref_import_failures_without_projecting_bad
     assert report["status"] == "failed"
     assert report["source_refs_imported"] == 0
     assert report["source_ref_import_failures"][0]["line"] == 1
+    assert report["projection"]["attempted"] == 0
     assert report["projection"]["projected"] == 0
 
 
@@ -146,6 +168,7 @@ def test_brain_project_reports_unreadable_source_ref_file_without_crashing(
         "line": 0,
         "reason_code": "FileNotFoundError",
     }
+    assert report["projection"]["attempted"] == 0
 
 
 def _h(value: str) -> str:

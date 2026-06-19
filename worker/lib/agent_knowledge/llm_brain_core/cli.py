@@ -36,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
             read_model=read_model,
             source_catalog=source_catalog,
             graph_adapter=build_graph_adapter_from_env(
-                enabled=bool(args.enable_graph),
+                enabled=True if args.enable_graph else None,
                 required=bool(args.graph_required),
             ),
         )
