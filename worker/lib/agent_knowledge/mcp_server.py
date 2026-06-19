@@ -194,6 +194,43 @@ def list_tools() -> list[dict]:
     ]
 
 
+class _SessionCardCache:
+    """Per-session snapshot of accepted MemoryCards by (project, limit).
+
+    Each brain tool call used to rebuild the read model and re-run
+    `list_accepted_cards` (full accepted-card reload, limit=100) against the
+    ledger. Within a single stdio MCP session the accepted-card set is stable
+    enough to snapshot, so this memoizes the result for the session lifetime and
+    collapses repeated tool calls onto one ledger read per (project, limit). It
+    wraps the real read model and forwards everything else unchanged, so graph
+    status, evidence policy, and other read paths are untouched. `invalidate()`
+    is the explicit refresh seam (e.g. after a known write) so the cache never
+    silently serves stale cards forever.
+    """
+
+    def __init__(self, read_model) -> None:
+        self._read_model = read_model
+        self._cards: dict[tuple[str, int], list[dict]] = {}
+
+    def list_accepted_cards(self, *, project: str, limit: int) -> list[dict]:
+        key = (str(project), int(limit))
+        cached = self._cards.get(key)
+        if cached is None:
+            cached = self._read_model.list_accepted_cards(project=project, limit=limit)
+            self._cards[key] = cached
+        # Hand out copies so a downstream consumer mutating its list cannot
+        # corrupt the shared snapshot.
+        return [dict(card) for card in cached]
+
+    def invalidate(self) -> None:
+        self._cards.clear()
+
+    def __getattr__(self, name: str):
+        # Forward any non-cached read-model method (get_card_meta,
+        # list_recent_cards, list_project_card_counts, ...) to the wrapped model.
+        return getattr(self._read_model, name)
+
+
 class KnowledgeSearchService:
     def __init__(
         self,
@@ -211,13 +248,20 @@ class KnowledgeSearchService:
         self.allow_private_results = bool(allow_private_results)
         self.native_memory_id = native_memory_id
         self.graph_adapter = graph_adapter
+        # Session-lifetime accepted-card snapshot shared across brain tool calls.
+        self._brain_card_cache = _SessionCardCache(LegacyLedgerBrainReadModel(self.ledger))
+
+    def invalidate_brain_card_cache(self) -> None:
+        """Refresh seam: drop the session card snapshot so the next brain tool
+        call re-reads accepted cards from the ledger."""
+
+        self._brain_card_cache.invalidate()
 
     def core_brain(self, *, project: str = ""):
-        read_model = LegacyLedgerBrainReadModel(self.ledger)
         return build_runtime_brain_service(
             project=project,
             artifact_store=LedgerSessionMemoryArtifactStore(self.ledger),
-            read_model=read_model,
+            read_model=self._brain_card_cache,
             source_catalog=LedgerSourceRefCatalog(self.ledger),
             graph_adapter=self.graph_adapter,
             document_bridge=RagFlowDocumentBridge(ragflow=self.ragflow, dataset_ids=self.dataset_ids),

@@ -96,6 +96,8 @@ the `--enable-graph` / `--graph-required` CLI flags plus
 | `LLM_BRAIN_EMBEDDING_DIM` | — | `1024` | Embedding dimension (int). |
 | `LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT` | — | `true` | Store raw episode content (off only for `0`/`false`/`no`). |
 | `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES` | — | `false` | Run Graphiti entity extraction (truthy: `1`/`true`/`yes`). Production default is episode-only. |
+| `LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS` | — | `30` | Per-call wait (s) for graph reads (search/retrieve). Non-positive or non-numeric falls back to default. A read past this bound degrades to `graph_status.status == "error"`, never a false `available`. |
+| `LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS` | — | `300` | Per-call wait (s) for graph writes (`upsert_episode`; longer because `extract_entities=true` runs an LLM). A write past this bound fails the upsert (counted as `failed`), not a silent hang. |
 
 Notes:
 
@@ -341,6 +343,104 @@ non-zero and prints `status: failed`; do not treat partial graph population as a
 completed bootstrap. A `truncated.any: true` result is **not** a failure, but it
 means the run covered only the newest `--limit` window — widen `--limit` (or
 page) before treating the projection as full-project coverage.
+
+## Projection Cost and Resume
+
+`brain-project` runs synchronously over the newest `--limit` canonical rows.
+Two operational levers matter for cost and re-run time.
+
+### extract_entities per-episode LLM cost
+
+`LLM_BRAIN_GRAPH_EXTRACT_ENTITIES` controls how each episode is written:
+
+| Mode | Env | LLM calls per episode | Cost shape |
+| --- | --- | --- | --- |
+| Episode-only (production default) | `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=false` | 0 | No LLM. One `EpisodicNode` MERGE per episode. Write time is backend I/O only; the write timeout's lower end applies. |
+| Entity extraction | `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=true` | Multiple per episode (Graphiti `add_episode`: entity extraction + dedupe + edge extraction; embeddings if configured) | Each episode triggers several LLM completions plus embedding calls. Cost and latency scale with episode count, so a full project window of N episodes is roughly N × (per-episode extraction calls). This is why the write timeout default (300s) is far larger than the read timeout. |
+
+Cost rule of thumb: a reproject of a project with N artifacts/cards/source-refs
+issues ~N graph writes. In episode-only mode that is ~N backend writes and **no
+LLM spend**. In `extract_entities=true` mode that is ~N × (entity + edge
+extraction + embedding) LLM calls — budget and rate-limit accordingly before
+enabling it on a large window, and prefer resume (below) to avoid paying for
+already-extracted episodes again.
+
+### Resume (skip already-projected episodes)
+
+Re-running over the same window normally returns unchanged rows as `duplicate`
+after a full upsert round-trip (and, in extract mode, after paying the LLM cost
+again). Pass a file of already-projected `episode_id`s to skip them entirely:
+
+```bash
+cd "$NEURONS_ROOT/worker"
+# capture episode_ids from a prior run's projection.episode_ids, one per line
+uv run neuron-knowledge brain-project \
+  --ledger /path/to/ledger.sqlite \
+  --project <project> \
+  --enable-graph \
+  --resume-projected-ids /path/to/projected-episode-ids.txt
+```
+
+Skipped episodes are reported under `projection.skipped_resumed` (distinct from
+`duplicates`, which still cost a round-trip). A missing/stale resume file is
+best-effort: it contributes no ids and the run falls back to a full
+re-projection rather than failing. `episode_id` encodes the content hash, so a
+listed id is the same content; skipping it stays idempotent.
+
+## Graph Index Lifecycle (reproject / group reset)
+
+The graph is a **derived index**: canonical SessionMemoryArtifacts and
+MemoryCards in the Ledger are the source of truth, and every graph node can be
+regenerated from them. There are two standard lifecycle operations.
+
+### 1. Project reproject (regenerate the derived index)
+
+Re-running `brain-project` for a project re-reads the newest `--limit` canonical
+rows and re-projects them. It is idempotent: `episode_id` MERGEs on identical
+content, so unchanged rows return as `duplicate`, not a second insert. Use this
+to refresh or rebuild the derived index after canonical writes.
+
+```bash
+cd "$NEURONS_ROOT/worker"
+LLM_BRAIN_GRAPH_ENABLED=true \
+uv run neuron-knowledge brain-project \
+  --ledger /path/to/ledger.sqlite \
+  --project <project> \
+  --limit 100 \
+  --enable-graph
+```
+
+Reproject is non-destructive: it never deletes graph nodes. A node that no
+longer has a canonical source is **not** removed by reproject; removal is a
+group-reset concern (below). Raise `--limit` if `truncated.any == true` so the
+reproject window covers the rows you intend to regenerate.
+
+### 2. Group reset (dispose a derived group before regeneration)
+
+Each project's episodes are scoped to a Graphiti `group_id` derived from the
+`/project/<project>` brain_id (see `_graphiti_group_id`). A group reset deletes
+exactly that group's derived nodes so a clean reproject can regenerate them.
+This is a **live graph mutation**: it is a hard-stop without explicit intent,
+exact argv, a recorded pre-count, and a post-reproject recall check (see the
+Safety Boundary and Graph Degrade Operations Matrix). Standard order:
+
+```text
+1. resolve the group_id for the project (the same derivation the adapter uses:
+   public-safe /project/<project> -> _graphiti_group_id)
+2. record the pre-reset Episodic/Entity node count for that group_id only
+3. delete ONLY nodes whose group_id matches the resolved value
+   (never a global wipe; never `docker compose down -v`; never another group)
+4. reproject the project (operation 1) to regenerate the derived index
+5. recall check: brain_context_resolve graph_status.status == "available" and
+   no "graph_edge_degraded"; confirm the regenerated node count is sane
+```
+
+Because the index is derived, a group reset loses no canonical knowledge: the
+Ledger still holds the artifacts and cards, and reproject rebuilds the group.
+Never reset a group as a substitute for fixing a canonical write — that hides a
+real data problem behind a regenerated index. Do not reset a healthy group; a
+`degraded`/`error` graph status is a backend/edge-index problem first (consult
+the degrade matrix), not automatically a reset trigger.
 
 ## Portable Export/Import
 

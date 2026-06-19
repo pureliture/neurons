@@ -16,6 +16,7 @@ class GraphProjectionReport:
     projected: int
     duplicates: int = 0
     skipped_disabled: int = 0
+    skipped_resumed: int = 0
     failed: int = 0
     episode_ids: tuple[str, ...] = ()
     failures: tuple[dict[str, Any], ...] = ()
@@ -36,7 +37,11 @@ class GraphProjectionWorker:
         self._graph_adapter = graph_adapter
 
     def project_memory_cards(
-        self, cards: list[dict[str, Any]], *, project: str = ""
+        self,
+        cards: list[dict[str, Any]],
+        *,
+        project: str = "",
+        resume_projected_ids: set[str] | None = None,
     ) -> GraphProjectionReport:
         episodes = []
         failures: list[dict[str, Any]] = []
@@ -45,7 +50,7 @@ class GraphProjectionWorker:
                 episodes.append(episode_from_memory_card(card, project=project))
             except Exception as exc:
                 failures.append(_failure(card, exc, phase="map"))
-        report = self.project_episodes(episodes)
+        report = self.project_episodes(episodes, resume_projected_ids=resume_projected_ids)
         merged_failures = tuple([*failures, *report.failures])
         failed = len(merged_failures)
         projected_or_duplicate = report.projected or report.duplicates
@@ -56,6 +61,7 @@ class GraphProjectionWorker:
             projected=report.projected,
             duplicates=report.duplicates,
             skipped_disabled=report.skipped_disabled,
+            skipped_resumed=report.skipped_resumed,
             failed=failed,
             episode_ids=report.episode_ids,
             failures=merged_failures,
@@ -69,6 +75,7 @@ class GraphProjectionWorker:
         memory_cards: list[dict[str, Any]] | None = None,
         source_refs: list[SourceRefRecord] | None = None,
         project: str = "",
+        resume_projected_ids: set[str] | None = None,
     ) -> GraphProjectionReport:
         batch = build_ontology_episode_batch_report(
             artifacts=artifacts or [],
@@ -76,7 +83,7 @@ class GraphProjectionWorker:
             source_refs=source_refs or [],
             project=project,
         )
-        report = self.project_episodes(list(batch.episodes))
+        report = self.project_episodes(list(batch.episodes), resume_projected_ids=resume_projected_ids)
         failures = tuple([*batch.failures, *report.failures])
         failed = len(failures)
         projected_or_duplicate = report.projected or report.duplicates
@@ -87,19 +94,35 @@ class GraphProjectionWorker:
             projected=report.projected,
             duplicates=report.duplicates,
             skipped_disabled=report.skipped_disabled,
+            skipped_resumed=report.skipped_resumed,
             failed=failed,
             episode_ids=report.episode_ids,
             failures=failures,
             details=tuple([*report.details, "ontology_batch_projection"]),
         )
 
-    def project_episodes(self, episodes: list[OntologyEpisode]) -> GraphProjectionReport:
+    def project_episodes(
+        self,
+        episodes: list[OntologyEpisode],
+        *,
+        resume_projected_ids: set[str] | None = None,
+    ) -> GraphProjectionReport:
+        # Resume: episode_ids already known to be in the derived index are
+        # skipped without an upsert round-trip. episode_id encodes the content
+        # hash, so a matching id is the same content; re-projecting it would only
+        # come back as `duplicate` after a full backend call. Skipping it avoids
+        # that call entirely while staying idempotent.
+        already = resume_projected_ids or set()
         projected = 0
         duplicates = 0
         skipped_disabled = 0
+        skipped_resumed = 0
         failures: list[dict[str, Any]] = []
         episode_ids: list[str] = []
         for episode in episodes:
+            if episode.episode_id in already:
+                skipped_resumed += 1
+                continue
             try:
                 result = self._graph_adapter.upsert_episode(episode)
             except Exception as exc:
@@ -138,6 +161,7 @@ class GraphProjectionWorker:
             projected=projected,
             duplicates=duplicates,
             skipped_disabled=skipped_disabled,
+            skipped_resumed=skipped_resumed,
             failed=failed,
             episode_ids=tuple(episode_ids),
             failures=tuple(failures),

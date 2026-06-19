@@ -5,6 +5,7 @@ import json
 import os
 import re
 import threading
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -14,6 +15,13 @@ from .graph import UpsertEpisodeResult
 from .models import GraphMemoryResult, OntologyEpisode
 
 _GRAPHITI_GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# Default async-call timeouts (seconds). Reads (search/retrieve) are expected to
+# return in seconds; writes (entity extraction via the LLM) can take much
+# longer. These are split so a slow write does not force every read to wait the
+# full upper bound, and both are injectable for tests and tuning.
+DEFAULT_GRAPH_READ_TIMEOUT_SECONDS = 30.0
+DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS = 300.0
 
 
 @dataclass(frozen=True)
@@ -33,6 +41,8 @@ class GraphitiNeo4jConfig:
     embedding_dim: int = 1024
     store_raw_episode_content: bool = True
     extract_entities: bool = False
+    read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS
+    write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "GraphitiNeo4jConfig":
@@ -55,6 +65,14 @@ class GraphitiNeo4jConfig:
             store_raw_episode_content=env.get("LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT", "true").lower()
             not in {"0", "false", "no"},
             extract_entities=env.get("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES", "false").lower() in {"1", "true", "yes"},
+            read_timeout_seconds=_float_env(
+                env.get("LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS", ""),
+                default=DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
+            ),
+            write_timeout_seconds=_float_env(
+                env.get("LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS", ""),
+                default=DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS,
+            ),
         )
 
 
@@ -73,11 +91,21 @@ class GraphitiNeo4jGraphMemoryAdapter:
         default_group_id: str = "",
         extract_entities: bool = False,
         episode_exists: Callable[[Any, str], Any] | None = None,
+        read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
+        write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS,
+        runner: "_AsyncLoopRunner | None" = None,
     ) -> None:
         self._graphiti = graphiti
         self._default_group_id = default_group_id
         self._extract_entities = extract_entities
-        self._runner = _AsyncLoopRunner.get_instance()
+        # Split read/write timeouts: a read that hangs must not be forced to wait
+        # the (longer) write upper bound, and vice versa. Injectable so a unit
+        # test can drive the timeout path deterministically with a tiny bound.
+        self._read_timeout_seconds = float(read_timeout_seconds)
+        self._write_timeout_seconds = float(write_timeout_seconds)
+        # `runner` is injectable so a test can supply a non-singleton loop runner
+        # without poisoning the shared production singleton.
+        self._runner = runner if runner is not None else _AsyncLoopRunner.get_instance()
         # Existence probe for episode_id MERGE idempotency. Injectable so tests
         # can simulate a pre-existing episode without a live Neo4j. Defaults to
         # Graphiti's EpisodicNode.get_by_uuid (async), which raises when absent.
@@ -89,6 +117,8 @@ class GraphitiNeo4jGraphMemoryAdapter:
             _build_graphiti(config),
             default_group_id=config.default_group_id,
             extract_entities=config.extract_entities,
+            read_timeout_seconds=config.read_timeout_seconds,
+            write_timeout_seconds=config.write_timeout_seconds,
         )
 
     @classmethod
@@ -134,7 +164,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
             )
             return "inserted"
 
-        return self._runner.run(_call)
+        return self._runner.run(_call, timeout=self._write_timeout_seconds)
 
     def search_context(
         self,
@@ -169,7 +199,9 @@ class GraphitiNeo4jGraphMemoryAdapter:
             return list(edges or []), list(episodes or []), details, edge_degraded
 
         try:
-            edges, episodes, details, edge_degraded = self._runner.run(_call)
+            edges, episodes, details, edge_degraded = self._runner.run(
+                _call, timeout=self._read_timeout_seconds
+            )
         except Exception as exc:
             return GraphMemoryResult(status="error", details=(type(exc).__name__,))
 
@@ -252,7 +284,9 @@ def probe_graphiti_connectivity(adapter: Any) -> None:
         raise RuntimeError("graph connectivity probe: driver has no verify_connectivity")
     result = verify()
     if asyncio.iscoroutine(result):
-        _AsyncLoopRunner.get_instance().run(lambda: result)
+        _AsyncLoopRunner.get_instance().run(
+            lambda: result, timeout=DEFAULT_GRAPH_READ_TIMEOUT_SECONDS
+        )
 
 
 def _build_graphiti(config: GraphitiNeo4jConfig):
@@ -311,21 +345,88 @@ class _AsyncLoopRunner:
                     cls._instance = cls()
         return cls._instance
 
-    def __init__(self) -> None:
+    def __init__(self, *, default_timeout: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS) -> None:
+        self._default_timeout = float(default_timeout)
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
-    def run(self, factory: Callable[[], Any]) -> Any:
+    def run(self, factory: Callable[[], Any], *, timeout: float | None = None) -> Any:
+        """Run an async factory on the background loop with a bounded wait.
+
+        `timeout` is the per-call wait in seconds; ``None`` falls back to the
+        runner's configured default. A timeout raises
+        ``concurrent.futures.TimeoutError`` (the caller decides how to surface
+        it: reads degrade to ``status='error'``, writes propagate as a failed
+        upsert). The pending coroutine is cancelled so a hung call does not leak
+        onto the shared loop.
+        """
+
         async def _invoke():
             return await factory()
 
+        wait = self._default_timeout if timeout is None else float(timeout)
         future = asyncio.run_coroutine_threadsafe(_invoke(), self._loop)
-        return future.result(timeout=300)
+        try:
+            return future.result(timeout=wait)
+        except FuturesTimeoutError:
+            # Stop the orphaned coroutine from running forever on the shared loop.
+            future.cancel()
+            raise
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
+
+    def shutdown(self) -> None:
+        """Stop the background loop and join its thread (process-exit seam).
+
+        Idempotent and best-effort: a daemon thread would die with the process
+        anyway, but an explicit shutdown lets a long-lived host (or a test)
+        release the loop deterministically instead of relying on interpreter
+        teardown.
+        """
+
+        loop = getattr(self, "_loop", None)
+        if loop is None or loop.is_closed():
+            return
+        # Cancel any still-pending coroutines (e.g. a timed-out backend call whose
+        # future was cancelled but whose task had not yet unwound) and let the
+        # loop drain them before stopping, so teardown does not emit "Task was
+        # destroyed but it is pending" noise.
+        drain = asyncio.run_coroutine_threadsafe(_drain_pending_tasks(), loop)
+        try:
+            drain.result(timeout=5)
+        except Exception:
+            pass
+        loop.call_soon_threadsafe(loop.stop)
+        thread = getattr(self, "_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+        if not loop.is_closed():
+            loop.close()
+        if _AsyncLoopRunner._instance is self:
+            with _AsyncLoopRunner._lock:
+                if _AsyncLoopRunner._instance is self:
+                    _AsyncLoopRunner._instance = None
+
+
+async def _drain_pending_tasks() -> None:
+    """Cancel and await every other task on the current loop.
+
+    Run on the loop thread during shutdown so timed-out/cancelled coroutines
+    unwind cleanly instead of being garbage-collected while still pending.
+    """
+
+    current = asyncio.current_task()
+    pending = [task for task in asyncio.all_tasks() if task is not current and not task.done()]
+    for task in pending:
+        task.cancel()
+    for task in pending:
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 def _episode_type_json():
@@ -447,3 +548,11 @@ def _int_env(value: str, *, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _float_env(value: str, *, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default

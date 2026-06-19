@@ -193,6 +193,59 @@ def test_mcp_brain_context_resolve_roundtrip_uses_core_without_ragflow(tmp_path:
     assert "/Users/" not in json.dumps(result, sort_keys=True)
 
 
+def test_session_card_cache_collapses_repeated_accepted_card_reads(tmp_path: Path):
+    # Repeated brain tool calls in one session must reuse a single accepted-card
+    # snapshot per (project, limit) instead of reloading the ledger every call.
+    service = _service(tmp_path)
+    real_read_model = service._brain_card_cache._read_model
+    counter = {"calls": 0}
+
+    class _CountingReadModel:
+        def list_accepted_cards(self, *, project, limit):
+            counter["calls"] += 1
+            return real_read_model.list_accepted_cards(project=project, limit=limit)
+
+        def __getattr__(self, name):
+            return getattr(real_read_model, name)
+
+    service._brain_card_cache._read_model = _CountingReadModel()
+
+    for _ in range(3):
+        service.core_brain(project=PROJECT).brain_context_resolve(
+            repository=PROJECT,
+            branch="codex/m14",
+            current_files=[],
+            current_request="언어 선호 확인",
+            project=PROJECT,
+        )
+
+    # Three tool calls, one underlying accepted-card read for the shared snapshot.
+    assert counter["calls"] == 1
+
+    # The explicit refresh seam re-reads on the next call.
+    service.invalidate_brain_card_cache()
+    service.core_brain(project=PROJECT).brain_context_resolve(
+        repository=PROJECT,
+        branch="codex/m14",
+        current_files=[],
+        current_request="언어 선호 확인",
+        project=PROJECT,
+    )
+    assert counter["calls"] == 2
+
+
+def test_session_card_cache_returns_independent_copies(tmp_path: Path):
+    # The cache must hand out copies so a caller mutating its card list cannot
+    # corrupt the shared session snapshot.
+    service = _service(tmp_path)
+    first = service._brain_card_cache.list_accepted_cards(project=PROJECT, limit=8)
+    if first:
+        first[0]["summary"] = "MUTATED"
+    second = service._brain_card_cache.list_accepted_cards(project=PROJECT, limit=8)
+    if second:
+        assert second[0]["summary"] != "MUTATED"
+
+
 def test_mcp_brain_context_resolve_reads_configured_graph_adapter(tmp_path: Path):
     graph = FakeGraphMemoryAdapter(
         [

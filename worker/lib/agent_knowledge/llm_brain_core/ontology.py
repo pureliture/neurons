@@ -93,7 +93,12 @@ def episode_from_memory_card(card: Mapping[str, Any], *, project: str = "") -> O
         "card_type": str(card.get("card_type") or ""),
         "title": public_safe_text(str(card.get("title") or ""), max_chars=240),
         "summary": public_safe_text(str(card.get("summary") or ""), max_chars=512),
-        "typed_payload": dict(card.get("typed_payload") or {}),
+        # typed_payload free text is operator-authored and can carry general PII
+        # or private paths. The graph body is serialized straight from this
+        # payload, so redact every nested string through the public-safe filter
+        # (the same redaction title/summary already get) before it reaches the
+        # derived index, instead of trusting raw card text.
+        "typed_payload": _public_safe_typed_payload(card.get("typed_payload")),
     }
     memory_id = require_non_empty(payload["memory_id"], "memory_id")
     card_type = require_non_empty(payload["card_type"], "card_type")
@@ -197,6 +202,37 @@ def _resolve_card_brain_id(*, card_brain_id: str, project: str, resolved_project
         return project_brain_id
     fallback = card_brain_id or (f"/project/{resolved_project}" if resolved_project else "")
     return require_non_empty(fallback, "brain_id")
+
+
+def _public_safe_typed_payload(value: Any, *, max_chars: int = 2048) -> Any:
+    """Recursively redact free-text inside a card's typed_payload.
+
+    Every string (dict value, list item, or nested) is passed through
+    `public_safe_text` so general PII / private paths in operator-authored card
+    fields never reach the graph body. Dict keys, booleans, and numbers are
+    preserved as-is so structured filtering still works downstream. The recursion
+    is depth-bounded as a cheap guard against pathological/cyclic-shaped input.
+    """
+
+    return _redact_value(value, max_chars=max_chars, depth=0)
+
+
+def _redact_value(value: Any, *, max_chars: int, depth: int) -> Any:
+    if depth > 12:
+        return public_safe_text(str(value), max_chars=max_chars)
+    if isinstance(value, str):
+        return public_safe_text(value, max_chars=max_chars)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _redact_value(item, max_chars=max_chars, depth=depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_value(item, max_chars=max_chars, depth=depth + 1) for item in value]
+    if isinstance(value, (bool, int, float)) or value is None:
+        return value
+    # Unknown/opaque types: stringify then redact so nothing raw slips through.
+    return public_safe_text(str(value), max_chars=max_chars)
 
 
 def _entity_type_for_card(card_type: str) -> str:
