@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from agent_knowledge.cli import main
 from agent_knowledge.curation import CurationService
 from agent_knowledge.ledger import Ledger
@@ -24,6 +26,8 @@ from agent_knowledge.mcp_server import (
 from agent_knowledge.memory_card import build_memory_candidate
 from agent_knowledge.memory_miner import build_memory_card_candidate_from_source_span
 from agent_knowledge.llm_brain_core.ledger_adapter import LedgerSourceRefCatalog
+from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
+from agent_knowledge.llm_brain_core.models import OntologyEpisode
 from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
 from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
 
@@ -185,6 +189,52 @@ def test_mcp_brain_context_resolve_roundtrip_uses_core_without_ragflow(tmp_path:
     assert "/Users/" not in json.dumps(result, sort_keys=True)
 
 
+def test_mcp_brain_context_resolve_reads_configured_graph_adapter(tmp_path: Path):
+    graph = FakeGraphMemoryAdapter(
+        [
+            _episode(
+                "Task",
+                "task:graph-agent",
+                {
+                    "brain_id": f"/project/{PROJECT}",
+                    "task_state": "Serve ContextPack through Brain MCP graph adapter",
+                    "next_action": "Run Codex and Claude Code MCP E2E",
+                },
+            )
+        ]
+    )
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        ragflow=DisabledRagflowClient(),
+        dataset_ids=[],
+        graph_adapter=graph,
+    )
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+                "arguments": {
+                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
+                    "branch": "codex/m14",
+                    "current_request": "Brain MCP graph adapter",
+                    "current_files": ["worker/lib/agent_knowledge/mcp_server.py"],
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["current_task"] == "Serve ContextPack through Brain MCP graph adapter"
+    assert result["last_stopped_at"] == "Run Codex and Claude Code MCP E2E"
+    assert result["graph_status"]["status"] == "available"
+    assert "graph_unavailable" not in result["gaps"]
+
+
 def test_mcp_brain_context_resolve_derives_project_when_omitted(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -343,10 +393,77 @@ def test_mcp_stdio_cli_serves_tools_list_without_ragflow_token(tmp_path: Path, m
     assert BRAIN_CONTEXT_RESOLVE_TOOL_NAME in names
 
 
+@pytest.mark.parametrize("agent_name", ["codex", "claude-code"])
+def test_mcp_stdio_cli_serves_contextpack_for_codex_and_claude_code_agents(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    agent_name: str,
+):
+    ledger = _ledger(tmp_path)
+    graph = FakeGraphMemoryAdapter(
+        [
+            _episode(
+                "Task",
+                f"task:{agent_name}",
+                {
+                    "brain_id": f"/project/{PROJECT}",
+                    "task_state": f"{agent_name} agent reads Brain MCP ContextPack",
+                    "next_action": "Use stdio command in agent MCP config",
+                },
+            )
+        ]
+    )
+    request_lines = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": agent_name}},
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+                "arguments": {
+                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
+                    "branch": "codex/m14",
+                    "current_request": f"{agent_name} Brain MCP ContextPack",
+                    "current_files": [],
+                    "project": PROJECT,
+                },
+            },
+        },
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(json.dumps(item) for item in request_lines) + "\n"))
+    monkeypatch.setattr("agent_knowledge.cli.build_graph_adapter_from_env", lambda **kwargs: graph)
+
+    assert main(["mcp-stdio", "--ledger", str(ledger.path), "--enable-graph"]) == 0
+
+    responses = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert responses[0]["result"]["serverInfo"]["name"] == "neurons"
+    result = responses[1]["result"]["structuredContent"]
+    assert result["current_task"] == f"{agent_name} agent reads Brain MCP ContextPack"
+    assert result["graph_status"]["status"] == "available"
+
+
 def _h(value):
     import hashlib
 
     return "sha256:" + hashlib.sha256(value.encode()).hexdigest()
+
+
+def _episode(entity_type: str, natural_id: str, payload: dict) -> OntologyEpisode:
+    return OntologyEpisode.from_payload(
+        event_id=f"evt_{natural_id.replace(':', '_')}",
+        entity_type=entity_type,
+        natural_id=natural_id,
+        payload=payload,
+        observed_at="2026-06-19T00:00:00+00:00",
+        reference_time="2026-06-19T00:00:00+00:00",
+    )
 
 
 class _FakeBridgeRagflow:

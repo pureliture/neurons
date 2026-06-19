@@ -9,6 +9,7 @@ from agent_knowledge.session_memory.brain_read_model import LegacyLedgerBrainRea
 
 from .ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
 from .runtime import build_runtime_brain_service
+from .runtime_graph import build_graph_adapter_from_env
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -20,6 +21,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--current-file", action="append", default=[])
     parser.add_argument("--current-request", required=True)
     parser.add_argument("--limit", type=int, default=8)
+    parser.add_argument("--enable-graph", action="store_true")
+    parser.add_argument("--graph-required", action="store_true")
     args = parser.parse_args(argv)
 
     try:
@@ -32,6 +35,10 @@ def main(argv: list[str] | None = None) -> int:
             artifact_store=artifact_store,
             read_model=read_model,
             source_catalog=source_catalog,
+            graph_adapter=build_graph_adapter_from_env(
+                enabled=bool(args.enable_graph),
+                required=bool(args.graph_required),
+            ),
         )
         pack = service.brain_context_resolve(
             repository=args.repository,

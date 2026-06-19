@@ -55,11 +55,14 @@ def test_ontology_episode_batch_maps_artifacts_cards_and_source_refs():
             ),
         ],
         source_refs=[source_ref],
+        project="neurons",
     )
 
     assert [episode.entity_type for episode in episodes] == ["Session", "Task", "Decision", "SourceRef"]
     assert episodes[0].payload["artifact_id"] == artifact.artifact_id
     assert episodes[-1].payload["relative_path_hash"].startswith("sha256:")
+    assert episodes[-1].payload["brain_id"] == "/project/neurons"
+    assert episodes[-1].payload["project"] == "neurons"
     assert "specs/design.md" not in str(episodes[-1].to_dict())
 
 
@@ -100,6 +103,7 @@ def test_projection_worker_projects_full_ontology_batch_and_context_uses_graph_t
             )
         ],
         source_refs=[source_ref],
+        project="neurons",
     ).to_dict()
     service = BrainReadService(graph_adapter=graph)
 
