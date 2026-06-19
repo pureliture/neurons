@@ -68,6 +68,42 @@ Hard stop:
 - firewall/systemd/package mutation;
 - production K3s/Nomad or central server mutation.
 
+## Graph Env Contract
+
+These are the only environment keys the LLM-Brain graph runtime reads
+(`agent_knowledge.llm_brain_core.runtime_graph` +
+`GraphitiNeo4jConfig.from_env`). `LLM_BRAIN_*` is canonical; the bare
+`NEO4J_*` / `GRAPHITI_*` / `OPENAI_*` / `MODEL_NAME` / `EMBEDDING_*` names are
+legacy fallbacks read only when the canonical key is unset. Activation is via
+the `--enable-graph` / `--graph-required` CLI flags plus
+`LLM_BRAIN_GRAPH_ENABLED`; there is no `GRAPH_ENABLED` key.
+
+| Canonical key | Legacy fallback | Default | Purpose |
+| --- | --- | --- | --- |
+| `LLM_BRAIN_GRAPH_ENABLED` | — | `false` | Best-effort backend toggle (truthy: `1`/`true`/`yes`/`on`). Equivalent to `--enable-graph`. `--graph-required` implies enabled. |
+| `LLM_BRAIN_NEO4J_URI` | `NEO4J_URI` | `bolt://localhost:7687` | Neo4j bolt URI. |
+| `LLM_BRAIN_NEO4J_USER` | `NEO4J_USER` | `neo4j` | Neo4j user. |
+| `LLM_BRAIN_NEO4J_PASSWORD` | `NEO4J_PASSWORD` | `` | Neo4j password (secret; never echoed to public output). |
+| `LLM_BRAIN_GRAPH_GROUP_ID` | — | `` | Default Graphiti `group_id`. Usually left empty; the per-project group key `/project/<project>` is passed explicitly. |
+| `LLM_BRAIN_GRAPH_LLM_PROVIDER` | `GRAPHITI_LLM_PROVIDER` | `openai` | Graphiti LLM provider id (lowercased). |
+| `LLM_BRAIN_LLM_MODEL` | `MODEL_NAME` | `` | Graphiti LLM model name. |
+| `LLM_BRAIN_SMALL_LLM_MODEL` | `SMALL_MODEL_NAME` | `` | Graphiti small/cheap model name. |
+| `LLM_BRAIN_LLM_BASE_URL` | `OPENAI_BASE_URL` | `` | LLM API base URL (OpenAI-compatible). |
+| `LLM_BRAIN_LLM_API_KEY` | `OPENAI_API_KEY` | `` | LLM API key (secret). |
+| `LLM_BRAIN_EMBEDDING_MODEL` | `EMBEDDING_MODEL` | `` | Embedding model name. |
+| `LLM_BRAIN_EMBEDDING_BASE_URL` | `OPENAI_BASE_URL` | `` | Embedding API base URL. |
+| `LLM_BRAIN_EMBEDDING_API_KEY` | `OPENAI_API_KEY` | `` | Embedding API key (secret). |
+| `LLM_BRAIN_EMBEDDING_DIM` | — | `1024` | Embedding dimension (int). |
+| `LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT` | — | `true` | Store raw episode content (off only for `0`/`false`/`no`). |
+| `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES` | — | `false` | Run Graphiti entity extraction (truthy: `1`/`true`/`yes`). Production default is episode-only. |
+
+Notes:
+
+- `_GRAPHITI_GROUP_ID_RE` in `graphiti_adapter.py` is an internal validation
+  regex for `group_id` shape, not an environment variable.
+- Secrets (`*_PASSWORD`, `*_API_KEY`) are inputs only; they must never appear in
+  CLI/MCP responses, logs, or runbook evidence.
+
 ## Source Test Gate
 
 Run in `neurons`:
@@ -196,6 +232,46 @@ Required LLM-Brain tools:
 
 The tools must not expose raw backend identifiers, raw private paths, secrets,
 RAGFlow dataset ids, or RAGFlow document ids.
+
+## Graph Degrade Operations Matrix
+
+The graph is a derived index. Canonical artifacts and MemoryCards always win, so
+some graph states are normal degrade, not an outage. Repairing or restarting a
+healthy runtime is a guardrail violation. Use this matrix before touching the
+backend.
+
+| Symptom (observed) | Normal degrade? | Action | Recovery (only if not normal) |
+| --- | --- | --- | --- |
+| `graph_status.status == "available"`, no `graph_edge_degraded` | n/a (healthy) | None. Do not restart. | — |
+| `--enable-graph` (best-effort) and backend unreachable: adapter unavailable, `gaps` has `graph_unavailable` | Yes — best-effort by design | None required for read serving; canonical memory still answers. | Bring Neo4j back, then re-run with `--enable-graph` to re-attach. |
+| `graph_status.status == "degraded"`, `details`/`gaps` include `graph_edge_degraded`: episodes load but edge/relationship search failed | Partial — episode reads survive, relationship recall is broken | Do not treat as full outage; do not wipe data. Investigate the edge index / search backend. | Rebuild/repair the edge index or fix the search backend; confirm `graph_edge_degraded` clears. |
+| `graph_status.status == "error"` / `unavailable` with `--graph-required`: startup connectivity probe failed (non-zero exit, no tool served) | No — must-have contract not met | Fix the backend before serving. The fail-fast is correct; do not relax `--graph-required` to mask it. | Restore Neo4j reachability + credentials, re-run `--graph-required`; the probe must pass. |
+| `brain-project` exits non-zero, `status: failed` | No — projection failed | Treat as incomplete bootstrap; do not claim coverage. | Fix the malformed SourceRef line or backend write path, re-run. |
+| `truncated.any == true` on `brain-project` | Yes — bounded `--limit` window | None; it is a partial-window note, not a failure. | Raise `--limit` (artifacts cap 100) or page to widen coverage. |
+
+Rule of thumb: `available` is the only healthy state; `degraded` and
+`error`/`unavailable` are gate failures for promotion but are NOT, by themselves,
+permission to restart a running backend. Diagnose first, restart only with
+evidence and intent.
+
+## Public Output Safety Checklist
+
+Every CLI/MCP response, runbook evidence block, log line, or PR snippet copied
+out of this runtime must pass all of these before sharing:
+
+```text
+[ ] no absolute paths (/Users/, /home/, /private/, C:\, UNC \\host)
+[ ] no raw relative source paths (only hashed relative_path_hash)
+[ ] no Neo4j/bolt URI, host:port, or backend connection string
+[ ] no credentials: *_PASSWORD, *_API_KEY, Bearer tokens, NEO4J_PASSWORD value
+[ ] no raw RAGFlow dataset_id or document_id
+[ ] no raw transcript/source body
+[ ] graph evidence shows status + details only, not raw backend node ids
+[ ] schema_version present on versioned payloads (e.g. llm_brain_context_resolve.v1)
+```
+
+If any box cannot be checked, redact before sharing. A degraded-but-public-safe
+response is acceptable to share; a leak is not, regardless of graph health.
 
 ## SourceRef Bootstrap and Graph Projection
 

@@ -248,6 +248,9 @@ def test_brain_context_resolve_cli_reads_ledger_backed_core(tmp_path, capsys):
     pack = report["context_pack"]
     assert pack["current_task"] == "Wire core runtime to Ledger and CouchDB source fixtures"
     assert pack["bridge_status"]["status"] == "disabled"
+    # The wrapped pack carries the same schema_version as the wrapper, matching
+    # the MCP surface which returns the bare pack.
+    assert pack["schema_version"] == "llm_brain_context_resolve.v1"
     assert "/Users/" not in json.dumps(report, sort_keys=True)
 
 

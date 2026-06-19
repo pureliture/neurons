@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from typing import Any, Protocol
 
 from ._util import ensure_public_safe
-from .models import OntologyEpisode, SessionMemoryArtifact
+from .models import SessionMemoryArtifact
 
 
 _EXTERNAL_INDEX_OBJECTS = ("dataset", "document")
@@ -52,28 +52,6 @@ class InMemorySessionMemoryArtifactStore:
             key=lambda artifact: (artifact.created_at, artifact.artifact_id),
             reverse=True,
         )[:bounded]
-
-    def to_episode(self, artifact: SessionMemoryArtifact) -> OntologyEpisode:
-        return OntologyEpisode.from_payload(
-            event_id=artifact.source_event_ids[0] if artifact.source_event_ids else artifact.artifact_id,
-            entity_type="Session",
-            natural_id=artifact.session_id_hash.replace(":", "_"),
-            payload={
-                "artifact_id": artifact.artifact_id,
-                "project": artifact.project,
-                "provider": artifact.provider,
-                "summary": artifact.summary,
-                "session_id_hash": artifact.session_id_hash,
-            },
-            lifecycle_state="accepted",
-            currentness="current",
-            source_event_ids=artifact.source_event_ids,
-            source_ref_ids=artifact.chunk_refs + artifact.tool_evidence_refs,
-            observed_at=artifact.created_at,
-            reference_time=artifact.created_at,
-            ontology_version=artifact.ontology_version,
-            extractor_version=artifact.extractor_version,
-        )
 
 
 def _reject_external_index_fields(value: Any, path: str = "artifact") -> None:
