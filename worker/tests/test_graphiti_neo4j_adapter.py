@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
+from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
 from agent_knowledge.llm_brain_core.graphiti_adapter import (
     GraphitiNeo4jConfig,
     GraphitiNeo4jGraphMemoryAdapter,
@@ -93,9 +97,11 @@ def test_graphiti_adapter_keeps_episode_retrieval_when_edge_index_is_missing():
         limit=5,
     )
 
-    assert result.status == "available"
+    # Edge index missing but episodes survive: this is a degraded read, not a
+    # healthy 'available' one, and it carries an explicit degrade signal.
+    assert result.status == "degraded"
     assert [episode.natural_id for episode in result.episodes] == ["task:episode-only"]
-    assert result.details == ("graphiti_neo4j", "edge_search:RuntimeError")
+    assert result.details == ("graphiti_neo4j", "edge_search:RuntimeError", "graph_edge_degraded")
 
 
 def test_graphiti_config_from_env_supports_ollama_openai_compatible_defaults():
@@ -142,6 +148,80 @@ def test_graphiti_episode_rehydration_rejects_missing_required_fields():
 def test_graphiti_datetime_conversion_does_not_fabricate_missing_times():
     assert _datetime_to_iso(None) == ""
     assert _datetime_to_iso("not-a-datetime") == ""
+
+
+def test_fake_adapter_simulates_episode_id_merge_on_reupsert():
+    # Production default (extract_entities=False) MERGEs on episode_id: a second
+    # upsert of the same episode is a duplicate, not a new row.
+    adapter = FakeGraphMemoryAdapter(default_group_id="/project/neurons")
+    episode = _episode("Task", "task:merge", {"brain_id": "/project/neurons", "task": "merge"})
+
+    assert adapter.upsert_episode(episode) == "inserted"
+    assert adapter.upsert_episode(episode) == "duplicate"
+
+    result = adapter.search_context(brain_id="/project/neurons", query="merge", limit=10)
+    assert [ep.natural_id for ep in result.episodes] == ["task:merge"]
+
+
+def test_fake_adapter_scopes_reads_by_group_id_like_graphiti_group_ids():
+    # group_ids filter must be honest: an episode in one brain group is never
+    # returned for a different brain_id, even when default_group_id is set.
+    adapter = FakeGraphMemoryAdapter(default_group_id="/project/neurons")
+    adapter.upsert_episode(_episode("Task", "task:neurons", {"brain_id": "/project/neurons", "task": "shared"}))
+    adapter.upsert_episode(_episode("Task", "task:other", {"brain_id": "/project/other", "task": "shared"}))
+
+    neurons = adapter.search_context(brain_id="/project/neurons", query="shared", limit=10)
+    other = adapter.search_context(brain_id="/project/other", query="shared", limit=10)
+    missing = adapter.search_context(brain_id="/project/absent", query="shared", limit=10)
+
+    assert [ep.natural_id for ep in neurons.episodes] == ["task:neurons"]
+    assert [ep.natural_id for ep in other.episodes] == ["task:other"]
+    assert missing.episodes == ()
+
+
+def test_fake_adapter_uses_default_group_id_when_episode_brain_id_missing():
+    # An episode without a payload brain_id falls back to default_group_id, the
+    # same fallback the real adapter applies for group_id derivation.
+    adapter = FakeGraphMemoryAdapter(default_group_id="/project/neurons")
+    adapter.upsert_episode(_episode("Task", "task:fallback", {"task": "fallback only"}))
+
+    in_default = adapter.search_context(brain_id="/project/neurons", query="fallback", limit=10)
+    in_other = adapter.search_context(brain_id="/project/other", query="fallback", limit=10)
+
+    assert [ep.natural_id for ep in in_default.episodes] == ["task:fallback"]
+    assert in_other.episodes == ()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("LLM_BRAIN_NEO4J_URI") and not os.environ.get("NEO4J_URI"),
+    reason="requires a live Neo4j (set NEO4J_URI / LLM_BRAIN_NEO4J_URI to run)",
+)
+def test_graphiti_neo4j_round_trip_against_live_backend():
+    """Live Neo4j round-trip: upsert one episode and read it back.
+
+    Skipped unless NEO4J_URI / LLM_BRAIN_NEO4J_URI is set. This is the seam for
+    the manual live E2E gate documented in the runbook; CI without a backend
+    skips it rather than connecting.
+    """
+
+    adapter = GraphitiNeo4jGraphMemoryAdapter.from_env()
+    natural_id = f"task:live-roundtrip-{os.getpid()}"
+    episode = _episode(
+        "Task",
+        natural_id,
+        {"brain_id": "/project/neurons", "task": "live round-trip smoke"},
+    )
+
+    result = adapter.upsert_episode(episode)
+    assert result and result != "failed"
+
+    search = adapter.search_context(
+        brain_id="/project/neurons",
+        query="live round-trip smoke",
+        entity_types=["Task"],
+        limit=10,
+    )
+    assert search.status in {"available", "degraded"}
 
 
 class _FakeGraphiti:

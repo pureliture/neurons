@@ -154,6 +154,9 @@ def episode_from_memory_card(card: Mapping[str, Any]) -> OntologyEpisode:
     }
     memory_id = require_non_empty(payload["memory_id"], "memory_id")
     card_type = require_non_empty(payload["card_type"], "card_type")
+    # brain_id is the graph group key. A missing brain_id silently breaks
+    # group_ids scoping, so fail fast instead of projecting an ungrouped episode.
+    payload["brain_id"] = require_non_empty(payload["brain_id"], "brain_id")
     natural_id = f"{card_type}:{memory_id}"
     entity_type = _entity_type_for_card(payload["card_type"])
     return OntologyEpisode.from_payload(

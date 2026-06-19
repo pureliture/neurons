@@ -15,6 +15,7 @@ class GraphProjectionReport:
     attempted: int
     projected: int
     duplicates: int = 0
+    skipped_disabled: int = 0
     failed: int = 0
     episode_ids: tuple[str, ...] = ()
     failures: tuple[dict[str, Any], ...] = ()
@@ -52,6 +53,7 @@ class GraphProjectionWorker:
             attempted=len(cards),
             projected=report.projected,
             duplicates=report.duplicates,
+            skipped_disabled=report.skipped_disabled,
             failed=failed,
             episode_ids=report.episode_ids,
             failures=merged_failures,
@@ -82,6 +84,7 @@ class GraphProjectionWorker:
             attempted=len(artifacts or []) + len(memory_cards or []) + len(source_refs or []),
             projected=report.projected,
             duplicates=report.duplicates,
+            skipped_disabled=report.skipped_disabled,
             failed=failed,
             episode_ids=report.episode_ids,
             failures=failures,
@@ -91,6 +94,7 @@ class GraphProjectionWorker:
     def project_episodes(self, episodes: list[OntologyEpisode]) -> GraphProjectionReport:
         projected = 0
         duplicates = 0
+        skipped_disabled = 0
         failures: list[dict[str, Any]] = []
         episode_ids: list[str] = []
         for episode in episodes:
@@ -106,6 +110,10 @@ class GraphProjectionWorker:
                 )
                 continue
             result_text = str(result or "")
+            if result_text == "skipped_disabled":
+                # Graph intentionally disabled: a no-op, not a projection or a failure.
+                skipped_disabled += 1
+                continue
             if result_text == "duplicate":
                 duplicates += 1
             elif result_text in {"", "unavailable", "failed", "error"}:
@@ -127,6 +135,7 @@ class GraphProjectionWorker:
             attempted=len(episodes),
             projected=projected,
             duplicates=duplicates,
+            skipped_disabled=skipped_disabled,
             failed=failed,
             episode_ids=tuple(episode_ids),
             failures=tuple(failures),

@@ -139,10 +139,25 @@ The agent smoke must call `brain_context_resolve`, not only `tools/list`, and
 must verify:
 
 ```text
-graph_status.status == "available"
+graph_status.status == "available"   (NOT "degraded" and NOT "error")
+"graph_edge_degraded" not present in graph_status.details
+"graph_edge_degraded" not present in the ContextPack gaps
 memory_status.authority == "canonical_artifact_and_card"
 raw_paths_printed == false by inspection of the JSON response
 ```
+
+`graph_status.status == "degraded"` means the episode read survived but the
+edge/relationship search failed (details include `graph_edge_degraded`). A
+degraded graph is NOT a passing E2E gate: relationship recall is broken even
+though episodes still load. Treat `degraded` and `error` as gate failures and
+fix the edge index / backend before promoting.
+
+`--graph-required` (must-have) runs a one-shot Neo4j connectivity probe at
+startup. If the backend is unreachable, the entrypoint fails fast with a
+non-zero exit before serving any tool call, instead of later surfacing an empty
+but falsely `available` graph. `--enable-graph` alone is best-effort: an
+unreachable backend degrades to an unavailable adapter without failing startup,
+and it never implies `--graph-required`.
 
 On Ubuntu, when `uv` is not installed, run the stdio import/tool-list smoke with
 host Python and the checked-out library path:
@@ -351,6 +366,30 @@ dump/load smoke: status=ok, episodes=4, graph_db_files_synced_between_pcs=false
 The dump/load current-pass used the existing stopped verification Neo4j data
 volume and a new restore verification volume. It did not delete graph volumes
 and did not sync graph DB files between PCs.
+
+### Manual Live E2E Evidence (merge gate)
+
+The in-repo test suite covers the graph seam with a Fake adapter and a
+skip-unless-env live round-trip
+(`tests/test_graphiti_neo4j_adapter.py::test_graphiti_neo4j_round_trip_against_live_backend`,
+skipped unless `NEO4J_URI` / `LLM_BRAIN_NEO4J_URI` is set). The suite alone does
+NOT prove a live backend. Before merging any change to the graph activation,
+result, or status seam, capture manual live E2E evidence and attach it to the PR:
+
+```text
+1. backend reachable:   --graph-required startup did not fail the connectivity probe
+2. round-trip:          one unique-natural_id episode upserted and read back from Neo4j
+3. status healthy:      brain_context_resolve graph_status.status == "available"
+4. no false-healthy:    graph_status.details has no "graph_edge_degraded";
+                        gaps has no "graph_edge_degraded"
+5. public-safe:         response has no raw paths, tokens, dataset/document ids,
+                        or raw backend identifiers
+6. skip honesty:        the skip-unless-env round-trip test ran (not skipped) for
+                        this evidence, i.e. NEO4J_URI / LLM_BRAIN_NEO4J_URI was set
+```
+
+A change that cannot show items 1-6 from a live run must not claim live E2E
+coverage; record that the live gate is pending and keep the merge blocked on it.
 
 ## Dendrite SourceRef Catalog
 

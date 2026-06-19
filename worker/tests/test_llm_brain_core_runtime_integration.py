@@ -251,6 +251,43 @@ def test_brain_context_resolve_cli_reads_ledger_backed_core(tmp_path, capsys):
     assert "/Users/" not in json.dumps(report, sort_keys=True)
 
 
+def test_brain_context_resolve_cli_failure_does_not_leak_raw_exception(tmp_path, monkeypatch, capsys):
+    def _raise(**kwargs):
+        _ = kwargs
+        raise RuntimeError("/Users/example/private TOKEN=secret bolt://neo4j:7687")
+
+    monkeypatch.setattr("agent_knowledge.llm_brain_core.cli.build_runtime_brain_service", _raise)
+
+    ledger_path = tmp_path / "ledger.sqlite3"
+    Ledger(ledger_path)
+
+    rc = neuron_main(
+        [
+            "brain-context-resolve",
+            "--ledger",
+            str(ledger_path),
+            "--project",
+            PROJECT,
+            "--repository",
+            "neurons",
+            "--branch",
+            "main",
+            "--current-request",
+            "leak check",
+        ]
+    )
+    stderr = capsys.readouterr().err
+    report = json.loads(stderr)
+
+    assert rc == 1
+    assert report["status"] == "failed"
+    assert report["error_class"] == "RuntimeError"
+    # Symmetric with brain-project and mcp-stdio: no raw exception text leaks.
+    assert "/Users/" not in stderr
+    assert "TOKEN" not in stderr
+    assert "bolt://" not in stderr
+
+
 def test_brain_event_mapping_accepts_existing_queue_shape():
     envelope = brain_event_from_ingress_payload(
         {
@@ -344,6 +381,62 @@ def test_runtime_episode_from_memory_card_rejects_malformed_identity_and_tolerat
     malformed["memory_id"] = ""
     with pytest.raises(ValueError, match="memory_id"):
         episode_from_memory_card(malformed)
+
+
+def test_memory_card_projection_requires_brain_id_fail_fast():
+    card = _card(
+        "mem_no_brain_id",
+        "task",
+        "Card missing brain_id",
+        {"task_state": "Card missing brain_id", "status": "open"},
+    )
+    card["brain_id"] = ""
+
+    with pytest.raises(ValueError, match="brain_id"):
+        episode_from_memory_card(card)
+
+
+def test_context_pack_separates_graph_edge_degraded_from_unavailable():
+    from agent_knowledge.llm_brain_core import BrainReadService, InMemorySessionMemoryArtifactStore
+    from agent_knowledge.llm_brain_core.models import GraphMemoryResult
+
+    class _DegradedGraph:
+        def upsert_episode(self, episode):
+            return "inserted"
+
+        def search_context(self, *, brain_id, query, entity_types=None, limit=10):
+            return GraphMemoryResult(
+                status="degraded",
+                episodes=(),
+                details=("graphiti_neo4j", "edge_search:RuntimeError", "graph_edge_degraded"),
+            )
+
+    service = BrainReadService(
+        artifact_store=InMemorySessionMemoryArtifactStore(),
+        memory_cards=[
+            _card(
+                "mem_degraded_task",
+                "task",
+                "Degraded edge search task",
+                {"task_state": "Degraded edge search task", "status": "open"},
+            )
+        ],
+        graph_adapter=_DegradedGraph(),
+    )
+
+    pack = service.brain_context_resolve(
+        repository="neurons",
+        branch="main",
+        current_files=[],
+        current_request="anything",
+        project=PROJECT,
+    ).to_dict()
+
+    # Edge degrade must not be reported as a healthy 'available' graph, and it is
+    # a distinct gap signal from a fully unavailable graph.
+    assert pack["graph_status"]["status"] == "degraded"
+    assert "graph_edge_degraded" in pack["gaps"]
+    assert "graph_unavailable" not in pack["gaps"]
 
 
 def test_context_project_filter_does_not_treat_missing_project_as_wildcard():

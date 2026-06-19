@@ -78,7 +78,11 @@ class BrainReadService:
         gaps: list[str] = []
         if not artifacts and not cards:
             gaps.append("no_canonical_memory")
-        if graph_result.status != "available":
+        if graph_result.status == "degraded":
+            # Edge/relationship search failed but episode reads survived: a
+            # partial graph, distinct from a fully unavailable one.
+            gaps.append("graph_edge_degraded")
+        elif graph_result.status != "available":
             gaps.append("graph_unavailable")
         pack = ContextPack(
             brain_id=brain_id,

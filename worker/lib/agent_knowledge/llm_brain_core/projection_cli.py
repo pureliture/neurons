@@ -108,8 +108,8 @@ def run_projection(
     )
     source_refs = imported_records if include_source_refs else []
     graph_adapter = build_graph_adapter_from_env(
-        enabled=True if enable_graph else None,
-        required=graph_required or enable_graph,
+        enable_flag=True if enable_graph else None,
+        required_flag=bool(graph_required),
     )
     projection = GraphProjectionWorker(graph_adapter).project_batch(
         artifacts=artifacts,

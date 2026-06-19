@@ -130,8 +130,9 @@ class GraphitiNeo4jGraphMemoryAdapter:
         group_id = _graphiti_group_id(brain_id or self._default_group_id)
         group_ids = [group_id] if group_id else None
 
-        async def _call() -> tuple[list[Any], list[Any], list[str]]:
+        async def _call() -> tuple[list[Any], list[Any], list[str], bool]:
             details: list[str] = ["graphiti_neo4j"]
+            edge_degraded = False
             try:
                 edges = await self._graphiti.search(
                     query,
@@ -140,16 +141,17 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 )
             except Exception as exc:
                 edges = []
+                edge_degraded = True
                 details.append(f"edge_search:{type(exc).__name__}")
             episodes = await self._graphiti.retrieve_episodes(
                 reference_time=datetime.now(timezone.utc),
                 last_n=max(bounded * 5, bounded),
                 group_ids=group_ids,
             )
-            return list(edges or []), list(episodes or []), details
+            return list(edges or []), list(episodes or []), details, edge_degraded
 
         try:
-            edges, episodes, details = self._runner.run(_call)
+            edges, episodes, details, edge_degraded = self._runner.run(_call)
         except Exception as exc:
             return GraphMemoryResult(status="error", details=(type(exc).__name__,))
 
@@ -172,11 +174,48 @@ class GraphitiNeo4jGraphMemoryAdapter:
             converted.append(episode)
 
         converted.sort(key=lambda item: (item.observed_at, item.episode_id), reverse=True)
+        # Edge (relationship) search failure with surviving episode reads is a
+        # partial result, not a healthy 'available' one. Separate it so downstream
+        # gates cannot read a false-healthy graph_status.
+        if edge_degraded:
+            return GraphMemoryResult(
+                status="degraded",
+                episodes=tuple(converted[:bounded]),
+                details=tuple([*details, "graph_edge_degraded"]),
+            )
         return GraphMemoryResult(
             status="available",
             episodes=tuple(converted[:bounded]),
             details=tuple(details),
         )
+
+
+def probe_graphiti_connectivity(adapter: Any) -> None:
+    """One-shot connectivity probe for the must-have (required) graph path.
+
+    Calls the underlying Neo4j driver's ``verify_connectivity`` once so a dead
+    or unreachable backend fails fast at startup instead of degrading to an empty
+    'available' read later. Raises on failure; returns ``None`` on success.
+
+    The probe is kept here (next to the adapter) but injected through
+    ``runtime_graph.build_graph_adapter_from_env`` so tests can substitute a
+    failing probe without a live Neo4j.
+    """
+
+    graphiti = getattr(adapter, "_graphiti", None)
+    driver = getattr(graphiti, "driver", None)
+    if driver is None:
+        raise RuntimeError("graph connectivity probe: no driver available")
+    verify = getattr(driver, "verify_connectivity", None)
+    if verify is None:
+        # Wrapped drivers may expose the neo4j driver one level down.
+        inner = getattr(driver, "client", None) or getattr(driver, "_driver", None)
+        verify = getattr(inner, "verify_connectivity", None)
+    if verify is None:
+        raise RuntimeError("graph connectivity probe: driver has no verify_connectivity")
+    result = verify()
+    if asyncio.iscoroutine(result):
+        _AsyncLoopRunner.get_instance().run(lambda: result)
 
 
 def _build_graphiti(config: GraphitiNeo4jConfig):
