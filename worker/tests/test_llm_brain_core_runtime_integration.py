@@ -384,6 +384,10 @@ def test_runtime_episode_from_memory_card_rejects_malformed_identity_and_tolerat
 
 
 def test_memory_card_projection_requires_brain_id_fail_fast():
+    # A card with no derivable group key (neither an explicit brain_id nor a
+    # project to derive /project/<project> from) must still fail fast rather than
+    # project an ungrouped episode. When a project IS present, brain_id is
+    # derived from it (see test_memory_card_projection_derives_brain_id_from_card_project).
     card = _card(
         "mem_no_brain_id",
         "task",
@@ -391,9 +395,108 @@ def test_memory_card_projection_requires_brain_id_fail_fast():
         {"task_state": "Card missing brain_id", "status": "open"},
     )
     card["brain_id"] = ""
+    card["project"] = ""
 
     with pytest.raises(ValueError, match="brain_id"):
         episode_from_memory_card(card)
+
+
+def test_memory_card_projection_derives_brain_id_from_card_project():
+    # No caller project and no explicit brain_id, but the card carries a project:
+    # derive the canonical group key /project/<project> instead of failing.
+    card = _card(
+        "mem_card_project_only",
+        "task",
+        "Card project drives group key",
+        {"task_state": "Card project drives group key", "status": "open"},
+    )
+    card["brain_id"] = ""
+
+    episode = episode_from_memory_card(card)
+
+    assert episode.payload["brain_id"] == f"/project/{PROJECT}"
+
+
+def test_memory_card_projection_enforces_project_group_key():
+    # When the caller passes a project, the canonical group key is
+    # /project/<project>; an episode is grouped there regardless of any benign
+    # brain_id already on the card, and a card without brain_id is still grouped.
+    card = _card(
+        "mem_project_group",
+        "task",
+        "Project-derived group key",
+        {"task_state": "Project-derived group key", "status": "open"},
+    )
+    card["brain_id"] = ""
+
+    episode = episode_from_memory_card(card, project="alpha")
+
+    assert episode.payload["brain_id"] == "/project/alpha"
+    assert episode.payload["project"] == "alpha"
+
+
+def test_memory_card_projection_fails_fast_on_brain_id_project_mismatch():
+    # A card whose own brain_id disagrees with the caller's project group key is
+    # a scoping hazard: it would land under a different brain than its project.
+    # Fail fast instead of silently grouping under the wrong brain.
+    card = _card(
+        "mem_brain_mismatch",
+        "task",
+        "Mismatched brain_id",
+        {"task_state": "Mismatched brain_id", "status": "open"},
+    )
+    card["brain_id"] = "/project/other-brain"
+
+    with pytest.raises(ValueError, match="brain_id"):
+        episode_from_memory_card(card, project=PROJECT)
+
+
+def test_memory_card_projection_accepts_matching_brain_id_and_project():
+    card = _card(
+        "mem_brain_match",
+        "task",
+        "Matching brain_id",
+        {"task_state": "Matching brain_id", "status": "open"},
+    )
+    card["brain_id"] = f"/project/{PROJECT}"
+
+    episode = episode_from_memory_card(card, project=PROJECT)
+
+    assert episode.payload["brain_id"] == f"/project/{PROJECT}"
+
+
+def test_fake_adapter_does_not_cross_contaminate_groups_on_identical_query_text():
+    # Two episodes projected under different brain_ids with identical content and
+    # query text must stay isolated: a search under one brain_id never returns
+    # the other brain's episode. This is the group_ids scoping invariant.
+    from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
+    from agent_knowledge.llm_brain_core.projection import GraphProjectionWorker
+
+    alpha = _card(
+        "mem_alpha_shared",
+        "task",
+        "Shared title across brains",
+        {"task_state": "Shared title across brains", "status": "open"},
+    )
+    beta = _card(
+        "mem_beta_shared",
+        "task",
+        "Shared title across brains",
+        {"task_state": "Shared title across brains", "status": "open"},
+    )
+    # Different project group keys; overwrite the fixture's brain_id deliberately.
+    beta["project"] = "beta-project"
+    beta["brain_id"] = "/project/beta-project"
+
+    graph = FakeGraphMemoryAdapter()
+    GraphProjectionWorker(graph).project_memory_cards([alpha], project=PROJECT)
+    GraphProjectionWorker(graph).project_memory_cards([beta], project="beta-project")
+
+    in_neurons = graph.search_context(brain_id=f"/project/{PROJECT}", query="shared title", limit=10)
+    in_beta = graph.search_context(brain_id="/project/beta-project", query="shared title", limit=10)
+
+    assert [ep.natural_id for ep in in_neurons.episodes] == ["task:mem_alpha_shared"]
+    assert [ep.natural_id for ep in in_beta.episodes] == ["task:mem_beta_shared"]
 
 
 def test_context_pack_separates_graph_edge_degraded_from_unavailable():

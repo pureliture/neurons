@@ -35,12 +35,14 @@ class GraphProjectionWorker:
     def __init__(self, graph_adapter: GraphMemoryAdapter) -> None:
         self._graph_adapter = graph_adapter
 
-    def project_memory_cards(self, cards: list[dict[str, Any]]) -> GraphProjectionReport:
+    def project_memory_cards(
+        self, cards: list[dict[str, Any]], *, project: str = ""
+    ) -> GraphProjectionReport:
         episodes = []
         failures: list[dict[str, Any]] = []
         for card in cards:
             try:
-                episodes.append(episode_from_memory_card(card))
+                episodes.append(episode_from_memory_card(card, project=project))
             except Exception as exc:
                 failures.append(_failure(card, exc, phase="map"))
         report = self.project_episodes(episodes)

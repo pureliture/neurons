@@ -103,6 +103,79 @@ def test_brain_project_imports_dendrite_source_refs_projects_graph_and_contextpa
     assert "/Users/" not in json.dumps(report | {"pack": pack}, sort_keys=True)
 
 
+def test_brain_project_signals_memory_card_truncation_at_limit_boundary(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    # More accepted cards than the --limit window: the run re-projects only the
+    # newest `--limit` cards, so the report must flag truncated.memory_cards so a
+    # partial-window run is not mistaken for full-project coverage.
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    for index in range(3):
+        ledger.upsert_llm_brain_memory_card(_accepted_task_card(f"mem_truncate_{index}", index))
+    graph = FakeGraphMemoryAdapter()
+    monkeypatch.setattr(
+        "agent_knowledge.llm_brain_core.projection_cli.build_graph_adapter_from_env",
+        lambda **kwargs: graph,
+    )
+
+    rc = neuron_main(
+        [
+            "brain-project",
+            "--ledger",
+            str(tmp_path / "ledger.sqlite3"),
+            "--project",
+            PROJECT,
+            "--limit",
+            "2",
+            "--skip-source-refs",
+            "--enable-graph",
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert report["limit"] == 2
+    assert report["canonical_counts"]["memory_cards"] == 2
+    assert report["truncated"]["memory_cards"] is True
+    assert report["truncated"]["any"] is True
+
+
+def test_brain_project_does_not_flag_truncation_below_limit(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    ledger.upsert_llm_brain_memory_card(_accepted_task_card("mem_one", 0))
+    graph = FakeGraphMemoryAdapter()
+    monkeypatch.setattr(
+        "agent_knowledge.llm_brain_core.projection_cli.build_graph_adapter_from_env",
+        lambda **kwargs: graph,
+    )
+
+    rc = neuron_main(
+        [
+            "brain-project",
+            "--ledger",
+            str(tmp_path / "ledger.sqlite3"),
+            "--project",
+            PROJECT,
+            "--limit",
+            "10",
+            "--skip-source-refs",
+            "--enable-graph",
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert report["canonical_counts"]["memory_cards"] == 1
+    assert report["truncated"]["memory_cards"] is False
+    assert report["truncated"]["any"] is False
+
+
 def test_brain_project_reports_source_ref_import_failures_without_projecting_bad_lines(
     tmp_path: Path,
     monkeypatch,
@@ -200,6 +273,46 @@ def test_brain_project_failure_output_does_not_print_raw_exception_details(
     assert report["message"] == "projection failed"
     assert "/Users/" not in stderr
     assert "TOKEN" not in stderr
+
+
+def _accepted_task_card(memory_id: str, index: int) -> dict:
+    summary = f"Truncation fixture task {index}"
+    return {
+        "memory_id": memory_id,
+        "brain_id": f"/project/{PROJECT}",
+        "card_type": "task",
+        "scope": "project",
+        "project": PROJECT,
+        "provider": "claude",
+        "title": summary,
+        "summary": summary,
+        "render_text": summary,
+        "lifecycle_state": "accepted",
+        "judgment_state": "none",
+        "status": "accepted",
+        "approval_state": "approved",
+        "governance_tier": "medium",
+        "freshness": "current",
+        "currentness": "current",
+        "confidence": 0.9,
+        "confidence_basis": "projection cli truncation fixture",
+        "source_refs": [{"source_ref_id": "src_truncation_fixture", "content_hash": _h("source-content")}],
+        "evidence_refs": [],
+        "evidence_hashes": [_h(memory_id)],
+        "derived_from": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflicts": [],
+        "active_until": "",
+        "updated_at": f"2026-06-19T00:0{index}:00Z",
+        "typed_payload": {
+            "task_state": summary,
+            "next_action": "Project this card",
+            "blocker": "",
+            "owner_hint": "neurons",
+            "status": "open",
+        },
+    }
 
 
 def _h(value: str) -> str:

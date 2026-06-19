@@ -142,11 +142,13 @@ def source_ref_from_catalog_event(event: Mapping[str, Any]) -> SourceRefRecord:
     )
 
 
-def episode_from_memory_card(card: Mapping[str, Any]) -> OntologyEpisode:
+def episode_from_memory_card(card: Mapping[str, Any], *, project: str = "") -> OntologyEpisode:
+    card_project = str(card.get("project") or "")
+    resolved_project = str(project or card_project)
     payload = {
         "memory_id": str(card.get("memory_id") or ""),
         "brain_id": str(card.get("brain_id") or ""),
-        "project": str(card.get("project") or ""),
+        "project": resolved_project,
         "card_type": str(card.get("card_type") or ""),
         "title": public_safe_text(str(card.get("title") or ""), max_chars=240),
         "summary": public_safe_text(str(card.get("summary") or ""), max_chars=512),
@@ -155,8 +157,16 @@ def episode_from_memory_card(card: Mapping[str, Any]) -> OntologyEpisode:
     memory_id = require_non_empty(payload["memory_id"], "memory_id")
     card_type = require_non_empty(payload["card_type"], "card_type")
     # brain_id is the graph group key. A missing brain_id silently breaks
-    # group_ids scoping, so fail fast instead of projecting an ungrouped episode.
-    payload["brain_id"] = require_non_empty(payload["brain_id"], "brain_id")
+    # group_ids scoping, so derive it from the project (the canonical group key
+    # `/project/<project>`) and fail fast instead of projecting an ungrouped
+    # episode. When the caller passes `project`, the card's own brain_id (if any)
+    # must agree with the project-derived key; a mismatch is a scoping hazard and
+    # fails fast rather than silently grouping under the wrong brain.
+    payload["brain_id"] = _resolve_card_brain_id(
+        card_brain_id=payload["brain_id"],
+        project=project,
+        resolved_project=resolved_project,
+    )
     natural_id = f"{card_type}:{memory_id}"
     entity_type = _entity_type_for_card(payload["card_type"])
     return OntologyEpisode.from_payload(
@@ -276,6 +286,29 @@ def _public_event_payload(payload: Mapping[str, Any], *, payload_hash: str) -> d
         "kind": str(payload.get("kind") or payload.get("documentKind") or metadata.get("kind") or ""),
         "supersedes": [str(item) for item in _list_or_empty(payload.get("supersedes"))],
     }
+
+
+def _resolve_card_brain_id(*, card_brain_id: str, project: str, resolved_project: str) -> str:
+    """Resolve the graph group key (`brain_id`) for a memory-card episode.
+
+    - When a `project` is supplied, the canonical group key is
+      `/project/<project>`. If the card already carries a `brain_id`, it must
+      match; a mismatch is a scoping hazard (the card would group under a
+      different brain than its project) and fails fast.
+    - When no `project` is supplied, fall back to the card's own `brain_id`
+      (project-derived if absent), and require a non-empty result so an
+      ungrouped episode is never projected.
+    """
+
+    project_brain_id = f"/project/{project}" if project else ""
+    if project_brain_id:
+        if card_brain_id and card_brain_id != project_brain_id:
+            raise ValueError(
+                f"memory card brain_id does not match project group key: {card_brain_id!r} != {project_brain_id!r}"
+            )
+        return project_brain_id
+    fallback = card_brain_id or (f"/project/{resolved_project}" if resolved_project else "")
+    return require_non_empty(fallback, "brain_id")
 
 
 def _entity_type_for_card(card_type: str) -> str:

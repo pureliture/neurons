@@ -87,6 +87,12 @@ def run_projection(
                 "memory_cards": 0,
                 "source_refs": 0,
             },
+            "limit": int(limit),
+            "truncated": {
+                "any": False,
+                "artifacts": False,
+                "memory_cards": False,
+            },
             "graph_enabled": enable_graph,
             "projection": {
                 "status": "failed",
@@ -100,6 +106,14 @@ def run_projection(
             },
             "raw_paths_printed": False,
         }
+    # `list_recent` / `list_accepted_cards` return at most `limit` rows ordered
+    # newest-first. When a source returns exactly its effective bound there may
+    # be older rows beyond the window, so the re-projection covers only the most
+    # recent `limit` items, not the full project history. Surface that as an
+    # explicit `truncated` signal instead of letting the runbook imply full
+    # coverage. The artifact store internally caps `limit` at 100, so the
+    # effective bound is computed the same way for an honest comparison.
+    artifact_bound = max(1, min(int(limit), 100))
     artifacts = artifact_store.list_recent(project=project, limit=limit) if include_artifacts else []
     cards = (
         LegacyLedgerBrainReadModel(ledger).list_accepted_cards(project=project, limit=limit)
@@ -107,6 +121,8 @@ def run_projection(
         else []
     )
     source_refs = imported_records if include_source_refs else []
+    artifacts_truncated = include_artifacts and len(artifacts) >= artifact_bound
+    cards_truncated = include_memory_cards and len(cards) >= max(1, int(limit))
     graph_adapter = build_graph_adapter_from_env(
         enable_flag=True if enable_graph else None,
         required_flag=bool(graph_required),
@@ -129,6 +145,12 @@ def run_projection(
             "artifacts": len(artifacts),
             "memory_cards": len(cards),
             "source_refs": len(source_refs),
+        },
+        "limit": int(limit),
+        "truncated": {
+            "any": bool(artifacts_truncated or cards_truncated),
+            "artifacts": bool(artifacts_truncated),
+            "memory_cards": bool(cards_truncated),
         },
         "graph_enabled": enable_graph,
         "projection": projection_dict,
