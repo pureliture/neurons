@@ -145,6 +145,8 @@ def source_ref_from_catalog_event(event: Mapping[str, Any]) -> SourceRefRecord:
 def episode_from_memory_card(card: Mapping[str, Any]) -> OntologyEpisode:
     payload = {
         "memory_id": str(card.get("memory_id") or ""),
+        "brain_id": str(card.get("brain_id") or ""),
+        "project": str(card.get("project") or ""),
         "card_type": str(card.get("card_type") or ""),
         "title": public_safe_text(str(card.get("title") or ""), max_chars=240),
         "summary": public_safe_text(str(card.get("summary") or ""), max_chars=512),
@@ -269,6 +271,7 @@ def _public_event_payload(payload: Mapping[str, Any], *, payload_hash: str) -> d
         "provider": str(payload.get("provider") or metadata.get("provider") or ""),
         "session_id_hash": str(payload.get("session_id_hash") or metadata.get("session_id_hash") or ""),
         "kind": str(payload.get("kind") or payload.get("documentKind") or metadata.get("kind") or ""),
+        "supersedes": [str(item) for item in _list_or_empty(payload.get("supersedes"))],
     }
 
 

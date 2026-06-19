@@ -184,6 +184,31 @@ def test_mcp_brain_context_resolve_roundtrip_uses_core_without_ragflow(tmp_path:
     assert "/Users/" not in json.dumps(result, sort_keys=True)
 
 
+def test_mcp_brain_context_resolve_derives_project_when_omitted(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+                "arguments": {
+                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
+                    "branch": "codex/llm-brain-core-design",
+                    "current_request": "언어 선호 확인",
+                    "current_files": ["docs/design.md"],
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["brain_id"] == f"/project/{PROJECT}"
+    assert result["persona_constraints"][0]["preference"] == "한국어로 응답한다"
+
+
 def test_mcp_brain_persona_check_roundtrip(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -194,6 +219,26 @@ def test_mcp_brain_persona_check_roundtrip(tmp_path: Path):
             "params": {
                 "name": BRAIN_PERSONA_CHECK_TOOL_NAME,
                 "arguments": {"plan": "한국어 응답 정책을 유지한다", "project": PROJECT},
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["status"] == "aligned"
+    assert result["facts"][0]["preference"] == "한국어로 응답한다"
+
+
+def test_mcp_brain_persona_check_uses_all_cards_when_project_omitted(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_PERSONA_CHECK_TOOL_NAME,
+                "arguments": {"plan": "한국어 응답 정책을 유지한다"},
             },
         },
         service,

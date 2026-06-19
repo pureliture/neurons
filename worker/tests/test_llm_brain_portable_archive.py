@@ -11,6 +11,7 @@ from agent_knowledge.llm_brain_core.ledger_adapter import (
     LedgerSourceRefCatalog,
 )
 from agent_knowledge.llm_brain_core.models import SessionMemoryArtifact, SourceRefRecord
+from agent_knowledge.llm_brain_core import portable as portable_module
 from agent_knowledge.llm_brain_core.portable import export_llm_brain_archive, import_llm_brain_archive
 
 
@@ -62,6 +63,48 @@ def test_llm_brain_portable_archive_has_manifest_and_no_raw_tables(tmp_path: Pat
     assert "ragflow_documents.jsonl" not in names
     assert manifest["raw_tables_included"] is False
     assert manifest["graph_db_files_included"] is False
+
+
+def test_llm_brain_portable_archive_specs_redact_private_workstation_paths(tmp_path: Path):
+    ledger_path = tmp_path / "source.sqlite3"
+    archive = tmp_path / "brain.tar.gz"
+    _seed_ledger(ledger_path)
+
+    export_llm_brain_archive(
+        ledger_path=ledger_path,
+        output_path=archive,
+        repo_root=Path(__file__).resolve().parents[2],
+    )
+
+    with tarfile.open(archive, "r:gz") as tar:
+        spec_members = [name for name in tar.getnames() if name.startswith("specs/llm-brain-core-v1/")]
+        spec_blob = "\n".join(tar.extractfile(name).read().decode("utf-8") for name in spec_members)
+
+    assert "/Users/example" not in spec_blob
+
+
+def test_llm_brain_portable_extract_tar_zst_uses_real_temp_path(tmp_path: Path, monkeypatch):
+    raw_tar = tmp_path / "raw.tar"
+    archive = tmp_path / "brain.tar.zst"
+    target = tmp_path / "out"
+    archive.write_bytes(b"fake zstd payload")
+    with tarfile.open(raw_tar, "w") as tar:
+        payload = tmp_path / "manifest.json"
+        payload.write_text('{"schema_version":"x"}\n', encoding="utf-8")
+        tar.add(payload, arcname="manifest.json")
+    tar_bytes = raw_tar.read_bytes()
+
+    def fake_run(argv, *, check, stdout):
+        assert argv[:4] == ["/usr/bin/zstd", "-q", "-d", "-c"]
+        assert check is True
+        stdout.write(tar_bytes)
+
+    monkeypatch.setattr(portable_module.shutil, "which", lambda name: "/usr/bin/zstd" if name == "zstd" else None)
+    monkeypatch.setattr(portable_module.subprocess, "run", fake_run)
+
+    portable_module._extract_archive(archive, target)
+
+    assert (target / "manifest.json").exists()
 
 
 def test_llm_brain_portable_cli_export_import(tmp_path: Path, capsys):

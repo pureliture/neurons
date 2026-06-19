@@ -293,8 +293,28 @@ def _select_current_task(cards: list[dict[str, Any]], request: str) -> dict[str,
     if not candidates:
         return None
     terms = _terms(request)
-    candidates.sort(key=lambda card: (_match_score(card, terms), str(card.get("updated_at") or card.get("created_at") or "")), reverse=True)
+    candidates.sort(
+        key=lambda card: (
+            _match_score(_card_match_text(card), terms),
+            str(card.get("updated_at") or card.get("created_at") or ""),
+        ),
+        reverse=True,
+    )
     return candidates[0]
+
+
+def _card_match_text(card: Mapping[str, Any]) -> str:
+    payload = card.get("typed_payload") if isinstance(card.get("typed_payload"), Mapping) else {}
+    return " ".join(
+        str(value or "")
+        for value in (
+            card.get("title"),
+            card.get("summary"),
+            payload.get("task_state"),
+            payload.get("next_action"),
+            payload.get("blocker"),
+        )
+    )
 
 
 def _task_title(card: Mapping[str, Any] | None) -> str:

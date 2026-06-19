@@ -216,10 +216,15 @@ def _extract_archive(archive: Path, target: Path) -> None:
         zstd = shutil.which("zstd")
         if not zstd:
             raise RuntimeError("zstd command is required for .tar.zst archives")
-        with tempfile.NamedTemporaryFile(prefix="llm-brain-import-", suffix=".tar") as tmp_tar:
-            with tmp_tar.open("wb") as handle:
+        tmp_tar = tempfile.NamedTemporaryFile(prefix="llm-brain-import-", suffix=".tar", delete=False)
+        tmp_tar_path = Path(tmp_tar.name)
+        tmp_tar.close()
+        try:
+            with tmp_tar_path.open("wb") as handle:
                 subprocess.run([zstd, "-q", "-d", "-c", str(archive)], check=True, stdout=handle)
-            _extract_tar(Path(tmp_tar.name), target, mode="r")
+            _extract_tar(tmp_tar_path, target, mode="r")
+        finally:
+            tmp_tar_path.unlink(missing_ok=True)
         return
     mode = "r:gz" if archive.name.endswith((".tar.gz", ".tgz")) else "r"
     _extract_tar(archive, target, mode=mode)
