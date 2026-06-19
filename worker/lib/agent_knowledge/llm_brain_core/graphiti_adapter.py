@@ -130,21 +130,26 @@ class GraphitiNeo4jGraphMemoryAdapter:
         group_id = _graphiti_group_id(brain_id or self._default_group_id)
         group_ids = [group_id] if group_id else None
 
-        async def _call() -> tuple[list[Any], list[Any]]:
-            edges = await self._graphiti.search(
-                query,
-                group_ids=group_ids,
-                num_results=bounded,
-            )
+        async def _call() -> tuple[list[Any], list[Any], list[str]]:
+            details: list[str] = ["graphiti_neo4j"]
+            try:
+                edges = await self._graphiti.search(
+                    query,
+                    group_ids=group_ids,
+                    num_results=bounded,
+                )
+            except Exception as exc:
+                edges = []
+                details.append(f"edge_search:{type(exc).__name__}")
             episodes = await self._graphiti.retrieve_episodes(
                 reference_time=datetime.now(timezone.utc),
                 last_n=max(bounded * 5, bounded),
                 group_ids=group_ids,
             )
-            return list(edges or []), list(episodes or [])
+            return list(edges or []), list(episodes or []), details
 
         try:
-            edges, episodes = self._runner.run(_call)
+            edges, episodes, details = self._runner.run(_call)
         except Exception as exc:
             return GraphMemoryResult(status="error", details=(type(exc).__name__,))
 
@@ -170,7 +175,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
         return GraphMemoryResult(
             status="available",
             episodes=tuple(converted[:bounded]),
-            details=("graphiti_neo4j",),
+            details=tuple(details),
         )
 
 
