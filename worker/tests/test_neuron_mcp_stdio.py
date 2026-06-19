@@ -27,7 +27,7 @@ from agent_knowledge.memory_card import build_memory_candidate
 from agent_knowledge.memory_miner import build_memory_card_candidate_from_source_span
 from agent_knowledge.llm_brain_core.ledger_adapter import LedgerSourceRefCatalog
 from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
-from agent_knowledge.llm_brain_core.models import OntologyEpisode
+from agent_knowledge.llm_brain_core.models import CONTEXT_PACK_SCHEMA_VERSION, OntologyEpisode
 from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
 from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
 
@@ -185,6 +185,10 @@ def test_mcp_brain_context_resolve_roundtrip_uses_core_without_ragflow(tmp_path:
     assert result["memory_status"]["authority"] == "canonical_artifact_and_card"
     assert result["bridge_status"]["status"] == "disabled"
     assert result["graph_status"]["authority"] == "derived_index"
+    # The MCP surface returns ContextPack.to_dict() directly, so the pack must
+    # carry the same schema_version the CLI wraps it under: CLI/MCP versioning
+    # symmetry.
+    assert result["schema_version"] == CONTEXT_PACK_SCHEMA_VERSION
     assert json.loads(response["result"]["content"][0]["text"]) == result
     assert "/Users/" not in json.dumps(result, sort_keys=True)
 

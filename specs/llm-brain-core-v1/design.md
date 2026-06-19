@@ -298,6 +298,41 @@ SourceRef LOCATES FileSnapshot
 SpanRef DERIVED_FROM SourceRef
 ```
 
+### Graph Env Contract
+
+Graph activation is governed by CLI flags (`--enable-graph` best-effort,
+`--graph-required` must-have with a connectivity probe) plus a single canonical
+env namespace read by `runtime_graph.build_graph_adapter_from_env` and
+`GraphitiNeo4jConfig.from_env`. `LLM_BRAIN_*` is canonical; bare
+`NEO4J_*` / `GRAPHITI_*` / `OPENAI_*` / `MODEL_NAME` / `EMBEDDING_*` are legacy
+fallbacks read only when the canonical key is unset. There is no `GRAPH_ENABLED`
+key (the only enable toggle env is `LLM_BRAIN_GRAPH_ENABLED`); earlier PR notes
+that referenced `GRAPH_ENABLED` were incorrect.
+
+| Canonical key | Legacy fallback | Default | Role |
+| --- | --- | --- | --- |
+| `LLM_BRAIN_GRAPH_ENABLED` | — | `false` | Best-effort toggle; mirrors `--enable-graph`. |
+| `LLM_BRAIN_NEO4J_URI` | `NEO4J_URI` | `bolt://localhost:7687` | Neo4j bolt URI. |
+| `LLM_BRAIN_NEO4J_USER` | `NEO4J_USER` | `neo4j` | Neo4j user. |
+| `LLM_BRAIN_NEO4J_PASSWORD` | `NEO4J_PASSWORD` | `` | Neo4j password (secret). |
+| `LLM_BRAIN_GRAPH_GROUP_ID` | — | `` | Default Graphiti `group_id`; per-project key `/project/<project>` is passed explicitly. |
+| `LLM_BRAIN_GRAPH_LLM_PROVIDER` | `GRAPHITI_LLM_PROVIDER` | `openai` | Graphiti LLM provider id. |
+| `LLM_BRAIN_LLM_MODEL` | `MODEL_NAME` | `` | LLM model name. |
+| `LLM_BRAIN_SMALL_LLM_MODEL` | `SMALL_MODEL_NAME` | `` | Small model name. |
+| `LLM_BRAIN_LLM_BASE_URL` | `OPENAI_BASE_URL` | `` | LLM base URL. |
+| `LLM_BRAIN_LLM_API_KEY` | `OPENAI_API_KEY` | `` | LLM API key (secret). |
+| `LLM_BRAIN_EMBEDDING_MODEL` | `EMBEDDING_MODEL` | `` | Embedding model name. |
+| `LLM_BRAIN_EMBEDDING_BASE_URL` | `OPENAI_BASE_URL` | `` | Embedding base URL. |
+| `LLM_BRAIN_EMBEDDING_API_KEY` | `OPENAI_API_KEY` | `` | Embedding API key (secret). |
+| `LLM_BRAIN_EMBEDDING_DIM` | — | `1024` | Embedding dimension (int). |
+| `LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT` | — | `true` | Store raw episode content. |
+| `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES` | — | `false` | Entity extraction; production default is episode-only. |
+
+The operational copy of this table, with degrade handling and the public-output
+checklist, lives in `docs/runbooks/LLM_BRAIN_CORE_V1_LOCAL_OPS.md`. The
+`_GRAPHITI_GROUP_ID_RE` symbol in `graphiti_adapter.py` is an internal
+`group_id` validation regex, not an environment variable.
+
 ### SourceRef Catalog Boundary
 
 `dendrite` produces local source catalog events. `neurons` consumes only metadata and policy state.

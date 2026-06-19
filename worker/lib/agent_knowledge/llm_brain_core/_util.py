@@ -42,6 +42,10 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def list_or_empty(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
 def require_non_empty(value: str, field: str) -> str:
     text = str(value or "").strip()
     if not text:

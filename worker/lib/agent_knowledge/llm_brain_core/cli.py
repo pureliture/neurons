@@ -8,6 +8,7 @@ from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.brain_read_model import LegacyLedgerBrainReadModel
 
 from .ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
+from .models import CONTEXT_PACK_SCHEMA_VERSION
 from .runtime import build_runtime_brain_service
 from .runtime_graph import build_graph_adapter_from_env
 
@@ -52,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             json.dumps(
                 {
-                    "schema_version": "llm_brain_context_resolve.v1",
+                    "schema_version": CONTEXT_PACK_SCHEMA_VERSION,
                     "status": "failed",
                     "error_class": type(exc).__name__,
                     # Do not echo raw exception text: it can carry private paths,
@@ -69,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         json.dumps(
             {
-                "schema_version": "llm_brain_context_resolve.v1",
+                "schema_version": CONTEXT_PACK_SCHEMA_VERSION,
                 "status": "ok",
                 "context_pack": pack,
             },

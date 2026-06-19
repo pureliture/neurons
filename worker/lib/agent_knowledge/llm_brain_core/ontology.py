@@ -4,9 +4,14 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from ._util import public_safe_text
+from ._util import (
+    list_or_empty,
+    public_safe_text,
+    require_non_empty,
+    short_hash,
+    utc_now_iso,
+)
 from .models import OntologyEpisode, SessionMemoryArtifact, SourceRefRecord
-from .runtime import episode_from_memory_card
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,48 @@ def episode_from_source_ref(record: SourceRefRecord, *, project: str = "") -> On
     )
 
 
+def episode_from_memory_card(card: Mapping[str, Any], *, project: str = "") -> OntologyEpisode:
+    card_project = str(card.get("project") or "")
+    resolved_project = str(project or card_project)
+    payload = {
+        "memory_id": str(card.get("memory_id") or ""),
+        "brain_id": str(card.get("brain_id") or ""),
+        "project": resolved_project,
+        "card_type": str(card.get("card_type") or ""),
+        "title": public_safe_text(str(card.get("title") or ""), max_chars=240),
+        "summary": public_safe_text(str(card.get("summary") or ""), max_chars=512),
+        "typed_payload": dict(card.get("typed_payload") or {}),
+    }
+    memory_id = require_non_empty(payload["memory_id"], "memory_id")
+    card_type = require_non_empty(payload["card_type"], "card_type")
+    # brain_id is the graph group key. A missing brain_id silently breaks
+    # group_ids scoping, so derive it from the project (the canonical group key
+    # `/project/<project>`) and fail fast instead of projecting an ungrouped
+    # episode. When the caller passes `project`, the card's own brain_id (if any)
+    # must agree with the project-derived key; a mismatch is a scoping hazard and
+    # fails fast rather than silently grouping under the wrong brain.
+    payload["brain_id"] = _resolve_card_brain_id(
+        card_brain_id=payload["brain_id"],
+        project=project,
+        resolved_project=resolved_project,
+    )
+    natural_id = f"{card_type}:{memory_id}"
+    entity_type = _entity_type_for_card(payload["card_type"])
+    return OntologyEpisode.from_payload(
+        event_id=f"evt:{short_hash([natural_id, card.get('content_hash', '')])}",
+        entity_type=entity_type,
+        natural_id=natural_id,
+        payload=payload,
+        lifecycle_state=str(card.get("lifecycle_state") or "accepted"),
+        currentness=str(card.get("currentness") or "unknown"),
+        source_event_ids=tuple(str(ref) for ref in list_or_empty(card.get("derived_from"))),
+        source_ref_ids=tuple(_source_ref_ids(card)),
+        observed_at=str(card.get("approved_at") or card.get("accepted_at") or card.get("updated_at") or utc_now_iso()),
+        ontology_version=str(card.get("ontology_version") or "1.0.0"),
+        extractor_version="memory-card-runtime.1",
+    )
+
+
 def build_ontology_episode_batch(
     *,
     artifacts: list[SessionMemoryArtifact] | tuple[SessionMemoryArtifact, ...] = (),
@@ -127,3 +174,49 @@ def _failure(item_type: str, item_id: str, exc: Exception) -> dict[str, Any]:
         "item_id": str(item_id or ""),
         "reason_code": type(exc).__name__,
     }
+
+
+def _resolve_card_brain_id(*, card_brain_id: str, project: str, resolved_project: str) -> str:
+    """Resolve the graph group key (`brain_id`) for a memory-card episode.
+
+    - When a `project` is supplied, the canonical group key is
+      `/project/<project>`. If the card already carries a `brain_id`, it must
+      match; a mismatch is a scoping hazard (the card would group under a
+      different brain than its project) and fails fast.
+    - When no `project` is supplied, fall back to the card's own `brain_id`
+      (project-derived if absent), and require a non-empty result so an
+      ungrouped episode is never projected.
+    """
+
+    project_brain_id = f"/project/{project}" if project else ""
+    if project_brain_id:
+        if card_brain_id and card_brain_id != project_brain_id:
+            raise ValueError(
+                f"memory card brain_id does not match project group key: {card_brain_id!r} != {project_brain_id!r}"
+            )
+        return project_brain_id
+    fallback = card_brain_id or (f"/project/{resolved_project}" if resolved_project else "")
+    return require_non_empty(fallback, "brain_id")
+
+
+def _entity_type_for_card(card_type: str) -> str:
+    return {
+        "decision": "Decision",
+        "task": "Task",
+        "drift": "Drift",
+        "preference": "PersonaFact",
+        "evidence": "Evidence",
+        "status": "Status",
+    }.get(card_type, "MemoryCard")
+
+
+def _source_ref_ids(card: Mapping[str, Any]) -> list[str]:
+    ids: list[str] = []
+    for ref in card.get("source_refs") or ():
+        if isinstance(ref, str):
+            ids.append(ref)
+        elif isinstance(ref, Mapping):
+            value = ref.get("source_ref_id") or ref.get("source_id")
+            if value:
+                ids.append(str(value))
+    return ids
