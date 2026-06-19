@@ -6,7 +6,7 @@ import os
 import re
 import threading
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -28,16 +28,18 @@ DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS = 300.0
 class GraphitiNeo4jConfig:
     uri: str = "bolt://localhost:7687"
     user: str = "neo4j"
-    password: str = ""
+    # Secrets are repr=False so an accidental repr()/traceback/locals dump of the
+    # config never leaks credentials (CLAUDE.md: no token/credential in output).
+    password: str = field(default="", repr=False)
     default_group_id: str = ""
     llm_provider: str = "openai"
     llm_model: str = ""
     small_model: str = ""
     llm_base_url: str = ""
-    llm_api_key: str = ""
+    llm_api_key: str = field(default="", repr=False)
     embedding_model: str = ""
     embedding_base_url: str = ""
-    embedding_api_key: str = ""
+    embedding_api_key: str = field(default="", repr=False)
     embedding_dim: int = 1024
     store_raw_episode_content: bool = True
     extract_entities: bool = False

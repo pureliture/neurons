@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._util import ensure_public_safe, public_safe_text
 from .artifact_store import InMemorySessionMemoryArtifactStore, SessionMemoryArtifactStore
@@ -17,6 +17,12 @@ from .document_bridge import DisabledDocumentBridge, DocumentBridge
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
 from .models import EvidenceRequest
 from .source_ref import SourceRefResolver
+
+if TYPE_CHECKING:
+    # `brain_context_resolve` is annotated `-> ContextPack`. With
+    # `from __future__ import annotations` the annotation is lazy, so the symbol
+    # is only needed by static type checkers, not at runtime.
+    from .models import ContextPack
 
 
 ACCEPTED_LIFECYCLE_STATES = {"accepted", "human_accepted", "auto_accepted"}

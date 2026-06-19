@@ -203,9 +203,16 @@ class _SessionCardCache:
     enough to snapshot, so this memoizes the result for the session lifetime and
     collapses repeated tool calls onto one ledger read per (project, limit). It
     wraps the real read model and forwards everything else unchanged, so graph
-    status, evidence policy, and other read paths are untouched. `invalidate()`
-    is the explicit refresh seam (e.g. after a known write) so the cache never
-    silently serves stale cards forever.
+    status, evidence policy, and other read paths are untouched.
+
+    Staleness scope: every exposed brain tool is read-only and there is currently
+    no in-session write path, so the snapshot stays correct for the session. A
+    write to the same ledger by another process (worker/ingestion) is NOT
+    reflected until the session restarts -- there is no cross-process or TTL
+    invalidation. `invalidate()` exists as the explicit refresh seam to call once
+    an in-session write path is added; its production wrapper
+    `invalidate_brain_card_cache` has no production caller yet, so today the seam
+    is reached only via tests.
     """
 
     def __init__(self, read_model) -> None:

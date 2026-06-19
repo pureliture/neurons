@@ -10,6 +10,7 @@ from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.brain_read_model import LegacyLedgerBrainReadModel
 
 from .ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
+from .models import PROJECTION_SCHEMA_VERSION
 from .projection import GraphProjectionWorker
 from .runtime import source_ref_from_catalog_event
 from .runtime_graph import build_graph_adapter_from_env
@@ -55,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             json.dumps(
                 {
-                    "schema_version": "llm_brain_projection.v1",
+                    "schema_version": PROJECTION_SCHEMA_VERSION,
                     "status": "failed",
                     "error_class": type(exc).__name__,
                     "message": "projection failed",
@@ -89,7 +90,7 @@ def run_projection(
     imported, import_failures, imported_records = _import_source_refs(source_catalog, source_ref_jsonl)
     if import_failures:
         return {
-            "schema_version": "llm_brain_projection.v1",
+            "schema_version": PROJECTION_SCHEMA_VERSION,
             "status": "failed",
             "project": project,
             "source_refs_imported": imported,
@@ -149,7 +150,7 @@ def run_projection(
     projection_dict = projection.to_dict()
     status = "ok" if projection.status == "succeeded" and not import_failures else "failed"
     return {
-        "schema_version": "llm_brain_projection.v1",
+        "schema_version": PROJECTION_SCHEMA_VERSION,
         "status": status,
         "project": project,
         "source_refs_imported": imported,
