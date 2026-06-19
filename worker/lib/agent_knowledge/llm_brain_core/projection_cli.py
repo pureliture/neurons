@@ -115,7 +115,12 @@ def _import_source_refs(catalog: LedgerSourceRefCatalog, paths: list[Path]) -> t
     imported = 0
     failures: list[dict[str, Any]] = []
     for path in paths:
-        with path.open("r", encoding="utf-8") as handle:
+        try:
+            handle = path.open("r", encoding="utf-8")
+        except OSError as exc:
+            failures.append({"source": path.name, "line": 0, "reason_code": type(exc).__name__})
+            continue
+        with handle:
             for line_no, line in enumerate(handle, start=1):
                 text = line.strip()
                 if not text:
