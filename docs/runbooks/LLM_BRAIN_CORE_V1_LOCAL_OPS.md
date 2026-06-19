@@ -29,7 +29,7 @@ Hard stop:
 - Docker volume deletion;
 - credential edit;
 - firewall/systemd/package mutation;
-- production K3s or central server mutation.
+- production K3s/Nomad or central server mutation.
 
 ## Source Test Gate
 
@@ -43,7 +43,7 @@ uv run pytest -q
 Expected current result:
 
 ```text
-755 passed, 7 skipped
+763 passed, 7 skipped, 1 warning
 ```
 
 Run in `dendrite`:
