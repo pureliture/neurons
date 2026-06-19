@@ -13,16 +13,18 @@ from agent_knowledge.llm_brain_core.models import OntologyEpisode
 
 def test_graphiti_adapter_upserts_public_safe_json_episode():
     graphiti = _FakeGraphiti()
-    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons", extract_entities=True)
     episode = _episode("Task", "task:graphiti", {"brain_id": "/project/neurons", "task": "Graphiti adapter"})
 
     result = adapter.upsert_episode(episode)
 
-    assert result == episode.episode_id
+    assert result == f"graph:{episode.episode_id}"
     assert graphiti.added[0]["name"] == episode.episode_id
     assert graphiti.added[0]["source"] == "json"
-    assert graphiti.added[0]["group_id"] == "/project/neurons"
+    assert graphiti.added[0]["group_id"].startswith("brain_")
+    assert "/" not in graphiti.added[0]["group_id"]
     body = json.loads(graphiti.added[0]["episode_body"])
+    assert body["episode_id"] == episode.episode_id
     assert body["entity_type"] == "Task"
     assert body["payload"]["task"] == "Graphiti adapter"
     assert "/Users/" not in graphiti.added[0]["episode_body"]
@@ -66,7 +68,8 @@ def test_graphiti_adapter_search_rehydrates_domain_episode_and_graph_fact():
     assert typed.status == "available"
     assert [episode.entity_type for episode in typed.episodes] == ["Task"]
     assert {episode.entity_type for episode in all_results.episodes} == {"Task", "GraphFact"}
-    assert graphiti.search_calls[0]["group_ids"] == ["/project/neurons"]
+    assert graphiti.search_calls[0]["group_ids"][0].startswith("brain_")
+    assert "/" not in graphiti.search_calls[0]["group_ids"][0]
 
 
 def test_graphiti_config_from_env_supports_ollama_openai_compatible_defaults():
@@ -79,6 +82,7 @@ def test_graphiti_config_from_env_supports_ollama_openai_compatible_defaults():
             "LLM_BRAIN_LLM_MODEL": "llama3.1:70b",
             "LLM_BRAIN_EMBEDDING_MODEL": "nomic-embed-text",
             "LLM_BRAIN_EMBEDDING_DIM": "768",
+            "LLM_BRAIN_GRAPH_EXTRACT_ENTITIES": "true",
         }
     )
 
@@ -87,6 +91,13 @@ def test_graphiti_config_from_env_supports_ollama_openai_compatible_defaults():
     assert config.llm_model == "llama3.1:70b"
     assert config.embedding_model == "nomic-embed-text"
     assert config.embedding_dim == 768
+    assert config.extract_entities is True
+
+
+def test_graphiti_config_defaults_to_episode_only_storage():
+    config = GraphitiNeo4jConfig.from_env({})
+
+    assert config.extract_entities is False
 
 
 class _FakeGraphiti:
@@ -99,7 +110,7 @@ class _FakeGraphiti:
     async def add_episode(self, **kwargs):
         self.added.append(dict(kwargs, source=kwargs["source"].value))
         self.episodes.append(SimpleNamespace(content=kwargs["episode_body"]))
-        return SimpleNamespace(uuid=kwargs["uuid"])
+        return SimpleNamespace(uuid=f"graph:{kwargs['name']}")
 
     async def search(self, query, *, group_ids=None, num_results=10):
         self.search_calls.append({"query": query, "group_ids": group_ids, "num_results": num_results})

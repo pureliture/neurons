@@ -1,7 +1,12 @@
-# LLM-Brain Core v1 Local Ops Runbook
+# LLM-Brain Core v1 Ops Runbook
 
-This runbook covers local-first LLM-Brain Core v1 operations in `neurons` and
-the thin-client SourceRef catalog contract in `dendrite`.
+This runbook covers LLM-Brain Core v1 operations in `neurons` and the
+thin-client SourceRef catalog contract in `dendrite`.
+
+`neurons` server/brain containers are Ubuntu deployment targets. Run
+LLM-Brain/Graphiti/Neo4j/FalkorDB container smokes through `ssh
+ragflow-ubuntu`. Mac-local execution is limited to source editing, Python
+tests, thin-client capture work, and SSH control-plane commands.
 
 Source of truth:
 - `specs/llm-brain-core-v1/requirements.md`
@@ -26,7 +31,7 @@ Hard stop:
 - firewall/systemd/package mutation;
 - production K3s or central server mutation.
 
-## Local Test Gate
+## Source Test Gate
 
 Run in `neurons`:
 
@@ -38,7 +43,7 @@ uv run pytest -q
 Expected current result:
 
 ```text
-754 passed, 7 skipped
+755 passed, 7 skipped
 ```
 
 Run in `dendrite`:
@@ -107,7 +112,7 @@ Archive excludes:
 Use `.tar.zst` only when the local `zstd` binary is installed. Otherwise use
 `.tar.gz`.
 
-## Graph Runtime Smoke
+## Ubuntu Graph Runtime Smoke
 
 Static compose profile check:
 
@@ -116,25 +121,29 @@ cd /Users/ddalkak/Projects/neurons/.worktrees/llm-brain-core-design
 ruby -ryaml -e 'data=YAML.load_file("compose.yaml"); svc=data.fetch("services").fetch("llm-brain-neo4j"); raise "profile" unless svc.fetch("profiles") == ["llm-brain-graph"]; vols=data.fetch("volumes"); raise "data volume" unless vols.key?("llm-brain-neo4j-data"); raise "logs volume" unless vols.key?("llm-brain-neo4j-logs"); puts "compose yaml static check ok"'
 ```
 
-Live graph smoke requires:
-- Docker daemon reachable at `unix:///var/run/docker.sock`;
-- Docker Compose plugin or an equivalent explicit `docker run` plan;
-- Neo4j credentials supplied through `.env`;
-- no volume deletion or reuse of production volumes.
-
-If `docker compose version` reports `unknown command` or `docker version`
-reports no server, classify the live graph smoke as `blocked_runtime_missing`,
-not as an implementation failure.
-
-When Compose is available:
+Ubuntu host preflight:
 
 ```bash
-cd /Users/ddalkak/Projects/neurons/.worktrees/llm-brain-core-design
-docker compose --profile llm-brain-graph config --quiet
-docker compose --profile llm-brain-graph up -d llm-brain-neo4j
+ssh ragflow-ubuntu 'docker version --format "{{.Server.Version}}"'
+ssh ragflow-ubuntu 'docker compose version --short'
 ```
 
-Do not run `docker compose down -v` as part of this runbook.
+Live graph smoke requires:
+- the copied or checked-out `neurons` worktree on Ubuntu;
+- isolated compose project name and non-production ports;
+- Neo4j credentials supplied through the smoke environment;
+- no volume deletion or reuse of production volumes.
+
+Expected verification shape:
+
+```text
+neo4j health: healthy
+Graphiti adapter smoke: status=available, details=["graphiti_neo4j"], matched=true
+Neo4j dump/load smoke: neo4j dump-load ok episodes=3
+```
+
+Do not run `docker compose down -v` as part of this runbook. Graph DB data
+directory sync between PCs is not allowed; use event replay or Neo4j dump/load.
 
 ## Dendrite SourceRef Catalog
 
