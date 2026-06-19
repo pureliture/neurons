@@ -45,26 +45,30 @@ def episode_from_session_artifact(artifact: SessionMemoryArtifact) -> OntologyEp
     )
 
 
-def episode_from_source_ref(record: SourceRefRecord) -> OntologyEpisode:
+def episode_from_source_ref(record: SourceRefRecord, *, project: str = "") -> OntologyEpisode:
     lifecycle_state = "deleted" if record.deleted_at else ("revoked" if record.revoked_at else "active")
     currentness = "stale" if record.deleted_at or record.revoked_at else "current"
+    payload = {
+        "source_ref_id": record.source_ref_id,
+        "device_id_hash": record.device_id_hash,
+        "root_id": record.root_id,
+        "relative_path_hash": record.relative_path_hash,
+        "content_hash": record.content_hash,
+        "sync_policy": record.sync_policy,
+        "permission_scope": record.permission_scope,
+        "last_seen_at": record.last_seen_at,
+        "deleted_at": record.deleted_at,
+        "revoked_at": record.revoked_at,
+        "derived_summary": public_safe_text(record.derived_summary, max_chars=512),
+    }
+    if project:
+        payload["project"] = project
+        payload["brain_id"] = f"/project/{project}"
     return OntologyEpisode.from_payload(
         event_id=f"evt_source_ref_{record.source_ref_id}",
         entity_type="SourceRef",
         natural_id=record.source_ref_id,
-        payload={
-            "source_ref_id": record.source_ref_id,
-            "device_id_hash": record.device_id_hash,
-            "root_id": record.root_id,
-            "relative_path_hash": record.relative_path_hash,
-            "content_hash": record.content_hash,
-            "sync_policy": record.sync_policy,
-            "permission_scope": record.permission_scope,
-            "last_seen_at": record.last_seen_at,
-            "deleted_at": record.deleted_at,
-            "revoked_at": record.revoked_at,
-            "derived_summary": public_safe_text(record.derived_summary, max_chars=512),
-        },
+        payload=payload,
         lifecycle_state=lifecycle_state,
         currentness=currentness,
         source_ref_ids=[record.source_ref_id],
@@ -79,11 +83,13 @@ def build_ontology_episode_batch(
     artifacts: list[SessionMemoryArtifact] | tuple[SessionMemoryArtifact, ...] = (),
     memory_cards: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] = (),
     source_refs: list[SourceRefRecord] | tuple[SourceRefRecord, ...] = (),
+    project: str = "",
 ) -> list[OntologyEpisode]:
     return list(build_ontology_episode_batch_report(
         artifacts=artifacts,
         memory_cards=memory_cards,
         source_refs=source_refs,
+        project=project,
     ).episodes)
 
 
@@ -92,6 +98,7 @@ def build_ontology_episode_batch_report(
     artifacts: list[SessionMemoryArtifact] | tuple[SessionMemoryArtifact, ...] = (),
     memory_cards: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] = (),
     source_refs: list[SourceRefRecord] | tuple[SourceRefRecord, ...] = (),
+    project: str = "",
 ) -> OntologyEpisodeBatch:
     episodes: list[OntologyEpisode] = []
     failures: list[dict[str, Any]] = []
@@ -108,7 +115,7 @@ def build_ontology_episode_batch_report(
             failures.append(_failure("memory_card", item_id, exc))
     for source_ref in source_refs:
         try:
-            episodes.append(episode_from_source_ref(source_ref))
+            episodes.append(episode_from_source_ref(source_ref, project=project))
         except Exception as exc:
             failures.append(_failure("source_ref", getattr(source_ref, "source_ref_id", ""), exc))
     return OntologyEpisodeBatch(episodes=tuple(episodes), failures=tuple(failures))

@@ -33,6 +33,26 @@ class NullGraphMemoryAdapter:
         return GraphMemoryResult(status="unavailable", details=("graph_disabled",))
 
 
+class UnavailableGraphMemoryAdapter:
+    """Graph adapter placeholder that preserves read-path safety with diagnostics."""
+
+    def __init__(self, reason: str) -> None:
+        self._reason = str(reason or "graph_unavailable")
+
+    def upsert_episode(self, episode: OntologyEpisode) -> str:
+        return "error"
+
+    def search_context(
+        self,
+        *,
+        brain_id: str,
+        query: str,
+        entity_types: list[str] | None = None,
+        limit: int = 10,
+    ) -> GraphMemoryResult:
+        return GraphMemoryResult(status="error", details=(self._reason,))
+
+
 class FakeGraphMemoryAdapter:
     """Small in-memory adapter for contract and context tests."""
 

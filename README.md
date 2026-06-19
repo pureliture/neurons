@@ -66,8 +66,14 @@ Owned here:
 - session-memory/project-memory build and read surfaces
 - brain query, MemoryCard, native-memory mirror/sync/reconcile
 - user-level MCP stdio read surface:
-  `neuron-knowledge mcp-stdio` exposes `knowledge.search`, `brain.query`, and
-  `brain.resolve`
+  `neuron-knowledge mcp-stdio` exposes `knowledge.search`, `brain.query`,
+  `brain.resolve`, and read-only Brain MCP tools such as
+  `brain_context_resolve`; Codex and Claude Code are the first agent E2E
+  targets for this stdio surface
+- production LLM-Brain projection/bootstrap:
+  `neuron-knowledge brain-project` imports dendrite public SourceRef catalogs
+  into the Ledger catalog and projects canonical artifacts, MemoryCards, and
+  SourceRefs into the derived graph index
 - GC safety planners and fail-closed GC command surfaces:
   `session-memory-gc`, `transcript-memory-gc`, `transcript-session-gc`,
   `transcript-volume-gc`, `session-memory-quarantine-terminal-skipped`, and

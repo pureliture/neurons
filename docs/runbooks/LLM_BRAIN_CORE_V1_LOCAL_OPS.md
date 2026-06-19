@@ -106,6 +106,44 @@ cd "$NEURONS_ROOT/worker"
 uv run neuron-knowledge mcp-stdio --ledger /path/to/ledger.sqlite
 ```
 
+Codex and Claude Code are the first supported agent E2E targets. Both use the
+same stdio MCP contract:
+
+```bash
+cd "$NEURONS_ROOT/worker"
+LLM_BRAIN_GRAPH_ENABLED=true \
+LLM_BRAIN_GRAPH_LLM_PROVIDER=openai-compatible \
+LLM_BRAIN_NEO4J_URI=bolt://127.0.0.1:17687 \
+LLM_BRAIN_NEO4J_USER=neo4j \
+LLM_BRAIN_NEO4J_PASSWORD="$NEO4J_PASSWORD" \
+LLM_BRAIN_LLM_BASE_URL=http://172.26.0.1:8930/v1 \
+LLM_BRAIN_LLM_MODEL=gemini-3.5-flash-thinking \
+LLM_BRAIN_EMBEDDING_BASE_URL=http://172.26.0.1:8930/v1 \
+LLM_BRAIN_EMBEDDING_MODEL=gemini-embedding-2 \
+LLM_BRAIN_EMBEDDING_DIM=3072 \
+uv run neuron-knowledge mcp-stdio \
+  --ledger /path/to/ledger.sqlite \
+  --enable-graph \
+  --graph-required
+```
+
+Agent config command shape:
+
+```text
+command: neuron-knowledge
+args: ["mcp-stdio", "--ledger", "<ledger.sqlite>", "--enable-graph", "--graph-required"]
+env: LLM_BRAIN_GRAPH_ENABLED=true and the Graphiti/Neo4j/LLM settings above
+```
+
+The agent smoke must call `brain_context_resolve`, not only `tools/list`, and
+must verify:
+
+```text
+graph_status.status == "available"
+memory_status.authority == "canonical_artifact_and_card"
+raw_paths_printed == false by inspection of the JSON response
+```
+
 On Ubuntu, when `uv` is not installed, run the stdio import/tool-list smoke with
 host Python and the checked-out library path:
 
@@ -143,6 +181,51 @@ Required LLM-Brain tools:
 
 The tools must not expose raw backend identifiers, raw private paths, secrets,
 RAGFlow dataset ids, or RAGFlow document ids.
+
+## SourceRef Bootstrap and Graph Projection
+
+`dendrite` scans local project roots and writes public SourceRef JSONL plus a
+private same-device index. `neurons` imports only the public JSONL:
+
+```bash
+cd "$NEURONS_ROOT/worker"
+LLM_BRAIN_GRAPH_ENABLED=true \
+uv run neuron-knowledge brain-project \
+  --ledger /path/to/ledger.sqlite \
+  --project neurons \
+  --source-ref-jsonl /path/to/dendrite-source-catalog.jsonl \
+  --enable-graph \
+  --graph-required
+```
+
+`brain-project` does all of the following in one production bootstrap pass:
+
+```text
+1. register SourceRef records in the Ledger-backed source catalog
+2. read recent SessionMemoryArtifact rows for the project
+3. read accepted MemoryCards for the project
+4. project artifacts, MemoryCards, and SourceRefs into Graphiti/Neo4j
+5. return projected/duplicate/failed counts without raw paths
+```
+
+Successful output shape:
+
+```json
+{
+  "schema_version": "llm_brain_projection.v1",
+  "status": "ok",
+  "source_refs_imported": 1,
+  "raw_paths_printed": false,
+  "projection": {
+    "status": "succeeded",
+    "failed": 0
+  }
+}
+```
+
+If any SourceRef line is malformed or graph projection fails, the command exits
+non-zero and prints `status: failed`; do not treat partial graph population as a
+completed bootstrap.
 
 ## Portable Export/Import
 

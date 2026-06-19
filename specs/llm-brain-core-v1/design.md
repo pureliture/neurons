@@ -85,7 +85,7 @@ AI tools ──► dendrite capture/spool ──► neurons ingest ──► Cou
            SourceRef metadata         GraphMemoryAdapter ──► derived graph index
            from dendrite              (null/fake/Graphiti)
 
-Agent/OpenClaw/Codex/Claude ── thin MCP/stdio/HTTP ──► Brain read API
+Agent/Codex/Claude Code/OpenClaw ── thin MCP/stdio/HTTP ──► Brain read API
 
                          optional bridge
 
@@ -121,7 +121,7 @@ Brain read API ──► RAGFlow bridge ──► existing Ubuntu RAGFlow corpus
 3. Query planner searches:
    - current accepted MemoryCards;
    - recent session-memory artifacts;
-   - optional `GraphMemoryResult` for `Task`, `Decision`, `Incident`, `File`, `PersonaFact`;
+   - optional `GraphMemoryResult` for `Task`, `Decision`, `Incident`, `File`, `PersonaFact`, `SourceRef`;
    - unresolved SourceRefs relevant to current files.
 4. ContextPack builder returns latest task, last stop point, unfinished items, current decisions, similar incidents, persona constraints, source refs, confidence and gaps.
 5. Response separates:
@@ -160,6 +160,21 @@ Brain read API ──► RAGFlow bridge ──► existing Ubuntu RAGFlow corpus
 5. Graph DB data directories are never file-synced between PCs.
 
 V1 designs the envelope and shadow replay gate. A production transport product is outside M1-M7 and must not block local brain milestones.
+
+### Flow 6: Production Projection and Agent E2E
+
+1. `dendrite source-catalog scan` writes public SourceRef JSONL and a private
+   same-device resolution index.
+2. `neuron-knowledge brain-project` imports that public JSONL into the
+   Ledger-backed SourceRef catalog.
+3. The same command projects SessionMemoryArtifacts, accepted MemoryCards, and
+   SourceRefs into the configured Graphiti/Neo4j derived graph.
+4. `neuron-knowledge mcp-stdio --enable-graph --graph-required` serves the
+   Brain MCP tools to Codex and Claude Code first. OpenClaw stays a compatible
+   MCP client, but is not the first E2E gate for M14.
+5. Agent E2E must call `brain_context_resolve` and prove the returned
+   `graph_status.status` is `available`; `tools/list` alone is only a
+   reachability smoke.
 
 ## Component Details
 

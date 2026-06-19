@@ -6,6 +6,7 @@ from typing import TextIO
 
 from .ledger import Ledger
 from .llm_brain_core.document_bridge import RagFlowDocumentBridge
+from .llm_brain_core.graph import GraphMemoryAdapter
 from .llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
 from .llm_brain_core.models import EvidenceRequest
 from .llm_brain_core.runtime import build_runtime_brain_service
@@ -202,12 +203,14 @@ class KnowledgeSearchService:
         dataset_ids: list[str],
         allow_private_results: bool = False,
         native_memory_id: str = "",
+        graph_adapter: GraphMemoryAdapter | None = None,
     ):
         self.ledger = ledger
         self.ragflow = ragflow
         self.dataset_ids = dataset_ids
         self.allow_private_results = bool(allow_private_results)
         self.native_memory_id = native_memory_id
+        self.graph_adapter = graph_adapter
 
     def core_brain(self, *, project: str = ""):
         read_model = LegacyLedgerBrainReadModel(self.ledger)
@@ -216,6 +219,7 @@ class KnowledgeSearchService:
             artifact_store=LedgerSessionMemoryArtifactStore(self.ledger),
             read_model=read_model,
             source_catalog=LedgerSourceRefCatalog(self.ledger),
+            graph_adapter=self.graph_adapter,
             document_bridge=RagFlowDocumentBridge(ragflow=self.ragflow, dataset_ids=self.dataset_ids),
         )
 

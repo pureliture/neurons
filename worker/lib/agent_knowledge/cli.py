@@ -12,6 +12,8 @@ from .couchdb_source import migration_cli
 from .ledger import Ledger
 from .llm_brain_core import cli as llm_brain_core_cli
 from .llm_brain_core import portable_cli as llm_brain_portable_cli
+from .llm_brain_core import projection_cli as llm_brain_projection_cli
+from .llm_brain_core.runtime_graph import build_graph_adapter_from_env
 from .mcp_server import KnowledgeSearchService, build_ragflow_client, run_stdio_server
 from .rag_ingress import state_cli
 from .session_memory import (
@@ -85,6 +87,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "brain-context-resolve": llm_brain_core_cli.main,
     "brain-export": llm_brain_portable_cli.export_main,
     "brain-import": llm_brain_portable_cli.import_main,
+    "brain-project": llm_brain_projection_cli.main,
     "backfill": _pending_server_command("backfill"),
     "context-for-prompt": _pending_server_command("context-for-prompt"),
     "derived-memory-resources": _pending_server_command("derived-memory-resources"),
@@ -112,6 +115,8 @@ def _mcp_stdio_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--native-memory-id", default="")
     parser.add_argument("--state-db-recall", default="")
     parser.add_argument("--ragflow-direct-recall", action="store_true")
+    parser.add_argument("--enable-graph", action="store_true")
+    parser.add_argument("--graph-required", action="store_true")
     args = parser.parse_args(argv)
     _ = args.state_db_recall
     _ = args.ragflow_direct_recall
@@ -126,6 +131,14 @@ def _mcp_stdio_main(argv: list[str] | None = None) -> int:
         token=token,
         policy_proxy_url=args.policy_proxy_url,
     )
+    try:
+        graph_adapter = build_graph_adapter_from_env(
+            enabled=True if args.enable_graph else None,
+            required=bool(args.graph_required),
+        )
+    except Exception as exc:
+        print(f"graph adapter unavailable: {type(exc).__name__}", file=sys.stderr)
+        return 1
     run_stdio_server(
         KnowledgeSearchService(
             ledger=ledger,
@@ -133,6 +146,7 @@ def _mcp_stdio_main(argv: list[str] | None = None) -> int:
             dataset_ids=list(args.dataset_id or []),
             allow_private_results=bool(args.allow_private_results),
             native_memory_id=args.native_memory_id or os.environ.get("RAGFLOW_NATIVE_MEMORY_ID", ""),
+            graph_adapter=graph_adapter,
         )
     )
     return 0
