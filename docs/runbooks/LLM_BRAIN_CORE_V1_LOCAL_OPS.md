@@ -240,6 +240,20 @@ Do not treat an older local Docker image as current merge-commit proof. The
 current-pass Graphiti adapter smoke must use the checked-out commit or a runner
 built from it.
 
+Current 2026-06-19 promotion verification used a container runner built from the
+Ubuntu checkout because host Python did not have `graphiti_core` or the `neo4j`
+driver installed:
+
+```text
+worker image: llm-brain-verify-worker:8b9596d
+adapter smoke: status=available, details=["graphiti_neo4j", "episodic_node_direct_read"], matched=true
+dump/load smoke: status=ok, episodes=4, graph_db_files_synced_between_pcs=false
+```
+
+The dump/load current-pass used the existing stopped verification Neo4j data
+volume and a new restore verification volume. It did not delete graph volumes
+and did not sync graph DB files between PCs.
+
 ## Dendrite SourceRef Catalog
 
 Scan an explicitly approved project root:
