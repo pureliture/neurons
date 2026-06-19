@@ -10,6 +10,7 @@ from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceSto
 from agent_knowledge.couchdb_source.tool_evidence_bundler import store_tool_evidence_bundles
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.llm_brain_core import (
+    BrainReadService,
     FakeGraphMemoryAdapter,
     LedgerSessionMemoryArtifactStore,
     LedgerSourceRefCatalog,
@@ -156,6 +157,59 @@ def test_runtime_connected_incident_drift_persona_paths(tmp_path):
     assert persona["status"] == "aligned"
 
 
+def test_current_task_selection_ignores_card_metadata_terms():
+    service = BrainReadService(
+        memory_cards=[
+            _card(
+                "mem_task_match",
+                "task",
+                "Task restore ContextPack",
+                {
+                    "task_state": "Task restore ContextPack",
+                    "next_action": "Continue graph projection",
+                    "status": "open",
+                },
+            )
+            | {"updated_at": "2026-06-19T00:00:00Z"},
+            _card(
+                "mem_task_metadata_only",
+                "task",
+                "Unrelated cleanup",
+                {
+                    "task_state": "Unrelated cleanup",
+                    "next_action": "Do not select this from metadata",
+                    "status": "open",
+                },
+            )
+            | {"updated_at": "2026-06-19T00:01:00Z"},
+        ]
+    )
+
+    pack = service.brain_context_resolve(
+        repository="/Users/example/Projects/neurons",
+        branch="codex/llm-brain-core-design",
+        current_files=[],
+        current_request="task",
+        project=PROJECT,
+    )
+
+    assert pack.current_task == "Task restore ContextPack"
+
+
+def test_memory_card_projection_preserves_brain_id_for_graph_grouping():
+    card = _card(
+        "mem_graph_project",
+        "task",
+        "Graph projection task",
+        {"task_state": "Graph projection task", "next_action": "Project card", "status": "open"},
+    )
+
+    episode = episode_from_memory_card(card)
+
+    assert episode.payload["brain_id"] == f"/project/{PROJECT}"
+    assert episode.payload["project"] == PROJECT
+
+
 def test_brain_context_resolve_cli_reads_ledger_backed_core(tmp_path, capsys):
     ledger_path = tmp_path / "ledger.sqlite3"
     ledger = Ledger(ledger_path)
@@ -213,11 +267,13 @@ def test_brain_event_mapping_accepts_existing_queue_shape():
                     }
                 }
             },
+            "supersedes": ["evt_prior"],
         },
         device_id_hash=_h("device-a"),
     )
 
     assert envelope.event_id == "evt_queue_1"
+    assert envelope.payload["supersedes"] == ["evt_prior"]
     assert envelope.idempotency_key == "ingress:session-memory:1"
     assert envelope.payload == {
         "target_id": "kn_session",
@@ -226,6 +282,7 @@ def test_brain_event_mapping_accepts_existing_queue_shape():
         "provider": PROVIDER,
         "session_id_hash": _sid(),
         "kind": "",
+        "supersedes": ["evt_prior"],
     }
 
 

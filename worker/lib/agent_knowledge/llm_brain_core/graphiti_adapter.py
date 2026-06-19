@@ -69,7 +69,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
         self._graphiti = graphiti
         self._default_group_id = default_group_id
         self._extract_entities = extract_entities
-        self._runner = _AsyncLoopRunner()
+        self._runner = _AsyncLoopRunner.get_instance()
 
     @classmethod
     def from_config(cls, config: GraphitiNeo4jConfig) -> "GraphitiNeo4jGraphMemoryAdapter":
@@ -219,6 +219,17 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
 
 
 class _AsyncLoopRunner:
+    _instance: _AsyncLoopRunner | None = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls) -> _AsyncLoopRunner:
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)

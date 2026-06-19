@@ -616,7 +616,7 @@ Done:
 Recommended design worktree:
 
 ```text
-cwd: /Users/ddalkak/Projects/neurons/.worktrees/llm-brain-core-design
+cwd: /Users/example/Projects/neurons/.worktrees/llm-brain-core-design
 branch: codex/llm-brain-core-design
 mode: docs/design first, then agentic-execution after design approval
 ```
@@ -625,7 +625,7 @@ After design approval, implementation autopilot should start a fresh dedicated w
 
 ```text
 branch: codex/llm-brain-graph-core-m1
-worktree: /Users/ddalkak/Projects/neurons/.worktrees/llm-brain-graph-core-m1
+worktree: /Users/example/Projects/neurons/.worktrees/llm-brain-graph-core-m1
 first milestone: M1 only
 ```
 

@@ -190,7 +190,7 @@ Ubuntu portable archive smoke:
 Cross-repo dendrite SourceRef check:
 
 ```bash
-cd /Users/ddalkak/Projects/dendrite/.worktrees/source-ref-catalog
+cd /Users/example/Projects/dendrite/.worktrees/source-ref-catalog
 uv run pytest -q
 ```
 

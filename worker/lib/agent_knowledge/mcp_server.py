@@ -211,7 +211,7 @@ class KnowledgeSearchService:
     def core_brain(self, *, project: str = ""):
         read_model = LegacyLedgerBrainReadModel(self.ledger)
         return build_runtime_brain_service(
-            project=project or "unknown",
+            project=project,
             artifact_store=LedgerSessionMemoryArtifactStore(self.ledger),
             read_model=read_model,
             source_catalog=LedgerSourceRefCatalog(self.ledger),

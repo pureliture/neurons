@@ -78,6 +78,23 @@ def test_event_replay_quarantines_same_idempotency_key_with_different_payload():
     assert result["quarantined"][0]["reason_code"] == "idempotency_conflict"
 
 
+def test_ingress_payload_mapping_preserves_supersedes_for_tombstone_resolution():
+    from agent_knowledge.llm_brain_core.runtime import brain_event_from_ingress_payload
+
+    envelope = brain_event_from_ingress_payload(
+        {
+            "eventId": "evt_resurrect",
+            "idempotencyKey": "brain-event:task:resolved-resurrect",
+            "contentHash": _h("payload"),
+            "target_id": "task:ctx",
+            "supersedes": ["evt_tombstone"],
+        },
+        device_id_hash=_h("device-a"),
+    )
+
+    assert envelope.payload["supersedes"] == ["evt_tombstone"]
+
+
 def _event(event_id, key, occurred_at, payload, tombstone=False):
     return BrainEventEnvelope.from_payload(
         event_id=event_id,

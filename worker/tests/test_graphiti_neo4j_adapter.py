@@ -100,6 +100,13 @@ def test_graphiti_config_defaults_to_episode_only_storage():
     assert config.extract_entities is False
 
 
+def test_graphiti_adapters_share_single_async_loop_runner():
+    first = GraphitiNeo4jGraphMemoryAdapter(_FakeGraphiti())
+    second = GraphitiNeo4jGraphMemoryAdapter(_FakeGraphiti())
+
+    assert first._runner is second._runner
+
+
 class _FakeGraphiti:
     def __init__(self) -> None:
         self.added: list[dict] = []
