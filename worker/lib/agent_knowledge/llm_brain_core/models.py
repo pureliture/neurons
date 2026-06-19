@@ -391,6 +391,11 @@ class GraphMemoryResult:
 # `to_dict()` keeps the two surfaces versioned symmetrically.
 CONTEXT_PACK_SCHEMA_VERSION = "llm_brain_context_resolve.v1"
 
+# Wire-shape identifier for the `brain-project` graph-projection CLI output. Kept
+# as a single constant so the success, import-failure, and error reports never
+# drift apart on a version bump.
+PROJECTION_SCHEMA_VERSION = "llm_brain_projection.v1"
+
 
 @dataclass(frozen=True)
 class ContextPack:

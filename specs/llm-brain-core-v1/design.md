@@ -158,6 +158,7 @@ Brain read API ──► RAGFlow bridge ──► existing Ubuntu RAGFlow corpus
 3. Duplicate and out-of-order events are ignored or quarantined deterministically.
 4. Central graph is rebuilt/projected from event envelopes.
 5. Graph DB data directories are never file-synced between PCs.
+6. The card→episode mapper's `brain_id` fail-fast (a memory card with neither a `brain_id` nor a derivable `project` is rejected, not projected ungrouped) applies on this rebuild path too: such a card is reported as a `conversion_failure` rather than silently projected into a wrong/empty graph group. Production current-payload events are expected to always carry `brain_id` (or a project), so this is a guard, not an expected path.
 
 V1 designs the envelope and shadow replay gate. A production transport product is outside M1-M7 and must not block local brain milestones.
 
