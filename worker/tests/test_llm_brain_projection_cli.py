@@ -114,6 +114,40 @@ def test_brain_project_reports_source_ref_import_failures_without_projecting_bad
     assert report["projection"]["projected"] == 0
 
 
+def test_brain_project_reports_unreadable_source_ref_file_without_crashing(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    ledger_path = tmp_path / "ledger.sqlite3"
+    missing_jsonl = tmp_path / "missing-source-public.jsonl"
+    graph = FakeGraphMemoryAdapter()
+    monkeypatch.setattr("agent_knowledge.llm_brain_core.projection_cli.build_graph_adapter_from_env", lambda **kwargs: graph)
+
+    rc = neuron_main(
+        [
+            "brain-project",
+            "--ledger",
+            str(ledger_path),
+            "--project",
+            PROJECT,
+            "--source-ref-jsonl",
+            str(missing_jsonl),
+            "--enable-graph",
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert report["status"] == "failed"
+    assert report["source_refs_imported"] == 0
+    assert report["source_ref_import_failures"][0] == {
+        "source": "missing-source-public.jsonl",
+        "line": 0,
+        "reason_code": "FileNotFoundError",
+    }
+
+
 def _h(value: str) -> str:
     import hashlib
 
