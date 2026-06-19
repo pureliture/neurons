@@ -225,6 +225,21 @@ Live graph smoke requires:
 - `graphiti_core` and the `neo4j` Python driver available in the smoke runner;
 - no volume deletion or reuse of production volumes.
 
+If reusing a stopped verification Neo4j volume, confirm the baseline before
+writing a smoke episode:
+
+```text
+container status: exited or created, not running
+container/volume prefix: llm-brain-verify-*
+production volume names: not mounted
+existing Episodic count: recorded before the smoke
+smoke natural_id/event_id: unique for the current run
+```
+
+Do not call a reused verification volume "clean". Treat it as a continuity
+fixture and prove only the current smoke's unique episode plus the restored node
+count.
+
 Expected verification shape:
 
 ```text
@@ -239,6 +254,20 @@ directory sync between PCs is not allowed; use event replay or Neo4j dump/load.
 Do not treat an older local Docker image as current merge-commit proof. The
 current-pass Graphiti adapter smoke must use the checked-out commit or a runner
 built from it.
+
+Current 2026-06-19 promotion verification used a container runner built from the
+Ubuntu checkout because host Python did not have `graphiti_core` or the `neo4j`
+driver installed:
+
+```text
+worker image: llm-brain-verify-worker:8b9596d
+adapter smoke: status=available, details=["graphiti_neo4j", "episodic_node_direct_read"], matched=true
+dump/load smoke: status=ok, episodes=4, graph_db_files_synced_between_pcs=false
+```
+
+The dump/load current-pass used the existing stopped verification Neo4j data
+volume and a new restore verification volume. It did not delete graph volumes
+and did not sync graph DB files between PCs.
 
 ## Dendrite SourceRef Catalog
 
