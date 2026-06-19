@@ -13,7 +13,7 @@ from agent_knowledge.session_memory.transcript_model import bound_text
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 OPAQUE_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_:-]{2,160}$")
 PRIVATE_OUTPUT_RE = re.compile(
-    r"(/Users/|~/|/private/|/Volumes/|\bBearer\s+|\braw[_ -]?transcript\b)",
+    r"(/Users/|~/|/private/|/Volumes/|[A-Za-z]:\\|\\\\[A-Za-z0-9_.-]+|\bBearer\s+|\braw[_ -]?transcript\b)",
     re.IGNORECASE,
 )
 SECRET_ASSIGNMENT_RE = re.compile(

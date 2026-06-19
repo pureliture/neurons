@@ -261,7 +261,17 @@ def _episode_node_to_ontology(node: Any) -> OntologyEpisode | None:
         parsed = json.loads(content)
     except json.JSONDecodeError:
         return None
-    if not isinstance(parsed, dict) or "episode_id" not in parsed:
+    required_fields = (
+        "episode_id",
+        "event_id",
+        "idempotency_key",
+        "entity_type",
+        "natural_id",
+        "lifecycle_state",
+        "currentness",
+        "content_hash",
+    )
+    if not isinstance(parsed, dict) or any(not parsed.get(field) for field in required_fields):
         return None
     return OntologyEpisode(
         episode_id=str(parsed["episode_id"]),
@@ -303,8 +313,8 @@ def _edge_to_ontology(edge: Any) -> OntologyEpisode:
         payload=payload,
         valid_from=valid_at,
         valid_to=invalid_at,
-        observed_at=valid_at,
-        reference_time=valid_at,
+        observed_at=valid_at or "unknown",
+        reference_time=valid_at or "unknown",
         extractor_version="graphiti-edge.1",
     )
 
@@ -340,7 +350,7 @@ def _datetime_to_iso(value: Any) -> str:
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
         return value.isoformat()
-    return datetime.now(timezone.utc).isoformat()
+    return ""
 
 
 def _terms(value: Any) -> list[str]:

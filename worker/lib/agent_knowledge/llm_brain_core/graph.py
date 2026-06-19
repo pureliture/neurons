@@ -64,6 +64,8 @@ class FakeGraphMemoryAdapter:
         matches: list[OntologyEpisode] = []
         related_ids: set[str] = set()
         for episode in self._episodes.values():
+            if _episode_brain_id(episode) != brain_id:
+                continue
             if wanted and episode.entity_type not in wanted:
                 continue
             text = episode.search_text()
@@ -75,6 +77,8 @@ class FakeGraphMemoryAdapter:
         if related_ids:
             seen = {episode.episode_id for episode in matches}
             for episode in self._episodes.values():
+                if _episode_brain_id(episode) != brain_id:
+                    continue
                 if episode.episode_id in seen:
                     continue
                 if wanted and episode.entity_type not in wanted:
@@ -89,3 +93,7 @@ class FakeGraphMemoryAdapter:
 def _related_incident_id(episode: OntologyEpisode) -> str:
     value = episode.payload.get("incident_id") or episode.payload.get("target_incident_id")
     return str(value or "")
+
+
+def _episode_brain_id(episode: OntologyEpisode) -> str:
+    return str(episode.payload.get("brain_id") or "")

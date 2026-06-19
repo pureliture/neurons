@@ -45,7 +45,8 @@ class GraphProjectionWorker:
         report = self.project_episodes(episodes)
         merged_failures = tuple([*failures, *report.failures])
         failed = len(merged_failures)
-        status = "succeeded" if failed == 0 else ("partial" if report.projected else "failed")
+        projected_or_duplicate = report.projected or report.duplicates
+        status = "succeeded" if failed == 0 else ("partial" if projected_or_duplicate else "failed")
         return GraphProjectionReport(
             status=status,
             attempted=len(cards),
@@ -102,8 +103,18 @@ class GraphProjectionWorker:
                     }
                 )
                 continue
-            if result == "duplicate":
+            result_text = str(result or "")
+            if result_text == "duplicate":
                 duplicates += 1
+            elif result_text in {"", "unavailable", "failed", "error"}:
+                failures.append(
+                    {
+                        "episode_id": episode.episode_id,
+                        "entity_type": episode.entity_type,
+                        "reason_code": result_text or "empty_result",
+                    }
+                )
+                continue
             else:
                 projected += 1
             episode_ids.append(episode.episode_id)

@@ -13,6 +13,13 @@ Source of truth:
 - `specs/llm-brain-core-v1/design.md`
 - `specs/llm-brain-core-v1/implementation-matrix.md`
 
+Set local checkout paths before running local source commands:
+
+```bash
+export NEURONS_ROOT=/path/to/neurons
+export DENDRITE_ROOT=/path/to/dendrite
+```
+
 ## Safety Boundary
 
 Allowed without a live mutation approval:
@@ -36,20 +43,20 @@ Hard stop:
 Run in `neurons`:
 
 ```bash
-cd /Users/ddalkak/Projects/neurons/.worktrees/llm-brain-core-design/worker
+cd "$NEURONS_ROOT/worker"
 uv run pytest -q
 ```
 
 Expected current result:
 
 ```text
-763 passed, 7 skipped, 1 warning
+773 passed, 7 skipped, 1 warning
 ```
 
 Run in `dendrite`:
 
 ```bash
-cd /Users/ddalkak/Projects/dendrite/.worktrees/source-ref-catalog
+cd "$DENDRITE_ROOT"
 uv run pytest -q
 ```
 
@@ -65,7 +72,7 @@ Expected current result:
 read-oriented LLM-Brain tools.
 
 ```bash
-cd /Users/ddalkak/Projects/neurons/.worktrees/llm-brain-core-design/worker
+cd "$NEURONS_ROOT/worker"
 uv run neuron-knowledge mcp-stdio --ledger /path/to/ledger.sqlite
 ```
 
@@ -86,14 +93,14 @@ RAGFlow dataset ids, or RAGFlow document ids.
 Export:
 
 ```bash
-cd /Users/ddalkak/Projects/neurons/.worktrees/llm-brain-core-design
+cd "$NEURONS_ROOT"
 ./scripts/brain-export --ledger /path/to/ledger.sqlite --out exports/brain.tar.gz --repo-root "$PWD"
 ```
 
 Import:
 
 ```bash
-cd /Users/ddalkak/Projects/neurons/.worktrees/llm-brain-core-design
+cd "$NEURONS_ROOT"
 ./scripts/brain-import --ledger /path/to/new-ledger.sqlite --archive exports/brain.tar.gz
 ```
 
@@ -117,7 +124,7 @@ Use `.tar.zst` only when the local `zstd` binary is installed. Otherwise use
 Static compose profile check:
 
 ```bash
-cd /Users/ddalkak/Projects/neurons/.worktrees/llm-brain-core-design
+cd "$NEURONS_ROOT"
 ruby -ryaml -e 'data=YAML.load_file("compose.yaml"); svc=data.fetch("services").fetch("llm-brain-neo4j"); raise "profile" unless svc.fetch("profiles") == ["llm-brain-graph"]; vols=data.fetch("volumes"); raise "data volume" unless vols.key?("llm-brain-neo4j-data"); raise "logs volume" unless vols.key?("llm-brain-neo4j-logs"); puts "compose yaml static check ok"'
 ```
 
@@ -150,7 +157,7 @@ directory sync between PCs is not allowed; use event replay or Neo4j dump/load.
 Scan an explicitly approved project root:
 
 ```bash
-cd /Users/ddalkak/Projects/dendrite/.worktrees/source-ref-catalog
+cd "$DENDRITE_ROOT"
 uv run dendrite source-catalog scan \
   --root /path/to/project \
   --root-id project-root \
