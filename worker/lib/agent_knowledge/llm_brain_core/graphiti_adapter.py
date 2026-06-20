@@ -5,33 +5,46 @@ import json
 import os
 import re
 import threading
-from dataclasses import dataclass
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 from ._util import public_safe_text, short_hash
+from .graph import UpsertEpisodeResult
 from .models import GraphMemoryResult, OntologyEpisode
 
 _GRAPHITI_GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# Default async-call timeouts (seconds). Reads (search/retrieve) are expected to
+# return in seconds; writes (entity extraction via the LLM) can take much
+# longer. These are split so a slow write does not force every read to wait the
+# full upper bound, and both are injectable for tests and tuning.
+DEFAULT_GRAPH_READ_TIMEOUT_SECONDS = 30.0
+DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS = 300.0
 
 
 @dataclass(frozen=True)
 class GraphitiNeo4jConfig:
     uri: str = "bolt://localhost:7687"
     user: str = "neo4j"
-    password: str = ""
+    # Secrets are repr=False so an accidental repr()/traceback/locals dump of the
+    # config never leaks credentials (CLAUDE.md: no token/credential in output).
+    password: str = field(default="", repr=False)
     default_group_id: str = ""
     llm_provider: str = "openai"
     llm_model: str = ""
     small_model: str = ""
     llm_base_url: str = ""
-    llm_api_key: str = ""
+    llm_api_key: str = field(default="", repr=False)
     embedding_model: str = ""
     embedding_base_url: str = ""
-    embedding_api_key: str = ""
+    embedding_api_key: str = field(default="", repr=False)
     embedding_dim: int = 1024
     store_raw_episode_content: bool = True
     extract_entities: bool = False
+    read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS
+    write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "GraphitiNeo4jConfig":
@@ -54,6 +67,14 @@ class GraphitiNeo4jConfig:
             store_raw_episode_content=env.get("LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT", "true").lower()
             not in {"0", "false", "no"},
             extract_entities=env.get("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES", "false").lower() in {"1", "true", "yes"},
+            read_timeout_seconds=_float_env(
+                env.get("LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS", ""),
+                default=DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
+            ),
+            write_timeout_seconds=_float_env(
+                env.get("LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS", ""),
+                default=DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS,
+            ),
         )
 
 
@@ -65,11 +86,32 @@ class GraphitiNeo4jGraphMemoryAdapter:
     public-safe `OntologyEpisode` JSON, never raw transcripts or raw file paths.
     """
 
-    def __init__(self, graphiti: Any, *, default_group_id: str = "", extract_entities: bool = False) -> None:
+    def __init__(
+        self,
+        graphiti: Any,
+        *,
+        default_group_id: str = "",
+        extract_entities: bool = False,
+        episode_exists: Callable[[Any, str], Any] | None = None,
+        read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
+        write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS,
+        runner: "_AsyncLoopRunner | None" = None,
+    ) -> None:
         self._graphiti = graphiti
         self._default_group_id = default_group_id
         self._extract_entities = extract_entities
-        self._runner = _AsyncLoopRunner.get_instance()
+        # Split read/write timeouts: a read that hangs must not be forced to wait
+        # the (longer) write upper bound, and vice versa. Injectable so a unit
+        # test can drive the timeout path deterministically with a tiny bound.
+        self._read_timeout_seconds = float(read_timeout_seconds)
+        self._write_timeout_seconds = float(write_timeout_seconds)
+        # `runner` is injectable so a test can supply a non-singleton loop runner
+        # without poisoning the shared production singleton.
+        self._runner = runner if runner is not None else _AsyncLoopRunner.get_instance()
+        # Existence probe for episode_id MERGE idempotency. Injectable so tests
+        # can simulate a pre-existing episode without a live Neo4j. Defaults to
+        # Graphiti's EpisodicNode.get_by_uuid (async), which raises when absent.
+        self._episode_exists = episode_exists or _default_episode_exists
 
     @classmethod
     def from_config(cls, config: GraphitiNeo4jConfig) -> "GraphitiNeo4jGraphMemoryAdapter":
@@ -77,20 +119,29 @@ class GraphitiNeo4jGraphMemoryAdapter:
             _build_graphiti(config),
             default_group_id=config.default_group_id,
             extract_entities=config.extract_entities,
+            read_timeout_seconds=config.read_timeout_seconds,
+            write_timeout_seconds=config.write_timeout_seconds,
         )
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "GraphitiNeo4jGraphMemoryAdapter":
         return cls.from_config(GraphitiNeo4jConfig.from_env(environ))
 
-    def upsert_episode(self, episode: OntologyEpisode) -> str:
+    def upsert_episode(self, episode: OntologyEpisode) -> UpsertEpisodeResult:
         body = json.dumps(episode.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         group_id = _graphiti_group_id(_group_id_for_episode(episode, self._default_group_id))
 
-        async def _call():
+        async def _call() -> UpsertEpisodeResult:
             if not self._extract_entities:
                 from graphiti_core.nodes import EpisodicNode
 
+                # episode_id MERGE idempotency: an episode_id already encodes the
+                # content_hash (see OntologyEpisode.from_payload), so a node with
+                # the same uuid is the same content. Treat a re-upsert as a
+                # `duplicate` to stay symmetric with FakeGraphMemoryAdapter, not a
+                # second projected row.
+                if await self._episode_exists(self._graphiti.driver, episode.episode_id):
+                    return "duplicate"
                 graphiti_episode = EpisodicNode(
                     uuid=episode.episode_id,
                     name=episode.episode_id,
@@ -103,9 +154,9 @@ class GraphitiNeo4jGraphMemoryAdapter:
                     valid_at=_parse_datetime(episode.reference_time),
                 )
                 await graphiti_episode.save(self._graphiti.driver)
-                return graphiti_episode
+                return "inserted"
 
-            return await self._graphiti.add_episode(
+            await self._graphiti.add_episode(
                 name=episode.episode_id,
                 episode_body=body,
                 source_description=f"llm_brain_core:{episode.entity_type}:{episode.natural_id}",
@@ -113,10 +164,9 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 source=_episode_type_json(),
                 group_id=group_id or None,
             )
+            return "inserted"
 
-        result = self._runner.run(_call)
-        graph_uuid = getattr(result, "uuid", "") or getattr(getattr(result, "episode", None), "uuid", "")
-        return public_safe_text(str(graph_uuid or episode.episode_id), max_chars=240)
+        return self._runner.run(_call, timeout=self._write_timeout_seconds)
 
     def search_context(
         self,
@@ -130,8 +180,9 @@ class GraphitiNeo4jGraphMemoryAdapter:
         group_id = _graphiti_group_id(brain_id or self._default_group_id)
         group_ids = [group_id] if group_id else None
 
-        async def _call() -> tuple[list[Any], list[Any], list[str]]:
+        async def _call() -> tuple[list[Any], list[Any], list[str], bool]:
             details: list[str] = ["graphiti_neo4j"]
+            edge_degraded = False
             try:
                 edges = await self._graphiti.search(
                     query,
@@ -140,16 +191,19 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 )
             except Exception as exc:
                 edges = []
+                edge_degraded = True
                 details.append(f"edge_search:{type(exc).__name__}")
             episodes = await self._graphiti.retrieve_episodes(
                 reference_time=datetime.now(timezone.utc),
                 last_n=max(bounded * 5, bounded),
                 group_ids=group_ids,
             )
-            return list(edges or []), list(episodes or []), details
+            return list(edges or []), list(episodes or []), details, edge_degraded
 
         try:
-            edges, episodes, details = self._runner.run(_call)
+            edges, episodes, details, edge_degraded = self._runner.run(
+                _call, timeout=self._read_timeout_seconds
+            )
         except Exception as exc:
             return GraphMemoryResult(status="error", details=(type(exc).__name__,))
 
@@ -172,10 +226,68 @@ class GraphitiNeo4jGraphMemoryAdapter:
             converted.append(episode)
 
         converted.sort(key=lambda item: (item.observed_at, item.episode_id), reverse=True)
+        # Edge (relationship) search failure with surviving episode reads is a
+        # partial result, not a healthy 'available' one. Separate it so downstream
+        # gates cannot read a false-healthy graph_status.
+        if edge_degraded:
+            return GraphMemoryResult(
+                status="degraded",
+                episodes=tuple(converted[:bounded]),
+                details=tuple([*details, "graph_edge_degraded"]),
+            )
         return GraphMemoryResult(
             status="available",
             episodes=tuple(converted[:bounded]),
             details=tuple(details),
+        )
+
+
+async def _default_episode_exists(driver: Any, episode_id: str) -> bool:
+    """Return True when an EpisodicNode with ``episode_id`` already exists.
+
+    Used by the production-default (extract_entities=False) path to detect a
+    re-upsert of the same episode_id as a `duplicate`. Graphiti's
+    ``EpisodicNode.get_by_uuid`` raises ``NodeNotFoundError`` when the node is
+    absent; any lookup error is treated as "not present" so a transient read
+    failure degrades to an insert attempt rather than masking a real write.
+    """
+
+    from graphiti_core.nodes import EpisodicNode
+
+    try:
+        node = await EpisodicNode.get_by_uuid(driver, episode_id)
+    except Exception:
+        return False
+    return node is not None
+
+
+def probe_graphiti_connectivity(adapter: Any) -> None:
+    """One-shot connectivity probe for the must-have (required) graph path.
+
+    Calls the underlying Neo4j driver's ``verify_connectivity`` once so a dead
+    or unreachable backend fails fast at startup instead of degrading to an empty
+    'available' read later. Raises on failure; returns ``None`` on success.
+
+    The probe is kept here (next to the adapter) but injected through
+    ``runtime_graph.build_graph_adapter_from_env`` so tests can substitute a
+    failing probe without a live Neo4j.
+    """
+
+    graphiti = getattr(adapter, "_graphiti", None)
+    driver = getattr(graphiti, "driver", None)
+    if driver is None:
+        raise RuntimeError("graph connectivity probe: no driver available")
+    verify = getattr(driver, "verify_connectivity", None)
+    if verify is None:
+        # Wrapped drivers may expose the neo4j driver one level down.
+        inner = getattr(driver, "client", None) or getattr(driver, "_driver", None)
+        verify = getattr(inner, "verify_connectivity", None)
+    if verify is None:
+        raise RuntimeError("graph connectivity probe: driver has no verify_connectivity")
+    result = verify()
+    if asyncio.iscoroutine(result):
+        _AsyncLoopRunner.get_instance().run(
+            lambda: result, timeout=DEFAULT_GRAPH_READ_TIMEOUT_SECONDS
         )
 
 
@@ -235,21 +347,88 @@ class _AsyncLoopRunner:
                     cls._instance = cls()
         return cls._instance
 
-    def __init__(self) -> None:
+    def __init__(self, *, default_timeout: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS) -> None:
+        self._default_timeout = float(default_timeout)
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
-    def run(self, factory: Callable[[], Any]) -> Any:
+    def run(self, factory: Callable[[], Any], *, timeout: float | None = None) -> Any:
+        """Run an async factory on the background loop with a bounded wait.
+
+        `timeout` is the per-call wait in seconds; ``None`` falls back to the
+        runner's configured default. A timeout raises
+        ``concurrent.futures.TimeoutError`` (the caller decides how to surface
+        it: reads degrade to ``status='error'``, writes propagate as a failed
+        upsert). The pending coroutine is cancelled so a hung call does not leak
+        onto the shared loop.
+        """
+
         async def _invoke():
             return await factory()
 
+        wait = self._default_timeout if timeout is None else float(timeout)
         future = asyncio.run_coroutine_threadsafe(_invoke(), self._loop)
-        return future.result(timeout=300)
+        try:
+            return future.result(timeout=wait)
+        except FuturesTimeoutError:
+            # Stop the orphaned coroutine from running forever on the shared loop.
+            future.cancel()
+            raise
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
+
+    def shutdown(self) -> None:
+        """Stop the background loop and join its thread (process-exit seam).
+
+        Idempotent and best-effort: a daemon thread would die with the process
+        anyway, but an explicit shutdown lets a long-lived host (or a test)
+        release the loop deterministically instead of relying on interpreter
+        teardown.
+        """
+
+        loop = getattr(self, "_loop", None)
+        if loop is None or loop.is_closed():
+            return
+        # Cancel any still-pending coroutines (e.g. a timed-out backend call whose
+        # future was cancelled but whose task had not yet unwound) and let the
+        # loop drain them before stopping, so teardown does not emit "Task was
+        # destroyed but it is pending" noise.
+        drain = asyncio.run_coroutine_threadsafe(_drain_pending_tasks(), loop)
+        try:
+            drain.result(timeout=5)
+        except Exception:
+            pass
+        loop.call_soon_threadsafe(loop.stop)
+        thread = getattr(self, "_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+        if not loop.is_closed():
+            loop.close()
+        if _AsyncLoopRunner._instance is self:
+            with _AsyncLoopRunner._lock:
+                if _AsyncLoopRunner._instance is self:
+                    _AsyncLoopRunner._instance = None
+
+
+async def _drain_pending_tasks() -> None:
+    """Cancel and await every other task on the current loop.
+
+    Run on the loop thread during shutdown so timed-out/cancelled coroutines
+    unwind cleanly instead of being garbage-collected while still pending.
+    """
+
+    current = asyncio.current_task()
+    pending = [task for task in asyncio.all_tasks() if task is not current and not task.done()]
+    for task in pending:
+        task.cancel()
+    for task in pending:
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 def _episode_type_json():
@@ -371,3 +550,11 @@ def _int_env(value: str, *, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _float_env(value: str, *, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default

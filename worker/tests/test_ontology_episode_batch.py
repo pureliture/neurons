@@ -148,6 +148,62 @@ def test_ontology_batch_reports_bad_card_and_projects_valid_items():
     assert report["failed"] == 1
 
 
+def test_typed_payload_free_text_is_redacted_before_reaching_graph_body():
+    # typed_payload free text is operator-authored: a private path or token in a
+    # nested string must be redacted in the projected episode (the graph body),
+    # not stored raw. This is the general-PII pass on top of the structural
+    # private-path/secret guard.
+    card = _card(
+        "mem_leaky",
+        "decision",
+        "Decision summary",
+        {
+            "decision": "Use the ledger at /Users/secret/private/ledger.sqlite",
+            "rationale": "Token=supersecret should not be stored raw in the graph.",
+            "nested": {"note": "see /Users/alice/.claude/transcript.jsonl"},
+            "tags": ["plain", "/Users/bob/private/notes.md"],
+            "status": "open",
+            "confidence_pct": 90,
+        },
+    )
+
+    episode = build_ontology_episode_batch(memory_cards=[card], project="neurons")[0]
+    typed = episode.payload["typed_payload"]
+    body = str(episode.to_dict())
+
+    assert "/Users/" not in body
+    assert "supersecret" not in body
+    assert "transcript.jsonl" not in body
+    # Structure and non-string scalars are preserved for downstream filtering.
+    assert typed["status"] == "open"
+    assert typed["confidence_pct"] == 90
+    assert isinstance(typed["nested"], dict)
+    assert isinstance(typed["tags"], list) and len(typed["tags"]) == 2
+    assert typed["tags"][0] == "plain"
+
+
+def test_typed_payload_redaction_preserves_clean_text_unchanged():
+    # A clean typed_payload must survive redaction so existing recall behavior is
+    # unchanged for non-sensitive cards.
+    card = _card(
+        "mem_clean",
+        "task",
+        "Clean task",
+        {
+            "task_state": "Run graph smoke",
+            "next_action": "Start Neo4j profile on a Compose host",
+            "status": "open",
+        },
+    )
+
+    episode = build_ontology_episode_batch(memory_cards=[card], project="neurons")[0]
+    typed = episode.payload["typed_payload"]
+
+    assert typed["task_state"] == "Run graph smoke"
+    assert typed["next_action"] == "Start Neo4j profile on a Compose host"
+    assert typed["status"] == "open"
+
+
 def test_ontology_batch_reports_non_mapping_memory_card_without_crashing():
     batch = build_ontology_episode_batch_report(memory_cards=[object()]).to_dict()
 

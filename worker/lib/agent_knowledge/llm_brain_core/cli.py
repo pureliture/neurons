@@ -8,6 +8,7 @@ from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.brain_read_model import LegacyLedgerBrainReadModel
 
 from .ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
+from .models import CONTEXT_PACK_SCHEMA_VERSION
 from .runtime import build_runtime_brain_service
 from .runtime_graph import build_graph_adapter_from_env
 
@@ -36,8 +37,8 @@ def main(argv: list[str] | None = None) -> int:
             read_model=read_model,
             source_catalog=source_catalog,
             graph_adapter=build_graph_adapter_from_env(
-                enabled=True if args.enable_graph else None,
-                required=bool(args.graph_required),
+                enable_flag=True if args.enable_graph else None,
+                required_flag=bool(args.graph_required),
             ),
         )
         pack = service.brain_context_resolve(
@@ -52,10 +53,13 @@ def main(argv: list[str] | None = None) -> int:
         print(
             json.dumps(
                 {
-                    "schema_version": "llm_brain_context_resolve.v1",
+                    "schema_version": CONTEXT_PACK_SCHEMA_VERSION,
                     "status": "failed",
                     "error_class": type(exc).__name__,
-                    "message": str(exc),
+                    # Do not echo raw exception text: it can carry private paths,
+                    # tokens, or backend ids. Mirror the other entrypoints and
+                    # emit only the exception class plus a static public message.
+                    "message": "context resolve failed",
                 },
                 sort_keys=True,
             ),
@@ -66,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         json.dumps(
             {
-                "schema_version": "llm_brain_context_resolve.v1",
+                "schema_version": CONTEXT_PACK_SCHEMA_VERSION,
                 "status": "ok",
                 "context_pack": pack,
             },
