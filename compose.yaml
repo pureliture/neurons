@@ -192,18 +192,21 @@ services:
       # graph-required: Neo4j/wrapper 미가용 시 기동 거부(advisor recall은 graph 중심).
       # degrade 기동을 원하면 이 플래그를 제거한다.
       - --graph-required
+    env_file:
+      # graph LLM/embedding 키(LLM_BRAIN_EMBEDDING_*·LLM_BRAIN_LLM_*·
+      # LLM_BRAIN_GRAPH_LLM_PROVIDER·LLM_BRAIN_GRAPH_EXTRACT_ENTITIES·API key 등)는
+      # 운영자 brain env 파일에서 주입한다 — 키 이름은 worker 코드(graphiti_adapter.from_env)가
+      # 읽는 정본을 그대로 쓴다(여기서 재정의해 오타로 갈라지지 않게 함).
+      - ${LLM_BRAIN_ENV_FILE:?set LLM_BRAIN_ENV_FILE (brain env, e.g. /home/ragflow/Projects/neurons/.env)}
     environment:
+      # env_file에 없거나 배포별로 강제할 값만 명시(environment가 env_file을 override).
       LLM_BRAIN_GRAPH_ENABLED: "true"
-      LLM_BRAIN_EXTRACT_ENTITIES: ${LLM_BRAIN_EXTRACT_ENTITIES:-true}
       LLM_BRAIN_GRAPH_GROUP_ID: ${LLM_BRAIN_GRAPH_GROUP_ID:-}
       LLM_BRAIN_NEO4J_URI: ${LLM_BRAIN_NEO4J_URI:-bolt://127.0.0.1:17687}
       LLM_BRAIN_NEO4J_USER: ${LLM_BRAIN_NEO4J_USER:-neo4j}
-      LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}
-      # 실 ledger는 PG. open_read_only의 --ledger 파일은 placeholder.
+      LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:?set LLM_BRAIN_NEO4J_PASSWORD}
+      # 실 ledger는 PG. open_read_only의 --ledger 파일은 placeholder. network_mode host면 DSN host=127.0.0.1.
       NEURON_LEDGER_PG_DSN: ${NEURON_LEDGER_PG_DSN:?set NEURON_LEDGER_PG_DSN (PG ledger)}
-      LLM_BRAIN_LLM_BASE_URL: ${LLM_BRAIN_LLM_BASE_URL:-http://127.0.0.1:8930/v1}
-      LLM_BRAIN_EMBEDDING_BASE_URL: ${LLM_BRAIN_EMBEDDING_BASE_URL:-http://127.0.0.1:8930/v1}
-      GRAPH_LLM_PROVIDER: ${GRAPH_LLM_PROVIDER:-openai-compatible}
     healthcheck:
       # python:3.13-slim엔 curl/wget이 없으므로 stdlib urllib로 점검. 서버가 tailnet IP에
       # bind하므로 loopback이 아닌 MCP_HTTP_HOST로 확인(network_mode: host라 도달 가능).
