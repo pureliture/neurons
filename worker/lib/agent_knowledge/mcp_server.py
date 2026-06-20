@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import sys
 from typing import TextIO
@@ -225,9 +226,11 @@ class _SessionCardCache:
         if cached is None:
             cached = self._read_model.list_accepted_cards(project=project, limit=limit)
             self._cards[key] = cached
-        # Hand out copies so a downstream consumer mutating its list cannot
-        # corrupt the shared snapshot.
-        return [dict(card) for card in cached]
+        # Hand out deep copies so a downstream consumer mutating not just its
+        # list but any nested dict/list inside a card cannot corrupt the shared
+        # snapshot. The accepted-card window is bounded (limit<=100), so the
+        # deepcopy cost is negligible against the ledger read it replaces.
+        return [copy.deepcopy(card) for card in cached]
 
     def invalidate(self) -> None:
         self._cards.clear()
@@ -417,7 +420,10 @@ def handle_jsonrpc_message(message: dict, service: KnowledgeSearchService) -> di
             return _success(request_id, _call_tool(message.get("params") or {}, service))
         return _error(request_id, -32601, f"method not found: {method}")
     except (TypeError, ValueError) as exc:
-        return _error(request_id, -32602, str(exc))
+        # Never echo the raw exception message: it can carry caller-supplied
+        # argument values or private context. Surface only a static message plus
+        # the exception type name, mirroring the brain_context_resolve redaction.
+        return _error(request_id, -32602, f"invalid params: {type(exc).__name__}")
     except Exception:
         return _error(request_id, -32603, "internal error")
 
