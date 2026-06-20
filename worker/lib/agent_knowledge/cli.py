@@ -123,7 +123,10 @@ def _mcp_stdio_main(argv: list[str] | None = None) -> int:
     try:
         ledger = Ledger.open_read_only(args.ledger)
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+        # Do not echo the raw exception: it can embed the ledger path or other
+        # private context. Emit a static message plus the exception type only,
+        # symmetric with the JSON-RPC handler and brain_context_resolve.
+        print(f"ledger open failed: {type(exc).__name__}", file=sys.stderr)
         return 2
     token = os.environ.get(args.token_env, "") if args.token_env else ""
     ragflow = build_ragflow_client(

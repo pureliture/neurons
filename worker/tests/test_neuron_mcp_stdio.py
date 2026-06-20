@@ -246,6 +246,55 @@ def test_session_card_cache_returns_independent_copies(tmp_path: Path):
         assert second[0]["summary"] != "MUTATED"
 
 
+def test_session_card_cache_isolates_nested_mutation_via_deepcopy(tmp_path: Path):
+    # A shallow `dict(card)` copy still shares nested dict/list objects, so a
+    # consumer mutating card["evidence_refs"][0] or card["meta"]["x"] would
+    # corrupt the shared snapshot. deepcopy must isolate the nested structures.
+    service = _service(tmp_path)
+
+    snapshot_card = {
+        "memory_id": "mem_nested",
+        "card_type": "preference",
+        "summary": "nested-card",
+        "meta": {"nested": {"flag": "original"}},
+        "evidence_refs": [{"knowledge_id": "kn", "content_hash": "sha256:c"}],
+        "tags": ["original-tag"],
+    }
+
+    class _NestedReadModel:
+        def list_accepted_cards(self, *, project, limit):
+            # Return the SAME backing objects every call to model a real cache
+            # snapshot; deepcopy on hand-out is what must protect them.
+            return [snapshot_card]
+
+        def __getattr__(self, name):
+            return getattr(service._brain_card_cache._read_model, name)
+
+    service._brain_card_cache._read_model = _NestedReadModel()
+    service.invalidate_brain_card_cache()
+
+    handed_out = service._brain_card_cache.list_accepted_cards(project=PROJECT, limit=8)
+    assert handed_out, "expected the nested card to be handed out"
+
+    # Mutate every nested level of the returned card.
+    handed_out[0]["meta"]["nested"]["flag"] = "MUTATED"
+    handed_out[0]["evidence_refs"][0]["content_hash"] = "sha256:MUTATED"
+    handed_out[0]["evidence_refs"].append({"knowledge_id": "injected"})
+    handed_out[0]["tags"].append("injected-tag")
+
+    # The cached snapshot's backing object stays clean: deepcopy isolated it.
+    assert snapshot_card["meta"]["nested"]["flag"] == "original"
+    assert snapshot_card["evidence_refs"][0]["content_hash"] == "sha256:c"
+    assert len(snapshot_card["evidence_refs"]) == 1
+    assert snapshot_card["tags"] == ["original-tag"]
+
+    # A second hand-out is also pristine (independent of the mutated copy).
+    again = service._brain_card_cache.list_accepted_cards(project=PROJECT, limit=8)
+    assert again[0]["meta"]["nested"]["flag"] == "original"
+    assert again[0]["evidence_refs"] == [{"knowledge_id": "kn", "content_hash": "sha256:c"}]
+    assert again[0]["tags"] == ["original-tag"]
+
+
 def test_mcp_brain_context_resolve_reads_configured_graph_adapter(tmp_path: Path):
     graph = FakeGraphMemoryAdapter(
         [
@@ -464,6 +513,55 @@ def test_mcp_stdio_graph_initialization_error_does_not_print_raw_details(tmp_pat
     assert "graph adapter unavailable: RuntimeError" in output.err
     assert "/Users/" not in output.err
     assert "TOKEN" not in output.err
+
+
+def test_jsonrpc_value_error_does_not_leak_raw_exception_message(tmp_path: Path, monkeypatch):
+    # A handler-level ValueError/TypeError must surface only a static message
+    # plus the exception type name, never the raw str(exc) which can carry a
+    # private path or token. Symmetric with the PR#11 brain_context_resolve fix.
+    service = _service(tmp_path)
+    leaky = "/Users/example/private/ledger.sqlite TOKEN=secret-bearer"
+    monkeypatch.setattr(
+        service,
+        "brain_resolve",
+        lambda **kwargs: (_ for _ in ()).throw(ValueError(leaky)),
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"name": BRAIN_RESOLVE_TOOL_NAME, "arguments": {"query": "x"}},
+        },
+        service,
+    )
+
+    error = response["error"]
+    assert error["code"] == -32602
+    assert error["message"] == "invalid params: ValueError"
+    serialized = json.dumps(response, sort_keys=True)
+    assert "/Users/" not in serialized
+    assert "TOKEN" not in serialized
+    assert "secret-bearer" not in serialized
+
+
+def test_mcp_stdio_ledger_open_error_does_not_leak_raw_path(tmp_path: Path, monkeypatch, capsys):
+    # Ledger.open_read_only raises ValueError embedding the ledger path; the CLI
+    # must print only a static message + exception type, not the raw path.
+    leaky = "/Users/example/private/missing-ledger.sqlite does not exist"
+    monkeypatch.setattr(
+        "agent_knowledge.cli.Ledger.open_read_only",
+        classmethod(lambda cls, path: (_ for _ in ()).throw(ValueError(leaky))),
+    )
+
+    rc = main(["mcp-stdio", "--ledger", "/Users/example/private/missing-ledger.sqlite"])
+    output = capsys.readouterr()
+
+    assert rc == 2
+    assert "ledger open failed: ValueError" in output.err
+    assert "/Users/" not in output.err
+    assert "missing-ledger" not in output.err
 
 
 @pytest.mark.parametrize("agent_name", ["codex", "claude-code"])

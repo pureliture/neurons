@@ -250,6 +250,7 @@ backend.
 | `graph_status.status == "error"` / `unavailable` with `--graph-required`: startup connectivity probe failed (non-zero exit, no tool served) | No — must-have contract not met | Fix the backend before serving. The fail-fast is correct; do not relax `--graph-required` to mask it. | Restore Neo4j reachability + credentials, re-run `--graph-required`; the probe must pass. |
 | `brain-project` exits non-zero, `status: failed` | No — projection failed | Treat as incomplete bootstrap; do not claim coverage. | Fix the malformed SourceRef line or backend write path, re-run. |
 | `truncated.any == true` on `brain-project` | Yes — bounded `--limit` window | None; it is a partial-window note, not a failure. | Raise `--limit` (artifacts cap 100) or page to widen coverage. |
+| Graph write times out (`LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS` exceeded), upsert counted as `failed` | Partial — a write timeout failure does not guarantee the in-flight Neo4j write did not land | Do not assume the episode is absent; do not hand-delete to "clean up". | Re-run the projection: `episode_id` MERGE is idempotent, so a re-projection converges any duplicate and self-heals (no second insert on identical content). |
 
 Rule of thumb: `available` is the only healthy state; `degraded` and
 `error`/`unavailable` are gate failures for promotion but are NOT, by themselves,
