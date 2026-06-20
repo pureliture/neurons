@@ -191,12 +191,11 @@
     <line x1="1124" y1="234" x2="1208" y2="234" stroke="#1f2d4a"/>
     <g font-size="9.6" fill="#94a3b8">
       <text x="1166" y="276" text-anchor="middle">config/</text>
-      <text x="1166" y="293" text-anchor="middle" fill="#64748b">Worker·Nats</text>
-      <text x="1166" y="306" text-anchor="middle" fill="#64748b">Configuration</text>
+      <text x="1166" y="293" text-anchor="middle" fill="#64748b">Worker·</text>
+      <text x="1166" y="306" text-anchor="middle" fill="#64748b">NatsJetStream</text>
+      <text x="1166" y="319" text-anchor="middle" fill="#64748b">Configuration</text>
       <text x="1166" y="378" text-anchor="middle">logging/</text>
       <text x="1166" y="395" text-anchor="middle" fill="#64748b">SafeJobSummary</text>
-      <text x="1166" y="480" text-anchor="middle">TargetIndexing</text>
-      <text x="1166" y="494" text-anchor="middle">State</text>
     </g>
     <text x="1166" y="700" fill="#475569" font-size="9" text-anchor="middle">공통 인프라</text>
     <text x="1166" y="714" fill="#475569" font-size="9" text-anchor="middle">조립 루트</text>
