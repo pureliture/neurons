@@ -102,6 +102,49 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
 }
 
 
+class _ServiceWiringError(Exception):
+    """recall service 와이어링 실패 + 매핑할 종료 코드(stderr 메시지는 redaction 완료)."""
+
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _build_recall_service(args) -> KnowledgeSearchService:
+    """mcp-stdio / mcp-http 공통 recall service 와이어링(단일 권위).
+
+    두 transport main이 동일 service를 조립하던 복제 seam을 제거한다. 실패 시
+    _ServiceWiringError(code, redacted_message)를 던져 호출부가 종료 코드로 매핑한다.
+    오류 메시지는 raw 예외를 에코하지 않고 type name만 노출한다(private path 비노출).
+    """
+    try:
+        ledger = Ledger.open_read_only(args.ledger)
+    except ValueError as exc:
+        raise _ServiceWiringError(2, f"ledger open failed: {type(exc).__name__}") from exc
+    token = os.environ.get(args.token_env, "") if args.token_env else ""
+    ragflow = build_ragflow_client(
+        ragflow_url=args.ragflow_url,
+        token=token,
+        policy_proxy_url=args.policy_proxy_url,
+    )
+    try:
+        graph_adapter = build_graph_adapter_from_env(
+            enable_flag=True if args.enable_graph else None,
+            required_flag=bool(args.graph_required),
+        )
+    except Exception as exc:
+        raise _ServiceWiringError(1, f"graph adapter unavailable: {type(exc).__name__}") from exc
+    return KnowledgeSearchService(
+        ledger=ledger,
+        ragflow=ragflow,
+        dataset_ids=list(args.dataset_id or []),
+        allow_private_results=bool(args.allow_private_results),
+        native_memory_id=args.native_memory_id or os.environ.get("RAGFLOW_NATIVE_MEMORY_ID", ""),
+        graph_adapter=graph_adapter,
+    )
+
+
 def _mcp_stdio_main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -121,41 +164,55 @@ def _mcp_stdio_main(argv: list[str] | None = None) -> int:
     _ = args.state_db_recall
     _ = args.ragflow_direct_recall
     try:
-        ledger = Ledger.open_read_only(args.ledger)
-    except ValueError as exc:
-        # Do not echo the raw exception: it can embed the ledger path or other
-        # private context. Emit a static message plus the exception type only,
-        # symmetric with the JSON-RPC handler and brain_context_resolve.
-        print(f"ledger open failed: {type(exc).__name__}", file=sys.stderr)
-        return 2
-    token = os.environ.get(args.token_env, "") if args.token_env else ""
-    ragflow = build_ragflow_client(
-        ragflow_url=args.ragflow_url,
-        token=token,
-        policy_proxy_url=args.policy_proxy_url,
-    )
-    try:
-        graph_adapter = build_graph_adapter_from_env(
-            enable_flag=True if args.enable_graph else None,
-            required_flag=bool(args.graph_required),
-        )
-    except Exception as exc:
-        print(f"graph adapter unavailable: {type(exc).__name__}", file=sys.stderr)
-        return 1
-    run_stdio_server(
-        KnowledgeSearchService(
-            ledger=ledger,
-            ragflow=ragflow,
-            dataset_ids=list(args.dataset_id or []),
-            allow_private_results=bool(args.allow_private_results),
-            native_memory_id=args.native_memory_id or os.environ.get("RAGFLOW_NATIVE_MEMORY_ID", ""),
-            graph_adapter=graph_adapter,
-        )
-    )
+        service = _build_recall_service(args)
+    except _ServiceWiringError as exc:
+        print(exc.message, file=sys.stderr)
+        return exc.code
+    run_stdio_server(service)
     return 0
 
 
 COMMAND_HANDLERS["mcp-stdio"] = _mcp_stdio_main
+
+
+def _mcp_http_main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    # mcp(FastMCP)는 optional extra(mcp-http)다. base CLI가 extra 없이도 동작하도록
+    # transport 모듈은 이 핸들러 안에서만 lazy import한다.
+    from . import mcp_http_server
+
+    parser = argparse.ArgumentParser(prog="neuron-knowledge mcp-http")
+    # 공통 인자: _mcp_stdio_main과 1:1 동일(service 구성 동일).
+    parser.add_argument("--ledger", required=True)
+    parser.add_argument("--dataset-id", action="append", default=[])
+    parser.add_argument("--ragflow-url", default="")
+    parser.add_argument("--token-env", default="")
+    parser.add_argument("--policy-proxy-url", default="")
+    parser.add_argument("--allow-private-results", action="store_true")
+    parser.add_argument("--native-memory-id", default="")
+    parser.add_argument("--enable-graph", action="store_true")
+    parser.add_argument("--graph-required", action="store_true")
+    # HTTP transport 전용.
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=mcp_http_server.DEFAULT_PORT)
+    parser.add_argument("--allow-non-loopback", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        service = _build_recall_service(args)
+    except _ServiceWiringError as exc:
+        print(exc.message, file=sys.stderr)
+        return exc.code
+    mcp_http_server.serve(
+        service,
+        host=args.host,
+        port=args.port,
+        allow_non_loopback=args.allow_non_loopback,
+    )
+    return 0
+
+
+COMMAND_HANDLERS["mcp-http"] = _mcp_http_main
 
 
 def _print_help() -> None:
