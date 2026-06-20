@@ -122,3 +122,45 @@ def test_enable_graph_alone_never_forces_required(tmp_path: Path, monkeypatch):
     assert proj[1] is False
     assert ctx[1] is False
     assert mcp[1] is False
+
+
+# --- Strict canonical-key assertions -------------------------------------
+#
+# _normalized() tolerantly accepts legacy aliases (enabled/required), so it
+# would still pass if an entrypoint silently drifted back to a non-canonical
+# kwarg name. These cases pin the wire contract directly: every entrypoint must
+# pass the canonical keys `enable_flag` / `required_flag`, and `required_flag`
+# must track ONLY --graph-required (never --enable-graph).
+
+_ALL_RUNNERS = (_run_projection_cli, _run_context_resolve_cli, _run_mcp_stdio)
+
+
+def test_all_entrypoints_use_canonical_kwarg_names(tmp_path: Path, monkeypatch):
+    for runner in _ALL_RUNNERS:
+        kwargs = runner(tmp_path, monkeypatch, enable=True, required=True)
+        # Canonical keys are present, legacy aliases are not used.
+        assert "enable_flag" in kwargs, f"{runner.__name__} dropped canonical enable_flag"
+        assert "required_flag" in kwargs, f"{runner.__name__} dropped canonical required_flag"
+        assert "enabled" not in kwargs, f"{runner.__name__} used legacy alias 'enabled'"
+        assert "required" not in kwargs, f"{runner.__name__} used legacy alias 'required'"
+
+
+def test_required_flag_tracks_graph_required_only_not_enable_graph(tmp_path: Path, monkeypatch):
+    for runner in _ALL_RUNNERS:
+        # --enable-graph alone: required_flag must be exactly False.
+        enable_only = runner(tmp_path, monkeypatch, enable=True, required=False)
+        assert enable_only["required_flag"] is False, (
+            f"{runner.__name__}: --enable-graph alone must not force required_flag"
+        )
+
+        # --graph-required (regardless of --enable-graph): required_flag True.
+        required_with_enable = runner(tmp_path, monkeypatch, enable=True, required=True)
+        assert required_with_enable["required_flag"] is True, (
+            f"{runner.__name__}: --graph-required must set required_flag True"
+        )
+
+        required_without_enable = runner(tmp_path, monkeypatch, enable=False, required=True)
+        assert required_without_enable["required_flag"] is True, (
+            f"{runner.__name__}: --graph-required must set required_flag True "
+            "independent of --enable-graph"
+        )
