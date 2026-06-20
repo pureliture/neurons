@@ -6,14 +6,36 @@ from typing import Any
 from agent_knowledge.couchdb_source.document_model import SourceDocType
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 
-from ._util import hash_payload, public_safe_text, require_non_empty, require_sha256, short_hash, utc_now_iso
+from ._util import (
+    hash_payload,
+    list_or_empty,
+    public_safe_text,
+    require_non_empty,
+    require_sha256,
+    short_hash,
+    utc_now_iso,
+)
 from .artifact_store import SessionMemoryArtifactStore
 from .context import BrainReadService
 from .document_bridge import DocumentBridge
 from .event_replay import BrainEventReplayStore
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
-from .models import BrainEventEnvelope, OntologyEpisode, SessionMemoryArtifact, SourceRefRecord
+from .models import BrainEventEnvelope, SessionMemoryArtifact, SourceRefRecord
+from .ontology import episode_from_memory_card
 from .source_ref import SourceRefCatalog, SourceRefResolver
+
+# `episode_from_memory_card` is a pure card->episode mapper. It lives in
+# `ontology` (the mapper layer) so the ontology module no longer has to import
+# back into this adapter/runtime module. It is re-exported here so existing
+# `from .runtime import episode_from_memory_card` call sites keep working.
+__all__ = [
+    "episode_from_memory_card",
+    "materialize_artifact_from_couchdb_source",
+    "brain_event_from_ingress_payload",
+    "source_ref_from_catalog_event",
+    "build_runtime_brain_service",
+    "replay_ingress_events",
+]
 
 
 def materialize_artifact_from_couchdb_source(
@@ -142,35 +164,6 @@ def source_ref_from_catalog_event(event: Mapping[str, Any]) -> SourceRefRecord:
     )
 
 
-def episode_from_memory_card(card: Mapping[str, Any]) -> OntologyEpisode:
-    payload = {
-        "memory_id": str(card.get("memory_id") or ""),
-        "brain_id": str(card.get("brain_id") or ""),
-        "project": str(card.get("project") or ""),
-        "card_type": str(card.get("card_type") or ""),
-        "title": public_safe_text(str(card.get("title") or ""), max_chars=240),
-        "summary": public_safe_text(str(card.get("summary") or ""), max_chars=512),
-        "typed_payload": dict(card.get("typed_payload") or {}),
-    }
-    memory_id = require_non_empty(payload["memory_id"], "memory_id")
-    card_type = require_non_empty(payload["card_type"], "card_type")
-    natural_id = f"{card_type}:{memory_id}"
-    entity_type = _entity_type_for_card(payload["card_type"])
-    return OntologyEpisode.from_payload(
-        event_id=f"evt:{short_hash([natural_id, card.get('content_hash', '')])}",
-        entity_type=entity_type,
-        natural_id=natural_id,
-        payload=payload,
-        lifecycle_state=str(card.get("lifecycle_state") or "accepted"),
-        currentness=str(card.get("currentness") or "unknown"),
-        source_event_ids=tuple(str(ref) for ref in _list_or_empty(card.get("derived_from"))),
-        source_ref_ids=tuple(_source_ref_ids(card)),
-        observed_at=str(card.get("approved_at") or card.get("accepted_at") or card.get("updated_at") or utc_now_iso()),
-        ontology_version=str(card.get("ontology_version") or "1.0.0"),
-        extractor_version="memory-card-runtime.1",
-    )
-
-
 def build_runtime_brain_service(
     *,
     project: str,
@@ -242,10 +235,6 @@ def _safe_size(value: Any) -> int:
     return 0
 
 
-def _list_or_empty(value: Any) -> list[Any]:
-    return list(value) if isinstance(value, (list, tuple)) else []
-
-
 def _source_event_id(doc: Mapping[str, Any]) -> str:
     doc_id = str(doc.get("_id") or "")
     return f"evt:{short_hash([doc_id, doc.get('content_hash', ''), doc.get('coverage_hash', '')])}"
@@ -271,28 +260,5 @@ def _public_event_payload(payload: Mapping[str, Any], *, payload_hash: str) -> d
         "provider": str(payload.get("provider") or metadata.get("provider") or ""),
         "session_id_hash": str(payload.get("session_id_hash") or metadata.get("session_id_hash") or ""),
         "kind": str(payload.get("kind") or payload.get("documentKind") or metadata.get("kind") or ""),
-        "supersedes": [str(item) for item in _list_or_empty(payload.get("supersedes"))],
+        "supersedes": [str(item) for item in list_or_empty(payload.get("supersedes"))],
     }
-
-
-def _entity_type_for_card(card_type: str) -> str:
-    return {
-        "decision": "Decision",
-        "task": "Task",
-        "drift": "Drift",
-        "preference": "PersonaFact",
-        "evidence": "Evidence",
-        "status": "Status",
-    }.get(card_type, "MemoryCard")
-
-
-def _source_ref_ids(card: Mapping[str, Any]) -> list[str]:
-    ids: list[str] = []
-    for ref in card.get("source_refs") or ():
-        if isinstance(ref, str):
-            ids.append(ref)
-        elif isinstance(ref, Mapping):
-            value = ref.get("source_ref_id") or ref.get("source_id")
-            if value:
-                ids.append(str(value))
-    return ids

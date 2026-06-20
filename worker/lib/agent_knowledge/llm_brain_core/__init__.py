@@ -5,7 +5,11 @@ from .context import BrainReadService
 from .document_bridge import DisabledDocumentBridge, DocumentBridgeResult
 from .event_replay import BrainEventReplayStore
 from .graph import FakeGraphMemoryAdapter, NullGraphMemoryAdapter, UnavailableGraphMemoryAdapter
-from .graphiti_adapter import GraphitiNeo4jConfig, GraphitiNeo4jGraphMemoryAdapter
+from .graphiti_adapter import (
+    GraphitiNeo4jConfig,
+    GraphitiNeo4jGraphMemoryAdapter,
+    probe_graphiti_connectivity,
+)
 from .ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
 from .models import (
     BrainEventEnvelope,
@@ -62,4 +66,5 @@ __all__ = [
     "episode_from_session_artifact",
     "episode_from_source_ref",
     "graph_env_enabled",
+    "probe_graphiti_connectivity",
 ]

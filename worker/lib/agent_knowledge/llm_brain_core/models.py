@@ -385,6 +385,18 @@ class GraphMemoryResult:
         }
 
 
+# Versioned identifier for the ContextPack wire shape. Both entrypoints emit it:
+# the CLI (`cli.py`) wraps the pack under this `schema_version`, and the MCP
+# stdio surface returns `ContextPack.to_dict()` directly, so embedding it in
+# `to_dict()` keeps the two surfaces versioned symmetrically.
+CONTEXT_PACK_SCHEMA_VERSION = "llm_brain_context_resolve.v1"
+
+# Wire-shape identifier for the `brain-project` graph-projection CLI output. Kept
+# as a single constant so the success, import-failure, and error reports never
+# drift apart on a version bump.
+PROJECTION_SCHEMA_VERSION = "llm_brain_projection.v1"
+
+
 @dataclass(frozen=True)
 class ContextPack:
     brain_id: str
@@ -417,4 +429,5 @@ class ContextPack:
             "gaps",
         ):
             data[key] = list(data[key])
+        data["schema_version"] = CONTEXT_PACK_SCHEMA_VERSION
         return data

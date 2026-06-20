@@ -108,36 +108,53 @@ class LedgerSourceRefCatalog:
         self._ensure_schema()
 
     def register(self, record: SourceRefRecord) -> None:
-        payload = json.dumps(asdict(record), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         with self._ledger._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO llm_brain_source_refs (
-                    source_ref_id, device_id_hash, root_id, relative_path_hash,
-                    content_hash, sync_policy, record_json, last_seen_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source_ref_id) DO UPDATE SET
-                    device_id_hash=excluded.device_id_hash,
-                    root_id=excluded.root_id,
-                    relative_path_hash=excluded.relative_path_hash,
-                    content_hash=excluded.content_hash,
-                    sync_policy=excluded.sync_policy,
-                    record_json=excluded.record_json,
-                    last_seen_at=excluded.last_seen_at,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    record.source_ref_id,
-                    record.device_id_hash,
-                    record.root_id,
-                    record.relative_path_hash,
-                    record.content_hash,
-                    record.sync_policy,
-                    payload,
-                    record.last_seen_at,
-                    record.last_seen_at,
-                ),
-            )
+            self._register_on_connection(connection, record)
+
+    def register_all(self, records: list[SourceRefRecord]) -> None:
+        """Register many records in a single transaction (all-or-nothing).
+
+        A failure on any record rolls back the whole batch (sqlite3's connection
+        context manager commits on clean exit, rolls back on exception), so a
+        mid-batch write error never leaves the catalog partially loaded.
+        """
+
+        if not records:
+            return
+        with self._ledger._connect() as connection:
+            for record in records:
+                self._register_on_connection(connection, record)
+
+    def _register_on_connection(self, connection: Any, record: SourceRefRecord) -> None:
+        payload = json.dumps(asdict(record), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        connection.execute(
+            """
+            INSERT INTO llm_brain_source_refs (
+                source_ref_id, device_id_hash, root_id, relative_path_hash,
+                content_hash, sync_policy, record_json, last_seen_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_ref_id) DO UPDATE SET
+                device_id_hash=excluded.device_id_hash,
+                root_id=excluded.root_id,
+                relative_path_hash=excluded.relative_path_hash,
+                content_hash=excluded.content_hash,
+                sync_policy=excluded.sync_policy,
+                record_json=excluded.record_json,
+                last_seen_at=excluded.last_seen_at,
+                updated_at=excluded.updated_at
+            """,
+            (
+                record.source_ref_id,
+                record.device_id_hash,
+                record.root_id,
+                record.relative_path_hash,
+                record.content_hash,
+                record.sync_policy,
+                payload,
+                record.last_seen_at,
+                record.last_seen_at,
+            ),
+        )
 
     def get(self, source_ref_id: str) -> SourceRefRecord | None:
         try:
