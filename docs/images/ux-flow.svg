@@ -41,7 +41,7 @@
     <text x="464" y="160" fill="#818cf8" font-size="13" font-weight="700">② POST /enqueue</text>
     <g font-size="10.3" fill="#9fb3d1">
       <text x="464" y="184">POST /v1/ingest/enqueue</text>
-      <text x="464" y="203">schemaVersion rag_ingress.v1</text>
+      <text x="464" y="203">schemaVersion rag_ingress_enqueue.v1</text>
       <text x="464" y="222">targetProfile = ragflow-*</text>
       <text x="464" y="241">idempotencyKey (옵션)</text>
     </g>
@@ -77,65 +77,81 @@
   <rect x="744" y="268" width="156" height="20" rx="6" fill="#0c142b"/>
   <text x="822" y="282" fill="#67e8f9" font-size="10" text-anchor="middle">publish + JetStream ack</text>
 
-  <!-- ===== LANE B : QUEUE / WORKER ===== -->
+  <!-- ===== LANE B : QUEUE / WORKER (live Python worker) ===== -->
   <rect x="56" y="306" width="1168" height="206" rx="14" fill="#101c1a" stroke="#1f4a3a"/>
   <rect x="56" y="306" width="112" height="206" rx="14" fill="#123026"/>
   <rect x="156" y="306" width="12" height="206" fill="#123026"/>
   <text x="112" y="410" fill="#6ee7b7" font-size="12" font-weight="700" text-anchor="middle" transform="rotate(-90 112 410)">QUEUE / WORKER</text>
+  <text x="112" y="478" fill="#3e7a8a" font-size="8.5" text-anchor="middle" transform="rotate(-90 112 478)">ingress-worker-py</text>
   <circle cx="112" cy="338" r="4" fill="#34d399"/>
 
+  <!-- ⑤ durable pull consumer -->
   <g>
-    <rect x="190" y="332" width="232" height="154" rx="11" fill="#13201f" stroke="#2f5a4a"/>
-    <text x="206" y="358" fill="#34d399" font-size="13" font-weight="700">⑤ JetStream</text>
-    <g font-size="10.3" fill="#9fd6bd">
-      <text x="206" y="382">stream RAG_INGRESS_QUEUE</text>
-      <text x="206" y="401">WorkQueuePolicy · file 저장</text>
-      <text x="206" y="420">subject routing</text>
-      <text x="220" y="438">transcript / document</text>
-      <text x="206" y="463">durable 보존 · 재시작 생존</text>
+    <rect x="184" y="332" width="206" height="154" rx="11" fill="#13201f" stroke="#2f5a4a"/>
+    <text x="198" y="358" fill="#34d399" font-size="13" font-weight="700">⑤ pull consumer</text>
+    <g font-size="10.1" fill="#9fd6bd">
+      <text x="198" y="382">durable pull consumer</text>
+      <text x="198" y="401">run_consume() async loop</text>
+      <text x="198" y="420">sub.fetch(batch) · 폴링</text>
+      <text x="198" y="439">explicit ack · max_deliver 5</text>
+      <text x="198" y="463">WorkQueue · 재시작 생존</text>
     </g>
   </g>
+
+  <!-- ⑥ normalize + redaction -->
   <g>
-    <rect x="448" y="332" width="232" height="154" rx="11" fill="#13201f" stroke="#2f5a4a"/>
-    <text x="464" y="358" fill="#34d399" font-size="13" font-weight="700">⑥ 워커 풀</text>
-    <g font-size="10.3" fill="#9fd6bd">
-      <text x="464" y="382">durable pull consumer</text>
-      <text x="464" y="401">bounded batch fetch</text>
-      <text x="464" y="420">WorkerLoopRunner.runOnce()</text>
-      <text x="464" y="439">explicit ack 정책</text>
-      <text x="464" y="463">max_deliver = 5</text>
+    <rect x="406" y="332" width="206" height="154" rx="11" fill="#13201f" stroke="#2f5a4a"/>
+    <text x="420" y="358" fill="#34d399" font-size="13" font-weight="700">⑥ normalize · redact</text>
+    <g font-size="10.1" fill="#9fd6bd">
+      <text x="420" y="382">per-message normalize</text>
+      <text x="420" y="401">server redaction (full)</text>
+      <text x="420" y="420">build rag-ready document</text>
+    </g>
+    <g font-size="10.1">
+      <rect x="420" y="430" width="178" height="44" rx="6" fill="#2a1313"/>
+      <circle cx="435" cy="445" r="5" fill="#f87171"/><text x="448" y="449" fill="#fca5a5">leak 발견 → fail-closed</text>
+      <text x="448" y="467" fill="#cf9a9a" font-size="9.3">quarantined_leak · 미전달</text>
     </g>
   </g>
+
+  <!-- ⑦ dedup + pressure gate -->
   <g>
-    <rect x="706" y="332" width="232" height="154" rx="11" fill="#0f1726" stroke="#2f5a4a"/>
-    <text x="722" y="358" fill="#34d399" font-size="13" font-weight="700">⑦ 압력 게이트</text>
-    <g font-size="10.4">
-      <rect x="722" y="372" width="200" height="30" rx="6" fill="#10241c"/>
-      <circle cx="739" cy="387" r="6" fill="#34d399"/><text x="753" y="391" fill="#86efc4">OPEN → deliver 진행</text>
-      <rect x="722" y="408" width="200" height="30" rx="6" fill="#251f0c"/>
-      <circle cx="739" cy="423" r="6" fill="#fbbf24"/><text x="753" y="427" fill="#fcd34d">THROTTLED → 신규 보류</text>
-      <rect x="722" y="444" width="200" height="30" rx="6" fill="#2a1313"/>
-      <circle cx="739" cy="459" r="6" fill="#f87171"/><text x="753" y="463" fill="#fca5a5">CLOSED → nak · 지연</text>
+    <rect x="628" y="332" width="206" height="154" rx="11" fill="#0f1726" stroke="#2f5a4a"/>
+    <text x="642" y="358" fill="#34d399" font-size="13" font-weight="700">⑦ dedup · 압력 게이트</text>
+    <g font-size="9.7" fill="#9fd6bd">
+      <text x="642" y="378">durable log + natural-key</text>
+      <text x="642" y="393">중복 redelivery → 재업로드 skip</text>
+    </g>
+    <text x="642" y="412" fill="#5b6b8c" font-size="9.2">pressure_open() polls /status</text>
+    <g font-size="10.1">
+      <rect x="642" y="418" width="178" height="20" rx="5" fill="#10241c"/>
+      <circle cx="655" cy="428" r="5" fill="#34d399"/><text x="668" y="432" fill="#86efc4">OPEN → fetch 진행</text>
+      <rect x="642" y="442" width="178" height="20" rx="5" fill="#251f0c"/>
+      <circle cx="655" cy="452" r="5" fill="#fbbf24"/><text x="668" y="456" fill="#fcd34d">THROTTLED → fetch 중지</text>
+      <rect x="642" y="466" width="178" height="20" rx="5" fill="#2a1313"/>
+      <circle cx="655" cy="476" r="5" fill="#f87171"/><text x="668" y="480" fill="#fca5a5">CLOSED → pause · 미전달</text>
     </g>
   </g>
+
+  <!-- ⑧ backend.submit_document → ack/nak -->
   <g>
-    <rect x="964" y="332" width="242" height="154" rx="11" fill="#13201f" stroke="#2f5a4a"/>
-    <text x="980" y="358" fill="#34d399" font-size="13" font-weight="700">⑧ 타깃 전달</text>
+    <rect x="850" y="332" width="356" height="154" rx="11" fill="#13201f" stroke="#2f5a4a"/>
+    <text x="866" y="358" fill="#34d399" font-size="13" font-weight="700">⑧ submit · ack / nak</text>
     <g font-size="10.3" fill="#9fd6bd">
-      <text x="980" y="382">RagTargetAdapter.deliver()</text>
-      <text x="980" y="401">upload › metadata › parse</text>
+      <text x="866" y="382">backend.submit_document(document)</text>
+      <text x="866" y="401">RAGFlow / CouchDB sink · out-of-repo</text>
     </g>
     <g font-size="10.2">
-      <circle cx="987" cy="421" r="5" fill="#34d399"/><text x="999" y="425" fill="#86efc4">성공 → explicit ack</text>
-      <circle cx="987" cy="444" r="5" fill="#fbbf24"/><text x="999" y="448" fill="#fcd34d">실패 → nak · 재배달</text>
-      <circle cx="987" cy="467" r="5" fill="#f87171"/><text x="999" y="471" fill="#fca5a5">max 초과 → dead-letter</text>
+      <circle cx="873" cy="421" r="5" fill="#34d399"/><text x="885" y="425" fill="#86efc4">성공 → msg.ack() · delivered</text>
+      <circle cx="873" cy="444" r="5" fill="#fbbf24"/><text x="885" y="448" fill="#fcd34d">일시 실패 → msg.nak() · 재배달</text>
+      <circle cx="873" cy="467" r="5" fill="#f87171"/><text x="885" y="471" fill="#fca5a5">max_deliver 초과 → ack-drop quarantine</text>
     </g>
   </g>
 
   <g fill="none" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#uflow)">
-    <path d="M422 409 H446"/>
-    <path d="M680 409 H704"/>
-    <path d="M938 409 H962"/>
+    <path d="M390 409 H404"/>
+    <path d="M612 409 H626"/>
+    <path d="M834 409 H848"/>
   </g>
 
   <!-- handoff B -> C -->
