@@ -9,7 +9,11 @@ from typing import Any
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.brain_read_model import LegacyLedgerBrainReadModel
 
-from .ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
+from .ledger_adapter import (
+    LedgerGraphProjectionStateStore,
+    LedgerSessionMemoryArtifactStore,
+    LedgerSourceRefCatalog,
+)
 from .models import PROJECTION_SCHEMA_VERSION
 from .projection import GraphProjectionWorker
 from .runtime import source_ref_from_catalog_event
@@ -87,6 +91,7 @@ def run_projection(
     ledger = Ledger(ledger_path)
     artifact_store = LedgerSessionMemoryArtifactStore(ledger)
     source_catalog = LedgerSourceRefCatalog(ledger)
+    projection_state_store = LedgerGraphProjectionStateStore(ledger)
     imported, import_failures, imported_records = _import_source_refs(source_catalog, source_ref_jsonl)
     if import_failures:
         return {
@@ -140,12 +145,19 @@ def run_projection(
         enable_flag=True if enable_graph else None,
         required_flag=bool(graph_required),
     )
-    projection = GraphProjectionWorker(graph_adapter).project_batch(
+    # Read seam: union the durable projection_state SoT with the file-based
+    # resume hint. The --resume-projected-ids file stays backward-compatible; the
+    # store adds durability so a re-run resumes even without a resume file.
+    resume_union: set[str] = set(resume_projected_ids or set())
+    resume_union |= projection_state_store.list_projected_ids(project)
+    projection = GraphProjectionWorker(
+        graph_adapter, projection_state_store=projection_state_store
+    ).project_batch(
         artifacts=artifacts,
         memory_cards=cards,
         source_refs=source_refs,
         project=project,
-        resume_projected_ids=resume_projected_ids,
+        resume_projected_ids=resume_union,
     )
     projection_dict = projection.to_dict()
     status = "ok" if projection.status == "succeeded" and not import_failures else "failed"

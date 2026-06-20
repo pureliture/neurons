@@ -97,6 +97,12 @@ class Ledger(
         return self._db_adapter.connect(configure_journal=configure_journal)
 
     def _initialize(self) -> None:
+        # Lazy import to avoid a module-load circular import: ledger_adapter lives
+        # in the llm_brain_core package whose __init__ imports modules that import
+        # this ledger module. By initialize-time this module is fully loaded, so
+        # referencing the single-source schema constant here is safe.
+        from .llm_brain_core.ledger_adapter import _GRAPH_PROJECTION_STATE_SCHEMA
+
         with self._connect(configure_journal=True) as connection:
             connection.executescript(
                 """
@@ -644,8 +650,12 @@ class Ledger(
                 VALUES ('agent_knowledge_memory_gc_audit.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
                 VALUES ('agent_knowledge_qdrant_collections.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
+                VALUES ('agent_knowledge_graph_projection_state.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 UPDATE knowledge_items SET type = 'session_memory' WHERE type = 'session_memory_sot';
                 """
+                # Single-source graph projection_state schema: injected from
+                # ledger_adapter so the table is declared in exactly one place.
+                + _GRAPH_PROJECTION_STATE_SCHEMA
             )
             _ensure_column(connection, "knowledge_items", "session_id_hash", "TEXT DEFAULT ''")
             _ensure_column(connection, "knowledge_items", "evidence_status", "TEXT DEFAULT 'historical'")
@@ -1550,7 +1560,6 @@ class Ledger(
                 (data["evidence_id_hash"],),
             ).fetchone()
         return dict(row) if row is not None else {}
-
 
 
 

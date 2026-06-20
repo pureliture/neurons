@@ -33,8 +33,16 @@ class GraphProjectionReport:
 class GraphProjectionWorker:
     """Project canonical MemoryCards into a derived graph adapter."""
 
-    def __init__(self, graph_adapter: GraphMemoryAdapter) -> None:
+    def __init__(
+        self,
+        graph_adapter: GraphMemoryAdapter,
+        *,
+        projection_state_store: Any = None,
+    ) -> None:
         self._graph_adapter = graph_adapter
+        # Optional durable SoT of projected episode_ids. When None the worker
+        # behaves exactly as before (behavior-preserving seam).
+        self._projection_state_store = projection_state_store
 
     def project_memory_cards(
         self,
@@ -153,6 +161,12 @@ class GraphProjectionWorker:
             else:
                 projected += 1
             episode_ids.append(episode.episode_id)
+            # Durable projection_state SoT: record only successful projections
+            # (projected/duplicate). skipped_disabled, skipped_resumed, and
+            # failures `continue` before this point, so they are never recorded
+            # here (plane separation).
+            if self._projection_state_store is not None:
+                self._projection_state_store.mark_projected(episode, result_text)
         failed = len(failures)
         status = "succeeded" if failed == 0 else ("partial" if projected or duplicates else "failed")
         return GraphProjectionReport(

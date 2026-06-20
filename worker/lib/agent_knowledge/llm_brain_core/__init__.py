@@ -17,7 +17,12 @@ from .hybrid_graph import (
     MetadataFirstHybridGraphAdapter,
     metadata_first_episode,
 )
-from .ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
+from .ledger_adapter import (
+    LedgerGraphProjectionStateStore,
+    LedgerSessionMemoryArtifactStore,
+    LedgerSourceRefCatalog,
+)
+
 from .models import (
     BrainEventEnvelope,
     ContextPack,
@@ -60,6 +65,7 @@ __all__ = [
     "HybridTextMirrorHit",
     "InMemorySessionMemoryArtifactStore",
     "InMemoryHybridTextMirror",
+    "LedgerGraphProjectionStateStore",
     "LedgerSessionMemoryArtifactStore",
     "LedgerSourceRefCatalog",
     "METADATA_FIRST_HYBRID_GRAPH_SCHEMA",
