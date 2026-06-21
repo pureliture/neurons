@@ -27,7 +27,11 @@ class _StubService:
         self._result = result if result is not None else {"results": []}
         self._raises = raises
         self._sleep = sleep
+        self.invalidations = 0
         self.last_kwargs: dict | None = None
+
+    def invalidate_brain_card_cache(self):
+        self.invalidations += 1
 
     def search(self, query, *, filters=None, limit=10, include_private=False):
         self.last_kwargs = {
@@ -76,6 +80,12 @@ def test_build_app_allows_tailnet_with_flag():
     assert "/healthz" in paths and "/mcp" in paths
 
 
+def test_build_app_allows_whole_loopback_subnet_without_flag():
+    app = mh.build_app(_StubService(), host="127.0.0.2", allow_non_loopback=False)
+    paths = {r.path for r in app.routes}
+    assert "/healthz" in paths and "/mcp" in paths
+
+
 def test_build_app_rejects_public_ip_even_with_flag():
     # tailnet 밖 공개 IP는 --allow-non-loopback이 있어도 거부(신뢰 경계 = tailnet 전용).
     with pytest.raises(ValueError, match="tailnet"):
@@ -99,6 +109,30 @@ def test_is_tailnet_address():
 def test_bracket_ipv6_and_ipv4():
     assert mh._bracket("fd7a:115c:a1e0::1") == "[fd7a:115c:a1e0::1]"
     assert mh._bracket("100.64.0.1") == "100.64.0.1"
+
+
+def test_transport_security_settings_cover_loopback_aliases():
+    settings = mh._transport_security_settings("127.0.0.2", 8765)
+
+    assert settings.enable_dns_rebinding_protection is True
+    assert "127.0.0.2" in settings.allowed_hosts
+    assert "127.0.0.2:8765" in settings.allowed_hosts
+    assert "localhost" in settings.allowed_hosts
+    assert "127.0.0.1:8765" in settings.allowed_hosts
+    assert "[::1]:8765" in settings.allowed_hosts
+    assert "http://localhost:8765" in settings.allowed_origins
+    assert "http://[::1]:8765" in settings.allowed_origins
+
+
+def test_transport_security_settings_cover_tailnet_without_loopback_aliases():
+    settings = mh._transport_security_settings("fd7a:115c:a1e0::1", 8765)
+
+    assert settings.enable_dns_rebinding_protection is True
+    assert settings.allowed_hosts == ["[fd7a:115c:a1e0::1]", "[fd7a:115c:a1e0::1]:8765"]
+    assert settings.allowed_origins == [
+        "http://[fd7a:115c:a1e0::1]",
+        "http://[fd7a:115c:a1e0::1]:8765",
+    ]
 
 
 def test_build_app_loopback_has_routes():
@@ -161,6 +195,19 @@ def test_dispatch_unexpected_exception_is_masked():
     assert res.content[0].text == "internal error"
     assert "private" not in res.content[0].text
     assert "token" not in res.content[0].text
+
+
+def test_dispatch_unexpected_exception_logs_redacted_stack(caplog):
+    caplog.set_level("ERROR", logger="agent_knowledge.mcp_http_server")
+    stub = _StubService(raises=RuntimeError("boom at /private/secret/path token=abc"))
+
+    res = asyncio.run(mh._dispatch_call_tool(stub, "knowledge.search", {"query": "q"}))
+
+    assert res.isError is True
+    assert "RuntimeError" in caplog.text
+    assert "stack=" in caplog.text
+    assert "private" not in caplog.text
+    assert "token" not in caplog.text
 
 
 # --- 비블로킹: 동기 _call_tool이 이벤트 루프를 막지 않음 ---
@@ -227,8 +274,9 @@ class _ServerThread:
 
 @pytest.fixture()
 def http_base():
-    app = mh.build_app(_StubService(result={"results": [{"knowledge_id": "kx"}]}))
-    with _ServerThread(app, _free_port()) as base:
+    port = _free_port()
+    app = mh.build_app(_StubService(result={"results": [{"knowledge_id": "kx"}]}), port=port)
+    with _ServerThread(app, port) as base:
         yield base
 
 
@@ -255,6 +303,27 @@ def test_initialize_list_and_call_over_http(http_base):
     assert "knowledge.search" in {t.name for t in tools.tools}
     assert called.isError is False
     assert called.structuredContent == {"results": [{"knowledge_id": "kx"}]}
+
+
+def test_http_call_refreshes_brain_card_cache_per_request():
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    stub = _StubService(result={"results": [{"knowledge_id": "fresh"}]})
+    port = _free_port()
+    app = mh.build_app(stub, port=port)
+
+    async def _roundtrip(base):
+        async with streamablehttp_client(f"{base}/mcp") as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                await session.call_tool("knowledge.search", {"query": "first"})
+                await session.call_tool("knowledge.search", {"query": "second"})
+
+    with _ServerThread(app, port) as base:
+        asyncio.run(_roundtrip(base))
+
+    assert stub.invalidations == 2
 
 
 def test_stateless_two_independent_sessions(http_base):

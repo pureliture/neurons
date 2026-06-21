@@ -191,6 +191,8 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--policy-proxy-url", default="")
     parser.add_argument("--allow-private-results", action="store_true")
     parser.add_argument("--native-memory-id", default="")
+    parser.add_argument("--state-db-recall", default="")
+    parser.add_argument("--ragflow-direct-recall", action="store_true")
     parser.add_argument("--enable-graph", action="store_true")
     parser.add_argument("--graph-required", action="store_true")
     # HTTP transport 전용.
@@ -198,6 +200,8 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=mcp_http_server.DEFAULT_PORT)
     parser.add_argument("--allow-non-loopback", action="store_true")
     args = parser.parse_args(argv)
+    _ = args.state_db_recall
+    _ = args.ragflow_direct_recall
     try:
         service = _build_recall_service(args)
     except _ServiceWiringError as exc:

@@ -167,12 +167,17 @@ services:
 
   neuron-knowledge-mcp:
     # 읽기 전용 recall MCP를 Streamable HTTP로 노출(end-client가 tailnet URL로 연결).
-    # profile 게이팅: 기본 `compose up`은 이 서비스를 띄우지 않는다.
+    # profile 게이팅: 기본 `compose up`은 이 서비스를 띄우지 않는다. --graph-required로
+    # Neo4j 필수이므로 llm-brain-graph 프로필도 함께 활성화해야 한다:
+    #   docker compose --profile llm-brain-mcp --profile llm-brain-graph up
     # 신뢰 경계 = Tailscale tailnet 전용. MCP_HTTP_HOST를 반드시 tailnet IP로 지정한다
     # (미지정 시 ${...:?}로 기동 거부 + 0.0.0.0은 코드가 하드 거부 = 이중 방어).
     # network_mode: host로 127.0.0.1의 Neo4j(17687)/vertex-wrapper(8930)/PG에 도달하고
     # 동시에 tailnet 인터페이스에 bind한다.
     profiles: ["llm-brain-mcp"]
+    depends_on:
+      llm-brain-neo4j:
+        condition: service_healthy
     build:
       context: ./worker
       dockerfile: Dockerfile.mcp-http
@@ -212,7 +217,7 @@ services:
       # bind하므로 loopback이 아닌 MCP_HTTP_HOST로 확인(network_mode: host라 도달 가능).
       test:
         - CMD-SHELL
-        - python -c "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://${MCP_HTTP_HOST}:${MCP_HTTP_PORT:-8765}/healthz',timeout=3).status==200 else 1)"
+        - python -c "import sys,urllib.request; host='${MCP_HTTP_HOST}'; port='${MCP_HTTP_PORT:-8765}'; authority=f'[{host}]:{port}' if ':' in host and not host.startswith('[') else f'{host}:{port}'; sys.exit(0 if urllib.request.urlopen(f'http://{authority}/healthz',timeout=3).status==200 else 1)"
       interval: 30s
       timeout: 5s
       retries: 3
