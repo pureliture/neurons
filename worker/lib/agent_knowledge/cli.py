@@ -16,6 +16,7 @@ from .llm_brain_core import couchdb_projection_cli as llm_brain_couchdb_projecti
 from .llm_brain_core import graph_projection_status_cli as llm_brain_graph_projection_status_cli
 from .llm_brain_core import portable_cli as llm_brain_portable_cli
 from .llm_brain_core import projection_cli as llm_brain_projection_cli
+from .llm_brain_core import regression_gate_cli as llm_brain_regression_gate_cli
 from .llm_brain_core.runtime_graph import build_graph_adapter_from_env
 from .mcp_server import KnowledgeSearchService, build_ragflow_client, run_stdio_server
 from .rag_ingress import state_cli
@@ -88,6 +89,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "session-memory-quarantine-terminal-skipped": terminal_skipped_quarantine.main,
     "session-memory-repair-zombie-snapshots": zombie_snapshot_repair.main,
     "brain-context-resolve": llm_brain_core_cli.main,
+    "brain-regression-gate": llm_brain_regression_gate_cli.main,
     "brain-export": llm_brain_portable_cli.export_main,
     "brain-import": llm_brain_portable_cli.import_main,
     "brain-project": llm_brain_projection_cli.main,
