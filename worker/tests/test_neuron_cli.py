@@ -36,6 +36,7 @@ def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
         "brain-context-resolve",
         "brain-regression-gate",
         "couchdb-migration-flow",
+        "couchdb-graph-trigger",
         "couchdb-graph-project",
         "couchdb-graph-status",
     ):

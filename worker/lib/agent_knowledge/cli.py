@@ -14,6 +14,7 @@ from .ledger import Ledger
 from .llm_brain_core import cli as llm_brain_core_cli
 from .llm_brain_core import couchdb_projection_cli as llm_brain_couchdb_projection_cli
 from .llm_brain_core import graph_projection_status_cli as llm_brain_graph_projection_status_cli
+from .llm_brain_core import graph_trigger_cli as llm_brain_graph_trigger_cli
 from .llm_brain_core import portable_cli as llm_brain_portable_cli
 from .llm_brain_core import projection_cli as llm_brain_projection_cli
 from .llm_brain_core import regression_gate_cli as llm_brain_regression_gate_cli
@@ -101,6 +102,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "session-entry-recall": _pending_server_command("session-entry-recall"),
     "couchdb-session-memory-build": couchdb_build_cli.main,
     "couchdb-migration-flow": couchdb_migration_flow_cli.main,
+    "couchdb-graph-trigger": llm_brain_graph_trigger_cli.main,
     "couchdb-graph-project": llm_brain_couchdb_projection_cli.main,
     "couchdb-graph-status": llm_brain_graph_projection_status_cli.main,
     "transcript-migration": migration_cli.main,
