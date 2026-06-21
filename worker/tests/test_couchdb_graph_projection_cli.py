@@ -31,6 +31,11 @@ class _FailingEntityGraph(_EntityFlagFakeGraph):
         self._failing_sid = failing_sid
 
 
+class _ExplodingEntityGraph(_EntityFlagFakeGraph):
+    def upsert_episode(self, episode):  # type: ignore[no-untyped-def]
+        raise AssertionError("graph adapter should not be called while locked")
+
+
 def _seed_session(
     store: InMemoryCouchDBSourceStore,
     *,
@@ -85,6 +90,7 @@ def _project(
     limit: int,
     dead_letter_jsonl: Path | None = None,
     progress_jsonl: Path | None = None,
+    runtime_dir: Path | None = None,
 ) -> dict[str, Any]:
     return run_couchdb_projection(
         ledger_path=tmp_path / "ledger.sqlite3",
@@ -101,6 +107,7 @@ def _project(
         progress_jsonl=progress_jsonl,
         report_every=100,
         graph_adapter=graph_adapter,
+        runtime_dir=runtime_dir,
     )
 
 
@@ -189,6 +196,33 @@ def test_progress_jsonl_uses_project_ref_not_raw_project(tmp_path):
     assert len(progress_events) == 1
     assert "project" not in progress_events[0]
     assert progress_events[0]["project_ref"].startswith("sha256:")
+
+
+def test_runtime_lock_skips_without_calling_graph_adapter(tmp_path):
+    import fcntl
+
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="locked")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(parents=True)
+    holder = (runtime / "graph-project.lock").open("a+", encoding="utf-8")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        report = _project(
+            tmp_path=tmp_path,
+            store=store,
+            graph_adapter=_ExplodingEntityGraph(),
+            limit=1,
+            runtime_dir=runtime,
+        )
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+
+    assert report["status"] == "already_running"
+    assert report["runtime_lock"] == {"enabled": True, "acquired": False}
+    assert report["mutation_performed"] is False
+    assert report["raw_paths_printed"] is False
 
 
 def test_status_reports_entity_coverage_backlog_and_lag(tmp_path):

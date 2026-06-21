@@ -49,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dead-letter-jsonl", default="")
     parser.add_argument("--progress-jsonl", default="")
     parser.add_argument("--report-every", type=int, default=25)
+    parser.add_argument("--runtime-dir", default="")
     args = parser.parse_args(argv)
 
     try:
@@ -72,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
             dead_letter_jsonl=Path(args.dead_letter_jsonl) if args.dead_letter_jsonl else None,
             progress_jsonl=Path(args.progress_jsonl) if args.progress_jsonl else None,
             report_every=int(args.report_every),
+            runtime_dir=Path(args.runtime_dir) if args.runtime_dir else None,
         )
     except Exception as exc:
         print(
@@ -109,7 +111,11 @@ def run_couchdb_projection(
     progress_jsonl: Path | None = None,
     report_every: int = 25,
     graph_adapter: Any | None = None,
+    runtime_dir: Path | None = None,
 ) -> dict[str, Any]:
+    lock_handle, locked_report = _acquire_runtime_lock(runtime_dir)
+    if locked_report is not None:
+        return locked_report
     ledger = Ledger(ledger_path)
     artifact_store = LedgerSessionMemoryArtifactStore(ledger)
     projection_state_store = LedgerGraphProjectionStateStore(ledger)
@@ -146,84 +152,88 @@ def run_couchdb_projection(
         },
     )
 
-    for index, session in enumerate(sessions, start=1):
-        item_started = time.monotonic()
-        session_project = str(session.get("project") or "")
-        session_provider = str(session.get("provider") or "")
-        session_id_hash = str(session.get("session_id_hash") or "")
-        by_project[session_project] += 1
-        by_provider[session_provider] += 1
-        status = "unknown"
-        reason = ""
-        try:
-            episode = session_episode_from_couchdb_source(
-                session_id_hash=session_id_hash,
-                source_store=source_store,
-                artifact_store=artifact_store,
-                extractor_version="couchdb-graph-project.1",
-            )
-            if resume and not reextract_entities:
-                if session_project not in projected_cache:
-                    projected_cache[session_project] = set(
-                        projection_state_store.list_projected_ids(
-                            session_project,
-                            extraction_level=target_level,
+    try:
+        for index, session in enumerate(sessions, start=1):
+            item_started = time.monotonic()
+            session_project = str(session.get("project") or "")
+            session_provider = str(session.get("provider") or "")
+            session_id_hash = str(session.get("session_id_hash") or "")
+            by_project[session_project] += 1
+            by_provider[session_provider] += 1
+            status = "unknown"
+            reason = ""
+            try:
+                episode = session_episode_from_couchdb_source(
+                    session_id_hash=session_id_hash,
+                    source_store=source_store,
+                    artifact_store=artifact_store,
+                    extractor_version="couchdb-graph-project.1",
+                )
+                if resume and not reextract_entities:
+                    if session_project not in projected_cache:
+                        projected_cache[session_project] = set(
+                            projection_state_store.list_projected_ids(
+                                session_project,
+                                extraction_level=target_level,
+                            )
                         )
-                    )
-                if episode.episode_id in projected_cache[session_project]:
-                    skipped_resumed += 1
-                    status = "skipped_resumed"
+                    if episode.episode_id in projected_cache[session_project]:
+                        skipped_resumed += 1
+                        status = "skipped_resumed"
+                    else:
+                        status, reason, p, d, f = _project_one(worker, episode)
+                        projected += p
+                        duplicates += d
+                        failed += f
+                        if not f:
+                            projected_cache[session_project].add(episode.episode_id)
                 else:
                     status, reason, p, d, f = _project_one(worker, episode)
                     projected += p
                     duplicates += d
                     failed += f
-                    if not f:
-                        projected_cache[session_project].add(episode.episode_id)
-            else:
-                status, reason, p, d, f = _project_one(worker, episode)
-                projected += p
-                duplicates += d
-                failed += f
-            if reason:
+                if reason:
+                    failure_reasons[reason] += 1
+                    _write_dead_letter(
+                        dead_letter_jsonl,
+                        session=session,
+                        reason_code=reason,
+                        stage="project",
+                    )
+            except Exception as exc:
+                failed += 1
+                status = "failed"
+                reason = type(exc).__name__
                 failure_reasons[reason] += 1
                 _write_dead_letter(
                     dead_letter_jsonl,
                     session=session,
                     reason_code=reason,
-                    stage="project",
+                    stage="materialize_or_project",
                 )
-        except Exception as exc:
-            failed += 1
-            status = "failed"
-            reason = type(exc).__name__
-            failure_reasons[reason] += 1
-            _write_dead_letter(
-                dead_letter_jsonl,
-                session=session,
-                reason_code=reason,
-                stage="materialize_or_project",
-            )
-        elapsed_ms = int((time.monotonic() - item_started) * 1000)
-        durations.append(elapsed_ms)
-        if index == 1 or index % report_every == 0 or status == "failed" or index == len(sessions):
-            _write_jsonl(
-                progress_jsonl,
-                {
-                    "event": "progress",
-                    "index": index,
-                    "selected": len(sessions),
-                    "status": status,
-                    "reason_code": reason,
-                    "elapsed_ms": elapsed_ms,
-                    "project_ref": _project_ref(session_project),
-                    "provider": session_provider,
-                    "projected": projected,
-                    "duplicates": duplicates,
-                    "failed": failed,
-                    "skipped_resumed": skipped_resumed,
-                },
-            )
+            elapsed_ms = int((time.monotonic() - item_started) * 1000)
+            durations.append(elapsed_ms)
+            if index == 1 or index % report_every == 0 or status == "failed" or index == len(sessions):
+                _write_jsonl(
+                    progress_jsonl,
+                    {
+                        "event": "progress",
+                        "index": index,
+                        "selected": len(sessions),
+                        "status": status,
+                        "reason_code": reason,
+                        "elapsed_ms": elapsed_ms,
+                        "project_ref": _project_ref(session_project),
+                        "provider": session_provider,
+                        "projected": projected,
+                        "duplicates": duplicates,
+                        "failed": failed,
+                        "skipped_resumed": skipped_resumed,
+                    },
+                )
+    finally:
+        if lock_handle is not None:
+            _release_runtime_lock(lock_handle)
 
     elapsed_total_ms = int((time.monotonic() - started) * 1000)
     attempted = len(sessions)
@@ -245,6 +255,10 @@ def run_couchdb_projection(
         "truncated": bool(limit > 0 and total_available > attempted),
         "graph_enabled": bool(enable_graph),
         "target_extraction_level": target_level,
+        "runtime_lock": {
+            "enabled": runtime_dir is not None,
+            "acquired": runtime_dir is not None,
+        },
         "projection": {
             "attempted": attempted,
             "projected": projected,
@@ -263,6 +277,40 @@ def run_couchdb_projection(
         "project_count": len(by_project),
         "raw_paths_printed": False,
     }
+
+
+def _acquire_runtime_lock(runtime_dir: Path | None) -> tuple[Any | None, dict[str, Any] | None]:
+    if runtime_dir is None:
+        return None, None
+    import fcntl
+
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    lock_handle = (runtime_dir / "graph-project.lock").open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_handle.close()
+        return None, {
+            "schema_version": COUCHDB_GRAPH_PROJECTION_SCHEMA_VERSION,
+            "projection_schema_version": PROJECTION_SCHEMA_VERSION,
+            "status": "already_running",
+            "runtime_lock": {
+                "enabled": True,
+                "acquired": False,
+            },
+            "mutation_performed": False,
+            "raw_paths_printed": False,
+        }
+    return lock_handle, None
+
+
+def _release_runtime_lock(lock_handle: Any) -> None:
+    import fcntl
+
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_handle.close()
 
 
 def _build_source_store(
