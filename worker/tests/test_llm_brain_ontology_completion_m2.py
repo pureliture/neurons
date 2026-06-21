@@ -71,12 +71,37 @@ def _episode(
     )
 
 
+class _EntityFakeDriver:
+    """Async driver stand-in supporting EpisodicNode.save() for the entity path.
+
+    The M2 fix ensure-saves the episode_id-keyed EpisodicNode BEFORE
+    add_episode(uuid=episode_id) (which graphiti backs with get_by_uuid that
+    would otherwise raise NodeNotFoundError). save() issues one execute_query
+    MERGE; we record write uuids (reads pass routing_='r') so a test can assert
+    the ensure-save wrote exactly the episode_id node.
+    """
+
+    provider = None
+    graph_operations_interface = None
+
+    def __init__(self) -> None:
+        self.saved_uuids: list[str] = []
+
+    async def execute_query(self, query, **params):
+        if "routing_" not in params:
+            uuid = params.get("uuid") or params.get("episode_uuid")
+            if uuid:
+                self.saved_uuids.append(str(uuid))
+        return ([], None, None)
+
+
 class _EntityFakeGraphiti:
     """Graphiti stand-in for the entity (add_episode) path.
 
     Records add_episode calls (including kwargs so the uuid pass-through can be
     asserted) and returns a stub results object holding the EntityNode/EntityEdge
-    text the write-time redaction gate inspects.
+    text the write-time redaction gate inspects. The driver supports the M2
+    ensure-save (EpisodicNode.save) the entity path now issues before add_episode.
     """
 
     def __init__(
@@ -88,7 +113,11 @@ class _EntityFakeGraphiti:
         self.added: list[dict] = []
         self._nodes = nodes or []
         self._edges = edges or []
-        self.driver = SimpleNamespace()
+        self.driver = _EntityFakeDriver()
+
+    @property
+    def saved_uuids(self) -> list[str]:
+        return self.driver.saved_uuids
 
     async def add_episode(self, **kwargs):
         self.added.append(dict(kwargs))
@@ -157,6 +186,10 @@ def test_entity_path_passes_uuid_and_is_idempotent_on_reupsert():
     # uuid=episode_id is passed so Graphiti reuses the existing EpisodicNode
     # instead of minting a random uuid.
     assert graphiti.added[0]["uuid"] == episode.episode_id
+    # M2 fix: the first pass ensure-saves the episode_id node before add_episode,
+    # so add_episode's get_by_uuid finds it (no NodeNotFoundError). The duplicate
+    # short-circuit means only the first pass saves -> exactly one ensure-save.
+    assert graphiti.saved_uuids == [episode.episode_id]
 
 
 def test_entity_path_existing_episodic_node_still_runs_entity_extraction():
