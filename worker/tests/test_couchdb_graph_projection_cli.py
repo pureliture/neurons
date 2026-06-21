@@ -8,6 +8,7 @@ from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
 from agent_knowledge.llm_brain_core.couchdb_projection_cli import run_couchdb_projection
 from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
+from agent_knowledge.llm_brain_core.graph_projection_status_cli import build_graph_projection_status
 from agent_knowledge.session_memory.transcript_model import TranscriptChunk, TranscriptSession
 
 
@@ -188,3 +189,79 @@ def test_progress_jsonl_uses_project_ref_not_raw_project(tmp_path):
     assert len(progress_events) == 1
     assert "project" not in progress_events[0]
     assert progress_events[0]["project_ref"].startswith("sha256:")
+
+
+def test_status_reports_entity_coverage_backlog_and_lag(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for raw_id in ("status-a", "status-b", "status-c"):
+        _seed_session(store, raw_id=raw_id)
+    _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=2,
+    )
+
+    report = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+    )
+
+    assert report["status"] == "ok"
+    assert "project" not in report["filters"]
+    assert report["filters"]["project_ref"].startswith("sha256:")
+    assert report["source"]["session_count"] == 3
+    assert report["projection_state"]["entity_session_projected"] == 2
+    assert report["projection_state"]["entity_session_backlog"] == 1
+    assert 0.66 < report["projection_state"]["entity_coverage_ratio"] < 0.67
+    assert report["lag"]["oldest_unprojected_started_at"] == "2026-06-21T00:00:00Z"
+    assert report["raw_paths_printed"] is False
+
+
+def test_status_summarizes_progress_and_dead_letters_without_raw_project(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="status-progress")
+    progress = tmp_path / "progress.jsonl"
+    progress.write_text(
+        "\n".join(
+            [
+                json.dumps({"event": "start", "selected": 1}),
+                json.dumps(
+                    {
+                        "event": "progress",
+                        "index": 1,
+                        "selected": 1,
+                        "project": PROJECT,
+                        "projected": 0,
+                        "skipped_resumed": 0,
+                        "failed": 1,
+                        "elapsed_ms": 42,
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dead_letter = tmp_path / "dead-letter.jsonl"
+    dead_letter.write_text(
+        json.dumps({"project": PROJECT, "reason_code": "ValueError"}) + "\n",
+        encoding="utf-8",
+    )
+
+    report = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+        progress_jsonl=[progress],
+        dead_letter_jsonl=[dead_letter],
+    )
+
+    assert report["progress"]["event_counts"] == {"progress": 1, "start": 1}
+    assert report["progress"]["last_index"] == 1
+    assert report["progress"]["failed"] == 1
+    assert report["progress"]["avg_checkpoint_elapsed_ms"] == 42
+    assert report["dead_letter"] == {"count": 1, "failure_reasons": {"ValueError": 1}}
+    assert PROJECT not in json.dumps(report, sort_keys=True)
