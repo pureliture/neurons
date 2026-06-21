@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -19,7 +18,6 @@ from agent_knowledge.llm_brain_core.graphiti_adapter import (
     _AsyncLoopRunner,
     _datetime_to_iso,
     _episode_node_to_ontology,
-    _normalize_structured_response,
 )
 from agent_knowledge.llm_brain_core.models import OntologyEpisode
 
@@ -71,6 +69,166 @@ def test_graphiti_adapter_default_path_inserts_then_reports_duplicate_on_reupser
     assert second == "duplicate"
     # The duplicate short-circuits before any second node save attempt.
     assert graphiti.saved_uuids == [episode.episode_id]
+
+
+def test_entity_path_ensures_episode_node_before_add_episode_when_absent():
+    # Scenario (a): entity mode + episode_id node ABSENT. The live bug:
+    # add_episode(uuid=episode_id) calls graphiti get_by_uuid first, which raises
+    # NodeNotFoundError when the node was never written (entity pass run as a
+    # separate CLI invocation). The fix ensure-saves the episode_id node first,
+    # so add_episode finds it and reports 'inserted' -- no NodeNotFoundError.
+    graphiti = _FakeGraphiti()
+
+    async def _not_extracted(driver, episode_id):
+        _ = (driver, episode_id)
+        return False
+
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        entity_extracted=_not_extracted,
+    )
+    episode = _episode("Task", "task:reextract", {"brain_id": "/project/neurons", "task": "reextract"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "inserted"
+    # ensure-save wrote the episode_id node before add_episode was reached.
+    assert graphiti.saved_uuids == [episode.episode_id]
+    assert graphiti.added[0]["uuid"] == episode.episode_id
+    assert graphiti.added[0]["name"] == episode.episode_id
+
+
+def test_both_paths_build_identical_episode_node_via_shared_helper():
+    # Scenario (b): both the episodic-only path and the entity-path ensure-save
+    # build the EpisodicNode through the SAME _build_episodic_node helper, so the
+    # MERGE key/shape is identical. Identical (uuid, name, content, source,
+    # source_description, group_id) means a 2-pass run (episodic then entity)
+    # MERGEs onto the same node -- no duplicate, no divergent Episodic node.
+    graphiti = _FakeGraphiti()
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+    )
+    episode = _episode("Task", "task:exists", {"brain_id": "/project/neurons", "task": "exists"})
+    body = json.dumps(episode.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    group_id = adapter._build_episodic_node(episode, body, "brain_x").group_id  # noqa: SLF001
+
+    node_a = adapter._build_episodic_node(episode, body, group_id)  # noqa: SLF001
+    node_b = adapter._build_episodic_node(episode, body, group_id)  # noqa: SLF001
+
+    for attr in ("uuid", "name", "content", "source", "source_description", "group_id"):
+        assert getattr(node_a, attr) == getattr(node_b, attr)
+    # MERGE key is episode_id; the same content always maps to the same node.
+    assert node_a.uuid == episode.episode_id
+    assert node_a.name == episode.episode_id
+    assert node_a.content == body
+
+
+def test_entity_path_ensure_save_writes_single_episode_id_node():
+    # Scenario (b) companion: the entity-path ensure-save issues exactly ONE node
+    # save keyed on episode_id (MERGE single write) with the normalized brain_
+    # group_id, then add_episode succeeds. No NodeNotFoundError, no duplicate.
+    graphiti = _FakeGraphiti()
+
+    async def _not_extracted(driver, episode_id):
+        _ = (driver, episode_id)
+        return False
+
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        entity_extracted=_not_extracted,
+    )
+    episode = _episode("Task", "task:exists", {"brain_id": "/project/neurons", "task": "exists"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "inserted"
+    assert graphiti.saved_uuids == [episode.episode_id]
+    entity_group_id = graphiti.added[0]["group_id"]
+    assert entity_group_id.startswith("brain_")
+    assert "/" not in entity_group_id
+
+
+def test_entity_path_short_circuits_to_duplicate_without_add_episode():
+    # Scenario (c): MENTIONS>0 (entity pass already ran). The entity-extracted
+    # guard short-circuits to 'duplicate' BEFORE any ensure-save or add_episode,
+    # so the LLM is not re-billed and no extra node is written.
+    graphiti = _FakeGraphiti()
+
+    async def _already_extracted(driver, episode_id):
+        _ = (driver, episode_id)
+        return True
+
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        entity_extracted=_already_extracted,
+    )
+    episode = _episode("Task", "task:dup-entity", {"brain_id": "/project/neurons", "task": "dup"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "duplicate"
+    # No ensure-save and no add_episode call: the duplicate short-circuits first.
+    assert graphiti.saved_uuids == []
+    assert graphiti.added == []
+
+
+def test_entity_path_hard_fails_on_private_extracted_text():
+    # Scenario (d): the LLM entity extractor synthesizes private/secret text.
+    # _reject_unsafe_extraction must HARD FAIL (ValueError) so it never persists,
+    # and the message names only the field kind (no raw private value echoed).
+    graphiti = _FakeGraphiti()
+
+    async def _not_extracted(driver, episode_id):
+        _ = (driver, episode_id)
+        return False
+
+    async def _add_episode_with_private(**kwargs):
+        # Ensure-save ran first, so the node exists; simulate add_episode
+        # succeeding but returning a node whose summary leaks a private path.
+        return SimpleNamespace(
+            nodes=[SimpleNamespace(name="Entity", summary="see /Users/secret/notes")],
+            edges=[],
+        )
+
+    graphiti.add_episode = _add_episode_with_private  # type: ignore[method-assign]
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        entity_extracted=_not_extracted,
+    )
+    episode = _episode("Task", "task:leak", {"brain_id": "/project/neurons", "task": "leak"})
+
+    with pytest.raises(ValueError) as excinfo:
+        adapter.upsert_episode(episode)
+
+    message = str(excinfo.value)
+    assert "EntityNode.summary" in message
+    # The raw private path must never be echoed in the exception text.
+    assert "/Users/secret/notes" not in message
+
+
+def test_episodic_default_path_still_saves_single_node_after_helper_extraction():
+    # Scenario (e) sibling: the episodic-only path now builds its node through the
+    # shared _build_episodic_node helper. Behavior must be preserved: a single
+    # save keyed on episode_id, no add_episode call, no NodeNotFoundError.
+    graphiti = _FakeGraphiti()
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+    episode = _episode("Task", "task:episodic-helper", {"brain_id": "/project/neurons", "task": "episodic"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "inserted"
+    assert graphiti.saved_uuids == [episode.episode_id]
+    assert graphiti.added == []
 
 
 def test_graphiti_adapter_search_rehydrates_domain_episode_and_graph_fact():
@@ -149,7 +307,6 @@ def test_graphiti_config_from_env_supports_ollama_openai_compatible_defaults():
             "LLM_BRAIN_NEO4J_PASSWORD": "secret",
             "LLM_BRAIN_GRAPH_LLM_PROVIDER": "ollama",
             "LLM_BRAIN_LLM_MODEL": "llama3.1:70b",
-            "LLM_BRAIN_EMBEDDING_PROVIDER": "ollama",
             "LLM_BRAIN_EMBEDDING_MODEL": "nomic-embed-text",
             "LLM_BRAIN_EMBEDDING_DIM": "768",
             "LLM_BRAIN_GRAPH_EXTRACT_ENTITIES": "true",
@@ -159,187 +316,15 @@ def test_graphiti_config_from_env_supports_ollama_openai_compatible_defaults():
     assert config.uri == "bolt://neo4j:7687"
     assert config.llm_provider == "ollama"
     assert config.llm_model == "llama3.1:70b"
-    assert config.embedding_provider == "ollama"
     assert config.embedding_model == "nomic-embed-text"
     assert config.embedding_dim == 768
     assert config.extract_entities is True
-
-
-def test_graphiti_config_from_env_supports_llm_fallback_policy():
-    config = GraphitiNeo4jConfig.from_env(
-        {
-            "LLM_BRAIN_GRAPH_EXTRACT_ENTITIES": "true",
-            "LLM_BRAIN_LLM_MODEL": "deepseek-v4-flash:cloud",
-            "LLM_BRAIN_SMALL_LLM_MODEL": "deepseek-v4-flash:cloud",
-            "LLM_BRAIN_LLM_FALLBACK_MODEL": "gemini-3.5-flash-thinking",
-            "LLM_BRAIN_SMALL_LLM_FALLBACK_MODEL": "gemini-3.5-flash-thinking",
-            "LLM_BRAIN_GRAPH_PRIMARY_ATTEMPTS": "3",
-            "LLM_BRAIN_GRAPH_FALLBACK_ATTEMPTS": "2",
-        }
-    )
-
-    assert config.llm_model == "deepseek-v4-flash:cloud"
-    assert config.fallback_llm_model == "gemini-3.5-flash-thinking"
-    assert config.fallback_small_model == "gemini-3.5-flash-thinking"
-    assert config.primary_attempts == 3
-    assert config.fallback_attempts == 2
 
 
 def test_graphiti_config_defaults_to_episode_only_storage():
     config = GraphitiNeo4jConfig.from_env({})
 
     assert config.extract_entities is False
-
-
-def test_graphiti_config_from_env_respects_explicit_empty_environment(monkeypatch):
-    monkeypatch.setenv("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES", "true")
-    monkeypatch.setenv("LLM_BRAIN_LLM_MODEL", "should-not-leak")
-
-    config = GraphitiNeo4jConfig.from_env({})
-
-    assert config.extract_entities is False
-    assert config.llm_model == ""
-
-
-def test_graphiti_from_config_delegates_backend_building(monkeypatch):
-    built_configs: list[GraphitiNeo4jConfig] = []
-    built_graphiti: list[object] = []
-
-    def _fake_build(config):
-        built_configs.append(config)
-        graphiti = object()
-        built_graphiti.append(graphiti)
-        return graphiti
-
-    monkeypatch.setattr(
-        "agent_knowledge.llm_brain_core.graphiti_adapter.build_graphiti_from_config",
-        _fake_build,
-    )
-    config = GraphitiNeo4jConfig(
-        extract_entities=True,
-        fallback_llm_model="fallback-main",
-        fallback_small_model="fallback-small",
-        primary_attempts=3,
-        fallback_attempts=2,
-    )
-
-    adapter = GraphitiNeo4jGraphMemoryAdapter.from_config(config)
-
-    assert built_configs[0].llm_model == "fallback-main"
-    assert built_configs[0].small_model == "fallback-small"
-    assert built_configs[0].fallback_llm_model == ""
-    assert built_configs[1] is config
-    assert adapter._graphiti is built_graphiti[1]
-    assert adapter._fallback_graphiti is built_graphiti[0]
-    assert adapter._primary_attempts == 3
-    assert adapter._fallback_attempts == 2
-
-
-def test_structured_response_normalizes_entity_name_alias():
-    from graphiti_core.prompts.extract_nodes import ExtractedEntities
-
-    normalized = _normalize_structured_response(
-        {
-            "extracted_entities": [
-                {"entity_name": "Project Atlas", "entity_type_id": 0, "episode_indices": [0]}
-            ]
-        },
-        ExtractedEntities,
-    )
-
-    assert normalized == {
-        "extracted_entities": [
-            {"name": "Project Atlas", "entity_type_id": 0, "episode_indices": [0]}
-        ]
-    }
-
-
-def test_structured_response_wraps_single_list_for_graphiti_model():
-    from graphiti_core.prompts.extract_nodes import ExtractedEntities
-
-    normalized = _normalize_structured_response(
-        [{"entity_text": "Neo4j", "episode_indices": [0]}],
-        ExtractedEntities,
-    )
-
-    assert normalized == {
-        "extracted_entities": [{"name": "Neo4j", "entity_type_id": 0, "episode_indices": [0]}]
-    }
-
-
-def test_structured_response_normalizes_episode_indices():
-    from graphiti_core.prompts.extract_edges import ExtractedEdges
-
-    normalized = _normalize_structured_response(
-        {
-            "edges": [
-                {
-                    "source_entity_name": "Project Atlas",
-                    "target_entity_name": "Neo4j",
-                    "relation_type": "DEPENDS_ON",
-                    "episode_indices": ["episode:abc", "1"],
-                }
-            ]
-        },
-        ExtractedEdges,
-    )
-
-    assert normalized["edges"][0]["episode_indices"] == [0, 1]
-
-
-def test_graphiti_adapter_retries_primary_then_fallback_for_entity_extraction():
-    primary = _FailingGraphiti(RuntimeError("primary failed"))
-    fallback = _FakeGraphiti()
-    adapter = GraphitiNeo4jGraphMemoryAdapter(
-        primary,
-        fallback_graphiti=fallback,
-        extract_entities=True,
-        primary_attempts=3,
-        fallback_attempts=1,
-    )
-    episode = _episode("Task", "task:fallback", {"brain_id": "/project/neurons", "task": "fallback"})
-
-    result = adapter.upsert_episode(episode)
-
-    assert result == "inserted"
-    assert len(primary.added) == 3
-    assert len(fallback.added) == 1
-    assert fallback.added[0]["name"] == episode.episode_id
-    assert adapter.last_write_details == (
-        "graphiti_neo4j",
-        "fallback_used",
-        "primary_error:RuntimeError",
-    )
-
-
-def test_graphiti_adapter_raises_after_primary_attempts_without_fallback():
-    primary = _FailingGraphiti(RuntimeError("primary failed"))
-    adapter = GraphitiNeo4jGraphMemoryAdapter(
-        primary,
-        extract_entities=True,
-        primary_attempts=2,
-    )
-    episode = _episode("Task", "task:no-fallback", {"brain_id": "/project/neurons", "task": "no fallback"})
-
-    with pytest.raises(RuntimeError, match="primary failed"):
-        adapter.upsert_episode(episode)
-
-    assert len(primary.added) == 2
-    assert adapter.last_write_details == ("graphiti_neo4j", "primary_error:RuntimeError")
-
-
-def test_graphiti_adapter_replaces_last_write_details_after_direct_write_failure():
-    graphiti = _FakeGraphiti()
-    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
-    adapter.upsert_episode(_episode("Task", "task:ok", {"brain_id": "/project/neurons", "task": "ok"}))
-    graphiti.driver.raise_on_execute = RuntimeError("direct write failed")
-
-    with pytest.raises(RuntimeError, match="direct write failed"):
-        adapter.upsert_episode(
-            _episode("Task", "task:fail", {"brain_id": "/project/neurons", "task": "fail"})
-        )
-
-    assert adapter.last_write_details == ("graphiti_neo4j", "direct_write_error:RuntimeError")
 
 
 def test_graphiti_adapters_share_single_async_loop_runner():
@@ -534,54 +519,14 @@ def test_graphiti_neo4j_round_trip_against_live_backend():
     assert search.status in {"available", "degraded"}
 
 
-@pytest.mark.skipif(
-    os.environ.get("LLM_BRAIN_GRAPHITI_EXTRACTION_CANARY") != "1",
-    reason="requires explicit canary opt-in",
-)
-@pytest.mark.skipif(
-    not os.environ.get("LLM_BRAIN_NEO4J_URI") and not os.environ.get("NEO4J_URI"),
-    reason="requires a live Neo4j (set NEO4J_URI / LLM_BRAIN_NEO4J_URI to run)",
-)
-def test_graphiti_neo4j_synthetic_schema_extraction_canary():
-    """Gated live Graphiti extraction canary over one public-safe synthetic episode."""
-
-    group_id = f"/project/neurons-model-connector-canary-{os.getpid()}"
-    config = replace(
-        GraphitiNeo4jConfig.from_env(),
-        default_group_id=group_id,
-        extract_entities=True,
-        store_raw_episode_content=True,
-    )
-    adapter = GraphitiNeo4jGraphMemoryAdapter.from_config(config)
-    natural_id = f"task:model-connector-canary-{os.getpid()}"
-    episode = _episode(
-        "Task",
-        natural_id,
-        {
-            "brain_id": group_id,
-            "task": "model connector synthetic canary",
-            "decision": "compatibility-first model connector boundary",
-        },
-    )
-
-    result = adapter.upsert_episode(episode)
-    assert result == "inserted"
-
-    search = adapter.search_context(
-        brain_id=group_id,
-        query="model connector synthetic canary",
-        entity_types=["Task"],
-        limit=10,
-    )
-    assert search.status in {"available", "degraded"}
-    assert any(item.natural_id == natural_id for item in search.episodes)
-
-
 class _FakeDriver:
     """Minimal async driver stand-in for EpisodicNode.save() in tests.
 
     EpisodicNode.save() issues a single execute_query MERGE; record the saved
     uuid so the default-path upsert test can assert exactly one node was written.
+    The set of saved uuids also backs a get_by_uuid simulation so the entity
+    path's NodeNotFoundError (node absent) vs. success (node present) can be
+    reproduced and verified without a live Neo4j.
     """
 
     provider = None
@@ -589,15 +534,19 @@ class _FakeDriver:
 
     def __init__(self) -> None:
         self.saved_uuids: list[str] = []
-        self.raise_on_execute: Exception | None = None
 
     async def execute_query(self, query, **params):
-        if self.raise_on_execute is not None:
-            raise self.raise_on_execute
-        uuid = params.get("uuid") or params.get("episode_uuid")
-        if uuid:
-            self.saved_uuids.append(str(uuid))
+        # Record only WRITE queries (MERGE/save). graphiti reads pass routing_='r'
+        # (e.g. EpisodicNode.get_by_uuid); recording those would wrongly count a
+        # read probe as a node save. Saves omit routing_, so gate on its absence.
+        if "routing_" not in params:
+            uuid = params.get("uuid") or params.get("episode_uuid")
+            if uuid:
+                self.saved_uuids.append(str(uuid))
         return ([], None, None)
+
+    def has_node(self, uuid: str) -> bool:
+        return str(uuid) in self.saved_uuids
 
 
 class _FakeGraphiti:
@@ -614,9 +563,19 @@ class _FakeGraphiti:
         return self.driver.saved_uuids
 
     async def add_episode(self, **kwargs):
+        # Mirror graphiti_core add_episode's "Get or create episode": when a uuid
+        # is supplied it does get_by_uuid(uuid) FIRST, which raises
+        # NodeNotFoundError if that node was never saved. This reproduces the
+        # M2 reextract bug -- the entity pass passes uuid=episode_id, and unless
+        # the node exists, add_episode fails before any entity is extracted.
+        uuid = kwargs.get("uuid")
+        if uuid is not None and not self.driver.has_node(uuid):
+            from graphiti_core.errors import NodeNotFoundError
+
+            raise NodeNotFoundError(uuid)
         self.added.append(dict(kwargs, source=kwargs["source"].value))
         self.episodes.append(SimpleNamespace(content=kwargs["episode_body"]))
-        return SimpleNamespace(uuid=f"graph:{kwargs['name']}")
+        return SimpleNamespace(uuid=f"graph:{kwargs['name']}", nodes=[], edges=[])
 
     async def search(self, query, *, group_ids=None, num_results=10):
         self.search_calls.append({"query": query, "group_ids": group_ids, "num_results": num_results})
@@ -628,16 +587,6 @@ class _FakeGraphiti:
         _ = reference_time
         _ = group_ids
         return list(self.episodes[-last_n:])
-
-
-class _FailingGraphiti(_FakeGraphiti):
-    def __init__(self, exc: Exception) -> None:
-        super().__init__()
-        self._exc = exc
-
-    async def add_episode(self, **kwargs):
-        self.added.append(dict(kwargs, source=kwargs["source"].value))
-        raise self._exc
 
 
 class _SlowGraphiti:

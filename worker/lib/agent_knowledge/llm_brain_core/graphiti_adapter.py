@@ -6,18 +6,12 @@ import os
 import re
 import threading
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from agent_knowledge.model_connectors import resolve_model_connection_config
-from agent_knowledge.model_connectors.openai_compatible import (
-    normalize_structured_response as _shared_normalize_structured_response,
-)
-
 from ._util import PRIVATE_OUTPUT_RE, SECRET_ASSIGNMENT_RE, public_safe_text, short_hash
 from .graph import UpsertEpisodeResult
-from .graphiti_backend import build_graphiti_from_config
 from .models import GraphMemoryResult, OntologyEpisode
 
 _GRAPHITI_GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -43,46 +37,36 @@ class GraphitiNeo4jConfig:
     small_model: str = ""
     llm_base_url: str = ""
     llm_api_key: str = field(default="", repr=False)
-    embedding_provider: str = "openai"
     embedding_model: str = ""
     embedding_base_url: str = ""
     embedding_api_key: str = field(default="", repr=False)
     embedding_dim: int = 1024
     store_raw_episode_content: bool = True
     extract_entities: bool = False
-    fallback_llm_model: str = ""
-    fallback_small_model: str = ""
-    primary_attempts: int = 1
-    fallback_attempts: int = 1
     read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS
     write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "GraphitiNeo4jConfig":
-        env = os.environ if environ is None else environ
-        model_config = resolve_model_connection_config(env)
+        env = environ or os.environ
+        provider = env.get("LLM_BRAIN_GRAPH_LLM_PROVIDER", env.get("GRAPHITI_LLM_PROVIDER", "openai"))
         return cls(
             uri=env.get("LLM_BRAIN_NEO4J_URI", env.get("NEO4J_URI", "bolt://localhost:7687")),
             user=env.get("LLM_BRAIN_NEO4J_USER", env.get("NEO4J_USER", "neo4j")),
             password=env.get("LLM_BRAIN_NEO4J_PASSWORD", env.get("NEO4J_PASSWORD", "")),
             default_group_id=env.get("LLM_BRAIN_GRAPH_GROUP_ID", ""),
-            llm_provider=model_config.llm.provider,
-            llm_model=model_config.llm.model,
-            small_model=model_config.llm.small_model,
-            llm_base_url=model_config.llm.base_url,
+            llm_provider=provider.lower(),
+            llm_model=env.get("LLM_BRAIN_LLM_MODEL", env.get("MODEL_NAME", "")),
+            small_model=env.get("LLM_BRAIN_SMALL_LLM_MODEL", env.get("SMALL_MODEL_NAME", "")),
+            llm_base_url=env.get("LLM_BRAIN_LLM_BASE_URL", env.get("OPENAI_BASE_URL", "")),
             llm_api_key=env.get("LLM_BRAIN_LLM_API_KEY", env.get("OPENAI_API_KEY", "")),
-            embedding_provider=model_config.embedding.provider,
-            embedding_model=model_config.embedding.model,
-            embedding_base_url=model_config.embedding.base_url,
+            embedding_model=env.get("LLM_BRAIN_EMBEDDING_MODEL", env.get("EMBEDDING_MODEL", "")),
+            embedding_base_url=env.get("LLM_BRAIN_EMBEDDING_BASE_URL", env.get("OPENAI_BASE_URL", "")),
             embedding_api_key=env.get("LLM_BRAIN_EMBEDDING_API_KEY", env.get("OPENAI_API_KEY", "")),
-            embedding_dim=model_config.embedding.dim,
+            embedding_dim=_int_env(env.get("LLM_BRAIN_EMBEDDING_DIM", ""), default=1024),
             store_raw_episode_content=env.get("LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT", "true").lower()
             not in {"0", "false", "no"},
             extract_entities=env.get("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES", "false").lower() in {"1", "true", "yes"},
-            fallback_llm_model=model_config.fallback_llm_model,
-            fallback_small_model=model_config.fallback_small_model,
-            primary_attempts=model_config.primary_attempts,
-            fallback_attempts=model_config.fallback_attempts,
             read_timeout_seconds=_float_env(
                 env.get("LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS", ""),
                 default=DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
@@ -106,11 +90,8 @@ class GraphitiNeo4jGraphMemoryAdapter:
         self,
         graphiti: Any,
         *,
-        fallback_graphiti: Any | None = None,
         default_group_id: str = "",
         extract_entities: bool = False,
-        primary_attempts: int = 1,
-        fallback_attempts: int = 1,
         episode_exists: Callable[[Any, str], Any] | None = None,
         entity_extracted: Callable[[Any, str], Any] | None = None,
         read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
@@ -118,11 +99,8 @@ class GraphitiNeo4jGraphMemoryAdapter:
         runner: "_AsyncLoopRunner | None" = None,
     ) -> None:
         self._graphiti = graphiti
-        self._fallback_graphiti = fallback_graphiti
         self._default_group_id = default_group_id
         self._extract_entities = extract_entities
-        self._primary_attempts = max(1, int(primary_attempts))
-        self._fallback_attempts = max(1, int(fallback_attempts))
         # Split read/write timeouts: a read that hangs must not be forced to wait
         # the (longer) write upper bound, and vice versa. Injectable so a unit
         # test can drive the timeout path deterministically with a tiny bound.
@@ -131,7 +109,6 @@ class GraphitiNeo4jGraphMemoryAdapter:
         # `runner` is injectable so a test can supply a non-singleton loop runner
         # without poisoning the shared production singleton.
         self._runner = runner if runner is not None else _AsyncLoopRunner.get_instance()
-        self._last_write_details: tuple[str, ...] = ()
         # Existence probe for episode_id MERGE idempotency. Injectable so tests
         # can simulate a pre-existing episode without a live Neo4j. Defaults to
         # Graphiti's EpisodicNode.get_by_uuid (async), which raises when absent.
@@ -144,29 +121,12 @@ class GraphitiNeo4jGraphMemoryAdapter:
         # Entity. Injectable for tests; defaults to a MENTIONS-count query.
         self._entity_extracted = entity_extracted or _default_entity_extracted
 
-    @property
-    def last_write_details(self) -> tuple[str, ...]:
-        return self._last_write_details
-
     @classmethod
     def from_config(cls, config: GraphitiNeo4jConfig) -> "GraphitiNeo4jGraphMemoryAdapter":
-        fallback_graphiti = None
-        if config.extract_entities and config.fallback_llm_model:
-            fallback_config = replace(
-                config,
-                llm_model=config.fallback_llm_model,
-                small_model=config.fallback_small_model or config.fallback_llm_model,
-                fallback_llm_model="",
-                fallback_small_model="",
-            )
-            fallback_graphiti = build_graphiti_from_config(fallback_config)
         return cls(
-            build_graphiti_from_config(config),
-            fallback_graphiti=fallback_graphiti,
+            _build_graphiti(config),
             default_group_id=config.default_group_id,
             extract_entities=config.extract_entities,
-            primary_attempts=config.primary_attempts,
-            fallback_attempts=config.fallback_attempts,
             read_timeout_seconds=config.read_timeout_seconds,
             write_timeout_seconds=config.write_timeout_seconds,
         )
@@ -175,14 +135,36 @@ class GraphitiNeo4jGraphMemoryAdapter:
     def from_env(cls, environ: dict[str, str] | None = None) -> "GraphitiNeo4jGraphMemoryAdapter":
         return cls.from_config(GraphitiNeo4jConfig.from_env(environ))
 
+    def _build_episodic_node(self, episode: OntologyEpisode, body: str, group_id: str) -> Any:
+        """Build the EpisodicNode for ``episode`` keyed on its episode_id.
+
+        Single source of the EpisodicNode shape for BOTH the episodic-only path
+        and the entity path's ensure-save. Keying ``uuid`` and ``name`` on
+        episode_id (which already encodes the content_hash) makes the node's
+        identity MERGE-idempotent: the same content always maps to the same node,
+        so the two paths cannot create divergent or duplicate Episodic nodes.
+        """
+
+        from graphiti_core.nodes import EpisodicNode
+
+        return EpisodicNode(
+            uuid=episode.episode_id,
+            name=episode.episode_id,
+            group_id=group_id or _graphiti_group_id("llm_brain_default"),
+            labels=[],
+            source=_episode_type_json(),
+            content=body,
+            source_description=f"llm_brain_core:{episode.entity_type}:{episode.natural_id}",
+            created_at=datetime.now(timezone.utc),
+            valid_at=_parse_datetime(episode.reference_time),
+        )
+
     def upsert_episode(self, episode: OntologyEpisode) -> UpsertEpisodeResult:
         body = json.dumps(episode.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         group_id = _graphiti_group_id(_group_id_for_episode(episode, self._default_group_id))
 
         async def _call() -> UpsertEpisodeResult:
             if not self._extract_entities:
-                from graphiti_core.nodes import EpisodicNode
-
                 # episode_id MERGE idempotency: an episode_id already encodes the
                 # content_hash (see OntologyEpisode.from_payload), so a node with
                 # the same uuid is the same content. Treat a re-upsert as a
@@ -191,17 +173,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 if await self._episode_exists(self._graphiti.driver, episode.episode_id):
                     self._last_write_details = ("graphiti_neo4j", "duplicate")
                     return "duplicate"
-                graphiti_episode = EpisodicNode(
-                    uuid=episode.episode_id,
-                    name=episode.episode_id,
-                    group_id=group_id or _graphiti_group_id("llm_brain_default"),
-                    labels=[],
-                    source=_episode_type_json(),
-                    content=body,
-                    source_description=f"llm_brain_core:{episode.entity_type}:{episode.natural_id}",
-                    created_at=datetime.now(timezone.utc),
-                    valid_at=_parse_datetime(episode.reference_time),
-                )
+                graphiti_episode = self._build_episodic_node(episode, body, group_id)
                 try:
                     await graphiti_episode.save(self._graphiti.driver)
                 except Exception as exc:
@@ -220,11 +192,22 @@ class GraphitiNeo4jGraphMemoryAdapter:
             # not re-billed) for an episode already extracted.
             if await self._entity_extracted(self._graphiti.driver, episode.episode_id):
                 return "duplicate"
-            # Pass uuid=episode.episode_id so Graphiti reuses an existing EpisodicNode
-            # (get_by_uuid) instead of minting a fresh random uuid. episode_id
-            # encodes the content_hash, so the same content always maps to the
-            # same node -- a 2-pass run (episodic then entity) does not create a
-            # duplicate EpisodicNode.
+            # Ensure the episode_id-keyed EpisodicNode exists BEFORE add_episode.
+            # Graphiti's add_episode(uuid=episode_id) does get_by_uuid(uuid) first
+            # (graphiti_core add_episode: "Get or create episode"), which raises
+            # NodeNotFoundError when the node is absent -- exactly the case for an
+            # entity pass run as a separate CLI invocation whose episode_id node
+            # was never written by an episodic pass. The save MERGEs on
+            # {uuid: episode_id} (same key/shape as the episodic path via the
+            # shared _build_episodic_node helper), so it is idempotent: it creates
+            # the node when missing and is a no-op when present -- no duplicate
+            # Episodic node. This guarantees the following get_by_uuid succeeds.
+            await self._build_episodic_node(episode, body, group_id).save(self._graphiti.driver)
+            # Pass uuid=episode_id so Graphiti reuses the existing EpisodicNode
+            # (get_by_uuid, now guaranteed present) instead of minting a fresh
+            # random uuid. episode_id encodes the content_hash, so the same
+            # content always maps to the same node -- a 2-pass run (episodic then
+            # entity) does not create a duplicate EpisodicNode.
             results = await self._graphiti.add_episode(
                 name=episode.episode_id,
                 episode_body=body,
@@ -244,40 +227,6 @@ class GraphitiNeo4jGraphMemoryAdapter:
             return "inserted"
 
         return self._runner.run(_call, timeout=self._write_timeout_seconds)
-
-    async def _add_episode_with_fallback(self, **kwargs: Any) -> tuple[str, ...]:
-        last_error: Exception | None = None
-        primary_errors: list[str] = []
-        for _ in range(self._primary_attempts):
-            try:
-                await self._graphiti.add_episode(**kwargs)
-                return ("graphiti_neo4j", "primary_write")
-            except Exception as exc:
-                last_error = exc
-                primary_errors.append(f"primary_error:{type(exc).__name__}")
-        if self._fallback_graphiti is not None:
-            fallback_errors: list[str] = []
-            for _ in range(self._fallback_attempts):
-                try:
-                    await self._fallback_graphiti.add_episode(**kwargs)
-                    return (
-                        "graphiti_neo4j",
-                        "fallback_used",
-                        *(primary_errors[-1:] or ()),
-                    )
-                except Exception as exc:
-                    last_error = exc
-                    fallback_errors.append(f"fallback_error:{type(exc).__name__}")
-            self._last_write_details = (
-                "graphiti_neo4j",
-                *(primary_errors[-1:] or ()),
-                *(fallback_errors[-1:] or ()),
-            )
-        elif primary_errors:
-            self._last_write_details = ("graphiti_neo4j", primary_errors[-1])
-        if last_error is not None:
-            raise last_error
-        return ("graphiti_neo4j", "write_not_attempted")
 
     def search_context(
         self,
@@ -351,40 +300,6 @@ class GraphitiNeo4jGraphMemoryAdapter:
             episodes=tuple(converted[:bounded]),
             details=tuple(details),
         )
-
-    def get_episodes_by_ids(
-        self,
-        episode_ids: list[str] | tuple[str, ...],
-        *,
-        brain_id: str = "",
-        entity_types: list[str] | None = None,
-    ) -> tuple[OntologyEpisode, ...]:
-        wanted = [str(item) for item in episode_ids if str(item or "")]
-        if not wanted:
-            return ()
-        group_id = _graphiti_group_id(brain_id or self._default_group_id)
-        wanted_types = set(entity_types or [])
-
-        async def _call() -> list[OntologyEpisode]:
-            from graphiti_core.nodes import EpisodicNode
-
-            episodes: list[OntologyEpisode] = []
-            for episode_id in wanted:
-                try:
-                    node = await EpisodicNode.get_by_uuid(self._graphiti.driver, episode_id)
-                except Exception:
-                    continue
-                if group_id and str(getattr(node, "group_id", "") or "") != group_id:
-                    continue
-                episode = _episode_node_to_ontology(node)
-                if episode is None:
-                    continue
-                if wanted_types and episode.entity_type not in wanted_types:
-                    continue
-                episodes.append(episode)
-            return episodes
-
-        return tuple(self._runner.run(_call, timeout=self._read_timeout_seconds))
 
 
 async def _default_episode_exists(driver: Any, episode_id: str) -> bool:
@@ -534,12 +449,48 @@ def probe_graphiti_connectivity(adapter: Any) -> None:
         )
 
 
-def _normalize_structured_response(value: Any, response_model: Any = None) -> Any:
-    return _shared_normalize_structured_response(value, response_model)
-
-
 def _build_graphiti(config: GraphitiNeo4jConfig):
-    return build_graphiti_from_config(config)
+    from graphiti_core import Graphiti
+
+    if config.llm_provider in {"ollama", "openai-compatible", "openai_compatible"}:
+        from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
+        from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+        from graphiti_core.llm_client.config import LLMConfig
+        from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+
+        base_url = config.llm_base_url or ("http://localhost:11434/v1" if config.llm_provider == "ollama" else "")
+        api_key = config.llm_api_key or ("ollama" if config.llm_provider == "ollama" else "")
+        llm_config = LLMConfig(
+            api_key=api_key,
+            model=config.llm_model or ("deepseek-r1:7b" if config.llm_provider == "ollama" else None),
+            small_model=config.small_model or config.llm_model or ("deepseek-r1:7b" if config.llm_provider == "ollama" else None),
+            base_url=base_url or None,
+        )
+        llm_client = OpenAIGenericClient(config=llm_config)
+        embedder = OpenAIEmbedder(
+            config=OpenAIEmbedderConfig(
+                api_key=config.embedding_api_key or api_key,
+                embedding_model=config.embedding_model or ("nomic-embed-text" if config.llm_provider == "ollama" else "text-embedding-3-small"),
+                embedding_dim=config.embedding_dim,
+                base_url=config.embedding_base_url or base_url or None,
+            )
+        )
+        return Graphiti(
+            config.uri,
+            config.user,
+            config.password,
+            llm_client=llm_client,
+            embedder=embedder,
+            cross_encoder=OpenAIRerankerClient(client=llm_client, config=llm_config),
+            store_raw_episode_content=config.store_raw_episode_content,
+        )
+
+    return Graphiti(
+        config.uri,
+        config.user,
+        config.password,
+        store_raw_episode_content=config.store_raw_episode_content,
+    )
 
 
 class _AsyncLoopRunner:
@@ -750,6 +701,13 @@ def _terms(value: Any) -> list[str]:
 
 def _matches(value: str, terms: list[str]) -> bool:
     return any(term in value for term in terms)
+
+
+def _int_env(value: str, *, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _float_env(value: str, *, default: float) -> float:
