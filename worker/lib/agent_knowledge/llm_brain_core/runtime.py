@@ -44,6 +44,19 @@ __all__ = [
 # joined prose is capped here as well as in OntologyEpisode.__post_init__ to keep
 # one episode from shipping an unbounded extraction body.
 _MAX_EXTRACTION_CHARS = 8000
+_CHUNK_METADATA_HEADER_KEYS = frozenset(
+    {
+        "session_id_hash",
+        "turn_start_index",
+        "turn_end_index",
+        "turn_part_index",
+        "turn_part_count",
+        "part_index",
+        "part_count",
+        "char_start",
+        "char_end",
+    }
+)
 
 
 def materialize_artifact_from_couchdb_source(
@@ -128,13 +141,46 @@ def extraction_text_from_couchdb_chunks(
         session_id_hash=session_id_hash,
         doc_type=SourceDocType.CONVERSATION_CHUNK,
     )
-    chunks = sorted(chunks, key=lambda doc: (doc.get("turn_start_index", 0), doc.get("_id", "")))
-    bodies = [str(doc.get("body") or "").strip() for doc in chunks]
+    chunks = sorted(chunks, key=_conversation_chunk_order_key)
+    bodies = [_strip_chunk_metadata_header(str(doc.get("body") or "")) for doc in chunks]
     prose = "\n\n".join(body for body in bodies if body)
     # Bound here as well as in OntologyEpisode.__post_init__; public_safe_text in
     # the model is the authoritative redaction+bound, this is an early cap so the
     # join itself never builds a huge string.
     return prose[:max_chars]
+
+
+def _conversation_chunk_order_key(doc: Mapping[str, Any]) -> tuple[int, int, int, int, str]:
+    return (
+        _safe_int(doc.get("turn_start_index")),
+        _safe_int(doc.get("turn_end_index")),
+        _safe_int(doc.get("part_index") or doc.get("turn_part_index")),
+        _safe_int(doc.get("char_start")),
+        str(doc.get("_id") or ""),
+    )
+
+
+def _strip_chunk_metadata_header(text: str) -> str:
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if not stripped:
+            index += 1
+            continue
+        key, sep, _value = stripped.partition(":")
+        if sep and key.strip() in _CHUNK_METADATA_HEADER_KEYS:
+            index += 1
+            continue
+        break
+    return "\n".join(lines[index:]).strip()
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def session_episode_from_couchdb_source(

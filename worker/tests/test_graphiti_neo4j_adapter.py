@@ -94,8 +94,9 @@ def test_entity_path_ensures_episode_node_before_add_episode_when_absent():
     result = adapter.upsert_episode(episode)
 
     assert result == "inserted"
-    # ensure-save wrote the episode_id node before add_episode was reached.
-    assert graphiti.saved_uuids == [episode.episode_id]
+    # The entity path writes the episode_id node before add_episode, then restores
+    # canonical JSON afterward. Both writes target the same episode_id node.
+    assert graphiti.saved_uuids == [episode.episode_id, episode.episode_id]
     assert graphiti.added[0]["uuid"] == episode.episode_id
     assert graphiti.added[0]["name"] == episode.episode_id
 
@@ -127,9 +128,9 @@ def test_both_paths_build_identical_episode_node_via_shared_helper():
     assert node_a.content == body
 
 
-def test_entity_path_ensure_save_writes_single_episode_id_node():
-    # Scenario (b) companion: the entity-path ensure-save issues exactly ONE node
-    # save keyed on episode_id (MERGE single write) with the normalized brain_
+def test_entity_path_ensure_save_and_restore_write_same_episode_id_node():
+    # Scenario (b) companion: the entity-path writes the extraction prose and
+    # final JSON restore to the same episode_id node with the normalized brain_
     # group_id, then add_episode succeeds. No NodeNotFoundError, no duplicate.
     graphiti = _FakeGraphiti()
 
@@ -148,7 +149,7 @@ def test_entity_path_ensure_save_writes_single_episode_id_node():
     result = adapter.upsert_episode(episode)
 
     assert result == "inserted"
-    assert graphiti.saved_uuids == [episode.episode_id]
+    assert graphiti.saved_uuids == [episode.episode_id, episode.episode_id]
     entity_group_id = graphiti.added[0]["group_id"]
     assert entity_group_id.startswith("brain_")
     assert "/" not in entity_group_id
