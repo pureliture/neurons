@@ -16,6 +16,13 @@ dependencies = [
     "sqlalchemy>=2.0.51",
 ]
 
+[project.optional-dependencies]
+# Streamable HTTP MCP transport (옵션). 기본 worker 이미지는 이 extra 없이 빌드되며
+# (trim 철학 보존), mcp-http 서비스만 별도 빌드에서 설치한다. 하한은 설치-검증 게이트에서
+# 실측 확정한 1.28.0으로 핀한다(StreamableHTTPSessionManager + low-level Server
+# 데코레이터 등록 + Tool/CallToolResult camelCase 필드를 이 버전에서 검증).
+mcp-http = ["mcp>=1.28.0"]
+
 [dependency-groups]
 # 테스트 러너는 런타임 의존성이 아니라 dev group으로 선언한다. CI의 clean
 # `uv run --group dev pytest`가 pytest를 결정적으로 설치하도록 하기 위함이다.
