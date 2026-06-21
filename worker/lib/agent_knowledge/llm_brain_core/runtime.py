@@ -20,8 +20,8 @@ from .context import BrainReadService
 from .document_bridge import DocumentBridge
 from .event_replay import BrainEventReplayStore
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
-from .models import BrainEventEnvelope, SessionMemoryArtifact, SourceRefRecord
-from .ontology import episode_from_memory_card
+from .models import BrainEventEnvelope, OntologyEpisode, SessionMemoryArtifact, SourceRefRecord
+from .ontology import episode_from_memory_card, episode_from_session_artifact
 from .source_ref import SourceRefCatalog, SourceRefResolver
 
 # `episode_from_memory_card` is a pure card->episode mapper. It lives in
@@ -31,11 +31,19 @@ from .source_ref import SourceRefCatalog, SourceRefResolver
 __all__ = [
     "episode_from_memory_card",
     "materialize_artifact_from_couchdb_source",
+    "session_episode_from_couchdb_source",
+    "extraction_text_from_couchdb_chunks",
     "brain_event_from_ingress_payload",
     "source_ref_from_catalog_event",
     "build_runtime_brain_service",
     "replay_ingress_events",
 ]
+
+# Bound the per-session extraction body. The graph entity pass (an LLM call) is
+# the cost-driver; a single session can hold many conversation chunks, so the
+# joined prose is capped here as well as in OntologyEpisode.__post_init__ to keep
+# one episode from shipping an unbounded extraction body.
+_MAX_EXTRACTION_CHARS = 8000
 
 
 def materialize_artifact_from_couchdb_source(
@@ -94,6 +102,70 @@ def materialize_artifact_from_couchdb_source(
     if artifact_store is not None:
         artifact_store.upsert(artifact)
     return artifact
+
+
+def extraction_text_from_couchdb_chunks(
+    *,
+    session_id_hash: str,
+    source_store: CouchDBSourceStore,
+    max_chars: int = _MAX_EXTRACTION_CHARS,
+) -> str:
+    """Join a session's CouchDB conversation-chunk bodies into extraction prose.
+
+    The conversation_chunk ``body`` is already public-safe (built via
+    ``redact_public_ingress_text`` + ``assert_source_text_clean`` in
+    ``build_conversation_chunk_document``), so this only fetches, orders, and
+    bounds it. Chunks are ordered by ``turn_start_index`` (then ``_id``) so the
+    prose reads in conversation order. The result is the REAL conversation
+    content the entity pass should extract from -- not the statistics summary.
+
+    Returns "" when the session has no conversation chunks, which the caller can
+    treat as "no prose sourced" (the adapter then falls back to the JSON body and
+    logs the generic-only regression).
+    """
+
+    chunks = source_store.find_by_session(
+        session_id_hash=session_id_hash,
+        doc_type=SourceDocType.CONVERSATION_CHUNK,
+    )
+    chunks = sorted(chunks, key=lambda doc: (doc.get("turn_start_index", 0), doc.get("_id", "")))
+    bodies = [str(doc.get("body") or "").strip() for doc in chunks]
+    prose = "\n\n".join(body for body in bodies if body)
+    # Bound here as well as in OntologyEpisode.__post_init__; public_safe_text in
+    # the model is the authoritative redaction+bound, this is an early cap so the
+    # join itself never builds a huge string.
+    return prose[:max_chars]
+
+
+def session_episode_from_couchdb_source(
+    *,
+    session_id_hash: str,
+    source_store: CouchDBSourceStore,
+    artifact_store: SessionMemoryArtifactStore | None = None,
+    ontology_version: str = "1.0.0",
+    extractor_version: str = "runtime.1",
+) -> OntologyEpisode:
+    """Materialize a Session OntologyEpisode carrying real conversation prose.
+
+    This is the materialize-time sourcing seam: the CouchDB source store IS
+    reachable here (unlike the ledger-only projection CLI path), so the real
+    redacted conversation-chunk prose is sourced and carried on the episode's
+    transient ``extraction_text``. The stored node content stays the canonical
+    JSON (recall-safe); only the entity-pass extraction input becomes real prose.
+    """
+
+    artifact = materialize_artifact_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=source_store,
+        artifact_store=artifact_store,
+        ontology_version=ontology_version,
+        extractor_version=extractor_version,
+    )
+    extraction_text = extraction_text_from_couchdb_chunks(
+        session_id_hash=session_id_hash,
+        source_store=source_store,
+    )
+    return episode_from_session_artifact(artifact, extraction_text=extraction_text)
 
 
 def brain_event_from_ingress_payload(

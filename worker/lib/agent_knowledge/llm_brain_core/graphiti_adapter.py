@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import threading
@@ -10,7 +11,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from ._util import PRIVATE_OUTPUT_RE, SECRET_ASSIGNMENT_RE, public_safe_text, short_hash
+from ._util import (
+    PRIVATE_OUTPUT_RE,
+    SECRET_ASSIGNMENT_RE,
+    ensure_public_safe,
+    public_safe_text,
+    short_hash,
+)
 from .graph import UpsertEpisodeResult
 from .models import GraphMemoryResult, OntologyEpisode
 
@@ -160,7 +167,18 @@ class GraphitiNeo4jGraphMemoryAdapter:
         )
 
     def upsert_episode(self, episode: OntologyEpisode) -> UpsertEpisodeResult:
+        # Two-body split:
+        #   `body`            -> stored EpisodicNode.content (canonical JSON). Recall
+        #                        (_episode_node_to_ontology) parses it with json.loads,
+        #                        so this MUST stay JSON for recall to keep working.
+        #   `extraction_body` -> the entity-pass input handed to add_episode. Real
+        #                        redacted prose (conversation chunks / typed-payload
+        #                        meaning) extracts far richer entities than a JSON
+        #                        metadata blob, which only ever yields generic ones.
+        # extraction_body is derived/transient and is NOT in content_hash, so it
+        # never changes episode_id (no node-dup explosion).
         body = json.dumps(episode.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        extraction_body = _extraction_body_for(episode, body)
         group_id = _graphiti_group_id(_group_id_for_episode(episode, self._default_group_id))
 
         async def _call() -> UpsertEpisodeResult:
@@ -208,9 +226,15 @@ class GraphitiNeo4jGraphMemoryAdapter:
             # random uuid. episode_id encodes the content_hash, so the same
             # content always maps to the same node -- a 2-pass run (episodic then
             # entity) does not create a duplicate EpisodicNode.
+            # episode_body is the extraction input (real prose), NOT the stored
+            # content. The EpisodicNode whose content is the canonical JSON was
+            # already ensure-saved above on {uuid: episode_id}; add_episode reuses
+            # that node (uuid=episode_id) and only runs the entity pass over
+            # episode_body, so the stored content stays JSON while extraction sees
+            # prose. `source` stays json: the ensure-saved content is JSON.
             results = await self._graphiti.add_episode(
                 name=episode.episode_id,
-                episode_body=body,
+                episode_body=extraction_body,
                 source_description=f"llm_brain_core:{episode.entity_type}:{episode.natural_id}",
                 reference_time=_parse_datetime(episode.reference_time),
                 source=_episode_type_json(),
@@ -381,6 +405,51 @@ def _mentions_count(result: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+_LOG = logging.getLogger(__name__)
+
+
+def _extraction_body_for(episode: OntologyEpisode, json_body: str) -> str:
+    """Pick the entity-pass extraction input for ``episode``.
+
+    Prefers ``episode.extraction_text`` (real redacted prose: conversation chunks
+    or typed-payload meaning), which is already public-safe and bounded by
+    OntologyEpisode.__post_init__. When it is empty (no prose was sourced -- e.g.
+    a Session episode whose CouchDB chunks were not materialized, or a card with
+    no semantic free text), it falls back to the canonical JSON body so the entity
+    pass still has SOMETHING to run on rather than failing.
+
+    The fallback is the generic-only regression case (a JSON metadata blob yields
+    only generic entities), so it is logged at WARNING -- never with raw content,
+    only the episode_id and entity_type -- so a run that silently regressed to
+    JSON extraction is visible. The chosen body is re-checked public-safe as a
+    defense-in-depth gate before it leaves for the backend.
+    """
+
+    prose = (episode.extraction_text or "").strip()
+    if prose:
+        # __post_init__ already redacted/bounded extraction_text; this is a
+        # cheap fail-closed re-assert so a malformed episode can never ship a
+        # private/secret extraction body to the LLM.
+        try:
+            ensure_public_safe(prose, "OntologyEpisode.extraction_text")
+        except ValueError:
+            _LOG.warning(
+                "extraction_text failed public-safe re-check; falling back to JSON body "
+                "(episode_id=%s entity_type=%s)",
+                episode.episode_id,
+                episode.entity_type,
+            )
+            return json_body
+        return prose
+    _LOG.warning(
+        "no extraction prose for episode; entity pass will run on JSON metadata "
+        "(generic-only extraction regression) episode_id=%s entity_type=%s",
+        episode.episode_id,
+        episode.entity_type,
+    )
+    return json_body
 
 
 def _reject_unsafe_extraction(results: Any) -> None:

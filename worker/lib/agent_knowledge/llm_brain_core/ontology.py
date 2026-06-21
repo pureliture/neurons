@@ -26,7 +26,21 @@ class OntologyEpisodeBatch:
         return data
 
 
-def episode_from_session_artifact(artifact: SessionMemoryArtifact) -> OntologyEpisode:
+def episode_from_session_artifact(
+    artifact: SessionMemoryArtifact,
+    *,
+    extraction_text: str = "",
+) -> OntologyEpisode:
+    """Map a SessionMemoryArtifact into a Session OntologyEpisode.
+
+    ``extraction_text`` is the real redacted conversation prose for the entity
+    pass. The artifact.summary is only a statistics string ("conversation_chunks=N
+    ..."), which extracts no real entities; the caller (materialize-time, where the
+    CouchDB conversation chunks are reachable) supplies the actual chunk prose so
+    the entity pass runs over real content. When omitted (no CouchDB access),
+    extraction falls back to the JSON body in the adapter -- behavior-preserving.
+    """
+
     return OntologyEpisode.from_payload(
         event_id=artifact.source_event_ids[0] if artifact.source_event_ids else artifact.artifact_id,
         entity_type="Session",
@@ -47,6 +61,7 @@ def episode_from_session_artifact(artifact: SessionMemoryArtifact) -> OntologyEp
         reference_time=artifact.created_at,
         ontology_version=artifact.ontology_version,
         extractor_version=artifact.extractor_version,
+        extraction_text=extraction_text,
     )
 
 
@@ -115,6 +130,16 @@ def episode_from_memory_card(card: Mapping[str, Any], *, project: str = "") -> O
     )
     natural_id = f"{card_type}:{memory_id}"
     entity_type = _entity_type_for_card(payload["card_type"])
+    # Build the entity-pass extraction prose from the card's MEANING text (title,
+    # summary, and the typed_payload semantic fields) rather than the JSON
+    # metadata blob. The payload was already public-safe redacted above, so this
+    # reuses the redacted values. OntologyEpisode.__post_init__ redacts+bounds
+    # extraction_text again as a fail-closed gate.
+    extraction_text = _card_extraction_text(
+        title=payload["title"],
+        summary=payload["summary"],
+        typed_payload=payload["typed_payload"],
+    )
     return OntologyEpisode.from_payload(
         event_id=f"evt:{short_hash([natural_id, card.get('content_hash', '')])}",
         entity_type=entity_type,
@@ -127,6 +152,7 @@ def episode_from_memory_card(card: Mapping[str, Any], *, project: str = "") -> O
         observed_at=str(card.get("approved_at") or card.get("accepted_at") or card.get("updated_at") or utc_now_iso()),
         ontology_version=str(card.get("ontology_version") or "1.0.0"),
         extractor_version="memory-card-runtime.1",
+        extraction_text=extraction_text,
     )
 
 
@@ -233,6 +259,58 @@ def _redact_value(value: Any, *, max_chars: int, depth: int) -> Any:
         return value
     # Unknown/opaque types: stringify then redact so nothing raw slips through.
     return public_safe_text(str(value), max_chars=max_chars)
+
+
+def _card_extraction_text(*, title: str, summary: str, typed_payload: Any) -> str:
+    """Flatten a card's human-meaning text into entity-pass extraction prose.
+
+    Concatenates the title, summary, and the free-text values inside
+    typed_payload (decision, rationale, task_state, next_action, subject,
+    observed_state, etc.) into one prose string. All inputs are already
+    public-safe (redacted in episode_from_memory_card / _public_safe_typed_payload),
+    so this only joins them; structural noise (numbers, booleans, empty strings)
+    is dropped so the extractor sees sentences, not scaffolding.
+    """
+
+    parts: list[str] = []
+    for value in (title, summary):
+        text = str(value or "").strip()
+        if text:
+            parts.append(text)
+    parts.extend(_meaning_strings(typed_payload, depth=0))
+    # De-duplicate consecutive identical fragments (title==summary is common)
+    # while preserving order, then join into a single prose blob.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for part in parts:
+        if part not in seen:
+            seen.add(part)
+            ordered.append(part)
+    return "\n".join(ordered)
+
+
+def _meaning_strings(value: Any, *, depth: int) -> list[str]:
+    """Collect non-trivial free-text strings from a (possibly nested) value.
+
+    Bounded recursion (mirrors _redact_value's depth guard). Only strings with
+    real signal are kept: pure numbers/short tokens and empty strings are
+    dropped so the extraction prose stays meaningful rather than echoing keys.
+    """
+
+    if depth > 12:
+        return []
+    out: list[str] = []
+    if isinstance(value, str):
+        text = value.strip()
+        if text and not text.replace(".", "").replace("-", "").isdigit():
+            out.append(text)
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            out.extend(_meaning_strings(item, depth=depth + 1))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            out.extend(_meaning_strings(item, depth=depth + 1))
+    return out
 
 
 def _entity_type_for_card(card_type: str) -> str:
