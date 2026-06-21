@@ -8,6 +8,7 @@ import sys
 from collections.abc import Callable
 
 from .couchdb_source import build_cli as couchdb_build_cli
+from .couchdb_source import migration_flow_cli as couchdb_migration_flow_cli
 from .couchdb_source import migration_cli
 from .ledger import Ledger
 from .llm_brain_core import cli as llm_brain_core_cli
@@ -97,6 +98,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "memory": autopilot_cli.main,
     "session-entry-recall": _pending_server_command("session-entry-recall"),
     "couchdb-session-memory-build": couchdb_build_cli.main,
+    "couchdb-migration-flow": couchdb_migration_flow_cli.main,
     "couchdb-graph-project": llm_brain_couchdb_projection_cli.main,
     "couchdb-graph-status": llm_brain_graph_projection_status_cli.main,
     "transcript-migration": migration_cli.main,
