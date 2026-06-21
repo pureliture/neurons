@@ -1,0 +1,190 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from agent_knowledge.couchdb_source import document_model as dm
+from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
+from agent_knowledge.llm_brain_core.couchdb_projection_cli import run_couchdb_projection
+from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
+from agent_knowledge.session_memory.transcript_model import TranscriptChunk, TranscriptSession
+
+
+PROVIDER = "codex"
+PROJECT = "neurons"
+
+
+class _EntityFlagFakeGraph(FakeGraphMemoryAdapter):
+    _extract_entities = True
+
+
+class _FailingEntityGraph(_EntityFlagFakeGraph):
+    def upsert_episode(self, episode):  # type: ignore[no-untyped-def]
+        if episode.payload.get("session_id_hash") == self._failing_sid:
+            raise ValueError("synthetic projection failure")
+        return super().upsert_episode(episode)
+
+    def __init__(self, failing_sid: str) -> None:
+        super().__init__()
+        self._failing_sid = failing_sid
+
+
+def _seed_session(
+    store: InMemoryCouchDBSourceStore,
+    *,
+    raw_id: str,
+    project: str = PROJECT,
+    provider: str = PROVIDER,
+    body: str = "user asked about ontology projection; assistant answered with a plan",
+) -> str:
+    sid = dm.build_session_id_hash(provider, raw_id)
+    session = TranscriptSession(
+        session_id_hash=sid,
+        provider=provider,
+        project=project,
+        started_at="2026-06-21T00:00:00Z",
+    )
+    store.put(dm.build_transcript_session_document(session=session))
+    chunk = TranscriptChunk.from_text(
+        chunk_id=f"chunk_{raw_id}",
+        session_id_hash=sid,
+        provider=provider,
+        project=project,
+        turn_start_index=0,
+        turn_end_index=0,
+        text=body,
+    )
+    chunk_doc = dm.build_conversation_chunk_document(chunk=chunk)
+    store.put(chunk_doc)
+    store.put(
+        dm.build_coverage_manifest_document(
+            session_id_hash=sid,
+            provider=provider,
+            project=project,
+            conversation_chunk_count=1,
+            tool_evidence_bundle_count=0,
+            conversation_content_hashes=[chunk_doc["content_hash"]],
+            tool_evidence_coverage_hashes=[],
+            project_authority={
+                "project": project,
+                "ambiguous": False,
+                "eligible_for_retirement": True,
+            },
+        )
+    )
+    return sid
+
+
+def _project(
+    *,
+    tmp_path: Path,
+    store: InMemoryCouchDBSourceStore,
+    graph_adapter: Any,
+    limit: int,
+    dead_letter_jsonl: Path | None = None,
+    progress_jsonl: Path | None = None,
+) -> dict[str, Any]:
+    return run_couchdb_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=limit,
+        project=PROJECT,
+        provider=PROVIDER,
+        enable_graph=True,
+        graph_required=False,
+        extract_entities=True,
+        reextract_entities=False,
+        resume=True,
+        dead_letter_jsonl=dead_letter_jsonl,
+        progress_jsonl=progress_jsonl,
+        report_every=100,
+        graph_adapter=graph_adapter,
+    )
+
+
+def test_projects_more_than_one_hundred_sessions_and_resumes_entity_level(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(105):
+        _seed_session(store, raw_id=f"session-{index:03d}")
+
+    first = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=105,
+    )
+
+    assert first["status"] == "ok"
+    assert first["canonical_counts"]["selected_sessions"] == 105
+    assert first["truncated"] is False
+    assert "project" not in first["filters"]
+    assert first["filters"]["project_set"] is True
+    assert first["filters"]["project_ref"].startswith("sha256:")
+    assert first["target_extraction_level"] == "entity"
+    assert first["projection"]["attempted"] == 105
+    assert first["projection"]["projected"] == 105
+    assert first["projection"]["skipped_resumed"] == 0
+    assert first["projection"]["failed"] == 0
+
+    second = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=105,
+    )
+
+    assert second["status"] == "ok"
+    assert second["projection"]["attempted"] == 105
+    assert second["projection"]["projected"] == 0
+    assert second["projection"]["skipped_resumed"] == 105
+    assert second["projection"]["failed"] == 0
+
+
+def test_partial_projection_continues_and_writes_dead_letter(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="good")
+    failing_sid = _seed_session(store, raw_id="bad")
+    dead_letter = tmp_path / "dead-letter.jsonl"
+
+    report = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_FailingEntityGraph(failing_sid),
+        limit=2,
+        dead_letter_jsonl=dead_letter,
+    )
+
+    assert report["status"] == "partial"
+    assert report["projection"]["attempted"] == 2
+    assert report["projection"]["projected"] == 1
+    assert report["projection"]["failed"] == 1
+    assert report["projection"]["failure_reasons"] == {"ValueError": 1}
+
+    lines = [json.loads(line) for line in dead_letter.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 1
+    assert lines[0]["session_id_hash"] == failing_sid
+    assert "project" not in lines[0]
+    assert lines[0]["project_ref"].startswith("sha256:")
+    assert lines[0]["reason_code"] == "ValueError"
+    assert lines[0]["stage"] == "project"
+
+
+def test_progress_jsonl_uses_project_ref_not_raw_project(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="progress")
+    progress = tmp_path / "progress.jsonl"
+
+    _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=1,
+        progress_jsonl=progress,
+    )
+
+    events = [json.loads(line) for line in progress.read_text(encoding="utf-8").splitlines()]
+    progress_events = [event for event in events if event["event"] == "progress"]
+    assert len(progress_events) == 1
+    assert "project" not in progress_events[0]
+    assert progress_events[0]["project_ref"].startswith("sha256:")
