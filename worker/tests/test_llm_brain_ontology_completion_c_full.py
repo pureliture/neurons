@@ -246,15 +246,18 @@ def test_session_extraction_body_is_redacted_and_bounded():
     assert len(prose) <= 8000
 
 
-def test_session_extraction_text_passes_through_public_safe_filter():
-    # An extraction_text carrying a private path is redacted by the model gate, so
-    # what reaches the adapter is safe (defense in depth even though CouchDB
-    # bodies are pre-redacted).
+def test_session_extraction_text_is_trusted_from_source_not_re_redacted():
+    # Contract: extraction_text is the entity-pass LLM INPUT and is trusted as-is.
+    # Its production sources (CouchDB chunk bodies via redact_public_ingress_text;
+    # card typed-payload via public_safe) are ALREADY redacted at ingestion/mapping,
+    # so the model does NOT re-redact it here -- re-redaction stripped legitimate
+    # technical prose and regressed extraction to generic. Bound length only; the
+    # strict public-safe gate stays on extraction OUTPUT, not this input.
     artifact = _fake_artifact()
-    episode = episode_from_session_artifact(
-        artifact, extraction_text="see notes at /Users/secret/private.md for details"
-    )
-    assert "/Users/secret/private.md" not in episode.extraction_text
+    long_text = "x" * 9000
+    episode = episode_from_session_artifact(artifact, extraction_text=long_text)
+    # passed through (not re-redacted) but length-bounded.
+    assert len(episode.extraction_text) == 8000
 
 
 # --------------------------------------------------------------------------- #
