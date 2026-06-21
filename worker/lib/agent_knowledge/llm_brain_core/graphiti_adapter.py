@@ -410,6 +410,40 @@ def _mentions_count(result: Any) -> int:
 _LOG = logging.getLogger(__name__)
 
 
+# gemini-3.5-flash-thinking, served through the vertex-wrapper under graphiti's
+# NON-strict json_schema response_format (openai_generic_client deliberately omits
+# "strict": true because raw model_json_schema() violates OpenAI's strict subset),
+# does not bind to the exact schema property names. It emits each extracted-entity
+# item key as ``entity_name`` instead of graphiti's required ``name`` field, so
+# ExtractedEntities.model_validate() fails for EVERY item ("Field required ... name")
+# and the entity pass yields 0 entities -- the live 0/3-entity stall. Normalize the
+# known deviation back to the schema field name before graphiti validates. Keyed on
+# the EXACT key ``entity_name`` so the edge model's ``source_entity_name`` /
+# ``target_entity_name`` (different keys) are untouched, and an already-correct
+# ``name`` is never clobbered.
+_STRUCTURED_KEY_ALIASES = {"entity_name": "name"}
+
+
+def _normalize_structured_keys(value: Any) -> Any:
+    """Recursively rename known gemini structured-output key aliases to graphiti's.
+
+    Pure transform over the parsed JSON (dict / list / scalar). For each dict it
+    renames an alias key to its canonical name only when the canonical key is not
+    already present, so a correct field is never overwritten. Extra keys gemini
+    adds (e.g. ``entity_type_name``) are left intact; pydantic ignores them.
+    """
+
+    if isinstance(value, list):
+        return [_normalize_structured_keys(item) for item in value]
+    if isinstance(value, dict):
+        result = {key: _normalize_structured_keys(val) for key, val in value.items()}
+        for alias, canonical in _STRUCTURED_KEY_ALIASES.items():
+            if alias in result and canonical not in result:
+                result[canonical] = result.pop(alias)
+        return result
+    return value
+
+
 def _extraction_body_for(episode: OntologyEpisode, json_body: str) -> str:
     """Pick the entity-pass extraction input for ``episode``.
 
@@ -523,7 +557,21 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
             small_model=config.small_model or config.llm_model or ("deepseek-r1:7b" if config.llm_provider == "ollama" else None),
             base_url=base_url or None,
         )
-        llm_client = OpenAIGenericClient(config=llm_config)
+        class _NeuronStructuredClient(OpenAIGenericClient):
+            """OpenAIGenericClient that repairs gemini-via-wrapper structured-output
+            field-name deviations before graphiti's pydantic validation.
+
+            gemini emits ``entity_name`` where graphiti's ExtractedEntities requires
+            ``name`` (non-strict json_schema, see _normalize_structured_keys), which
+            otherwise drops every extracted entity. We normalize the parsed dict in
+            the single chokepoint both the direct and retry paths funnel through.
+            """
+
+            async def _generate_response(self, *args, **kwargs):
+                data = await super()._generate_response(*args, **kwargs)
+                return _normalize_structured_keys(data)
+
+        llm_client = _NeuronStructuredClient(config=llm_config)
         embedder = OpenAIEmbedder(
             config=OpenAIEmbedderConfig(
                 api_key=config.embedding_api_key or api_key,
