@@ -4,12 +4,21 @@ import json
 from dataclasses import asdict
 from typing import Any
 
-from agent_knowledge.ledger_base import _table_exists
+from agent_knowledge.ledger_base import _ensure_column, _table_exists
 
 from .artifact_store import _reject_external_index_fields
 from .graphiti_adapter import _graphiti_group_id, _group_id_for_episode
 from .models import OntologyEpisode, SessionMemoryArtifact, SourceRefRecord
 from .source_ref import SourceRefResolver
+
+# Default extraction pass for a projected episode. The episodic-only pass
+# (raw EpisodicNode, no entity extraction) is the production default; the entity
+# pass runs add_episode so Graphiti extracts EntityNode/RELATES_TO. Recording the
+# level lets a re-run resume per-pass instead of skipping the entity pass just
+# because the episodic pass already ran (composite (episode_id, extraction_level)
+# idempotency).
+EXTRACTION_LEVEL_EPISODIC = "episodic"
+EXTRACTION_LEVEL_ENTITY = "entity"
 
 
 class LedgerSessionMemoryArtifactStore:
@@ -209,27 +218,39 @@ class LedgerGraphProjectionStateStore:
         self._ledger = ledger
         self._ensure_schema()
 
-    def mark_projected(self, episode: OntologyEpisode, upsert_result: str) -> None:
+    def mark_projected(
+        self,
+        episode: OntologyEpisode,
+        upsert_result: str,
+        extraction_level: str = EXTRACTION_LEVEL_EPISODIC,
+    ) -> None:
         # group_id is derived with the graphiti helpers (not reimplemented) so the
         # stored group key matches exactly what the graph adapter writes.
         group_id = _graphiti_group_id(_group_id_for_episode(episode, ""))
         project = str(episode.payload.get("project") or "")
         brain_id = str(episode.payload.get("brain_id") or "")
+        level = str(extraction_level or EXTRACTION_LEVEL_EPISODIC)
         with self._ledger._connect() as connection:
+            # Conflict target is the composite (episode_id, extraction_level): the
+            # episodic and entity passes of the SAME episode are tracked as two
+            # rows, so a re-run can resume per-pass instead of skipping the entity
+            # pass just because the episodic pass already ran.
             connection.execute(
                 """
                 INSERT INTO llm_brain_graph_projection_state (
-                    episode_id, project, entity_type, natural_id, group_id,
-                    brain_id, content_hash, ontology_version, extractor_version,
-                    upsert_result, projected_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ON CONFLICT(episode_id) DO UPDATE SET
+                    episode_id, extraction_level, project, entity_type,
+                    natural_id, group_id, brain_id, content_hash,
+                    ontology_version, extractor_version, upsert_result,
+                    projected_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(episode_id, extraction_level) DO UPDATE SET
                     upsert_result=excluded.upsert_result,
                     projected_at=excluded.projected_at,
                     updated_at=excluded.updated_at
                 """,
                 (
                     episode.episode_id,
+                    level,
                     project,
                     episode.entity_type,
                     episode.natural_id,
@@ -242,27 +263,45 @@ class LedgerGraphProjectionStateStore:
                 ),
             )
 
-    def list_projected_ids(self, project: str | None = None) -> set[str]:
+    def list_projected_ids(
+        self,
+        project: str | None = None,
+        *,
+        extraction_level: str | None = None,
+    ) -> set[str]:
+        # `extraction_level=None` returns episode_ids projected at ANY level
+        # (backward-compatible: the episodic-only resume set). A specific level
+        # narrows the resume set to that pass, so the entity pass resumes only on
+        # ids already projected at the entity level.
+        clauses: list[str] = []
+        params: list[str] = []
+        if project is not None:
+            clauses.append("project = ?")
+            params.append(project)
+        if extraction_level is not None:
+            clauses.append("extraction_level = ?")
+            params.append(str(extraction_level))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._ledger._connect() as connection:
             # Dialect-aware pre-check: an absent table degrades to an empty set
             # without letting a postgres UndefinedTable propagate.
             if not _table_exists(connection, "llm_brain_graph_projection_state"):
                 return set()
-            if project is None:
-                rows = connection.execute(
-                    "SELECT episode_id FROM llm_brain_graph_projection_state"
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    "SELECT episode_id FROM llm_brain_graph_projection_state WHERE project = ?",
-                    (project,),
-                ).fetchall()
+            rows = connection.execute(
+                "SELECT episode_id FROM llm_brain_graph_projection_state" + where,
+                tuple(params),
+            ).fetchall()
         return {str(row["episode_id"]) for row in rows}
 
     def _ensure_schema(self) -> None:
         if getattr(self._ledger, "read_only", False):
             return
         with self._ledger._connect() as connection:
+            # Migrate FIRST: a pre-M2 table lacks the extraction_level column, so
+            # the schema's level index must not run before the migration adds it.
+            # On a brand-new ledger the migration is a no-op (table absent) and the
+            # schema below creates the table + indexes.
+            _migrate_extraction_level(connection)
             connection.executescript(_GRAPH_PROJECTION_STATE_SCHEMA)
 
 
@@ -305,11 +344,18 @@ CREATE INDEX IF NOT EXISTS idx_llm_brain_source_refs_content_hash
 
 # Single source of truth for the graph projection_state table. Ledger._initialize
 # imports and installs this exact constant so the schema is declared once and the
-# store + ledger can never drift. Standard SQL only (TEXT / PRIMARY KEY /
+# store + ledger can never drift. Standard SQL only (TEXT / UNIQUE /
 # CREATE INDEX IF NOT EXISTS) so it works on both sqlite and postgres.
+#
+# Idempotency key is the COMPOSITE (episode_id, extraction_level), enforced by a
+# UNIQUE constraint rather than a sole episode_id PRIMARY KEY, so the episodic and
+# entity passes of the same episode coexist as two rows. extraction_level carries
+# a NOT NULL DEFAULT so a legacy episodic-only insert (no level) backfills to
+# 'episodic'.
 _GRAPH_PROJECTION_STATE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS llm_brain_graph_projection_state (
-    episode_id TEXT PRIMARY KEY,
+    episode_id TEXT NOT NULL,
+    extraction_level TEXT NOT NULL DEFAULT 'episodic',
     project TEXT NOT NULL DEFAULT '',
     entity_type TEXT NOT NULL DEFAULT '',
     natural_id TEXT NOT NULL DEFAULT '',
@@ -320,13 +366,95 @@ CREATE TABLE IF NOT EXISTS llm_brain_graph_projection_state (
     extractor_version TEXT NOT NULL DEFAULT '',
     upsert_result TEXT NOT NULL DEFAULT '',
     projected_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    UNIQUE(episode_id, extraction_level)
 );
 CREATE INDEX IF NOT EXISTS idx_llm_brain_graph_projection_state_project_projected
     ON llm_brain_graph_projection_state(project, projected_at);
 CREATE INDEX IF NOT EXISTS idx_llm_brain_graph_projection_state_group
     ON llm_brain_graph_projection_state(group_id);
+CREATE INDEX IF NOT EXISTS idx_llm_brain_graph_projection_state_level
+    ON llm_brain_graph_projection_state(extraction_level);
 """
+
+
+def _migrate_extraction_level(connection: Any) -> None:
+    """Lazily bring a pre-M2 projection_state table up to the composite schema.
+
+    A pre-M2 table has ``episode_id`` as a sole PRIMARY KEY and no
+    ``extraction_level`` column, so it cannot hold both passes of one episode.
+    This migration is non-destructive: it adds the column (defaulting existing
+    rows to 'episodic') and, only when the legacy sole-PK shape is detected,
+    rebuilds the table into the composite-unique shape, copying every row. The
+    table is derived resume state (re-derivable from the graph), so the rebuild
+    carries no authoritative data loss risk.
+
+    On a freshly-created table (already the new shape) this is a no-op: the column
+    exists and there is no sole episode_id PRIMARY KEY to migrate.
+    """
+
+    table = "llm_brain_graph_projection_state"
+    if not _table_exists(connection, table):
+        return
+    # Step 1 (always safe / idempotent): ensure the column exists and backfill.
+    _ensure_column(connection, table, "extraction_level", "TEXT NOT NULL DEFAULT 'episodic'")
+    connection.execute(
+        f"UPDATE {table} SET extraction_level = 'episodic' "
+        "WHERE extraction_level IS NULL OR extraction_level = ''"
+    )
+    # Step 2 (only for the legacy sole-PK shape): rebuild so the composite
+    # (episode_id, extraction_level) uniqueness replaces episode_id-as-sole-PK.
+    if not _episode_id_is_sole_primary_key(connection, table):
+        return
+    connection.executescript(
+        f"""
+        ALTER TABLE {table} RENAME TO {table}_pre_m2;
+        {_GRAPH_PROJECTION_STATE_SCHEMA}
+        INSERT INTO {table} (
+            episode_id, extraction_level, project, entity_type, natural_id,
+            group_id, brain_id, content_hash, ontology_version,
+            extractor_version, upsert_result, projected_at, updated_at
+        )
+        SELECT
+            episode_id,
+            COALESCE(NULLIF(extraction_level, ''), 'episodic'),
+            project, entity_type, natural_id, group_id, brain_id, content_hash,
+            ontology_version, extractor_version, upsert_result, projected_at,
+            updated_at
+        FROM {table}_pre_m2;
+        DROP TABLE {table}_pre_m2;
+        """
+    )
+
+
+def _episode_id_is_sole_primary_key(connection: Any, table: str) -> bool:
+    """Return True when ``episode_id`` is the table's only PRIMARY KEY column.
+
+    Detects the pre-M2 schema shape so the composite-unique rebuild runs at most
+    once. Dialect-aware (sqlite PRAGMA vs postgres information_schema); a backend
+    whose PK introspection is unavailable degrades to False (skip the rebuild)
+    rather than risk an unnecessary destructive table swap.
+    """
+
+    if getattr(connection, "dialect", "sqlite") == "postgres":
+        rows = connection.execute(
+            """
+            SELECT kcu.column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_name = kcu.constraint_name
+                AND tc.table_schema = kcu.table_schema
+            WHERE tc.constraint_type = 'PRIMARY KEY'
+                AND tc.table_schema = 'public'
+                AND tc.table_name = ?
+            """,
+            (table,),
+        ).fetchall()
+        pk_columns = [str(row["column_name"]) for row in rows]
+    else:
+        rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+        pk_columns = [str(row["name"]) for row in rows if row["pk"]]
+    return pk_columns == ["episode_id"]
 
 
 def _artifact_from_json(value: str) -> SessionMemoryArtifact:

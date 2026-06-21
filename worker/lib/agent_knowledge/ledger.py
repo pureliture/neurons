@@ -101,9 +101,17 @@ class Ledger(
         # in the llm_brain_core package whose __init__ imports modules that import
         # this ledger module. By initialize-time this module is fully loaded, so
         # referencing the single-source schema constant here is safe.
-        from .llm_brain_core.ledger_adapter import _GRAPH_PROJECTION_STATE_SCHEMA
+        from .llm_brain_core.ledger_adapter import (
+            _GRAPH_PROJECTION_STATE_SCHEMA,
+            _migrate_extraction_level,
+        )
 
         with self._connect(configure_journal=True) as connection:
+            # Lazy non-destructive upgrade of a pre-M2 projection_state table
+            # BEFORE the schema script runs: the script's extraction_level index
+            # must not execute before the migration adds that column. No-op on a
+            # fresh ledger (table absent) and on an already-new-shape table.
+            _migrate_extraction_level(connection)
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS knowledge_items (
@@ -655,6 +663,8 @@ class Ledger(
                 """
                 # Single-source graph projection_state schema: injected from
                 # ledger_adapter so the table is declared in exactly one place.
+                # The pre-M2 -> composite-unique migration already ran above so the
+                # extraction_level column exists before this script's level index.
                 + _GRAPH_PROJECTION_STATE_SCHEMA
             )
             _ensure_column(connection, "knowledge_items", "session_id_hash", "TEXT DEFAULT ''")

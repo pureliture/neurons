@@ -144,6 +144,7 @@ def test_schema_single_source_initialize_matches_store(tmp_path: Path):
 
     expected = {
         "episode_id",
+        "extraction_level",
         "project",
         "entity_type",
         "natural_id",
