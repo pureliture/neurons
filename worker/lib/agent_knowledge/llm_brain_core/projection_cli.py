@@ -6,10 +6,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import os
+
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.brain_read_model import LegacyLedgerBrainReadModel
 
 from .ledger_adapter import (
+    EXTRACTION_LEVEL_ENTITY,
+    EXTRACTION_LEVEL_EPISODIC,
     LedgerGraphProjectionStateStore,
     LedgerSessionMemoryArtifactStore,
     LedgerSourceRefCatalog,
@@ -41,6 +45,25 @@ def main(argv: list[str] | None = None) -> int:
             "instead of re-upserting the whole window."
         ),
     )
+    parser.add_argument(
+        "--extract-entities",
+        action="store_true",
+        help=(
+            "Run the entity pass (Graphiti add_episode -> EntityNode/RELATES_TO). "
+            "Resume is narrowed to episodes already projected at the entity level, "
+            "so an earlier episodic-only run does not block the entity pass. "
+            "Overrides LLM_BRAIN_GRAPH_EXTRACT_ENTITIES for this run."
+        ),
+    )
+    parser.add_argument(
+        "--reextract-entities",
+        action="store_true",
+        help=(
+            "Promote episodes already projected episodic-only to the entity pass. "
+            "Implies --extract-entities and bypasses the entity-level resume guard "
+            "so the entity pass re-runs even when an episodic record exists."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -55,6 +78,11 @@ def main(argv: list[str] | None = None) -> int:
             include_memory_cards=not bool(args.skip_memory_cards),
             include_source_refs=not bool(args.skip_source_refs),
             resume_projected_ids=_load_resume_ids([Path(item) for item in args.resume_projected_ids or []]),
+            # None when neither entity flag is set: keep the env-driven default
+            # (LLM_BRAIN_GRAPH_EXTRACT_ENTITIES) untouched so a plain run is
+            # behavior-preserving. A flag forces the entity pass on for this run.
+            extract_entities=(True if (args.extract_entities or args.reextract_entities) else None),
+            reextract_entities=bool(args.reextract_entities),
         )
     except Exception as exc:
         print(
@@ -87,6 +115,8 @@ def run_projection(
     include_memory_cards: bool,
     include_source_refs: bool,
     resume_projected_ids: set[str] | None = None,
+    extract_entities: bool | None = None,
+    reextract_entities: bool = False,
 ) -> dict[str, Any]:
     ledger = Ledger(ledger_path)
     artifact_store = LedgerSessionMemoryArtifactStore(ledger)
@@ -141,15 +171,38 @@ def run_projection(
     source_refs = imported_records if include_source_refs else []
     artifacts_truncated = include_artifacts and len(artifacts) >= artifact_bound
     cards_truncated = include_memory_cards and len(cards) >= max(1, int(limit))
+    # The entity pass on/off default stays env-driven
+    # (LLM_BRAIN_GRAPH_EXTRACT_ENTITIES); --extract-entities / --reextract-entities
+    # force it on for this run by overlaying the env the adapter reads. None means
+    # "no override": keep the existing env default (behavior-preserving).
+    graph_environ = None
+    if extract_entities is not None:
+        graph_environ = dict(os.environ)
+        graph_environ["LLM_BRAIN_GRAPH_EXTRACT_ENTITIES"] = "true" if extract_entities else "false"
     graph_adapter = build_graph_adapter_from_env(
+        environ=graph_environ,
         enable_flag=True if enable_graph else None,
         required_flag=bool(graph_required),
     )
     # Read seam: union the durable projection_state SoT with the file-based
     # resume hint. The --resume-projected-ids file stays backward-compatible; the
     # store adds durability so a re-run resumes even without a resume file.
+    #
+    # Level-narrowed resume: an entity pass resumes only on ids already projected
+    # AT the entity level, so an earlier episodic-only run does not skip the entity
+    # pass. --reextract-entities bypasses the entity-level resume entirely so the
+    # entity pass re-runs over episodic-only episodes (the file-based resume hint
+    # is still honored as an explicit user-supplied skip list).
+    target_level = (
+        EXTRACTION_LEVEL_ENTITY
+        if bool(getattr(graph_adapter, "_extract_entities", False))
+        else EXTRACTION_LEVEL_EPISODIC
+    )
     resume_union: set[str] = set(resume_projected_ids or set())
-    resume_union |= projection_state_store.list_projected_ids(project)
+    if not reextract_entities:
+        resume_union |= projection_state_store.list_projected_ids(
+            project, extraction_level=target_level
+        )
     projection = GraphProjectionWorker(
         graph_adapter, projection_state_store=projection_state_store
     ).project_batch(

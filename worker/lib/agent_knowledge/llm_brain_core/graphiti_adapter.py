@@ -15,7 +15,7 @@ from agent_knowledge.model_connectors.openai_compatible import (
     normalize_structured_response as _shared_normalize_structured_response,
 )
 
-from ._util import public_safe_text, short_hash
+from ._util import PRIVATE_OUTPUT_RE, SECRET_ASSIGNMENT_RE, public_safe_text, short_hash
 from .graph import UpsertEpisodeResult
 from .graphiti_backend import build_graphiti_from_config
 from .models import GraphMemoryResult, OntologyEpisode
@@ -112,6 +112,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
         primary_attempts: int = 1,
         fallback_attempts: int = 1,
         episode_exists: Callable[[Any, str], Any] | None = None,
+        entity_extracted: Callable[[Any, str], Any] | None = None,
         read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
         write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS,
         runner: "_AsyncLoopRunner | None" = None,
@@ -135,6 +136,13 @@ class GraphitiNeo4jGraphMemoryAdapter:
         # can simulate a pre-existing episode without a live Neo4j. Defaults to
         # Graphiti's EpisodicNode.get_by_uuid (async), which raises when absent.
         self._episode_exists = episode_exists or _default_episode_exists
+        # Entity-extraction idempotency probe (entity path only). Distinct from
+        # _episode_exists: an EpisodicNode can already exist (episodic pass) while
+        # NO Entity/RELATES_TO has been extracted yet, so the entity pass must
+        # still run. This probe answers "did the entity pass already run for this
+        # episode_id" by checking for MENTIONS edges from the episode to any
+        # Entity. Injectable for tests; defaults to a MENTIONS-count query.
+        self._entity_extracted = entity_extracted or _default_entity_extracted
 
     @property
     def last_write_details(self) -> tuple[str, ...]:
@@ -205,14 +213,34 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 self._last_write_details = ("graphiti_neo4j", "episode_node_direct_write")
                 return "inserted"
 
-            self._last_write_details = await self._add_episode_with_fallback(
+            # Entity-path idempotency guard. Unlike the episodic path, an existing
+            # EpisodicNode is NOT enough: the entity pass may not have run yet. We
+            # probe specifically for already-extracted Entity/RELATES_TO and treat
+            # a hit as `duplicate`, so the entity pass is not re-run (and the LLM
+            # not re-billed) for an episode already extracted.
+            if await self._entity_extracted(self._graphiti.driver, episode.episode_id):
+                return "duplicate"
+            # Pass uuid=episode.episode_id so Graphiti reuses an existing EpisodicNode
+            # (get_by_uuid) instead of minting a fresh random uuid. episode_id
+            # encodes the content_hash, so the same content always maps to the
+            # same node -- a 2-pass run (episodic then entity) does not create a
+            # duplicate EpisodicNode.
+            results = await self._graphiti.add_episode(
                 name=episode.episode_id,
                 episode_body=body,
                 source_description=f"llm_brain_core:{episode.entity_type}:{episode.natural_id}",
                 reference_time=_parse_datetime(episode.reference_time),
                 source=_episode_type_json(),
                 group_id=group_id or None,
+                uuid=episode.episode_id,
             )
+            # Write-time redaction hard gate. Inputs are already public-safe
+            # (OntologyEpisode.__post_init__ -> ensure_public_safe), but the LLM
+            # entity extractor synthesizes NEW text (EntityNode.name/summary,
+            # RELATES_TO.fact). That synthesized text is not covered by the input
+            # invariant, so we postcheck it and HARD FAIL (raise) on any private
+            # path / secret-assignment match rather than letting it persist.
+            _reject_unsafe_extraction(results)
             return "inserted"
 
         return self._runner.run(_call, timeout=self._write_timeout_seconds)
@@ -376,6 +404,104 @@ async def _default_episode_exists(driver: Any, episode_id: str) -> bool:
     except Exception:
         return False
     return node is not None
+
+
+# MENTIONS is the EpisodicNode -> EntityNode edge Graphiti writes when the entity
+# pass extracts entities for an episode. Its presence is the signal that the
+# entity pass already ran for this episode_id (as opposed to an episodic-only
+# node, which has no MENTIONS edges).
+_ENTITY_EXTRACTED_QUERY = (
+    "MATCH (e:Episodic {uuid: $uuid})-[:MENTIONS]->(:Entity) RETURN count(*) AS mentions"
+)
+
+
+async def _default_entity_extracted(driver: Any, episode_id: str) -> bool:
+    """Return True when the entity pass already extracted entities for ``episode_id``.
+
+    Probes for at least one MENTIONS edge from the episode to an Entity. A lookup
+    error degrades to False ("not extracted") so a transient read failure leads
+    to an extraction attempt rather than masking a missing entity pass. The
+    driver may expose either ``execute_query`` (neo4j async) or a wrapper; we use
+    ``execute_query`` which the adapter's other paths also rely on.
+    """
+
+    execute_query = getattr(driver, "execute_query", None)
+    if execute_query is None:
+        return False
+    try:
+        result = await execute_query(_ENTITY_EXTRACTED_QUERY, uuid=episode_id)
+    except Exception:
+        return False
+    return _mentions_count(result) > 0
+
+
+def _mentions_count(result: Any) -> int:
+    """Extract the MENTIONS count from a neo4j execute_query result.
+
+    neo4j's async ``execute_query`` returns a ``(records, summary, keys)`` tuple;
+    each record is a mapping with the aliased ``mentions`` column. Any shape we
+    cannot read returns 0 (treated as "not extracted") rather than raising.
+    """
+
+    records = result[0] if isinstance(result, (tuple, list)) and result else result
+    if not records:
+        return 0
+    try:
+        first = records[0]
+    except (IndexError, TypeError, KeyError):
+        return 0
+    value: Any = None
+    if isinstance(first, dict):
+        value = first.get("mentions")
+    else:
+        getter = getattr(first, "get", None)
+        if callable(getter):
+            value = getter("mentions")
+        else:
+            try:
+                value = first["mentions"]
+            except (IndexError, TypeError, KeyError):
+                value = None
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _reject_unsafe_extraction(results: Any) -> None:
+    """Hard-fail when LLM-extracted entity text carries private/secret content.
+
+    Scans EntityNode.name / EntityNode.summary and EntityEdge (RELATES_TO).fact
+    on the add_episode results for PRIVATE_OUTPUT_RE / SECRET_ASSIGNMENT_RE. A
+    match raises ValueError, which propagates as a failed upsert (projection
+    records it as a failure, never a projected/duplicate row). The exception
+    message names only the field kind, never the offending text, so the raw
+    private/secret value is not re-emitted in a traceback or log.
+    """
+
+    if results is None:
+        return
+    for node in _safe_iter(getattr(results, "nodes", None)):
+        _reject_field(getattr(node, "name", ""), "extracted EntityNode.name")
+        _reject_field(getattr(node, "summary", ""), "extracted EntityNode.summary")
+    for edge in _safe_iter(getattr(results, "edges", None)):
+        _reject_field(getattr(edge, "fact", ""), "extracted RELATES_TO.fact")
+
+
+def _safe_iter(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    try:
+        return list(value)
+    except TypeError:
+        return []
+
+
+def _reject_field(value: Any, field: str) -> None:
+    text = str(value or "")
+    if PRIVATE_OUTPUT_RE.search(text) or SECRET_ASSIGNMENT_RE.search(text):
+        # Name only the field kind; never echo the matched private/secret text.
+        raise ValueError(f"{field} contains private or raw content")
 
 
 def probe_graphiti_connectivity(adapter: Any) -> None:
