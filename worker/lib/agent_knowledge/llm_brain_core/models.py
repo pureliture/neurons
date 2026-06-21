@@ -318,15 +318,15 @@ class OntologyEpisode:
         object.__setattr__(self, "source_event_ids", tuple(self.source_event_ids))
         object.__setattr__(self, "source_ref_ids", tuple(self.source_ref_ids))
         object.__setattr__(self, "relations", tuple(self.relations))
-        # extraction_text is derived/transient. It still must be public-safe
-        # before it ever reaches the graph (CouchDB chunk bodies are already
-        # redacted, but card-derived text and any future source must pass the
-        # same filter). Normalize through public_safe_text with a bounded length
-        # so a single episode never ships an unbounded extraction body.
+        # extraction_text is derived/transient LLM-extraction input. Its sources
+        # (CouchDB chunk bodies; card typed-payload) are ALREADY redacted at
+        # ingestion/mapping, so re-redacting here just strips legitimate technical
+        # prose and regressed extraction to generic. Bound the length only; the
+        # strict public-safe gate stays on extraction OUTPUT, not this input.
         object.__setattr__(
             self,
             "extraction_text",
-            public_safe_text(self.extraction_text, max_chars=8000),
+            (self.extraction_text or "")[:8000],
         )
         ensure_public_safe(self.payload, "OntologyEpisode.payload")
         ensure_public_safe(list(self.source_ref_ids), "OntologyEpisode.source_ref_ids")

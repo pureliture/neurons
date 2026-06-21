@@ -413,35 +413,23 @@ _LOG = logging.getLogger(__name__)
 def _extraction_body_for(episode: OntologyEpisode, json_body: str) -> str:
     """Pick the entity-pass extraction input for ``episode``.
 
-    Prefers ``episode.extraction_text`` (real redacted prose: conversation chunks
-    or typed-payload meaning), which is already public-safe and bounded by
-    OntologyEpisode.__post_init__. When it is empty (no prose was sourced -- e.g.
-    a Session episode whose CouchDB chunks were not materialized, or a card with
-    no semantic free text), it falls back to the canonical JSON body so the entity
-    pass still has SOMETHING to run on rather than failing.
+    Prefers ``episode.extraction_text`` (real prose: conversation chunks or
+    typed-payload meaning). Those sources are ALREADY ingress-redacted at capture
+    (redact_public_ingress_text + assert_source_text_clean) / mapping, so the
+    LLM-input prose is trusted as-is. We deliberately do NOT re-apply the strict
+    public-safe gate to this input: that over-strict re-check rejected legitimate
+    technical conversation (paths, ``key=value`` discussed in code) and regressed
+    every session to the generic JSON body. The strict gate stays on extraction
+    OUTPUT (``_reject_unsafe_extraction``), not on this input.
 
-    The fallback is the generic-only regression case (a JSON metadata blob yields
-    only generic entities), so it is logged at WARNING -- never with raw content,
-    only the episode_id and entity_type -- so a run that silently regressed to
-    JSON extraction is visible. The chosen body is re-checked public-safe as a
-    defense-in-depth gate before it leaves for the backend.
+    When no prose was sourced (e.g. a Session whose CouchDB chunks were not
+    materialized), it falls back to the canonical JSON body -- logged at WARNING
+    (episode_id/entity_type only, never raw content) -- so a generic-only run is
+    visible.
     """
 
     prose = (episode.extraction_text or "").strip()
     if prose:
-        # __post_init__ already redacted/bounded extraction_text; this is a
-        # cheap fail-closed re-assert so a malformed episode can never ship a
-        # private/secret extraction body to the LLM.
-        try:
-            ensure_public_safe(prose, "OntologyEpisode.extraction_text")
-        except ValueError:
-            _LOG.warning(
-                "extraction_text failed public-safe re-check; falling back to JSON body "
-                "(episode_id=%s entity_type=%s)",
-                episode.episode_id,
-                episode.entity_type,
-            )
-            return json_body
         return prose
     _LOG.warning(
         "no extraction prose for episode; entity pass will run on JSON metadata "
