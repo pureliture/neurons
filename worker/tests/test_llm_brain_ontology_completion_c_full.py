@@ -22,6 +22,7 @@ from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceSto
 from agent_knowledge.llm_brain_core.graphiti_adapter import (
     GraphitiNeo4jGraphMemoryAdapter,
     _episode_node_to_ontology,
+    _normalize_structured_keys,
 )
 from agent_knowledge.llm_brain_core.models import OntologyEpisode
 from agent_knowledge.llm_brain_core.ontology import (
@@ -361,3 +362,61 @@ def _fake_artifact():
         source_event_ids=["evt:c-full"],
         created_at="2026-06-20T00:00:00Z",
     )
+
+
+# ---------------------------------------------------------------------------
+# gemini structured-output key normalization (entity_name -> name)
+#
+# Root cause of the live 0-entity stall: under graphiti's non-strict json_schema
+# response_format, gemini-3.5-flash-thinking emits each extracted-entity item as
+# {"entity_name": X, "entity_type_id": 0} while graphiti's ExtractedEntities
+# requires the field `name`, so model_validate() drops every entity. The adapter
+# normalizes the parsed dict before validation. These lock that contract.
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_renames_entity_name_to_name_in_list():
+    raw = {
+        "extracted_entities": [
+            {"entity_name": "graphify", "entity_type_id": 0},
+            {"entity_name": "Neo4j", "entity_type_id": 0},
+        ]
+    }
+    out = _normalize_structured_keys(raw)
+    assert [e["name"] for e in out["extracted_entities"]] == ["graphify", "Neo4j"]
+    assert all("entity_name" not in e for e in out["extracted_entities"])
+    # entity_type_id is graphiti's expected key already and must survive untouched.
+    assert all(e["entity_type_id"] == 0 for e in out["extracted_entities"])
+
+
+def test_normalize_preserves_extra_keys_like_entity_type_name():
+    raw = {"entity_name": "graphify", "entity_type_id": 0, "entity_type_name": "Tool"}
+    out = _normalize_structured_keys(raw)
+    assert out["name"] == "graphify"
+    # Extra keys gemini adds are left intact; pydantic ignores them.
+    assert out["entity_type_name"] == "Tool"
+
+
+def test_normalize_does_not_touch_edge_source_target_entity_name():
+    # Edge model uses distinct keys; the exact-key alias must not corrupt them.
+    raw = {
+        "source_entity_name": "graphify",
+        "target_entity_name": "Neo4j",
+        "fact": "graphify writes to Neo4j",
+    }
+    out = _normalize_structured_keys(raw)
+    assert out == raw
+
+
+def test_normalize_never_clobbers_existing_name():
+    raw = {"name": "canonical", "entity_name": "deviant"}
+    out = _normalize_structured_keys(raw)
+    # A correct `name` already present wins; the alias is not applied over it.
+    assert out["name"] == "canonical"
+
+
+def test_normalize_passes_scalars_and_is_recursive():
+    assert _normalize_structured_keys("x") == "x"
+    assert _normalize_structured_keys(7) == 7
+    nested = {"outer": [{"entity_name": "a"}]}
+    assert _normalize_structured_keys(nested) == {"outer": [{"name": "a"}]}
