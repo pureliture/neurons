@@ -51,12 +51,15 @@ class _CapturingDriver:
 
     def __init__(self) -> None:
         self.saved_uuids: list[str] = []
+        self.saved_contents: list[str] = []
 
     async def execute_query(self, query, **params):
         if "routing_" not in params:
             uuid = params.get("uuid") or params.get("episode_uuid")
             if uuid:
                 self.saved_uuids.append(str(uuid))
+            if "content" in params:
+                self.saved_contents.append(str(params.get("content") or ""))
         return ([], None, None)
 
     def has_node(self, uuid: str) -> bool:
@@ -73,6 +76,10 @@ class _CapturingGraphiti:
     @property
     def saved_uuids(self) -> list[str]:
         return self.driver.saved_uuids
+
+    @property
+    def saved_contents(self) -> list[str]:
+        return self.driver.saved_contents
 
     async def add_episode(self, **kwargs):
         self.added.append(dict(kwargs))
@@ -229,6 +236,23 @@ def test_session_episode_extraction_body_is_couchdb_chunk_prose():
     assert '"episode_id"' not in extraction_body
 
 
+def test_entity_path_temporarily_stores_prose_then_restores_json_content():
+    store = InMemoryCouchDBSourceStore()
+    chunk_text = "Graphiti should extract Neo4j and vertex-wrapper entities from prose."
+    session_id_hash = _seed_session_with_chunk(store, text=chunk_text)
+    episode = session_episode_from_couchdb_source(
+        session_id_hash=session_id_hash, source_store=store
+    )
+    graphiti = _CapturingGraphiti()
+
+    _adapter(graphiti).upsert_episode(episode)
+
+    assert chunk_text in graphiti.saved_contents[0]
+    restored = json.loads(graphiti.saved_contents[-1])
+    assert restored["episode_id"] == episode.episode_id
+    assert "Graphiti should extract" not in graphiti.saved_contents[-1]
+
+
 def test_session_extraction_body_is_redacted_and_bounded():
     store = InMemoryCouchDBSourceStore()
     # The chunk body is already public-safe redacted by the CouchDB builder;
@@ -245,6 +269,104 @@ def test_session_extraction_body_is_redacted_and_bounded():
     # No private path leaks survive in the sourced prose.
     assert "/Users/" not in prose
     assert len(prose) <= 8000
+
+
+def test_session_extraction_text_orders_multipart_chunks_by_turn_part():
+    store = InMemoryCouchDBSourceStore()
+    session_id_hash = _sid()
+    session = TranscriptSession(
+        session_id_hash=session_id_hash,
+        provider=PROVIDER,
+        project=PROJECT,
+        started_at="2026-06-20T00:00:00Z",
+    )
+    store.put(dm.build_transcript_session_document(session=session))
+    for part_index, text in (
+        (3, "assistant: third part mentions Graphiti relation extraction."),
+        (1, "user: first part introduces vertex-wrapper structured output."),
+        (2, "assistant: second part explains entity_name normalization."),
+    ):
+        chunk = TranscriptChunk(
+            chunk_id=f"chunk_c_full_part_{part_index}",
+            session_id_hash=session_id_hash,
+            provider=PROVIDER,
+            project=PROJECT,
+            turn_start_index=1,
+            turn_end_index=1,
+            redacted_text=text,
+            content_hash=dm.sha256_hash(text),
+            part_index=part_index,
+            part_count=3,
+            char_start=(part_index - 1) * 100,
+            char_end=part_index * 100,
+        )
+        doc = dm.build_conversation_chunk_document(chunk=chunk)
+        doc["body"] = "\n".join(
+            [
+                f"session_id_hash: {session_id_hash}",
+                "turn_start_index: 1",
+                f"turn_part_index: {part_index}",
+                "turn_part_count: 3",
+                f"char_start: {(part_index - 1) * 100}",
+                f"char_end: {part_index * 100}",
+                "",
+                text,
+            ]
+        )
+        store.put(doc)
+
+    prose = extraction_text_from_couchdb_chunks(
+        session_id_hash=session_id_hash, source_store=store
+    )
+
+    assert prose.index("first part") < prose.index("second part") < prose.index("third part")
+
+
+def test_session_extraction_text_strips_couchdb_chunk_metadata_headers():
+    store = InMemoryCouchDBSourceStore()
+    session_id_hash = _sid()
+    store.put(
+        dm.build_transcript_session_document(
+            session=TranscriptSession(
+                session_id_hash=session_id_hash,
+                provider=PROVIDER,
+                project=PROJECT,
+                started_at="2026-06-20T00:00:00Z",
+            )
+        )
+    )
+    chunk = TranscriptChunk.from_text(
+        chunk_id="chunk_c_full_header",
+        session_id_hash=session_id_hash,
+        provider=PROVIDER,
+        project=PROJECT,
+        turn_start_index=1,
+        turn_end_index=1,
+        text="user: discuss Graphiti, Neo4j, and vertex-wrapper behavior.",
+    )
+    doc = dm.build_conversation_chunk_document(chunk=chunk)
+    doc["body"] = "\n".join(
+        [
+            f"session_id_hash: {session_id_hash}",
+            "turn_start_index: 1",
+            "turn_part_index: 1",
+            "turn_part_count: 1",
+            "char_start: 0",
+            "char_end: 64",
+            "",
+            chunk.redacted_text,
+        ]
+    )
+    store.put(doc)
+
+    prose = extraction_text_from_couchdb_chunks(
+        session_id_hash=session_id_hash, source_store=store
+    )
+
+    assert prose.startswith("user: discuss Graphiti")
+    assert "session_id_hash:" not in prose
+    assert "turn_part_index:" not in prose
+    assert "char_start:" not in prose
 
 
 def test_session_extraction_text_is_trusted_from_source_not_re_redacted():

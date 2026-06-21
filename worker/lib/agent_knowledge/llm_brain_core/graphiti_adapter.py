@@ -212,15 +212,15 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 return "duplicate"
             # Ensure the episode_id-keyed EpisodicNode exists BEFORE add_episode.
             # Graphiti's add_episode(uuid=episode_id) does get_by_uuid(uuid) first
-            # (graphiti_core add_episode: "Get or create episode"), which raises
-            # NodeNotFoundError when the node is absent -- exactly the case for an
-            # entity pass run as a separate CLI invocation whose episode_id node
-            # was never written by an episodic pass. The save MERGEs on
-            # {uuid: episode_id} (same key/shape as the episodic path via the
-            # shared _build_episodic_node helper), so it is idempotent: it creates
-            # the node when missing and is a no-op when present -- no duplicate
-            # Episodic node. This guarantees the following get_by_uuid succeeds.
-            await self._build_episodic_node(episode, body, group_id).save(self._graphiti.driver)
+            # and then extracts from the returned node's `content`, not directly
+            # from the `episode_body` argument. Therefore the entity path must
+            # temporarily store the extraction prose on the existing node before
+            # calling add_episode; otherwise Graphiti re-reads the canonical JSON
+            # body and extracts only generic metadata entities. The `finally`
+            # restore below puts recall-safe canonical JSON back on the node.
+            await self._build_episodic_node(episode, extraction_body, group_id).save(
+                self._graphiti.driver
+            )
             # Pass uuid=episode_id so Graphiti reuses the existing EpisodicNode
             # (get_by_uuid, now guaranteed present) instead of minting a fresh
             # random uuid. episode_id encodes the content_hash, so the same
@@ -232,15 +232,20 @@ class GraphitiNeo4jGraphMemoryAdapter:
             # that node (uuid=episode_id) and only runs the entity pass over
             # episode_body, so the stored content stays JSON while extraction sees
             # prose. `source` stays json: the ensure-saved content is JSON.
-            results = await self._graphiti.add_episode(
-                name=episode.episode_id,
-                episode_body=extraction_body,
-                source_description=f"llm_brain_core:{episode.entity_type}:{episode.natural_id}",
-                reference_time=_parse_datetime(episode.reference_time),
-                source=_episode_type_json(),
-                group_id=group_id or None,
-                uuid=episode.episode_id,
-            )
+            try:
+                results = await self._graphiti.add_episode(
+                    name=episode.episode_id,
+                    episode_body=extraction_body,
+                    source_description=f"llm_brain_core:{episode.entity_type}:{episode.natural_id}",
+                    reference_time=_parse_datetime(episode.reference_time),
+                    source=_episode_type_json(),
+                    group_id=group_id or None,
+                    uuid=episode.episode_id,
+                )
+            finally:
+                await self._build_episodic_node(episode, body, group_id).save(
+                    self._graphiti.driver
+                )
             # Write-time redaction hard gate. Inputs are already public-safe
             # (OntologyEpisode.__post_init__ -> ensure_public_safe), but the LLM
             # entity extractor synthesizes NEW text (EntityNode.name/summary,

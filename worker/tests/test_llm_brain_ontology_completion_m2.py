@@ -187,9 +187,10 @@ def test_entity_path_passes_uuid_and_is_idempotent_on_reupsert():
     # instead of minting a random uuid.
     assert graphiti.added[0]["uuid"] == episode.episode_id
     # M2 fix: the first pass ensure-saves the episode_id node before add_episode,
-    # so add_episode's get_by_uuid finds it (no NodeNotFoundError). The duplicate
-    # short-circuit means only the first pass saves -> exactly one ensure-save.
-    assert graphiti.saved_uuids == [episode.episode_id]
+    # so add_episode's get_by_uuid finds it (no NodeNotFoundError). C-full then
+    # restores canonical JSON content after extraction, so the first pass saves
+    # twice. The duplicate short-circuits before both writes.
+    assert graphiti.saved_uuids == [episode.episode_id, episode.episode_id]
 
 
 def test_entity_path_existing_episodic_node_still_runs_entity_extraction():
