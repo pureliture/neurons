@@ -61,27 +61,33 @@
   <!-- PRODUCERS -->
   <text x="56" y="178" fill="#5b6b8c" font-size="11" font-weight="700" letter-spacing="1.5">PRODUCERS</text>
   <g>
-    <rect x="56" y="190" width="212" height="78" rx="11" fill="#111b35" stroke="#283a5e"/>
-    <rect x="56" y="190" width="4" height="78" rx="2" fill="#818cf8"/>
-    <text x="76" y="220" fill="#dbe4f3" font-size="13" font-weight="600">Local PC</text>
-    <text x="76" y="242" fill="#6b7da0" font-size="11">codex · claude 세션</text>
-    <text x="76" y="258" fill="#6b7da0" font-size="11">conversation_chunk</text>
+    <!-- dendrite: single Mac thin-client producer, two emit surfaces -->
+    <rect x="48" y="184" width="228" height="184" rx="13" fill="none" stroke="#818cf8" stroke-width="1.2" stroke-dasharray="6 5" opacity="0.5"/>
+    <text x="62" y="201" fill="#a5b4fc" font-size="10.5" font-weight="600">dendrite (Mac thin-client)</text>
 
-    <rect x="56" y="284" width="212" height="78" rx="11" fill="#111b35" stroke="#283a5e"/>
-    <rect x="56" y="284" width="4" height="78" rx="2" fill="#818cf8"/>
-    <text x="76" y="314" fill="#dbe4f3" font-size="13" font-weight="600">Mac mini</text>
-    <text x="76" y="336" fill="#6b7da0" font-size="11">session-compactor</text>
-    <text x="76" y="352" fill="#6b7da0" font-size="11">transcript packer</text>
+    <rect x="64" y="210" width="204" height="68" rx="11" fill="#111b35" stroke="#283a5e"/>
+    <rect x="64" y="210" width="4" height="68" rx="2" fill="#818cf8"/>
+    <text x="84" y="234" fill="#dbe4f3" font-size="12" font-weight="600">client sessions</text>
+    <text x="84" y="253" fill="#6b7da0" font-size="11">codex · claude 세션</text>
+    <text x="84" y="269" fill="#6b7da0" font-size="11">conversation_chunk</text>
 
-    <rect x="56" y="378" width="212" height="78" rx="11" fill="#111b35" stroke="#283a5e"/>
-    <rect x="56" y="378" width="4" height="78" rx="2" fill="#818cf8"/>
-    <text x="76" y="408" fill="#dbe4f3" font-size="13" font-weight="600">Ubuntu runner</text>
-    <text x="76" y="430" fill="#6b7da0" font-size="11">memory-regeneration</text>
-    <text x="76" y="446" fill="#6b7da0" font-size="11">session/task/card</text>
+    <rect x="64" y="288" width="204" height="68" rx="11" fill="#111b35" stroke="#283a5e"/>
+    <rect x="64" y="288" width="4" height="68" rx="2" fill="#818cf8"/>
+    <text x="84" y="312" fill="#dbe4f3" font-size="12" font-weight="600">session-compactor</text>
+    <text x="84" y="331" fill="#6b7da0" font-size="11">transcript packer</text>
+    <text x="84" y="347" fill="#6b7da0" font-size="11">document_payload</text>
+
+    <!-- neurons server-side producer, co-located in worker/ -->
+    <rect x="56" y="378" width="212" height="78" rx="11" fill="#111b35" stroke="#2a3f4a"/>
+    <rect x="56" y="378" width="4" height="78" rx="2" fill="#2dd4bf"/>
+    <text x="76" y="402" fill="#dbe4f3" font-size="12.5" font-weight="600">neurons server-side</text>
+    <text x="76" y="421" fill="#7c8cae" font-size="10">worker/ · memory-regeneration</text>
+    <text x="76" y="437" fill="#6b7da0" font-size="11">session/task/card</text>
+    <text x="76" y="451" fill="#5b6b8c" font-size="9.5">out-of-repo loopback enqueue</text>
   </g>
   <g fill="none" stroke="#34406a" stroke-width="1.5">
-    <path d="M268 229 C293 229 290 312 312 318"/>
-    <path d="M268 323 H312"/>
+    <path d="M268 244 C293 244 290 312 312 318"/>
+    <path d="M268 322 H312"/>
     <path d="M268 417 C293 417 290 350 312 344"/>
   </g>
 
@@ -125,17 +131,18 @@
     <rect x="784" y="222" width="188" height="34" rx="13" fill="#123a31"/>
     <rect x="784" y="244" width="188" height="12" fill="#123a31"/>
     <circle cx="804" cy="239" r="5" fill="#34d399"/>
-    <text x="818" y="243" fill="#86efc4" font-size="12.5" font-weight="700">ingress-worker</text>
-    <text x="800" y="284" fill="#9fb3d1" font-size="11">› WorkerLoopRunner</text>
+    <text x="818" y="243" fill="#86efc4" font-size="12.5" font-weight="700">ingress-worker-py</text>
+    <text x="800" y="284" fill="#9fb3d1" font-size="11">› shadow_worker (Python)</text>
     <text x="800" y="306" fill="#9fb3d1" font-size="11">› pressure gate</text>
-    <text x="800" y="328" fill="#9fb3d1" font-size="11">› IngestConsumer</text>
+    <text x="800" y="328" fill="#9fb3d1" font-size="11">› pull consumer + deliver</text>
     <line x1="800" y1="344" x2="956" y2="344" stroke="#1f2d4a"/>
     <g font-size="10.5">
       <circle cx="806" cy="367" r="5" fill="#34d399"/><text x="818" y="371" fill="#86efc4">OPEN  → deliver</text>
       <circle cx="806" cy="391" r="5" fill="#fbbf24"/><text x="818" y="395" fill="#fcd34d">THROTTLED → hold</text>
       <circle cx="806" cy="415" r="5" fill="#f87171"/><text x="818" y="419" fill="#fca5a5">CLOSED → nak</text>
     </g>
-    <text x="800" y="437" fill="#5b6b8c" font-size="10">fail-closed 기본값</text>
+    <text x="800" y="430" fill="#5b6b8c" font-size="10">fail-closed 기본값</text>
+    <text x="800" y="442" fill="#6b5563" font-size="8">Java worker 은퇴 (retired)</text>
   </g>
 
   <!-- port membrane -->
@@ -154,12 +161,13 @@
     <rect x="1044" y="244" width="168" height="12" fill="#3a2412"/>
     <circle cx="1064" cy="239" r="5" fill="#f97316"/>
     <text x="1078" y="243" fill="#fdba74" font-size="12.5" font-weight="700">RAGFlow</text>
-    <text x="1060" y="282" fill="#9fb3d1" font-size="10">datasets</text>
+    <text x="1060" y="278" fill="#9fb3d1" font-size="10">datasets · target-profile 7개 중 일부</text>
     <g font-size="10" fill="#cbb89f">
-      <rect x="1060" y="290" width="136" height="22" rx="5" fill="#251a10"/><text x="1070" y="305">transcript-memory</text>
-      <rect x="1060" y="318" width="136" height="22" rx="5" fill="#251a10"/><text x="1070" y="333">session-summary</text>
-      <rect x="1060" y="346" width="136" height="22" rx="5" fill="#251a10"/><text x="1070" y="361">task-summary</text>
-      <rect x="1060" y="374" width="136" height="22" rx="5" fill="#251a10"/><text x="1070" y="389">approved-memory-card</text>
+      <rect x="1060" y="284" width="136" height="20" rx="5" fill="#1c140c" opacity="0.6"/><text x="1070" y="298" fill="#6b5563" text-decoration="line-through">transcript-memory</text><text x="1184" y="298" fill="#6b5563" font-size="8" text-anchor="end">retired</text>
+      <rect x="1060" y="308" width="136" height="20" rx="5" fill="#251a10"/><text x="1070" y="322">session-memory</text>
+      <rect x="1060" y="332" width="136" height="20" rx="5" fill="#251a10"/><text x="1070" y="346">session-summary</text>
+      <rect x="1060" y="356" width="136" height="20" rx="5" fill="#251a10"/><text x="1070" y="370">task-summary</text>
+      <rect x="1060" y="380" width="136" height="20" rx="5" fill="#251a10"/><text x="1070" y="394">approved-memory-card</text>
     </g>
     <text x="1060" y="424" fill="#5b6b8c" font-size="9.5">upload › metadata › parse</text>
   </g>
