@@ -34,6 +34,7 @@ def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
         "session-memory-quarantine-terminal-skipped",
         "session-memory-repair-zombie-snapshots",
         "brain-context-resolve",
+        "couchdb-migration-flow",
         "couchdb-graph-project",
         "couchdb-graph-status",
     ):
