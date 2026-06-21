@@ -181,6 +181,32 @@ def test_entity_path_short_circuits_to_duplicate_without_add_episode():
     assert graphiti.added == []
 
 
+def test_entity_path_force_reextract_bypasses_entity_extracted_guard():
+    # --reextract-entities must bypass the adapter-level MENTIONS guard as well
+    # as the durable projection resume guard, so an already-extracted episode can
+    # be measured/rebuilt intentionally during bounded live validation.
+    graphiti = _FakeGraphiti()
+
+    async def _already_extracted(driver, episode_id):
+        _ = (driver, episode_id)
+        return True
+
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        force_reextract_entities=True,
+        entity_extracted=_already_extracted,
+    )
+    episode = _episode("Task", "task:force-entity", {"brain_id": "/project/neurons", "task": "force"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "inserted"
+    assert graphiti.saved_uuids == [episode.episode_id, episode.episode_id]
+    assert graphiti.added[0]["uuid"] == episode.episode_id
+
+
 def test_entity_path_hard_fails_on_private_extracted_text():
     # Scenario (d): the LLM entity extractor synthesizes private/secret text.
     # _reject_unsafe_extraction must HARD FAIL (ValueError) so it never persists,
@@ -311,6 +337,7 @@ def test_graphiti_config_from_env_supports_ollama_openai_compatible_defaults():
             "LLM_BRAIN_EMBEDDING_MODEL": "nomic-embed-text",
             "LLM_BRAIN_EMBEDDING_DIM": "768",
             "LLM_BRAIN_GRAPH_EXTRACT_ENTITIES": "true",
+            "LLM_BRAIN_GRAPH_FORCE_REEXTRACT_ENTITIES": "true",
         }
     )
 
@@ -320,12 +347,14 @@ def test_graphiti_config_from_env_supports_ollama_openai_compatible_defaults():
     assert config.embedding_model == "nomic-embed-text"
     assert config.embedding_dim == 768
     assert config.extract_entities is True
+    assert config.force_reextract_entities is True
 
 
 def test_graphiti_config_defaults_to_episode_only_storage():
     config = GraphitiNeo4jConfig.from_env({})
 
     assert config.extract_entities is False
+    assert config.force_reextract_entities is False
 
 
 def test_graphiti_adapters_share_single_async_loop_runner():
