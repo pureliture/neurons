@@ -19,6 +19,8 @@ Streamable HTTP transport를 추가한다. tool 선언/디스패치/안전 기�
 from __future__ import annotations
 
 import ipaddress
+import logging
+import traceback
 from typing import Any
 
 from mcp import types as mcp_types
@@ -33,6 +35,7 @@ from starlette.routing import Route
 from .mcp_server import KnowledgeSearchService, _call_tool, list_tools
 
 DEFAULT_PORT = 8765
+_LOGGER = logging.getLogger(__name__)
 
 # Tailscale tailnet 대역: IPv4 CGNAT 100.64.0.0/10, IPv6 ULA fd7a:115c:a1e0::/48.
 # 신뢰 경계 = tailnet 전용이므로 비-loopback bind는 이 대역만 허용한다(v1 앱 token 없음 →
@@ -59,6 +62,46 @@ def _bracket(host: str) -> str:
     except ValueError:
         pass
     return host
+
+
+def _is_loopback_address(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host == "localhost"
+
+
+def _transport_security_settings(host: str, port: int) -> TransportSecuritySettings:
+    authority = f"{_bracket(host)}:{port}"
+    allowed_hosts = [_bracket(host), authority]
+    allowed_origins = [f"http://{_bracket(host)}", f"http://{authority}"]
+    if _is_loopback_address(host):
+        loopback_hosts = [
+            "localhost",
+            f"localhost:{port}",
+            "127.0.0.1",
+            f"127.0.0.1:{port}",
+            "[::1]",
+            f"[::1]:{port}",
+        ]
+        allowed_hosts.extend(alias for alias in loopback_hosts if alias not in allowed_hosts)
+        allowed_origins.extend(
+            f"http://{alias}" for alias in loopback_hosts if f"http://{alias}" not in allowed_origins
+        )
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
+def _redacted_traceback(exc: BaseException) -> str:
+    frames = traceback.extract_tb(exc.__traceback__)
+    parts = []
+    for frame in frames[-6:]:
+        filename = frame.filename.replace("\\", "/").rsplit("/", 1)[-1]
+        parts.append(f"{filename}:{frame.name}:{frame.lineno}")
+    return " > ".join(parts)
 
 
 def _to_sdk_tools() -> list[mcp_types.Tool]:
@@ -101,9 +144,14 @@ async def _dispatch_call_tool(
             content=[mcp_types.TextContent(type="text", text=f"invalid params: {type(exc).__name__}")],
             isError=True,
         )
-    except Exception:
+    except Exception as exc:
         # 예기치 못한 내부 예외(graph adapter stack 등)는 마스킹 = handle_jsonrpc_message의
         # -32603 정책을 HTTP 경로에 재현. private path/token/raw id/stack 비노출(CLAUDE.md).
+        _LOGGER.error(
+            "unexpected mcp-http tool execution error: %s stack=%s",
+            type(exc).__name__,
+            _redacted_traceback(exc),
+        )
         return mcp_types.CallToolResult(
             content=[mcp_types.TextContent(type="text", text="internal error")],
             isError=True,
@@ -135,7 +183,7 @@ def build_app(
     # --allow-non-loopback + tailnet 대역일 때만 허용(공개/사설 IP 오설정 노출 차단).
     if host == "0.0.0.0":  # noqa: S104 - 명시적 거부 가드
         raise ValueError("mcp-http refuses 0.0.0.0 bind")
-    is_loopback = host in {"127.0.0.1", "localhost", "::1"}
+    is_loopback = _is_loopback_address(host)
     if not is_loopback:
         if not allow_non_loopback:
             raise ValueError("mcp-http must bind loopback unless --allow-non-loopback is set")
@@ -155,17 +203,11 @@ def build_app(
     async def _handle_call_tool(
         name: str, arguments: dict[str, Any] | None
     ) -> mcp_types.CallToolResult:
+        service.invalidate_brain_card_cache()
         return await _dispatch_call_tool(service, name, arguments)
 
-    # 비-loopback(tailnet) bind면 DNS rebinding 보호 활성 + Host/Origin 허용목록 고정.
-    security_settings: TransportSecuritySettings | None = None
-    if not is_loopback:
-        authority = f"{_bracket(host)}:{port}"
-        security_settings = TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=[_bracket(host), authority],
-            allowed_origins=[f"http://{_bracket(host)}", f"http://{authority}"],
-        )
+    # DNS rebinding 보호는 loopback/tailnet 모두 활성화한다.
+    security_settings = _transport_security_settings(host, port)
 
     session_manager = StreamableHTTPSessionManager(
         app=server,
