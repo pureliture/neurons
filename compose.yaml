@@ -165,6 +165,63 @@ services:
       - llm-brain-neo4j-data:/data
       - llm-brain-neo4j-logs:/logs
 
+  neuron-knowledge-mcp:
+    # 읽기 전용 recall MCP를 Streamable HTTP로 노출(end-client가 tailnet URL로 연결).
+    # profile 게이팅: 기본 `compose up`은 이 서비스를 띄우지 않는다. --graph-required로
+    # Neo4j 필수이므로 llm-brain-graph 프로필도 함께 활성화해야 한다:
+    #   docker compose --profile llm-brain-mcp --profile llm-brain-graph up
+    # 신뢰 경계 = Tailscale tailnet 전용. MCP_HTTP_HOST를 반드시 tailnet IP로 지정한다
+    # (미지정 시 ${...:?}로 기동 거부 + 0.0.0.0은 코드가 하드 거부 = 이중 방어).
+    # network_mode: host로 127.0.0.1의 Neo4j(17687)/vertex-wrapper(8930)/PG에 도달하고
+    # 동시에 tailnet 인터페이스에 bind한다.
+    profiles: ["llm-brain-mcp"]
+    depends_on:
+      llm-brain-neo4j:
+        condition: service_healthy
+    build:
+      context: ./worker
+      dockerfile: Dockerfile.mcp-http
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - neuron-knowledge
+      - mcp-http
+      - --ledger
+      - /app/state/ledger.sqlite
+      - --host
+      - ${MCP_HTTP_HOST:?set MCP_HTTP_HOST to the tailnet IP (never 0.0.0.0)}
+      - --port
+      - ${MCP_HTTP_PORT:-8765}
+      - --allow-non-loopback
+      - --enable-graph
+      # graph-required: Neo4j/wrapper 미가용 시 기동 거부(advisor recall은 graph 중심).
+      # degrade 기동을 원하면 이 플래그를 제거한다.
+      - --graph-required
+    env_file:
+      # graph LLM/embedding 키(LLM_BRAIN_EMBEDDING_*·LLM_BRAIN_LLM_*·
+      # LLM_BRAIN_GRAPH_LLM_PROVIDER·LLM_BRAIN_GRAPH_EXTRACT_ENTITIES·API key 등)는
+      # 운영자 brain env 파일에서 주입한다 — 키 이름은 worker 코드(graphiti_adapter.from_env)가
+      # 읽는 정본을 그대로 쓴다(여기서 재정의해 오타로 갈라지지 않게 함).
+      - ${LLM_BRAIN_ENV_FILE:?set LLM_BRAIN_ENV_FILE (brain env, e.g. /home/ops/Projects/neurons/.env)}
+    environment:
+      # env_file에 없거나 배포별로 강제할 값만 명시(environment가 env_file을 override).
+      LLM_BRAIN_GRAPH_ENABLED: "true"
+      LLM_BRAIN_GRAPH_GROUP_ID: ${LLM_BRAIN_GRAPH_GROUP_ID:-}
+      LLM_BRAIN_NEO4J_URI: ${LLM_BRAIN_NEO4J_URI:-bolt://127.0.0.1:17687}
+      LLM_BRAIN_NEO4J_USER: ${LLM_BRAIN_NEO4J_USER:-neo4j}
+      LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:?set LLM_BRAIN_NEO4J_PASSWORD}
+      # 실 ledger는 PG. open_read_only의 --ledger 파일은 placeholder. network_mode host면 DSN host=127.0.0.1.
+      NEURON_LEDGER_PG_DSN: ${NEURON_LEDGER_PG_DSN:?set NEURON_LEDGER_PG_DSN (PG ledger)}
+    healthcheck:
+      # python:3.13-slim엔 curl/wget이 없으므로 stdlib urllib로 점검. 서버가 tailnet IP에
+      # bind하므로 loopback이 아닌 MCP_HTTP_HOST로 확인(network_mode: host라 도달 가능).
+      test:
+        - CMD-SHELL
+        - python -c "import sys,urllib.request; host='${MCP_HTTP_HOST}'; port='${MCP_HTTP_PORT:-8765}'; authority=f'[{host}]:{port}' if ':' in host and not host.startswith('[') else f'{host}:{port}'; sys.exit(0 if urllib.request.urlopen(f'http://{authority}/healthz',timeout=3).status==200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
 volumes:
   nats_data:
   rag-ingress-live-state:

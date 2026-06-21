@@ -1,0 +1,28 @@
+# Streamable HTTP MCP transport 컨테이너 (optional extra: mcp-http).
+#
+# 기본 worker 이미지(Dockerfile)는 이 extra 없이 빌드된다(trim 철학 보존). 이 변형만
+# mcp(FastMCP) + starlette + uvicorn을 설치한다. 읽기 전용 recall transport 전용이며
+# host/port/tailnet/graph 플래그는 compose command가 주입한다(이미지 CMD는 안전 기본값).
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY lib ./lib
+RUN pip install --no-cache-dir ".[mcp-http]"
+
+# open_read_only는 --ledger 경로의 존재만 검증한다(실 데이터는 NEURON_LEDGER_PG_DSN→PG).
+# placeholder ledger 파일을 둔다.
+RUN useradd --create-home --shell /usr/sbin/nologin appuser \
+    && mkdir -p /app/state \
+    && touch /app/state/ledger.sqlite \
+    && chown -R appuser:appuser /app/state
+
+USER appuser
+
+# 안전 기본값: loopback bind. 네트워크 노출(tailnet --host + --allow-non-loopback)과
+# graph/ledger 플래그는 compose command가 덮어쓴다. 0.0.0.0 bind는 코드가 거부한다.
+CMD ["neuron-knowledge", "mcp-http", "--ledger", "/app/state/ledger.sqlite", "--host", "127.0.0.1"]
