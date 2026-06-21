@@ -61,7 +61,8 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Promote episodes already projected episodic-only to the entity pass. "
             "Implies --extract-entities and bypasses the entity-level resume guard "
-            "so the entity pass re-runs even when an episodic record exists."
+            "and adapter entity-extracted guard so the entity pass re-runs even "
+            "when an episodic/entity record exists."
         ),
     )
     args = parser.parse_args(argv)
@@ -174,11 +175,18 @@ def run_projection(
     # The entity pass on/off default stays env-driven
     # (LLM_BRAIN_GRAPH_EXTRACT_ENTITIES); --extract-entities / --reextract-entities
     # force it on for this run by overlaying the env the adapter reads. None means
-    # "no override": keep the existing env default (behavior-preserving).
+    # "no override": keep the existing env default (behavior-preserving). Reextract
+    # also tells the adapter to bypass its already-MENTIONS guard; otherwise the
+    # durable projection resume would be bypassed but Graphiti would still return
+    # adapter-level duplicates for already-extracted episodes.
     graph_environ = None
-    if extract_entities is not None:
+    if extract_entities is not None or reextract_entities:
         graph_environ = dict(os.environ)
-        graph_environ["LLM_BRAIN_GRAPH_EXTRACT_ENTITIES"] = "true" if extract_entities else "false"
+        if extract_entities is not None:
+            graph_environ["LLM_BRAIN_GRAPH_EXTRACT_ENTITIES"] = "true" if extract_entities else "false"
+        if reextract_entities:
+            graph_environ["LLM_BRAIN_GRAPH_EXTRACT_ENTITIES"] = "true"
+            graph_environ["LLM_BRAIN_GRAPH_FORCE_REEXTRACT_ENTITIES"] = "true"
     graph_adapter = build_graph_adapter_from_env(
         environ=graph_environ,
         enable_flag=True if enable_graph else None,

@@ -596,6 +596,42 @@ def test_cli_reextract_entities_bypasses_entity_level_resume(tmp_path, monkeypat
     assert second["projection"]["duplicates"] == 1
 
 
+def test_cli_reextract_entities_sets_adapter_force_reextract_env(tmp_path, monkeypatch):
+    # Projection resume bypass alone is not enough: the Graphiti adapter has its
+    # own MENTIONS guard. --reextract-entities must set a second env bit so the
+    # adapter intentionally re-runs the entity pass for already-extracted nodes.
+    ledger_path = tmp_path / "ledger.sqlite3"
+    Ledger(ledger_path).upsert_llm_brain_memory_card(_accepted_task_card("mem_cli_force_env"))
+    captured_environ: dict[str, str] = {}
+
+    def _capture(environ=None, **kwargs):
+        _ = kwargs
+        assert environ is not None
+        captured_environ.update(environ)
+        return _EntityFlagFakeGraph()
+
+    monkeypatch.setattr(
+        "agent_knowledge.llm_brain_core.projection_cli.build_graph_adapter_from_env",
+        _capture,
+    )
+
+    assert neuron_main(
+        [
+            "brain-project",
+            "--ledger",
+            str(ledger_path),
+            "--project",
+            "neurons",
+            "--skip-source-refs",
+            "--enable-graph",
+            "--reextract-entities",
+        ]
+    ) == 0
+
+    assert captured_environ["LLM_BRAIN_GRAPH_EXTRACT_ENTITIES"] == "true"
+    assert captured_environ["LLM_BRAIN_GRAPH_FORCE_REEXTRACT_ENTITIES"] == "true"
+
+
 # --------------------------------------------------------------------------- #
 # TDD 7: behavior-preserving regression (extract_entities=False default)
 # --------------------------------------------------------------------------- #

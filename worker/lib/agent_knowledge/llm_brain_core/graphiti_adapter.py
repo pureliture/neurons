@@ -50,6 +50,7 @@ class GraphitiNeo4jConfig:
     embedding_dim: int = 1024
     store_raw_episode_content: bool = True
     extract_entities: bool = False
+    force_reextract_entities: bool = False
     read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS
     write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS
 
@@ -74,6 +75,8 @@ class GraphitiNeo4jConfig:
             store_raw_episode_content=env.get("LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT", "true").lower()
             not in {"0", "false", "no"},
             extract_entities=env.get("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES", "false").lower() in {"1", "true", "yes"},
+            force_reextract_entities=env.get("LLM_BRAIN_GRAPH_FORCE_REEXTRACT_ENTITIES", "false").lower()
+            in {"1", "true", "yes"},
             read_timeout_seconds=_float_env(
                 env.get("LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS", ""),
                 default=DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
@@ -99,6 +102,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
         *,
         default_group_id: str = "",
         extract_entities: bool = False,
+        force_reextract_entities: bool = False,
         episode_exists: Callable[[Any, str], Any] | None = None,
         entity_extracted: Callable[[Any, str], Any] | None = None,
         read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
@@ -108,6 +112,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
         self._graphiti = graphiti
         self._default_group_id = default_group_id
         self._extract_entities = extract_entities
+        self._force_reextract_entities = force_reextract_entities
         # Split read/write timeouts: a read that hangs must not be forced to wait
         # the (longer) write upper bound, and vice versa. Injectable so a unit
         # test can drive the timeout path deterministically with a tiny bound.
@@ -134,6 +139,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
             _build_graphiti(config),
             default_group_id=config.default_group_id,
             extract_entities=config.extract_entities,
+            force_reextract_entities=config.force_reextract_entities,
             read_timeout_seconds=config.read_timeout_seconds,
             write_timeout_seconds=config.write_timeout_seconds,
         )
@@ -208,7 +214,10 @@ class GraphitiNeo4jGraphMemoryAdapter:
             # probe specifically for already-extracted Entity/RELATES_TO and treat
             # a hit as `duplicate`, so the entity pass is not re-run (and the LLM
             # not re-billed) for an episode already extracted.
-            if await self._entity_extracted(self._graphiti.driver, episode.episode_id):
+            if (
+                not self._force_reextract_entities
+                and await self._entity_extracted(self._graphiti.driver, episode.episode_id)
+            ):
                 return "duplicate"
             # Ensure the episode_id-keyed EpisodicNode exists BEFORE add_episode.
             # Graphiti's add_episode(uuid=episode_id) does get_by_uuid(uuid) first
