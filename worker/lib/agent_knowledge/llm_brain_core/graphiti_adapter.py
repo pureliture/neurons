@@ -6,7 +6,7 @@ import os
 import re
 import threading
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -43,6 +43,10 @@ class GraphitiNeo4jConfig:
     embedding_dim: int = 1024
     store_raw_episode_content: bool = True
     extract_entities: bool = False
+    fallback_llm_model: str = ""
+    fallback_small_model: str = ""
+    primary_attempts: int = 1
+    fallback_attempts: int = 1
     read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS
     write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS
 
@@ -67,6 +71,22 @@ class GraphitiNeo4jConfig:
             store_raw_episode_content=env.get("LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT", "true").lower()
             not in {"0", "false", "no"},
             extract_entities=env.get("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES", "false").lower() in {"1", "true", "yes"},
+            fallback_llm_model=env.get(
+                "LLM_BRAIN_LLM_FALLBACK_MODEL",
+                env.get("LLM_BRAIN_GRAPH_FALLBACK_LLM_MODEL", ""),
+            ),
+            fallback_small_model=env.get(
+                "LLM_BRAIN_SMALL_LLM_FALLBACK_MODEL",
+                env.get("LLM_BRAIN_GRAPH_FALLBACK_SMALL_LLM_MODEL", ""),
+            ),
+            primary_attempts=_positive_int_env(
+                env.get("LLM_BRAIN_GRAPH_PRIMARY_ATTEMPTS", ""),
+                default=1,
+            ),
+            fallback_attempts=_positive_int_env(
+                env.get("LLM_BRAIN_GRAPH_FALLBACK_ATTEMPTS", ""),
+                default=1,
+            ),
             read_timeout_seconds=_float_env(
                 env.get("LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS", ""),
                 default=DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
@@ -90,16 +110,22 @@ class GraphitiNeo4jGraphMemoryAdapter:
         self,
         graphiti: Any,
         *,
+        fallback_graphiti: Any | None = None,
         default_group_id: str = "",
         extract_entities: bool = False,
+        primary_attempts: int = 1,
+        fallback_attempts: int = 1,
         episode_exists: Callable[[Any, str], Any] | None = None,
         read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
         write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS,
         runner: "_AsyncLoopRunner | None" = None,
     ) -> None:
         self._graphiti = graphiti
+        self._fallback_graphiti = fallback_graphiti
         self._default_group_id = default_group_id
         self._extract_entities = extract_entities
+        self._primary_attempts = max(1, int(primary_attempts))
+        self._fallback_attempts = max(1, int(fallback_attempts))
         # Split read/write timeouts: a read that hangs must not be forced to wait
         # the (longer) write upper bound, and vice versa. Injectable so a unit
         # test can drive the timeout path deterministically with a tiny bound.
@@ -115,10 +141,23 @@ class GraphitiNeo4jGraphMemoryAdapter:
 
     @classmethod
     def from_config(cls, config: GraphitiNeo4jConfig) -> "GraphitiNeo4jGraphMemoryAdapter":
+        fallback_graphiti = None
+        if config.extract_entities and config.fallback_llm_model:
+            fallback_config = replace(
+                config,
+                llm_model=config.fallback_llm_model,
+                small_model=config.fallback_small_model or config.fallback_llm_model,
+                fallback_llm_model="",
+                fallback_small_model="",
+            )
+            fallback_graphiti = _build_graphiti(fallback_config)
         return cls(
             _build_graphiti(config),
+            fallback_graphiti=fallback_graphiti,
             default_group_id=config.default_group_id,
             extract_entities=config.extract_entities,
+            primary_attempts=config.primary_attempts,
+            fallback_attempts=config.fallback_attempts,
             read_timeout_seconds=config.read_timeout_seconds,
             write_timeout_seconds=config.write_timeout_seconds,
         )
@@ -156,7 +195,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 await graphiti_episode.save(self._graphiti.driver)
                 return "inserted"
 
-            await self._graphiti.add_episode(
+            await self._add_episode_with_fallback(
                 name=episode.episode_id,
                 episode_body=body,
                 source_description=f"llm_brain_core:{episode.entity_type}:{episode.natural_id}",
@@ -167,6 +206,24 @@ class GraphitiNeo4jGraphMemoryAdapter:
             return "inserted"
 
         return self._runner.run(_call, timeout=self._write_timeout_seconds)
+
+    async def _add_episode_with_fallback(self, **kwargs: Any) -> None:
+        last_error: Exception | None = None
+        for _ in range(self._primary_attempts):
+            try:
+                await self._graphiti.add_episode(**kwargs)
+                return
+            except Exception as exc:
+                last_error = exc
+        if self._fallback_graphiti is not None:
+            for _ in range(self._fallback_attempts):
+                try:
+                    await self._fallback_graphiti.add_episode(**kwargs)
+                    return
+                except Exception as exc:
+                    last_error = exc
+        if last_error is not None:
+            raise last_error
 
     def search_context(
         self,
@@ -325,6 +382,50 @@ def probe_graphiti_connectivity(adapter: Any) -> None:
         )
 
 
+_STRUCTURED_KEY_ALIASES = {
+    "entity_name": "name",
+    "entity": "name",
+    "entity_value": "name",
+    "entity_text": "name",
+}
+
+
+def _normalize_structured_keys(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_normalize_structured_keys(item) for item in value]
+    if isinstance(value, dict):
+        result = {key: _normalize_structured_keys(val) for key, val in value.items()}
+        for alias, canonical in _STRUCTURED_KEY_ALIASES.items():
+            if alias in result and canonical not in result:
+                result[canonical] = result.pop(alias)
+        if "name" in result and "entity_type_id" not in result:
+            result["entity_type_id"] = 0
+        if isinstance(result.get("episode_indices"), list):
+            indices: list[int] = []
+            for item in result["episode_indices"]:
+                try:
+                    indices.append(int(item))
+                except (TypeError, ValueError):
+                    indices.append(0)
+            result["episode_indices"] = indices
+        return result
+    return value
+
+
+def _normalize_structured_response(value: Any, response_model: Any = None) -> Any:
+    normalized = _normalize_structured_keys(value)
+    if not isinstance(normalized, list) or response_model is None:
+        return normalized
+    fields = getattr(response_model, "model_fields", {}) or {}
+    list_field_names = [
+        name for name, field in fields.items()
+        if str(getattr(field, "annotation", "")).startswith("list[")
+    ]
+    if len(list_field_names) == 1:
+        return {list_field_names[0]: normalized}
+    return normalized
+
+
 def _build_graphiti(config: GraphitiNeo4jConfig):
     from graphiti_core import Graphiti
 
@@ -342,7 +443,16 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
             small_model=config.small_model or config.llm_model or ("deepseek-r1:7b" if config.llm_provider == "ollama" else None),
             base_url=base_url or None,
         )
-        llm_client = OpenAIGenericClient(config=llm_config)
+
+        class _NeuronStructuredClient(OpenAIGenericClient):
+            async def _generate_response(self, *args, **kwargs):
+                response_model = kwargs.get("response_model")
+                if response_model is None and len(args) >= 2:
+                    response_model = args[1]
+                data = await super()._generate_response(*args, **kwargs)
+                return _normalize_structured_response(data, response_model)
+
+        llm_client = _NeuronStructuredClient(config=llm_config)
         embedder = OpenAIEmbedder(
             config=OpenAIEmbedderConfig(
                 api_key=config.embedding_api_key or api_key,
@@ -584,6 +694,11 @@ def _int_env(value: str, *, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _positive_int_env(value: str, *, default: int) -> int:
+    parsed = _int_env(value, default=default)
+    return parsed if parsed > 0 else default
 
 
 def _float_env(value: str, *, default: float) -> float:

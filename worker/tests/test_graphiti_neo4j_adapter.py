@@ -18,6 +18,7 @@ from agent_knowledge.llm_brain_core.graphiti_adapter import (
     _AsyncLoopRunner,
     _datetime_to_iso,
     _episode_node_to_ontology,
+    _normalize_structured_response,
 )
 from agent_knowledge.llm_brain_core.models import OntologyEpisode
 
@@ -161,10 +162,117 @@ def test_graphiti_config_from_env_supports_ollama_openai_compatible_defaults():
     assert config.extract_entities is True
 
 
+def test_graphiti_config_from_env_supports_llm_fallback_policy():
+    config = GraphitiNeo4jConfig.from_env(
+        {
+            "LLM_BRAIN_GRAPH_EXTRACT_ENTITIES": "true",
+            "LLM_BRAIN_LLM_MODEL": "deepseek-v4-flash:cloud",
+            "LLM_BRAIN_SMALL_LLM_MODEL": "deepseek-v4-flash:cloud",
+            "LLM_BRAIN_LLM_FALLBACK_MODEL": "gemini-3.5-flash-thinking",
+            "LLM_BRAIN_SMALL_LLM_FALLBACK_MODEL": "gemini-3.5-flash-thinking",
+            "LLM_BRAIN_GRAPH_PRIMARY_ATTEMPTS": "3",
+            "LLM_BRAIN_GRAPH_FALLBACK_ATTEMPTS": "2",
+        }
+    )
+
+    assert config.llm_model == "deepseek-v4-flash:cloud"
+    assert config.fallback_llm_model == "gemini-3.5-flash-thinking"
+    assert config.fallback_small_model == "gemini-3.5-flash-thinking"
+    assert config.primary_attempts == 3
+    assert config.fallback_attempts == 2
+
+
 def test_graphiti_config_defaults_to_episode_only_storage():
     config = GraphitiNeo4jConfig.from_env({})
 
     assert config.extract_entities is False
+
+
+def test_structured_response_normalizes_entity_name_alias():
+    from graphiti_core.prompts.extract_nodes import ExtractedEntities
+
+    normalized = _normalize_structured_response(
+        {
+            "extracted_entities": [
+                {"entity_name": "Project Atlas", "entity_type_id": 0, "episode_indices": [0]}
+            ]
+        },
+        ExtractedEntities,
+    )
+
+    assert normalized == {
+        "extracted_entities": [
+            {"name": "Project Atlas", "entity_type_id": 0, "episode_indices": [0]}
+        ]
+    }
+
+
+def test_structured_response_wraps_single_list_for_graphiti_model():
+    from graphiti_core.prompts.extract_nodes import ExtractedEntities
+
+    normalized = _normalize_structured_response(
+        [{"entity_text": "Neo4j", "episode_indices": [0]}],
+        ExtractedEntities,
+    )
+
+    assert normalized == {
+        "extracted_entities": [{"name": "Neo4j", "entity_type_id": 0, "episode_indices": [0]}]
+    }
+
+
+def test_structured_response_normalizes_episode_indices():
+    from graphiti_core.prompts.extract_edges import ExtractedEdges
+
+    normalized = _normalize_structured_response(
+        {
+            "edges": [
+                {
+                    "source_entity_name": "Project Atlas",
+                    "target_entity_name": "Neo4j",
+                    "relation_type": "DEPENDS_ON",
+                    "episode_indices": ["episode:abc", "1"],
+                }
+            ]
+        },
+        ExtractedEdges,
+    )
+
+    assert normalized["edges"][0]["episode_indices"] == [0, 1]
+
+
+def test_graphiti_adapter_retries_primary_then_fallback_for_entity_extraction():
+    primary = _FailingGraphiti(RuntimeError("primary failed"))
+    fallback = _FakeGraphiti()
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        primary,
+        fallback_graphiti=fallback,
+        extract_entities=True,
+        primary_attempts=3,
+        fallback_attempts=1,
+    )
+    episode = _episode("Task", "task:fallback", {"brain_id": "/project/neurons", "task": "fallback"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "inserted"
+    assert len(primary.added) == 3
+    assert len(fallback.added) == 1
+    assert fallback.added[0]["name"] == episode.episode_id
+
+
+def test_graphiti_adapter_raises_after_primary_attempts_without_fallback():
+    primary = _FailingGraphiti(RuntimeError("primary failed"))
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        primary,
+        extract_entities=True,
+        primary_attempts=2,
+    )
+    episode = _episode("Task", "task:no-fallback", {"brain_id": "/project/neurons", "task": "no fallback"})
+
+    with pytest.raises(RuntimeError, match="primary failed"):
+        adapter.upsert_episode(episode)
+
+    assert len(primary.added) == 2
 
 
 def test_graphiti_adapters_share_single_async_loop_runner():
@@ -407,6 +515,16 @@ class _FakeGraphiti:
         _ = reference_time
         _ = group_ids
         return list(self.episodes[-last_n:])
+
+
+class _FailingGraphiti(_FakeGraphiti):
+    def __init__(self, exc: Exception) -> None:
+        super().__init__()
+        self._exc = exc
+
+    async def add_episode(self, **kwargs):
+        self.added.append(dict(kwargs, source=kwargs["source"].value))
+        raise self._exc
 
 
 class _SlowGraphiti:
