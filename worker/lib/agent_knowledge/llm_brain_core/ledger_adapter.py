@@ -293,6 +293,34 @@ class LedgerGraphProjectionStateStore:
             ).fetchall()
         return {str(row["episode_id"]) for row in rows}
 
+    def list_projected_natural_ids(
+        self,
+        project: str | None = None,
+        *,
+        extraction_level: str | None = None,
+        entity_type: str | None = None,
+    ) -> set[str]:
+        clauses: list[str] = []
+        params: list[str] = []
+        if project is not None:
+            clauses.append("project = ?")
+            params.append(project)
+        if extraction_level is not None:
+            clauses.append("extraction_level = ?")
+            params.append(str(extraction_level))
+        if entity_type is not None:
+            clauses.append("entity_type = ?")
+            params.append(str(entity_type))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._ledger._connect() as connection:
+            if not _table_exists(connection, "llm_brain_graph_projection_state"):
+                return set()
+            rows = connection.execute(
+                "SELECT natural_id FROM llm_brain_graph_projection_state" + where,
+                tuple(params),
+            ).fetchall()
+        return {str(row["natural_id"]) for row in rows if str(row["natural_id"])}
+
     def _ensure_schema(self) -> None:
         if getattr(self._ledger, "read_only", False):
             return

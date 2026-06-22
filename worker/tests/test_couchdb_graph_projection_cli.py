@@ -149,6 +149,33 @@ def test_projects_more_than_one_hundred_sessions_and_resumes_entity_level(tmp_pa
     assert second["projection"]["failed"] == 0
 
 
+def test_resume_uses_session_natural_id_when_episode_hash_changes(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    raw_id = "stable-natural-id"
+    _seed_session(store, raw_id=raw_id, body="first body mentions Graphiti and Neo4j")
+
+    first = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=1,
+    )
+
+    assert first["projection"]["projected"] == 1
+
+    _seed_session(store, raw_id=raw_id, body="changed body mentions DeepSeek and Gemini")
+    second = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_ExplodingEntityGraph(),
+        limit=1,
+    )
+
+    assert second["projection"]["projected"] == 0
+    assert second["projection"]["skipped_resumed"] == 1
+    assert second["projection"]["failed"] == 0
+
+
 def test_partial_projection_continues_and_writes_dead_letter(tmp_path):
     store = InMemoryCouchDBSourceStore()
     _seed_session(store, raw_id="good")
