@@ -510,6 +510,13 @@ enable되어도 Neo4j 연결 불가면 `UnavailableGraphMemoryAdapter`로 degrad
 LLM 추출 없는 단일 `EpisodicNode` JSON 저장이고, entity extraction은
 `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES`로 한 번 더 gate된다.
 
+**Metadata-first hybrid transition:** `MetadataFirstHybridGraphAdapter`는 graph에
+opaque id, hash, lifecycle, scope 같은 metadata-first episode만 저장하고, 검색용 free
+text는 선택적 `HybridTextMirror`에 둔다. read path는 mirror hit을 metadata episode에
+episode-id exact lookup으로 public-safe hint join하지만, canonical winner는 여전히
+artifact/MemoryCard ledger다. 이 전환 계층은 `GraphMemoryAdapter` 프로토콜을 그대로
+구현하므로 기존 Graphiti/Neo4j, fake/null adapter 호출부를 깨지 않는다.
+
 <br/>
 
 <img src="https://capsule-render.vercel.app/api?type=rect&color=0:0e7490,100:2dd4bf&height=3" width="100%" />

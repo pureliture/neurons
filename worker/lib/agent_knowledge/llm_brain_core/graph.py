@@ -23,6 +23,14 @@ class GraphMemoryAdapter(Protocol):
         limit: int = 10,
     ) -> GraphMemoryResult: ...
 
+    def get_episodes_by_ids(
+        self,
+        episode_ids: list[str] | tuple[str, ...],
+        *,
+        brain_id: str = "",
+        entity_types: list[str] | None = None,
+    ) -> tuple[OntologyEpisode, ...]: ...
+
 
 class NullGraphMemoryAdapter:
     def upsert_episode(self, episode: OntologyEpisode) -> UpsertEpisodeResult:
@@ -38,6 +46,15 @@ class NullGraphMemoryAdapter:
         limit: int = 10,
     ) -> GraphMemoryResult:
         return GraphMemoryResult(status="unavailable", details=("graph_disabled",))
+
+    def get_episodes_by_ids(
+        self,
+        episode_ids: list[str] | tuple[str, ...],
+        *,
+        brain_id: str = "",
+        entity_types: list[str] | None = None,
+    ) -> tuple[OntologyEpisode, ...]:
+        return ()
 
 
 class UnavailableGraphMemoryAdapter:
@@ -59,6 +76,15 @@ class UnavailableGraphMemoryAdapter:
         limit: int = 10,
     ) -> GraphMemoryResult:
         return GraphMemoryResult(status="error", details=(self._reason,))
+
+    def get_episodes_by_ids(
+        self,
+        episode_ids: list[str] | tuple[str, ...],
+        *,
+        brain_id: str = "",
+        entity_types: list[str] | None = None,
+    ) -> tuple[OntologyEpisode, ...]:
+        return ()
 
 
 class FakeGraphMemoryAdapter:
@@ -135,6 +161,28 @@ class FakeGraphMemoryAdapter:
                     seen.add(episode.episode_id)
         matches.sort(key=lambda episode: (episode.observed_at, episode.episode_id), reverse=True)
         return GraphMemoryResult(status="available", episodes=tuple(matches[:bounded]))
+
+    def get_episodes_by_ids(
+        self,
+        episode_ids: list[str] | tuple[str, ...],
+        *,
+        brain_id: str = "",
+        entity_types: list[str] | None = None,
+    ) -> tuple[OntologyEpisode, ...]:
+        wanted_ids = [str(item) for item in episode_ids if str(item or "")]
+        wanted_types = set(entity_types or [])
+        target_group = _normalize_group_id(brain_id or self._default_group_id)
+        episodes: list[OntologyEpisode] = []
+        for episode_id in wanted_ids:
+            episode = self._episodes.get(episode_id)
+            if episode is None:
+                continue
+            if target_group and self._episode_group(episode) != target_group:
+                continue
+            if wanted_types and episode.entity_type not in wanted_types:
+                continue
+            episodes.append(episode)
+        return tuple(episodes)
 
     def _episode_group(self, episode: OntologyEpisode) -> str:
         stored = self._group_ids.get(episode.episode_id)
