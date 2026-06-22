@@ -172,12 +172,13 @@ def run_couchdb_projection(
                 if resume and not reextract_entities:
                     if session_project not in projected_cache:
                         projected_cache[session_project] = set(
-                            projection_state_store.list_projected_ids(
+                            projection_state_store.list_projected_natural_ids(
                                 session_project,
                                 extraction_level=target_level,
+                                entity_type="Session",
                             )
                         )
-                    if episode.episode_id in projected_cache[session_project]:
+                    if episode.natural_id in projected_cache[session_project]:
                         skipped_resumed += 1
                         status = "skipped_resumed"
                     else:
@@ -186,7 +187,7 @@ def run_couchdb_projection(
                         duplicates += d
                         failed += f
                         if not f:
-                            projected_cache[session_project].add(episode.episode_id)
+                            projected_cache[session_project].add(episode.natural_id)
                 else:
                     status, reason, p, d, f = _project_one(worker, episode)
                     projected += p
