@@ -70,6 +70,11 @@ class _FakeQdrantClient:
         return {"points": ranked[:limit]}
 
 
+class _ListQueryQdrantClient(_FakeQdrantClient):
+    def query_points(self, **kwargs):
+        return super().query_points(**kwargs)["points"]
+
+
 class _StaticNormalizer:
     def __init__(self, text: str) -> None:
         self.text = text
@@ -189,6 +194,22 @@ def test_qdrant_docling_adapter_filters_target_profile_before_limit():
     assert hits[0]["target_profile"] == "ragflow-session-memory"
 
 
+def test_qdrant_docling_adapter_accepts_list_query_response():
+    client = _ListQueryQdrantClient()
+    adapter = QdrantDoclingMirrorAdapter(
+        client=client,
+        collection_name="mirror_test",
+        normalizer=PassthroughMarkdownNormalizer(),
+        embedding_provider=HashEmbeddingProvider(size=8),
+    )
+    adapter.submit_document(_document(body="list response shape"))
+
+    hits = adapter.query_mirror_candidates("list response shape", target_profile="ragflow-session-memory")
+
+    assert len(hits) == 1
+    assert hits[0]["target_profile"] == "ragflow-session-memory"
+
+
 def test_qdrant_docling_adapter_query_checks_embedding_size():
     adapter = QdrantDoclingMirrorAdapter(
         client=_FakeQdrantClient(),
@@ -251,6 +272,45 @@ def test_qdrant_docling_adapter_does_not_create_collection_after_probe_error():
     assert client.created is False
 
 
+def test_qdrant_docling_adapter_wraps_collection_exists_probe_error():
+    class BoomClient:
+        def collection_exists(self, collection_name):
+            _ = collection_name
+            raise RuntimeError("auth failed")
+
+        def create_collection(self, *, collection_name, vectors_config):
+            _ = collection_name
+            _ = vectors_config
+            raise AssertionError("must not create after probe failure")
+
+    with pytest.raises(SearchableMirrorUnavailable, match="collection probe failed"):
+        QdrantDoclingMirrorAdapter(client=BoomClient())
+
+
+def test_qdrant_docling_adapter_treats_string_404_as_collection_missing():
+    class NotFound(Exception):
+        status_code = "404"
+
+    class Client:
+        def __init__(self) -> None:
+            self.created = False
+
+        def get_collection(self, collection_name):
+            _ = collection_name
+            raise NotFound("not found")
+
+        def create_collection(self, *, collection_name, vectors_config):
+            _ = collection_name
+            _ = vectors_config
+            self.created = True
+
+    client = Client()
+
+    QdrantDoclingMirrorAdapter(client=client)
+
+    assert client.created is True
+
+
 def test_searchable_mirror_gate_blocks_failover_without_evidence_packet():
     report = build_searchable_mirror_gate_report(dry_run=True, redact_paths=True)
 
@@ -303,6 +363,37 @@ def test_searchable_mirror_gate_rejects_compare_mismatch():
 
     assert report["comparison_gate_status"] == "blocked_until_valid_evidence_packet"
     assert "read_compare_mismatch_count_nonzero" in report["blockers"]
+
+
+def test_searchable_mirror_gate_requires_non_empty_compare_evidence():
+    packet = _valid_evidence_packet()
+    packet["dual_write"]["total_count"] = 0
+    packet["read_compare"]["total_count"] = 0
+    packet["read_compare"]["matched_count"] = 0
+
+    report = build_searchable_mirror_gate_report(
+        dry_run=True,
+        redact_paths=True,
+        evidence_packet=packet,
+    )
+
+    assert report["comparison_gate_status"] == "blocked_until_valid_evidence_packet"
+    assert "dual_write.total_count_must_be_positive" in report["blockers"]
+    assert "read_compare.total_count_must_be_positive" in report["blockers"]
+
+
+def test_searchable_mirror_gate_rejects_bool_counts():
+    packet = _valid_evidence_packet()
+    packet["read_compare"]["mismatch_count"] = False
+
+    report = build_searchable_mirror_gate_report(
+        dry_run=True,
+        redact_paths=True,
+        evidence_packet=packet,
+    )
+
+    assert report["comparison_gate_status"] == "blocked_until_valid_evidence_packet"
+    assert "read_compare.mismatch_count_required" in report["blockers"]
 
 
 def test_searchable_mirror_gate_cli_is_dry_run_redacted_and_no_go(tmp_path, capsys):
