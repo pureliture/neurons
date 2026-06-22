@@ -361,6 +361,8 @@ def test_graphiti_config_from_env_supports_llm_fallback_policy():
             "LLM_BRAIN_SMALL_LLM_FALLBACK_MODEL": "gemini-3.5-flash-thinking",
             "LLM_BRAIN_GRAPH_PRIMARY_ATTEMPTS": "3",
             "LLM_BRAIN_GRAPH_FALLBACK_ATTEMPTS": "2",
+            "LLM_BRAIN_GRAPH_PRIMARY_ATTEMPT_TIMEOUT_SECONDS": "12.5",
+            "LLM_BRAIN_GRAPH_FALLBACK_ATTEMPT_TIMEOUT_SECONDS": "45",
         }
     )
 
@@ -369,6 +371,8 @@ def test_graphiti_config_from_env_supports_llm_fallback_policy():
     assert config.fallback_small_model == "gemini-3.5-flash-thinking"
     assert config.primary_attempts == 3
     assert config.fallback_attempts == 2
+    assert config.primary_attempt_timeout_seconds == 12.5
+    assert config.fallback_attempt_timeout_seconds == 45.0
 
 
 def test_graphiti_config_defaults_to_episode_only_storage():
@@ -449,6 +453,27 @@ def test_graphiti_adapter_retries_primary_then_fallback_for_entity_extraction():
     assert len(primary.added) == 3
     assert len(fallback.added) == 1
     assert fallback.added[0]["name"] == episode.episode_id
+
+
+def test_graphiti_adapter_bounds_primary_attempt_timeout_before_fallback():
+    primary = _SlowAddGraphiti(delay_seconds=1.0)
+    fallback = _FakeGraphiti()
+    fallback.driver = primary.driver
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        primary,
+        fallback_graphiti=fallback,
+        extract_entities=True,
+        primary_attempts=2,
+        fallback_attempts=1,
+        primary_attempt_timeout_seconds=0.01,
+    )
+    episode = _episode("Task", "task:timeout-fallback", {"brain_id": "/project/neurons", "task": "fallback"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "inserted"
+    assert len(primary.added) == 2
+    assert len(fallback.added) == 1
 
 
 def test_graphiti_adapter_raises_after_primary_attempts_without_fallback():
@@ -736,6 +761,17 @@ class _FailingGraphiti(_FakeGraphiti):
     async def add_episode(self, **kwargs):
         self.added.append(dict(kwargs, source=kwargs["source"].value))
         raise self._exc
+
+
+class _SlowAddGraphiti(_FakeGraphiti):
+    def __init__(self, *, delay_seconds: float) -> None:
+        super().__init__()
+        self._delay_seconds = delay_seconds
+
+    async def add_episode(self, **kwargs):
+        self.added.append(dict(kwargs, source=kwargs["source"].value))
+        await asyncio.sleep(self._delay_seconds)
+        return None
 
 
 class _SlowGraphiti:
