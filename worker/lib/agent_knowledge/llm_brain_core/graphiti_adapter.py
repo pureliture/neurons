@@ -55,6 +55,8 @@ class GraphitiNeo4jConfig:
     fallback_small_model: str = ""
     primary_attempts: int = 1
     fallback_attempts: int = 1
+    primary_attempt_timeout_seconds: float = 0.0
+    fallback_attempt_timeout_seconds: float = 0.0
     read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS
     write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS
 
@@ -97,6 +99,14 @@ class GraphitiNeo4jConfig:
                 env.get("LLM_BRAIN_GRAPH_FALLBACK_ATTEMPTS", ""),
                 default=1,
             ),
+            primary_attempt_timeout_seconds=_non_negative_float_env(
+                env.get("LLM_BRAIN_GRAPH_PRIMARY_ATTEMPT_TIMEOUT_SECONDS", ""),
+                default=0.0,
+            ),
+            fallback_attempt_timeout_seconds=_non_negative_float_env(
+                env.get("LLM_BRAIN_GRAPH_FALLBACK_ATTEMPT_TIMEOUT_SECONDS", ""),
+                default=0.0,
+            ),
             read_timeout_seconds=_float_env(
                 env.get("LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS", ""),
                 default=DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
@@ -126,6 +136,8 @@ class GraphitiNeo4jGraphMemoryAdapter:
         force_reextract_entities: bool = False,
         primary_attempts: int = 1,
         fallback_attempts: int = 1,
+        primary_attempt_timeout_seconds: float = 0.0,
+        fallback_attempt_timeout_seconds: float = 0.0,
         episode_exists: Callable[[Any, str], Any] | None = None,
         entity_extracted: Callable[[Any, str], Any] | None = None,
         read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
@@ -139,6 +151,8 @@ class GraphitiNeo4jGraphMemoryAdapter:
         self._force_reextract_entities = force_reextract_entities
         self._primary_attempts = max(1, int(primary_attempts))
         self._fallback_attempts = max(1, int(fallback_attempts))
+        self._primary_attempt_timeout_seconds = max(0.0, float(primary_attempt_timeout_seconds))
+        self._fallback_attempt_timeout_seconds = max(0.0, float(fallback_attempt_timeout_seconds))
         # Split read/write timeouts: a read that hangs must not be forced to wait
         # the (longer) write upper bound, and vice versa. Injectable so a unit
         # test can drive the timeout path deterministically with a tiny bound.
@@ -179,6 +193,8 @@ class GraphitiNeo4jGraphMemoryAdapter:
             force_reextract_entities=config.force_reextract_entities,
             primary_attempts=config.primary_attempts,
             fallback_attempts=config.fallback_attempts,
+            primary_attempt_timeout_seconds=config.primary_attempt_timeout_seconds,
+            fallback_attempt_timeout_seconds=config.fallback_attempt_timeout_seconds,
             read_timeout_seconds=config.read_timeout_seconds,
             write_timeout_seconds=config.write_timeout_seconds,
         )
@@ -309,13 +325,21 @@ class GraphitiNeo4jGraphMemoryAdapter:
         last_error: Exception | None = None
         for _ in range(self._primary_attempts):
             try:
-                return await self._graphiti.add_episode(**kwargs)
+                return await _add_episode_with_attempt_timeout(
+                    self._graphiti,
+                    self._primary_attempt_timeout_seconds,
+                    **kwargs,
+                )
             except Exception as exc:
                 last_error = exc
         if self._fallback_graphiti is not None:
             for _ in range(self._fallback_attempts):
                 try:
-                    return await self._fallback_graphiti.add_episode(**kwargs)
+                    return await _add_episode_with_attempt_timeout(
+                        self._fallback_graphiti,
+                        self._fallback_attempt_timeout_seconds,
+                        **kwargs,
+                    )
                 except Exception as exc:
                     last_error = exc
         if last_error is not None:
@@ -412,6 +436,13 @@ async def _default_episode_exists(driver: Any, episode_id: str) -> bool:
     except Exception:
         return False
     return node is not None
+
+
+async def _add_episode_with_attempt_timeout(graphiti: Any, timeout_seconds: float, **kwargs: Any) -> Any:
+    add_episode = graphiti.add_episode(**kwargs)
+    if timeout_seconds > 0:
+        return await asyncio.wait_for(add_episode, timeout=timeout_seconds)
+    return await add_episode
 
 
 # MENTIONS is the EpisodicNode -> EntityNode edge Graphiti writes when the entity
@@ -951,3 +982,11 @@ def _float_env(value: str, *, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def _non_negative_float_env(value: str, *, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
