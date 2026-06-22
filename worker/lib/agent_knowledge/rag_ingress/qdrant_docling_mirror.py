@@ -297,7 +297,10 @@ class QdrantDoclingMirrorAdapter:
     def _ensure_collection(self) -> None:
         exists = False
         if hasattr(self._client, "collection_exists"):
-            exists = bool(self._client.collection_exists(self._collection_name))
+            try:
+                exists = bool(self._client.collection_exists(self._collection_name))
+            except Exception as exc:
+                raise SearchableMirrorUnavailable("Qdrant collection probe failed") from exc
         else:
             try:
                 self._client.get_collection(self._collection_name)
@@ -571,6 +574,8 @@ def _point_score(point: Any) -> float | None:
 
 
 def _query_result_points(result: Any) -> list[Any]:
+    if isinstance(result, (list, tuple)):
+        return list(result)
     if isinstance(result, dict):
         points = result.get("points")
         if points is not None:
@@ -586,13 +591,17 @@ def _is_qdrant_not_found_error(exc: Exception) -> bool:
     status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
     response = getattr(exc, "response", None)
     response_status = getattr(response, "status_code", None)
-    if status_code == 404 or response_status == 404:
+    if _is_status_404(status_code) or _is_status_404(response_status):
         return True
     class_name = exc.__class__.__name__.lower()
     if "notfound" in class_name or "not_found" in class_name:
         return True
     message = str(exc).lower()
     return "404" in message or "not found" in message
+
+
+def _is_status_404(value: Any) -> bool:
+    return value == 404 or str(value or "").strip() == "404"
 
 
 def _hit_from_payload(payload: dict[str, Any], *, score: float | None) -> SearchableMirrorHit:
@@ -643,6 +652,7 @@ def _validate_searchable_mirror_evidence_packet(
     approval = _section(evidence_packet, "operator_approval", blockers)
 
     _require_digest(dual_write, "dual_write.evidence_digest", blockers)
+    _positive_int(dual_write, "dual_write.total_count", blockers)
     target_profiles = dual_write.get("target_profiles") if isinstance(dual_write, dict) else None
     if not isinstance(target_profiles, list) or not target_profiles:
         blockers.append("dual_write.target_profiles_required")
@@ -650,7 +660,7 @@ def _validate_searchable_mirror_evidence_packet(
         blockers.append("dual_write.target_profiles_invalid")
 
     _require_digest(read_compare, "read_compare.evidence_digest", blockers)
-    compare_total = _non_negative_int(read_compare, "read_compare.total_count", blockers)
+    compare_total = _positive_int(read_compare, "read_compare.total_count", blockers)
     compare_matched = _non_negative_int(read_compare, "read_compare.matched_count", blockers)
     compare_mismatch = _non_negative_int(read_compare, "read_compare.mismatch_count", blockers)
     if compare_mismatch is not None and compare_mismatch != 0:
@@ -715,8 +725,16 @@ def _require_digest(section: dict[str, Any], field: str, blockers: list[str]) ->
 def _non_negative_int(section: dict[str, Any], field: str, blockers: list[str]) -> int | None:
     key = field.split(".", 1)[1]
     value = section.get(key)
-    if not isinstance(value, int) or value < 0:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         blockers.append(f"{field}_required")
+        return None
+    return value
+
+
+def _positive_int(section: dict[str, Any], field: str, blockers: list[str]) -> int | None:
+    value = _non_negative_int(section, field, blockers)
+    if value is not None and value <= 0:
+        blockers.append(f"{field}_must_be_positive")
         return None
     return value
 
