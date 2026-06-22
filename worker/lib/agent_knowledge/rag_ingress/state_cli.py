@@ -105,6 +105,16 @@ def _build_parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--dataset-id")
     reconcile.add_argument("--max-runtime-seconds", type=float, default=300.0)
 
+    mirror_gate = subparsers.add_parser("searchable-mirror-gate")
+    mirror_gate.add_argument("--redact-paths", action="store_true")
+    mirror_gate.add_argument("--dry-run", action="store_true")
+    mirror_gate.add_argument("--evidence-packet")
+    mirror_gate.add_argument("--dual-write-evidence", action="store_true")
+    mirror_gate.add_argument("--read-compare-evidence", action="store_true")
+    mirror_gate.add_argument("--apple-silicon-local-evidence", action="store_true")
+    mirror_gate.add_argument("--ubuntu-host-evidence", action="store_true")
+    mirror_gate.add_argument("--operator-approval", action="store_true")
+
     return parser
 
 
@@ -303,6 +313,27 @@ def _run_reconcile_deliveries(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_searchable_mirror_gate(args: argparse.Namespace) -> int:
+    try:
+        from .qdrant_docling_mirror import build_searchable_mirror_gate_report
+
+        result = build_searchable_mirror_gate_report(
+            dry_run=bool(args.dry_run),
+            redact_paths=bool(args.redact_paths),
+            evidence_packet_path=args.evidence_packet,
+            dual_write_evidence=bool(args.dual_write_evidence),
+            read_compare_evidence=bool(args.read_compare_evidence),
+            apple_silicon_local_evidence=bool(args.apple_silicon_local_evidence),
+            ubuntu_host_evidence=bool(args.ubuntu_host_evidence),
+            operator_approval=bool(args.operator_approval),
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_argv = _strip_program(list(sys.argv[1:] if argv is None else argv))
     parser = _build_parser()
@@ -315,6 +346,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_drain_deliveries(args)
     if args.command == "reconcile-deliveries":
         return _run_reconcile_deliveries(args)
+    if args.command == "searchable-mirror-gate":
+        return _run_searchable_mirror_gate(args)
     parser.error("unknown command")
 
 
