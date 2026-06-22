@@ -7,7 +7,7 @@ import os
 import re
 import threading
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -51,6 +51,10 @@ class GraphitiNeo4jConfig:
     store_raw_episode_content: bool = True
     extract_entities: bool = False
     force_reextract_entities: bool = False
+    fallback_llm_model: str = ""
+    fallback_small_model: str = ""
+    primary_attempts: int = 1
+    fallback_attempts: int = 1
     read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS
     write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS
 
@@ -77,6 +81,22 @@ class GraphitiNeo4jConfig:
             extract_entities=env.get("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES", "false").lower() in {"1", "true", "yes"},
             force_reextract_entities=env.get("LLM_BRAIN_GRAPH_FORCE_REEXTRACT_ENTITIES", "false").lower()
             in {"1", "true", "yes"},
+            fallback_llm_model=env.get(
+                "LLM_BRAIN_LLM_FALLBACK_MODEL",
+                env.get("LLM_BRAIN_GRAPH_FALLBACK_LLM_MODEL", ""),
+            ),
+            fallback_small_model=env.get(
+                "LLM_BRAIN_SMALL_LLM_FALLBACK_MODEL",
+                env.get("LLM_BRAIN_GRAPH_FALLBACK_SMALL_LLM_MODEL", ""),
+            ),
+            primary_attempts=_positive_int_env(
+                env.get("LLM_BRAIN_GRAPH_PRIMARY_ATTEMPTS", ""),
+                default=1,
+            ),
+            fallback_attempts=_positive_int_env(
+                env.get("LLM_BRAIN_GRAPH_FALLBACK_ATTEMPTS", ""),
+                default=1,
+            ),
             read_timeout_seconds=_float_env(
                 env.get("LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS", ""),
                 default=DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
@@ -100,9 +120,12 @@ class GraphitiNeo4jGraphMemoryAdapter:
         self,
         graphiti: Any,
         *,
+        fallback_graphiti: Any | None = None,
         default_group_id: str = "",
         extract_entities: bool = False,
         force_reextract_entities: bool = False,
+        primary_attempts: int = 1,
+        fallback_attempts: int = 1,
         episode_exists: Callable[[Any, str], Any] | None = None,
         entity_extracted: Callable[[Any, str], Any] | None = None,
         read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
@@ -110,9 +133,12 @@ class GraphitiNeo4jGraphMemoryAdapter:
         runner: "_AsyncLoopRunner | None" = None,
     ) -> None:
         self._graphiti = graphiti
+        self._fallback_graphiti = fallback_graphiti
         self._default_group_id = default_group_id
         self._extract_entities = extract_entities
         self._force_reextract_entities = force_reextract_entities
+        self._primary_attempts = max(1, int(primary_attempts))
+        self._fallback_attempts = max(1, int(fallback_attempts))
         # Split read/write timeouts: a read that hangs must not be forced to wait
         # the (longer) write upper bound, and vice versa. Injectable so a unit
         # test can drive the timeout path deterministically with a tiny bound.
@@ -135,11 +161,24 @@ class GraphitiNeo4jGraphMemoryAdapter:
 
     @classmethod
     def from_config(cls, config: GraphitiNeo4jConfig) -> "GraphitiNeo4jGraphMemoryAdapter":
+        fallback_graphiti = None
+        if config.extract_entities and config.fallback_llm_model:
+            fallback_config = replace(
+                config,
+                llm_model=config.fallback_llm_model,
+                small_model=config.fallback_small_model or config.fallback_llm_model,
+                fallback_llm_model="",
+                fallback_small_model="",
+            )
+            fallback_graphiti = _build_graphiti(fallback_config)
         return cls(
             _build_graphiti(config),
+            fallback_graphiti=fallback_graphiti,
             default_group_id=config.default_group_id,
             extract_entities=config.extract_entities,
             force_reextract_entities=config.force_reextract_entities,
+            primary_attempts=config.primary_attempts,
+            fallback_attempts=config.fallback_attempts,
             read_timeout_seconds=config.read_timeout_seconds,
             write_timeout_seconds=config.write_timeout_seconds,
         )
@@ -242,7 +281,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
             # episode_body, so the stored content stays JSON while extraction sees
             # prose. `source` stays json: the ensure-saved content is JSON.
             try:
-                results = await self._graphiti.add_episode(
+                results = await self._add_episode_with_fallback(
                     name=episode.episode_id,
                     episode_body=extraction_body,
                     source_description=f"llm_brain_core:{episode.entity_type}:{episode.natural_id}",
@@ -265,6 +304,22 @@ class GraphitiNeo4jGraphMemoryAdapter:
             return "inserted"
 
         return self._runner.run(_call, timeout=self._write_timeout_seconds)
+
+    async def _add_episode_with_fallback(self, **kwargs: Any) -> Any:
+        last_error: Exception | None = None
+        for _ in range(self._primary_attempts):
+            try:
+                return await self._graphiti.add_episode(**kwargs)
+            except Exception as exc:
+                last_error = exc
+        if self._fallback_graphiti is not None:
+            for _ in range(self._fallback_attempts):
+                try:
+                    return await self._fallback_graphiti.add_episode(**kwargs)
+                except Exception as exc:
+                    last_error = exc
+        if last_error is not None:
+            raise last_error
 
     def search_context(
         self,
@@ -435,7 +490,12 @@ _LOG = logging.getLogger(__name__)
 # the EXACT key ``entity_name`` so the edge model's ``source_entity_name`` /
 # ``target_entity_name`` (different keys) are untouched, and an already-correct
 # ``name`` is never clobbered.
-_STRUCTURED_KEY_ALIASES = {"entity_name": "name"}
+_STRUCTURED_KEY_ALIASES = {
+    "entity_name": "name",
+    "entity": "name",
+    "entity_value": "name",
+    "entity_text": "name",
+}
 
 
 def _normalize_structured_keys(value: Any) -> Any:
@@ -456,6 +516,54 @@ def _normalize_structured_keys(value: Any) -> Any:
                 result[canonical] = result.pop(alias)
         return result
     return value
+
+
+def _normalize_structured_response(value: Any, response_model: Any = None) -> Any:
+    normalized = _normalize_structured_keys(value)
+    if response_model is None:
+        return normalized
+    fields = getattr(response_model, "model_fields", {}) or {}
+    if isinstance(normalized, list):
+        list_field_names = [
+            name for name, field in fields.items()
+            if str(getattr(field, "annotation", "")).startswith("list[")
+        ]
+        if len(list_field_names) == 1:
+            normalized = {list_field_names[0]: normalized}
+    if isinstance(normalized, dict):
+        return _normalize_response_model_payload(normalized, fields)
+    return normalized
+
+
+def _normalize_response_model_payload(payload: dict[str, Any], fields: dict[str, Any]) -> dict[str, Any]:
+    result = dict(payload)
+    for field_name in fields:
+        items = result.get(field_name)
+        if not isinstance(items, list):
+            continue
+        normalized_items = []
+        for item in items:
+            if isinstance(item, dict):
+                normalized_items.append(_normalize_response_model_item(item, field_name))
+            else:
+                normalized_items.append(item)
+        result[field_name] = normalized_items
+    return result
+
+
+def _normalize_response_model_item(item: dict[str, Any], field_name: str) -> dict[str, Any]:
+    result = dict(item)
+    if field_name == "extracted_entities" and "name" in result and "entity_type_id" not in result:
+        result["entity_type_id"] = 0
+    if isinstance(result.get("episode_indices"), list):
+        indices: list[int] = []
+        for value in result["episode_indices"]:
+            try:
+                indices.append(int(value))
+            except (TypeError, ValueError):
+                indices.append(0)
+        result["episode_indices"] = indices
+    return result
 
 
 def _extraction_body_for(episode: OntologyEpisode, json_body: str) -> str:
@@ -582,8 +690,11 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
             """
 
             async def _generate_response(self, *args, **kwargs):
+                response_model = kwargs.get("response_model")
+                if response_model is None and len(args) >= 2:
+                    response_model = args[1]
                 data = await super()._generate_response(*args, **kwargs)
-                return _normalize_structured_keys(data)
+                return _normalize_structured_response(data, response_model)
 
         llm_client = _NeuronStructuredClient(config=llm_config)
         embedder = OpenAIEmbedder(
@@ -827,6 +938,11 @@ def _int_env(value: str, *, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _positive_int_env(value: str, *, default: int) -> int:
+    parsed = _int_env(value, default=default)
+    return parsed if parsed > 0 else default
 
 
 def _float_env(value: str, *, default: float) -> float:
