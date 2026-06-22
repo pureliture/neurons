@@ -241,6 +241,40 @@ class GraphitiNeo4jGraphMemoryAdapter:
             details=tuple(details),
         )
 
+    def get_episodes_by_ids(
+        self,
+        episode_ids: list[str] | tuple[str, ...],
+        *,
+        brain_id: str = "",
+        entity_types: list[str] | None = None,
+    ) -> tuple[OntologyEpisode, ...]:
+        wanted = [str(item) for item in episode_ids if str(item or "")]
+        if not wanted:
+            return ()
+        group_id = _graphiti_group_id(brain_id or self._default_group_id)
+        wanted_types = set(entity_types or [])
+
+        async def _call() -> list[OntologyEpisode]:
+            from graphiti_core.nodes import EpisodicNode
+
+            episodes: list[OntologyEpisode] = []
+            for episode_id in wanted:
+                try:
+                    node = await EpisodicNode.get_by_uuid(self._graphiti.driver, episode_id)
+                except Exception:
+                    continue
+                if group_id and str(getattr(node, "group_id", "") or "") != group_id:
+                    continue
+                episode = _episode_node_to_ontology(node)
+                if episode is None:
+                    continue
+                if wanted_types and episode.entity_type not in wanted_types:
+                    continue
+                episodes.append(episode)
+            return episodes
+
+        return tuple(self._runner.run(_call, timeout=self._read_timeout_seconds))
+
 
 async def _default_episode_exists(driver: Any, episode_id: str) -> bool:
     """Return True when an EpisodicNode with ``episode_id`` already exists.

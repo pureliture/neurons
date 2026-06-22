@@ -268,6 +268,31 @@ Core model, backend-neutral:
 
 `GraphitiNeo4jGraphMemoryAdapter` converts this model to Graphiti-specific episodes in M6. Core code does not import Graphiti types before M6.
 
+### Metadata-First Hybrid Graph Transition
+
+`MetadataFirstHybridGraphAdapter` wraps any existing `GraphMemoryAdapter`.
+The wrapped graph stores a metadata-first `OntologyEpisode`: ids, hashes,
+lifecycle/currentness, scope, provider/project, SourceRef linkage, and schema
+hashes. It does not need to store task summaries, typed payload prose, or other
+free text as graph node body.
+
+Optional `HybridTextMirror` keeps public-safe searchable text keyed by
+`episode_id`. Reads first find candidate episode ids through the mirror, then
+join those hits back onto graph metadata episodes through the
+`GraphMemoryAdapter.get_episodes_by_ids` exact lookup seam. Joined hints stay
+bounded and public-safe. This preserves ContextPack ergonomics while keeping
+graph storage metadata-first.
+
+Rules:
+- artifact and MemoryCard ledger remain canonical winners;
+- graph and text mirror are both derived indexes;
+- graph metadata can be rebuilt from canonical episodes;
+- mirror text can be dropped or replaced without changing graph authority;
+- mirror hit + metadata join miss is reported as degraded, not a healthy empty
+  read;
+- raw paths, raw transcript bodies, backend ids, and secrets remain forbidden in
+  graph payloads and mirror hints.
+
 ### Ontology Model
 
 Minimum schema invariants:
