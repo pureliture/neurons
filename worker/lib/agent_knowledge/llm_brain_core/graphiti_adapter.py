@@ -11,6 +11,8 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+
 from ._util import (
     PRIVATE_OUTPUT_RE,
     SECRET_ASSIGNMENT_RE,
@@ -29,6 +31,11 @@ _GRAPHITI_GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # full upper bound, and both are injectable for tests and tuning.
 DEFAULT_GRAPH_READ_TIMEOUT_SECONDS = 30.0
 DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS = 300.0
+_ALLOWED_LLM_REASONING_EFFORTS = frozenset({"high", "medium", "low", "none"})
+_GEMINI_LLM_FORBIDDEN_MESSAGE = (
+    "Gemini LLM models are forbidden for Graphiti semantic extraction; "
+    "use Gemma-4 MaaS or an Ollama model instead. Gemini embeddings remain allowed."
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +49,7 @@ class GraphitiNeo4jConfig:
     llm_provider: str = "openai"
     llm_model: str = ""
     small_model: str = ""
+    llm_reasoning_effort: str = ""
     llm_base_url: str = ""
     llm_api_key: str = field(default="", repr=False)
     embedding_model: str = ""
@@ -64,14 +72,29 @@ class GraphitiNeo4jConfig:
     def from_env(cls, environ: dict[str, str] | None = None) -> "GraphitiNeo4jConfig":
         env = environ or os.environ
         provider = env.get("LLM_BRAIN_GRAPH_LLM_PROVIDER", env.get("GRAPHITI_LLM_PROVIDER", "openai"))
+        llm_model = env.get("LLM_BRAIN_LLM_MODEL", env.get("MODEL_NAME", ""))
+        small_model = env.get("LLM_BRAIN_SMALL_LLM_MODEL", env.get("SMALL_MODEL_NAME", ""))
+        fallback_llm_model = env.get(
+            "LLM_BRAIN_LLM_FALLBACK_MODEL",
+            env.get("LLM_BRAIN_GRAPH_FALLBACK_LLM_MODEL", ""),
+        )
+        fallback_small_model = env.get(
+            "LLM_BRAIN_SMALL_LLM_FALLBACK_MODEL",
+            env.get("LLM_BRAIN_GRAPH_FALLBACK_SMALL_LLM_MODEL", ""),
+        )
+        for model in (llm_model, small_model, fallback_llm_model, fallback_small_model):
+            _reject_forbidden_gemini_llm_model(model)
         return cls(
             uri=env.get("LLM_BRAIN_NEO4J_URI", env.get("NEO4J_URI", "bolt://localhost:7687")),
             user=env.get("LLM_BRAIN_NEO4J_USER", env.get("NEO4J_USER", "neo4j")),
             password=env.get("LLM_BRAIN_NEO4J_PASSWORD", env.get("NEO4J_PASSWORD", "")),
             default_group_id=env.get("LLM_BRAIN_GRAPH_GROUP_ID", ""),
             llm_provider=provider.lower(),
-            llm_model=env.get("LLM_BRAIN_LLM_MODEL", env.get("MODEL_NAME", "")),
-            small_model=env.get("LLM_BRAIN_SMALL_LLM_MODEL", env.get("SMALL_MODEL_NAME", "")),
+            llm_model=llm_model,
+            small_model=small_model,
+            llm_reasoning_effort=_llm_reasoning_effort_env(
+                env.get("LLM_BRAIN_LLM_REASONING_EFFORT", "")
+            ),
             llm_base_url=env.get("LLM_BRAIN_LLM_BASE_URL", env.get("OPENAI_BASE_URL", "")),
             llm_api_key=env.get("LLM_BRAIN_LLM_API_KEY", env.get("OPENAI_API_KEY", "")),
             embedding_model=env.get("LLM_BRAIN_EMBEDDING_MODEL", env.get("EMBEDDING_MODEL", "")),
@@ -83,14 +106,8 @@ class GraphitiNeo4jConfig:
             extract_entities=env.get("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES", "false").lower() in {"1", "true", "yes"},
             force_reextract_entities=env.get("LLM_BRAIN_GRAPH_FORCE_REEXTRACT_ENTITIES", "false").lower()
             in {"1", "true", "yes"},
-            fallback_llm_model=env.get(
-                "LLM_BRAIN_LLM_FALLBACK_MODEL",
-                env.get("LLM_BRAIN_GRAPH_FALLBACK_LLM_MODEL", ""),
-            ),
-            fallback_small_model=env.get(
-                "LLM_BRAIN_SMALL_LLM_FALLBACK_MODEL",
-                env.get("LLM_BRAIN_GRAPH_FALLBACK_SMALL_LLM_MODEL", ""),
-            ),
+            fallback_llm_model=fallback_llm_model,
+            fallback_small_model=fallback_small_model,
             primary_attempts=_positive_int_env(
                 env.get("LLM_BRAIN_GRAPH_PRIMARY_ATTEMPTS", ""),
                 default=1,
@@ -700,7 +717,6 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
         from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
         from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
         from graphiti_core.llm_client.config import LLMConfig
-        from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 
         base_url = config.llm_base_url or ("http://localhost:11434/v1" if config.llm_provider == "ollama" else "")
         api_key = config.llm_api_key or ("ollama" if config.llm_provider == "ollama" else "")
@@ -710,24 +726,10 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
             small_model=config.small_model or config.llm_model or ("deepseek-r1:7b" if config.llm_provider == "ollama" else None),
             base_url=base_url or None,
         )
-        class _NeuronStructuredClient(OpenAIGenericClient):
-            """OpenAIGenericClient that repairs gemini-via-wrapper structured-output
-            field-name deviations before graphiti's pydantic validation.
-
-            gemini emits ``entity_name`` where graphiti's ExtractedEntities requires
-            ``name`` (non-strict json_schema, see _normalize_structured_keys), which
-            otherwise drops every extracted entity. We normalize the parsed dict in
-            the single chokepoint both the direct and retry paths funnel through.
-            """
-
-            async def _generate_response(self, *args, **kwargs):
-                response_model = kwargs.get("response_model")
-                if response_model is None and len(args) >= 2:
-                    response_model = args[1]
-                data = await super()._generate_response(*args, **kwargs)
-                return _normalize_structured_response(data, response_model)
-
-        llm_client = _NeuronStructuredClient(config=llm_config)
+        llm_client = _ReasoningOpenAIGenericClient(
+            config=llm_config,
+            reasoning_effort=config.llm_reasoning_effort,
+        )
         embedder = OpenAIEmbedder(
             config=OpenAIEmbedderConfig(
                 api_key=config.embedding_api_key or api_key,
@@ -742,7 +744,7 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
             config.password,
             llm_client=llm_client,
             embedder=embedder,
-            cross_encoder=OpenAIRerankerClient(client=llm_client, config=llm_config),
+            cross_encoder=OpenAIRerankerClient(client=llm_client.client, config=llm_config),
             store_raw_episode_content=config.store_raw_episode_content,
         )
 
@@ -752,6 +754,52 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
         config.password,
         store_raw_episode_content=config.store_raw_episode_content,
     )
+
+
+class _ReasoningOpenAIGenericClient(OpenAIGenericClient):
+    """OpenAI-compatible Graphiti client with optional per-request reasoning."""
+
+    def __init__(self, *args: Any, reasoning_effort: str = "", **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._reasoning_effort = reasoning_effort
+
+    async def _generate_response(self, messages, response_model=None, max_tokens=None, model_size=None):
+        import json as _json
+
+        import openai
+        from graphiti_core.llm_client.client import DEFAULT_MAX_TOKENS
+        from graphiti_core.llm_client.errors import EmptyResponseError, RateLimitError
+        from graphiti_core.llm_client.openai_generic_client import DEFAULT_MODEL
+
+        max_tokens_value = DEFAULT_MAX_TOKENS if max_tokens is None else max_tokens
+        openai_messages = []
+        for message in messages:
+            message.content = self._clean_input(message.content)
+            if message.role == "user":
+                openai_messages.append({"role": "user", "content": message.content})
+            elif message.role == "system":
+                openai_messages.append({"role": "system", "content": message.content})
+        request = {
+            "model": self.model or DEFAULT_MODEL,
+            "messages": openai_messages,
+            "temperature": self.temperature,
+            "max_tokens": max_tokens_value,
+            "response_format": self._build_response_format(response_model),
+        }
+        if self._reasoning_effort:
+            request["reasoning_effort"] = self._reasoning_effort
+        try:
+            response = await self.client.chat.completions.create(**request)
+            result = response.choices[0].message.content or ""
+            if not result:
+                raise EmptyResponseError("LLM returned an empty response")
+            data = _json.loads(self._strip_code_fences(result))
+            return _normalize_structured_response(data, response_model)
+        except openai.RateLimitError as exc:
+            raise RateLimitError from exc
+        except Exception as exc:
+            _LOG.error("Error in generating LLM response: %s", exc)
+            raise
 
 
 class _AsyncLoopRunner:
@@ -982,6 +1030,20 @@ def _float_env(value: str, *, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def _llm_reasoning_effort_env(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return ""
+    if normalized not in _ALLOWED_LLM_REASONING_EFFORTS:
+        raise ValueError("LLM_BRAIN_LLM_REASONING_EFFORT must be one of high, medium, low, none")
+    return normalized
+
+
+def _reject_forbidden_gemini_llm_model(model: str) -> None:
+    if "gemini" in str(model or "").strip().lower():
+        raise ValueError(_GEMINI_LLM_FORBIDDEN_MESSAGE)
 
 
 def _non_negative_float_env(value: str, *, default: float) -> float:
