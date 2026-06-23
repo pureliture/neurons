@@ -86,8 +86,9 @@ the `--enable-graph` / `--graph-required` CLI flags plus
 | `LLM_BRAIN_NEO4J_PASSWORD` | `NEO4J_PASSWORD` | `` | Neo4j password (secret; never echoed to public output). |
 | `LLM_BRAIN_GRAPH_GROUP_ID` | — | `` | Default Graphiti `group_id`. Usually left empty; the per-project group key `/project/<project>` is passed explicitly. |
 | `LLM_BRAIN_GRAPH_LLM_PROVIDER` | `GRAPHITI_LLM_PROVIDER` | `openai` | Graphiti LLM provider id (lowercased). |
-| `LLM_BRAIN_LLM_MODEL` | `MODEL_NAME` | `` | Graphiti LLM model name. |
-| `LLM_BRAIN_SMALL_LLM_MODEL` | `SMALL_MODEL_NAME` | `` | Graphiti small/cheap model name. |
+| `LLM_BRAIN_LLM_MODEL` | `MODEL_NAME` | `` | Graphiti LLM model name. Gemini chat/extraction models are forbidden; use Gemma-4 MaaS or Ollama instead. |
+| `LLM_BRAIN_SMALL_LLM_MODEL` | `SMALL_MODEL_NAME` | `` | Graphiti small/cheap model name. Gemini chat/extraction models are forbidden here too. |
+| `LLM_BRAIN_LLM_REASONING_EFFORT` | — | `` | Optional per-request reasoning override for OpenAI-compatible LLM calls. Allowed: `high`, `medium`, `low`, `none`. Empty preserves provider defaults. |
 | `LLM_BRAIN_LLM_BASE_URL` | `OPENAI_BASE_URL` | `` | LLM API base URL (OpenAI-compatible). |
 | `LLM_BRAIN_LLM_API_KEY` | `OPENAI_API_KEY` | `` | LLM API key (secret). |
 | `LLM_BRAIN_EMBEDDING_MODEL` | `EMBEDDING_MODEL` | `` | Embedding model name. |
@@ -155,7 +156,8 @@ LLM_BRAIN_NEO4J_URI=bolt://127.0.0.1:17687 \
 LLM_BRAIN_NEO4J_USER=neo4j \
 LLM_BRAIN_NEO4J_PASSWORD="$NEO4J_PASSWORD" \
 LLM_BRAIN_LLM_BASE_URL=http://172.26.0.1:8930/v1 \
-LLM_BRAIN_LLM_MODEL=gemini-3.5-flash-thinking \
+LLM_BRAIN_LLM_MODEL=gemma-4-26b-a4b-it-maas \
+LLM_BRAIN_LLM_REASONING_EFFORT=none \
 LLM_BRAIN_EMBEDDING_BASE_URL=http://172.26.0.1:8930/v1 \
 LLM_BRAIN_EMBEDDING_MODEL=gemini-embedding-2 \
 LLM_BRAIN_EMBEDDING_DIM=3072 \

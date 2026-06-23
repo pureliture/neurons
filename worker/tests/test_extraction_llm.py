@@ -18,13 +18,13 @@ def test_openai_compat_completion_fn_posts_chat_completions_and_returns_content(
         return json.dumps({"choices": [{"message": {"role": "assistant", "content": "[{\"x\":1}]"}}]})
 
     fn = build_openai_compat_completion_fn(
-        "http://127.0.0.1:8930/v1", "gemini-3.5-flash-thinking", post_fn=fake_post
+        "http://127.0.0.1:8930/v1", "gemma-4-26b-a4b-it-maas", post_fn=fake_post
     )
     out = fn([{"role": "user", "content": "hi"}])
 
     assert out == '[{"x":1}]'
     assert captured["url"] == "http://127.0.0.1:8930/v1/chat/completions"
-    assert captured["body"]["model"] == "gemini-3.5-flash-thinking"
+    assert captured["body"]["model"] == "gemma-4-26b-a4b-it-maas"
     assert captured["body"]["messages"][0]["content"] == "hi"
 
 

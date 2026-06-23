@@ -16,6 +16,7 @@ from agent_knowledge.llm_brain_core.graphiti_adapter import (
     GraphitiNeo4jConfig,
     GraphitiNeo4jGraphMemoryAdapter,
     _AsyncLoopRunner,
+    _ReasoningOpenAIGenericClient,
     _datetime_to_iso,
     _episode_node_to_ontology,
     _normalize_structured_response,
@@ -351,14 +352,65 @@ def test_graphiti_config_from_env_supports_ollama_openai_compatible_defaults():
     assert config.force_reextract_entities is True
 
 
+def test_graphiti_config_reads_llm_reasoning_effort_from_env():
+    config = GraphitiNeo4jConfig.from_env(
+        {
+            "LLM_BRAIN_GRAPH_LLM_PROVIDER": "openai-compatible",
+            "LLM_BRAIN_LLM_MODEL": "ollama:qwen3.5:cloud",
+            "LLM_BRAIN_LLM_REASONING_EFFORT": "medium",
+        }
+    )
+
+    assert config.llm_reasoning_effort == "medium"
+
+
+def test_graphiti_config_rejects_invalid_llm_reasoning_effort():
+    with pytest.raises(ValueError, match="LLM_BRAIN_LLM_REASONING_EFFORT"):
+        GraphitiNeo4jConfig.from_env({"LLM_BRAIN_LLM_REASONING_EFFORT": "extreme"})
+
+
+def test_graphiti_config_rejects_gemini_llm_models_for_cost_guard():
+    with pytest.raises(ValueError, match="Gemini LLM models are forbidden"):
+        GraphitiNeo4jConfig.from_env({"LLM_BRAIN_LLM_MODEL": "gemini-3.5-flash-thinking"})
+
+
+def test_graphiti_config_rejects_legacy_gemini_llm_models_for_cost_guard():
+    with pytest.raises(ValueError, match="Gemini LLM models are forbidden"):
+        GraphitiNeo4jConfig.from_env({"MODEL_NAME": "Gemini-2.5-Pro"})
+
+
+def test_graphiti_config_rejects_gemini_small_llm_models_for_cost_guard():
+    with pytest.raises(ValueError, match="Gemini LLM models are forbidden"):
+        GraphitiNeo4jConfig.from_env({"LLM_BRAIN_SMALL_LLM_MODEL": "gemini-2.5-flash"})
+
+
+def test_graphiti_config_rejects_gemini_fallback_llm_models_for_cost_guard():
+    with pytest.raises(ValueError, match="Gemini LLM models are forbidden"):
+        GraphitiNeo4jConfig.from_env({"LLM_BRAIN_LLM_FALLBACK_MODEL": "gemini-2.5-flash"})
+
+
+def test_graphiti_config_allows_gemma4_maas_and_gemini_embedding():
+    config = GraphitiNeo4jConfig.from_env(
+        {
+            "LLM_BRAIN_LLM_MODEL": "gemma-4-26b-a4b-it-maas",
+            "LLM_BRAIN_SMALL_LLM_MODEL": "gemma-4-26b-a4b-it-maas",
+            "LLM_BRAIN_EMBEDDING_MODEL": "gemini-embedding-2",
+        }
+    )
+
+    assert config.llm_model == "gemma-4-26b-a4b-it-maas"
+    assert config.small_model == "gemma-4-26b-a4b-it-maas"
+    assert config.embedding_model == "gemini-embedding-2"
+
+
 def test_graphiti_config_from_env_supports_llm_fallback_policy():
     config = GraphitiNeo4jConfig.from_env(
         {
             "LLM_BRAIN_GRAPH_EXTRACT_ENTITIES": "true",
-            "LLM_BRAIN_LLM_MODEL": "deepseek-v4-flash:cloud",
-            "LLM_BRAIN_SMALL_LLM_MODEL": "deepseek-v4-flash:cloud",
-            "LLM_BRAIN_LLM_FALLBACK_MODEL": "gemini-3.5-flash-thinking",
-            "LLM_BRAIN_SMALL_LLM_FALLBACK_MODEL": "gemini-3.5-flash-thinking",
+            "LLM_BRAIN_LLM_MODEL": "ollama:qwen3.5:cloud",
+            "LLM_BRAIN_SMALL_LLM_MODEL": "ollama:qwen3.5:cloud",
+            "LLM_BRAIN_LLM_FALLBACK_MODEL": "ollama:gemma4:31b-cloud",
+            "LLM_BRAIN_SMALL_LLM_FALLBACK_MODEL": "ollama:gemma4:31b-cloud",
             "LLM_BRAIN_GRAPH_PRIMARY_ATTEMPTS": "3",
             "LLM_BRAIN_GRAPH_FALLBACK_ATTEMPTS": "2",
             "LLM_BRAIN_GRAPH_PRIMARY_ATTEMPT_TIMEOUT_SECONDS": "12.5",
@@ -366,13 +418,84 @@ def test_graphiti_config_from_env_supports_llm_fallback_policy():
         }
     )
 
-    assert config.llm_model == "deepseek-v4-flash:cloud"
-    assert config.fallback_llm_model == "gemini-3.5-flash-thinking"
-    assert config.fallback_small_model == "gemini-3.5-flash-thinking"
+    assert config.llm_model == "ollama:qwen3.5:cloud"
+    assert config.fallback_llm_model == "ollama:gemma4:31b-cloud"
+    assert config.fallback_small_model == "ollama:gemma4:31b-cloud"
     assert config.primary_attempts == 3
     assert config.fallback_attempts == 2
     assert config.primary_attempt_timeout_seconds == 12.5
     assert config.fallback_attempt_timeout_seconds == 45.0
+
+
+@pytest.mark.anyio
+async def test_reasoning_openai_generic_client_passes_reasoning_effort_to_chat_completion():
+    from graphiti_core.llm_client.config import LLMConfig
+    from graphiti_core.prompts.models import Message
+
+    captured: dict[str, object] = {}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"ok": true}'),
+                    )
+                ]
+            )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=_FakeCompletions(),
+        )
+    )
+    client = _ReasoningOpenAIGenericClient(
+        config=LLMConfig(api_key="unit-test", model="ollama:qwen3.5:cloud"),
+        client=fake_client,
+        reasoning_effort="medium",
+    )
+
+    result = await client.generate_response(
+        [
+            Message(role="system", content="Return JSON."),
+            Message(role="user", content="Say ok."),
+        ]
+    )
+
+    assert result == {"ok": True}
+    assert captured["model"] == "ollama:qwen3.5:cloud"
+    assert captured["reasoning_effort"] == "medium"
+
+
+@pytest.mark.anyio
+async def test_reasoning_openai_generic_client_omits_reasoning_effort_when_unset():
+    from graphiti_core.llm_client.config import LLMConfig
+    from graphiti_core.prompts.models import Message
+
+    captured: dict[str, object] = {}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"ok": true}'),
+                    )
+                ]
+            )
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions()))
+    client = _ReasoningOpenAIGenericClient(
+        config=LLMConfig(api_key="unit-test", model="ollama:qwen3.5:cloud"),
+        client=fake_client,
+    )
+
+    result = await client.generate_response([Message(role="user", content="Say ok.")])
+
+    assert result == {"ok": True}
+    assert "reasoning_effort" not in captured
 
 
 def test_graphiti_config_defaults_to_episode_only_storage():
