@@ -78,10 +78,11 @@ def list_tools() -> list[dict]:
                 "properties": {
                     "query": {"type": "string"},
                     "project": {"type": "string"},
+                    "repository": {"type": "string"},
                     "card_types": {"type": "array", "items": {"type": "string"}},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
                 },
-                "required": ["query", "project"],
+                "required": ["query"],
                 "additionalProperties": False,
             },
         },
@@ -93,9 +94,10 @@ def list_tools() -> list[dict]:
                 "properties": {
                     "symptom": {"type": "string"},
                     "project": {"type": "string"},
+                    "repository": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
                 },
-                "required": ["symptom", "project"],
+                "required": ["symptom"],
                 "additionalProperties": False,
             },
         },
@@ -107,8 +109,9 @@ def list_tools() -> list[dict]:
                 "properties": {
                     "subject": {"type": "string"},
                     "project": {"type": "string"},
+                    "repository": {"type": "string"},
                 },
-                "required": ["subject", "project"],
+                "required": ["subject"],
                 "additionalProperties": False,
             },
         },
@@ -119,6 +122,7 @@ def list_tools() -> list[dict]:
                 "type": "object",
                 "properties": {
                     "project": {"type": "string"},
+                    "repository": {"type": "string"},
                     "scope": {"type": "string"},
                 },
                 "additionalProperties": False,
@@ -132,6 +136,7 @@ def list_tools() -> list[dict]:
                 "properties": {
                     "plan": {"type": "string"},
                     "project": {"type": "string"},
+                    "repository": {"type": "string"},
                 },
                 "required": ["plan"],
                 "additionalProperties": False,

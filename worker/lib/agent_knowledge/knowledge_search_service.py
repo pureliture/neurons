@@ -7,7 +7,7 @@ from .llm_brain_core.document_bridge import RagFlowDocumentBridge
 from .llm_brain_core.graph import GraphMemoryAdapter
 from .llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
 from .llm_brain_core.runtime import build_runtime_brain_service
-from .memory_read_pipeline import MemoryReadPipeline, MemorySearchQuery
+from .memory_read_pipeline import AuthorizedMemoryReader, MemoryReadPipeline, MemorySearchQuery
 from .ragflow_client import RagflowHttpClient
 from .session_memory.brain_query import resolve_brain_ids, run_brain_query_v2
 from .session_memory.brain_read_model import LegacyLedgerBrainReadModel, build_semantic_recall
@@ -90,7 +90,8 @@ class KnowledgeSearchService:
         allow_private_results: bool = False,
         native_memory_id: str = "",
         graph_adapter: GraphMemoryAdapter | None = None,
-        read_pipeline: MemoryReadPipeline | None = None,
+        authorized_reader: AuthorizedMemoryReader | None = None,
+        read_pipeline: AuthorizedMemoryReader | None = None,
     ):
         self.ledger = ledger
         self.ragflow = ragflow
@@ -98,12 +99,13 @@ class KnowledgeSearchService:
         self.allow_private_results = bool(allow_private_results)
         self.native_memory_id = native_memory_id
         self.graph_adapter = graph_adapter
-        self.read_pipeline = read_pipeline or MemoryReadPipeline(
+        self.authorized_reader = authorized_reader or read_pipeline or MemoryReadPipeline(
             ledger=ledger,
             ragflow=ragflow,
             dataset_ids=dataset_ids,
             allow_private_results=allow_private_results,
         )
+        self.read_pipeline = self.authorized_reader
         # Session-lifetime accepted-card snapshot shared across brain tool calls.
         self._brain_card_cache = _SessionCardCache(LegacyLedgerBrainReadModel(self.ledger))
 
@@ -131,13 +133,14 @@ class KnowledgeSearchService:
         limit: int = 10,
         include_private: bool = False,
     ) -> dict:
+        bounded_limit = _knowledge_search_public_limit(limit)
         search_query = MemorySearchQuery(
             query=query,
             filters=filters,
-            limit=limit,
+            limit=bounded_limit,
             include_private=include_private,
         )
-        response = self.read_pipeline.read(search_query)
+        response = self.authorized_reader.read(search_query)
         results_dict = []
         for item in response.results:
             item_dict = {
@@ -231,3 +234,7 @@ class KnowledgeSearchService:
 
     def brain_resolve(self, *, query: str = "") -> dict:
         return resolve_brain_ids(read_model=LegacyLedgerBrainReadModel(self.ledger), query=query)
+
+
+def _knowledge_search_public_limit(limit: int) -> int:
+    return max(1, min(10, int(limit)))
