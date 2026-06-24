@@ -50,6 +50,7 @@ PAYLOAD_INDEX_FIELDS = (
     "project",
     "provider",
     "session_id_hash",
+    "memory_id",
     "content_hash",
     "idempotency_key",
     "document_kind",
@@ -85,6 +86,8 @@ class SearchableMirrorHit:
     score: float | None
     summary: str
     privacy_class: str = ""
+    memory_id: str = ""
+    session_id_hash: str = ""
     canonical_resolution_required: bool = True
     authority_join_status: str = "not_checked"
 
@@ -100,6 +103,13 @@ class SearchableMirrorHit:
             "canonical_resolution_required": self.canonical_resolution_required,
             "authority_join_status": self.authority_join_status,
         }
+        # Additive: only surface memory_id / session_id_hash when present so
+        # existing points/tests (without them) keep their exact dict shape.
+        if self.memory_id:
+            data["memory_id"] = self.memory_id
+        if self.session_id_hash:
+            # session_id_hash is the CouchDB authority-join key (projection_state).
+            data["session_id_hash"] = self.session_id_hash
         if self.score is not None:
             data["score"] = self.score
         ensure_public_safe(data, "SearchableMirrorHit")
@@ -473,6 +483,69 @@ class QdrantDoclingMirrorAdapter:
             return MirrorDeletionResult(status="absent", document_ref=point_id, existed=False)
         return self.delete_document(handle, missing_ok=missing_ok)
 
+    @property
+    def collection_name(self) -> str:
+        return self._collection_name
+
+    def collection_exists(self) -> bool | None:
+        """Whether the backing collection exists, or None if unknowable.
+
+        Read-only probe (no create). Supports both the fake (``collection_exists``)
+        and the real client (``collection_exists`` / ``get_collection``). Returns
+        None only when the client cannot answer, so a caller can decide its own
+        fail-closed policy.
+        """
+        prober = getattr(self._client, "collection_exists", None)
+        if callable(prober):
+            try:
+                return bool(prober(self._collection_name))
+            except Exception:
+                return None
+        describe = getattr(self._client, "get_collection", None)
+        if not callable(describe):
+            return None
+        try:
+            describe(self._collection_name)
+            return True
+        except Exception as exc:
+            if _is_qdrant_not_found_error(exc):
+                return False
+            return None
+
+    @property
+    def embedding_size(self) -> int:
+        """Declared embedding vector size for this adapter's provider."""
+        return int(self._embedding.size)
+
+    def collection_vector_size(self) -> int | None:
+        """Configured vector size of the backing collection, or None if unknown.
+
+        Reads the size from the client without an embed/upsert. Supports the local
+        fake (``collection_vector_size`` accessor) and the real qdrant-client
+        (``get_collection`` -> ``config.params.vectors.size``). Returns None when
+        the client cannot report it (a dim guard then falls back to provider/upsert
+        validation).
+        """
+        getter = getattr(self._client, "collection_vector_size", None)
+        if callable(getter):
+            try:
+                return getter(self._collection_name)
+            except Exception:
+                return None
+        describe = getattr(self._client, "get_collection", None)
+        if not callable(describe):
+            return None
+        try:
+            info = describe(self._collection_name)
+        except Exception:
+            return None
+        try:
+            vectors = info.config.params.vectors  # type: ignore[attr-defined]
+            size = getattr(vectors, "size", None)
+            return int(size) if size is not None else None
+        except Exception:
+            return None
+
     def _retrieve_points(self, ids: list[str]) -> list[Any]:
         return list(
             self._client.retrieve(
@@ -514,12 +587,18 @@ def build_remote_qdrant_docling_mirror_adapter(
     collection_name: str = DEFAULT_COLLECTION_NAME,
     embedding_provider: EmbeddingProvider | None = None,
     normalizer: MarkdownNormalizer | None = None,
+    ensure_collection: bool = True,
 ) -> QdrantDoclingMirrorAdapter:
     """Create a Qdrant adapter against a remote server URL (e.g. compose service).
 
     Optional-dependency guarded like the local builder. Used by the M6 dual-write
     activation when ``QDRANT_URL`` is configured; tests inject a fake client to the
     adapter directly and never exercise this network path.
+
+    ``ensure_collection`` defaults True (legacy dual-write behaviour: create the
+    collection if absent). A backfill ``run``/``rollback`` passes False so a
+    typo'd collection name fails closed instead of silently creating an empty
+    server-side collection (which would also make any dim guard moot).
     """
 
     if not url:
@@ -535,6 +614,7 @@ def build_remote_qdrant_docling_mirror_adapter(
         collection_name=collection_name,
         embedding_provider=embedding_provider,
         normalizer=normalizer,
+        ensure_collection=ensure_collection,
     )
 
 
@@ -660,7 +740,10 @@ def _promoted_filter_fields(metadata: dict[str, Any], document: RagReadyDocument
     # interchangeably); fall back to the document_kind so the field is always set.
     result_type = str(metadata.get("result_type") or metadata.get("type") or document.document_kind or "")
     promoted: dict[str, Any] = {"result_type": public_safe_text(result_type, max_chars=120)}
-    for key in ("project", "provider", "session_id_hash"):
+    # ``memory_id`` is promoted so the downstream brain_query consumer
+    # (``_mirror_memory_id``) can read it top-level for dedup/conflict-by-memory_id;
+    # additive and backward-compatible (absent -> not set).
+    for key in ("project", "provider", "session_id_hash", "memory_id"):
         value = metadata.get(key)
         if value is not None and str(value) != "":
             promoted[key] = public_safe_text(str(value), max_chars=240)
@@ -852,6 +935,8 @@ def _hit_from_payload(payload: dict[str, Any], *, score: float | None) -> Search
         score=score,
         summary=public_safe_text(str(payload.get("summary") or ""), max_chars=512),
         privacy_class=public_safe_text(str(payload.get("privacy_class") or ""), max_chars=80),
+        memory_id=public_safe_text(str(payload.get("memory_id") or ""), max_chars=240),
+        session_id_hash=public_safe_text(str(payload.get("session_id_hash") or ""), max_chars=240),
     )
 
 

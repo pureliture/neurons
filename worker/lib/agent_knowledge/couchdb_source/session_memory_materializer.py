@@ -62,6 +62,29 @@ class SessionMemoryProjector(Protocol):
     def project(self, *, target_profile: str, document: dict) -> str: ...
 
 
+@runtime_checkable
+class QdrantMirrorSink(Protocol):
+    """Best-effort forward sink into the Qdrant searchable mirror.
+
+    Called from the projection SUCCESS path AFTER the canonical projection_state is
+    committed. A sink failure must NEVER break the canonical projection (it is
+    wrapped in try/except by the caller). The same build path the offline backfill
+    uses, so a forward-mirrored point and a backfilled point share a deterministic
+    point_id (idempotent across both paths).
+    """
+
+    def submit(
+        self,
+        *,
+        session_id_hash: str,
+        provider: str,
+        project: str,
+        content_hash: str,
+        body: str,
+        memory_id: str,
+    ) -> None: ...
+
+
 class RecordingSessionMemoryProjector:
     """Test/dry-run projector. Records calls and rejects non-session-memory targets."""
 
@@ -182,11 +205,18 @@ def project_session_memory(
     materialized: MaterializedSessionMemory,
     store: CouchDBSourceStore,
     projector: SessionMemoryProjector,
+    mirror_sink: "QdrantMirrorSink | None" = None,
 ) -> dict:
     """Project a materialized session-memory to RAGFlow, recording projection_state.
 
     Fail-closed: a not-fully-materialized session is never projected. A projector
     error leaves the CouchDB source intact and records a failed projection_state.
+
+    ``mirror_sink`` (optional) forwards the just-projected body into the Qdrant
+    searchable mirror, best-effort: it is called only on the SUCCESS path, only
+    AFTER the canonical projection_state has been committed, and any exception it
+    raises is swallowed so a mirror failure can never break the canonical
+    projection.
     """
 
     if not materialized.fully_materialized:
@@ -224,9 +254,33 @@ def project_session_memory(
         project=materialized.project,
         projection_status=ProjectionStatus.PROJECTED,
         session_memory_knowledge_id=ref,
+        active_content_hash=materialized.content_hash,
     )
     store.put(state)
-    return {"status": ProjectionStatus.PROJECTED, "reason": "", "ref": ref}
+
+    # Best-effort forward mirror: only after the canonical state is committed, and
+    # never allowed to break the projection. mirror_failed is reported for
+    # observability but does not change the canonical PROJECTED outcome.
+    mirror_failed = False
+    if mirror_sink is not None:
+        try:
+            mirror_sink.submit(
+                session_id_hash=materialized.session_id_hash,
+                provider=materialized.provider,
+                project=materialized.project,
+                content_hash=materialized.content_hash,
+                body=materialized.body,
+                memory_id=ref,
+            )
+        except Exception:  # best-effort: canonical projection already committed
+            mirror_failed = True
+
+    return {
+        "status": ProjectionStatus.PROJECTED,
+        "reason": "",
+        "ref": ref,
+        "mirror_failed": mirror_failed,
+    }
 
 
 def materialize_and_project(
@@ -234,6 +288,7 @@ def materialize_and_project(
     session_id_hash: str,
     store: CouchDBSourceStore,
     projector: SessionMemoryProjector | None = None,
+    mirror_sink: "QdrantMirrorSink | None" = None,
 ) -> dict:
     """End-to-end M3 step for one session: refresh coverage, materialize, project."""
 
@@ -241,7 +296,9 @@ def materialize_and_project(
     materialized = materialize_session_memory(session_id_hash=session_id_hash, store=store)
     projection = None
     if projector is not None:
-        projection = project_session_memory(materialized=materialized, store=store, projector=projector)
+        projection = project_session_memory(
+            materialized=materialized, store=store, projector=projector, mirror_sink=mirror_sink
+        )
     return {
         "session_id_hash": session_id_hash,
         "fully_materialized": materialized.fully_materialized,
@@ -256,6 +313,7 @@ def materialize_and_project(
 __all__ = [
     "MaterializedSessionMemory",
     "SessionMemoryProjector",
+    "QdrantMirrorSink",
     "RecordingSessionMemoryProjector",
     "update_coverage_with_tool_evidence",
     "materialize_session_memory",

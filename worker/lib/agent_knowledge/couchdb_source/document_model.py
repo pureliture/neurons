@@ -458,6 +458,7 @@ def build_projection_state_document(
     projection_status: str,
     target_profile: str = RAGFLOW_RECALL_PROFILE,
     session_memory_knowledge_id: str = "",
+    active_content_hash: str = "",
     failure_reason: str = "",
     source_locator_hash: str = "",
 ) -> dict:
@@ -465,6 +466,12 @@ def build_projection_state_document(
 
     ``target_profile`` is checked against the ownership rule so the retired
     ``transcript-memory`` profile can never be recorded as a projection target.
+
+    ``active_content_hash`` (additive) records the ``content_hash`` of the
+    currently-projected session-memory body. It is the join key the Qdrant
+    searchable-mirror authority resolver matches against, so a mirror point is
+    only authoritative when its content_hash equals the latest projected body's
+    hash. Populated on the SUCCESS (PROJECTED) path; left "" on failure paths.
     """
 
     assert_ragflow_target_allowed(target_profile)
@@ -484,6 +491,7 @@ def build_projection_state_document(
             "target_profile": target_profile,
             "projection_status": projection_status,
             "session_memory_knowledge_id": session_memory_knowledge_id,
+            "active_content_hash": active_content_hash,
             "failure_reason": failure_reason,
         }
     )

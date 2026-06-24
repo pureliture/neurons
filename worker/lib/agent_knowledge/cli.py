@@ -135,6 +135,12 @@ def _build_recall_service(args) -> KnowledgeSearchService:
         )
     except Exception as exc:
         raise _ServiceWiringError(1, f"graph adapter unavailable: {type(exc).__name__}") from exc
+    # M8 read cutover: when QDRANT_URL (+ COUCHDB_URL authority store) is configured,
+    # fill brain.query's archive/evidence lanes from the Qdrant searchable mirror.
+    # Additive -- the RAGFlow archive search is off in the live MCP (empty dataset_ids).
+    from .rag_ingress.qdrant_recall import build_qdrant_brain_query_search_from_env
+
+    mirror_search = build_qdrant_brain_query_search_from_env(os.environ)
     return KnowledgeSearchService(
         ledger=ledger,
         ragflow=ragflow,
@@ -142,6 +148,7 @@ def _build_recall_service(args) -> KnowledgeSearchService:
         allow_private_results=bool(args.allow_private_results),
         native_memory_id=args.native_memory_id or os.environ.get("RAGFLOW_NATIVE_MEMORY_ID", ""),
         graph_adapter=graph_adapter,
+        mirror_search=mirror_search,
     )
 
 
