@@ -87,10 +87,32 @@ def public_safe_text(value: str, *, max_chars: int = 2048) -> str:
     return bound_text(redact_public_ingress_text(normalized), max_chars)
 
 
-def ensure_public_safe(value: Any, field: str = "value") -> None:
-    text = stable_json(value) if isinstance(value, (dict, list, tuple)) else str(value or "")
+def _scan_public_safe_text(text: str, field: str) -> None:
     if PRIVATE_OUTPUT_RE.search(text) or SECRET_ASSIGNMENT_RE.search(text):
         raise ValueError(f"{field} contains private or raw content")
+
+
+def ensure_public_safe(value: Any, field: str = "value") -> None:
+    """Reject private/raw content in ``value`` (a leak guard for stored/emitted data).
+
+    For containers, every key and leaf string is scanned with its RAW string form
+    (recursively) -- NOT the JSON-serialized blob. Scanning the JSON blob caused
+    false positives: ``json.dumps`` escapes real newlines as ``\\n`` and other control
+    chars with backslashes, so a benign body line ending in ``word:`` followed by a
+    newline serialized to ``word:\\n`` and matched the Windows-path alternative
+    ``[A-Za-z]:\\`` in ``PRIVATE_OUTPUT_RE``. Per-value raw scanning still catches
+    real ``/Users/`` / ``Bearer`` / ``C:\\path`` / UNC ``\\\\host`` / ``API_KEY:``
+    content (and now scans dict keys too), while dropping escape-artifact matches.
+    """
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _scan_public_safe_text(str(key), field)
+            ensure_public_safe(item, field)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            ensure_public_safe(item, field)
+    else:
+        _scan_public_safe_text(str(value or ""), field)
 
 
 def public_dict(value: dict[str, Any], *, field: str = "value") -> dict[str, Any]:
