@@ -14,12 +14,22 @@ from agent_knowledge.mcp_server import (
     BRAIN_QUERY_TOOL_NAME,
     BRAIN_RESOLVE_TOOL_NAME,
     BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+    BRAIN_DRIFT_EXPLAIN_TOOL_NAME,
     BRAIN_EVIDENCE_GET_TOOL_NAME,
+    BRAIN_INCIDENT_SEARCH_TOOL_NAME,
     BRAIN_MEMORY_SEARCH_TOOL_NAME,
     BRAIN_PERSONA_CHECK_TOOL_NAME,
+    BRAIN_PERSONA_GET_TOOL_NAME,
     TOOL_NAME,
     DisabledRagflowClient,
     KnowledgeSearchService,
+    MemoryReadPipeline,
+    MemoryProvenance,
+    MemorySearchQuery,
+    MemorySearchResponse,
+    MemorySearchResultItem,
+    _call_tool,
+    dispatch_tool_call,
     handle_jsonrpc_message,
     list_tools,
 )
@@ -32,6 +42,8 @@ from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
 from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
 
 PROJECT = "workspace-ragflow-advisor"
+FIXTURE_REPOSITORY = PROJECT
+FIXTURE_BRANCH = "fixture-branch"
 
 
 def _ledger(tmp_path: Path) -> Ledger:
@@ -123,6 +135,33 @@ def test_mcp_tool_list_exposes_neuron_owned_tools():
     assert BRAIN_EVIDENCE_GET_TOOL_NAME in names
 
 
+def test_brain_memory_search_schema_matches_repository_project_derivation():
+    tools = {tool["name"]: tool for tool in list_tools()}
+    schema = tools[BRAIN_MEMORY_SEARCH_TOOL_NAME]["inputSchema"]
+
+    assert "repository" in schema["properties"]
+    assert "project" in schema["properties"]
+    assert schema["required"] == ["query"]
+    assert schema["anyOf"] == [{"required": ["project"]}, {"required": ["repository"]}]
+
+
+def test_project_deriving_brain_tool_schemas_allow_repository():
+    tools = {tool["name"]: tool for tool in list_tools()}
+
+    expected_required = {
+        BRAIN_MEMORY_SEARCH_TOOL_NAME: ["query"],
+        BRAIN_INCIDENT_SEARCH_TOOL_NAME: ["symptom"],
+        BRAIN_DRIFT_EXPLAIN_TOOL_NAME: ["subject"],
+        BRAIN_PERSONA_GET_TOOL_NAME: None,
+        BRAIN_PERSONA_CHECK_TOOL_NAME: ["plan"],
+    }
+    for tool_name, required in expected_required.items():
+        schema = tools[tool_name]["inputSchema"]
+        assert "repository" in schema["properties"]
+        assert "project" in schema["properties"]
+        assert schema.get("required") == required
+
+
 def test_mcp_brain_query_roundtrip(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -142,6 +181,29 @@ def test_mcp_brain_query_roundtrip(tmp_path: Path):
     assert result["audit"]["path"] == "ledger_precedence_v2"
     assert result["current"][0]["summary"] == "한국어로 응답한다"
     assert json.loads(response["result"]["content"][0]["text"]) == result
+
+
+def test_brain_query_semantic_recall_type_error_is_audited(tmp_path: Path, monkeypatch):
+    service = _service(tmp_path)
+    service.native_memory_id = "mem_native"
+
+    def broken_semantic_recall(**kwargs):
+        def recall(query: str, brain_id: str):
+            raise TypeError("malformed native-memory hit")
+
+        return recall
+
+    monkeypatch.setattr(
+        "agent_knowledge.knowledge_search_service.build_semantic_recall",
+        broken_semantic_recall,
+    )
+
+    result = service.brain_query(brain_id=f"/project/{PROJECT}", query="언어 선호")
+
+    assert result["current"][0]["summary"] == "한국어로 응답한다"
+    assert result["audit"]["native_memory_bound"] is True
+    assert result["audit"]["native_memory_hits"] == 0
+    assert result["audit"]["native_memory_error_type"] == "TypeError"
 
 
 def test_mcp_brain_resolve_roundtrip(tmp_path: Path):
@@ -170,8 +232,8 @@ def test_mcp_brain_context_resolve_roundtrip_uses_core_without_ragflow(tmp_path:
             "params": {
                 "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
                 "arguments": {
-                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
-                    "branch": "codex/llm-brain-core-design",
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
                     "current_request": "언어 선호 확인",
                     "current_files": ["docs/design.md"],
                     "project": PROJECT,
@@ -213,7 +275,7 @@ def test_session_card_cache_collapses_repeated_accepted_card_reads(tmp_path: Pat
     for _ in range(3):
         service.core_brain(project=PROJECT).brain_context_resolve(
             repository=PROJECT,
-            branch="codex/m14",
+            branch=FIXTURE_BRANCH,
             current_files=[],
             current_request="언어 선호 확인",
             project=PROJECT,
@@ -226,7 +288,7 @@ def test_session_card_cache_collapses_repeated_accepted_card_reads(tmp_path: Pat
     service.invalidate_brain_card_cache()
     service.core_brain(project=PROJECT).brain_context_resolve(
         repository=PROJECT,
-        branch="codex/m14",
+        branch=FIXTURE_BRANCH,
         current_files=[],
         current_request="언어 선호 확인",
         project=PROJECT,
@@ -323,8 +385,8 @@ def test_mcp_brain_context_resolve_reads_configured_graph_adapter(tmp_path: Path
             "params": {
                 "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
                 "arguments": {
-                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
-                    "branch": "codex/m14",
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
                     "current_request": "Brain MCP graph adapter",
                     "current_files": ["worker/lib/agent_knowledge/mcp_server.py"],
                     "project": PROJECT,
@@ -351,8 +413,8 @@ def test_mcp_brain_context_resolve_derives_project_when_omitted(tmp_path: Path):
             "params": {
                 "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
                 "arguments": {
-                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
-                    "branch": "codex/llm-brain-core-design",
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
                     "current_request": "언어 선호 확인",
                     "current_files": ["docs/design.md"],
                 },
@@ -381,7 +443,8 @@ def test_mcp_brain_context_resolve_includes_configured_read_only_bridge(tmp_path
             "params": {
                 "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
                 "arguments": {
-                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
                     "current_request": "RAGFlow bridge citation",
                     "current_files": [],
                 },
@@ -406,7 +469,7 @@ def test_mcp_brain_memory_search_derives_project_from_repository(tmp_path: Path)
             "params": {
                 "name": BRAIN_MEMORY_SEARCH_TOOL_NAME,
                 "arguments": {
-                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
+                    "repository": FIXTURE_REPOSITORY,
                     "query": "한국어 응답",
                 },
             },
@@ -417,6 +480,192 @@ def test_mcp_brain_memory_search_derives_project_from_repository(tmp_path: Path)
     result = response["result"]["structuredContent"]
     assert result["memory_status"]["count"] == 1
     assert result["results"][0]["summary"] == "한국어로 응답한다"
+
+
+def test_mcp_brain_memory_search_normalizes_git_repository_project(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_MEMORY_SEARCH_TOOL_NAME,
+                "arguments": {
+                    "repository": "https://github.com/pureliture/workspace-ragflow-advisor.git",
+                    "query": "한국어 응답",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["memory_status"]["count"] == 1
+    assert result["results"][0]["summary"] == "한국어로 응답한다"
+
+
+def test_mcp_knowledge_search_caps_limit_at_tool_layer(tmp_path: Path):
+    pipeline = _RecordingReadPipeline()
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        ragflow=DisabledRagflowClient(),
+        dataset_ids=[],
+        read_pipeline=pipeline,
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "tools/call",
+            "params": {
+                "name": TOOL_NAME,
+                "arguments": {"query": "hello", "limit": 100},
+            },
+        },
+        service,
+    )
+
+    assert "error" not in response
+    assert pipeline.seen_limits == [10]
+
+
+def test_service_search_caps_public_limit_before_authorized_reader(tmp_path: Path):
+    pipeline = _RecordingReadPipeline()
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        ragflow=DisabledRagflowClient(),
+        dataset_ids=[],
+        authorized_reader=pipeline,
+    )
+
+    result = service.search("hello", limit=100)
+
+    assert result == {"results": []}
+    assert pipeline.seen_limits == [10]
+
+
+def test_private_call_tool_alias_stays_compatible(tmp_path: Path):
+    service = _service(tmp_path)
+    params = {"name": TOOL_NAME, "arguments": {"query": "hello"}}
+
+    assert _call_tool(params, service) == dispatch_tool_call(params, service)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        (BRAIN_QUERY_TOOL_NAME, {"query": "언어 선호"}),
+        (
+            BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+            {"repository": PROJECT, "branch": FIXTURE_BRANCH},
+        ),
+        (BRAIN_MEMORY_SEARCH_TOOL_NAME, {"query": "언어 선호"}),
+        (BRAIN_MEMORY_SEARCH_TOOL_NAME, {"repository": PROJECT}),
+        (BRAIN_INCIDENT_SEARCH_TOOL_NAME, {"repository": PROJECT}),
+        (BRAIN_DRIFT_EXPLAIN_TOOL_NAME, {"repository": PROJECT}),
+        (BRAIN_PERSONA_CHECK_TOOL_NAME, {"repository": PROJECT}),
+        (BRAIN_EVIDENCE_GET_TOOL_NAME, {"source_ref_id": "src_neuron_mcp"}),
+    ],
+)
+def test_mcp_dispatch_rejects_missing_required_inputs(
+    tmp_path: Path,
+    tool_name: str,
+    arguments: dict,
+):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 14,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments},
+        },
+        service,
+    )
+
+    assert response["error"]["code"] == -32602
+    assert response["error"]["message"] == "invalid params: ValueError"
+
+
+def test_service_search_returns_public_safe_provenance(tmp_path: Path):
+    pipeline = _StaticReadPipeline(
+        [
+            MemorySearchResultItem(
+                knowledge_id="kn_public",
+                result_type="project_memory",
+                title="Public memory",
+                domain="memory",
+                project=PROJECT,
+                provider="codex",
+                summary="safe summary",
+                score=0.95,
+                currentness="server_authorized",
+                provenance=MemoryProvenance(
+                    dataset="raw_dataset_id",
+                    ragflow_document_id="raw_doc_id",
+                ),
+            )
+        ]
+    )
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        ragflow=DisabledRagflowClient(),
+        dataset_ids=[],
+        authorized_reader=pipeline,
+    )
+
+    result = service.search("hello")
+
+    assert result["results"][0]["provenance"] == {
+        "authority": "ledger_authorized",
+        "citation_ref": "kn_public",
+    }
+    serialized = json.dumps(result, sort_keys=True)
+    assert "raw_dataset_id" not in serialized
+    assert "raw_doc_id" not in serialized
+
+
+def test_brain_query_ragflow_fallback_omits_raw_document_ids_and_content(tmp_path: Path):
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        ragflow=_RawFallbackRagflow(),
+        dataset_ids=["ds_memory"],
+    )
+
+    result = service._brain_query_ragflow_search("fallback", f"/project/{PROJECT}")
+
+    assert result[0]["memory_id"] == ""
+    assert result[0]["summary"] == ""
+    serialized = json.dumps(result, sort_keys=True)
+    assert "raw_doc_id" not in serialized
+    assert "private raw content" not in serialized
+
+
+def test_memory_read_pipeline_respects_query_limit_above_tool_cap():
+    pipeline = MemoryReadPipeline(
+        ledger=_AuthorizingLedger(),
+        ragflow=_ManyDocsRagflow(count=12),
+        dataset_ids=["ds_memory"],
+    )
+
+    response = pipeline.read(MemorySearchQuery(query="reuse pipeline", limit=12))
+
+    assert len(response.results) == 12
+    assert response.results[-1].knowledge_id == "kn_doc_11"
+
+
+def test_memory_read_pipeline_normalizes_limit_before_retrieve():
+    pipeline = MemoryReadPipeline(
+        ledger=_AuthorizingLedger(),
+        ragflow=_ManyDocsRagflow(count=3, expected_limit=1),
+        dataset_ids=["ds_memory"],
+    )
+
+    response = pipeline.read(MemorySearchQuery(query="reuse pipeline", limit=0))
+
+    assert len(response.results) == 1
 
 
 def test_mcp_brain_persona_check_roundtrip(tmp_path: Path):
@@ -599,8 +848,8 @@ def test_mcp_stdio_cli_serves_contextpack_for_codex_and_claude_code_agents(
             "params": {
                 "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
                 "arguments": {
-                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
-                    "branch": "codex/m14",
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
                     "current_request": f"{agent_name} Brain MCP ContextPack",
                     "current_files": [],
                     "project": PROJECT,
@@ -650,3 +899,71 @@ class _FakeBridgeRagflow:
                 "source_ref_id": "src_bridge_citation",
             }
         ][:limit]
+
+
+class _RecordingReadPipeline:
+    def __init__(self):
+        self.seen_limits = []
+
+    def read(self, query: MemorySearchQuery) -> MemorySearchResponse:
+        self.seen_limits.append(query.limit)
+        return MemorySearchResponse(results=[])
+
+
+class _StaticReadPipeline:
+    def __init__(self, results: list[MemorySearchResultItem]):
+        self.results = results
+
+    def read(self, query: MemorySearchQuery) -> MemorySearchResponse:
+        return MemorySearchResponse(results=self.results[: query.limit])
+
+
+class _ManyDocsRagflow:
+    def __init__(self, *, count: int, expected_limit: int = 12):
+        self.count = count
+        self.expected_limit = expected_limit
+
+    def retrieve(self, query, dataset_ids, filters=None, limit=10):
+        assert query == "reuse pipeline"
+        assert dataset_ids == ["ds_memory"]
+        assert limit == self.expected_limit
+        return [
+            {
+                "document_id": f"doc_{index}",
+                "kb_id": "ds_memory",
+                "score": 1.0 - (index / 100),
+            }
+            for index in range(self.count)
+        ]
+
+
+class _RawFallbackRagflow:
+    def retrieve(self, query, dataset_ids, filters=None, limit=10):
+        assert query == "fallback"
+        assert dataset_ids == ["ds_memory"]
+        assert filters == {"project": PROJECT}
+        return [
+            {
+                "document_id": "raw_doc_id",
+                "doc_id": "raw_doc_alias",
+                "content": "private raw content",
+                "score": 0.5,
+            }
+        ]
+
+
+class _AuthorizingLedger:
+    def authorize_document(self, document_id, *, filters, include_private):
+        assert filters == {}
+        assert include_private is False
+        return {
+            "knowledge_id": f"kn_{document_id}",
+            "type": "project_memory",
+            "title": f"Memory {document_id}",
+            "domain": "memory",
+            "project": PROJECT,
+            "provider": "codex",
+            "summary": f"Summary {document_id}",
+            "ragflow_dataset_id": "ds_memory",
+            "ragflow_document_id": document_id,
+        }
