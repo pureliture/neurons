@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from agent_knowledge.llm_brain_core._util import (
+from agent_knowledge.public_safe_util import (
     ensure_public_safe,
     hash_payload,
     public_safe_text,
