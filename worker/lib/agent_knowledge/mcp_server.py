@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 import json
 import sys
 from typing import TextIO
@@ -241,6 +242,131 @@ class _SessionCardCache:
         return getattr(self._read_model, name)
 
 
+@dataclass(frozen=True)
+class TurnRange:
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class ConversationChunkDetails:
+    chunk_id: str
+    session_id_hash: str
+    turn_range: TurnRange
+    snippet: str
+    source_status: str
+    redaction_version: int | str
+
+
+@dataclass(frozen=True)
+class MemoryProvenance:
+    dataset: str
+    ragflow_document_id: str
+
+
+@dataclass(frozen=True)
+class MemorySearchResultItem:
+    knowledge_id: str
+    result_type: str
+    title: str
+    domain: str
+    project: str
+    provider: str
+    summary: str
+    score: float | None
+    currentness: str
+    provenance: MemoryProvenance
+    conversation_chunk: ConversationChunkDetails | None = None
+
+
+@dataclass(frozen=True)
+class MemorySearchResponse:
+    results: list[MemorySearchResultItem]
+
+
+@dataclass(frozen=True)
+class MemorySearchQuery:
+    query: str
+    filters: dict | None = None
+    limit: int = 10
+    include_private: bool = False
+
+
+class MemoryReadPipeline:
+    def __init__(
+        self,
+        *,
+        ledger: Ledger,
+        ragflow,
+        dataset_ids: list[str],
+        allow_private_results: bool = False,
+    ):
+        self.ledger = ledger
+        self.ragflow = ragflow
+        self.dataset_ids = dataset_ids
+        self.allow_private_results = bool(allow_private_results)
+
+    def read(self, query: MemorySearchQuery) -> MemorySearchResponse:
+        chunks = self.ragflow.retrieve(
+            query.query,
+            self.dataset_ids,
+            filters=query.filters,
+            limit=query.limit,
+        )
+        results: list[MemorySearchResultItem] = []
+        private_allowed = bool(query.include_private and self.allow_private_results)
+        for chunk in chunks:
+            document_id = str(chunk.get("document_id") or chunk.get("doc_id") or "")
+            if not document_id:
+                continue
+            item = self.ledger.authorize_document(
+                document_id,
+                filters=query.filters or {},
+                include_private=private_allowed,
+            )
+            if item is None:
+                continue
+            provenance = MemoryProvenance(
+                dataset=str(chunk.get("kb_id") or chunk.get("dataset_id") or item["ragflow_dataset_id"]),
+                ragflow_document_id=item["ragflow_document_id"],
+            )
+            conversation_chunk_details = None
+            if item["type"] == "conversation_chunk":
+                conversation_chunk = self.ledger.get_conversation_chunk_by_document(document_id)
+                if conversation_chunk is None:
+                    continue
+                conversation_chunk_details = ConversationChunkDetails(
+                    chunk_id=conversation_chunk["chunk_id"],
+                    session_id_hash=conversation_chunk["session_id_hash"],
+                    turn_range=TurnRange(
+                        start=conversation_chunk["turn_start_index"],
+                        end=conversation_chunk["turn_end_index"],
+                    ),
+                    snippet=redact_and_bound_text(
+                        str(chunk.get("content") or ""),
+                        MAX_TRANSCRIPT_SNIPPET_CHARS,
+                    ),
+                    source_status=conversation_chunk["source_status"],
+                    redaction_version=conversation_chunk["redaction_version"],
+                )
+            result_item = MemorySearchResultItem(
+                knowledge_id=item["knowledge_id"],
+                result_type=item["type"],
+                title=item["title"],
+                domain=item["domain"],
+                project=item["project"],
+                provider=item["provider"],
+                summary=item["summary"],
+                score=chunk.get("score"),
+                currentness="server_authorized",
+                provenance=provenance,
+                conversation_chunk=conversation_chunk_details,
+            )
+            results.append(result_item)
+        sliced_results = results[: max(1, min(10, int(query.limit)))]
+        return MemorySearchResponse(results=sliced_results)
+
+
 class KnowledgeSearchService:
     def __init__(
         self,
@@ -251,6 +377,7 @@ class KnowledgeSearchService:
         allow_private_results: bool = False,
         native_memory_id: str = "",
         graph_adapter: GraphMemoryAdapter | None = None,
+        read_pipeline: MemoryReadPipeline | None = None,
     ):
         self.ledger = ledger
         self.ragflow = ragflow
@@ -258,6 +385,12 @@ class KnowledgeSearchService:
         self.allow_private_results = bool(allow_private_results)
         self.native_memory_id = native_memory_id
         self.graph_adapter = graph_adapter
+        self.read_pipeline = read_pipeline or MemoryReadPipeline(
+            ledger=ledger,
+            ragflow=ragflow,
+            dataset_ids=dataset_ids,
+            allow_private_results=allow_private_results,
+        )
         # Session-lifetime accepted-card snapshot shared across brain tool calls.
         self._brain_card_cache = _SessionCardCache(LegacyLedgerBrainReadModel(self.ledger))
 
@@ -285,57 +418,45 @@ class KnowledgeSearchService:
         limit: int = 10,
         include_private: bool = False,
     ) -> dict:
-        chunks = self.ragflow.retrieve(query, self.dataset_ids, filters=filters, limit=limit)
-        results: list[dict] = []
-        private_allowed = bool(include_private and self.allow_private_results)
-        for chunk in chunks:
-            document_id = str(chunk.get("document_id") or chunk.get("doc_id") or "")
-            if not document_id:
-                continue
-            item = self.ledger.authorize_document(
-                document_id,
-                filters=filters or {},
-                include_private=private_allowed,
-            )
-            if item is None:
-                continue
-            result = {
-                "knowledge_id": item["knowledge_id"],
-                "result_type": item["type"],
-                "title": item["title"],
-                "domain": item["domain"],
-                "project": item["project"],
-                "provider": item["provider"],
-                "summary": item["summary"],
-                "score": chunk.get("score"),
-                "currentness": "server_authorized",
+        search_query = MemorySearchQuery(
+            query=query,
+            filters=filters,
+            limit=limit,
+            include_private=include_private,
+        )
+        response = self.read_pipeline.read(search_query)
+        results_dict = []
+        for item in response.results:
+            item_dict = {
+                "knowledge_id": item.knowledge_id,
+                "result_type": item.result_type,
+                "title": item.title,
+                "domain": item.domain,
+                "project": item.project,
+                "provider": item.provider,
+                "summary": item.summary,
+                "score": item.score,
+                "currentness": item.currentness,
                 "provenance": {
-                    "dataset": chunk.get("kb_id") or chunk.get("dataset_id") or item["ragflow_dataset_id"],
-                    "ragflow_document_id": item["ragflow_document_id"],
+                    "dataset": item.provenance.dataset,
+                    "ragflow_document_id": item.provenance.ragflow_document_id,
                 },
             }
-            if item["type"] == "conversation_chunk":
-                conversation_chunk = self.ledger.get_conversation_chunk_by_document(document_id)
-                if conversation_chunk is None:
-                    continue
-                result.update(
-                    {
-                        "chunk_id": conversation_chunk["chunk_id"],
-                        "session_id_hash": conversation_chunk["session_id_hash"],
-                        "turn_range": {
-                            "start": conversation_chunk["turn_start_index"],
-                            "end": conversation_chunk["turn_end_index"],
-                        },
-                        "snippet": redact_and_bound_text(
-                            str(chunk.get("content") or ""),
-                            MAX_TRANSCRIPT_SNIPPET_CHARS,
-                        ),
-                        "source_status": conversation_chunk["source_status"],
-                        "redaction_version": conversation_chunk["redaction_version"],
-                    }
-                )
-            results.append(result)
-        return {"results": results[: max(1, min(10, int(limit)))]}
+            if item.conversation_chunk is not None:
+                chunk = item.conversation_chunk
+                item_dict.update({
+                    "chunk_id": chunk.chunk_id,
+                    "session_id_hash": chunk.session_id_hash,
+                    "turn_range": {
+                        "start": chunk.turn_range.start,
+                        "end": chunk.turn_range.end,
+                    },
+                    "snippet": chunk.snippet,
+                    "source_status": chunk.source_status,
+                    "redaction_version": chunk.redaction_version,
+                })
+            results_dict.append(item_dict)
+        return {"results": results_dict}
 
     def brain_query(self, *, brain_id: str, query: str, limit: int = 8) -> dict:
         read_model = LegacyLedgerBrainReadModel(self.ledger)
