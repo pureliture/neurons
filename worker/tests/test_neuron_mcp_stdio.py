@@ -20,6 +20,9 @@ from agent_knowledge.mcp_server import (
     TOOL_NAME,
     DisabledRagflowClient,
     KnowledgeSearchService,
+    MemoryReadPipeline,
+    MemorySearchQuery,
+    MemorySearchResponse,
     handle_jsonrpc_message,
     list_tools,
 )
@@ -419,6 +422,45 @@ def test_mcp_brain_memory_search_derives_project_from_repository(tmp_path: Path)
     assert result["results"][0]["summary"] == "한국어로 응답한다"
 
 
+def test_mcp_knowledge_search_caps_limit_at_tool_layer(tmp_path: Path):
+    pipeline = _RecordingReadPipeline()
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        ragflow=DisabledRagflowClient(),
+        dataset_ids=[],
+        read_pipeline=pipeline,
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "tools/call",
+            "params": {
+                "name": TOOL_NAME,
+                "arguments": {"query": "hello", "limit": 100},
+            },
+        },
+        service,
+    )
+
+    assert "error" not in response
+    assert pipeline.seen_limits == [10]
+
+
+def test_memory_read_pipeline_respects_query_limit_above_tool_cap():
+    pipeline = MemoryReadPipeline(
+        ledger=_AuthorizingLedger(),
+        ragflow=_ManyDocsRagflow(count=12),
+        dataset_ids=["ds_memory"],
+    )
+
+    response = pipeline.read(MemorySearchQuery(query="reuse pipeline", limit=12))
+
+    assert len(response.results) == 12
+    assert response.results[-1].knowledge_id == "kn_doc_11"
+
+
 def test_mcp_brain_persona_check_roundtrip(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -650,3 +692,47 @@ class _FakeBridgeRagflow:
                 "source_ref_id": "src_bridge_citation",
             }
         ][:limit]
+
+
+class _RecordingReadPipeline:
+    def __init__(self):
+        self.seen_limits = []
+
+    def read(self, query: MemorySearchQuery) -> MemorySearchResponse:
+        self.seen_limits.append(query.limit)
+        return MemorySearchResponse(results=[])
+
+
+class _ManyDocsRagflow:
+    def __init__(self, *, count: int):
+        self.count = count
+
+    def retrieve(self, query, dataset_ids, filters=None, limit=10):
+        assert query == "reuse pipeline"
+        assert dataset_ids == ["ds_memory"]
+        assert limit == 12
+        return [
+            {
+                "document_id": f"doc_{index}",
+                "kb_id": "ds_memory",
+                "score": 1.0 - (index / 100),
+            }
+            for index in range(self.count)
+        ]
+
+
+class _AuthorizingLedger:
+    def authorize_document(self, document_id, *, filters, include_private):
+        assert filters == {}
+        assert include_private is False
+        return {
+            "knowledge_id": f"kn_{document_id}",
+            "type": "project_memory",
+            "title": f"Memory {document_id}",
+            "domain": "memory",
+            "project": PROJECT,
+            "provider": "codex",
+            "summary": f"Summary {document_id}",
+            "ragflow_dataset_id": "ds_memory",
+            "ragflow_document_id": document_id,
+        }

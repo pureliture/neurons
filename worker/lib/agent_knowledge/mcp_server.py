@@ -363,7 +363,7 @@ class MemoryReadPipeline:
                 conversation_chunk=conversation_chunk_details,
             )
             results.append(result_item)
-        sliced_results = results[: max(1, min(10, int(query.limit)))]
+        sliced_results = results[: max(1, int(query.limit))]
         return MemorySearchResponse(results=sliced_results)
 
 
@@ -665,7 +665,7 @@ def _call_tool(params: dict, service: KnowledgeSearchService) -> dict:
     result = service.search(
         query,
         filters=filters,
-        limit=int(arguments.get("limit", 10)),
+        limit=_knowledge_search_limit(arguments),
         include_private=bool(arguments.get("include_private", False)),
     )
     return _tool_result(result)
@@ -675,6 +675,10 @@ def _bounded_limit(value, *, default: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return default
     return max(1, min(maximum, int(value)))
+
+
+def _knowledge_search_limit(arguments: dict) -> int:
+    return max(1, min(10, int(arguments.get("limit", 10))))
 
 
 def _project_arg(arguments: dict) -> str:
