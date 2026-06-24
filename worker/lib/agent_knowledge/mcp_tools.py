@@ -83,6 +83,7 @@ def list_tools() -> list[dict]:
                     "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
                 },
                 "required": ["query"],
+                "anyOf": [{"required": ["project"]}, {"required": ["repository"]}],
                 "additionalProperties": False,
             },
         },

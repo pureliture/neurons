@@ -100,7 +100,7 @@ def dispatch_tool_call(params: dict, service: KnowledgeSearchService) -> dict:
         card_types = arguments.get("card_types")
         if card_types is not None and not isinstance(card_types, list):
             raise ValueError("card_types must be an array")
-        project = _project_arg(arguments)
+        project = _require_project_scope(arguments, tool_name=tool_name)
         result = service.core_brain(project=project).brain_memory_search(
             query=query,
             project=project,
@@ -207,6 +207,13 @@ def _require_non_empty_string(arguments: dict, key: str, *, tool_name: str) -> s
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{tool_name} requires a non-empty {key}")
     return value
+
+
+def _require_project_scope(arguments: dict, *, tool_name: str) -> str:
+    project = _project_arg(arguments)
+    if not project:
+        raise ValueError(f"{tool_name} requires project or repository")
+    return project
 
 
 def _project_arg(arguments: dict) -> str:

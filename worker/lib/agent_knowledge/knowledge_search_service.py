@@ -189,7 +189,7 @@ class KnowledgeSearchService:
             semantic_failure_type = ""
             try:
                 semantic_hits = semantic(query, brain_id)
-            except (OSError, RuntimeError, ValueError, KeyError, sqlite3.DatabaseError) as exc:
+            except (OSError, RuntimeError, ValueError, KeyError, TypeError, sqlite3.DatabaseError) as exc:
                 semantic_hits = []
                 semantic_failure_type = type(exc).__name__
             audit = dict(result.get("audit") or {})

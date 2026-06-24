@@ -142,6 +142,7 @@ def test_brain_memory_search_schema_matches_repository_project_derivation():
     assert "repository" in schema["properties"]
     assert "project" in schema["properties"]
     assert schema["required"] == ["query"]
+    assert schema["anyOf"] == [{"required": ["project"]}, {"required": ["repository"]}]
 
 
 def test_project_deriving_brain_tool_schemas_allow_repository():
@@ -180,6 +181,29 @@ def test_mcp_brain_query_roundtrip(tmp_path: Path):
     assert result["audit"]["path"] == "ledger_precedence_v2"
     assert result["current"][0]["summary"] == "한국어로 응답한다"
     assert json.loads(response["result"]["content"][0]["text"]) == result
+
+
+def test_brain_query_semantic_recall_type_error_is_audited(tmp_path: Path, monkeypatch):
+    service = _service(tmp_path)
+    service.native_memory_id = "mem_native"
+
+    def broken_semantic_recall(**kwargs):
+        def recall(query: str, brain_id: str):
+            raise TypeError("malformed native-memory hit")
+
+        return recall
+
+    monkeypatch.setattr(
+        "agent_knowledge.knowledge_search_service.build_semantic_recall",
+        broken_semantic_recall,
+    )
+
+    result = service.brain_query(brain_id=f"/project/{PROJECT}", query="언어 선호")
+
+    assert result["current"][0]["summary"] == "한국어로 응답한다"
+    assert result["audit"]["native_memory_bound"] is True
+    assert result["audit"]["native_memory_hits"] == 0
+    assert result["audit"]["native_memory_error_type"] == "TypeError"
 
 
 def test_mcp_brain_resolve_roundtrip(tmp_path: Path):
@@ -537,6 +561,7 @@ def test_private_call_tool_alias_stays_compatible(tmp_path: Path):
             BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
             {"repository": PROJECT, "branch": FIXTURE_BRANCH},
         ),
+        (BRAIN_MEMORY_SEARCH_TOOL_NAME, {"query": "언어 선호"}),
         (BRAIN_MEMORY_SEARCH_TOOL_NAME, {"repository": PROJECT}),
         (BRAIN_INCIDENT_SEARCH_TOOL_NAME, {"repository": PROJECT}),
         (BRAIN_DRIFT_EXPLAIN_TOOL_NAME, {"repository": PROJECT}),
