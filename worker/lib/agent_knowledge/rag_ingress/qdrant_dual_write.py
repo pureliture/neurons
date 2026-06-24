@@ -13,6 +13,7 @@ deployed and the flag off, the existing RAGFlow/CouchDB delivery is byte-identic
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -126,6 +127,23 @@ def build_qdrant_mirror_from_env(environ: Any) -> Any | None:
     )
 
 
+def _default_mirror_outcome_logger(outcome: "MirrorWriteOutcome") -> None:
+    # Redaction-safe operability signal: status + error_class only (never a
+    # message/payload). Logged for non-success so a silently-failing mirror is
+    # observable. Without this the live worker would be blind to mirror_error.
+    if outcome.status != "mirrored":
+        print(
+            json.dumps(
+                {
+                    "event": "qdrant_mirror_write",
+                    "status": outcome.status,
+                    "error_class": outcome.error_class,
+                }
+            ),
+            flush=True,
+        )
+
+
 def maybe_wrap_dual_write(
     primary: Any,
     *,
@@ -136,10 +154,11 @@ def maybe_wrap_dual_write(
     """Wrap ``primary`` with a best-effort Qdrant mirror when dual-write is enabled.
 
     Off by default: returns ``primary`` unchanged unless ``MIRROR_DUAL_WRITE=1``.
-    Fail-safe: if the flag is on but no mirror is configured (no ``QDRANT_URL``),
-    returns ``primary`` so the live delivery worker keeps writing to RAGFlow
-    rather than crashing. This is the only shadow_worker activation hook; it
-    performs no live mutation by itself.
+    Fail-safe at BUILD time too: if the flag is on but the mirror cannot be
+    constructed (no ``QDRANT_URL``, missing embedding model, optional dep absent,
+    bad URL), returns ``primary`` so a mirror misconfig can never block the
+    authoritative live delivery worker from starting. This is the only
+    shadow_worker activation hook; it performs no live mutation by itself.
     """
 
     if primary is None:
@@ -147,10 +166,21 @@ def maybe_wrap_dual_write(
     if str(environ.get("MIRROR_DUAL_WRITE") or "").strip() != "1":
         return primary
     builder = mirror_builder or build_qdrant_mirror_from_env
-    mirror = builder(environ)
+    try:
+        mirror = builder(environ)
+    except Exception as exc:
+        # Mirror construction failure must NOT crash the authoritative worker.
+        _default_mirror_outcome_logger(
+            MirrorWriteOutcome(status="mirror_build_error", error_class=exc.__class__.__name__)
+        )
+        return primary
     if mirror is None:
         return primary
-    return MirrorDualWriteBackend(primary=primary, mirror=mirror, on_mirror_outcome=on_mirror_outcome)
+    return MirrorDualWriteBackend(
+        primary=primary,
+        mirror=mirror,
+        on_mirror_outcome=on_mirror_outcome or _default_mirror_outcome_logger,
+    )
 
 
 __all__ = [

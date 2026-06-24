@@ -40,12 +40,26 @@ def _query_hash(query: str) -> str:
     return "sha256:" + hashlib.sha256(str(query or "").encode("utf-8")).hexdigest()[:16]
 
 
+def _assert_authority_joined(hit: dict[str, Any]) -> None:
+    # The harness compares AUTHORITY-joined hits. Reject a raw, unresolved mirror
+    # candidate (canonical_resolution_required is True) so a caller cannot pass
+    # un-joined Qdrant hits and get a falsely-passing parity result.
+    if hit.get("canonical_resolution_required") is True:
+        raise ValueError("read-compare requires authority-joined hits; got an unresolved mirror candidate")
+
+
 def _top_hashes(hits: Iterable[dict[str, Any]], k: int) -> list[str]:
+    # dedup while preserving order, THEN take top-k, so a repeated content_hash in
+    # the top results does not shrink the recall denominator.
     out: list[str] = []
+    seen: set[str] = set()
     for hit in hits:
+        _assert_authority_joined(hit)
         content_hash = str(hit.get("content_hash") or "")
-        if content_hash:
-            out.append(content_hash)
+        if not content_hash or content_hash in seen:
+            continue
+        seen.add(content_hash)
+        out.append(content_hash)
         if len(out) >= k:
             break
     return out
