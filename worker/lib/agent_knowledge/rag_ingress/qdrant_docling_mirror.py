@@ -88,6 +88,47 @@ class SearchableMirrorHit:
         return data
 
 
+@dataclass(frozen=True)
+class MirrorDeletionResult:
+    """Outcome of a mirror point deletion.
+
+    ``status`` is backend-neutral: ``deleted`` (a point existed and was removed),
+    ``absent`` (no point existed for the key; delete is a safe no-op), or
+    ``collection_mismatch`` (the handle does not belong to this collection, so no
+    deletion was attempted). ``existed`` reports whether a point was present
+    *before* the delete so a GC caller can record a real removal vs. a no-op.
+    """
+
+    status: str
+    document_ref: str
+    existed: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        data = {
+            "status": self.status,
+            "document_ref": self.document_ref,
+            "existed": self.existed,
+        }
+        ensure_public_safe(data, "MirrorDeletionResult")
+        return data
+
+
+class MirrorDeletionCapable(Protocol):
+    """Optional deletion capability layered on top of ``IndexBackendAdapter``.
+
+    The backend-neutral ``IndexBackendAdapter`` protocol covers submit / find /
+    status only; it has no delete. RAGFlow document deletion currently bypasses
+    the adapter and goes through the GC ``hard_delete_documents`` chokepoint, so
+    there is no neutral delete seam yet. This optional protocol is the draft seam
+    a GC/retirement path would target for a Qdrant mirror. It is intentionally
+    NOT wired into any live route here.
+    """
+
+    def delete_document(
+        self, handle: BackendDocumentHandle, *, missing_ok: bool = True
+    ) -> "MirrorDeletionResult": ...
+
+
 class PassthroughMarkdownNormalizer:
     """Test/local fallback normalizer for already-redacted markdown."""
 
@@ -316,6 +357,62 @@ class QdrantDoclingMirrorAdapter:
             vectors_config=_vector_params(self._embedding.size),
         )
 
+    def delete_document(
+        self, handle: BackendDocumentHandle, *, missing_ok: bool = True
+    ) -> MirrorDeletionResult:
+        """Delete one mirror point by handle (draft GC/retirement seam).
+
+        Idempotent: deleting an absent point is a safe no-op when ``missing_ok``.
+        This never touches RAGFlow; it only removes a Qdrant point, and it is not
+        wired into any live GC route -- it exists so a future GC chokepoint can
+        target the same neutral seam for the mirror.
+        """
+
+        if handle.dataset_ref != _dataset_ref(self._collection_name):
+            return MirrorDeletionResult(
+                status="collection_mismatch",
+                document_ref=handle.document_ref,
+                existed=False,
+            )
+        existed = bool(self._retrieve_points([handle.document_ref]))
+        if not existed and not missing_ok:
+            raise ValueError("mirror point not found and missing_ok is False")
+        self._client.delete(
+            collection_name=self._collection_name,
+            points_selector=_points_selector([handle.document_ref]),
+        )
+        return MirrorDeletionResult(
+            status="deleted" if existed else "absent",
+            document_ref=handle.document_ref,
+            existed=existed,
+        )
+
+    def delete_by_natural_key(
+        self,
+        *,
+        target_profile: str,
+        idempotency_key: str,
+        content_hash: str,
+        missing_ok: bool = True,
+    ) -> MirrorDeletionResult:
+        """Resolve a natural key to its deterministic point id, then delete it."""
+
+        handle = self.find_by_natural_key(
+            target_profile=target_profile,
+            idempotency_key=idempotency_key,
+            payload_hash=content_hash,
+        )
+        if handle is None:
+            point_id = point_id_for_natural_key(
+                target_profile=target_profile,
+                idempotency_key=idempotency_key,
+                content_hash=content_hash,
+            )
+            if not missing_ok:
+                raise ValueError("mirror point not found and missing_ok is False")
+            return MirrorDeletionResult(status="absent", document_ref=point_id, existed=False)
+        return self.delete_document(handle, missing_ok=missing_ok)
+
     def _retrieve_points(self, ids: list[str]) -> list[Any]:
         return list(
             self._client.retrieve(
@@ -508,6 +605,14 @@ def _point_struct(*, point_id: str, vector: list[float], payload: dict[str, Any]
     except ImportError:
         return {"id": point_id, "vector": vector, "payload": payload}
     return models.PointStruct(id=point_id, vector=vector, payload=payload)
+
+
+def _points_selector(ids: list[str]) -> Any:
+    try:
+        from qdrant_client import models
+    except ImportError:
+        return list(ids)
+    return models.PointIdsList(points=list(ids))
 
 
 def _query_points(
@@ -751,6 +856,8 @@ __all__ = [
     "HashEmbeddingProvider",
     "MIRROR_AUTHORITY",
     "MIRROR_BACKEND",
+    "MirrorDeletionCapable",
+    "MirrorDeletionResult",
     "PassthroughMarkdownNormalizer",
     "QdrantDoclingMirrorAdapter",
     "SearchableMirrorHit",
