@@ -72,3 +72,19 @@ Stage 1만 이 루프에서 실행한다(M1–M5, 가역·test-evidence). M6–M
 - 테스트 11개, 전체 worker suite 910 passed, 9 skipped. 라이브 mutation 0.
 - 남은 라이브 활성화(operator/Ubuntu): Qdrant 호스트 배포 + shadow_worker env 분기 +
   per-action 게이트 + 실데이터 parity 측정.
+
+## M6 배포 배선 + M9/M10 전제조건 (오토파일럿, code-only)
+- dual-write 활성화 hook: shadow_worker default-off env 분기(MIRROR_DUAL_WRITE=1 +
+  QDRANT_URL), build_remote_qdrant_docling_mirror_adapter, build_qdrant_mirror_from_env.
+- compose.yaml: `qdrant` 서비스(profile searchable-mirror, 127.0.0.1:6333, qdrant_data
+  볼륨, `${QDRANT_IMAGE:-qdrant/qdrant:latest}`) + ingress-worker-py dual-write env
+  (전부 default-off) + 임베딩 env passthrough. 바 `compose up` 무변.
+- worker/Dockerfile: lean deps(qdrant-client + openai; docling 제외 — Passthrough).
+- 문서 05: RAGFlow 벡터 미러 은퇴(M9/M10) 전제조건 — "안 쓴다/불필요"가 아직 거짓인
+  audit 근거(라이브 writer + no-fallback reader 잔존), 삭제 전 blocker 체크리스트,
+  비가역 per-action 증거 게이트, 가역/비가역 경계.
+- 전체 worker suite 915 passed. 라이브 mutation 0(플래그 off·Qdrant 미배포·delete 미실행).
+- 호스트 테스트: 브랜치 checkout → `docker compose build ingress-worker-py` →
+  `--profile searchable-mirror up -d qdrant` → 워커 env에 MIRROR_DUAL_WRITE=1+QDRANT_URL.
+  머지 불필요(이미지가 소스 빌드).
+- M9/M10 라이브 delete/disable: 이 세션 미실행(비가역+호스트+per-action 증거 필요).
