@@ -49,6 +49,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dead-letter-jsonl", default="")
     parser.add_argument("--progress-jsonl", default="")
     parser.add_argument("--report-every", type=int, default=25)
+    parser.add_argument(
+        "--max-projects",
+        type=int,
+        default=0,
+        help="Stop after this many non-resumed successful graph upserts. 0 means no cap.",
+    )
     parser.add_argument("--runtime-dir", default="")
     args = parser.parse_args(argv)
 
@@ -73,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
             dead_letter_jsonl=Path(args.dead_letter_jsonl) if args.dead_letter_jsonl else None,
             progress_jsonl=Path(args.progress_jsonl) if args.progress_jsonl else None,
             report_every=int(args.report_every),
+            max_projects=int(args.max_projects),
             runtime_dir=Path(args.runtime_dir) if args.runtime_dir else None,
         )
     except Exception as exc:
@@ -110,6 +117,7 @@ def run_couchdb_projection(
     dead_letter_jsonl: Path | None = None,
     progress_jsonl: Path | None = None,
     report_every: int = 25,
+    max_projects: int = 0,
     graph_adapter: Any | None = None,
     runtime_dir: Path | None = None,
 ) -> dict[str, Any]:
@@ -133,6 +141,7 @@ def run_couchdb_projection(
     sessions = _select_sessions(source_store, project=project, provider=provider, limit=limit)
     total_available = _count_sessions(source_store, project=project, provider=provider)
     report_every = max(1, int(report_every))
+    max_projects = max(0, int(max_projects))
 
     projected_cache: dict[str, set[str]] = {}
     durations: list[int] = []
@@ -140,6 +149,8 @@ def run_couchdb_projection(
     by_project: Counter[str] = Counter()
     failure_reasons: Counter[str] = Counter()
     projected = duplicates = failed = skipped_resumed = 0
+    processed = 0
+    stopped_after_max_projects = False
     started = time.monotonic()
 
     _write_jsonl(
@@ -154,6 +165,7 @@ def run_couchdb_projection(
 
     try:
         for index, session in enumerate(sessions, start=1):
+            processed = index
             item_started = time.monotonic()
             session_project = str(session.get("project") or "")
             session_provider = str(session.get("provider") or "")
@@ -232,12 +244,15 @@ def run_couchdb_projection(
                         "skipped_resumed": skipped_resumed,
                     },
                 )
+            if max_projects and (projected + duplicates) >= max_projects:
+                stopped_after_max_projects = True
+                break
     finally:
         if lock_handle is not None:
             _release_runtime_lock(lock_handle)
 
     elapsed_total_ms = int((time.monotonic() - started) * 1000)
-    attempted = len(sessions)
+    attempted = processed
     status = "ok" if failed == 0 else ("partial" if projected or duplicates or skipped_resumed else "failed")
     return {
         "schema_version": COUCHDB_GRAPH_PROJECTION_SCHEMA_VERSION,
@@ -245,7 +260,7 @@ def run_couchdb_projection(
         "status": status,
         "canonical_counts": {
             "source_sessions": total_available,
-            "selected_sessions": attempted,
+            "selected_sessions": len(sessions),
         },
         "filters": {
             "project_set": bool(project),
@@ -253,7 +268,7 @@ def run_couchdb_projection(
             "provider": provider,
         },
         "limit": int(limit),
-        "truncated": bool(limit > 0 and total_available > attempted),
+        "truncated": bool((limit > 0 and total_available > len(sessions)) or stopped_after_max_projects),
         "graph_enabled": bool(enable_graph),
         "target_extraction_level": target_level,
         "runtime_lock": {
@@ -268,6 +283,7 @@ def run_couchdb_projection(
             "failed": failed,
             "failure_rate": (failed / attempted) if attempted else 0.0,
             "failure_reasons": dict(sorted(failure_reasons.items())),
+            "stopped_after_max_projects": stopped_after_max_projects,
         },
         "metrics": {
             "avg_ms": int(sum(durations) / len(durations)) if durations else 0,
