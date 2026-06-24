@@ -1,7 +1,7 @@
 """Streamable HTTP transport for the neuron-knowledge MCP surface.
 
 기존 stdio transport(`run_stdio_server`)는 그대로 두고, MCP 공식 SDK(mcp)의
-Streamable HTTP transport를 추가한다. tool 선언/디스패치/안전 기본값은 `mcp_server`의
+Streamable HTTP transport를 추가한다. tool 선언/디스패치/안전 기본값은 MCP JSON-RPC
 단일 seam(`list_tools` / `_call_tool`)을 재사용하고, 이 모듈은 transport만 담당한다.
 
 설치-검증 게이트(mcp==1.28.0 실측):
@@ -32,7 +32,9 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from .mcp_server import KnowledgeSearchService, _call_tool, list_tools
+from .knowledge_search_service import KnowledgeSearchService
+from .mcp_jsonrpc import _call_tool
+from .mcp_tools import list_tools
 
 DEFAULT_PORT = 8765
 _LOGGER = logging.getLogger(__name__)
