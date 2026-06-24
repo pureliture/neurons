@@ -1313,7 +1313,6 @@ class IngressStatusMixin:
         disabled-dataset, or provenance-invalid records remain hidden from
         retrieval.
         """
-        filters = filters or {}
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM knowledge_items WHERE ragflow_document_id = ?",
@@ -1321,7 +1320,33 @@ class IngressStatusMixin:
             ).fetchone()
         if row is None:
             return None
-        item = dict(row)
+        return self._authorize_knowledge_item(dict(row), filters=filters)
+
+    def authorize_document_by_content_hash(
+        self, content_hash: str, *, filters: dict | None = None, include_private: bool = False
+    ) -> dict | None:
+        """Canonical authorization predicate keyed by ``content_hash``.
+
+        Identical lifecycle/authority gate as :meth:`authorize_document` (status,
+        authorization_status, disabled_at, supersedes, expiry, dataset-enabled,
+        type-specific active-snapshot/coverage checks). The Qdrant searchable
+        mirror resolves every hit through this so the non-authority mirror cannot
+        diverge from canonical authority semantics.
+        """
+        _ = include_private
+        if not content_hash:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM knowledge_items WHERE content_hash = ?",
+                (content_hash,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._authorize_knowledge_item(dict(row), filters=filters)
+
+    def _authorize_knowledge_item(self, item: dict, *, filters: dict | None = None) -> dict | None:
+        filters = filters or {}
         if item["status"] != "indexed":
             return None
         if item.get("authorization_status") != "active":

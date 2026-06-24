@@ -642,6 +642,8 @@ class Ledger(
                 VALUES ('agent_knowledge_native_memory_mirror.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
                 VALUES ('agent_knowledge_memory_gc_audit.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_qdrant_collections.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 UPDATE knowledge_items SET type = 'session_memory' WHERE type = 'session_memory_sot';
                 """
             )

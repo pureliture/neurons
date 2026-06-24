@@ -51,13 +51,16 @@ class OpenAICompatibleReranker:
 
 
 def resolve_reranker_config(environ: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Reuse the same OpenAI-compatible LLM endpoint as the graph adapter."""
+    """Reuse the same OpenAI-compatible LLM endpoint as the graph adapter.
+
+    api_key is NOT returned (read only at client-build time) so logging this
+    config object cannot leak the secret.
+    """
 
     env = environ if environ is not None else os.environ
     return {
         "model": env.get("LLM_BRAIN_LLM_MODEL") or env.get("MODEL_NAME") or "",
         "base_url": env.get("LLM_BRAIN_LLM_BASE_URL") or env.get("OPENAI_BASE_URL") or "",
-        "api_key": env.get("LLM_BRAIN_LLM_API_KEY") or env.get("OPENAI_API_KEY") or "",
     }
 
 

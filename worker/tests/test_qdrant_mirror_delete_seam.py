@@ -68,6 +68,11 @@ def test_delete_document_removes_point_and_is_idempotent():
     again = adapter.delete_document(handle)
     assert again.status == "absent"
     assert again.existed is False
+    # public-safe serialization path
+    serialized = deletion.to_dict()
+    assert serialized["status"] == "deleted"
+    assert serialized["existed"] is True
+    assert "document_ref" in serialized
 
 
 def test_delete_by_natural_key_resolves_and_removes():
