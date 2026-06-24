@@ -60,3 +60,15 @@ Stage 1만 이 루프에서 실행한다(M1–M5, 가역·test-evidence). M6–M
   주변 코드와 일관 유지(자연어 markdown 문서는 한국어 유지). rerank 라이브 stub은
   follow-on 표기됨.
 - 전체 worker suite 899 passed, 9 skipped.
+
+## M6/M7 code-only seam (branch codex/qdrant-mirror-m6-dualwrite-shadow; main 머지 후 분기)
+- Stage 1이 main에 머지(PR #22, merge 200a2c0). 이 브랜치는 갱신된 main 기준.
+- MirrorDualWriteBackend(`qdrant_dual_write.py`): primary(RAGFlow/CouchDB) authority +
+  best-effort Qdrant mirror. mirror 실패는 primary를 안 깸, find/status는 primary 전용.
+  shadow_worker 미배선(활성화 env 분기는 Qdrant 배포 시 추가).
+- read-compare harness(`qdrant_read_compare.py`): primary vs mirror top-k content_hash
+  overlap + recall@k + exact-match(read_compare evidence packet 형), recall_parity_passes
+  게이트 헬퍼. 주입 fetcher라 no-network.
+- 테스트 11개, 전체 worker suite 910 passed, 9 skipped. 라이브 mutation 0.
+- 남은 라이브 활성화(operator/Ubuntu): Qdrant 호스트 배포 + shadow_worker env 분기 +
+  per-action 게이트 + 실데이터 parity 측정.
