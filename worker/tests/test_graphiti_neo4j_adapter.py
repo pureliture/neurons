@@ -19,6 +19,7 @@ from agent_knowledge.llm_brain_core.graphiti_adapter import (
     _ReasoningOpenAIGenericClient,
     _datetime_to_iso,
     _episode_node_to_ontology,
+    _existing_fact_idx_values_from_messages,
     _normalize_structured_response,
 )
 from agent_knowledge.llm_brain_core.models import OntologyEpisode
@@ -569,6 +570,42 @@ def test_structured_response_normalizes_episode_indices():
     )
 
     assert normalized["edges"][0]["episode_indices"] == [0, 1]
+
+
+def test_structured_response_drops_invalid_duplicate_fact_idxs_only():
+    from graphiti_core.prompts.dedupe_edges import EdgeDuplicate
+
+    normalized = _normalize_structured_response(
+        {
+            "duplicate_facts": [0, "2", 6, -1, "bad"],
+            "contradicted_facts": [0, 2, 6],
+        },
+        EdgeDuplicate,
+        valid_duplicate_fact_idxs={0, 2},
+    )
+
+    assert normalized["duplicate_facts"] == [0, 2]
+    assert normalized["contradicted_facts"] == [0, 2, 6]
+
+
+def test_existing_fact_idx_values_parse_only_existing_facts_block():
+    from graphiti_core.prompts.models import Message
+
+    messages = [
+        Message(
+            role="user",
+            content="""
+<EXISTING FACTS>
+[{'idx': 0, 'fact': 'kept'}, {'idx': 2, 'fact': 'kept'}]
+</EXISTING FACTS>
+<FACT INVALIDATION CANDIDATES>
+[{'idx': 6, 'fact': 'not a duplicate candidate'}]
+</FACT INVALIDATION CANDIDATES>
+""",
+        )
+    ]
+
+    assert _existing_fact_idx_values_from_messages(messages) == {0, 2}
 
 
 def test_graphiti_adapter_retries_primary_then_fallback_for_entity_extraction():
