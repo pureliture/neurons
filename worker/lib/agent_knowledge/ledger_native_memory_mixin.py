@@ -528,6 +528,86 @@ class NativeMemoryMixin:
                 (logical_name,),
             ).fetchone()
         return dict(row) if row else None
+
+    def upsert_qdrant_collection(
+        self,
+        *,
+        logical_name: str,
+        collection: str,
+        embedding_model: str = "",
+        vector_size: int = 0,
+        distance: str = "Cosine",
+        payload_index_version: str = "",
+    ) -> dict:
+        """Register/refresh a logical_name -> Qdrant collection mapping.
+
+        Parallel to ``upsert_ragflow_dataset_plan`` for the searchable mirror.
+        This is the authority for collection health/enable state; it performs no
+        network call and does not touch any live Qdrant collection.
+        """
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO qdrant_collections (
+                    logical_name, collection, embedding_model, vector_size,
+                    distance, payload_index_version, created_at, enabled, disabled_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, '')
+                ON CONFLICT(logical_name) DO UPDATE SET
+                    collection=excluded.collection,
+                    embedding_model=excluded.embedding_model,
+                    vector_size=excluded.vector_size,
+                    distance=excluded.distance,
+                    payload_index_version=excluded.payload_index_version,
+                    enabled=1,
+                    disabled_at=''
+                """,
+                (
+                    logical_name,
+                    collection,
+                    embedding_model,
+                    int(vector_size),
+                    distance,
+                    payload_index_version,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM qdrant_collections WHERE logical_name = ?",
+                (logical_name,),
+            ).fetchone()
+        return dict(row)
+
+    def get_qdrant_collection(self, logical_name: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM qdrant_collections WHERE logical_name = ?",
+                (logical_name,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_qdrant_collections(self) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM qdrant_collections ORDER BY logical_name"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _qdrant_collection_is_enabled(self, collection: str) -> bool:
+        # Fail-closed: a collection absent from the registry is NOT treated as
+        # enabled (unlike ragflow_datasets which fails open). The mirror must be
+        # explicitly registered before any live use.
+        if not collection:
+            return False
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT enabled, disabled_at FROM qdrant_collections WHERE collection = ?",
+                (collection,),
+            ).fetchone()
+        if row is None:
+            return False
+        return bool(row["enabled"]) and not row["disabled_at"]
     def list_tool_evidence_summaries(
         self,
         *,
