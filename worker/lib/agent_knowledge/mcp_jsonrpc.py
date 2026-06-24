@@ -39,7 +39,7 @@ def handle_jsonrpc_message(message: dict, service: KnowledgeSearchService) -> di
         if method == "tools/list":
             return _success(request_id, {"tools": list_tools()})
         if method == "tools/call":
-            return _success(request_id, _call_tool(message.get("params") or {}, service))
+            return _success(request_id, dispatch_tool_call(message.get("params") or {}, service))
         return _error(request_id, -32601, f"method not found: {method}")
     except (TypeError, ValueError) as exc:
         # Never echo the raw exception message: it can carry caller-supplied
@@ -74,7 +74,7 @@ def run_stdio_server(
         stdout.flush()
 
 
-def _call_tool(params: dict, service: KnowledgeSearchService) -> dict:
+def dispatch_tool_call(params: dict, service: KnowledgeSearchService) -> dict:
     tool_name = params.get("name")
     arguments = params.get("arguments") or {}
     if tool_name == BRAIN_CONTEXT_RESOLVE_TOOL_NAME:
@@ -170,6 +170,10 @@ def _call_tool(params: dict, service: KnowledgeSearchService) -> dict:
         include_private=bool(arguments.get("include_private", False)),
     )
     return _tool_result(result)
+
+
+def _call_tool(params: dict, service: KnowledgeSearchService) -> dict:
+    return dispatch_tool_call(params, service)
 
 
 def _bounded_limit(value, *, default: int, maximum: int) -> int:

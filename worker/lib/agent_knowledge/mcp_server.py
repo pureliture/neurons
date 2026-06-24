@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .knowledge_search_service import DisabledRagflowClient, KnowledgeSearchService, build_ragflow_client
-from .mcp_jsonrpc import handle_jsonrpc_message, run_stdio_server
+from .mcp_jsonrpc import _call_tool, dispatch_tool_call, handle_jsonrpc_message, run_stdio_server
 from .mcp_tools import (
     BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
     BRAIN_DRIFT_EXPLAIN_TOOL_NAME,
@@ -16,6 +16,7 @@ from .mcp_tools import (
     list_tools,
 )
 from .memory_read_pipeline import (
+    AuthorizedMemoryReader,
     ConversationChunkDetails,
     MemoryProvenance,
     MemoryReadPipeline,
@@ -36,6 +37,7 @@ __all__ = [
     "BRAIN_QUERY_TOOL_NAME",
     "BRAIN_RESOLVE_TOOL_NAME",
     "TOOL_NAME",
+    "AuthorizedMemoryReader",
     "ConversationChunkDetails",
     "DisabledRagflowClient",
     "KnowledgeSearchService",
@@ -46,7 +48,9 @@ __all__ = [
     "MemorySearchResultItem",
     "TurnRange",
     "build_ragflow_client",
+    "dispatch_tool_call",
     "handle_jsonrpc_message",
     "list_tools",
     "run_stdio_server",
+    "_call_tool",
 ]

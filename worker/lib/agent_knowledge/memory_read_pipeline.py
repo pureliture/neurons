@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from .ledger import Ledger
 from .session_memory.transcript_model import MAX_TRANSCRIPT_SNIPPET_CHARS, redact_and_bound_text
@@ -54,6 +55,11 @@ class MemorySearchQuery:
     filters: dict | None = None
     limit: int = 10
     include_private: bool = False
+
+
+class AuthorizedMemoryReader(Protocol):
+    def read(self, query: MemorySearchQuery) -> MemorySearchResponse:
+        """Return only ledger-authorized, public-safe memory result items."""
 
 
 class MemoryReadPipeline:

@@ -14,15 +14,20 @@ from agent_knowledge.mcp_server import (
     BRAIN_QUERY_TOOL_NAME,
     BRAIN_RESOLVE_TOOL_NAME,
     BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+    BRAIN_DRIFT_EXPLAIN_TOOL_NAME,
     BRAIN_EVIDENCE_GET_TOOL_NAME,
+    BRAIN_INCIDENT_SEARCH_TOOL_NAME,
     BRAIN_MEMORY_SEARCH_TOOL_NAME,
     BRAIN_PERSONA_CHECK_TOOL_NAME,
+    BRAIN_PERSONA_GET_TOOL_NAME,
     TOOL_NAME,
     DisabledRagflowClient,
     KnowledgeSearchService,
     MemoryReadPipeline,
     MemorySearchQuery,
     MemorySearchResponse,
+    _call_tool,
+    dispatch_tool_call,
     handle_jsonrpc_message,
     list_tools,
 )
@@ -124,6 +129,32 @@ def test_mcp_tool_list_exposes_neuron_owned_tools():
     assert BRAIN_CONTEXT_RESOLVE_TOOL_NAME in names
     assert BRAIN_PERSONA_CHECK_TOOL_NAME in names
     assert BRAIN_EVIDENCE_GET_TOOL_NAME in names
+
+
+def test_brain_memory_search_schema_matches_repository_project_derivation():
+    tools = {tool["name"]: tool for tool in list_tools()}
+    schema = tools[BRAIN_MEMORY_SEARCH_TOOL_NAME]["inputSchema"]
+
+    assert "repository" in schema["properties"]
+    assert "project" in schema["properties"]
+    assert schema["required"] == ["query"]
+
+
+def test_project_deriving_brain_tool_schemas_allow_repository():
+    tools = {tool["name"]: tool for tool in list_tools()}
+
+    expected_required = {
+        BRAIN_MEMORY_SEARCH_TOOL_NAME: ["query"],
+        BRAIN_INCIDENT_SEARCH_TOOL_NAME: ["symptom"],
+        BRAIN_DRIFT_EXPLAIN_TOOL_NAME: ["subject"],
+        BRAIN_PERSONA_GET_TOOL_NAME: None,
+        BRAIN_PERSONA_CHECK_TOOL_NAME: ["plan"],
+    }
+    for tool_name, required in expected_required.items():
+        schema = tools[tool_name]["inputSchema"]
+        assert "repository" in schema["properties"]
+        assert "project" in schema["properties"]
+        assert schema.get("required") == required
 
 
 def test_mcp_brain_query_roundtrip(tmp_path: Path):
@@ -446,6 +477,28 @@ def test_mcp_knowledge_search_caps_limit_at_tool_layer(tmp_path: Path):
 
     assert "error" not in response
     assert pipeline.seen_limits == [10]
+
+
+def test_service_search_caps_public_limit_before_authorized_reader(tmp_path: Path):
+    pipeline = _RecordingReadPipeline()
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        ragflow=DisabledRagflowClient(),
+        dataset_ids=[],
+        authorized_reader=pipeline,
+    )
+
+    result = service.search("hello", limit=100)
+
+    assert result == {"results": []}
+    assert pipeline.seen_limits == [10]
+
+
+def test_private_call_tool_alias_stays_compatible(tmp_path: Path):
+    service = _service(tmp_path)
+    params = {"name": TOOL_NAME, "arguments": {"query": "hello"}}
+
+    assert _call_tool(params, service) == dispatch_tool_call(params, service)
 
 
 def test_memory_read_pipeline_respects_query_limit_above_tool_cap():
