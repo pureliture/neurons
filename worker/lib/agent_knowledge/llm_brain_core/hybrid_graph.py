@@ -286,6 +286,19 @@ class MetadataFirstHybridGraphAdapter:
             details=tuple(details),
         )
 
+    def get_episodes_by_ids(
+        self,
+        episode_ids: list[str] | tuple[str, ...],
+        *,
+        brain_id: str = "",
+        entity_types: list[str] | None = None,
+    ) -> tuple[OntologyEpisode, ...]:
+        return self._graph_adapter.get_episodes_by_ids(
+            episode_ids,
+            brain_id=brain_id,
+            entity_types=entity_types,
+        )
+
 
 def metadata_first_episode(episode: OntologyEpisode) -> OntologyEpisode:
     metadata_payload = _metadata_payload(episode.payload)

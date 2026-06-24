@@ -22,7 +22,6 @@ from .ledger_adapter import (
     LedgerSessionMemoryArtifactStore,
     LedgerSourceRefCatalog,
 )
-
 from .models import (
     BrainEventEnvelope,
     ContextPack,
@@ -41,7 +40,7 @@ from .ontology import (
     episode_from_source_ref,
 )
 from .projection import GraphProjectionReport, GraphProjectionWorker
-from .runtime_graph import build_graph_adapter_from_env, graph_env_enabled
+from .runtime_graph import build_graph_adapter_from_env, graph_env_enabled, metadata_first_hybrid_enabled
 from .source_ref import SourceRefResolver
 from .sync_shadow import CentralBrainShadowRebuilder, CentralShadowRebuildReport
 
@@ -64,8 +63,8 @@ __all__ = [
     "GraphitiNeo4jGraphMemoryAdapter",
     "HybridTextMirrorHit",
     "InMemorySessionMemoryArtifactStore",
-    "InMemoryHybridTextMirror",
     "LedgerGraphProjectionStateStore",
+    "InMemoryHybridTextMirror",
     "LedgerSessionMemoryArtifactStore",
     "LedgerSourceRefCatalog",
     "METADATA_FIRST_HYBRID_GRAPH_SCHEMA",
@@ -83,6 +82,7 @@ __all__ = [
     "episode_from_session_artifact",
     "episode_from_source_ref",
     "graph_env_enabled",
+    "metadata_first_hybrid_enabled",
     "metadata_first_episode",
     "probe_graphiti_connectivity",
 ]

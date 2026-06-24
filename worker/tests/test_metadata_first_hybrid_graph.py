@@ -60,6 +60,9 @@ def test_hybrid_adapter_stores_metadata_in_graph_and_joins_text_mirror_on_search
     assert "metadata_first_hybrid" in result.details
     assert "text_mirror_hits:1" in result.details
 
+    exact = adapter.get_episodes_by_ids([_task_episode().episode_id], brain_id="/project/neurons")
+    assert exact[0].payload["metadata_first"] is True
+
 
 def test_contextpack_can_restore_task_from_metadata_first_hybrid_graph():
     adapter = MetadataFirstHybridGraphAdapter(

@@ -97,6 +97,7 @@ the `--enable-graph` / `--graph-required` CLI flags plus
 | `LLM_BRAIN_EMBEDDING_DIM` | — | `1024` | Embedding dimension (int). |
 | `LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT` | — | `true` | Store raw episode content (off only for `0`/`false`/`no`). |
 | `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES` | — | `false` | Run Graphiti entity extraction (truthy: `1`/`true`/`yes`). Production default is episode-only. |
+| `LLM_BRAIN_GRAPH_METADATA_FIRST_HYBRID` | — | `false` | Wrap Graphiti with the metadata-first hybrid adapter. This stores metadata-only graph episodes and forces `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=false` for that runtime path. |
 | `LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS` | — | `30` | Per-call wait (s) for graph reads (search/retrieve). Non-positive or non-numeric falls back to default. A read past this bound degrades to `graph_status.status == "error"`, never a false `available`. |
 | `LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS` | — | `300` | Per-call wait (s) for graph writes (`upsert_episode`; longer because `extract_entities=true` runs an LLM). A write past this bound fails the upsert (counted as `failed`), not a silent hang. |
 
