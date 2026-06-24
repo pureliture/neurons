@@ -39,6 +39,22 @@ from .server_runtime import public_ingress_leak_violations
 
 DEFAULT_COLLECTION_NAME = "neurons_searchable_mirror_poc"
 DEFAULT_VECTOR_SIZE = 64
+
+# Keyword payload fields declared as Qdrant payload indexes at collection-create
+# time so production filters do not full-scan. ``privacy_class`` is mandatory for
+# safe multi-privacy retrieval.
+PAYLOAD_INDEX_FIELDS = (
+    "target_profile",
+    "privacy_class",
+    "result_type",
+    "project",
+    "provider",
+    "session_id_hash",
+    "content_hash",
+    "idempotency_key",
+    "document_kind",
+    "redaction_version",
+)
 EVIDENCE_PACKET_SCHEMA = "agent_knowledge_searchable_mirror_gate_evidence.v1"
 MIRROR_AUTHORITY = "searchable_runtime_mirror"
 MIRROR_BACKEND = "qdrant_docling"
@@ -299,6 +315,7 @@ class QdrantDoclingMirrorAdapter:
         query: str,
         *,
         target_profile: str = "",
+        filters: dict[str, str] | None = None,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
         """Backward-compatible alias for mirror-candidate search.
@@ -307,30 +324,37 @@ class QdrantDoclingMirrorAdapter:
         ledger/CouchDB/Neo4j authorities before product use.
         """
 
-        return self.query_mirror_candidates(query, target_profile=target_profile, limit=limit)
+        return self.query_mirror_candidates(
+            query, target_profile=target_profile, filters=filters, limit=limit
+        )
 
     def query_mirror_candidates(
         self,
         query: str,
         *,
         target_profile: str = "",
+        filters: dict[str, str] | None = None,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
         safe_query = _validate_mirror_text(query)
         vector = self._embedding.embed(safe_query)
         if len(vector) != self._embedding.size:
             raise ValueError("embedding provider returned wrong vector size")
+        conditions = _filter_conditions_dict(target_profile=target_profile, filters=filters)
         result = _query_points(
             self._client,
             collection_name=self._collection_name,
             query=vector,
             limit=max(1, min(int(limit), 20)),
-            query_filter=_target_profile_filter(target_profile),
+            query_filter=_payload_filter(conditions),
         )
         hits: list[dict[str, Any]] = []
         for point in _query_result_points(result):
             payload = _point_payload(point)
-            if target_profile and payload.get("target_profile") != target_profile:
+            # Defence-in-depth: re-check every condition against the returned
+            # payload so a backend that ignores the filter cannot leak a row
+            # from another profile/privacy_class.
+            if not _payload_satisfies(payload, conditions):
                 continue
             hits.append(_hit_from_payload(payload, score=_point_score(point)).to_dict())
         return hits
@@ -356,6 +380,24 @@ class QdrantDoclingMirrorAdapter:
             collection_name=self._collection_name,
             vectors_config=_vector_params(self._embedding.size),
         )
+        self._ensure_payload_indexes()
+
+    def _ensure_payload_indexes(self) -> None:
+        # Declared at create time so production filters (target_profile,
+        # privacy_class, result_type, ...) don't full-scan. No-op when the client
+        # does not support payload indexes (e.g. a minimal local/fake client).
+        creator = getattr(self._client, "create_payload_index", None)
+        if not callable(creator):
+            return
+        for field in PAYLOAD_INDEX_FIELDS:
+            try:
+                creator(
+                    collection_name=self._collection_name,
+                    field_name=field,
+                    field_schema=_keyword_index_schema(),
+                )
+            except Exception as exc:
+                raise SearchableMirrorUnavailable("Qdrant payload index create failed") from exc
 
     def delete_document(
         self, handle: BackendDocumentHandle, *, missing_ok: bool = True
@@ -556,8 +598,25 @@ def _payload_for_document(document: RagReadyDocument, markdown: str) -> dict[str
         "summary": public_safe_text(markdown, max_chars=512),
         "metadata": metadata,
     }
+    # Promote RAGFlow-parity filter keys to top-level payload so they can be
+    # indexed and filtered like target_profile (they otherwise live only inside
+    # the nested ``metadata`` dict). None of these overwrite an existing top-level
+    # key.
+    payload.update(_promoted_filter_fields(metadata, document))
     ensure_public_safe(payload, "qdrant_docling_payload")
     return payload
+
+
+def _promoted_filter_fields(metadata: dict[str, Any], document: RagReadyDocument) -> dict[str, Any]:
+    # Canonical filter field name is ``result_type`` (RAGFlow uses result_type/type
+    # interchangeably); fall back to the document_kind so the field is always set.
+    result_type = str(metadata.get("result_type") or metadata.get("type") or document.document_kind or "")
+    promoted: dict[str, Any] = {"result_type": public_safe_text(result_type, max_chars=120)}
+    for key in ("project", "provider", "session_id_hash"):
+        value = metadata.get(key)
+        if value is not None and str(value) != "":
+            promoted[key] = public_safe_text(str(value), max_chars=240)
+    return promoted
 
 
 def _public_safe_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -640,28 +699,48 @@ def _query_points(
         return client.query_points(**kwargs)
 
 
-def _target_profile_filter(target_profile: str) -> Any:
-    if not target_profile:
+def _filter_conditions_dict(*, target_profile: str, filters: dict[str, str] | None) -> dict[str, str]:
+    conditions: dict[str, str] = {}
+    if target_profile:
+        conditions["target_profile"] = str(target_profile)
+    for key, value in (filters or {}).items():
+        if value is not None and str(value) != "":
+            conditions[str(key)] = str(value)
+    return conditions
+
+
+def _payload_filter(conditions: dict[str, str]) -> Any:
+    if not conditions:
         return None
     try:
         from qdrant_client import models
     except ImportError:
         return {
-            "must": [
-                {
-                    "key": "target_profile",
-                    "match": {"value": str(target_profile)},
-                }
-            ]
+            "must": [{"key": key, "match": {"value": value}} for key, value in conditions.items()]
         }
     return models.Filter(
         must=[
-            models.FieldCondition(
-                key="target_profile",
-                match=models.MatchValue(value=str(target_profile)),
-            )
+            models.FieldCondition(key=key, match=models.MatchValue(value=value))
+            for key, value in conditions.items()
         ]
     )
+
+
+def _payload_satisfies(payload: dict[str, Any], conditions: dict[str, str]) -> bool:
+    return all(payload.get(key) == value for key, value in conditions.items())
+
+
+def _target_profile_filter(target_profile: str) -> Any:
+    # Retained single-field helper, now delegating to the general builder.
+    return _payload_filter(_filter_conditions_dict(target_profile=target_profile, filters=None))
+
+
+def _keyword_index_schema() -> Any:
+    try:
+        from qdrant_client import models
+    except ImportError:
+        return "keyword"
+    return models.PayloadSchemaType.KEYWORD
 
 
 def _point_payload(point: Any) -> dict[str, Any]:
@@ -858,6 +937,7 @@ __all__ = [
     "MIRROR_BACKEND",
     "MirrorDeletionCapable",
     "MirrorDeletionResult",
+    "PAYLOAD_INDEX_FIELDS",
     "PassthroughMarkdownNormalizer",
     "QdrantDoclingMirrorAdapter",
     "SearchableMirrorHit",

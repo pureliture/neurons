@@ -91,6 +91,8 @@ class InMemoryQdrantClient:
     def __init__(self) -> None:
         # collection_name -> {point_id: {"vector": [...], "payload": {...}}}
         self._collections: dict[str, dict[Any, dict[str, Any]]] = {}
+        # collection_name -> [indexed field names]
+        self._payload_indexes: dict[str, list[str]] = {}
 
     # -- collection lifecycle -------------------------------------------------
     def collection_exists(self, collection_name: str) -> bool:
@@ -98,6 +100,16 @@ class InMemoryQdrantClient:
 
     def create_collection(self, collection_name: str, vectors_config: Any = None) -> None:
         self._collections.setdefault(collection_name, {})
+        self._payload_indexes.setdefault(collection_name, [])
+
+    def create_payload_index(
+        self, *, collection_name: str, field_name: str, field_schema: Any = None
+    ) -> dict[str, Any]:
+        self._payload_indexes.setdefault(collection_name, []).append(str(field_name))
+        return {"status": "completed"}
+
+    def payload_indexes(self, collection_name: str) -> list[str]:
+        return list(self._payload_indexes.get(collection_name, []))
 
     # -- writes ---------------------------------------------------------------
     def upsert(self, *, collection_name: str, points: list[Any]) -> dict[str, Any]:
