@@ -578,6 +578,8 @@ _STRUCTURED_KEY_ALIASES = {
     "entity_value": "name",
     "entity_text": "name",
 }
+_EXISTING_FACTS_BLOCK_RE = re.compile(r"<EXISTING FACTS>\s*(.*?)\s*</EXISTING FACTS>", re.DOTALL)
+_FACT_IDX_RE = re.compile(r"""["']?idx["']?\s*[:=]\s*(-?\d+)""")
 
 
 def _normalize_structured_keys(value: Any) -> Any:
@@ -600,7 +602,12 @@ def _normalize_structured_keys(value: Any) -> Any:
     return value
 
 
-def _normalize_structured_response(value: Any, response_model: Any = None) -> Any:
+def _normalize_structured_response(
+    value: Any,
+    response_model: Any = None,
+    *,
+    valid_duplicate_fact_idxs: set[int] | None = None,
+) -> Any:
     normalized = _normalize_structured_keys(value)
     if response_model is None:
         return normalized
@@ -613,7 +620,8 @@ def _normalize_structured_response(value: Any, response_model: Any = None) -> An
         if len(list_field_names) == 1:
             normalized = {list_field_names[0]: normalized}
     if isinstance(normalized, dict):
-        return _normalize_response_model_payload(normalized, fields)
+        payload = _normalize_response_model_payload(normalized, fields)
+        return _sanitize_duplicate_fact_idxs(payload, fields, valid_duplicate_fact_idxs)
     return normalized
 
 
@@ -646,6 +654,54 @@ def _normalize_response_model_item(item: dict[str, Any], field_name: str) -> dic
                 indices.append(0)
         result["episode_indices"] = indices
     return result
+
+
+def _sanitize_duplicate_fact_idxs(
+    payload: dict[str, Any],
+    fields: dict[str, Any],
+    valid_duplicate_fact_idxs: set[int] | None,
+) -> dict[str, Any]:
+    """Drop impossible Graphiti EdgeDuplicate duplicate refs before validation.
+
+    Graphiti's dedupe_edges prompt uses continuous idx values across two lists,
+    but ``duplicate_facts`` may only reference the first ``EXISTING FACTS`` list.
+    Some OpenAI-compatible Ollama models occasionally return idx values from the
+    second list; Graphiti ignores them after logging a warning. Filtering here
+    keeps the same semantics without emitting stderr noise or retrying the LLM.
+    """
+
+    if valid_duplicate_fact_idxs is None or "duplicate_facts" not in fields:
+        return payload
+    duplicate_facts = payload.get("duplicate_facts")
+    if not isinstance(duplicate_facts, list):
+        return payload
+
+    filtered: list[int] = []
+    for value in duplicate_facts:
+        try:
+            idx = int(value)
+        except (TypeError, ValueError):
+            continue
+        if idx in valid_duplicate_fact_idxs:
+            filtered.append(idx)
+
+    result = dict(payload)
+    result["duplicate_facts"] = filtered
+    return result
+
+
+def _existing_fact_idx_values_from_messages(messages: list[Any]) -> set[int] | None:
+    for message in reversed(messages):
+        content = getattr(message, "content", None)
+        if content is None and isinstance(message, dict):
+            content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        match = _EXISTING_FACTS_BLOCK_RE.search(content)
+        if not match:
+            continue
+        return {int(idx.group(1)) for idx in _FACT_IDX_RE.finditer(match.group(1))}
+    return None
 
 
 def _extraction_body_for(episode: OntologyEpisode, json_body: str) -> str:
@@ -813,6 +869,7 @@ class _ReasoningOpenAIGenericClient(OpenAIGenericClient):
                 openai_messages.append({"role": "user", "content": message.content})
             elif message.role == "system":
                 openai_messages.append({"role": "system", "content": message.content})
+        valid_duplicate_fact_idxs = _existing_fact_idx_values_from_messages(openai_messages)
         request = {
             "model": self.model or DEFAULT_MODEL,
             "messages": openai_messages,
@@ -828,7 +885,11 @@ class _ReasoningOpenAIGenericClient(OpenAIGenericClient):
             if not result:
                 raise EmptyResponseError("LLM returned an empty response")
             data = _json.loads(self._strip_code_fences(result))
-            return _normalize_structured_response(data, response_model)
+            return _normalize_structured_response(
+                data,
+                response_model,
+                valid_duplicate_fact_idxs=valid_duplicate_fact_idxs,
+            )
         except openai.RateLimitError as exc:
             raise RateLimitError from exc
         except Exception as exc:
