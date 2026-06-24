@@ -238,11 +238,73 @@ services:
       LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}
       LLM_BRAIN_GRAPH_LLM_PROVIDER: openai-compatible
       LLM_BRAIN_LLM_BASE_URL: http://llm-brain-vertex-wrapper:${LLM_BRAIN_VERTEX_WRAPPER_CONTAINER_PORT:-8080}/v1
-      LLM_BRAIN_LLM_MODEL: ${LLM_BRAIN_LLM_MODEL:-gemini-3.5-flash-thinking}
+      LLM_BRAIN_LLM_MODEL: ${LLM_BRAIN_LLM_MODEL:-gemma-4-26b-a4b-it-maas}
+      LLM_BRAIN_SMALL_LLM_MODEL: ${LLM_BRAIN_SMALL_LLM_MODEL:-gemma-4-26b-a4b-it-maas}
+      LLM_BRAIN_LLM_REASONING_EFFORT: ${LLM_BRAIN_LLM_REASONING_EFFORT:-none}
       LLM_BRAIN_EMBEDDING_BASE_URL: http://llm-brain-vertex-wrapper:${LLM_BRAIN_VERTEX_WRAPPER_CONTAINER_PORT:-8080}/v1
       LLM_BRAIN_EMBEDDING_MODEL: ${LLM_BRAIN_EMBEDDING_MODEL:-gemini-embedding-2}
       LLM_BRAIN_EMBEDDING_DIM: ${LLM_BRAIN_EMBEDDING_DIM:-3072}
       LLM_BRAIN_GRAPH_EXTRACT_ENTITIES: ${LLM_BRAIN_GRAPH_EXTRACT_ENTITIES:-true}
+      LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS: ${LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS:-1200}
+    depends_on:
+      - llm-brain-couchdb
+      - llm-brain-ledger-postgres
+      - llm-brain-neo4j
+      - llm-brain-vertex-wrapper
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - llm-brain-runtime:/var/lib/agent-knowledge/llm-brain
+
+  llm-brain-graph-trigger:
+    profiles: ["llm-brain-core"]
+    build: ./worker
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        mkdir -p /var/lib/agent-knowledge/llm-brain/graph-trigger
+        echo "[llm-brain-graph-trigger] scheduler start"
+        while true; do
+          neuron-knowledge couchdb-graph-trigger \
+            --ledger "$${LLM_BRAIN_LEDGER_PATH:-/var/lib/agent-knowledge/llm-brain/ledger.sqlite}" \
+            --runtime-dir /var/lib/agent-knowledge/llm-brain/graph-trigger \
+            --limit "$${LLM_BRAIN_GRAPH_TRIGGER_LIMIT:-25}" \
+            --project "$${LLM_BRAIN_GRAPH_TRIGGER_PROJECT:-}" \
+            --provider "$${LLM_BRAIN_GRAPH_TRIGGER_PROVIDER:-}" \
+            --execute \
+            --graph-required \
+            --report-every "$${LLM_BRAIN_GRAPH_TRIGGER_REPORT_EVERY:-25}" \
+            || echo "[llm-brain-graph-trigger] rc=$$?"
+          sleep "$${LLM_BRAIN_GRAPH_TRIGGER_INTERVAL_SECONDS:-300}"
+        done
+    environment:
+      COUCHDB_URL: http://llm-brain-couchdb:5984
+      COUCHDB_DB: ${LLM_BRAIN_COUCHDB_DB:-transcript_source}
+      COUCHDB_USER: ${LLM_BRAIN_COUCHDB_USER:-neurons}
+      COUCHDB_PASSWORD: ${LLM_BRAIN_COUCHDB_PASSWORD:-llmbrain}
+      NEURON_LEDGER_PG_DSN: postgresql://${LLM_BRAIN_LEDGER_POSTGRES_USER:-neurons}:${LLM_BRAIN_LEDGER_POSTGRES_PASSWORD:-llmbrain}@llm-brain-ledger-postgres:5432/${LLM_BRAIN_LEDGER_POSTGRES_DB:-neurons_ledger}
+      LLM_BRAIN_GRAPH_ENABLED: "true"
+      LLM_BRAIN_NEO4J_URI: bolt://llm-brain-neo4j:7687
+      LLM_BRAIN_NEO4J_USER: ${LLM_BRAIN_NEO4J_USER:-neo4j}
+      LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}
+      LLM_BRAIN_GRAPH_LLM_PROVIDER: openai-compatible
+      LLM_BRAIN_LLM_BASE_URL: http://llm-brain-vertex-wrapper:${LLM_BRAIN_VERTEX_WRAPPER_CONTAINER_PORT:-8080}/v1
+      LLM_BRAIN_LLM_MODEL: ${LLM_BRAIN_LLM_MODEL:-gemma-4-26b-a4b-it-maas}
+      LLM_BRAIN_SMALL_LLM_MODEL: ${LLM_BRAIN_SMALL_LLM_MODEL:-gemma-4-26b-a4b-it-maas}
+      LLM_BRAIN_LLM_REASONING_EFFORT: ${LLM_BRAIN_LLM_REASONING_EFFORT:-none}
+      LLM_BRAIN_EMBEDDING_BASE_URL: http://llm-brain-vertex-wrapper:${LLM_BRAIN_VERTEX_WRAPPER_CONTAINER_PORT:-8080}/v1
+      LLM_BRAIN_EMBEDDING_MODEL: ${LLM_BRAIN_EMBEDDING_MODEL:-gemini-embedding-2}
+      LLM_BRAIN_EMBEDDING_DIM: ${LLM_BRAIN_EMBEDDING_DIM:-3072}
+      LLM_BRAIN_GRAPH_EXTRACT_ENTITIES: ${LLM_BRAIN_GRAPH_EXTRACT_ENTITIES:-true}
+      LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS: ${LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS:-1200}
+      LLM_BRAIN_GRAPH_TRIGGER_INTERVAL_SECONDS: ${LLM_BRAIN_GRAPH_TRIGGER_INTERVAL_SECONDS:-300}
+      LLM_BRAIN_GRAPH_TRIGGER_LIMIT: ${LLM_BRAIN_GRAPH_TRIGGER_LIMIT:-25}
+      LLM_BRAIN_GRAPH_TRIGGER_PROJECT: ${LLM_BRAIN_GRAPH_TRIGGER_PROJECT:-}
+      LLM_BRAIN_GRAPH_TRIGGER_PROVIDER: ${LLM_BRAIN_GRAPH_TRIGGER_PROVIDER:-}
+      LLM_BRAIN_GRAPH_TRIGGER_REPORT_EVERY: ${LLM_BRAIN_GRAPH_TRIGGER_REPORT_EVERY:-25}
     depends_on:
       - llm-brain-couchdb
       - llm-brain-ledger-postgres

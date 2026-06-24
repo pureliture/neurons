@@ -260,6 +260,36 @@ Rule of thumb: `available` is the only healthy state; `degraded` and
 permission to restart a running backend. Diagnose first, restart only with
 evidence and intent.
 
+## Graph Trigger Scheduler
+
+`llm-brain-graph-trigger` is the M4 timer-facing service in the
+`llm-brain-core` compose profile. It runs `couchdb-graph-trigger` on a bounded
+interval, uses `graph-project.lock` to avoid pileups with manual/full batches,
+and defaults to the allowed Gemma-4 MaaS semantic extraction model.
+
+Default knobs in `.env.example`:
+
+```text
+LLM_BRAIN_LLM_MODEL=gemma-4-26b-a4b-it-maas
+LLM_BRAIN_SMALL_LLM_MODEL=gemma-4-26b-a4b-it-maas
+LLM_BRAIN_LLM_REASONING_EFFORT=none
+LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS=1200
+LLM_BRAIN_GRAPH_TRIGGER_INTERVAL_SECONDS=300
+LLM_BRAIN_GRAPH_TRIGGER_LIMIT=25
+LLM_BRAIN_GRAPH_TRIGGER_PROJECT=
+LLM_BRAIN_GRAPH_TRIGGER_PROVIDER=
+LLM_BRAIN_GRAPH_TRIGGER_REPORT_EVERY=25
+```
+
+Dry-run the trigger before enabling the scheduler. A passing dry-run reports a
+bounded plan, no mutation, no network use, and no raw paths.
+
+Live enablement is a compose/runtime mutation. Before starting the service,
+record current `couchdb-graph-status`, confirm no full batch runner is active,
+and set rollback to stopping only `llm-brain-graph-trigger`. Do not restart
+Neo4j, CouchDB, RAGFlow, or the bridge just because the trigger reports
+`already_running` or a bounded window has no backlog.
+
 ## Public Output Safety Checklist
 
 Every CLI/MCP response, runbook evidence block, log line, or PR snippet copied
