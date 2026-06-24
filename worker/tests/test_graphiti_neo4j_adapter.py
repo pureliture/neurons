@@ -73,6 +73,20 @@ def test_graphiti_adapter_default_path_inserts_then_reports_duplicate_on_reupser
     assert graphiti.saved_uuids == [episode.episode_id]
 
 
+def test_graphiti_adapter_default_path_does_not_build_entity_extraction_body(monkeypatch):
+    graphiti = _FakeGraphiti()
+
+    def _explode(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("episodic-only path must not prepare entity extraction input")
+
+    monkeypatch.setattr("agent_knowledge.llm_brain_core.graphiti_adapter._extraction_body_for", _explode)
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+    episode = _episode("Task", "task:metadata-first", {"brain_id": "/project/neurons", "task": "metadata-first"})
+
+    assert adapter.upsert_episode(episode) == "inserted"
+    assert graphiti.saved_uuids == [episode.episode_id]
+
+
 def test_entity_path_ensures_episode_node_before_add_episode_when_absent():
     # Scenario (a): entity mode + episode_id node ABSENT. The live bug:
     # add_episode(uuid=episode_id) calls graphiti get_by_uuid first, which raises

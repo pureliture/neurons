@@ -256,7 +256,6 @@ class GraphitiNeo4jGraphMemoryAdapter:
         # extraction_body is derived/transient and is NOT in content_hash, so it
         # never changes episode_id (no node-dup explosion).
         body = json.dumps(episode.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-        extraction_body = _extraction_body_for(episode, body)
         group_id = _graphiti_group_id(_group_id_for_episode(episode, self._default_group_id))
 
         async def _call() -> UpsertEpisodeResult:
@@ -291,6 +290,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 and await self._entity_extracted(self._graphiti.driver, episode.episode_id)
             ):
                 return "duplicate"
+            extraction_body = _extraction_body_for(episode, body)
             # Ensure the episode_id-keyed EpisodicNode exists BEFORE add_episode.
             # Graphiti's add_episode(uuid=episode_id) does get_by_uuid(uuid) first
             # and then extracts from the returned node's `content`, not directly
