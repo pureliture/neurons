@@ -59,7 +59,7 @@ class MemorySearchQuery:
 
 class AuthorizedMemoryReader(Protocol):
     def read(self, query: MemorySearchQuery) -> MemorySearchResponse:
-        """Return only ledger-authorized, public-safe memory result items."""
+        """ledger가 승인한 public-safe memory 결과만 반환한다."""
 
 
 class MemoryReadPipeline:
@@ -77,11 +77,12 @@ class MemoryReadPipeline:
         self.allow_private_results = bool(allow_private_results)
 
     def read(self, query: MemorySearchQuery) -> MemorySearchResponse:
+        bounded_limit = max(1, int(query.limit))
         chunks = self.ragflow.retrieve(
             query.query,
             self.dataset_ids,
             filters=query.filters,
-            limit=query.limit,
+            limit=bounded_limit,
         )
         results: list[MemorySearchResultItem] = []
         private_allowed = bool(query.include_private and self.allow_private_results)
@@ -133,5 +134,5 @@ class MemoryReadPipeline:
                 conversation_chunk=conversation_chunk_details,
             )
             results.append(result_item)
-        sliced_results = results[: max(1, int(query.limit))]
+        sliced_results = results[:bounded_limit]
         return MemorySearchResponse(results=sliced_results)

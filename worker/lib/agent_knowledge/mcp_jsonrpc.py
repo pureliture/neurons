@@ -5,6 +5,7 @@ import sys
 from typing import TextIO
 
 from .knowledge_search_service import KnowledgeSearchService
+from .llm_brain_core.context import _project_from_repository
 from .llm_brain_core.models import EvidenceRequest
 from .mcp_tools import (
     BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
@@ -78,43 +79,49 @@ def dispatch_tool_call(params: dict, service: KnowledgeSearchService) -> dict:
     tool_name = params.get("name")
     arguments = params.get("arguments") or {}
     if tool_name == BRAIN_CONTEXT_RESOLVE_TOOL_NAME:
+        repository = _require_non_empty_string(arguments, "repository", tool_name=tool_name)
+        branch = _require_non_empty_string(arguments, "branch", tool_name=tool_name)
+        current_request = _require_non_empty_string(arguments, "current_request", tool_name=tool_name)
         current_files = arguments.get("current_files") or []
         if not isinstance(current_files, list):
             raise ValueError("current_files must be an array")
         project = _project_arg(arguments)
         result = service.core_brain(project=project).brain_context_resolve(
-            repository=str(arguments.get("repository") or ""),
-            branch=str(arguments.get("branch") or ""),
+            repository=repository,
+            branch=branch,
             current_files=[str(item) for item in current_files],
-            current_request=str(arguments.get("current_request") or ""),
+            current_request=current_request,
             project=project or None,
             limit=_bounded_limit(arguments.get("limit"), default=8, maximum=20),
         ).to_dict()
         return _tool_result(result)
     if tool_name == BRAIN_MEMORY_SEARCH_TOOL_NAME:
+        query = _require_non_empty_string(arguments, "query", tool_name=tool_name)
         card_types = arguments.get("card_types")
         if card_types is not None and not isinstance(card_types, list):
             raise ValueError("card_types must be an array")
         project = _project_arg(arguments)
         result = service.core_brain(project=project).brain_memory_search(
-            query=str(arguments.get("query") or ""),
+            query=query,
             project=project,
             card_types=[str(item) for item in card_types] if isinstance(card_types, list) else None,
             limit=_bounded_limit(arguments.get("limit"), default=8, maximum=20),
         )
         return _tool_result(result)
     if tool_name == BRAIN_INCIDENT_SEARCH_TOOL_NAME:
+        symptom = _require_non_empty_string(arguments, "symptom", tool_name=tool_name)
         project = _project_arg(arguments)
         result = service.core_brain(project=project).brain_incident_search(
-            symptom=str(arguments.get("symptom") or ""),
+            symptom=symptom,
             project=project,
             limit=_bounded_limit(arguments.get("limit"), default=5, maximum=20),
         )
         return _tool_result(result)
     if tool_name == BRAIN_DRIFT_EXPLAIN_TOOL_NAME:
+        subject = _require_non_empty_string(arguments, "subject", tool_name=tool_name)
         project = _project_arg(arguments)
         result = service.core_brain(project=project).brain_drift_explain(
-            subject=str(arguments.get("subject") or ""),
+            subject=subject,
             project=project,
         )
         return _tool_result(result)
@@ -126,17 +133,24 @@ def dispatch_tool_call(params: dict, service: KnowledgeSearchService) -> dict:
         )
         return _tool_result(result)
     if tool_name == BRAIN_PERSONA_CHECK_TOOL_NAME:
+        plan = _require_non_empty_string(arguments, "plan", tool_name=tool_name)
         project = _project_arg(arguments)
         result = service.core_brain(project=project).brain_persona_check(
-            plan=str(arguments.get("plan") or ""),
+            plan=plan,
             project=project or None,
         )
         return _tool_result(result)
     if tool_name == BRAIN_EVIDENCE_GET_TOOL_NAME:
+        source_ref_id = _require_non_empty_string(arguments, "source_ref_id", tool_name=tool_name)
+        requesting_device_id_hash = _require_non_empty_string(
+            arguments,
+            "requesting_device_id_hash",
+            tool_name=tool_name,
+        )
         result = service.core_brain().brain_evidence_get(
             EvidenceRequest(
-                source_ref_id=str(arguments.get("source_ref_id") or ""),
-                requesting_device_id_hash=str(arguments.get("requesting_device_id_hash") or ""),
+                source_ref_id=source_ref_id,
+                requesting_device_id_hash=requesting_device_id_hash,
                 span_ref_id=str(arguments.get("span_ref_id") or ""),
                 approval_ref=str(arguments.get("approval_ref") or ""),
                 expected_content_hash=str(arguments.get("expected_content_hash") or ""),
@@ -146,9 +160,11 @@ def dispatch_tool_call(params: dict, service: KnowledgeSearchService) -> dict:
         )
         return _tool_result(result)
     if tool_name == BRAIN_QUERY_TOOL_NAME:
+        brain_id = _require_non_empty_string(arguments, "brain_id", tool_name=tool_name)
+        query = _require_non_empty_string(arguments, "query", tool_name=tool_name)
         result = service.brain_query(
-            brain_id=str(arguments.get("brain_id") or ""),
-            query=str(arguments.get("query") or ""),
+            brain_id=brain_id,
+            query=query,
             limit=_bounded_limit(arguments.get("limit"), default=8, maximum=10),
         )
         return _tool_result(result)
@@ -186,6 +202,13 @@ def _knowledge_search_limit(arguments: dict) -> int:
     return max(1, min(10, int(arguments.get("limit", 10))))
 
 
+def _require_non_empty_string(arguments: dict, key: str, *, tool_name: str) -> str:
+    value = arguments.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{tool_name} requires a non-empty {key}")
+    return value
+
+
 def _project_arg(arguments: dict) -> str:
     explicit = str(arguments.get("project") or "").strip()
     if explicit:
@@ -193,7 +216,8 @@ def _project_arg(arguments: dict) -> str:
     repository = str(arguments.get("repository") or "").strip().rstrip("/\\")
     if not repository:
         return ""
-    return repository.replace("\\", "/").split("/")[-1]
+    project = _project_from_repository(repository.replace("\\", "/"))
+    return "" if project == "unknown" else project
 
 
 def _tool_result(result: dict) -> dict:
