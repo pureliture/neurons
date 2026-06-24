@@ -97,6 +97,30 @@ def test_query_filters_by_privacy_class():
     assert all(hit["content_hash"] != public_doc.content_hash for hit in private_hits)
 
 
+def test_query_filter_shape_includes_privacy_class_clause():
+    # Assert the SERVER-side query_filter (not just the client-side re-check) carries
+    # the privacy_class condition, so a backend that honors the filter is scoped.
+    client = InMemoryQdrantClient()
+    adapter, _ = _adapter(client)
+    adapter.submit_document(_doc(body="x decision", privacy="private"))
+    adapter.query_mirror_candidates(
+        "decision", target_profile="derived-memory-items", privacy_class="private", limit=5
+    )
+    must = client.last_query_filter["must"]  # dict-shape filter (no qdrant_client installed)
+    keys = {cond["key"]: cond["match"]["value"] for cond in must}
+    assert keys.get("privacy_class") == "private"
+    assert keys.get("target_profile") == "derived-memory-items"
+
+
+def test_fully_unscoped_query_is_refused():
+    adapter, _ = _adapter()
+    adapter.submit_document(_doc(body="anything"))
+    import pytest
+
+    with pytest.raises(ValueError):
+        adapter.query_mirror_candidates("anything")  # no target_profile, no privacy_class, no filters
+
+
 def test_query_filters_by_result_type_and_project():
     adapter, _ = _adapter()
     keep = _doc(body="gamma card about authority", result_type="approved_memory_card", project="neurons")

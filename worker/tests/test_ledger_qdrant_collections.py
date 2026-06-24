@@ -66,6 +66,28 @@ def test_qdrant_collection_enabled_is_fail_closed_for_unknown(tmp_path):
     assert ledger._qdrant_collection_is_enabled("reg1") is True
 
 
+def test_qdrant_collection_disabled_flips_enable_check_to_false(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.upsert_qdrant_collection(logical_name="role-a", collection="shared")
+    assert ledger._qdrant_collection_is_enabled("shared") is True
+    # disable via enabled=0
+    with ledger._connect() as conn:
+        conn.execute("UPDATE qdrant_collections SET enabled = 0 WHERE logical_name = 'role-a'")
+    assert ledger._qdrant_collection_is_enabled("shared") is False
+
+
+def test_qdrant_collection_enable_is_fail_closed_when_any_mapping_disabled(tmp_path):
+    ledger = _ledger(tmp_path)
+    # two logical names map to one physical collection (legal: single-collection design)
+    ledger.upsert_qdrant_collection(logical_name="role-a", collection="shared")
+    ledger.upsert_qdrant_collection(logical_name="role-b", collection="shared")
+    assert ledger._qdrant_collection_is_enabled("shared") is True
+    with ledger._connect() as conn:
+        conn.execute("UPDATE qdrant_collections SET disabled_at = '2020-01-01' WHERE logical_name = 'role-b'")
+    # ANY disabled mapping -> fail closed
+    assert ledger._qdrant_collection_is_enabled("shared") is False
+
+
 def test_qdrant_collections_table_survives_reopen(tmp_path):
     path = tmp_path / "ledger.sqlite3"
     Ledger(path).upsert_qdrant_collection(logical_name="r", collection="c", vector_size=1024)

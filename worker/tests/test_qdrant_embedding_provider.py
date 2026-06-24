@@ -55,19 +55,28 @@ def test_provider_rejects_nonpositive_size():
         OpenAICompatibleEmbeddingProvider(embed_fn=lambda _t: [], size=0)
 
 
-def test_resolve_embedding_config_prefers_llm_brain_then_openai_then_default():
+def test_resolve_embedding_config_primary_wins_and_falls_back_and_omits_secret():
+    # both primary (LLM_BRAIN_*) and fallback (OPENAI_*/EMBEDDING_*) present:
+    # primary must win for model and base_url.
     cfg = resolve_embedding_config(
         {
             "LLM_BRAIN_EMBEDDING_MODEL": "bge-m3",
-            "LLM_BRAIN_EMBEDDING_BASE_URL": "http://127.0.0.1:8930/v1",
-            "OPENAI_API_KEY": "fallback-key",
+            "EMBEDDING_MODEL": "should-lose",
+            "LLM_BRAIN_EMBEDDING_BASE_URL": "http://primary/v1",
+            "OPENAI_BASE_URL": "http://should-lose/v1",
             "LLM_BRAIN_EMBEDDING_DIM": "1024",
         }
     )
     assert cfg["model"] == "bge-m3"
-    assert cfg["base_url"] == "http://127.0.0.1:8930/v1"
-    assert cfg["api_key"] == "fallback-key"  # OPENAI_* fallback when LLM_BRAIN_* absent
+    assert cfg["base_url"] == "http://primary/v1"
     assert cfg["dim"] == 1024
+    # secret is never returned in the config dict
+    assert "api_key" not in cfg
+
+    # fallback branch when primary absent
+    fb = resolve_embedding_config({"EMBEDDING_MODEL": "fallback-model", "OPENAI_BASE_URL": "http://fb/v1"})
+    assert fb["model"] == "fallback-model"
+    assert fb["base_url"] == "http://fb/v1"
 
 
 def test_resolve_embedding_config_defaults_dim_when_missing_or_invalid():
@@ -110,3 +119,34 @@ def test_provider_satisfies_adapter_embedding_protocol_end_to_end():
     result = adapter.submit_document(doc)
     assert result.status == IndexStatus.INDEXED
     assert client.point_count("neurons_searchable_mirror_poc") == 1
+
+
+class _WrongSizeProvider:
+    @property
+    def size(self) -> int:
+        return 16
+
+    def embed(self, text: str) -> list[float]:
+        return [0.0] * 8  # disagrees with declared size
+
+
+def test_submit_document_size_guard_rejects_mismatched_vector_no_point_written():
+    client = InMemoryQdrantClient()
+    adapter = QdrantDoclingMirrorAdapter(
+        client=client,
+        normalizer=PassthroughMarkdownNormalizer(),
+        embedding_provider=_WrongSizeProvider(),
+    )
+    doc = build_rag_ready_document(
+        target_profile="derived-memory-items",
+        document_kind="approved_memory_card",
+        source_namespace="workspace-neurons",
+        source_alias="cards/x.md",
+        privacy_class="private",
+        body="body",
+        filename="x.md",
+        metadata={"project": "neurons"},
+    )
+    with pytest.raises(ValueError):
+        adapter.submit_document(doc)
+    assert client.point_count("neurons_searchable_mirror_poc") == 0

@@ -601,13 +601,15 @@ class NativeMemoryMixin:
         if not collection:
             return False
         with self._connect() as connection:
-            row = connection.execute(
+            rows = connection.execute(
                 "SELECT enabled, disabled_at FROM qdrant_collections WHERE collection = ?",
                 (collection,),
-            ).fetchone()
-        if row is None:
+            ).fetchall()
+        if not rows:
             return False
-        return bool(row["enabled"]) and not row["disabled_at"]
+        # ``collection`` is not UNIQUE (single physical collection can back several
+        # logical_names). Fail-closed: enabled only if EVERY mapping is enabled.
+        return all(bool(row["enabled"]) and not row["disabled_at"] for row in rows)
     def list_tool_evidence_summaries(
         self,
         *,

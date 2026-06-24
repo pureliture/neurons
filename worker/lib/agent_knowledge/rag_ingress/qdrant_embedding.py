@@ -57,11 +57,12 @@ class OpenAICompatibleEmbeddingProvider:
 
 
 def resolve_embedding_config(environ: Mapping[str, str] | None = None) -> dict[str, object]:
-    """Resolve the OpenAI-compatible embedding config from env.
+    """Resolve the non-secret OpenAI-compatible embedding config from env.
 
     Reuses the same precedence as ``GraphitiNeo4jConfig.from_env`` so the mirror and
-    the graph adapter speak to one endpoint. Secrets are read but never returned in
-    any log/print path by callers.
+    the graph adapter speak to one endpoint. The api_key is deliberately NOT
+    returned here -- it is read only at client-build time -- so a caller that logs
+    this config object cannot leak the secret.
     """
 
     env = environ if environ is not None else os.environ
@@ -75,7 +76,6 @@ def resolve_embedding_config(environ: Mapping[str, str] | None = None) -> dict[s
     return {
         "model": env.get("LLM_BRAIN_EMBEDDING_MODEL") or env.get("EMBEDDING_MODEL") or "",
         "base_url": env.get("LLM_BRAIN_EMBEDDING_BASE_URL") or env.get("OPENAI_BASE_URL") or "",
-        "api_key": env.get("LLM_BRAIN_EMBEDDING_API_KEY") or env.get("OPENAI_API_KEY") or "",
         "dim": dim,
     }
 
@@ -91,15 +91,13 @@ def build_openai_embedding_provider(
     OpenAI-compatible embeddings endpoint is wired lazily.
     """
 
-    config = resolve_embedding_config(environ)
+    env = environ if environ is not None else os.environ
+    config = resolve_embedding_config(env)
     model = str(config["model"])
     size = int(config["dim"])
     if embed_fn is None:
-        embed_fn = _openai_embed_fn(
-            model=model,
-            base_url=str(config["base_url"]),
-            api_key=str(config["api_key"]),
-        )
+        api_key = env.get("LLM_BRAIN_EMBEDDING_API_KEY") or env.get("OPENAI_API_KEY") or ""
+        embed_fn = _openai_embed_fn(model=model, base_url=str(config["base_url"]), api_key=api_key)
     return OpenAICompatibleEmbeddingProvider(embed_fn=embed_fn, size=size, model=model)
 
 

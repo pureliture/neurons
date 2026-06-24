@@ -93,6 +93,8 @@ class InMemoryQdrantClient:
         self._collections: dict[str, dict[Any, dict[str, Any]]] = {}
         # collection_name -> [indexed field names]
         self._payload_indexes: dict[str, list[str]] = {}
+        # last query_filter passed to query_points (test introspection)
+        self.last_query_filter: Any = None
 
     # -- collection lifecycle -------------------------------------------------
     def collection_exists(self, collection_name: str) -> bool:
@@ -162,6 +164,9 @@ class InMemoryQdrantClient:
         query_filter: Any = None,
     ) -> dict[str, Any]:
         store = self._collections.get(collection_name, {})
+        # record for tests that assert the server-side filter shape independently
+        # of the adapter's client-side defence-in-depth re-check.
+        self.last_query_filter = query_filter
         conditions = _filter_conditions(query_filter)
         scored: list[dict[str, Any]] = []
         for point_id, record in store.items():

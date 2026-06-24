@@ -52,6 +52,17 @@ def test_rerank_empty_is_empty():
     assert reranker.rerank(query="q", candidates=[], top_n=5) == []
 
 
+def test_rerank_strict_order_and_top_n_floor_of_one():
+    # scores [0, 5, 1] -> strict order B, C, A
+    reranker = OpenAICompatibleReranker(rank_fn=lambda _q, texts: [0.0, 5.0, 1.0], text_key="summary")
+    candidates = [{"summary": "a"}, {"summary": "b"}, {"summary": "c"}]
+    ranked = reranker.rerank(query="q", candidates=candidates, top_n=3)
+    assert [r["summary"] for r in ranked] == ["b", "c", "a"]
+    # top_n=0 floors to 1 (documented surprising contract)
+    one = reranker.rerank(query="q", candidates=candidates, top_n=0)
+    assert len(one) == 1 and one[0]["summary"] == "b"
+
+
 def test_rerank_score_count_mismatch_raises():
     reranker = OpenAICompatibleReranker(rank_fn=lambda _q, _t: [1.0])
     with pytest.raises(ValueError):
@@ -98,10 +109,10 @@ def test_query_then_rerank_then_authority_join_compose():
         query="ledger", candidates=hits, top_n=5
     )
     # all authorized in this fake ledger
-    ledger = {h: {"status": "active", "currentness": "current"} for h in hashes.values()}
+    ledger = {h: {"privacy_level": "private", "currentness": "current"} for h in hashes.values()}
 
     class _L:
-        def get_by_content_hash(self, ch):
+        def authorize_document_by_content_hash(self, ch, *, filters=None):
             return ledger.get(ch)
 
     joined = join_mirror_hits_to_authority(reranked, resolver=LedgerContentHashAuthorityResolver(_L()))

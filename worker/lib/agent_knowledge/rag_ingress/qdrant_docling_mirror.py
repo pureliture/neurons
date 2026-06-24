@@ -84,6 +84,7 @@ class SearchableMirrorHit:
     content_hash: str
     score: float | None
     summary: str
+    privacy_class: str = ""
     canonical_resolution_required: bool = True
     authority_join_status: str = "not_checked"
 
@@ -95,6 +96,7 @@ class SearchableMirrorHit:
             "source_ref": self.source_ref,
             "content_hash": self.content_hash,
             "summary": self.summary,
+            "privacy_class": self.privacy_class,
             "canonical_resolution_required": self.canonical_resolution_required,
             "authority_join_status": self.authority_join_status,
         }
@@ -315,6 +317,7 @@ class QdrantDoclingMirrorAdapter:
         query: str,
         *,
         target_profile: str = "",
+        privacy_class: str = "",
         filters: dict[str, str] | None = None,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
@@ -325,7 +328,11 @@ class QdrantDoclingMirrorAdapter:
         """
 
         return self.query_mirror_candidates(
-            query, target_profile=target_profile, filters=filters, limit=limit
+            query,
+            target_profile=target_profile,
+            privacy_class=privacy_class,
+            filters=filters,
+            limit=limit,
         )
 
     def query_mirror_candidates(
@@ -333,6 +340,7 @@ class QdrantDoclingMirrorAdapter:
         query: str,
         *,
         target_profile: str = "",
+        privacy_class: str = "",
         filters: dict[str, str] | None = None,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
@@ -340,7 +348,17 @@ class QdrantDoclingMirrorAdapter:
         vector = self._embedding.embed(safe_query)
         if len(vector) != self._embedding.size:
             raise ValueError("embedding provider returned wrong vector size")
-        conditions = _filter_conditions_dict(target_profile=target_profile, filters=filters)
+        merged_filters = dict(filters or {})
+        if privacy_class:
+            merged_filters["privacy_class"] = privacy_class
+        conditions = _filter_conditions_dict(target_profile=target_profile, filters=merged_filters)
+        # Fail-closed: never run a fully-unscoped query (it would return the entire
+        # collection across all profiles/privacy classes). The caller must scope by
+        # target_profile and/or privacy_class/filters.
+        if not conditions:
+            raise ValueError(
+                "mirror query requires a scoping condition (target_profile and/or privacy_class/filters)"
+            )
         result = _query_points(
             self._client,
             collection_name=self._collection_name,
@@ -797,6 +815,7 @@ def _hit_from_payload(payload: dict[str, Any], *, score: float | None) -> Search
         content_hash=str(payload.get("content_hash") or ""),
         score=score,
         summary=public_safe_text(str(payload.get("summary") or ""), max_chars=512),
+        privacy_class=public_safe_text(str(payload.get("privacy_class") or ""), max_chars=80),
     )
 
 

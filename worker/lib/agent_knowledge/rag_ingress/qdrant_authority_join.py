@@ -3,22 +3,21 @@
 A Qdrant hit is never authoritative on its own -- ``SearchableMirrorHit`` carries
 ``canonical_resolution_required=True`` / ``authority_join_status="not_checked"``.
 Before any product use, each candidate must be resolved against the canonical
-authority (ledger / CouchDB), exactly as the RAGFlow retrieval path resolves every
-chunk through ``ledger.authorize_document``.
+authority, exactly as the RAGFlow retrieval path resolves every chunk through
+``ledger.authorize_document``.
 
-This module provides the join: resolved hits are flipped to
-``authority_join_status="resolved"`` (``canonical_resolution_required=False``) and
-carry only public-safe authority refs; unresolved hits are dropped by default and
-never silently promoted to authority.
+Critically, resolution routes through the SAME canonical predicate the ledger uses
+(``authorize_document_by_content_hash`` -> ``_authorize_knowledge_item``), so the
+mirror cannot diverge: a superseded / disabled / expired / disabled-dataset /
+authorization-revoked record is dropped here exactly as it is for a local read.
+Resolved hits are flipped to ``authority_join_status="resolved"`` and have their
+scope (privacy/project/provider/currentness) reconciled from the authoritative
+record; unresolved hits are dropped by default and never promoted to authority.
 """
 
 from __future__ import annotations
 
 from typing import Any, Iterable, Protocol, runtime_checkable
-
-# knowledge_items.status values that authorize a mirror hit as a real, current
-# canonical record. Conservative: only fully indexed/active records authorize.
-AUTHORIZED_STATUSES = frozenset({"indexed", "active"})
 
 
 @runtime_checkable
@@ -34,7 +33,8 @@ def join_mirror_hits_to_authority(
 ) -> list[dict[str, Any]]:
     """Resolve mirror candidates against canonical authority.
 
-    Resolved hits become authoritative-joined; unresolved hits are dropped
+    Resolved hits become authoritative-joined and have privacy/project/provider/
+    currentness reconciled from the canonical record; unresolved hits are dropped
     (default) or kept flagged ``unresolved`` but never promoted to authority.
     """
 
@@ -53,37 +53,45 @@ def join_mirror_hits_to_authority(
         joined["authority_join_status"] = "resolved"
         joined["canonical_resolution_required"] = False
         joined["authority"] = "local_ledger"
-        # public-safe authority signal only -- never raw ids / paths
-        joined["authority_currentness"] = str(record.get("currentness") or record.get("status") or "")
+        # The gate guarantees the record is current (supersedes empty, not
+        # disabled/expired, authorization_status active); reconcile scope from the
+        # authoritative record so the non-authority mirror cannot relabel scope.
+        joined["authority_currentness"] = str(record.get("currentness") or "current")
+        for hit_key, record_key in (
+            ("privacy_class", "privacy_level"),
+            ("project", "project"),
+            ("provider", "provider"),
+        ):
+            value = record.get(record_key)
+            if value not in (None, ""):
+                joined[hit_key] = str(value)
         out.append(joined)
     return out
 
 
 class LedgerContentHashAuthorityResolver:
-    """Resolve a mirror hit to a ``knowledge_items`` row via ``content_hash``.
+    """Resolve a mirror hit to a canonical ``knowledge_items`` row via content_hash.
 
-    ``content_hash`` is a sha256 of the document body, so a match is a strong
-    identity link. The record must additionally carry an authorized status.
+    Delegates the entire lifecycle/authority decision to
+    ``ledger.authorize_document_by_content_hash`` so this seam can never diverge
+    from canonical authorization. ``content_hash`` is a sha256 of the body and is
+    UNIQUE in ``knowledge_items``, so a match is a strong identity link.
     """
 
-    def __init__(self, ledger: Any, *, authorized_statuses: Iterable[str] = AUTHORIZED_STATUSES) -> None:
+    def __init__(self, ledger: Any, *, filters: dict[str, str] | None = None) -> None:
         self._ledger = ledger
-        self._authorized = frozenset(authorized_statuses)
+        self._filters = dict(filters or {})
 
     def resolve(self, hit: dict[str, Any]) -> dict[str, Any] | None:
         content_hash = str(hit.get("content_hash") or "")
         if not content_hash:
             return None
-        record = self._ledger.get_by_content_hash(content_hash)
-        if record is None:
-            return None
-        if str(record.get("status") or "") not in self._authorized:
-            return None
-        return record
+        return self._ledger.authorize_document_by_content_hash(
+            content_hash, filters=self._filters or None
+        )
 
 
 __all__ = [
-    "AUTHORIZED_STATUSES",
     "LedgerContentHashAuthorityResolver",
     "MirrorAuthorityResolver",
     "join_mirror_hits_to_authority",
