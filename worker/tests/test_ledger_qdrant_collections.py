@@ -66,13 +66,12 @@ def test_qdrant_collection_enabled_is_fail_closed_for_unknown(tmp_path):
     assert ledger._qdrant_collection_is_enabled("reg1") is True
 
 
-def test_qdrant_collection_disabled_flips_enable_check_to_false(tmp_path):
+def test_disable_qdrant_collection_flips_enable_check_to_false(tmp_path):
     ledger = _ledger(tmp_path)
     ledger.upsert_qdrant_collection(logical_name="role-a", collection="shared")
     assert ledger._qdrant_collection_is_enabled("shared") is True
-    # disable via enabled=0
-    with ledger._connect() as conn:
-        conn.execute("UPDATE qdrant_collections SET enabled = 0 WHERE logical_name = 'role-a'")
+    row = ledger.disable_qdrant_collection("role-a")
+    assert row["enabled"] == 0 and row["disabled_at"]
     assert ledger._qdrant_collection_is_enabled("shared") is False
 
 
@@ -82,9 +81,20 @@ def test_qdrant_collection_enable_is_fail_closed_when_any_mapping_disabled(tmp_p
     ledger.upsert_qdrant_collection(logical_name="role-a", collection="shared")
     ledger.upsert_qdrant_collection(logical_name="role-b", collection="shared")
     assert ledger._qdrant_collection_is_enabled("shared") is True
-    with ledger._connect() as conn:
-        conn.execute("UPDATE qdrant_collections SET disabled_at = '2020-01-01' WHERE logical_name = 'role-b'")
+    ledger.disable_qdrant_collection("role-b")
     # ANY disabled mapping -> fail closed
+    assert ledger._qdrant_collection_is_enabled("shared") is False
+
+
+def test_upsert_does_not_revive_a_disabled_collection(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.upsert_qdrant_collection(logical_name="role-a", collection="shared", vector_size=384)
+    ledger.disable_qdrant_collection("role-a")
+    # a metadata refresh must NOT silently re-enable a disabled mapping
+    ledger.upsert_qdrant_collection(logical_name="role-a", collection="shared", vector_size=1024)
+    row = ledger.get_qdrant_collection("role-a")
+    assert row["vector_size"] == 1024  # metadata updated
+    assert row["enabled"] == 0  # but still disabled
     assert ledger._qdrant_collection_is_enabled("shared") is False
 
 

@@ -121,6 +121,19 @@ def test_fully_unscoped_query_is_refused():
         adapter.query_mirror_candidates("anything")  # no target_profile, no privacy_class, no filters
 
 
+def test_filters_cannot_override_explicit_target_profile():
+    adapter, _ = _adapter()
+    adapter.submit_document(_doc(body="anything"))
+    import pytest
+
+    with pytest.raises(ValueError):
+        adapter.query_mirror_candidates(
+            "anything",
+            target_profile="derived-memory-items",
+            filters={"target_profile": "some-other-profile"},
+        )
+
+
 def test_query_filters_by_result_type_and_project():
     adapter, _ = _adapter()
     keep = _doc(body="gamma card about authority", result_type="approved_memory_card", project="neurons")

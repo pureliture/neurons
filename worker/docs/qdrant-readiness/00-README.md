@@ -14,8 +14,13 @@
   IndexBackendAdapter 호환, evidence packet gate, production NO-GO", embedding
   model은 명시적 미결정.
 - `specs/recall-cutover/{requirements,design}.md` — recall을 RAGFlow
-  `session-memory`로 컷오버하고 transcript-memory를 은퇴(RC1–RC6 done). **현재
-  recall 권위 surface = RAGFlow session-memory.**
+  `session-memory`로 컷오버하고 transcript-memory를 은퇴(RC1–RC6 done). 단 그 이후
+  recall은 **ledger-first**로 옮겨졌다(권위 read model = ledger; RAGFlow
+  retrieval은 `--dataset-id`가 있을 때만 도는 archive/evidence 보조 lane). 따라서
+  Qdrant 미러의 권위 결정은 ledger이고 미러 범위는 archive/evidence lane이다 —
+  근거는 [`02-collection-schema-metadata-mapping.md`](02-collection-schema-metadata-mapping.md)
+  §0의 검증 항목. (recall-cutover의 "RAGFlow session-memory recall"은 그 시점
+  상태이며 ledger-first 전환이 그것을 대체한다.)
 - `specs/couchdb-transcript-migration/` — CouchDB transcript source 이관.
 
 ## Scope

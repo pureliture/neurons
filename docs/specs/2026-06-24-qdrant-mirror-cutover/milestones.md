@@ -42,3 +42,21 @@ Stage 1만 이 루프에서 실행한다(M1–M5, 가역·test-evidence). M6–M
   area count 주석, schema_migrations seed, embedding 우선순위/submit size-guard/rerank
   order/to_dict 테스트.
 - 전체 worker suite 896 passed, 9 skipped. authority refactor 무회귀.
+
+## 3-리뷰(CodeRabbit + codebase-arch-mgr + system-arch-mgr) 후속 수정
+- upsert_qdrant_collection이 disabled row를 자동 부활시키던 것 수정(메타데이터만
+  갱신, enable 전환은 disable_qdrant_collection 등 명시 동사). +no-revive 테스트.
+- _filter_conditions_dict: filters가 명시 target_profile을 덮어쓰지 못하게(충돌 시
+  ValueError). +테스트.
+- join_mirror_hits_to_authority: mirror privacy_class가 권위 privacy_level과 다르면
+  relabel 대신 drop(privacy_mismatch). +테스트.
+- 정직성: qdrant_collections registry는 intended state 기록이고 read/write
+  enforcement는 M8 배선이라고 docstring 명시(과대표현 제거).
+- 문서 정합: doc 00 recall=ledger-first로 통일, doc 04 단계번호 정본=cutover spec
+  포인터, doc 03 disable 2-layer(B collection-level=M3 / A per-point=M9) 정리,
+  design.md open-question에 M8 배선 항목(brain_query 수렴/registry enforcement/
+  embedding_model 검증) 추가.
+- skip(사유): 코드 docstring 영어 지적 — 이 패키지 컨벤션이 영어 docstring이라
+  주변 코드와 일관 유지(자연어 markdown 문서는 한국어 유지). rerank 라이브 stub은
+  follow-on 표기됨.
+- 전체 worker suite 899 passed, 9 skipped.

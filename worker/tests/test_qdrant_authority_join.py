@@ -126,6 +126,20 @@ def test_join_reconciles_scope_from_authoritative_record():
     assert joined["provider"] == "codex"
 
 
+def test_join_drops_hit_when_mirror_privacy_disagrees_with_authority():
+    # mirror labeled the hit 'private' but the canonical record is 'secret-tier'
+    ledger = _RecordingLedger({"sha256:a": {"privacy_level": "secret-tier"}})
+    hit = {**_hit("sha256:a"), "privacy_class": "private"}
+    # default: dropped (never relabel-and-serve)
+    assert join_mirror_hits_to_authority([hit], resolver=LedgerContentHashAuthorityResolver(ledger)) == []
+    # not-dropping: flagged privacy_mismatch, not resolved
+    [flagged] = join_mirror_hits_to_authority(
+        [hit], resolver=LedgerContentHashAuthorityResolver(ledger), drop_unresolved=False
+    )
+    assert flagged["authority_join_status"] == "privacy_mismatch"
+    assert flagged["canonical_resolution_required"] is True
+
+
 def test_unresolved_hit_dropped_by_default_kept_flagged_otherwise():
     ledger = _RecordingLedger({})
     assert join_mirror_hits_to_authority([_hit("sha256:a")], resolver=LedgerContentHashAuthorityResolver(ledger)) == []

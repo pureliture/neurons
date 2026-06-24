@@ -180,7 +180,8 @@ class InMemoryQdrantClient:
                 }
             )
         scored.sort(key=lambda item: item["score"], reverse=True)
-        return {"points": scored[: max(1, int(limit))]}
+        # match Qdrant semantics: limit<=0 yields no points (adapter clamps to >=1)
+        return {"points": scored[: max(0, int(limit))]}
 
     # -- test introspection ---------------------------------------------------
     def point_count(self, collection_name: str) -> int:

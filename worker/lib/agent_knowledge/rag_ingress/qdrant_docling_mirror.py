@@ -722,8 +722,14 @@ def _filter_conditions_dict(*, target_profile: str, filters: dict[str, str] | No
     if target_profile:
         conditions["target_profile"] = str(target_profile)
     for key, value in (filters or {}).items():
-        if value is not None and str(value) != "":
-            conditions[str(key)] = str(value)
+        key = str(key)
+        if value is None or str(value) == "":
+            continue
+        # The explicit target_profile argument is authoritative: a filters entry
+        # may not silently widen/redirect scope by overwriting it.
+        if key == "target_profile" and target_profile and str(value) != str(target_profile):
+            raise ValueError("filters.target_profile conflicts with the target_profile argument")
+        conditions[key] = str(value)
     return conditions
 
 
