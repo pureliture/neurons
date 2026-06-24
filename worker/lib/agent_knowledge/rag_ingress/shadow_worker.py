@@ -475,6 +475,12 @@ def main() -> int:
                 resolve_dataset_id=resolver,
                 broad_scan_pages=broad_scan_pages,
             )
+        # M6 dual-write shadow (OFF unless MIRROR_DUAL_WRITE=1 + QDRANT_URL set).
+        # Best-effort Qdrant mirror alongside the authoritative primary; a mirror
+        # failure never breaks RAGFlow/CouchDB delivery. Default-off keeps the live
+        # worker byte-identical.
+        from .qdrant_dual_write import maybe_wrap_dual_write
+        backend = maybe_wrap_dual_write(backend, environ=os.environ)
     nats_url = os.environ.get("RAG_INGRESS_NATS_URL", "nats://127.0.0.1:4222")
     subject = os.environ.get("SHADOW_SUBJECT", "rag.shadow.>")
     durable = os.environ.get("SHADOW_DURABLE", "shadow_python_worker")
