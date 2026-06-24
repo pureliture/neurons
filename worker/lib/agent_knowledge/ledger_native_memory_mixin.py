@@ -528,6 +528,112 @@ class NativeMemoryMixin:
                 (logical_name,),
             ).fetchone()
         return dict(row) if row else None
+
+    def upsert_qdrant_collection(
+        self,
+        *,
+        logical_name: str,
+        collection: str,
+        embedding_model: str = "",
+        vector_size: int = 0,
+        distance: str = "Cosine",
+        payload_index_version: str = "",
+    ) -> dict:
+        """Register/refresh a logical_name -> Qdrant collection mapping.
+
+        Parallel to ``upsert_ragflow_dataset_plan`` for the searchable mirror. This
+        records the INTENDED collection mapping + vector params; it performs no
+        network call and touches no live Qdrant collection. A refresh updates only
+        metadata and never re-enables a disabled row (use
+        ``disable_qdrant_collection`` / a future enable verb for state changes).
+
+        NOTE (Stage 1): the registry records intended enable state. Read/write
+        ENFORCEMENT (consulting ``_qdrant_collection_is_enabled`` from the adapter)
+        is wired at the M8 read-cutover; it is not load-bearing yet.
+        """
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO qdrant_collections (
+                    logical_name, collection, embedding_model, vector_size,
+                    distance, payload_index_version, created_at, enabled, disabled_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, '')
+                ON CONFLICT(logical_name) DO UPDATE SET
+                    collection=excluded.collection,
+                    embedding_model=excluded.embedding_model,
+                    vector_size=excluded.vector_size,
+                    distance=excluded.distance,
+                    payload_index_version=excluded.payload_index_version
+                """,
+                (
+                    logical_name,
+                    collection,
+                    embedding_model,
+                    int(vector_size),
+                    distance,
+                    payload_index_version,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM qdrant_collections WHERE logical_name = ?",
+                (logical_name,),
+            ).fetchone()
+        return dict(row)
+
+    def get_qdrant_collection(self, logical_name: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM qdrant_collections WHERE logical_name = ?",
+                (logical_name,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_qdrant_collections(self) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM qdrant_collections ORDER BY logical_name"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def disable_qdrant_collection(self, logical_name: str) -> dict | None:
+        """Disable a registry mapping (enable transition is an explicit op).
+
+        ``upsert_qdrant_collection`` only refreshes metadata and never re-enables a
+        disabled row, so disable/enable are deliberate verbs rather than a side
+        effect of an upsert. Returns the updated row (or None if absent).
+        """
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE qdrant_collections SET enabled = 0, disabled_at = ? WHERE logical_name = ?",
+                (now, logical_name),
+            )
+            row = connection.execute(
+                "SELECT * FROM qdrant_collections WHERE logical_name = ?",
+                (logical_name,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def _qdrant_collection_is_enabled(self, collection: str) -> bool:
+        # Fail-closed: a collection absent from the registry is NOT treated as
+        # enabled (unlike ragflow_datasets which fails open). The mirror must be
+        # explicitly registered before any live use.
+        if not collection:
+            return False
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT enabled, disabled_at FROM qdrant_collections WHERE collection = ?",
+                (collection,),
+            ).fetchall()
+        if not rows:
+            return False
+        # ``collection`` is not UNIQUE (single physical collection can back several
+        # logical_names). Fail-closed: enabled only if EVERY mapping is enabled.
+        return all(bool(row["enabled"]) and not row["disabled_at"] for row in rows)
     def list_tool_evidence_summaries(
         self,
         *,
