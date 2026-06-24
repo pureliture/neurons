@@ -128,6 +128,19 @@ services:
       RAGFLOW_PROCEDURAL_MEMORY_DATASET_ID: ${RAGFLOW_PROCEDURAL_MEMORY_DATASET_ID:-}
       RAGFLOW_TASK_SUMMARY_DATASET_ID: ${RAGFLOW_TASK_SUMMARY_DATASET_ID:-}
       RAGFLOW_APPROVED_MEMORY_CARD_DATASET_ID: ${RAGFLOW_APPROVED_MEMORY_CARD_DATASET_ID:-}
+      # M6 dual-write shadow — OFF by default. Set MIRROR_DUAL_WRITE=1 + QDRANT_URL
+      # to ALSO mirror each delivery into Qdrant (best-effort; a mirror failure never
+      # affects the authoritative RAGFlow/CouchDB write). Needs the `qdrant` service
+      # (profile searchable-mirror) and the OpenAI-compatible embedding env below.
+      MIRROR_DUAL_WRITE: ${MIRROR_DUAL_WRITE:-0}
+      QDRANT_URL: ${QDRANT_URL:-}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-}
+      # Embedding endpoint reused from the graph adapter (LLM_BRAIN_EMBEDDING_*).
+      # Empty by default -> dual-write stays inert.
+      LLM_BRAIN_EMBEDDING_MODEL: ${LLM_BRAIN_EMBEDDING_MODEL:-}
+      LLM_BRAIN_EMBEDDING_BASE_URL: ${LLM_BRAIN_EMBEDDING_BASE_URL:-}
+      LLM_BRAIN_EMBEDDING_API_KEY: ${LLM_BRAIN_EMBEDDING_API_KEY:-}
+      LLM_BRAIN_EMBEDDING_DIM: ${LLM_BRAIN_EMBEDDING_DIM:-1024}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:
@@ -137,6 +150,19 @@ services:
     depends_on:
       - nats-jetstream
       - ingress-api
+
+  qdrant:
+    # Searchable-mirror store (M6 dual-write target). Profile-gated so a bare
+    # `compose up` does NOT start it. Opt-in:
+    #   docker compose --profile searchable-mirror up -d qdrant
+    # Loopback-only bind; pin QDRANT_IMAGE to a tested tag for production.
+    profiles: ["searchable-mirror"]
+    image: ${QDRANT_IMAGE:-qdrant/qdrant:latest}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
 
   llm-brain-neo4j:
     profiles: ["llm-brain-graph"]
@@ -227,3 +253,4 @@ volumes:
   rag-ingress-live-state:
   llm-brain-neo4j-data:
   llm-brain-neo4j-logs:
+  qdrant_data:
