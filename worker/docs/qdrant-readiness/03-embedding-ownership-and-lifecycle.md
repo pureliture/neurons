@@ -101,18 +101,25 @@ normalize(Docling/Passthrough) → _validate_mirror_text(leak 검사+redact)
 - **어떤 live GC route에도 연결되지 않았다.** GC가 mirror에 대해 target할 지점의
   초안일 뿐이다.
 
-### 4.3 disable(soft) 결정 사항 (미해결)
+### 4.3 disable 메커니즘 — 두 layer (현황 정리)
 
-Qdrant에는 native disable이 없으므로 둘 중 하나를 골라야 한다:
+Qdrant에는 native per-point disable이 없다. 두 layer가 있고, **M3에서 실제 구현된
+것은 (B) collection-level뿐**이다.
 
-1. **payload `enabled` bool + 모든 read filter에 `enabled=true` 강제** — RAGFlow
-   disable과 가장 근접. rollback이 enable 토글로 가능.
-2. **hard delete + ledger authority** — mirror는 어차피 authority가 아니므로
-   tombstone 없이 hard delete하고, 복구는 재-ingest(ledger/CouchDB가 본문 보유).
+- **(A) per-point soft-disable** — payload `enabled` bool + 모든 read filter에
+  `enabled=true` 강제. 단일 stale point(supersede의 "옛 point 내림")용. **M3에서
+  미구현, M9로 연기.** 그때까지 **supersede의 옛 point 정리는 hard-delete-only**
+  (delete seam). RAGFlow의 `disable_document`(per-doc soft)에 대응하는 per-point
+  소프트 레버는 아직 없다.
+- **(B) collection-level enable** — ledger `qdrant_collections.enabled` /
+  `disable_qdrant_collection`, fail-closed(`_qdrant_collection_is_enabled`). **M3
+  구현됨.** collection 단위 rollback/quarantine 레버다. 단 현재 어떤 read/write
+  경로도 이를 consult하지 않는다(enforcement는 M8 read-cutover에서 배선; 그 전까진
+  intended state 기록일 뿐).
 
-권고: rollback 단순성을 위해 v1은 (1) `enabled` payload 필드를 채택하되, GC 최종
-삭제는 (2) hard delete로 수행. supersede는 옛 point를 `enabled=false`로 내린 뒤
-soak 후 hard delete.
+요약: M3는 collection-level enable(B)을 authority로 두고, per-point soft-disable(A)은
+M9로 연기한다. 그 사이 supersede/정리는 delete seam(hard delete)로만 한다.
+requirements Q4의 "payload enabled 필드" 결정은 M9 항목으로 미룬다.
 
 ### 4.4 GC chokepoint 정합
 
@@ -130,6 +137,6 @@ GC 규약)은 Qdrant에도 그대로 적용한다.
 | dedup | meta_fields 스캔 | point 존재 + 3-key 일치 | ✅ PoC |
 | update-in-place | 없음(재upload) | 없음(같은 hash=overwrite, 새 hash=새 point) | ✅ 의미 동일 |
 | supersede | 새 upload + (disable/delete 옛) | 새 upsert + 옛 disable/delete | ⚠️ delete seam만 초안 |
-| disable(soft) | `disable_document` | payload `enabled` 결정 필요 | ❌ 미정 |
+| disable(soft) | `disable_document`(per-doc) | (A) per-point payload `enabled` = M9 연기 / (B) collection-level `qdrant_collections.enabled` = M3 구현(미배선, M8 enforcement) | ⚠️ (B)만 구현 |
 | delete(hard) | `delete_documents`(chokepoint) | `delete_document` seam | ⚠️ seam 초안, chokepoint 미연결 |
 | status | poll DONE/FAIL | upsert 동기 INDEXED | ✅ reconciler 불필요화 |

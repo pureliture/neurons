@@ -45,8 +45,13 @@ gate는 통과 증거(evidence)를 산출하고, 그 증거가 다음 단계 진
 
 ## 2. cutover ladder (RAGFlow OFF까지)
 
-각 Stage는 **이전 Stage의 evidence가 green일 때만** 진입한다. RAGFlow는 Stage 6
-이전까지 항상 ON이며 authority/fallback으로 남는다.
+> 단계 번호 정본은 `docs/specs/2026-06-24-qdrant-mirror-cutover`다(거기서 Stage 1 =
+> code-only = M1–M5). 본 readiness 문서의 아래 `Stage 0`(code-only) + `Stage 1`
+> (embedding/schema 확정)은 그 spec의 **Stage 1(code-only, M1–M5)** 한 단계에
+> 대응한다. 충돌 시 cutover spec을 따른다.
+
+각 Stage는 **이전 Stage의 evidence가 green일 때만** 진입한다. RAGFlow는 마지막
+Stage(RAGFlow 벡터 미러 disable) 이전까지 항상 ON이며 authority/fallback으로 남는다.
 
 ### Stage 0 — code-only readiness (현재, 이 작업으로 충족)
 

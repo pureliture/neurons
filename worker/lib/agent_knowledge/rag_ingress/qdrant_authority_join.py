@@ -49,6 +49,20 @@ def join_mirror_hits_to_authority(
             rejected["canonical_resolution_required"] = True
             out.append(rejected)
             continue
+        # Privacy isolation: the mirror payload's privacy_class must agree with the
+        # canonical privacy_level. If they disagree the mirror is mislabeled --
+        # NEVER relabel-and-serve (that would silently move a stricter-tier record
+        # into a looser scope the caller queried under). Drop as if unresolved.
+        record_privacy = str(record.get("privacy_level") or "")
+        hit_privacy = str(hit.get("privacy_class") or "")
+        if record_privacy and hit_privacy and record_privacy != hit_privacy:
+            if drop_unresolved:
+                continue
+            mismatch = dict(hit)
+            mismatch["authority_join_status"] = "privacy_mismatch"
+            mismatch["canonical_resolution_required"] = True
+            out.append(mismatch)
+            continue
         joined = dict(hit)
         joined["authority_join_status"] = "resolved"
         joined["canonical_resolution_required"] = False

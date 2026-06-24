@@ -541,9 +541,15 @@ class NativeMemoryMixin:
     ) -> dict:
         """Register/refresh a logical_name -> Qdrant collection mapping.
 
-        Parallel to ``upsert_ragflow_dataset_plan`` for the searchable mirror.
-        This is the authority for collection health/enable state; it performs no
-        network call and does not touch any live Qdrant collection.
+        Parallel to ``upsert_ragflow_dataset_plan`` for the searchable mirror. This
+        records the INTENDED collection mapping + vector params; it performs no
+        network call and touches no live Qdrant collection. A refresh updates only
+        metadata and never re-enables a disabled row (use
+        ``disable_qdrant_collection`` / a future enable verb for state changes).
+
+        NOTE (Stage 1): the registry records intended enable state. Read/write
+        ENFORCEMENT (consulting ``_qdrant_collection_is_enabled`` from the adapter)
+        is wired at the M8 read-cutover; it is not load-bearing yet.
         """
 
         now = datetime.now(timezone.utc).isoformat()
@@ -559,9 +565,7 @@ class NativeMemoryMixin:
                     embedding_model=excluded.embedding_model,
                     vector_size=excluded.vector_size,
                     distance=excluded.distance,
-                    payload_index_version=excluded.payload_index_version,
-                    enabled=1,
-                    disabled_at=''
+                    payload_index_version=excluded.payload_index_version
                 """,
                 (
                     logical_name,
@@ -593,6 +597,26 @@ class NativeMemoryMixin:
                 "SELECT * FROM qdrant_collections ORDER BY logical_name"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def disable_qdrant_collection(self, logical_name: str) -> dict | None:
+        """Disable a registry mapping (enable transition is an explicit op).
+
+        ``upsert_qdrant_collection`` only refreshes metadata and never re-enables a
+        disabled row, so disable/enable are deliberate verbs rather than a side
+        effect of an upsert. Returns the updated row (or None if absent).
+        """
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE qdrant_collections SET enabled = 0, disabled_at = ? WHERE logical_name = ?",
+                (now, logical_name),
+            )
+            row = connection.execute(
+                "SELECT * FROM qdrant_collections WHERE logical_name = ?",
+                (logical_name,),
+            ).fetchone()
+        return dict(row) if row else None
 
     def _qdrant_collection_is_enabled(self, collection: str) -> bool:
         # Fail-closed: a collection absent from the registry is NOT treated as
