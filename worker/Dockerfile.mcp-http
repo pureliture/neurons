@@ -12,7 +12,11 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY lib ./lib
-RUN pip install --no-cache-dir ".[mcp-http]"
+# mcp-http transport + the M8 Qdrant-backed recall deps (qdrant-client + openai
+# embedding client). Docling is intentionally excluded -- the recall path uses the
+# passthrough normalizer, so the heavy docling dep from the searchable-mirror extra
+# is not needed here.
+RUN pip install --no-cache-dir ".[mcp-http]" "qdrant-client>=1.10" "openai>=1.0"
 
 # open_read_only는 --ledger 경로의 존재만 검증한다(실 데이터는 NEURON_LEDGER_PG_DSN→PG).
 # placeholder ledger 파일을 둔다.
