@@ -62,6 +62,7 @@ AREA_TABLES: dict[str, frozenset[str]] = {
     }),
     AREA_D: frozenset({
         "ragflow_datasets",
+        "qdrant_collections",
         "memory_cards",
         "memory_card_evidence",
         "llm_brain_memory_cards",
