@@ -42,6 +42,8 @@ from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
 from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
 
 PROJECT = "workspace-ragflow-advisor"
+FIXTURE_REPOSITORY = PROJECT
+FIXTURE_BRANCH = "fixture-branch"
 
 
 def _ledger(tmp_path: Path) -> Ledger:
@@ -206,8 +208,8 @@ def test_mcp_brain_context_resolve_roundtrip_uses_core_without_ragflow(tmp_path:
             "params": {
                 "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
                 "arguments": {
-                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
-                    "branch": "codex/llm-brain-core-design",
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
                     "current_request": "언어 선호 확인",
                     "current_files": ["docs/design.md"],
                     "project": PROJECT,
@@ -249,7 +251,7 @@ def test_session_card_cache_collapses_repeated_accepted_card_reads(tmp_path: Pat
     for _ in range(3):
         service.core_brain(project=PROJECT).brain_context_resolve(
             repository=PROJECT,
-            branch="codex/m14",
+            branch=FIXTURE_BRANCH,
             current_files=[],
             current_request="언어 선호 확인",
             project=PROJECT,
@@ -262,7 +264,7 @@ def test_session_card_cache_collapses_repeated_accepted_card_reads(tmp_path: Pat
     service.invalidate_brain_card_cache()
     service.core_brain(project=PROJECT).brain_context_resolve(
         repository=PROJECT,
-        branch="codex/m14",
+        branch=FIXTURE_BRANCH,
         current_files=[],
         current_request="언어 선호 확인",
         project=PROJECT,
@@ -359,8 +361,8 @@ def test_mcp_brain_context_resolve_reads_configured_graph_adapter(tmp_path: Path
             "params": {
                 "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
                 "arguments": {
-                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
-                    "branch": "codex/m14",
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
                     "current_request": "Brain MCP graph adapter",
                     "current_files": ["worker/lib/agent_knowledge/mcp_server.py"],
                     "project": PROJECT,
@@ -387,8 +389,8 @@ def test_mcp_brain_context_resolve_derives_project_when_omitted(tmp_path: Path):
             "params": {
                 "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
                 "arguments": {
-                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
-                    "branch": "codex/llm-brain-core-design",
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
                     "current_request": "언어 선호 확인",
                     "current_files": ["docs/design.md"],
                 },
@@ -417,8 +419,8 @@ def test_mcp_brain_context_resolve_includes_configured_read_only_bridge(tmp_path
             "params": {
                 "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
                 "arguments": {
-                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
-                    "branch": "codex/m14",
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
                     "current_request": "RAGFlow bridge citation",
                     "current_files": [],
                 },
@@ -443,7 +445,7 @@ def test_mcp_brain_memory_search_derives_project_from_repository(tmp_path: Path)
             "params": {
                 "name": BRAIN_MEMORY_SEARCH_TOOL_NAME,
                 "arguments": {
-                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
+                    "repository": FIXTURE_REPOSITORY,
                     "query": "한국어 응답",
                 },
             },
@@ -533,7 +535,7 @@ def test_private_call_tool_alias_stays_compatible(tmp_path: Path):
         (BRAIN_QUERY_TOOL_NAME, {"query": "언어 선호"}),
         (
             BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
-            {"repository": PROJECT, "branch": "main"},
+            {"repository": PROJECT, "branch": FIXTURE_BRANCH},
         ),
         (BRAIN_MEMORY_SEARCH_TOOL_NAME, {"repository": PROJECT}),
         (BRAIN_INCIDENT_SEARCH_TOOL_NAME, {"repository": PROJECT}),
@@ -821,8 +823,8 @@ def test_mcp_stdio_cli_serves_contextpack_for_codex_and_claude_code_agents(
             "params": {
                 "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
                 "arguments": {
-                    "repository": "/Users/example/Projects/workspace-ragflow-advisor",
-                    "branch": "codex/m14",
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
                     "current_request": f"{agent_name} Brain MCP ContextPack",
                     "current_files": [],
                     "project": PROJECT,
