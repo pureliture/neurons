@@ -91,6 +91,7 @@ def _project(
     dead_letter_jsonl: Path | None = None,
     progress_jsonl: Path | None = None,
     runtime_dir: Path | None = None,
+    max_projects: int = 0,
 ) -> dict[str, Any]:
     return run_couchdb_projection(
         ledger_path=tmp_path / "ledger.sqlite3",
@@ -106,6 +107,7 @@ def _project(
         dead_letter_jsonl=dead_letter_jsonl,
         progress_jsonl=progress_jsonl,
         report_every=100,
+        max_projects=max_projects,
         graph_adapter=graph_adapter,
         runtime_dir=runtime_dir,
     )
@@ -174,6 +176,37 @@ def test_resume_uses_session_natural_id_when_episode_hash_changes(tmp_path):
     assert second["projection"]["projected"] == 0
     assert second["projection"]["skipped_resumed"] == 1
     assert second["projection"]["failed"] == 0
+
+
+def test_max_projects_stops_after_bounded_non_resumed_upserts(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(5):
+        _seed_session(store, raw_id=f"bounded-{index}")
+
+    first = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=2,
+    )
+    assert first["projection"]["projected"] == 2
+
+    second = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=5,
+        max_projects=2,
+    )
+
+    assert second["status"] == "ok"
+    assert second["canonical_counts"]["selected_sessions"] == 5
+    assert second["projection"]["attempted"] == 4
+    assert second["projection"]["skipped_resumed"] == 2
+    assert second["projection"]["projected"] == 2
+    assert second["projection"]["failed"] == 0
+    assert second["projection"]["stopped_after_max_projects"] is True
+    assert second["truncated"] is True
 
 
 def test_partial_projection_continues_and_writes_dead_letter(tmp_path):
