@@ -67,6 +67,24 @@ def test_recall_parity_passes_gate_helper():
     assert recall_parity_passes({"mismatch_count": 3, "mean_recall_at_k": 0.97}, min_mean_recall_at_k=0.95, require_exact=False) is True
 
 
+def test_unresolved_mirror_candidate_is_rejected():
+    import pytest
+
+    unresolved = [{"content_hash": "a", "canonical_resolution_required": True}]
+    with pytest.raises(ValueError):
+        compare_recall(["q"], primary_fetch=lambda q: unresolved, mirror_fetch=lambda q: [], k=10)
+
+
+def test_duplicate_content_hash_does_not_shrink_recall_denominator():
+    # 'a' appears twice in primary top results; dedup-then-topk keeps denominator honest
+    primary = [{"content_hash": "a"}, {"content_hash": "a"}, {"content_hash": "b"}]
+    mirror = [{"content_hash": "a"}, {"content_hash": "b"}]
+    report = compare_recall(["q"], primary_fetch=lambda q: primary, mirror_fetch=lambda q: mirror, k=10)
+    # primary distinct {a,b} fully covered -> recall 1.0, exact match
+    assert report["mean_recall_at_k"] == 1.0
+    assert report["matched_count"] == 1
+
+
 def test_empty_cohort_is_vacuously_full_recall():
     report = compare_recall([], primary_fetch=lambda q: [], mirror_fetch=lambda q: [], k=10)
     assert report["total_count"] == 0
