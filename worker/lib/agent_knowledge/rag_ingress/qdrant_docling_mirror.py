@@ -508,6 +508,36 @@ def build_local_qdrant_docling_mirror_adapter(
     )
 
 
+def build_remote_qdrant_docling_mirror_adapter(
+    *,
+    url: str,
+    collection_name: str = DEFAULT_COLLECTION_NAME,
+    embedding_provider: EmbeddingProvider | None = None,
+    normalizer: MarkdownNormalizer | None = None,
+) -> QdrantDoclingMirrorAdapter:
+    """Create a Qdrant adapter against a remote server URL (e.g. compose service).
+
+    Optional-dependency guarded like the local builder. Used by the M6 dual-write
+    activation when ``QDRANT_URL`` is configured; tests inject a fake client to the
+    adapter directly and never exercise this network path.
+    """
+
+    if not url:
+        raise SearchableMirrorUnavailable("QDRANT_URL is required for the remote mirror adapter")
+    try:
+        from qdrant_client import QdrantClient
+    except ImportError as exc:  # pragma: no cover - optional dependency guard
+        raise SearchableMirrorUnavailable(
+            "qdrant-client is not installed; install the searchable mirror optional dependencies"
+        ) from exc
+    return QdrantDoclingMirrorAdapter(
+        client=QdrantClient(url=url),
+        collection_name=collection_name,
+        embedding_provider=embedding_provider,
+        normalizer=normalizer,
+    )
+
+
 def build_searchable_mirror_gate_report(
     *,
     dry_run: bool,

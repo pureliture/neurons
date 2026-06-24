@@ -97,4 +97,65 @@ class MirrorDualWriteBackend:
         return self._primary.document_status_detail(handle)
 
 
-__all__ = ["MirrorDualWriteBackend", "MirrorWriteOutcome"]
+def build_qdrant_mirror_from_env(environ: Any) -> Any | None:
+    """Build the Qdrant mirror adapter from env, or None when not configured.
+
+    Requires ``QDRANT_URL``; reuses the OpenAI-compatible embedding provider
+    (``LLM_BRAIN_EMBEDDING_*``) and a passthrough normalizer (bodies are already
+    redacted markdown). Returns None when ``QDRANT_URL`` is unset so the caller
+    fails safe to primary-only delivery. The qdrant-client import is lazy (live
+    path only); tests inject a mirror builder instead.
+    """
+
+    url = str(environ.get("QDRANT_URL") or "").strip()
+    if not url:
+        return None
+    from .qdrant_docling_mirror import (
+        DEFAULT_COLLECTION_NAME,
+        PassthroughMarkdownNormalizer,
+        build_remote_qdrant_docling_mirror_adapter,
+    )
+    from .qdrant_embedding import build_openai_embedding_provider
+
+    collection = str(environ.get("QDRANT_COLLECTION") or DEFAULT_COLLECTION_NAME).strip()
+    return build_remote_qdrant_docling_mirror_adapter(
+        url=url,
+        collection_name=collection,
+        embedding_provider=build_openai_embedding_provider(environ=environ),
+        normalizer=PassthroughMarkdownNormalizer(),
+    )
+
+
+def maybe_wrap_dual_write(
+    primary: Any,
+    *,
+    environ: Any,
+    mirror_builder: Callable[[Any], Any | None] | None = None,
+    on_mirror_outcome: MirrorOutcomeHook = None,
+) -> Any:
+    """Wrap ``primary`` with a best-effort Qdrant mirror when dual-write is enabled.
+
+    Off by default: returns ``primary`` unchanged unless ``MIRROR_DUAL_WRITE=1``.
+    Fail-safe: if the flag is on but no mirror is configured (no ``QDRANT_URL``),
+    returns ``primary`` so the live delivery worker keeps writing to RAGFlow
+    rather than crashing. This is the only shadow_worker activation hook; it
+    performs no live mutation by itself.
+    """
+
+    if primary is None:
+        return None
+    if str(environ.get("MIRROR_DUAL_WRITE") or "").strip() != "1":
+        return primary
+    builder = mirror_builder or build_qdrant_mirror_from_env
+    mirror = builder(environ)
+    if mirror is None:
+        return primary
+    return MirrorDualWriteBackend(primary=primary, mirror=mirror, on_mirror_outcome=on_mirror_outcome)
+
+
+__all__ = [
+    "MirrorDualWriteBackend",
+    "MirrorWriteOutcome",
+    "build_qdrant_mirror_from_env",
+    "maybe_wrap_dual_write",
+]
