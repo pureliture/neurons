@@ -32,7 +32,7 @@ AREA_TITLES: dict[str, str] = {
     CORE: "Schema / connection / migration infrastructure",
 }
 
-# 테이블 → 영역 (deepdive 영역 35개 + core 인프라 1개 = 36).
+# 테이블 → 영역 (deepdive 영역 36개 + core 인프라 1개 = 37).
 AREA_TABLES: dict[str, frozenset[str]] = {
     AREA_A: frozenset({
         "knowledge_items",
@@ -62,6 +62,7 @@ AREA_TABLES: dict[str, frozenset[str]] = {
     }),
     AREA_D: frozenset({
         "ragflow_datasets",
+        "qdrant_collections",
         "memory_cards",
         "memory_card_evidence",
         "llm_brain_memory_cards",

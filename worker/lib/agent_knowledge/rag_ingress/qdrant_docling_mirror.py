@@ -39,6 +39,22 @@ from .server_runtime import public_ingress_leak_violations
 
 DEFAULT_COLLECTION_NAME = "neurons_searchable_mirror_poc"
 DEFAULT_VECTOR_SIZE = 64
+
+# Keyword payload fields declared as Qdrant payload indexes at collection-create
+# time so production filters do not full-scan. ``privacy_class`` is mandatory for
+# safe multi-privacy retrieval.
+PAYLOAD_INDEX_FIELDS = (
+    "target_profile",
+    "privacy_class",
+    "result_type",
+    "project",
+    "provider",
+    "session_id_hash",
+    "content_hash",
+    "idempotency_key",
+    "document_kind",
+    "redaction_version",
+)
 EVIDENCE_PACKET_SCHEMA = "agent_knowledge_searchable_mirror_gate_evidence.v1"
 MIRROR_AUTHORITY = "searchable_runtime_mirror"
 MIRROR_BACKEND = "qdrant_docling"
@@ -68,6 +84,7 @@ class SearchableMirrorHit:
     content_hash: str
     score: float | None
     summary: str
+    privacy_class: str = ""
     canonical_resolution_required: bool = True
     authority_join_status: str = "not_checked"
 
@@ -79,6 +96,7 @@ class SearchableMirrorHit:
             "source_ref": self.source_ref,
             "content_hash": self.content_hash,
             "summary": self.summary,
+            "privacy_class": self.privacy_class,
             "canonical_resolution_required": self.canonical_resolution_required,
             "authority_join_status": self.authority_join_status,
         }
@@ -86,6 +104,47 @@ class SearchableMirrorHit:
             data["score"] = self.score
         ensure_public_safe(data, "SearchableMirrorHit")
         return data
+
+
+@dataclass(frozen=True)
+class MirrorDeletionResult:
+    """Outcome of a mirror point deletion.
+
+    ``status`` is backend-neutral: ``deleted`` (a point existed and was removed),
+    ``absent`` (no point existed for the key; delete is a safe no-op), or
+    ``collection_mismatch`` (the handle does not belong to this collection, so no
+    deletion was attempted). ``existed`` reports whether a point was present
+    *before* the delete so a GC caller can record a real removal vs. a no-op.
+    """
+
+    status: str
+    document_ref: str
+    existed: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        data = {
+            "status": self.status,
+            "document_ref": self.document_ref,
+            "existed": self.existed,
+        }
+        ensure_public_safe(data, "MirrorDeletionResult")
+        return data
+
+
+class MirrorDeletionCapable(Protocol):
+    """Optional deletion capability layered on top of ``IndexBackendAdapter``.
+
+    The backend-neutral ``IndexBackendAdapter`` protocol covers submit / find /
+    status only; it has no delete. RAGFlow document deletion currently bypasses
+    the adapter and goes through the GC ``hard_delete_documents`` chokepoint, so
+    there is no neutral delete seam yet. This optional protocol is the draft seam
+    a GC/retirement path would target for a Qdrant mirror. It is intentionally
+    NOT wired into any live route here.
+    """
+
+    def delete_document(
+        self, handle: BackendDocumentHandle, *, missing_ok: bool = True
+    ) -> "MirrorDeletionResult": ...
 
 
 class PassthroughMarkdownNormalizer:
@@ -258,6 +317,8 @@ class QdrantDoclingMirrorAdapter:
         query: str,
         *,
         target_profile: str = "",
+        privacy_class: str = "",
+        filters: dict[str, str] | None = None,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
         """Backward-compatible alias for mirror-candidate search.
@@ -266,30 +327,52 @@ class QdrantDoclingMirrorAdapter:
         ledger/CouchDB/Neo4j authorities before product use.
         """
 
-        return self.query_mirror_candidates(query, target_profile=target_profile, limit=limit)
+        return self.query_mirror_candidates(
+            query,
+            target_profile=target_profile,
+            privacy_class=privacy_class,
+            filters=filters,
+            limit=limit,
+        )
 
     def query_mirror_candidates(
         self,
         query: str,
         *,
         target_profile: str = "",
+        privacy_class: str = "",
+        filters: dict[str, str] | None = None,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
         safe_query = _validate_mirror_text(query)
         vector = self._embedding.embed(safe_query)
         if len(vector) != self._embedding.size:
             raise ValueError("embedding provider returned wrong vector size")
+        merged_filters = dict(filters or {})
+        if privacy_class:
+            merged_filters["privacy_class"] = privacy_class
+        conditions = _filter_conditions_dict(target_profile=target_profile, filters=merged_filters)
+        # Fail-closed: never run a fully-unscoped query (it would return the entire
+        # collection across all profiles/privacy classes). The caller must scope by
+        # target_profile and/or privacy_class/filters.
+        if not conditions:
+            raise ValueError(
+                "mirror query requires a scoping condition (target_profile and/or privacy_class/filters)"
+            )
         result = _query_points(
             self._client,
             collection_name=self._collection_name,
             query=vector,
             limit=max(1, min(int(limit), 20)),
-            query_filter=_target_profile_filter(target_profile),
+            query_filter=_payload_filter(conditions),
         )
         hits: list[dict[str, Any]] = []
         for point in _query_result_points(result):
             payload = _point_payload(point)
-            if target_profile and payload.get("target_profile") != target_profile:
+            # Defence-in-depth: re-check every condition against the returned
+            # payload so a backend that ignores the filter cannot leak a row
+            # from another profile/privacy_class.
+            if not _payload_satisfies(payload, conditions):
                 continue
             hits.append(_hit_from_payload(payload, score=_point_score(point)).to_dict())
         return hits
@@ -315,6 +398,80 @@ class QdrantDoclingMirrorAdapter:
             collection_name=self._collection_name,
             vectors_config=_vector_params(self._embedding.size),
         )
+        self._ensure_payload_indexes()
+
+    def _ensure_payload_indexes(self) -> None:
+        # Declared at create time so production filters (target_profile,
+        # privacy_class, result_type, ...) don't full-scan. No-op when the client
+        # does not support payload indexes (e.g. a minimal local/fake client).
+        creator = getattr(self._client, "create_payload_index", None)
+        if not callable(creator):
+            return
+        for field in PAYLOAD_INDEX_FIELDS:
+            try:
+                creator(
+                    collection_name=self._collection_name,
+                    field_name=field,
+                    field_schema=_keyword_index_schema(),
+                )
+            except Exception as exc:
+                raise SearchableMirrorUnavailable("Qdrant payload index create failed") from exc
+
+    def delete_document(
+        self, handle: BackendDocumentHandle, *, missing_ok: bool = True
+    ) -> MirrorDeletionResult:
+        """Delete one mirror point by handle (draft GC/retirement seam).
+
+        Idempotent: deleting an absent point is a safe no-op when ``missing_ok``.
+        This never touches RAGFlow; it only removes a Qdrant point, and it is not
+        wired into any live GC route -- it exists so a future GC chokepoint can
+        target the same neutral seam for the mirror.
+        """
+
+        if handle.dataset_ref != _dataset_ref(self._collection_name):
+            return MirrorDeletionResult(
+                status="collection_mismatch",
+                document_ref=handle.document_ref,
+                existed=False,
+            )
+        existed = bool(self._retrieve_points([handle.document_ref]))
+        if not existed and not missing_ok:
+            raise ValueError("mirror point not found and missing_ok is False")
+        self._client.delete(
+            collection_name=self._collection_name,
+            points_selector=_points_selector([handle.document_ref]),
+        )
+        return MirrorDeletionResult(
+            status="deleted" if existed else "absent",
+            document_ref=handle.document_ref,
+            existed=existed,
+        )
+
+    def delete_by_natural_key(
+        self,
+        *,
+        target_profile: str,
+        idempotency_key: str,
+        content_hash: str,
+        missing_ok: bool = True,
+    ) -> MirrorDeletionResult:
+        """Resolve a natural key to its deterministic point id, then delete it."""
+
+        handle = self.find_by_natural_key(
+            target_profile=target_profile,
+            idempotency_key=idempotency_key,
+            payload_hash=content_hash,
+        )
+        if handle is None:
+            point_id = point_id_for_natural_key(
+                target_profile=target_profile,
+                idempotency_key=idempotency_key,
+                content_hash=content_hash,
+            )
+            if not missing_ok:
+                raise ValueError("mirror point not found and missing_ok is False")
+            return MirrorDeletionResult(status="absent", document_ref=point_id, existed=False)
+        return self.delete_document(handle, missing_ok=missing_ok)
 
     def _retrieve_points(self, ids: list[str]) -> list[Any]:
         return list(
@@ -459,8 +616,25 @@ def _payload_for_document(document: RagReadyDocument, markdown: str) -> dict[str
         "summary": public_safe_text(markdown, max_chars=512),
         "metadata": metadata,
     }
+    # Promote RAGFlow-parity filter keys to top-level payload so they can be
+    # indexed and filtered like target_profile (they otherwise live only inside
+    # the nested ``metadata`` dict). None of these overwrite an existing top-level
+    # key.
+    payload.update(_promoted_filter_fields(metadata, document))
     ensure_public_safe(payload, "qdrant_docling_payload")
     return payload
+
+
+def _promoted_filter_fields(metadata: dict[str, Any], document: RagReadyDocument) -> dict[str, Any]:
+    # Canonical filter field name is ``result_type`` (RAGFlow uses result_type/type
+    # interchangeably); fall back to the document_kind so the field is always set.
+    result_type = str(metadata.get("result_type") or metadata.get("type") or document.document_kind or "")
+    promoted: dict[str, Any] = {"result_type": public_safe_text(result_type, max_chars=120)}
+    for key in ("project", "provider", "session_id_hash"):
+        value = metadata.get(key)
+        if value is not None and str(value) != "":
+            promoted[key] = public_safe_text(str(value), max_chars=240)
+    return promoted
 
 
 def _public_safe_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -510,6 +684,14 @@ def _point_struct(*, point_id: str, vector: list[float], payload: dict[str, Any]
     return models.PointStruct(id=point_id, vector=vector, payload=payload)
 
 
+def _points_selector(ids: list[str]) -> Any:
+    try:
+        from qdrant_client import models
+    except ImportError:
+        return list(ids)
+    return models.PointIdsList(points=list(ids))
+
+
 def _query_points(
     client: Any,
     *,
@@ -535,28 +717,54 @@ def _query_points(
         return client.query_points(**kwargs)
 
 
-def _target_profile_filter(target_profile: str) -> Any:
-    if not target_profile:
+def _filter_conditions_dict(*, target_profile: str, filters: dict[str, str] | None) -> dict[str, str]:
+    conditions: dict[str, str] = {}
+    if target_profile:
+        conditions["target_profile"] = str(target_profile)
+    for key, value in (filters or {}).items():
+        key = str(key)
+        if value is None or str(value) == "":
+            continue
+        # The explicit target_profile argument is authoritative: a filters entry
+        # may not silently widen/redirect scope by overwriting it.
+        if key == "target_profile" and target_profile and str(value) != str(target_profile):
+            raise ValueError("filters.target_profile conflicts with the target_profile argument")
+        conditions[key] = str(value)
+    return conditions
+
+
+def _payload_filter(conditions: dict[str, str]) -> Any:
+    if not conditions:
         return None
     try:
         from qdrant_client import models
     except ImportError:
         return {
-            "must": [
-                {
-                    "key": "target_profile",
-                    "match": {"value": str(target_profile)},
-                }
-            ]
+            "must": [{"key": key, "match": {"value": value}} for key, value in conditions.items()]
         }
     return models.Filter(
         must=[
-            models.FieldCondition(
-                key="target_profile",
-                match=models.MatchValue(value=str(target_profile)),
-            )
+            models.FieldCondition(key=key, match=models.MatchValue(value=value))
+            for key, value in conditions.items()
         ]
     )
+
+
+def _payload_satisfies(payload: dict[str, Any], conditions: dict[str, str]) -> bool:
+    return all(payload.get(key) == value for key, value in conditions.items())
+
+
+def _target_profile_filter(target_profile: str) -> Any:
+    # Retained single-field helper, now delegating to the general builder.
+    return _payload_filter(_filter_conditions_dict(target_profile=target_profile, filters=None))
+
+
+def _keyword_index_schema() -> Any:
+    try:
+        from qdrant_client import models
+    except ImportError:
+        return "keyword"
+    return models.PayloadSchemaType.KEYWORD
 
 
 def _point_payload(point: Any) -> dict[str, Any]:
@@ -613,6 +821,7 @@ def _hit_from_payload(payload: dict[str, Any], *, score: float | None) -> Search
         content_hash=str(payload.get("content_hash") or ""),
         score=score,
         summary=public_safe_text(str(payload.get("summary") or ""), max_chars=512),
+        privacy_class=public_safe_text(str(payload.get("privacy_class") or ""), max_chars=80),
     )
 
 
@@ -751,6 +960,9 @@ __all__ = [
     "HashEmbeddingProvider",
     "MIRROR_AUTHORITY",
     "MIRROR_BACKEND",
+    "MirrorDeletionCapable",
+    "MirrorDeletionResult",
+    "PAYLOAD_INDEX_FIELDS",
     "PassthroughMarkdownNormalizer",
     "QdrantDoclingMirrorAdapter",
     "SearchableMirrorHit",
