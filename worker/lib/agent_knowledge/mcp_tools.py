@@ -16,7 +16,7 @@ def list_tools() -> list[dict]:
     return [
         {
             "name": TOOL_NAME,
-            "description": "Search server-owned RAGFlow-backed neuron knowledge.",
+            "description": "서버가 소유한 RAGFlow 기반 neuron 지식을 검색한다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -31,7 +31,7 @@ def list_tools() -> list[dict]:
         },
         {
             "name": BRAIN_QUERY_TOOL_NAME,
-            "description": "use brain: query accepted/current neuron memory by brain_id.",
+            "description": "brain_id 기준으로 승인된 최신 neuron memory를 질의한다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -46,7 +46,7 @@ def list_tools() -> list[dict]:
         },
         {
             "name": BRAIN_RESOLVE_TOOL_NAME,
-            "description": "Resolve available /project/<project> brain_id candidates.",
+            "description": "사용 가능한 /project/<project> brain_id 후보를 찾는다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
@@ -55,7 +55,7 @@ def list_tools() -> list[dict]:
         },
         {
             "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
-            "description": "Resolve the current LLM-Brain ContextPack from canonical artifacts/cards plus derived graph status.",
+            "description": "canonical artifact/card와 파생 graph 상태로 현재 LLM-Brain ContextPack을 만든다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -72,7 +72,7 @@ def list_tools() -> list[dict]:
         },
         {
             "name": BRAIN_MEMORY_SEARCH_TOOL_NAME,
-            "description": "Search accepted/current LLM-Brain memory with derived graph results labeled separately.",
+            "description": "승인된 최신 LLM-Brain memory를 검색하고 파생 graph 결과는 별도 표시한다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -88,7 +88,7 @@ def list_tools() -> list[dict]:
         },
         {
             "name": BRAIN_INCIDENT_SEARCH_TOOL_NAME,
-            "description": "Search prior incidents, attempts, fixes, verifications, and do-not-apply cases.",
+            "description": "이전 incident, 시도, 수정, 검증, 적용 금지 사례를 검색한다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -103,7 +103,7 @@ def list_tools() -> list[dict]:
         },
         {
             "name": BRAIN_DRIFT_EXPLAIN_TOOL_NAME,
-            "description": "Explain design, persona, or project assumption drift from canonical memory cards.",
+            "description": "canonical memory card 기준으로 설계, persona, project 가정의 drift를 설명한다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -117,7 +117,7 @@ def list_tools() -> list[dict]:
         },
         {
             "name": BRAIN_PERSONA_GET_TOOL_NAME,
-            "description": "Return persona facts from accepted/current LLM-Brain memory.",
+            "description": "승인된 최신 LLM-Brain memory에서 persona fact를 반환한다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -130,7 +130,7 @@ def list_tools() -> list[dict]:
         },
         {
             "name": BRAIN_PERSONA_CHECK_TOOL_NAME,
-            "description": "Check a plan against accepted persona facts and return aligned/conflict/drift status.",
+            "description": "계획을 승인된 persona fact와 비교해 aligned/conflict/drift 상태를 반환한다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -144,7 +144,7 @@ def list_tools() -> list[dict]:
         },
         {
             "name": BRAIN_EVIDENCE_GET_TOOL_NAME,
-            "description": "Resolve a SourceRef/SpanRef through the LLM-Brain evidence policy without exposing raw private paths.",
+            "description": "raw private path를 노출하지 않고 LLM-Brain evidence policy로 SourceRef/SpanRef를 해석한다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import sqlite3
 
 from .ledger import Ledger
 from .llm_brain_core.document_bridge import RagFlowDocumentBridge
@@ -35,24 +36,21 @@ def build_ragflow_client(
 
 
 class _SessionCardCache:
-    """Per-session snapshot of accepted MemoryCards by (project, limit).
+    """세션 안에서 승인된 MemoryCard를 (project, limit) 단위로 스냅샷한다.
 
-    Each brain tool call used to rebuild the read model and re-run
-    `list_accepted_cards` (full accepted-card reload, limit=100) against the
-    ledger. Within a single stdio MCP session the accepted-card set is stable
-    enough to snapshot, so this memoizes the result for the session lifetime and
-    collapses repeated tool calls onto one ledger read per (project, limit). It
-    wraps the real read model and forwards everything else unchanged, so graph
-    status, evidence policy, and other read paths are untouched.
+    기존 brain tool 호출은 read model을 매번 다시 만들고 ledger에
+    `list_accepted_cards`(승인 카드 전체 reload, limit=100)를 다시 질의했다.
+    단일 stdio MCP 세션에서는 승인 카드 집합이 충분히 안정적이므로, 세션 생명주기
+    동안 결과를 메모이즈해 반복 호출을 (project, limit)별 ledger read 1회로 줄인다.
+    실제 read model을 감싸며 나머지 read path는 그대로 전달하므로 graph 상태,
+    evidence policy, 다른 조회 경로는 건드리지 않는다.
 
-    Staleness scope: every exposed brain tool is read-only and there is currently
-    no in-session write path, so the snapshot stays correct for the session. A
-    write to the same ledger by another process (worker/ingestion) is NOT
-    reflected until the session restarts -- there is no cross-process or TTL
-    invalidation. `invalidate()` exists as the explicit refresh seam to call once
-    an in-session write path is added; its production wrapper
-    `invalidate_brain_card_cache` has no production caller yet, so today the seam
-    is reached only via tests.
+    stale 범위: 현재 노출된 brain tool은 모두 read-only이고 세션 내부 write path가
+    없으므로 세션 동안 스냅샷은 유효하다. 다른 프로세스(worker/ingestion)가 같은
+    ledger에 쓰는 변경은 세션 재시작 전까지 반영되지 않는다. cross-process 또는 TTL
+    invalidation은 없다. `invalidate()`는 향후 세션 내부 write path가 생기면 호출할
+    명시적 refresh seam이다. production wrapper인 `invalidate_brain_card_cache`는
+    아직 production caller가 없고, 현재는 테스트에서만 닿는다.
     """
 
     def __init__(self, read_model) -> None:
@@ -65,18 +63,16 @@ class _SessionCardCache:
         if cached is None:
             cached = self._read_model.list_accepted_cards(project=project, limit=limit)
             self._cards[key] = cached
-        # Hand out deep copies so a downstream consumer mutating not just its
-        # list but any nested dict/list inside a card cannot corrupt the shared
-        # snapshot. The accepted-card window is bounded (limit<=100), so the
-        # deepcopy cost is negligible against the ledger read it replaces.
+        # downstream consumer가 list뿐 아니라 card 내부 dict/list까지 mutate해도
+        # 공유 스냅샷이 오염되지 않도록 deep copy를 넘긴다. accepted-card window는
+        # 작게 제한되어 있어(limit<=100) ledger read를 줄이는 이득에 비해 비용이 작다.
         return [copy.deepcopy(card) for card in cached]
 
     def invalidate(self) -> None:
         self._cards.clear()
 
     def __getattr__(self, name: str):
-        # Forward any non-cached read-model method (get_card_meta,
-        # list_recent_cards, list_project_card_counts, ...) to the wrapped model.
+        # 캐시하지 않는 read-model 메서드는 감싼 모델로 그대로 위임한다.
         return getattr(self._read_model, name)
 
 
@@ -110,8 +106,7 @@ class KnowledgeSearchService:
         self._brain_card_cache = _SessionCardCache(LegacyLedgerBrainReadModel(self.ledger))
 
     def invalidate_brain_card_cache(self) -> None:
-        """Refresh seam: drop the session card snapshot so the next brain tool
-        call re-reads accepted cards from the ledger."""
+        """세션 card snapshot을 비워 다음 brain tool 호출이 ledger를 다시 읽게 한다."""
 
         self._brain_card_cache.invalidate()
 
@@ -154,8 +149,8 @@ class KnowledgeSearchService:
                 "score": item.score,
                 "currentness": item.currentness,
                 "provenance": {
-                    "dataset": item.provenance.dataset,
-                    "ragflow_document_id": item.provenance.ragflow_document_id,
+                    "authority": "ledger_authorized",
+                    "citation_ref": item.knowledge_id,
                 },
             }
             if item.conversation_chunk is not None:
@@ -191,13 +186,17 @@ class KnowledgeSearchService:
                 ragflow=self.ragflow,
                 memory_id=self.native_memory_id,
             )
+            semantic_failure_type = ""
             try:
                 semantic_hits = semantic(query, brain_id)
-            except Exception:
+            except (OSError, RuntimeError, ValueError, KeyError, sqlite3.DatabaseError) as exc:
                 semantic_hits = []
+                semantic_failure_type = type(exc).__name__
             audit = dict(result.get("audit") or {})
             audit["native_memory_bound"] = True
             audit["native_memory_hits"] = len(semantic_hits)
+            if semantic_failure_type:
+                audit["native_memory_error_type"] = semantic_failure_type
             result["audit"] = audit
         return result
 
@@ -219,12 +218,10 @@ class KnowledgeSearchService:
                         chunk.get("memory_id")
                         or metadata.get("memory_id")
                         or chunk.get("source_ref")
-                        or chunk.get("document_id")
-                        or chunk.get("doc_id")
                         or ""
                     ),
                     "card_type": str(chunk.get("card_type") or metadata.get("card_type") or ""),
-                    "summary": str(chunk.get("summary") or chunk.get("content") or ""),
+                    "summary": str(chunk.get("summary") or ""),
                     "currentness": str(chunk.get("currentness") or metadata.get("currentness") or "unknown"),
                     "score": chunk.get("score"),
                     "content_hash": str(chunk.get("content_hash") or metadata.get("content_hash") or ""),

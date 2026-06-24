@@ -24,8 +24,10 @@ from agent_knowledge.mcp_server import (
     DisabledRagflowClient,
     KnowledgeSearchService,
     MemoryReadPipeline,
+    MemoryProvenance,
     MemorySearchQuery,
     MemorySearchResponse,
+    MemorySearchResultItem,
     _call_tool,
     dispatch_tool_call,
     handle_jsonrpc_message,
@@ -416,6 +418,7 @@ def test_mcp_brain_context_resolve_includes_configured_read_only_bridge(tmp_path
                 "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
                 "arguments": {
                     "repository": "/Users/example/Projects/workspace-ragflow-advisor",
+                    "branch": "codex/m14",
                     "current_request": "RAGFlow bridge citation",
                     "current_files": [],
                 },
@@ -441,6 +444,29 @@ def test_mcp_brain_memory_search_derives_project_from_repository(tmp_path: Path)
                 "name": BRAIN_MEMORY_SEARCH_TOOL_NAME,
                 "arguments": {
                     "repository": "/Users/example/Projects/workspace-ragflow-advisor",
+                    "query": "한국어 응답",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["memory_status"]["count"] == 1
+    assert result["results"][0]["summary"] == "한국어로 응답한다"
+
+
+def test_mcp_brain_memory_search_normalizes_git_repository_project(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_MEMORY_SEARCH_TOOL_NAME,
+                "arguments": {
+                    "repository": "https://github.com/pureliture/workspace-ragflow-advisor.git",
                     "query": "한국어 응답",
                 },
             },
@@ -501,6 +527,95 @@ def test_private_call_tool_alias_stays_compatible(tmp_path: Path):
     assert _call_tool(params, service) == dispatch_tool_call(params, service)
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        (BRAIN_QUERY_TOOL_NAME, {"query": "언어 선호"}),
+        (
+            BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+            {"repository": PROJECT, "branch": "main"},
+        ),
+        (BRAIN_MEMORY_SEARCH_TOOL_NAME, {"repository": PROJECT}),
+        (BRAIN_INCIDENT_SEARCH_TOOL_NAME, {"repository": PROJECT}),
+        (BRAIN_DRIFT_EXPLAIN_TOOL_NAME, {"repository": PROJECT}),
+        (BRAIN_PERSONA_CHECK_TOOL_NAME, {"repository": PROJECT}),
+        (BRAIN_EVIDENCE_GET_TOOL_NAME, {"source_ref_id": "src_neuron_mcp"}),
+    ],
+)
+def test_mcp_dispatch_rejects_missing_required_inputs(
+    tmp_path: Path,
+    tool_name: str,
+    arguments: dict,
+):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 14,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments},
+        },
+        service,
+    )
+
+    assert response["error"]["code"] == -32602
+    assert response["error"]["message"] == "invalid params: ValueError"
+
+
+def test_service_search_returns_public_safe_provenance(tmp_path: Path):
+    pipeline = _StaticReadPipeline(
+        [
+            MemorySearchResultItem(
+                knowledge_id="kn_public",
+                result_type="project_memory",
+                title="Public memory",
+                domain="memory",
+                project=PROJECT,
+                provider="codex",
+                summary="safe summary",
+                score=0.95,
+                currentness="server_authorized",
+                provenance=MemoryProvenance(
+                    dataset="raw_dataset_id",
+                    ragflow_document_id="raw_doc_id",
+                ),
+            )
+        ]
+    )
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        ragflow=DisabledRagflowClient(),
+        dataset_ids=[],
+        authorized_reader=pipeline,
+    )
+
+    result = service.search("hello")
+
+    assert result["results"][0]["provenance"] == {
+        "authority": "ledger_authorized",
+        "citation_ref": "kn_public",
+    }
+    serialized = json.dumps(result, sort_keys=True)
+    assert "raw_dataset_id" not in serialized
+    assert "raw_doc_id" not in serialized
+
+
+def test_brain_query_ragflow_fallback_omits_raw_document_ids_and_content(tmp_path: Path):
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        ragflow=_RawFallbackRagflow(),
+        dataset_ids=["ds_memory"],
+    )
+
+    result = service._brain_query_ragflow_search("fallback", f"/project/{PROJECT}")
+
+    assert result[0]["memory_id"] == ""
+    assert result[0]["summary"] == ""
+    serialized = json.dumps(result, sort_keys=True)
+    assert "raw_doc_id" not in serialized
+    assert "private raw content" not in serialized
+
+
 def test_memory_read_pipeline_respects_query_limit_above_tool_cap():
     pipeline = MemoryReadPipeline(
         ledger=_AuthorizingLedger(),
@@ -512,6 +627,18 @@ def test_memory_read_pipeline_respects_query_limit_above_tool_cap():
 
     assert len(response.results) == 12
     assert response.results[-1].knowledge_id == "kn_doc_11"
+
+
+def test_memory_read_pipeline_normalizes_limit_before_retrieve():
+    pipeline = MemoryReadPipeline(
+        ledger=_AuthorizingLedger(),
+        ragflow=_ManyDocsRagflow(count=3, expected_limit=1),
+        dataset_ids=["ds_memory"],
+    )
+
+    response = pipeline.read(MemorySearchQuery(query="reuse pipeline", limit=0))
+
+    assert len(response.results) == 1
 
 
 def test_mcp_brain_persona_check_roundtrip(tmp_path: Path):
@@ -756,14 +883,23 @@ class _RecordingReadPipeline:
         return MemorySearchResponse(results=[])
 
 
+class _StaticReadPipeline:
+    def __init__(self, results: list[MemorySearchResultItem]):
+        self.results = results
+
+    def read(self, query: MemorySearchQuery) -> MemorySearchResponse:
+        return MemorySearchResponse(results=self.results[: query.limit])
+
+
 class _ManyDocsRagflow:
-    def __init__(self, *, count: int):
+    def __init__(self, *, count: int, expected_limit: int = 12):
         self.count = count
+        self.expected_limit = expected_limit
 
     def retrieve(self, query, dataset_ids, filters=None, limit=10):
         assert query == "reuse pipeline"
         assert dataset_ids == ["ds_memory"]
-        assert limit == 12
+        assert limit == self.expected_limit
         return [
             {
                 "document_id": f"doc_{index}",
@@ -771,6 +907,21 @@ class _ManyDocsRagflow:
                 "score": 1.0 - (index / 100),
             }
             for index in range(self.count)
+        ]
+
+
+class _RawFallbackRagflow:
+    def retrieve(self, query, dataset_ids, filters=None, limit=10):
+        assert query == "fallback"
+        assert dataset_ids == ["ds_memory"]
+        assert filters == {"project": PROJECT}
+        return [
+            {
+                "document_id": "raw_doc_id",
+                "doc_id": "raw_doc_alias",
+                "content": "private raw content",
+                "score": 0.5,
+            }
         ]
 
 
