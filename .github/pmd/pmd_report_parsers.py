@@ -44,7 +44,13 @@ def parse_cpd(path: Path) -> dict:
     if not path.exists():
         return {"blocks": [], "total_blocks": 0, "total_lines": 0}
 
-    tree = ET.parse(path)
+    # CPD runs under ignoreExitValue, so a CPD error (exit 1/2) can leave an empty
+    # or truncated cpd.xml. Treat an unparseable report as "no duplicates" instead
+    # of hard-failing the comment-only workflow.
+    try:
+        tree = ET.parse(path)
+    except ET.ParseError:
+        return {"blocks": [], "total_blocks": 0, "total_lines": 0}
     root = tree.getroot()
     blocks = []
     total_lines = 0
