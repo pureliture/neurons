@@ -173,6 +173,7 @@ def run_couchdb_bulk_semantic_projection(
     batch_items: list[tuple[dict[str, Any], Any]] = []
     projected = skipped_resumed = failed = materialized = llm_batches = 0
     entities_written = relations_written = 0
+    fallback_single_session_batches = 0
     processed = 0
     stopped_after_max_projects = False
 
@@ -248,7 +249,8 @@ def run_couchdb_bulk_semantic_projection(
                             allow_empty_sessions=allow_empty_sessions,
                         )
                         batch_items = []
-                        llm_batches += 1
+                        llm_batches += int(report["llm_batches"])
+                        fallback_single_session_batches += int(report["fallback_single_session_batches"])
                         projected += int(report["projected"])
                         failed += int(report["failed"])
                         entities_written += int(report["entities_written"])
@@ -305,7 +307,8 @@ def run_couchdb_bulk_semantic_projection(
                 failure_reasons=failure_reasons,
                 allow_empty_sessions=allow_empty_sessions,
             )
-            llm_batches += 1
+            llm_batches += int(report["llm_batches"])
+            fallback_single_session_batches += int(report["fallback_single_session_batches"])
             projected += int(report["projected"])
             failed += int(report["failed"])
             entities_written += int(report["entities_written"])
@@ -349,6 +352,7 @@ def run_couchdb_bulk_semantic_projection(
         },
         "semantic": {
             "llm_batches": llm_batches,
+            "fallback_single_session_batches": fallback_single_session_batches,
             "max_sessions_per_call": max_sessions_per_call,
             "max_session_chars": max_session_chars,
             "entities_written": entities_written,
@@ -377,16 +381,28 @@ def _flush_batch_items(
     failure_reasons: Counter[str],
     allow_empty_sessions: bool,
 ) -> dict[str, int]:
-    batch_inputs = [item for _session, item in batch_items]
     try:
-        extraction = extractor.extract(list(batch_inputs))
-        report = writer.write_batch(
-            list(batch_inputs),
-            extraction,
+        report = _extract_write_and_mark(
+            batch_items,
+            extractor=extractor,
+            writer=writer,
+            projection_state_store=projection_state_store,
+            projected_cache=projected_cache,
             allow_empty_sessions=allow_empty_sessions,
         )
     except Exception as exc:
         reason = _reason_code(exc)
+        if isinstance(exc, json.JSONDecodeError) and len(batch_items) > 1:
+            return _flush_batch_items_as_singletons(
+                batch_items,
+                extractor=extractor,
+                writer=writer,
+                projection_state_store=projection_state_store,
+                projected_cache=projected_cache,
+                dead_letter_jsonl=dead_letter_jsonl,
+                failure_reasons=failure_reasons,
+                allow_empty_sessions=allow_empty_sessions,
+            )
         failure_reasons[reason] += len(batch_items)
         for session, _item in batch_items:
             _write_dead_letter(
@@ -400,8 +416,85 @@ def _flush_batch_items(
             "failed": len(batch_items),
             "entities_written": 0,
             "relations_written": 0,
+            "llm_batches": 1,
+            "fallback_single_session_batches": 0,
         }
 
+    return {
+        "projected": int(report.projected),
+        "failed": 0,
+        "entities_written": int(report.entities_written),
+        "relations_written": int(report.relations_written),
+        "llm_batches": 1,
+        "fallback_single_session_batches": 0,
+    }
+
+
+def _flush_batch_items_as_singletons(
+    batch_items: list[tuple[dict[str, Any], Any]],
+    *,
+    extractor: Any,
+    writer: Any,
+    projection_state_store: LedgerGraphProjectionStateStore,
+    projected_cache: dict[str, set[str]],
+    dead_letter_jsonl: Path | None,
+    failure_reasons: Counter[str],
+    allow_empty_sessions: bool,
+) -> dict[str, int]:
+    projected = failed = entities_written = relations_written = 0
+    llm_batches = 1
+    for batch_item in batch_items:
+        try:
+            report = _extract_write_and_mark(
+                [batch_item],
+                extractor=extractor,
+                writer=writer,
+                projection_state_store=projection_state_store,
+                projected_cache=projected_cache,
+                allow_empty_sessions=allow_empty_sessions,
+            )
+        except Exception as exc:
+            reason = _reason_code(exc)
+            failure_reasons[reason] += 1
+            session, _item = batch_item
+            _write_dead_letter(
+                dead_letter_jsonl,
+                session=session,
+                reason_code=reason,
+                stage="extract_or_write_singleton_fallback",
+            )
+            failed += 1
+        else:
+            projected += int(report.projected)
+            entities_written += int(report.entities_written)
+            relations_written += int(report.relations_written)
+        llm_batches += 1
+    return {
+        "projected": projected,
+        "failed": failed,
+        "entities_written": entities_written,
+        "relations_written": relations_written,
+        "llm_batches": llm_batches,
+        "fallback_single_session_batches": len(batch_items),
+    }
+
+
+def _extract_write_and_mark(
+    batch_items: list[tuple[dict[str, Any], Any]],
+    *,
+    extractor: Any,
+    writer: Any,
+    projection_state_store: LedgerGraphProjectionStateStore,
+    projected_cache: dict[str, set[str]],
+    allow_empty_sessions: bool,
+) -> Any:
+    batch_inputs = [item for _session, item in batch_items]
+    extraction = extractor.extract(list(batch_inputs))
+    report = writer.write_batch(
+        list(batch_inputs),
+        extraction,
+        allow_empty_sessions=allow_empty_sessions,
+    )
     for item in batch_inputs:
         episode = item.episode
         projection_state_store.mark_projected(
@@ -411,12 +504,7 @@ def _flush_batch_items(
         )
         project = str(episode.payload.get("project") or "")
         projected_cache.setdefault(project, set()).add(episode.natural_id)
-    return {
-        "projected": int(report.projected),
-        "failed": 0,
-        "entities_written": int(report.entities_written),
-        "relations_written": int(report.relations_written),
-    }
+    return report
 
 
 def _p95(values: list[int]) -> int:
