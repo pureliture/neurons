@@ -126,7 +126,6 @@ class OpenAICompatibleBulkSemanticExtractor:
                 "type": "json_schema",
                 "json_schema": {
                     "name": "bulk_semantic_extraction",
-                    "strict": True,
                     "schema": _BULK_SEMANTIC_JSON_SCHEMA,
                 },
             },
@@ -473,7 +472,7 @@ def _bulk_semantic_messages(batch: list[BulkSemanticSessionInput]) -> list[dict[
             "role": "system",
             "content": (
                 "Extract a compact semantic graph from each session. "
-                "Return only JSON that matches the schema. "
+                "Return only one minified JSON object. The first character must be { and the last must be }. "
                 "Entities should be concrete domain concepts, tools, systems, files, tasks, "
                 "decisions, models, services, or incidents. Avoid generic entities such as user, "
                 "assistant, session, conversation, or project unless they are the actual subject. "
