@@ -10,8 +10,14 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from agent_knowledge.model_connectors import resolve_model_connection_config
+from agent_knowledge.model_connectors.openai_compatible import (
+    normalize_structured_response as _shared_normalize_structured_response,
+)
+
 from ._util import public_safe_text, short_hash
 from .graph import UpsertEpisodeResult
+from .graphiti_backend import build_graphiti_from_config
 from .models import GraphMemoryResult, OntologyEpisode
 
 _GRAPHITI_GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -52,41 +58,29 @@ class GraphitiNeo4jConfig:
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "GraphitiNeo4jConfig":
-        env = environ or os.environ
-        provider = env.get("LLM_BRAIN_GRAPH_LLM_PROVIDER", env.get("GRAPHITI_LLM_PROVIDER", "openai"))
+        env = os.environ if environ is None else environ
+        model_config = resolve_model_connection_config(env)
         return cls(
             uri=env.get("LLM_BRAIN_NEO4J_URI", env.get("NEO4J_URI", "bolt://localhost:7687")),
             user=env.get("LLM_BRAIN_NEO4J_USER", env.get("NEO4J_USER", "neo4j")),
             password=env.get("LLM_BRAIN_NEO4J_PASSWORD", env.get("NEO4J_PASSWORD", "")),
             default_group_id=env.get("LLM_BRAIN_GRAPH_GROUP_ID", ""),
-            llm_provider=provider.lower(),
-            llm_model=env.get("LLM_BRAIN_LLM_MODEL", env.get("MODEL_NAME", "")),
-            small_model=env.get("LLM_BRAIN_SMALL_LLM_MODEL", env.get("SMALL_MODEL_NAME", "")),
-            llm_base_url=env.get("LLM_BRAIN_LLM_BASE_URL", env.get("OPENAI_BASE_URL", "")),
+            llm_provider=model_config.llm.provider,
+            llm_model=model_config.llm.model,
+            small_model=model_config.llm.small_model,
+            llm_base_url=model_config.llm.base_url,
             llm_api_key=env.get("LLM_BRAIN_LLM_API_KEY", env.get("OPENAI_API_KEY", "")),
-            embedding_model=env.get("LLM_BRAIN_EMBEDDING_MODEL", env.get("EMBEDDING_MODEL", "")),
-            embedding_base_url=env.get("LLM_BRAIN_EMBEDDING_BASE_URL", env.get("OPENAI_BASE_URL", "")),
+            embedding_model=model_config.embedding.model,
+            embedding_base_url=model_config.embedding.base_url,
             embedding_api_key=env.get("LLM_BRAIN_EMBEDDING_API_KEY", env.get("OPENAI_API_KEY", "")),
-            embedding_dim=_int_env(env.get("LLM_BRAIN_EMBEDDING_DIM", ""), default=1024),
+            embedding_dim=model_config.embedding.dim,
             store_raw_episode_content=env.get("LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT", "true").lower()
             not in {"0", "false", "no"},
             extract_entities=env.get("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES", "false").lower() in {"1", "true", "yes"},
-            fallback_llm_model=env.get(
-                "LLM_BRAIN_LLM_FALLBACK_MODEL",
-                env.get("LLM_BRAIN_GRAPH_FALLBACK_LLM_MODEL", ""),
-            ),
-            fallback_small_model=env.get(
-                "LLM_BRAIN_SMALL_LLM_FALLBACK_MODEL",
-                env.get("LLM_BRAIN_GRAPH_FALLBACK_SMALL_LLM_MODEL", ""),
-            ),
-            primary_attempts=_positive_int_env(
-                env.get("LLM_BRAIN_GRAPH_PRIMARY_ATTEMPTS", ""),
-                default=1,
-            ),
-            fallback_attempts=_positive_int_env(
-                env.get("LLM_BRAIN_GRAPH_FALLBACK_ATTEMPTS", ""),
-                default=1,
-            ),
+            fallback_llm_model=model_config.fallback_llm_model,
+            fallback_small_model=model_config.fallback_small_model,
+            primary_attempts=model_config.primary_attempts,
+            fallback_attempts=model_config.fallback_attempts,
             read_timeout_seconds=_float_env(
                 env.get("LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS", ""),
                 default=DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
@@ -134,10 +128,15 @@ class GraphitiNeo4jGraphMemoryAdapter:
         # `runner` is injectable so a test can supply a non-singleton loop runner
         # without poisoning the shared production singleton.
         self._runner = runner if runner is not None else _AsyncLoopRunner.get_instance()
+        self._last_write_details: tuple[str, ...] = ()
         # Existence probe for episode_id MERGE idempotency. Injectable so tests
         # can simulate a pre-existing episode without a live Neo4j. Defaults to
         # Graphiti's EpisodicNode.get_by_uuid (async), which raises when absent.
         self._episode_exists = episode_exists or _default_episode_exists
+
+    @property
+    def last_write_details(self) -> tuple[str, ...]:
+        return self._last_write_details
 
     @classmethod
     def from_config(cls, config: GraphitiNeo4jConfig) -> "GraphitiNeo4jGraphMemoryAdapter":
@@ -150,9 +149,9 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 fallback_llm_model="",
                 fallback_small_model="",
             )
-            fallback_graphiti = _build_graphiti(fallback_config)
+            fallback_graphiti = build_graphiti_from_config(fallback_config)
         return cls(
-            _build_graphiti(config),
+            build_graphiti_from_config(config),
             fallback_graphiti=fallback_graphiti,
             default_group_id=config.default_group_id,
             extract_entities=config.extract_entities,
@@ -180,6 +179,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 # `duplicate` to stay symmetric with FakeGraphMemoryAdapter, not a
                 # second projected row.
                 if await self._episode_exists(self._graphiti.driver, episode.episode_id):
+                    self._last_write_details = ("graphiti_neo4j", "duplicate")
                     return "duplicate"
                 graphiti_episode = EpisodicNode(
                     uuid=episode.episode_id,
@@ -193,9 +193,10 @@ class GraphitiNeo4jGraphMemoryAdapter:
                     valid_at=_parse_datetime(episode.reference_time),
                 )
                 await graphiti_episode.save(self._graphiti.driver)
+                self._last_write_details = ("graphiti_neo4j", "episode_node_direct_write")
                 return "inserted"
 
-            await self._add_episode_with_fallback(
+            self._last_write_details = await self._add_episode_with_fallback(
                 name=episode.episode_id,
                 episode_body=body,
                 source_description=f"llm_brain_core:{episode.entity_type}:{episode.natural_id}",
@@ -207,23 +208,39 @@ class GraphitiNeo4jGraphMemoryAdapter:
 
         return self._runner.run(_call, timeout=self._write_timeout_seconds)
 
-    async def _add_episode_with_fallback(self, **kwargs: Any) -> None:
+    async def _add_episode_with_fallback(self, **kwargs: Any) -> tuple[str, ...]:
         last_error: Exception | None = None
+        primary_errors: list[str] = []
         for _ in range(self._primary_attempts):
             try:
                 await self._graphiti.add_episode(**kwargs)
-                return
+                return ("graphiti_neo4j", "primary_write")
             except Exception as exc:
                 last_error = exc
+                primary_errors.append(f"primary_error:{type(exc).__name__}")
         if self._fallback_graphiti is not None:
+            fallback_errors: list[str] = []
             for _ in range(self._fallback_attempts):
                 try:
                     await self._fallback_graphiti.add_episode(**kwargs)
-                    return
+                    return (
+                        "graphiti_neo4j",
+                        "fallback_used",
+                        *(primary_errors[-1:] or ()),
+                    )
                 except Exception as exc:
                     last_error = exc
+                    fallback_errors.append(f"fallback_error:{type(exc).__name__}")
+            self._last_write_details = (
+                "graphiti_neo4j",
+                *(primary_errors[-1:] or ()),
+                *(fallback_errors[-1:] or ()),
+            )
+        elif primary_errors:
+            self._last_write_details = ("graphiti_neo4j", primary_errors[-1])
         if last_error is not None:
             raise last_error
+        return ("graphiti_neo4j", "write_not_attempted")
 
     def search_context(
         self,
@@ -382,101 +399,12 @@ def probe_graphiti_connectivity(adapter: Any) -> None:
         )
 
 
-_STRUCTURED_KEY_ALIASES = {
-    "entity_name": "name",
-    "entity": "name",
-    "entity_value": "name",
-    "entity_text": "name",
-}
-
-
-def _normalize_structured_keys(value: Any) -> Any:
-    if isinstance(value, list):
-        return [_normalize_structured_keys(item) for item in value]
-    if isinstance(value, dict):
-        result = {key: _normalize_structured_keys(val) for key, val in value.items()}
-        for alias, canonical in _STRUCTURED_KEY_ALIASES.items():
-            if alias in result and canonical not in result:
-                result[canonical] = result.pop(alias)
-        if "name" in result and "entity_type_id" not in result:
-            result["entity_type_id"] = 0
-        if isinstance(result.get("episode_indices"), list):
-            indices: list[int] = []
-            for item in result["episode_indices"]:
-                try:
-                    indices.append(int(item))
-                except (TypeError, ValueError):
-                    indices.append(0)
-            result["episode_indices"] = indices
-        return result
-    return value
-
-
 def _normalize_structured_response(value: Any, response_model: Any = None) -> Any:
-    normalized = _normalize_structured_keys(value)
-    if not isinstance(normalized, list) or response_model is None:
-        return normalized
-    fields = getattr(response_model, "model_fields", {}) or {}
-    list_field_names = [
-        name for name, field in fields.items()
-        if str(getattr(field, "annotation", "")).startswith("list[")
-    ]
-    if len(list_field_names) == 1:
-        return {list_field_names[0]: normalized}
-    return normalized
+    return _shared_normalize_structured_response(value, response_model)
 
 
 def _build_graphiti(config: GraphitiNeo4jConfig):
-    from graphiti_core import Graphiti
-
-    if config.llm_provider in {"ollama", "openai-compatible", "openai_compatible"}:
-        from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
-        from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
-        from graphiti_core.llm_client.config import LLMConfig
-        from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
-
-        base_url = config.llm_base_url or ("http://localhost:11434/v1" if config.llm_provider == "ollama" else "")
-        api_key = config.llm_api_key or ("ollama" if config.llm_provider == "ollama" else "")
-        llm_config = LLMConfig(
-            api_key=api_key,
-            model=config.llm_model or ("deepseek-r1:7b" if config.llm_provider == "ollama" else None),
-            small_model=config.small_model or config.llm_model or ("deepseek-r1:7b" if config.llm_provider == "ollama" else None),
-            base_url=base_url or None,
-        )
-
-        class _NeuronStructuredClient(OpenAIGenericClient):
-            async def _generate_response(self, *args, **kwargs):
-                response_model = kwargs.get("response_model")
-                if response_model is None and len(args) >= 2:
-                    response_model = args[1]
-                data = await super()._generate_response(*args, **kwargs)
-                return _normalize_structured_response(data, response_model)
-
-        llm_client = _NeuronStructuredClient(config=llm_config)
-        embedder = OpenAIEmbedder(
-            config=OpenAIEmbedderConfig(
-                api_key=config.embedding_api_key or api_key,
-                embedding_model=config.embedding_model or ("nomic-embed-text" if config.llm_provider == "ollama" else "text-embedding-3-small"),
-                embedding_dim=config.embedding_dim,
-                base_url=config.embedding_base_url or base_url or None,
-            )
-        )
-        return Graphiti(
-            config.uri,
-            config.user,
-            config.password,
-            llm_client=llm_client,
-            embedder=embedder,
-            cross_encoder=OpenAIRerankerClient(client=llm_client, config=llm_config),
-            store_raw_episode_content=config.store_raw_episode_content,
-        )
-
-    return Graphiti(
-        config.uri,
-        config.user,
-        config.password,
-        store_raw_episode_content=config.store_raw_episode_content,
-    )
+    return build_graphiti_from_config(config)
 
 
 class _AsyncLoopRunner:
@@ -687,18 +615,6 @@ def _terms(value: Any) -> list[str]:
 
 def _matches(value: str, terms: list[str]) -> bool:
     return any(term in value for term in terms)
-
-
-def _int_env(value: str, *, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _positive_int_env(value: str, *, default: int) -> int:
-    parsed = _int_env(value, default=default)
-    return parsed if parsed > 0 else default
 
 
 def _float_env(value: str, *, default: float) -> float:

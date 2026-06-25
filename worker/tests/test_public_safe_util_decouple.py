@@ -43,3 +43,14 @@ def test_importing_dual_write_builder_chain_does_not_load_llm_brain_core():
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_importing_qdrant_rerank_builder_does_not_load_llm_brain_core_or_graphiti():
+    code = (
+        "import sys; "
+        "from agent_knowledge.rag_ingress.qdrant_rerank import build_openai_reranker as _b; "
+        "leaked = sorted(k for k in sys.modules if 'llm_brain_core' in k or 'graphiti_core' in k); "
+        "assert not leaked, leaked"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

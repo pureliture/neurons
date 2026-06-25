@@ -14,14 +14,16 @@ on the live path (mirrors the optional-dependency pattern in
 
 from __future__ import annotations
 
-import os
 from typing import Callable, Mapping
 
-from .qdrant_docling_mirror import SearchableMirrorUnavailable
+from agent_knowledge.model_connectors import (
+    DEFAULT_EMBEDDING_DIM,
+    ModelPolicy,
+    PolicyViolation,
+    resolve_embedding_spec,
+)
 
-# Matches GraphitiNeo4jConfig.embedding_dim default; the mirror collection vector
-# size is fixed to this at create time and can only change via a new collection.
-DEFAULT_EMBEDDING_DIM = 1024
+from .qdrant_docling_mirror import SearchableMirrorUnavailable
 
 EmbedFn = Callable[[str], list[float]]
 
@@ -57,26 +59,20 @@ class OpenAICompatibleEmbeddingProvider:
 
 
 def resolve_embedding_config(environ: Mapping[str, str] | None = None) -> dict[str, object]:
-    """Resolve the non-secret OpenAI-compatible embedding config from env.
+    """Resolve the embedding connection config from env.
 
     Reuses the same precedence as ``GraphitiNeo4jConfig.from_env`` so the mirror and
     the graph adapter speak to one endpoint. The api_key is deliberately NOT
-    returned here -- it is read only at client-build time -- so a caller that logs
-    this config object cannot leak the secret.
+    returned here. The returned base_url can still identify a host; do not log this
+    object on production paths without redaction.
     """
 
-    env = environ if environ is not None else os.environ
-    dim_raw = str(env.get("LLM_BRAIN_EMBEDDING_DIM") or "").strip()
-    try:
-        dim = int(dim_raw) if dim_raw else DEFAULT_EMBEDDING_DIM
-    except ValueError:
-        dim = DEFAULT_EMBEDDING_DIM
-    if dim <= 0:
-        dim = DEFAULT_EMBEDDING_DIM
+    spec = resolve_embedding_spec(environ)
     return {
-        "model": env.get("LLM_BRAIN_EMBEDDING_MODEL") or env.get("EMBEDDING_MODEL") or "",
-        "base_url": env.get("LLM_BRAIN_EMBEDDING_BASE_URL") or env.get("OPENAI_BASE_URL") or "",
-        "dim": dim,
+        "provider": spec.provider,
+        "model": spec.model,
+        "base_url": spec.base_url,
+        "dim": spec.dim,
     }
 
 
@@ -91,7 +87,13 @@ def build_openai_embedding_provider(
     OpenAI-compatible embeddings endpoint is wired lazily.
     """
 
+    import os
+
     env = environ if environ is not None else os.environ
+    try:
+        ModelPolicy().validate(resolve_embedding_spec(env), capability="embedding")
+    except PolicyViolation as exc:
+        raise SearchableMirrorUnavailable(str(exc)) from exc
     config = resolve_embedding_config(env)
     model = str(config["model"])
     size = int(config["dim"])

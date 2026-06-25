@@ -6,8 +6,11 @@ score-count guard, config reuse, and query->rerank->authority-join composition.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
+from agent_knowledge.model_connectors import CandidateReranker
 from agent_knowledge.rag_ingress.qdrant_authority_join import (
     LedgerContentHashAuthorityResolver,
     join_mirror_hits_to_authority,
@@ -16,6 +19,7 @@ from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
     HashEmbeddingProvider,
     PassthroughMarkdownNormalizer,
     QdrantDoclingMirrorAdapter,
+    SearchableMirrorUnavailable,
 )
 from agent_knowledge.rag_ingress.qdrant_docling_testing import InMemoryQdrantClient
 from agent_knowledge.rag_ingress.qdrant_rerank import (
@@ -80,6 +84,32 @@ def test_resolve_reranker_config_reuses_llm_endpoint_env():
 def test_build_reranker_with_injected_rank_fn():
     reranker = build_openai_reranker(rank_fn=_by_keyword_rank("z"))
     assert isinstance(reranker, OpenAICompatibleReranker)
+    assert isinstance(reranker, CandidateReranker)
+
+
+def test_build_reranker_without_rank_fn_uses_shared_live_factory_fail_closed():
+    with pytest.raises(SearchableMirrorUnavailable, match="disabled"):
+        build_openai_reranker(environ={})
+
+
+def test_build_live_reranker_preserves_unavailable_exception_contract_when_enabled():
+    with pytest.raises(SearchableMirrorUnavailable, match="LLM_BRAIN_LLM_MODEL"):
+        build_openai_reranker(environ={"LLM_BRAIN_QDRANT_RERANK_ENABLED": "1"})
+
+
+def test_build_live_reranker_uses_bounded_timeout():
+    reranker = build_openai_reranker(
+        environ={
+            "LLM_BRAIN_QDRANT_RERANK_ENABLED": "1",
+            "LLM_BRAIN_LLM_PROVIDER": "openai-compatible",
+            "LLM_BRAIN_LLM_MODEL": "rerank",
+            "LLM_BRAIN_RERANK_TIMEOUT_SECONDS": "0.01",
+        },
+        rank_fn=lambda _q, _texts: [time.sleep(0.05) or 1.0],
+    )
+
+    with pytest.raises(SearchableMirrorUnavailable, match="timed out"):
+        reranker.rerank(query="q", candidates=[{"summary": "slow"}], top_n=1)
 
 
 def test_query_then_rerank_then_authority_join_compose():
