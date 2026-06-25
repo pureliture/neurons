@@ -381,3 +381,28 @@ def test_deterministic_writer_uses_graphiti_compatible_nodes_and_edges(tmp_path)
     assert embedder.texts == ["Graphiti", "Neo4j", "Graphiti stores extracted facts in Neo4j."]
     assert entity_calls[0]["params"]["entity_data"]["name_embedding"] == [0.0, 0.5]
     assert relation_calls[0]["params"]["edge_data"]["fact_embedding"] == [2.0, 2.5]
+
+
+def test_deterministic_writer_omits_vector_procedure_without_embeddings(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    sid = _seed_session(store, raw_id="writer-noembed")
+    episode = session_episode_from_couchdb_source(session_id_hash=sid, source_store=store)
+    item = make_bulk_session_input(session_key="s1", episode=episode, max_chars=800)
+    extraction = BulkSemanticExtractionResult(
+        (
+            BulkSemanticSessionResult(
+                session_key="s1",
+                entities=(BulkSemanticEntity(name="Graphiti", type="Library", summary="Temporal graph library"),),
+                relations=(),
+            ),
+        )
+    )
+    driver = _FakeAsyncDriver()
+    writer = DeterministicGraphitiSemanticWriter(driver)
+
+    report = writer.write_batch([item], extraction)
+
+    assert report == BulkSemanticWriteReport(projected=1, entities_written=1, relations_written=0)
+    entity_calls = [call for call in driver.calls if "entity_data" in call["params"]]
+    assert len(entity_calls) == 1
+    assert "setNodeVectorProperty" not in entity_calls[0]["query"]
