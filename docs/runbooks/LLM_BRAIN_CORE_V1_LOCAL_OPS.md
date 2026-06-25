@@ -98,6 +98,12 @@ the `--enable-graph` / `--graph-required` CLI flags plus
 | `LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT` | — | `true` | Store raw episode content (off only for `0`/`false`/`no`). |
 | `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES` | — | `false` | Run Graphiti entity extraction (truthy: `1`/`true`/`yes`). Production default is episode-only. |
 | `LLM_BRAIN_GRAPH_METADATA_FIRST_HYBRID` | — | `false` | Wrap Graphiti with the metadata-first hybrid adapter. This stores metadata-only graph episodes and forces `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=false` for that runtime path. |
+| `LLM_BRAIN_BULK_SEMANTIC_MAX_SESSIONS_PER_CALL` | — | `5` | `couchdb-graph-bulk-semantic` canary/production batch size: how many sessions are packed into one structured semantic extraction call. Start at 5, then raise after quality/cost evidence. |
+| `LLM_BRAIN_BULK_SEMANTIC_MAX_SESSION_CHARS` | — | `1600` | Per-session compact extraction body size for bulk semantic extraction. Uses head/tail sampling instead of the 8000-char Graphiti entity body. |
+| `LLM_BRAIN_BULK_SEMANTIC_MAX_TOKENS` | — | `4096` | Completion token cap for one bulk semantic extraction call. |
+| `LLM_BRAIN_BULK_SEMANTIC_TIMEOUT_SECONDS` | — | `600` | OpenAI-compatible HTTP timeout for one bulk semantic extraction call. |
+| `LLM_BRAIN_BULK_SEMANTIC_ALLOW_EMPTY_SESSIONS` | — | `false` | When false, a model response with no entities for a session fails that batch instead of marking semantic coverage complete with an empty graph. |
+| `LLM_BRAIN_BULK_SEMANTIC_EMBEDDINGS` | — | `true` | If embedding env is configured, batch-embed extracted entity names and relation facts before deterministic write. Set to `false` for count-only/cost smoke. |
 | `LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS` | — | `30` | Per-call wait (s) for graph reads (search/retrieve). Non-positive or non-numeric falls back to default. A read past this bound degrades to `graph_status.status == "error"`, never a false `available`. |
 | `LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS` | — | `300` | Per-call wait (s) for graph writes (`upsert_episode`; longer because `extract_entities=true` runs an LLM). A write past this bound fails the upsert (counted as `failed`), not a silent hang. |
 
@@ -391,6 +397,7 @@ Two operational levers matter for cost and re-run time.
 | --- | --- | --- | --- |
 | Episode-only (production default) | `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=false` | 0 | No LLM. One `EpisodicNode` MERGE per episode. Write time is backend I/O only; the write timeout's lower end applies. |
 | Entity extraction | `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=true` | Multiple per episode (Graphiti `add_episode`: entity extraction + dedupe + edge extraction; embeddings if configured) | Each episode triggers several LLM completions plus embedding calls. Cost and latency scale with episode count, so a full project window of N episodes is roughly N × (per-episode extraction calls). This is why the write timeout default (300s) is far larger than the read timeout. |
+| Bulk semantic extraction | `neuron-knowledge couchdb-graph-bulk-semantic` | ~1 / `LLM_BRAIN_BULK_SEMANTIC_MAX_SESSIONS_PER_CALL` sessions | One structured extraction call packs several compact session bodies, then a deterministic Graphiti-compatible writer stores `Episodic`, `Entity`, `MENTIONS`, and `RELATES_TO` without additional LLM calls. This is the lower-token semantic lane; validate quality before raising the batch size. |
 
 Cost rule of thumb: a reproject of a project with N artifacts/cards/source-refs
 issues ~N graph writes. In episode-only mode that is ~N backend writes and **no
@@ -398,6 +405,14 @@ LLM spend**. In `extract_entities=true` mode that is ~N × (entity + edge
 extraction + embedding) LLM calls — budget and rate-limit accordingly before
 enabling it on a large window, and prefer resume (below) to avoid paying for
 already-extracted episodes again.
+
+Bulk semantic extraction is the cost-control path for semantic coverage. Start
+with `--max-projects 5 --max-sessions-per-call 5`; if entity/relation quality and
+JSON failure rate are acceptable, increase to 10 sessions per call. The
+deterministic writer can still batch-embed entity names and relation facts so
+Graphiti hybrid search keeps useful vector recall, but it avoids Graphiti's
+per-session chat extraction/dedupe calls. Keep `--max-projects` bounded during
+canary so one command cannot silently consume the whole backlog.
 
 ### Resume (skip already-projected episodes)
 
