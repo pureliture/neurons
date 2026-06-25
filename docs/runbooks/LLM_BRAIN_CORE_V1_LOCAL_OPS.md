@@ -270,8 +270,13 @@ evidence and intent.
 
 `llm-brain-graph-trigger` is the M4 timer-facing service in the
 `llm-brain-core` compose profile. It runs `couchdb-graph-trigger` on a bounded
-interval, uses `graph-project.lock` to avoid pileups with manual/full batches,
-and defaults to the allowed Gemma-4 MaaS semantic extraction model.
+interval and uses `graph-project.lock` to avoid pileups with manual/full batches.
+It is **metadata-first / episode-only by default**: it does not run per-session
+Graphiti `add_episode` entity extraction inline. Operational semantic enrichment
+is the trailing bulk lane (see Bulk Semantic Trigger Scheduler below).
+Per-session entity extraction is debug/manual opt-in only via
+`couchdb-graph-trigger --extract-entities` (or `--reextract-entities`); the env
+default `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=false` must not regress to on.
 
 Default knobs in `.env.example`:
 
@@ -295,6 +300,66 @@ record current `couchdb-graph-status`, confirm no full batch runner is active,
 and set rollback to stopping only `llm-brain-graph-trigger`. Do not restart
 Neo4j, CouchDB, RAGFlow, or the bridge just because the trigger reports
 `already_running` or a bounded window has no backlog.
+
+## Bulk Semantic Trigger Scheduler
+
+`llm-brain-bulk-semantic-trigger` is the trailing semantic enrichment lane. It is
+**off by default**: it lives in its own `llm-brain-bulk-semantic` compose profile,
+so neither a bare `docker compose up` nor `--profile llm-brain-core up` starts it.
+Activate it explicitly only after a passing dry-run:
+
+```text
+docker compose --profile llm-brain-bulk-semantic up -d llm-brain-bulk-semantic-trigger
+```
+
+It runs `couchdb-bulk-semantic-trigger`, a thin wrapper over
+`couchdb-graph-bulk-semantic`, on a bounded interval. It shares the same
+`--runtime-dir` (`/var/lib/agent-knowledge/llm-brain/graph-trigger`) and thus the
+same `graph-project.lock` as `llm-brain-graph-trigger` and any manual full batch,
+so the bulk batch and the episodic hot path serialize on one lock (no concurrent
+Neo4j writes). On lock contention the wrapper reports `already_running` and sleeps.
+
+Allowed models: Cloud Vertex AI Model Garden MaaS Gemma-4 (chat/extraction) and the
+configured embedding model only. Gemini / Gemini Flash chat/extraction is forbidden.
+
+Default knobs in `.env.example`:
+
+```text
+LLM_BRAIN_BULK_SEMANTIC_MAX_SESSIONS_PER_CALL=5
+LLM_BRAIN_BULK_SEMANTIC_MAX_SESSION_CHARS=1600
+LLM_BRAIN_BULK_SEMANTIC_MAX_TOKENS=4096
+LLM_BRAIN_BULK_SEMANTIC_TIMEOUT_SECONDS=600
+LLM_BRAIN_BULK_SEMANTIC_EMBEDDINGS=true
+LLM_BRAIN_BULK_SEMANTIC_ALLOW_EMPTY_SESSIONS=false
+LLM_BRAIN_BULK_SEMANTIC_TRIGGER_ENABLE=false
+LLM_BRAIN_BULK_SEMANTIC_TRIGGER_INTERVAL_SECONDS=900
+LLM_BRAIN_BULK_SEMANTIC_TRIGGER_LIMIT=100
+LLM_BRAIN_BULK_SEMANTIC_TRIGGER_MAX_PROJECTS=5
+LLM_BRAIN_BULK_SEMANTIC_TRIGGER_PROJECT=
+LLM_BRAIN_BULK_SEMANTIC_TRIGGER_PROVIDER=
+LLM_BRAIN_BULK_SEMANTIC_TRIGGER_REPORT_EVERY=25
+```
+
+`LLM_BRAIN_BULK_SEMANTIC_TRIGGER_ENABLE` is advisory only — the real off-switch is
+the compose profile (startup is profile-gated, not env-gated).
+
+Dry-run the wrapper before enabling the scheduler. A passing dry-run reports a
+bounded plan (`child_command: couchdb-graph-bulk-semantic`,
+`runtime_lock: graph-project.lock`), no mutation, no network use, and no raw paths.
+The frozen child has no zero-mutation dry-run; the wrapper supplies it. For a real
+selected/skipped read, use a tiny bounded execute (`--max-projects 1`).
+
+Monitoring caveat: `--max-projects` counts materialized, not projected, sessions.
+A tick where every LLM call fails can report `stopped_after_max_projects=true` with
+`projected=0`, so alert on `projection.failed`, not the budget flag alone. The
+`by_provider` keys and the progress-jsonl `provider` field are raw — keep the
+runtime-volume JSONL internal; never forward to a public sink without redaction.
+
+Live enablement is a compose/runtime mutation. Before starting the service, record
+current `couchdb-graph-status`, confirm no full batch runner is active, and set
+rollback to stopping only `llm-brain-bulk-semantic-trigger`. Do not restart Neo4j,
+CouchDB, RAGFlow, or the bridge just because the wrapper reports `already_running`
+or a bounded window has no backlog.
 
 ## Public Output Safety Checklist
 
