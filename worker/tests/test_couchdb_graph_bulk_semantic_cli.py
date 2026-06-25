@@ -14,6 +14,7 @@ from agent_knowledge.llm_brain_core.bulk_semantic import (
     BulkSemanticSessionResult,
     BulkSemanticWriteReport,
     DeterministicGraphitiSemanticWriter,
+    OpenAICompatibleBulkSemanticExtractor,
     make_bulk_session_input,
     parse_bulk_semantic_result,
 )
@@ -58,6 +59,16 @@ class _ExplodingExtractor:
     def extract(self, batch):  # type: ignore[no-untyped-def]
         _ = batch
         raise AssertionError("extractor should not run")
+
+
+class _FailingExtractor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def extract(self, batch):  # type: ignore[no-untyped-def]
+        _ = batch
+        self.calls += 1
+        raise ValueError("synthetic extraction failure")
 
 
 class _FakeBulkWriter:
@@ -240,6 +251,37 @@ def test_bulk_semantic_max_projects_caps_below_batch_size(tmp_path):
     assert extractor.calls == [["s1", "s2"]]
 
 
+def test_bulk_semantic_max_projects_caps_failed_extraction_batches(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(10):
+        _seed_session(store, raw_id=f"failing-cap-{index}")
+    extractor = _FailingExtractor()
+    dead_letter = tmp_path / "dead-letter.jsonl"
+
+    report = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=10,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=5,
+        max_projects=5,
+        dead_letter_jsonl=dead_letter,
+        extractor=extractor,
+        writer=_FakeBulkWriter(),
+    )
+
+    assert report["status"] == "failed"
+    assert report["projection"]["attempted"] == 5
+    assert report["projection"]["materialized"] == 5
+    assert report["projection"]["projected"] == 0
+    assert report["projection"]["failed"] == 5
+    assert report["projection"]["stopped_after_max_projects"] is True
+    assert report["semantic"]["llm_batches"] == 1
+    assert extractor.calls == 1
+    assert len(dead_letter.read_text(encoding="utf-8").splitlines()) == 5
+
+
 def test_bulk_semantic_parse_accepts_aliases_and_rejects_private_output():
     parsed = parse_bulk_semantic_result(
         {
@@ -267,6 +309,31 @@ def test_bulk_semantic_parse_accepts_aliases_and_rejects_private_output():
                 ]
             }
         )
+
+
+def test_openai_bulk_extractor_accepts_json_wrapped_in_prose():
+    def fake_post(url, *, headers, body, timeout):  # type: ignore[no-untyped-def]
+        _ = (url, headers, body, timeout)
+        return json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": 'Here is the JSON:\\n{"sessions":[{"session_key":"s1","entities":[{"name":"Graphiti","type":"Library","summary":""}],"relations":[]}]}',
+                        }
+                    }
+                ]
+            }
+        )
+
+    extractor = OpenAICompatibleBulkSemanticExtractor(
+        base_url="http://example.test/v1",
+        model="gemma-4-26b-a4b-it-maas",
+        post_fn=fake_post,
+    )
+    result = extractor.extract([])
+
+    assert result.sessions[0].entities[0].name == "Graphiti"
 
 
 def test_deterministic_writer_uses_graphiti_compatible_nodes_and_edges(tmp_path):

@@ -146,7 +146,7 @@ class OpenAICompatibleBulkSemanticExtractor:
         content = str(data["choices"][0]["message"]["content"] or "")
         if not content.strip():
             raise ValueError("bulk semantic extractor returned empty content")
-        parsed = json.loads(_strip_code_fences(content))
+        parsed = _loads_json_object(content)
         return parse_bulk_semantic_result(parsed)
 
 
@@ -583,6 +583,18 @@ def _strip_code_fences(value: str) -> str:
     if lines and lines[-1].strip() == "```":
         lines = lines[:-1]
     return "\n".join(lines).strip()
+
+
+def _loads_json_object(value: str) -> Any:
+    text = _strip_code_fences(value)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start : end + 1])
+        raise
 
 
 def _urllib_post(url: str, *, headers: dict, body: str, timeout: int) -> str:

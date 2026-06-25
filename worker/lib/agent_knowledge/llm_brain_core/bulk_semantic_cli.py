@@ -200,6 +200,9 @@ def run_couchdb_bulk_semantic_projection(
             natural_id = session_id_hash.replace(":", "_")
             status = "unknown"
             reason = ""
+            if max_projects and materialized >= max_projects:
+                stopped_after_max_projects = True
+                break
             try:
                 if session_project not in projected_cache:
                     projected_cache[session_project] = set(
@@ -231,10 +234,8 @@ def run_couchdb_bulk_semantic_projection(
                     )
                     materialized += 1
                     status = "queued"
-                    if len(batch_items) >= _batch_cap(
-                        max_sessions_per_call=max_sessions_per_call,
-                        max_projects=max_projects,
-                        projected=projected,
+                    if len(batch_items) >= max_sessions_per_call or (
+                        max_projects and materialized >= max_projects
                     ):
                         report = _flush_batch_items(
                             batch_items,
@@ -252,11 +253,15 @@ def run_couchdb_bulk_semantic_projection(
                         failed += int(report["failed"])
                         entities_written += int(report["entities_written"])
                         relations_written += int(report["relations_written"])
-                        status = "projected"
+                        if int(report["failed"]):
+                            status = "failed"
+                            reason = "extract_or_write"
+                        else:
+                            status = "projected"
             except Exception as exc:
                 failed += 1
                 status = "failed"
-                reason = type(exc).__name__
+                reason = _reason_code(exc)
                 failure_reasons[reason] += 1
                 _write_dead_letter(
                     dead_letter_jsonl,
@@ -285,7 +290,7 @@ def run_couchdb_bulk_semantic_projection(
                         "llm_batches": llm_batches,
                     },
                 )
-            if max_projects and projected >= max_projects:
+            if max_projects and materialized >= max_projects:
                 stopped_after_max_projects = True
                 break
 
@@ -381,7 +386,7 @@ def _flush_batch_items(
             allow_empty_sessions=allow_empty_sessions,
         )
     except Exception as exc:
-        reason = type(exc).__name__
+        reason = _reason_code(exc)
         failure_reasons[reason] += len(batch_items)
         for session, _item in batch_items:
             _write_dead_letter(
@@ -414,13 +419,6 @@ def _flush_batch_items(
     }
 
 
-def _batch_cap(*, max_sessions_per_call: int, max_projects: int, projected: int) -> int:
-    if max_projects <= 0:
-        return max(1, int(max_sessions_per_call))
-    remaining = max(1, int(max_projects) - int(projected))
-    return max(1, min(int(max_sessions_per_call), remaining))
-
-
 def _p95(values: list[int]) -> int:
     if not values:
         return 0
@@ -440,3 +438,12 @@ def _positive_int_env(value: str, default: int) -> int:
 def _truthy(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
+
+def _reason_code(exc: Exception) -> str:
+    code = getattr(exc, "code", None)
+    if code is None:
+        return type(exc).__name__
+    try:
+        return f"{type(exc).__name__}_{int(code)}"
+    except (TypeError, ValueError):
+        return type(exc).__name__
