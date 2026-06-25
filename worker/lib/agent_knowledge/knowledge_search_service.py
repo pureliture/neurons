@@ -88,6 +88,7 @@ class KnowledgeSearchService:
         graph_adapter: GraphMemoryAdapter | None = None,
         authorized_reader: AuthorizedMemoryReader | None = None,
         read_pipeline: AuthorizedMemoryReader | None = None,
+        mirror_search=None,
     ):
         self.ledger = ledger
         self.ragflow = ragflow
@@ -95,6 +96,11 @@ class KnowledgeSearchService:
         self.allow_private_results = bool(allow_private_results)
         self.native_memory_id = native_memory_id
         self.graph_adapter = graph_adapter
+        # M8 read cutover: a Qdrant-backed (query, brain_id) -> list[dict] callable
+        # that fills brain.query's archive/evidence lanes from the Qdrant searchable
+        # mirror. When set it REPLACES the RAGFlow archive search (which is off in the
+        # live MCP anyway). None -> legacy behaviour (RAGFlow if dataset_ids, else empty).
+        self._mirror_search = mirror_search
         self.authorized_reader = authorized_reader or read_pipeline or MemoryReadPipeline(
             ledger=ledger,
             ragflow=ragflow,
@@ -171,7 +177,9 @@ class KnowledgeSearchService:
 
     def brain_query(self, *, brain_id: str, query: str, limit: int = 8) -> dict:
         read_model = LegacyLedgerBrainReadModel(self.ledger)
-        ragflow_search = self._brain_query_ragflow_search if self.dataset_ids else None
+        ragflow_search = self._mirror_search or (
+            self._brain_query_ragflow_search if self.dataset_ids else None
+        )
         result = run_brain_query_v2(
             read_model=read_model,
             ragflow_search=ragflow_search,

@@ -458,6 +458,7 @@ def build_projection_state_document(
     projection_status: str,
     target_profile: str = RAGFLOW_RECALL_PROFILE,
     session_memory_knowledge_id: str = "",
+    active_content_hash: str = "",
     failure_reason: str = "",
     source_locator_hash: str = "",
 ) -> dict:
@@ -465,11 +466,26 @@ def build_projection_state_document(
 
     ``target_profile`` is checked against the ownership rule so the retired
     ``transcript-memory`` profile can never be recorded as a projection target.
+
+    ``active_content_hash`` (additive) records the ``content_hash`` of the
+    currently-projected session-memory body. It is the join key the Qdrant
+    searchable-mirror authority resolver matches against, so a mirror point is
+    only authoritative when its content_hash equals the latest projected body's
+    hash. Populated on the SUCCESS (PROJECTED) path; left "" on failure paths.
     """
 
     assert_ragflow_target_allowed(target_profile)
     if projection_status not in ProjectionStatus.known():
         raise ValueError(f"unknown projection_status: {projection_status}")
+    # A PROJECTED state without an active_content_hash would leave the authority
+    # resolver with no currentness join key, so require it on the success path.
+    # Failure paths use FAILED and are unaffected.
+    if projection_status == ProjectionStatus.PROJECTED and not active_content_hash:
+        raise ValueError("active_content_hash is required for projected state")
+    if active_content_hash:
+        # Defensive: a malformed hash stored here would silently break the
+        # authority resolver's currentness match later.
+        assert_hash_like("active_content_hash", active_content_hash)
     doc = _base_document(
         doc_type=SourceDocType.PROJECTION_STATE,
         doc_id=projection_state_doc_id(session_id_hash),
@@ -484,6 +500,7 @@ def build_projection_state_document(
             "target_profile": target_profile,
             "projection_status": projection_status,
             "session_memory_knowledge_id": session_memory_knowledge_id,
+            "active_content_hash": active_content_hash,
             "failure_reason": failure_reason,
         }
     )

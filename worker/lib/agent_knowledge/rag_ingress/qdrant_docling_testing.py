@@ -21,6 +21,25 @@ import math
 from typing import Any
 
 
+def _vectors_config_size(vectors_config: Any) -> int | None:
+    """Extract the configured vector size from any vectors_config shape.
+
+    The adapter emits a plain dict ``{"size": N, "distance": "Cosine"}`` when
+    ``qdrant_client`` is absent, or a ``models.VectorParams(size=N, ...)`` when it
+    is installed. Returns None for an unrecognised shape.
+    """
+    if vectors_config is None:
+        return None
+    if isinstance(vectors_config, dict):
+        size = vectors_config.get("size")
+    else:
+        size = getattr(vectors_config, "size", None)
+    try:
+        return int(size) if size is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _point_field(point: Any, key: str) -> Any:
     if isinstance(point, dict):
         return point.get(key)
@@ -93,6 +112,8 @@ class InMemoryQdrantClient:
         self._collections: dict[str, dict[Any, dict[str, Any]]] = {}
         # collection_name -> [indexed field names]
         self._payload_indexes: dict[str, list[str]] = {}
+        # collection_name -> configured vector size (from create_collection)
+        self._vector_sizes: dict[str, int] = {}
         # last query_filter passed to query_points (test introspection)
         self.last_query_filter: Any = None
 
@@ -103,6 +124,17 @@ class InMemoryQdrantClient:
     def create_collection(self, collection_name: str, vectors_config: Any = None) -> None:
         self._collections.setdefault(collection_name, {})
         self._payload_indexes.setdefault(collection_name, [])
+        size = _vectors_config_size(vectors_config)
+        if size is not None:
+            self._vector_sizes[collection_name] = int(size)
+
+    def collection_vector_size(self, collection_name: str) -> int | None:
+        """Configured vector size for a collection, or None if unknown.
+
+        Test-support accessor so dim-mismatch guards can be exercised without a
+        real Qdrant ``get_collection`` round-trip.
+        """
+        return self._vector_sizes.get(collection_name)
 
     def create_payload_index(
         self, *, collection_name: str, field_name: str, field_schema: Any = None

@@ -162,6 +162,7 @@ def test_projection_state_rejects_transcript_memory_target() -> None:
         project="neurons",
         projection_status=dm.ProjectionStatus.PROJECTED,
         session_memory_knowledge_id="sha256:" + "9" * 64,
+        active_content_hash="sha256:" + "9" * 64,
     )
     assert ok["target_profile"] == dm.RAGFLOW_RECALL_PROFILE
     with pytest.raises(dm.OwnershipViolation):
