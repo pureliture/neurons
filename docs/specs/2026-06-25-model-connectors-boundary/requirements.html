@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Model Connectors Boundary Requirements</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17202a;
+      --muted: #5f6b7a;
+      --line: #d7dde5;
+      --panel: #f5f7fa;
+      --accent: #0f766e;
+      --warn: #9a3412;
+    }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: #ffffff;
+      line-height: 1.58;
+    }
+    main {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 40px 24px 72px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 34px;
+      line-height: 1.18;
+      letter-spacing: 0;
+    }
+    h2 {
+      margin-top: 36px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      font-size: 22px;
+      letter-spacing: 0;
+    }
+    h3 {
+      margin-top: 24px;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.93em;
+      background: var(--panel);
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+    }
+    .notice {
+      border-left: 4px solid var(--accent);
+      background: var(--panel);
+      padding: 14px 16px;
+      margin: 18px 0 26px;
+      color: var(--muted);
+    }
+    .open {
+      border-left-color: var(--warn);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 22px;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: var(--panel);
+    }
+    li {
+      margin: 6px 0;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Model Connectors Boundary Requirements</h1>
+    <div class="notice">Source of truth는 <code>requirements.md</code>입니다. 이 HTML은 generated preview companion입니다.</div>
+
+    <h2>승인 대상</h2>
+    <ul>
+      <li>Source of truth: <code>requirements.md</code></li>
+      <li>Preview companion: <code>requirements.html</code></li>
+      <li>현재 단계: Phase 1 Requirements Discovery</li>
+      <li>승인 전 제한: <code>design.md</code> 작성, 구현 코드 변경, live mutation 금지</li>
+    </ul>
+
+    <h2>배경</h2>
+    <ul>
+      <li><code>GraphitiNeo4jGraphMemoryAdapter</code> 생성자는 이미 Graphiti instance를 받을 수 있지만, env 해석과 모델 조립이 adapter 파일에 묶여 있다.</li>
+      <li>Qdrant searchable mirror도 기존 OpenAI-compatible embedding/rerank endpoint 재사용을 전제로 한다.</li>
+      <li><code>rag_ingress</code> 경로가 heavy <code>llm_brain_core</code> package를 끌어오지 않는 import guard가 중요하다.</li>
+    </ul>
+
+    <h2>질문-답변 흐름</h2>
+    <h3>Q1: 1차 성공 범위는 어디까지로 잡을까?</h3>
+    <div class="notice"><strong>라이브 canary 포함</strong>으로 확정. code-only refactor와 fake/no-network test만으로 끝내지 않고, 구현 단계에서 별도 operator gate 이후 실제 Graphiti schema extraction canary까지 요구한다.</div>
+    <ul>
+      <li>Phase 1/2 중에는 live 실행하지 않는다.</li>
+      <li>구현 단계에서 current evidence, exact argv, bounded timeout, redaction, postcheck, rollback/abort 기준을 제시한다.</li>
+      <li>RAGFlow disable/delete, Qdrant cutover, native-memory authority 이전은 범위 밖이다.</li>
+    </ul>
+    <h3>Q2: Graphiti schema extraction canary는 어느 깊이까지 확인할까?</h3>
+    <div class="notice"><strong>단일 synthetic episode</strong>로 확정. public-safe synthetic episode 하나로 Graphiti extraction, upsert, search를 확인한다.</div>
+    <ul>
+      <li>실제 projection slice나 live project memory를 태우지 않는다.</li>
+      <li>isolated <code>brain_id</code> / group scope를 사용한다.</li>
+      <li>raw transcript/source body, private path, secret-like 값, raw dataset/document id를 출력하지 않는다.</li>
+      <li>성공 기준은 연결, 모델 기반 schema extraction, episode upsert, bounded search/readback 통과다.</li>
+    </ul>
+    <h3>Q3: 공용 model connector 책임은 어디가 소유할까?</h3>
+    <div class="notice"><strong>낮은 shared layer</strong>로 확정. Graphiti/Qdrant adapter보다 낮은 계층이 소유하고, <code>llm_brain_core</code>와 <code>rag_ingress</code>는 서로를 import하지 않는다.</div>
+    <ul>
+      <li>구현 package 이름은 아직 확정하지 않는다.</li>
+      <li>실제 위치와 public import path는 Phase 2 design에서 import guard와 compatibility를 검증하며 정한다.</li>
+    </ul>
+    <h3>Q4: <code>GraphitiNeo4jConfig</code>는 어떻게 다룰까?</h3>
+    <div class="notice"><strong>장기 facade 유지</strong>로 확정. 기존 public surface는 유지하고 내부만 새 connector/builder 경로로 delegate할 수 있다.</div>
+    <ul>
+      <li><code>GraphitiNeo4jConfig</code>, <code>GraphitiNeo4jGraphMemoryAdapter.from_config</code>, <code>GraphitiNeo4jGraphMemoryAdapter.from_env</code>를 유지한다.</li>
+      <li>기존 import path와 behavior는 깨지지 않아야 한다.</li>
+      <li>deprecation warning, 즉시 제거, 내부 전용화는 이번 범위 밖이다.</li>
+    </ul>
+    <h3>Q5: <code>agent_knowledge</code> root package rename은 이번 scope에 포함할까?</h3>
+    <div class="notice"><strong>이번 scope에서는 현재 root 유지</strong>로 확정. 이번 요구사항은 <code>model_connectors</code> leaf package와 model connection boundary만 다룬다.</div>
+    <ul>
+      <li>기존 root import path인 <code>agent_knowledge</code>는 유지한다.</li>
+      <li><code>agent_knowledge</code> rename은 별도 repo identity/API migration 요구사항으로 분리한다.</li>
+    </ul>
+
+    <h2>기능 요구사항</h2>
+    <ul>
+      <li>Graphiti adapter의 역할은 Graphiti instance를 통한 episode upsert/search로 제한한다.</li>
+      <li>모델 연결 책임은 env 해석, non-secret model spec, policy, client 생성, fallback 구성으로 분리한다.</li>
+      <li>model connector shared layer는 <code>llm_brain_core</code>와 <code>rag_ingress</code>보다 낮은 위치에서 제공되어야 한다.</li>
+      <li>이번 scope에서는 기존 <code>agent_knowledge</code> root import path를 바꾸지 않는다.</li>
+      <li>기존 public compatibility와 env precedence를 유지한다.</li>
+      <li><code>GraphitiNeo4jConfig</code>는 장기 compatibility facade로 유지한다.</li>
+      <li>secret-like 값은 repr, log, error, preview artifact에 노출하지 않는다.</li>
+      <li>Graphiti fallback, timeout, structured extraction normalization, graph activation behavior는 무회귀여야 한다.</li>
+      <li>구현 검증은 fake/no-network test에 더해 public-safe synthetic episode 기반의 isolated live Graphiti schema extraction canary를 포함한다.</li>
+      <li>Qdrant import guard를 보존한다.</li>
+      <li>정책 판정은 role/capability 단위로 한다.</li>
+    </ul>
+
+    <h2>비기능 요구사항</h2>
+    <table>
+      <thead><tr><th>항목</th><th>요구값</th></tr></thead>
+      <tbody>
+        <tr><td>Safety</td><td>code-only 변경 우선. live mutation은 별도 승인 전 금지.</td></tr>
+        <tr><td>Compatibility</td><td>기존 public import path, env precedence, test behavior, <code>GraphitiNeo4jConfig</code> facade 유지.</td></tr>
+        <tr><td>Privacy</td><td>raw host, private path, token, API key, raw transcript, dataset_id, document_id 출력 금지.</td></tr>
+        <tr><td>Import locality</td><td>shared connector는 Graphiti/Qdrant adapter보다 낮은 layer에 위치하고 두 상위 영역 사이 circular import를 만들지 않는다.</td></tr>
+        <tr><td>Observability</td><td>policy block, fallback, timeout, vector dim mismatch, probe failure를 redacted signal로 구분.</td></tr>
+        <tr><td>Testability</td><td>기본 test는 fake/no-network, live endpoint wiring은 lazy path.</td></tr>
+        <tr><td>Live gate</td><td>Graphiti schema extraction canary는 구현 단계의 별도 operator gate 이후에만 실행한다.</td></tr>
+        <tr><td>Canary scope</td><td>단일 public-safe synthetic episode만 사용하며 실제 projection slice는 범위 밖이다.</td></tr>
+        <tr><td>YAGNI</td><td>새 모델 선택, live cutover, RAGFlow disable/delete, native-memory authority 이전, <code>agent_knowledge</code> root package rename 제외.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>미결정 항목</h2>
+    <ul>
+      <li>없음. <code>requirements.md</code> 승인 후 Phase 2에서 접근안을 비교한다.</li>
+    </ul>
+  </main>
+</body>
+</html>

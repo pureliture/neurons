@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from concurrent.futures import TimeoutError as FuturesTimeoutError
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -188,6 +189,50 @@ def test_graphiti_config_defaults_to_episode_only_storage():
     assert config.extract_entities is False
 
 
+def test_graphiti_config_from_env_respects_explicit_empty_environment(monkeypatch):
+    monkeypatch.setenv("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES", "true")
+    monkeypatch.setenv("LLM_BRAIN_LLM_MODEL", "should-not-leak")
+
+    config = GraphitiNeo4jConfig.from_env({})
+
+    assert config.extract_entities is False
+    assert config.llm_model == ""
+
+
+def test_graphiti_from_config_delegates_backend_building(monkeypatch):
+    built_configs: list[GraphitiNeo4jConfig] = []
+    built_graphiti: list[object] = []
+
+    def _fake_build(config):
+        built_configs.append(config)
+        graphiti = object()
+        built_graphiti.append(graphiti)
+        return graphiti
+
+    monkeypatch.setattr(
+        "agent_knowledge.llm_brain_core.graphiti_adapter.build_graphiti_from_config",
+        _fake_build,
+    )
+    config = GraphitiNeo4jConfig(
+        extract_entities=True,
+        fallback_llm_model="fallback-main",
+        fallback_small_model="fallback-small",
+        primary_attempts=3,
+        fallback_attempts=2,
+    )
+
+    adapter = GraphitiNeo4jGraphMemoryAdapter.from_config(config)
+
+    assert built_configs[0].llm_model == "fallback-main"
+    assert built_configs[0].small_model == "fallback-small"
+    assert built_configs[0].fallback_llm_model == ""
+    assert built_configs[1] is config
+    assert adapter._graphiti is built_graphiti[1]
+    assert adapter._fallback_graphiti is built_graphiti[0]
+    assert adapter._primary_attempts == 3
+    assert adapter._fallback_attempts == 2
+
+
 def test_structured_response_normalizes_entity_name_alias():
     from graphiti_core.prompts.extract_nodes import ExtractedEntities
 
@@ -258,6 +303,11 @@ def test_graphiti_adapter_retries_primary_then_fallback_for_entity_extraction():
     assert len(primary.added) == 3
     assert len(fallback.added) == 1
     assert fallback.added[0]["name"] == episode.episode_id
+    assert adapter.last_write_details == (
+        "graphiti_neo4j",
+        "fallback_used",
+        "primary_error:RuntimeError",
+    )
 
 
 def test_graphiti_adapter_raises_after_primary_attempts_without_fallback():
@@ -273,6 +323,7 @@ def test_graphiti_adapter_raises_after_primary_attempts_without_fallback():
         adapter.upsert_episode(episode)
 
     assert len(primary.added) == 2
+    assert adapter.last_write_details == ("graphiti_neo4j", "primary_error:RuntimeError")
 
 
 def test_graphiti_adapters_share_single_async_loop_runner():
@@ -465,6 +516,49 @@ def test_graphiti_neo4j_round_trip_against_live_backend():
         limit=10,
     )
     assert search.status in {"available", "degraded"}
+
+
+@pytest.mark.skipif(
+    os.environ.get("LLM_BRAIN_GRAPHITI_EXTRACTION_CANARY") != "1",
+    reason="requires explicit canary opt-in",
+)
+@pytest.mark.skipif(
+    not os.environ.get("LLM_BRAIN_NEO4J_URI") and not os.environ.get("NEO4J_URI"),
+    reason="requires a live Neo4j (set NEO4J_URI / LLM_BRAIN_NEO4J_URI to run)",
+)
+def test_graphiti_neo4j_synthetic_schema_extraction_canary():
+    """Gated live Graphiti extraction canary over one public-safe synthetic episode."""
+
+    group_id = f"/project/neurons-model-connector-canary-{os.getpid()}"
+    config = replace(
+        GraphitiNeo4jConfig.from_env(),
+        default_group_id=group_id,
+        extract_entities=True,
+        store_raw_episode_content=True,
+    )
+    adapter = GraphitiNeo4jGraphMemoryAdapter.from_config(config)
+    natural_id = f"task:model-connector-canary-{os.getpid()}"
+    episode = _episode(
+        "Task",
+        natural_id,
+        {
+            "brain_id": group_id,
+            "task": "model connector synthetic canary",
+            "decision": "compatibility-first model connector boundary",
+        },
+    )
+
+    result = adapter.upsert_episode(episode)
+    assert result == "inserted"
+
+    search = adapter.search_context(
+        brain_id=group_id,
+        query="model connector synthetic canary",
+        entity_types=["Task"],
+        limit=10,
+    )
+    assert search.status in {"available", "degraded"}
+    assert any(item.natural_id == natural_id for item in search.episodes)
 
 
 class _FakeDriver:
