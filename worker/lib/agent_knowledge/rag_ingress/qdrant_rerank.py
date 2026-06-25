@@ -1,14 +1,16 @@
-"""Optional Qdrant mirror rerank consumer for shared model connectors."""
+"""Qdrant mirror가 공유 reranker connector를 선택적으로 소비하는 경계."""
 
 from __future__ import annotations
 
 import os
+import math
 from collections.abc import Mapping
 
 from agent_knowledge.model_connectors import (
     CandidateReranker,
     FunctionRerankerClient,
     ModelConnectorConfigError,
+    PolicyViolation,
     RankFn,
     build_reranker_client,
     resolve_model_connection_config,
@@ -18,7 +20,7 @@ from agent_knowledge.rag_ingress.qdrant_docling_mirror import SearchableMirrorUn
 
 
 class OpenAICompatibleReranker(CandidateReranker):
-    """Back-compat Qdrant facade over the shared CandidateReranker."""
+    """공유 ``CandidateReranker`` 위에 얹은 Qdrant 호환 facade."""
 
     def __init__(
         self,
@@ -47,7 +49,7 @@ class _QdrantLiveReranker(CandidateReranker):
 
 
 def resolve_reranker_config(environ: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Back-compat wrapper for shared reranker connection config."""
+    """공유 reranker 연결 config를 기존 Qdrant 호출부 형태로 반환한다."""
 
     return _resolve_reranker_config(environ)
 
@@ -57,7 +59,7 @@ def build_openai_reranker(
     environ: Mapping[str, str] | None = None,
     rank_fn: RankFn | None = None,
 ) -> CandidateReranker:
-    """Build the shared candidate reranker for Qdrant mirror hits."""
+    """Qdrant mirror hit에 적용할 공유 candidate reranker를 만든다."""
 
     env = os.environ if environ is None else environ
     timeout_seconds = _positive_float(env.get("LLM_BRAIN_RERANK_TIMEOUT_SECONDS"))
@@ -73,7 +75,7 @@ def build_openai_reranker(
             api_key=_value(env, "LLM_BRAIN_LLM_API_KEY", "OPENAI_API_KEY"),
             timeout_seconds=timeout_seconds,
         )
-    except ModelConnectorConfigError as exc:
+    except (ModelConnectorConfigError, PolicyViolation) as exc:
         raise SearchableMirrorUnavailable(str(exc)) from exc
     return _QdrantLiveReranker(client)
 
@@ -91,7 +93,7 @@ def _positive_float(value: str | None) -> float | None:
         parsed = float(str(value or "").strip()) if str(value or "").strip() else 30.0
     except ValueError:
         return 30.0
-    return parsed if parsed > 0 else 30.0
+    return parsed if math.isfinite(parsed) and parsed > 0 else 30.0
 
 
 __all__ = [

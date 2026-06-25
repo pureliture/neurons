@@ -149,6 +149,7 @@ def test_graphiti_config_from_env_supports_ollama_openai_compatible_defaults():
             "LLM_BRAIN_NEO4J_PASSWORD": "secret",
             "LLM_BRAIN_GRAPH_LLM_PROVIDER": "ollama",
             "LLM_BRAIN_LLM_MODEL": "llama3.1:70b",
+            "LLM_BRAIN_EMBEDDING_PROVIDER": "ollama",
             "LLM_BRAIN_EMBEDDING_MODEL": "nomic-embed-text",
             "LLM_BRAIN_EMBEDDING_DIM": "768",
             "LLM_BRAIN_GRAPH_EXTRACT_ENTITIES": "true",
@@ -158,6 +159,7 @@ def test_graphiti_config_from_env_supports_ollama_openai_compatible_defaults():
     assert config.uri == "bolt://neo4j:7687"
     assert config.llm_provider == "ollama"
     assert config.llm_model == "llama3.1:70b"
+    assert config.embedding_provider == "ollama"
     assert config.embedding_model == "nomic-embed-text"
     assert config.embedding_dim == 768
     assert config.extract_entities is True
@@ -324,6 +326,20 @@ def test_graphiti_adapter_raises_after_primary_attempts_without_fallback():
 
     assert len(primary.added) == 2
     assert adapter.last_write_details == ("graphiti_neo4j", "primary_error:RuntimeError")
+
+
+def test_graphiti_adapter_replaces_last_write_details_after_direct_write_failure():
+    graphiti = _FakeGraphiti()
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+    adapter.upsert_episode(_episode("Task", "task:ok", {"brain_id": "/project/neurons", "task": "ok"}))
+    graphiti.driver.raise_on_execute = RuntimeError("direct write failed")
+
+    with pytest.raises(RuntimeError, match="direct write failed"):
+        adapter.upsert_episode(
+            _episode("Task", "task:fail", {"brain_id": "/project/neurons", "task": "fail"})
+        )
+
+    assert adapter.last_write_details == ("graphiti_neo4j", "direct_write_error:RuntimeError")
 
 
 def test_graphiti_adapters_share_single_async_loop_runner():
@@ -573,8 +589,11 @@ class _FakeDriver:
 
     def __init__(self) -> None:
         self.saved_uuids: list[str] = []
+        self.raise_on_execute: Exception | None = None
 
     async def execute_query(self, query, **params):
+        if self.raise_on_execute is not None:
+            raise self.raise_on_execute
         uuid = params.get("uuid") or params.get("episode_uuid")
         if uuid:
             self.saved_uuids.append(str(uuid))

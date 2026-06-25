@@ -143,6 +143,17 @@ def test_openai_compatible_reranker_client_preserves_duplicate_passage_scores():
     assert asyncio.run(client.ascore("q", ["same", "same"])) == [1.0, 0.0]
 
 
+def test_candidate_reranker_honors_zero_top_n():
+    shared = FunctionRerankerClient(lambda _q, _texts: [1.0, 2.0])
+    reranker = CandidateReranker(shared)
+
+    assert reranker.rerank(
+        query="q",
+        candidates=[{"summary": "a"}, {"summary": "b"}],
+        top_n=0,
+    ) == []
+
+
 def test_model_policy_denies_gemini_chat_but_allows_embedding_and_gemma_maas():
     policy = ModelPolicy()
 
@@ -151,7 +162,8 @@ def test_model_policy_denies_gemini_chat_but_allows_embedding_and_gemma_maas():
     with pytest.raises(PolicyViolation):
         policy.validate(ModelEndpointSpec(provider="typo-provider", model="x"), capability="rerank")
 
-    policy.validate({"provider": "gemini"}, capability="embedding")
+    with pytest.raises(PolicyViolation):
+        policy.validate({"provider": "gemini"}, capability="embedding")
     policy.validate(ModelEndpointSpec(provider="gemma4-maas", model="gemma"), capability="structured_extraction")
 
 
@@ -178,6 +190,28 @@ def test_openai_compatible_graphiti_components_fail_closed_when_embedding_missin
             provider="openai-compatible",
             model="llm",
             base_url="http://example.test/v1",
+        ),
+    )
+
+    with pytest.raises(ModelConnectorConfigError, match="LLM_BRAIN_EMBEDDING_MODEL"):
+        build_openai_compatible_graphiti_components(config)
+
+
+def test_openai_compatible_graphiti_components_validate_embedding_provider_independently():
+    config = ModelConnectionConfig(
+        llm=ModelEndpointSpec(
+            provider="ollama",
+            model="llm",
+            base_url="http://llm.test/v1",
+        ),
+        embedding=EmbeddingSpec(
+            provider="openai-compatible",
+            base_url="http://embed.test/v1",
+        ),
+        reranker=RerankerSpec(
+            provider="ollama",
+            model="llm",
+            base_url="http://llm.test/v1",
         ),
     )
 
