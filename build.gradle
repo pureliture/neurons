@@ -8,6 +8,8 @@ plugins {
 group = 'com.local'
 version = '0.1.0-SNAPSHOT'
 
+def pmdVersion = '7.25.0'
+
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(25)
@@ -15,7 +17,7 @@ java {
 }
 
 pmd {
-    toolVersion = '7.3.0'
+    toolVersion = pmdVersion
     ruleSetFiles = files('.github/pmd/ruleset.xml')
     ruleSets = []
     ignoreFailures = true
@@ -40,8 +42,8 @@ dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation 'io.nats:jnats:2.25.2'
 
-    cpd 'net.sourceforge.pmd:pmd-cli:7.3.0'
-    cpd 'net.sourceforge.pmd:pmd-java:7.3.0'
+    cpd "net.sourceforge.pmd:pmd-cli:${pmdVersion}"
+    cpd "net.sourceforge.pmd:pmd-java:${pmdVersion}"
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.testcontainers:testcontainers:2.0.5'
