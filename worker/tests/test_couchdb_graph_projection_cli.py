@@ -6,6 +6,7 @@ from typing import Any
 
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
+from agent_knowledge.ledger import Ledger
 from agent_knowledge.llm_brain_core.couchdb_projection_cli import run_couchdb_projection
 from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
 from agent_knowledge.llm_brain_core.graph_projection_status_cli import build_graph_projection_status
@@ -312,6 +313,53 @@ def test_status_reports_entity_coverage_backlog_and_lag(tmp_path):
     assert 0.66 < report["projection_state"]["entity_coverage_ratio"] < 0.67
     assert report["lag"]["oldest_unprojected_started_at"] == "2026-06-21T00:00:00Z"
     assert report["raw_paths_printed"] is False
+
+
+def test_status_excludes_source_invalid_sessions_from_valid_backlog(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    projected_sid = _seed_session(store, raw_id="valid-projected")
+    invalid_sid = _seed_session(store, raw_id="invalid-source")
+    backlog_sid = _seed_session(store, raw_id="valid-backlog")
+    _ = (projected_sid, backlog_sid)
+    projected_natural_id = projected_sid.replace(":", "_")
+    invalid_natural_id = invalid_sid.replace(":", "_")
+    with Ledger(tmp_path / "ledger.sqlite3")._connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO llm_brain_graph_projection_state (
+                episode_id, extraction_level, project, entity_type, natural_id,
+                group_id, brain_id, content_hash, ontology_version,
+                extractor_version, upsert_result, projected_at, updated_at
+            ) VALUES (?, 'entity', ?, 'Session', ?, '', '', '', '', '', 'inserted',
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (f"projected:{projected_natural_id}", PROJECT, projected_natural_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO llm_brain_graph_projection_state (
+                episode_id, extraction_level, project, entity_type, natural_id,
+                group_id, brain_id, content_hash, ontology_version,
+                extractor_version, upsert_result, projected_at, updated_at
+            ) VALUES (?, 'entity', ?, 'Session', ?, '', '', '', '', '', 'source_invalid',
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (f"source-invalid:{invalid_natural_id}", PROJECT, invalid_natural_id),
+        )
+
+    report = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+    )
+
+    assert report["source"]["session_count"] == 3
+    assert report["projection_state"]["entity_valid_source_sessions"] == 2
+    assert report["projection_state"]["entity_source_invalid"] == 1
+    assert report["projection_state"]["entity_session_projected"] == 1
+    assert report["projection_state"]["entity_session_backlog"] == 1
+    assert report["projection_state"]["entity_coverage_ratio"] == 0.5
 
 
 def test_status_summarizes_progress_and_dead_letters_without_raw_project(tmp_path):

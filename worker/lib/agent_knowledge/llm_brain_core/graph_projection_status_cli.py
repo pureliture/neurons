@@ -18,6 +18,7 @@ from .couchdb_projection_cli import _build_source_store, _filter_sessions, _proj
 from .ledger_adapter import EXTRACTION_LEVEL_ENTITY, EXTRACTION_LEVEL_EPISODIC
 
 GRAPH_PROJECTION_STATUS_SCHEMA_VERSION = "llm_brain_graph_projection_status.v1"
+SOURCE_INVALID_UPSERT_RESULTS = frozenset({"source_invalid", "invalid_source"})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -95,8 +96,10 @@ def build_graph_projection_status(
         extraction_level=EXTRACTION_LEVEL_ENTITY,
     )
     episodic_ids = _projected_session_natural_ids(episodic_rows)
-    entity_ids = _projected_session_natural_ids(entity_rows)
-    entity_backlog = sorted(source_natural_ids - entity_ids)
+    invalid_entity_ids = source_natural_ids & _source_invalid_session_natural_ids(entity_rows)
+    valid_source_natural_ids = source_natural_ids - invalid_entity_ids
+    entity_ids = _projected_session_natural_ids(entity_rows) - invalid_entity_ids
+    entity_backlog = sorted(valid_source_natural_ids - entity_ids)
     unprojected_started_at = [
         str(session.get("started_at") or "")
         for session in source_sessions
@@ -107,7 +110,8 @@ def build_graph_projection_status(
     dead_letter = _summarize_dead_letters(dead_letter_jsonl or [])
 
     source_count = len(source_sessions)
-    entity_projected = len(source_natural_ids & entity_ids)
+    valid_source_count = len(valid_source_natural_ids)
+    entity_projected = len(valid_source_natural_ids & entity_ids)
     episodic_projected = len(source_natural_ids & episodic_ids)
     now = datetime.now(timezone.utc)
     return {
@@ -125,7 +129,9 @@ def build_graph_projection_status(
             "episodic_session_projected": episodic_projected,
             "entity_session_projected": entity_projected,
             "entity_session_backlog": len(entity_backlog),
-            "entity_coverage_ratio": (entity_projected / source_count) if source_count else 0.0,
+            "entity_source_invalid": len(invalid_entity_ids),
+            "entity_valid_source_sessions": valid_source_count,
+            "entity_coverage_ratio": (entity_projected / valid_source_count) if valid_source_count else 0.0,
             "latest_entity_projected_at": _latest_projected_at(entity_rows),
             "entity_projected_last_1h": _recent_count(entity_rows, now=now, seconds=3600),
             "entity_projected_last_24h": _recent_count(entity_rows, now=now, seconds=86400),
@@ -190,6 +196,15 @@ def _projection_rows(
 
 def _projected_session_natural_ids(rows: list[dict[str, str]]) -> set[str]:
     return {str(row.get("natural_id") or "") for row in rows if str(row.get("natural_id") or "")}
+
+
+def _source_invalid_session_natural_ids(rows: list[dict[str, str]]) -> set[str]:
+    return {
+        str(row.get("natural_id") or "")
+        for row in rows
+        if str(row.get("natural_id") or "")
+        and str(row.get("upsert_result") or "") in SOURCE_INVALID_UPSERT_RESULTS
+    }
 
 
 def _session_natural_id(session_id_hash: str) -> str:
