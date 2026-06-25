@@ -176,7 +176,7 @@ def test_mask_and_store_makes_body_public_safe_keeps_content_hash():
     )
     doc = build_session_memory_mirror_document(
         session_id_hash="sha256:" + "0" * 64, provider="codex", project="neurons",
-        content_hash=ch, body=body, memory_id="mem_z",
+        content_hash=ch, body=body,
     )
     # content_hash stays the verbatim authority key (NOT recomputed from masked body)
     assert doc.content_hash == ch
@@ -200,7 +200,6 @@ def test_content_hash_is_materialized_value_verbatim():
         project="neurons",
         content_hash=mat.content_hash,
         body=mat.body,
-        memory_id="mem_x",
     )
     assert document.content_hash == mat.content_hash
     assert document.privacy_class == SESSION_MEMORY_PRIVACY_CLASS == "private"
@@ -265,14 +264,18 @@ def test_resolver_drops_missing_projection_state():
 def test_resolver_legacy_doc_without_active_content_hash_resolves():
     # The ~3577 pre-existing projected sessions have NO active_content_hash; a
     # backfilled point must still resolve on projection_status alone (legacy
-    # fallback). Build a PROJECTED state with the field absent/empty.
+    # fallback). The builder now REQUIRES active_content_hash for a PROJECTED state,
+    # so simulate a pre-existing legacy doc by stripping the field after build (these
+    # docs already live in CouchDB, written before the field became required).
     store = InMemoryCouchDBSourceStore()
     sid = _sid(raw="legacy")
     legacy = dm.build_projection_state_document(
         session_id_hash=sid, provider="codex", project="neurons",
         projection_status=dm.ProjectionStatus.PROJECTED,
+        active_content_hash="sha256:" + "f" * 64,
     )
-    assert str(legacy.get("active_content_hash", "")) == ""  # legacy: field empty
+    legacy["active_content_hash"] = ""  # legacy: field empty on already-stored docs
+    assert str(legacy.get("active_content_hash", "")) == ""
     store.put(legacy)
     record = CouchDBProjectionStateAuthorityResolver(store).resolve(
         {"session_id_hash": sid, "content_hash": "sha256:" + "c" * 64}

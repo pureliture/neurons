@@ -41,7 +41,8 @@ def _seed_projected(store, sid, *, project="neurons", chunk_texts=("alpha apple 
     for i, t in enumerate(chunk_texts):
         ch = TranscriptChunk.from_text(chunk_id=f"c{i}", session_id_hash=sid, provider="codex", project=project, turn_start_index=i, turn_end_index=i, text=t)
         d = dm.build_conversation_chunk_document(chunk=ch)
-        store.put(d); conv.append(d["content_hash"])
+        store.put(d)
+        conv.append(d["content_hash"])
     store.put(dm.build_coverage_manifest_document(session_id_hash=sid, provider="codex", project=project, conversation_chunk_count=len(chunk_texts), tool_evidence_bundle_count=0, conversation_content_hashes=conv, tool_evidence_coverage_hashes=[]))
     store_tool_evidence_bundles([ToolEvidenceSummaryRecord(session_id_hash=sid, provider="codex", project=project, category="test_result", outcome="pass", tool_name="bash", command_summary="x", redacted_summary="12 passed", evidence_index=0)], store=store)
 

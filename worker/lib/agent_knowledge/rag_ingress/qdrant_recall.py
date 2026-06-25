@@ -40,8 +40,11 @@ def build_qdrant_brain_query_search(
         project = project_from_brain_id(brain_id)
         filters = {"project": project} if project else None
         resolver = CouchDBProjectionStateAuthorityResolver(store, filters=filters)
+        # query_mirror_candidates supports a ``filters`` arg, so push the project
+        # scope down to the Qdrant query too (the authority-join resolver filter
+        # stays as the authoritative gate -- this is an additional pre-filter).
         raw = adapter.query_mirror_candidates(
-            str(query or ""), target_profile="session-memory", limit=limit
+            str(query or ""), target_profile="session-memory", filters=filters, limit=limit
         )
         joined = join_mirror_hits_to_authority(raw, resolver=resolver, drop_unresolved=True)
         results: list[dict[str, Any]] = []
@@ -71,12 +74,17 @@ def build_qdrant_brain_query_search_from_env(environ: Any) -> BrainQuerySearch |
 
     Requires ``QDRANT_URL`` + ``COUCHDB_URL`` (the authority store). Reuses the
     OpenAI-compatible embedding provider and the mirror collection
-    (``ensure_collection=False`` -- never create). Any construction failure returns
-    None so the MCP falls back to its prior (RAGFlow-off) recall rather than crashing.
+    (``ensure_collection=False`` -- never create). Two failure modes are
+    distinguished: "not configured" (either URL absent -> silent None, normal) vs
+    "configured but construction failed" (URL present but build raised -> a
+    redaction-safe warning is logged before returning None, so a real recall
+    misconfig is not silently swallowed). Either way None lets the MCP fall back to
+    its prior (RAGFlow-off) recall rather than crashing.
     """
 
     url = str(environ.get("QDRANT_URL") or "").strip()
     couch_url = str(environ.get("COUCHDB_URL") or "").strip()
+    # "not configured": QDRANT_URL/COUCHDB_URL이 없으면 조용히 None을 반환한다(정상).
     if not url or not couch_url:
         return None
     try:
@@ -108,7 +116,15 @@ def build_qdrant_brain_query_search_from_env(environ: Any) -> BrainQuerySearch |
         )
         store = CouchDBHttpSourceStore(base_url=couch_url, db=db, auth_header=auth_header)
         return build_qdrant_brain_query_search(adapter=adapter, store=store)
-    except Exception:
+    except Exception as exc:
+        # "configured but construction failed": URL은 있는데 빌드가 깨진 경우다.
+        # 실제 recall misconfig가 조용히 묻히지 않도록 redaction-safe하게(예외 타입만)
+        # 경고를 남기고 None을 반환한다(메시지/payload는 절대 로깅하지 않는다).
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "qdrant recall configured but construction failed: %s", type(exc).__name__
+        )
         return None
 
 

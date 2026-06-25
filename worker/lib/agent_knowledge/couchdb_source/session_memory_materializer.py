@@ -271,7 +271,6 @@ def project_session_memory(
                 project=materialized.project,
                 content_hash=materialized.content_hash,
                 body=materialized.body,
-                memory_id=ref,
             )
         except Exception as exc:  # best-effort: canonical projection already committed
             mirror_failed = True

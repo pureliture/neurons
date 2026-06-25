@@ -1,30 +1,35 @@
-"""CLI for the session-memory Qdrant searchable-mirror backfill (CouchDB-native).
+"""session-memory Qdrant searchable-mirror backfill CLI (CouchDB-native).
 
-Subcommands:
-  verify            Count PROJECTED session-memory sessions (CouchDB read; no writes).
-  dry-run (default) Materialize+build every mirror document without upserting.
-  run [--limit N]   Upsert the mirror points. REQUIRES an explicit --collection.
-  rollback --submitted F   Delete exactly the points recorded in jsonl ``F``.
-  parity            Parity-soak entrypoint (RAGFlow primary vs CouchDB-joined mirror).
+서브커맨드:
+  verify            PROJECTED session-memory 세션 수를 센다(CouchDB read; 쓰기 없음).
+  dry-run (default) 모든 mirror document를 materialize+build하되 upsert하지 않는다.
+  run [--limit N]   mirror point를 upsert한다. 명시적 --collection이 필수다.
+  rollback --submitted F   jsonl ``F``에 기록된 point만 정확히 삭제한다.
+  parity            Parity-soak 엔트리포인트(RAGFlow primary vs CouchDB-joined mirror).
 
-Source/authority: the CouchDB source plane (the go-forward recall authority; the
-ledger ``knowledge_items`` is retiring and is NOT used here). The corpus is every
-session whose ``projection_state`` is ``projected``.
+사용법(argparse 순서): GLOBAL 옵션(--collection / --checkpoint / --submitted /
+--qdrant-url / --embedding-concurrency)은 서브커맨드 앞에 오고, 서브커맨드 전용
+옵션(--limit / --create-collection)은 서브커맨드 뒤에 온다::
 
-Safety:
-- ``run`` requires an explicit ``--collection`` so a live upsert can never fall
-  through to a default name (a staging name is accepted; the live name is only
-  used when the operator types it).
-- ``run``/``rollback`` build the adapter with ``ensure_collection=False``: a
-  non-existent target collection fails closed (never silently created server-side).
-  ``run`` may pass ``--create-collection`` to opt into first-time staging setup.
-- MIRROR-ONLY: the CLI never writes the CouchDB primary, never writes RAGFlow, and
-  never builds a dual-write backend. Backfill reads CouchDB (read-only materialize)
-  and upserts/deletes Qdrant points only. RAGFlow is touched only by the parity
-  primary fetch, never by backfill.
-- Output is JSON of counts/statuses (redaction-safe). The jsonl audit / checkpoint
-  hold natural-key triples (content_hash + idempotency_key + target_profile), never
-  bodies or raw ids.
+    qdrant-backfill --collection NAME --qdrant-url URL run --limit 10 --create-collection
+    qdrant-backfill --collection NAME --submitted FILE rollback
+
+source/authority: CouchDB source plane(go-forward recall authority; ledger
+``knowledge_items``는 은퇴 중이며 여기서 사용하지 않는다). corpus는
+``projection_state``가 ``projected``인 모든 세션이다.
+
+안전장치:
+- ``run``은 명시적 ``--collection``이 필수라서 live upsert가 default 이름으로
+  흘러갈 수 없다(staging 이름은 허용되며, live 이름은 operator가 직접 입력할 때만 쓴다).
+- ``run``/``rollback``은 ``ensure_collection=False``로 adapter를 만든다: 존재하지
+  않는 target collection은 fail-closed이며(서버측에서 조용히 생성되지 않는다),
+  ``run``은 최초 staging 셋업을 위해 ``--create-collection``을 넘길 수 있다.
+- MIRROR-ONLY: CLI는 CouchDB primary나 RAGFlow에 쓰지 않고, dual-write backend도
+  만들지 않는다. backfill은 CouchDB를 읽고(read-only materialize) Qdrant point만
+  upsert/delete한다. RAGFlow는 parity의 primary fetch에서만 닿고 backfill에서는 닿지 않는다.
+- 출력은 counts/statuses의 JSON이다(redaction-safe). jsonl audit / checkpoint는
+  natural-key triple(content_hash + idempotency_key + target_profile)만 담고, body나
+  raw id는 담지 않는다.
 """
 
 from __future__ import annotations
@@ -42,7 +47,7 @@ from .qdrant_backfill import (
     rollback_submitted,
 )
 
-# The live mirror collection name (operator must still type it for ``run``).
+# live mirror collection 이름(``run``에서는 operator가 직접 입력해야 한다).
 LIVE_COLLECTION_NAME = "neurons_mirror_gemini_3072_v1"
 
 
@@ -64,9 +69,8 @@ def _load_submitted_jsonl(path: str) -> list[dict[str, Any]]:
         try:
             records.append(json.loads(line))
         except json.JSONDecodeError:
-            # Tolerate a corrupt/partial line (e.g. an interrupted append) rather
-            # than aborting a rollback over the whole manifest, mirroring the
-            # checkpoint loader's leniency.
+            # 손상/부분 라인(예: 중단된 append)은 manifest 전체에 대한 rollback을
+            # 중단시키지 않고 관용적으로 건너뛴다. checkpoint loader의 관용성과 동일.
             continue
     return records
 
@@ -93,10 +97,10 @@ def _load_checkpoint_hashes(path: str | None) -> set[str]:
 
 
 def _appender(*paths: str | None):
-    """Return on_submit appending each triple as a jsonl line to every given path.
+    """각 triple을 jsonl 라인으로 주어진 모든 경로에 append하는 on_submit을 반환한다.
 
-    Holds natural-key triples only (no bodies/raw-ids), so the jsonl doubles as a
-    rollback manifest and a resume checkpoint.
+    natural-key triple만 담으므로(body/raw-id 없음) jsonl은 rollback manifest이자
+    resume checkpoint 역할을 겸한다.
     """
     targets = [Path(p) for p in paths if p]
     handles = [p.open("a", encoding="utf-8") for p in targets]
@@ -114,15 +118,15 @@ def _appender(*paths: str | None):
 # ----------------------------------------------------------------- wiring (live)
 
 def _build_store(args):
-    """Build the CouchDB source store from env (read-only usage in backfill).
+    """env에서 CouchDB source store를 만든다(backfill에서는 read-only로만 사용).
 
-    Mirrors ``couchdb_source.build_cli`` env contract: COUCHDB_URL (required),
-    COUCHDB_USER/COUCHDB_PASSWORD (basic auth), COUCHDB_DB (default
-    ``transcript_source``). Fail-closed if COUCHDB_URL is absent.
+    ``couchdb_source.build_cli``의 env 계약을 따른다: COUCHDB_URL(필수),
+    COUCHDB_USER/COUCHDB_PASSWORD(basic auth), COUCHDB_DB(default
+    ``transcript_source``). COUCHDB_URL이 없으면 fail-closed.
     """
     couchdb_url = os.environ.get("COUCHDB_URL", "")
     if not couchdb_url:
-        raise SystemExit("COUCHDB_URL is required for the CouchDB-native backfill")
+        raise SystemExit("CouchDB-native backfill에는 COUCHDB_URL이 필요하다")
     couchdb_user = os.environ.get("COUCHDB_USER", "")
     couchdb_password = os.environ.get("COUCHDB_PASSWORD", "")
     couchdb_db = os.environ.get("COUCHDB_DB", "transcript_source")
@@ -136,12 +140,11 @@ def _build_store(args):
 
 
 def _build_adapter(args, *, collection_name: str, ensure_collection: bool):
-    """Build the remote mirror adapter.
+    """remote mirror adapter를 만든다.
 
-    ``ensure_collection`` is False for run/rollback: a non-existent target
-    collection fails closed (SystemExit naming the collection) instead of being
-    silently created server-side. Pass ``--create-collection`` with ``run`` to
-    opt into first-time creation.
+    run/rollback에서는 ``ensure_collection``이 False다: 존재하지 않는 target
+    collection은 서버측에서 조용히 생성되지 않고 fail-closed된다(해당 collection
+    이름을 담은 SystemExit). 최초 생성을 원하면 ``run``에 ``--create-collection``을 넘긴다.
     """
     from .qdrant_docling_mirror import (
         PassthroughMarkdownNormalizer,
@@ -149,7 +152,9 @@ def _build_adapter(args, *, collection_name: str, ensure_collection: bool):
     )
     from .qdrant_embedding import build_openai_embedding_provider
 
-    url = str(os.environ.get("QDRANT_URL") or args.qdrant_url or "").strip()
+    # --qdrant-url가 QDRANT_URL env보다 우선한다(help 문구와 일치). 배포 러너는
+    # QDRANT_URL env를 세팅하므로 env는 fallback으로 유지한다.
+    url = str(args.qdrant_url or os.environ.get("QDRANT_URL") or "").strip()
     adapter = build_remote_qdrant_docling_mirror_adapter(
         url=url,
         collection_name=collection_name,
@@ -161,9 +166,9 @@ def _build_adapter(args, *, collection_name: str, ensure_collection: bool):
         exists = adapter.collection_exists()
         if exists is False:
             raise SystemExit(
-                f"target collection does not exist: {collection_name!r}. "
-                "Refusing to create it implicitly; pass --create-collection (run only) "
-                "to set up a new collection, or fix the --collection name."
+                f"target collection이 존재하지 않는다: {collection_name!r}. "
+                "암묵적 생성을 거부한다. 새 collection을 만들려면 --create-collection"
+                "(run 전용)을 넘기거나 --collection 이름을 고쳐라."
             )
     return adapter
 
@@ -201,10 +206,10 @@ def _cmd_dry_run(args) -> int:
 
 def _cmd_run(args) -> int:
     if not args.collection:
-        raise SystemExit("run requires an explicit --collection (refusing default to avoid accidental live writes)")
+        raise SystemExit("run에는 명시적 --collection이 필요하다(우발적 live write를 막기 위해 default를 거부)")
     store = _build_store(args)
-    # Default: never create the collection (a typo fails closed). --create-collection
-    # opts into first-time creation for staging setup only.
+    # 기본: collection을 절대 생성하지 않는다(오타는 fail-closed). --create-collection은
+    # staging 셋업 한정으로 최초 생성을 opt-in한다.
     adapter = _build_adapter(
         args,
         collection_name=args.collection,
@@ -235,11 +240,11 @@ def _cmd_run(args) -> int:
 
 def _cmd_rollback(args) -> int:
     if not args.submitted:
-        raise SystemExit("rollback requires --submitted <jsonl>")
+        raise SystemExit("rollback에는 --submitted <jsonl>이 필요하다")
     if not args.collection:
-        raise SystemExit("rollback requires an explicit --collection")
-    # rollback never creates a collection: deleting from a non-existent collection
-    # is meaningless and a typo must fail closed.
+        raise SystemExit("rollback에는 명시적 --collection이 필요하다")
+    # rollback은 collection을 절대 생성하지 않는다: 존재하지 않는 collection에서의
+    # 삭제는 의미가 없고 오타는 반드시 fail-closed되어야 한다.
     adapter = _build_adapter(args, collection_name=args.collection, ensure_collection=False)
     submitted = _load_submitted_jsonl(args.submitted)
     report = rollback_submitted(adapter=adapter, submitted=submitted)
@@ -251,31 +256,30 @@ def _cmd_rollback(args) -> int:
 
 
 def _cmd_parity(args) -> int:
-    # The parity soak needs a configured query cohort + thresholds that are set at
-    # gate time after measuring the RAGFlow baseline, plus a live RAGFlow primary
-    # fetch and a CouchDB store for the mirror authority-join. Rather than bake a
-    # baseline into the CLI, this surfaces the wiring entrypoint and refuses to emit
-    # a verdict without an explicit cohort file.
+    # parity soak는 RAGFlow baseline을 측정한 뒤 gate 시점에 설정되는 query cohort +
+    # threshold, 그리고 live RAGFlow primary fetch와 mirror authority-join용 CouchDB
+    # store가 필요하다. baseline을 CLI에 박아넣는 대신 wiring 엔트리포인트만 드러내고
+    # 명시적 cohort 파일 없이는 verdict를 내지 않는다.
     if not args.cohort:
         raise SystemExit(
-            "parity requires --cohort <queries.txt> and threshold flags; "
-            "run programmatically via qdrant_backfill_parity.run_parity_soak for the gate"
+            "parity에는 --cohort <queries.txt>와 threshold 플래그가 필요하다. "
+            "gate는 qdrant_backfill_parity.run_parity_soak를 통해 프로그램적으로 실행하라"
         )
     raise SystemExit(
-        "parity CLI is a thin entrypoint; the gate runner lives in "
-        "qdrant_backfill_parity.run_parity_soak (pure-compute, injectable fetchers). "
-        "primary_fetch = RAGFlow retrieve over the session-memory dataset (the only "
-        "RAGFlow use in this CLI); mirror_fetch = Qdrant query joined via the CouchDB "
-        "projection-state resolver."
+        "parity CLI는 thin 엔트리포인트다. gate runner는 "
+        "qdrant_backfill_parity.run_parity_soak에 있다(pure-compute, 주입 가능한 fetcher). "
+        "primary_fetch = session-memory dataset에 대한 RAGFlow retrieve(이 CLI에서 "
+        "RAGFlow를 쓰는 유일한 곳), mirror_fetch = CouchDB projection-state resolver로 "
+        "join한 Qdrant query."
     )
 
 
 class _DryRunAdapter:
-    """Adapter stand-in for dry-run: validates documents but never writes.
+    """dry-run용 adapter 대역: document를 검증하되 절대 쓰지 않는다.
 
-    ``dry_run=True`` short-circuits ``submit_document`` in the core, so this is
-    only a safety net to guarantee no write path is reachable on the dry-run code
-    path even if that contract changes.
+    core에서 ``dry_run=True``는 ``submit_document``를 short-circuit하므로, 이 클래스는
+    그 계약이 바뀌더라도 dry-run 코드 경로에서 write 경로에 도달할 수 없음을 보장하는
+    안전망일 뿐이다.
     """
 
     embedding_size = None
@@ -283,34 +287,34 @@ class _DryRunAdapter:
     def collection_vector_size(self) -> None:
         return None
 
-    def submit_document(self, *_args, **_kwargs):  # pragma: no cover - never called on dry-run
-        raise AssertionError("dry-run must not submit documents")
+    def submit_document(self, *_args, **_kwargs):  # pragma: no cover - dry-run에서는 호출되지 않음
+        raise AssertionError("dry-run은 document를 submit해서는 안 된다")
 
 
 # ------------------------------------------------------------------------- main
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="qdrant-backfill")
-    parser.add_argument("--collection", default="", help="Qdrant collection name (REQUIRED for run/rollback)")
-    parser.add_argument("--checkpoint", default="", help="jsonl resume checkpoint (hashes only)")
-    parser.add_argument("--submitted", default="", help="jsonl manifest of submitted natural keys")
+    parser.add_argument("--collection", default="", help="Qdrant collection 이름 (run/rollback에 필수)")
+    parser.add_argument("--checkpoint", default="", help="jsonl resume checkpoint (hash만)")
+    parser.add_argument("--submitted", default="", help="submit된 natural key의 jsonl manifest")
     parser.add_argument("--embedding-concurrency", type=int, default=1, help="embedding concurrency (default 1)")
-    parser.add_argument("--qdrant-url", default="", help="Qdrant url (else QDRANT_URL env)")
-    parser.add_argument("--cohort", default="", help="parity: query cohort file")
+    parser.add_argument("--qdrant-url", default="", help="Qdrant url (없으면 QDRANT_URL env를 fallback으로 사용)")
+    parser.add_argument("--cohort", default="", help="parity: query cohort 파일")
 
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("verify", help="count PROJECTED session-memory sessions (CouchDB read; no writes)")
-    dry = sub.add_parser("dry-run", help="materialize+build without upserting (default)")
+    sub.add_parser("verify", help="PROJECTED session-memory 세션 수를 센다(CouchDB read; 쓰기 없음)")
+    dry = sub.add_parser("dry-run", help="upsert 없이 materialize+build (default)")
     dry.add_argument("--limit", type=int, default=None)
-    run = sub.add_parser("run", help="upsert mirror points (requires --collection)")
+    run = sub.add_parser("run", help="mirror point를 upsert한다(--collection 필수)")
     run.add_argument("--limit", type=int, default=None)
     run.add_argument(
         "--create-collection",
         action="store_true",
-        help="allow first-time creation of an absent collection (staging setup only; off by default)",
+        help="없는 collection의 최초 생성을 허용한다(staging 셋업 전용; 기본 off)",
     )
-    sub.add_parser("rollback", help="delete recorded points (requires --submitted)")
-    sub.add_parser("parity", help="parity soak entrypoint")
+    sub.add_parser("rollback", help="기록된 point를 삭제한다(--submitted 필수)")
+    sub.add_parser("parity", help="parity soak 엔트리포인트")
     return parser
 
 
