@@ -482,6 +482,7 @@ def _bulk_semantic_messages(batch: list[BulkSemanticSessionInput]) -> list[dict[
             "content": (
                 "Extract a compact semantic graph from each session. "
                 "Return only one minified JSON object. The first character must be { and the last must be }. "
+                "Every input session must appear exactly once in sessions and must contain at least one entity. "
                 "Entities should be concrete domain concepts, tools, systems, files, tasks, "
                 "decisions, models, services, or incidents. Avoid generic entities such as user, "
                 "assistant, session, conversation, or project unless they are the actual subject. "
@@ -686,6 +687,7 @@ _BULK_SEMANTIC_JSON_SCHEMA: dict[str, Any] = {
                     "session_key": {"type": "string"},
                     "entities": {
                         "type": "array",
+                        "minItems": 1,
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
