@@ -85,6 +85,20 @@ def test_embedding_and_reranker_specs_preserve_legacy_fallbacks():
     assert reranker.base_url == "http://legacy/v1"
 
 
+def test_model_connection_config_inherits_llm_endpoint_for_embedding_when_embedding_endpoint_absent():
+    config = resolve_model_connection_config(
+        {
+            "LLM_BRAIN_GRAPH_LLM_PROVIDER": "ollama",
+            "LLM_BRAIN_LLM_MODEL": "llm",
+            "LLM_BRAIN_LLM_BASE_URL": "http://ollama.test/v1",
+            "LLM_BRAIN_EMBEDDING_MODEL": "nomic-embed-text",
+        }
+    )
+
+    assert config.embedding.provider == "ollama"
+    assert config.embedding.base_url == "http://ollama.test/v1"
+
+
 def test_embedding_dim_defaults_on_bad_values():
     assert resolve_embedding_spec({"LLM_BRAIN_EMBEDDING_DIM": "bad"}).dim == DEFAULT_EMBEDDING_DIM
     assert resolve_embedding_spec({"LLM_BRAIN_EMBEDDING_DIM": "-1"}).dim == DEFAULT_EMBEDDING_DIM
