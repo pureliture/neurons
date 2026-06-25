@@ -1,23 +1,21 @@
-"""Parity-soak runner for the session-memory Qdrant mirror vs RAGFlow.
+"""session-memory Qdrant 미러 vs RAGFlow parity-soak 러너.
 
-Wraps the pure-compute :func:`compare_recall` / :func:`recall_parity_passes`
-harness (``qdrant_read_compare``) for the post-backfill parity gate:
+backfill 이후 parity 게이트를 위해 순수-계산 harness :func:`compare_recall` /
+:func:`recall_parity_passes` (``qdrant_read_compare``)를 감싼다:
 
-- ``primary_fetch`` is RAGFlow retrieve over the session-memory dataset, each chunk
-  authority-joined (so the primary side is itself the authoritative recall set).
-- ``mirror_fetch`` is a Qdrant query whose raw candidates are joined to authority
-  via :func:`join_mirror_hits_to_authority` with
-  :class:`CouchDBProjectionStateAuthorityResolver` -- the SAME projection-state
-  join the product read path uses, so a mirror hit only counts if its session is
-  still PROJECTED and its content_hash matches the currently-projected body.
+- ``primary_fetch``는 session-memory dataset에 대한 RAGFlow retrieve이며, 각 chunk가
+  authority-join된다(즉 primary 쪽 자체가 권위 recall 집합이다).
+- ``mirror_fetch``는 Qdrant 쿼리의 raw candidate를
+  :class:`CouchDBProjectionStateAuthorityResolver`로 :func:`join_mirror_hits_to_authority`
+  하여 권위에 결합한 것이다 -- 제품 read 경로가 쓰는 것과 동일한 projection-state join이라,
+  세션이 여전히 PROJECTED이고 content_hash가 현재 투영된 body와 일치할 때만 미러 hit이 집계된다.
 
-MANDATORY non-emptiness guard: :func:`compare_recall` treats an empty primary
-top-k as vacuously recall=1.0 / exact-match (``qdrant_read_compare.py:89-90``). A
-soak where RAGFlow returns nothing for most queries would therefore report a
-*false* green. This runner REJECTS the run (``passed=False``,
-``rejected_reason='insufficient_primary_coverage'``) unless the primary fetch
-returns >0 hits for at least ``min_nonempty_fraction`` of the cohort. The parity
-verdict is only trusted when primary coverage clears that floor.
+필수 non-emptiness 가드: :func:`compare_recall`는 primary top-k가 비면 공허하게
+recall=1.0 / exact-match로 취급한다(``qdrant_read_compare.py:89-90``). 대부분 쿼리에서
+RAGFlow가 아무것도 안 돌려주는 soak은 그래서 *거짓* green을 보고하게 된다. 이 러너는 primary
+fetch가 cohort의 최소 ``min_nonempty_fraction`` 이상에서 >0 hit을 돌려주지 않으면 실행을
+REJECT한다(``passed=False``, ``rejected_reason='insufficient_primary_coverage'``). parity
+판정은 primary coverage가 그 하한을 넘을 때만 신뢰한다.
 """
 
 from __future__ import annotations
@@ -35,7 +33,7 @@ DEFAULT_MIN_NONEMPTY_FRACTION = 0.5
 
 @dataclass(frozen=True)
 class ParityResult:
-    """Redaction-safe parity outcome (counts/ratios/flags only)."""
+    """redaction-safe parity 결과(카운트/비율/플래그만)."""
 
     schema_version: str
     passed: bool
@@ -69,12 +67,12 @@ def build_authority_joined_mirror_fetch(
     store: Any,
     filters: dict[str, str] | None = None,
 ) -> Fetcher:
-    """Wrap a raw mirror-candidate query so its hits are authority-joined.
+    """raw 미러-candidate 쿼리를 감싸 hit이 authority-join되도록 한다.
 
-    ``mirror_query(query) -> list[raw mirror hit dicts]`` (each carrying
-    ``content_hash`` + ``session_id_hash``). The returned fetcher resolves every
-    candidate through the CouchDB projection-state gate and drops anything that does
-    not resolve, so the parity harness only ever sees authority-joined mirror hits.
+    ``mirror_query(query) -> list[raw mirror hit dicts]`` (각 hit은 ``content_hash`` +
+    ``session_id_hash`` 보유). 반환되는 fetcher는 모든 candidate를 CouchDB projection-state
+    게이트로 resolve하고 resolve 안 되는 것은 버리므로, parity harness는 authority-join된
+    미러 hit만 보게 된다.
     """
 
     resolver = CouchDBProjectionStateAuthorityResolver(store, filters=filters)
@@ -96,18 +94,18 @@ def run_parity_soak(
     require_exact: bool = True,
     min_nonempty_fraction: float = DEFAULT_MIN_NONEMPTY_FRACTION,
 ) -> ParityResult:
-    """Run the parity soak with the mandatory primary non-emptiness guard.
+    """필수 primary non-emptiness 가드와 함께 parity soak을 실행한다.
 
-    Both fetchers must already yield AUTHORITY-JOINED hits (the harness rejects raw
-    mirror candidates). The verdict is rejected -- never a green pass -- if primary
-    coverage is below ``min_nonempty_fraction`` of the cohort.
+    두 fetcher 모두 이미 AUTHORITY-JOIN된 hit을 내야 한다(harness는 raw 미러 candidate를
+    거부한다). primary coverage가 cohort의 ``min_nonempty_fraction`` 미만이면 판정은
+    rejected다 -- 절대 green pass가 아니다.
     """
 
     cohort = list(queries or [])
     cohort_size = len(cohort)
 
-    # Memoize primary_fetch so the coverage probe below and compare_recall's own
-    # internal fetch don't hit the (RAGFlow) primary twice per query.
+    # primary_fetch를 메모이즈해, 아래 coverage probe와 compare_recall 내부 fetch가 쿼리당
+    # (RAGFlow) primary를 두 번 호출하지 않게 한다.
     _primary_cache: dict[str, list[dict[str, Any]]] = {}
 
     def cached_primary_fetch(query: str) -> list[dict[str, Any]]:
@@ -115,7 +113,7 @@ def run_parity_soak(
             _primary_cache[query] = list(primary_fetch(query) or [])
         return _primary_cache[query]
 
-    # Probe primary coverage BEFORE trusting any recall number.
+    # recall 수치를 신뢰하기 전에 primary coverage를 먼저 확인한다.
     nonempty_primary = 0
     for query in cohort:
         if cached_primary_fetch(query):
@@ -123,7 +121,7 @@ def run_parity_soak(
 
     fraction = (nonempty_primary / cohort_size) if cohort_size else 0.0
 
-    # Empty cohort OR insufficient primary coverage => reject (vacuous-recall guard).
+    # 빈 cohort 또는 primary coverage 부족 => reject(vacuous-recall 가드).
     if cohort_size == 0 or fraction < float(min_nonempty_fraction):
         return ParityResult(
             schema_version=PARITY_SCHEMA,

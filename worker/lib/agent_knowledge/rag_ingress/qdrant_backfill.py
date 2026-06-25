@@ -83,7 +83,10 @@ class BackfillReport:
             "skipped_empty_body_count": self.skipped_empty_body_count,
             "error_count": self.error_count,
             "submitted": [dict(item) for item in self.submitted],
-            "network_used": False,
+            # 진실되게: live(non-dry-run) run은 Qdrant upsert로 네트워크를 사용한다.
+            # dry-run은 어떤 write도 하지 않으므로 False.
+            "network_used": (not self.dry_run),
+            # mirror-only: primary/RAGFlow는 항상 쓰지 않는다(항상 False).
             "primary_written": False,
             "ragflow_written": False,
             "raw_ids_printed": False,
@@ -110,7 +113,9 @@ class RollbackReport:
             "absent_count": self.absent_count,
             "error_count": self.error_count,
             "statuses": [dict(item) for item in self.statuses],
-            "network_used": False,
+            # 진실되게: 삭제할 item이 주어지면 rollback은 네트워크로 delete를 수행한다.
+            # 요청이 0개면 네트워크를 쓰지 않으므로 False.
+            "network_used": (self.requested_count > 0),
             "raw_ids_printed": False,
         }
 
@@ -168,6 +173,19 @@ def public_safe_mask_body(body: str) -> str:
 
 # ----------------------------------------------------- shared mirror-document build
 
+def derive_mirror_memory_id(content_hash: str) -> str:
+    """Derive the SAFE mirror payload ``memory_id`` from the content_hash.
+
+    Legacy ``projection_state.session_memory_knowledge_id`` can be a raw RAGFlow
+    document_id; carrying it as the mirror payload would risk a raw-document-id
+    leak. Instead derive a public-safe, content-addressed id that is IDENTICAL in
+    both the backfill and the forward projector, so the two paths stay idempotent.
+    Mirrors :class:`QdrantSessionMemoryProjector`'s ref format.
+    """
+
+    return "qdrant_sm:" + str(content_hash or "").split(":")[-1][:16]
+
+
 def build_session_memory_mirror_document(
     *,
     session_id_hash: str,
@@ -175,7 +193,6 @@ def build_session_memory_mirror_document(
     project: str,
     content_hash: str,
     body: str,
-    memory_id: str,
 ) -> RagReadyDocument:
     """Build the mirror ``RagReadyDocument`` for one projected session-memory.
 
@@ -187,8 +204,9 @@ def build_session_memory_mirror_document(
       idempotent across backfill + forward).
     - ``privacy_class`` is the uniform ``"private"`` (CouchDB-source has no privacy
       field; the corpus is private transcripts).
-    - metadata promotes ``memory_id``/``project``/``provider``/``session_id_hash``
-      to indexed payload fields.
+    - ``memory_id`` is a SAFE content-derived value (never a raw RAGFlow
+      document_id), IDENTICAL across backfill + forward; ``project``/``provider``/
+      ``session_id_hash`` are promoted to indexed payload fields too.
     """
 
     if not content_hash:
@@ -199,7 +217,9 @@ def build_session_memory_mirror_document(
         raise ValueError("session_id_hash is required")
 
     metadata: dict[str, Any] = {
-        "memory_id": str(memory_id or ""),
+        # Safe, content-derived id (no raw RAGFlow document_id leak); identical in
+        # both backfill and forward so the payload stays consistent + idempotent.
+        "memory_id": derive_mirror_memory_id(content_hash),
         "project": str(project or ""),
         "provider": str(provider),
         "session_id_hash": str(session_id_hash),
@@ -262,7 +282,6 @@ class QdrantSessionMemoryMirrorSink:
         project: str,
         content_hash: str,
         body: str,
-        memory_id: str,
     ) -> None:
         document = build_session_memory_mirror_document(
             session_id_hash=session_id_hash,
@@ -270,7 +289,6 @@ class QdrantSessionMemoryMirrorSink:
             project=project,
             content_hash=content_hash,
             body=body,
-            memory_id=memory_id,
         )
         self._adapter.submit_document(document)
 
@@ -293,14 +311,16 @@ class QdrantSessionMemoryProjector:
 
     def project(self, *, target_profile: str, document: dict[str, Any]) -> str:
         content_hash = str(document.get("content_hash") or "")
-        ref = "qdrant_sm:" + content_hash.split(":")[-1][:16]
+        # The mirror payload memory_id is derived from content_hash inside the build
+        # helper (identical value), so the sink no longer needs a ref argument. This
+        # ref is only stored as the CouchDB projection_state.session_memory_knowledge_id.
+        ref = derive_mirror_memory_id(content_hash)
         self._sink.submit(
             session_id_hash=str(document.get("session_id_hash") or ""),
             provider=str(document.get("provider") or ""),
             project=str(document.get("project") or ""),
             content_hash=content_hash,
             body=str(document.get("body") or ""),
-            memory_id=ref,
         )
         return ref
 
@@ -343,6 +363,10 @@ def iter_projected_session_memories(store: Any) -> Iterator[dict[str, Any]]:
     materializes them per session so this stays a cheap, redaction-safe scan.
     """
 
+    # NOTE: session_memory_knowledge_id (legacy raw RAGFlow document_id) is
+    # intentionally NOT read here -- the mirror payload memory_id is derived from
+    # content_hash inside the build helper, so carrying the raw ref would only risk
+    # a raw-document-id leak.
     states = store.find_by_type(
         SourceDocType.PROJECTION_STATE,
         fields=[
@@ -351,7 +375,6 @@ def iter_projected_session_memories(store: Any) -> Iterator[dict[str, Any]]:
             "provider",
             "project",
             "projection_status",
-            "session_memory_knowledge_id",
         ],
     )
     seen: set[str] = set()
@@ -366,7 +389,6 @@ def iter_projected_session_memories(store: Any) -> Iterator[dict[str, Any]]:
             "session_id_hash": session_id_hash,
             "provider": str(state.get("provider") or ""),
             "project": str(state.get("project") or ""),
-            "memory_id": str(state.get("session_memory_knowledge_id") or ""),
         }
 
 
@@ -440,7 +462,6 @@ def backfill_session_memory(
                 project=descriptor["project"],
                 content_hash=content_hash,
                 body=body,
-                memory_id=descriptor["memory_id"],
             )
         except Exception:
             return ("error", None)
@@ -570,6 +591,7 @@ __all__ = [
     "QdrantSessionMemoryProjector",
     "public_safe_mask_body",
     "assert_embedding_dim_matches_collection",
+    "derive_mirror_memory_id",
     "build_session_memory_mirror_document",
     "iter_projected_session_memories",
     "backfill_session_memory",

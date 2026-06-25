@@ -475,12 +475,17 @@ def build_projection_state_document(
     """
 
     assert_ragflow_target_allowed(target_profile)
+    if projection_status not in ProjectionStatus.known():
+        raise ValueError(f"unknown projection_status: {projection_status}")
+    # A PROJECTED state without an active_content_hash would leave the authority
+    # resolver with no currentness join key, so require it on the success path.
+    # Failure paths use FAILED and are unaffected.
+    if projection_status == ProjectionStatus.PROJECTED and not active_content_hash:
+        raise ValueError("active_content_hash is required for projected state")
     if active_content_hash:
         # Defensive: a malformed hash stored here would silently break the
         # authority resolver's currentness match later.
         assert_hash_like("active_content_hash", active_content_hash)
-    if projection_status not in ProjectionStatus.known():
-        raise ValueError(f"unknown projection_status: {projection_status}")
     doc = _base_document(
         doc_type=SourceDocType.PROJECTION_STATE,
         doc_id=projection_state_doc_id(session_id_hash),

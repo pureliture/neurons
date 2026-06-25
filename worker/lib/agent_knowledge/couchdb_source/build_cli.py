@@ -63,7 +63,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--approval", default="", help="Path to live-approval JSON (required for non-dry-run).")
     parser.add_argument("--dataset-name", default="session-memory", help="RAGFlow dataset name (default: session-memory).")
     parser.add_argument("--ragflow-url", default="", help="RAGFlow base URL (overrides RAGFLOW_URL env).")
-    parser.add_argument("--token-env", default="RAGFLOW_API_KEY", help="Env var holding the RAGFlow bearer token.")
+    parser.add_argument(
+        "--token-env",
+        default="RAGFLOW_API_KEY",
+        help="(무시됨) RAGFlow 토큰은 항상 RAGFLOW_API_KEY env에서만 읽는다.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -158,6 +162,27 @@ def main(argv: list[str] | None = None) -> int:
     from .session_memory_materializer import materialize_and_project
 
     backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "ragflow").strip().lower()
+    # Fail-closed: 오타 등으로 알 수 없는 backend가 들어오면 ragflow로 조용히
+    # fallback하지 않고 명시적으로 거부한다.
+    if backend not in {"ragflow", "qdrant"}:
+        print(
+            json.dumps(
+                {
+                    "schema_version": BUILD_CLI_SCHEMA_VERSION,
+                    "error": "env_invalid",
+                    "reason": (
+                        "SESSION_MEMORY_PROJECTION_BACKEND는 'ragflow' 또는 'qdrant'여야 한다"
+                    ),
+                    "dry_run": False,
+                    "selected": 0,
+                    "projected": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                },
+                sort_keys=True,
+            )
+        )
+        return 2
     if backend == "qdrant":
         # Qdrant-direct write path (RAGFlow-free): project each session-memory
         # straight into the Qdrant searchable mirror as the CANONICAL target. No
@@ -185,7 +210,9 @@ def main(argv: list[str] | None = None) -> int:
         mirror_sink = None
     else:
         ragflow_url = args.ragflow_url or os.environ.get("RAGFLOW_URL", "")
-        bearer_token = os.environ.get(args.token_env, "")
+        # Repo guardrail: RAGFlow 토큰은 RAGFLOW_API_KEY 하나만 사용한다. args.token_env로
+        # 임의의 env 이름을 secret 소스로 받지 않도록 하드코딩한다.
+        bearer_token = os.environ.get("RAGFLOW_API_KEY", "")
         if not ragflow_url or not bearer_token:
             print(
                 json.dumps(

@@ -1,8 +1,7 @@
-"""Backfill CLI safety (CouchDB-native): no accidental server-side collection
-creation (run/rollback fail closed on an absent collection unless
---create-collection), CouchDB store fail-closed on missing COUCHDB_URL, and
-dry-run/verify never touch the server. Qdrant construction is monkeypatched to
-in-memory fakes -- no network.
+"""Backfill CLI 안전성(CouchDB-native): 서버측 collection의 우발적 생성이 없고
+(run/rollback은 --create-collection이 없는 한 없는 collection에서 fail-closed),
+COUCHDB_URL이 없으면 CouchDB store가 fail-closed되며, dry-run/verify는 서버를 절대
+건드리지 않는다. Qdrant 구성은 in-memory fake로 monkeypatch된다 -- 네트워크 없음.
 """
 
 from __future__ import annotations
@@ -50,10 +49,10 @@ def shared_client():
 
 @pytest.fixture
 def patched_qdrant(monkeypatch, shared_client):
-    """Patch the remote adapter builder + embedding provider to in-memory fakes.
+    """remote adapter builder + embedding provider를 in-memory fake로 patch한다.
 
-    The fake builder honours ``ensure_collection`` exactly as the real one does, so
-    the fail-closed / opt-in-create behaviour is exercised faithfully.
+    fake builder는 실제 builder와 동일하게 ``ensure_collection``을 존중하므로
+    fail-closed / opt-in-create 동작이 충실히 검증된다.
     """
 
     def _fake_builder(*, url, collection_name, embedding_provider=None, normalizer=None, ensure_collection=True):
@@ -74,7 +73,7 @@ def patched_qdrant(monkeypatch, shared_client):
     return shared_client
 
 
-# ---------------------------------------------- FIX 1: no accidental collection create
+# ------------------------------------------- FIX 1: collection의 우발적 생성 없음
 
 def test_run_absent_collection_without_create_fails_closed(patched_qdrant):
     client = patched_qdrant
@@ -117,10 +116,10 @@ def test_rollback_absent_collection_fails_closed(patched_qdrant, tmp_path):
 
 def test_dry_run_creates_no_collection(patched_qdrant, monkeypatch):
     client = patched_qdrant
-    # dry-run uses the _DryRunAdapter, never _build_adapter; CouchDB store is read.
+    # dry-run은 _build_adapter가 아니라 _DryRunAdapter를 쓴다; CouchDB store는 읽는다.
     monkeypatch.setattr(cli_mod, "_build_store", lambda args: InMemoryCouchDBSourceStore())
     cli_mod._cmd_dry_run(_args(collection="should_not_be_created"))
-    assert client._collections == {}  # nothing created anywhere
+    assert client._collections == {}  # 어디에도 생성되지 않음
 
 
 def test_verify_creates_no_collection(patched_qdrant, monkeypatch, capsys):
@@ -132,7 +131,7 @@ def test_verify_creates_no_collection(patched_qdrant, monkeypatch, capsys):
     assert '"command": "verify"' in out
 
 
-# -------------------------------------- FIX 3: CouchDB store fail-closed on missing url
+# --------------------------------- FIX 3: url이 없으면 CouchDB store fail-closed
 
 def test_missing_couchdb_url_fails_closed(monkeypatch):
     monkeypatch.delenv("COUCHDB_URL", raising=False)
@@ -149,7 +148,7 @@ def test_build_store_with_couchdb_url_succeeds(monkeypatch):
     assert store is not None
 
 
-# ------------------------------------------------------------------- jsonl tolerance
+# ------------------------------------------------------------------- jsonl 관용성
 
 def test_load_submitted_jsonl_skips_corrupt_line(tmp_path):
     manifest = tmp_path / "submitted.jsonl"
