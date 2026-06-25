@@ -1,0 +1,109 @@
+name: PMD Static Analysis
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "src/main/java/**"
+      - "build.gradle"
+      - "settings.gradle"
+      - "gradle/**"
+      - ".github/pmd/**"
+      - ".github/workflows/pmd.yml"
+      - "scripts/test_pmd_report.py"
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  pmd:
+    name: PMD
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.1"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run report contract tests
+        run: python3 scripts/test_pmd_report.py
+
+      - name: Run PMD + CPD
+        run: gradle pmdMain cpdCheck --no-daemon
+
+      - name: Collect changed Java files
+        id: changed
+        run: |
+          set -euo pipefail
+          base_sha="${{ github.event.pull_request.base.sha }}"
+          head_sha="${{ github.event.pull_request.head.sha }}"
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$base_sha" "$head_sha" -- ':(glob)src/main/java/**/*.java')
+          if [ "${#files[@]}" -gt 0 ]; then
+            printf '%s\n' "${files[@]}" > changed-files.txt
+          else
+            : > changed-files.txt
+          fi
+          echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
+          echo "Changed Java files: ${#files[@]}"
+
+      - name: Generate report HTML and PR comment
+        run: |
+          set -euo pipefail
+          artifact_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ -s changed-files.txt ]; then
+            mapfile -t changed < changed-files.txt
+            python3 .github/pmd/generate_report.py \
+              --changed-files "${changed[@]}" \
+              --artifact-url "$artifact_url"
+          else
+            python3 .github/pmd/generate_report.py \
+              --changed-files \
+              --artifact-url "$artifact_url"
+          fi
+
+      - name: Find existing PMD comment
+        id: find-comment
+        continue-on-error: true
+        uses: peter-evans/find-comment@v3
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: github-actions[bot]
+          body-includes: neurons:pmd-pr-comment:v1
+
+      - name: Post or update PR comment
+        continue-on-error: true
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.find-comment.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: build/reports/pmd/pr-comment.md
+          edit-mode: replace
+
+      - name: Upload PMD + CPD reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pmd-report
+          path: |
+            build/reports/pmd/main-custom.html
+            build/reports/pmd/main.xml
+            build/reports/cpd/cpd.xml
+          retention-days: 30
