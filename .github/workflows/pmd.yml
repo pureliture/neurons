@@ -10,6 +10,7 @@ on:
       - "gradle/**"
       - ".github/pmd/**"
       - ".github/workflows/pmd.yml"
+      - "scripts/test_pmd_report.py"
 
 permissions:
   contents: read
@@ -42,6 +43,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Run report contract tests
+        run: python3 scripts/test_pmd_report.py
+
       - name: Run PMD + CPD
         run: gradle pmdMain cpdCheck --no-daemon
 
@@ -51,8 +55,12 @@ jobs:
           set -euo pipefail
           base_sha="${{ github.event.pull_request.base.sha }}"
           head_sha="${{ github.event.pull_request.head.sha }}"
-          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$base_sha" "$head_sha" -- 'src/main/java/**/*.java')
-          printf '%s\n' "${files[@]}" > changed-files.txt
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$base_sha" "$head_sha" -- ':(glob)src/main/java/**/*.java')
+          if [ "${#files[@]}" -gt 0 ]; then
+            printf '%s\n' "${files[@]}" > changed-files.txt
+          else
+            : > changed-files.txt
+          fi
           echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
           echo "Changed Java files: ${#files[@]}"
 
@@ -73,6 +81,7 @@ jobs:
 
       - name: Find existing PMD comment
         id: find-comment
+        continue-on-error: true
         uses: peter-evans/find-comment@v3
         with:
           issue-number: ${{ github.event.pull_request.number }}
@@ -80,6 +89,7 @@ jobs:
           body-includes: neurons:pmd-pr-comment:v1
 
       - name: Post or update PR comment
+        continue-on-error: true
         uses: peter-evans/create-or-update-comment@v4
         with:
           comment-id: ${{ steps.find-comment.outputs.comment-id }}
