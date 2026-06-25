@@ -63,7 +63,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--approval", default="", help="Path to live-approval JSON (required for non-dry-run).")
     parser.add_argument("--dataset-name", default="session-memory", help="RAGFlow dataset name (default: session-memory).")
     parser.add_argument("--ragflow-url", default="", help="RAGFlow base URL (overrides RAGFLOW_URL env).")
-    parser.add_argument("--token-env", default="RAGFLOW_API_KEY", help="Env var holding the RAGFlow bearer token.")
+    parser.add_argument(
+        "--token-env",
+        default="RAGFLOW_API_KEY",
+        help="(무시됨) RAGFlow 토큰은 항상 RAGFLOW_API_KEY env에서만 읽는다.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -155,18 +159,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # --- Projector construction (live run only) ------------------------------
-    ragflow_url = args.ragflow_url or os.environ.get("RAGFLOW_URL", "")
-    bearer_token = os.environ.get(args.token_env, "")
+    from .session_memory_materializer import materialize_and_project
 
-    if not ragflow_url or not bearer_token:
+    backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "ragflow").strip().lower()
+    # Fail-closed: 오타 등으로 알 수 없는 backend가 들어오면 ragflow로 조용히
+    # fallback하지 않고 명시적으로 거부한다.
+    if backend not in {"ragflow", "qdrant"}:
         print(
             json.dumps(
                 {
                     "schema_version": BUILD_CLI_SCHEMA_VERSION,
-                    "error": "env_missing",
-                    "reason": "ragflow_url and token are required for live runs",
+                    "error": "env_invalid",
+                    "reason": (
+                        "SESSION_MEMORY_PROJECTION_BACKEND는 'ragflow' 또는 'qdrant'여야 한다"
+                    ),
                     "dry_run": False,
-                    "selected": selected_count,
+                    "selected": 0,
                     "projected": 0,
                     "failed": 0,
                     "skipped": 0,
@@ -175,15 +183,65 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 2
+    if backend == "qdrant":
+        # Qdrant-direct write path (RAGFlow-free): project each session-memory
+        # straight into the Qdrant searchable mirror as the CANONICAL target. No
+        # RAGFlow URL/token required. A submit failure marks the projection FAILED
+        # (retried next run), not best-effort. mirror_sink stays None -- the projector
+        # IS the Qdrant writer, so there is no separate best-effort forward hook.
+        projector = _build_qdrant_projector(os.environ)
+        if projector is None:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": BUILD_CLI_SCHEMA_VERSION,
+                        "error": "env_missing",
+                        "reason": "QDRANT_URL (and a reachable mirror collection) is required for the qdrant projection backend",
+                        "dry_run": False,
+                        "selected": selected_count,
+                        "projected": 0,
+                        "failed": 0,
+                        "skipped": 0,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 2
+        mirror_sink = None
+    else:
+        ragflow_url = args.ragflow_url or os.environ.get("RAGFLOW_URL", "")
+        # Repo guardrail: RAGFlow 토큰은 RAGFLOW_API_KEY 하나만 사용한다. args.token_env로
+        # 임의의 env 이름을 secret 소스로 받지 않도록 하드코딩한다.
+        bearer_token = os.environ.get("RAGFLOW_API_KEY", "")
+        if not ragflow_url or not bearer_token:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": BUILD_CLI_SCHEMA_VERSION,
+                        "error": "env_missing",
+                        "reason": "ragflow_url and token are required for live runs",
+                        "dry_run": False,
+                        "selected": selected_count,
+                        "projected": 0,
+                        "failed": 0,
+                        "skipped": 0,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 2
 
-    from .ragflow_projector import RagflowSessionMemoryProjector
-    from .session_memory_materializer import materialize_and_project
+        from .ragflow_projector import RagflowSessionMemoryProjector
 
-    projector = RagflowSessionMemoryProjector(
-        ragflow_url=ragflow_url,
-        bearer_token=bearer_token,
-        dataset_name=args.dataset_name,
-    )
+        projector = RagflowSessionMemoryProjector(
+            ragflow_url=ragflow_url,
+            bearer_token=bearer_token,
+            dataset_name=args.dataset_name,
+        )
+        # Optional best-effort Qdrant forward mirror ALONGSIDE RAGFlow (legacy dual
+        # path). Off unless MIRROR_DUAL_WRITE=1 AND QDRANT_URL are set; a mirror
+        # misconfig yields a None sink and NEVER blocks the canonical RAGFlow projection.
+        mirror_sink = _build_forward_mirror_sink(os.environ)
 
     projected = 0
     failed = 0
@@ -199,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
                 session_id_hash=session_id_hash,
                 store=store,
                 projector=projector,
+                mirror_sink=mirror_sink,
             )
             projection = result.get("projection") or {}
             status = str(projection.get("status") or "")
@@ -225,6 +284,85 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     return 0 if failed == 0 else 1
+
+
+def _build_forward_mirror_sink(environ):
+    """Build the best-effort Qdrant forward mirror sink, or None when disabled.
+
+    Enabled only when ``MIRROR_DUAL_WRITE=1`` AND ``QDRANT_URL`` are set. Reuses the
+    OpenAI-compatible embedding provider (``LLM_BRAIN_EMBEDDING_*``) and a passthrough
+    normalizer (session-memory bodies are already redacted). ``ensure_collection`` is
+    False: the forward write targets the existing live mirror collection and must NOT
+    create one implicitly. Any construction failure (missing dep, bad url, absent
+    collection) returns None so a mirror misconfig can never block the canonical
+    CouchDB session-memory builder.
+    """
+
+    if str(environ.get("MIRROR_DUAL_WRITE") or "").strip() != "1":
+        return None
+    url = str(environ.get("QDRANT_URL") or "").strip()
+    if not url:
+        return None
+    try:
+        from ..rag_ingress.qdrant_backfill import QdrantSessionMemoryMirrorSink
+        from ..rag_ingress.qdrant_docling_mirror import (
+            DEFAULT_COLLECTION_NAME,
+            PassthroughMarkdownNormalizer,
+            build_remote_qdrant_docling_mirror_adapter,
+        )
+        from ..rag_ingress.qdrant_embedding import build_openai_embedding_provider
+
+        collection = str(environ.get("QDRANT_COLLECTION") or DEFAULT_COLLECTION_NAME).strip()
+        adapter = build_remote_qdrant_docling_mirror_adapter(
+            url=url,
+            collection_name=collection,
+            embedding_provider=build_openai_embedding_provider(environ=environ),
+            normalizer=PassthroughMarkdownNormalizer(),
+            ensure_collection=False,
+        )
+        return QdrantSessionMemoryMirrorSink(adapter)
+    except Exception:
+        # Mirror misconfig must never block the canonical builder.
+        return None
+
+
+def _build_qdrant_projector(environ):
+    """Build the Qdrant-direct session-memory projector, or None when unbuildable.
+
+    Requires ``QDRANT_URL`` and a reachable, already-existing mirror collection
+    (``ensure_collection=False`` -- never create implicitly). Reuses the
+    OpenAI-compatible embedding provider (``LLM_BRAIN_EMBEDDING_*``) and the
+    passthrough normalizer. Returns None on missing url / unbuildable adapter so the
+    caller fails closed (the qdrant backend then reports env_missing and projects
+    nothing this run rather than silently dropping sessions).
+    """
+
+    url = str(environ.get("QDRANT_URL") or "").strip()
+    if not url:
+        return None
+    try:
+        from ..rag_ingress.qdrant_backfill import (
+            QdrantSessionMemoryMirrorSink,
+            QdrantSessionMemoryProjector,
+        )
+        from ..rag_ingress.qdrant_docling_mirror import (
+            DEFAULT_COLLECTION_NAME,
+            PassthroughMarkdownNormalizer,
+            build_remote_qdrant_docling_mirror_adapter,
+        )
+        from ..rag_ingress.qdrant_embedding import build_openai_embedding_provider
+
+        collection = str(environ.get("QDRANT_COLLECTION") or DEFAULT_COLLECTION_NAME).strip()
+        adapter = build_remote_qdrant_docling_mirror_adapter(
+            url=url,
+            collection_name=collection,
+            embedding_provider=build_openai_embedding_provider(environ=environ),
+            normalizer=PassthroughMarkdownNormalizer(),
+            ensure_collection=False,
+        )
+        return QdrantSessionMemoryProjector(QdrantSessionMemoryMirrorSink(adapter))
+    except Exception:
+        return None
 
 
 if __name__ == "__main__":

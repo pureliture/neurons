@@ -89,6 +89,7 @@ def _mark_projected(store: InMemoryCouchDBSourceStore, sid: str, provider: str, 
         project=project,
         projection_status=dm.ProjectionStatus.PROJECTED,
         session_memory_knowledge_id="ragflow-ref-fake",
+        active_content_hash="sha256:" + "a" * 64,
     )
     store.put(state)
 
