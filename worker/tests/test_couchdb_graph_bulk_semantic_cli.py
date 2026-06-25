@@ -312,8 +312,11 @@ def test_bulk_semantic_parse_accepts_aliases_and_rejects_private_output():
 
 
 def test_openai_bulk_extractor_accepts_json_wrapped_in_prose():
+    captured = {}
+
     def fake_post(url, *, headers, body, timeout):  # type: ignore[no-untyped-def]
-        _ = (url, headers, body, timeout)
+        _ = (url, headers, timeout)
+        captured.update(json.loads(body))
         return json.dumps(
             {
                 "choices": [
@@ -334,6 +337,7 @@ def test_openai_bulk_extractor_accepts_json_wrapped_in_prose():
     result = extractor.extract([])
 
     assert result.sessions[0].entities[0].name == "Graphiti"
+    assert "strict" not in captured["response_format"]["json_schema"]
 
 
 def test_deterministic_writer_uses_graphiti_compatible_nodes_and_edges(tmp_path):
