@@ -381,6 +381,7 @@ def test_deterministic_writer_uses_graphiti_compatible_nodes_and_edges(tmp_path)
     assert embedder.texts == ["Graphiti", "Neo4j", "Graphiti stores extracted facts in Neo4j."]
     assert entity_calls[0]["params"]["entity_data"]["name_embedding"] == [0.0, 0.5]
     assert relation_calls[0]["params"]["edge_data"]["fact_embedding"] == [2.0, 2.5]
+    assert relation_calls[0]["params"]["edge_data"]["extraction_mode"] == "bulk_semantic"
 
 
 def test_deterministic_writer_omits_vector_procedure_without_embeddings(tmp_path):

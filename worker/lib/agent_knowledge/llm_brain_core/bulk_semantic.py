@@ -355,6 +355,7 @@ class DeterministicGraphitiSemanticWriter:
                     created_at=datetime.now(timezone.utc),
                     valid_at=reference_time,
                     reference_time=reference_time,
+                    attributes={"extraction_mode": "bulk_semantic"},
                 )
                 if entity_edge.fact_embedding:
                     await entity_edge.save(self._driver)
@@ -614,6 +615,7 @@ async def _save_entity_edge_without_embedding(driver: Any, edge: Any) -> None:
         "valid_at": edge.valid_at,
         "invalid_at": edge.invalid_at,
         "reference_time": edge.reference_time,
+        **dict(edge.attributes or {}),
     }
     await driver.execute_query(
         """
