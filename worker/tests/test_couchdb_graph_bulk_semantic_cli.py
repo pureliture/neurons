@@ -338,6 +338,8 @@ def test_openai_bulk_extractor_accepts_json_wrapped_in_prose():
 
     assert result.sessions[0].entities[0].name == "Graphiti"
     assert "strict" not in captured["response_format"]["json_schema"]
+    properties = captured["response_format"]["json_schema"]["schema"]["properties"]
+    assert properties["sessions"]["items"]["properties"]["entities"]["minItems"] == 1
 
 
 def test_deterministic_writer_uses_graphiti_compatible_nodes_and_edges(tmp_path):
