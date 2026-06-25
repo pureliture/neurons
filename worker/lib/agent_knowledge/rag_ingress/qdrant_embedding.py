@@ -1,37 +1,37 @@
-"""OpenAI-compatible EmbeddingProvider for the Qdrant searchable mirror.
+"""Qdrant searchable mirror용 OpenAI-compatible ``EmbeddingProvider``.
 
-The mirror needs worker-produced vectors (RAGFlow embedded server-side; Qdrant
-does not). Rather than choose a new model, this reuses the *same* OpenAI-compatible
-embedding endpoint the Graphiti adapter already uses -- the ``LLM_BRAIN_EMBEDDING_*``
-(falling back to ``OPENAI_*``) env, default dim 1024. No new secret is introduced.
+Mirror는 worker가 만든 vector가 필요하고, RAGFlow는 server-side embedding을
+쓴다. 새 model을 고르지 않고 Graphiti adapter와 같은
+``LLM_BRAIN_EMBEDDING_*`` env, ``OPENAI_*`` fallback, 기본 dim 1024를
+재사용한다. 새 secret은 만들지 않는다.
 
-Testability: the provider wraps an injected ``embed_fn``, so unit tests run with a
-fake embedder and need no network and no optional ``openai`` dependency. The real
-endpoint is wired lazily in :func:`build_openai_embedding_provider`, exercised only
-on the live path (mirrors the optional-dependency pattern in
-``qdrant_docling_mirror``).
+Test에서는 ``embed_fn``을 주입해 network와 optional ``openai`` dependency 없이
+검증한다. 실제 endpoint는 :func:`build_openai_embedding_provider`의 live path에서만
+lazily 연결한다.
 """
 
 from __future__ import annotations
 
-import os
 from typing import Callable, Mapping
 
-from .qdrant_docling_mirror import SearchableMirrorUnavailable
+from agent_knowledge.model_connectors import (
+    DEFAULT_EMBEDDING_DIM,
+    ModelPolicy,
+    PolicyViolation,
+    resolve_embedding_spec,
+)
 
-# Matches GraphitiNeo4jConfig.embedding_dim default; the mirror collection vector
-# size is fixed to this at create time and can only change via a new collection.
-DEFAULT_EMBEDDING_DIM = 1024
+from .qdrant_docling_mirror import SearchableMirrorUnavailable
 
 EmbedFn = Callable[[str], list[float]]
 
 
 class OpenAICompatibleEmbeddingProvider:
-    """``EmbeddingProvider`` over an injected OpenAI-compatible embed function.
+    """주입된 OpenAI-compatible embed function 기반 ``EmbeddingProvider``.
 
-    Satisfies the ``EmbeddingProvider`` protocol (``size`` + ``embed``) consumed by
-    :class:`QdrantDoclingMirrorAdapter`. The returned vector length is validated
-    against the declared ``size`` so a misconfigured endpoint fails closed.
+    :class:`QdrantDoclingMirrorAdapter`가 소비하는 ``EmbeddingProvider`` protocol
+    (``size`` + ``embed``)을 만족한다. 반환 vector 길이는 선언된 ``size``와
+    맞춰 검증해서 잘못 설정된 endpoint는 fail closed 처리한다.
     """
 
     def __init__(self, *, embed_fn: EmbedFn, size: int, model: str = "") -> None:
@@ -57,26 +57,19 @@ class OpenAICompatibleEmbeddingProvider:
 
 
 def resolve_embedding_config(environ: Mapping[str, str] | None = None) -> dict[str, object]:
-    """Resolve the non-secret OpenAI-compatible embedding config from env.
+    """Env에서 embedding 연결 config를 해석한다.
 
-    Reuses the same precedence as ``GraphitiNeo4jConfig.from_env`` so the mirror and
-    the graph adapter speak to one endpoint. The api_key is deliberately NOT
-    returned here -- it is read only at client-build time -- so a caller that logs
-    this config object cannot leak the secret.
+    ``GraphitiNeo4jConfig.from_env``와 같은 우선순위를 써서 mirror와 graph adapter가
+    같은 endpoint를 보게 한다. api_key는 의도적으로 반환하지 않는다. base_url은
+    host를 식별할 수 있으므로 production path에서 redaction 없이 log하지 않는다.
     """
 
-    env = environ if environ is not None else os.environ
-    dim_raw = str(env.get("LLM_BRAIN_EMBEDDING_DIM") or "").strip()
-    try:
-        dim = int(dim_raw) if dim_raw else DEFAULT_EMBEDDING_DIM
-    except ValueError:
-        dim = DEFAULT_EMBEDDING_DIM
-    if dim <= 0:
-        dim = DEFAULT_EMBEDDING_DIM
+    spec = resolve_embedding_spec(environ)
     return {
-        "model": env.get("LLM_BRAIN_EMBEDDING_MODEL") or env.get("EMBEDDING_MODEL") or "",
-        "base_url": env.get("LLM_BRAIN_EMBEDDING_BASE_URL") or env.get("OPENAI_BASE_URL") or "",
-        "dim": dim,
+        "provider": spec.provider,
+        "model": spec.model,
+        "base_url": spec.base_url,
+        "dim": spec.dim,
     }
 
 
@@ -85,13 +78,19 @@ def build_openai_embedding_provider(
     environ: Mapping[str, str] | None = None,
     embed_fn: EmbedFn | None = None,
 ) -> OpenAICompatibleEmbeddingProvider:
-    """Build the mirror embedding provider from env.
+    """Env에서 mirror embedding provider를 만든다.
 
-    ``embed_fn`` is injectable for tests/local. When omitted, the real
-    OpenAI-compatible embeddings endpoint is wired lazily.
+    ``embed_fn``은 test/local 주입용이다. 생략하면 실제 OpenAI-compatible embeddings
+    endpoint를 lazily 연결한다.
     """
 
+    import os
+
     env = environ if environ is not None else os.environ
+    try:
+        ModelPolicy().validate(resolve_embedding_spec(env), capability="embedding")
+    except PolicyViolation as exc:
+        raise SearchableMirrorUnavailable(str(exc)) from exc
     config = resolve_embedding_config(env)
     model = str(config["model"])
     size = int(config["dim"])

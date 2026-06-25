@@ -1,90 +1,99 @@
-"""Optional reranker seam for Qdrant searchable-mirror candidates.
-
-RAGFlow retrieval accepts an optional ``rerank_id``. The Qdrant mirror keeps parity
-by reusing the *same* OpenAI-compatible reranker (cross-encoder) the Graphiti
-adapter already wires (``OpenAIRerankerClient`` over ``LLM_BRAIN_LLM_*``). No new
-model is chosen.
-
-This is a composable post-step over mirror hits, not wired into the adapter by
-default (the spec marks rerank optional). Tests inject ``rank_fn`` so they run with
-no network and no optional dependency; the live endpoint is wired lazily.
-"""
+"""Qdrant mirror가 공유 reranker connector를 선택적으로 소비하는 경계."""
 
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Mapping
+import math
+from collections.abc import Mapping
 
-from .qdrant_docling_mirror import SearchableMirrorUnavailable
+from agent_knowledge.model_connectors import (
+    CandidateReranker,
+    FunctionRerankerClient,
+    ModelConnectorConfigError,
+    PolicyViolation,
+    RankFn,
+    build_reranker_client,
+    resolve_model_connection_config,
+    resolve_reranker_config as _resolve_reranker_config,
+)
+from agent_knowledge.rag_ingress.qdrant_docling_mirror import SearchableMirrorUnavailable
 
-# rank_fn(query, [text, ...]) -> [score, ...] aligned with the input order.
-RankFn = Callable[[str, list[str]], list[float]]
 
+class OpenAICompatibleReranker(CandidateReranker):
+    """공유 ``CandidateReranker`` 위에 얹은 Qdrant 호환 facade."""
 
-class OpenAICompatibleReranker:
-    """Reorders mirror candidates by an injected relevance score function."""
-
-    def __init__(self, *, rank_fn: RankFn, text_key: str = "summary") -> None:
-        self._rank_fn = rank_fn
-        self._text_key = str(text_key or "summary")
-
-    def rerank(
+    def __init__(
         self,
         *,
-        query: str,
-        candidates: list[dict[str, Any]],
-        top_n: int = 5,
-    ) -> list[dict[str, Any]]:
-        if not candidates:
-            return []
-        texts = [str(item.get(self._text_key) or item.get("summary") or "") for item in candidates]
-        scores = list(self._rank_fn(str(query or ""), texts))
-        if len(scores) != len(candidates):
-            raise ValueError("reranker returned wrong score count")
-        order = sorted(range(len(candidates)), key=lambda i: float(scores[i]), reverse=True)
-        ranked: list[dict[str, Any]] = []
-        for index in order[: max(1, int(top_n))]:
-            item = dict(candidates[index])
-            item["rerank_score"] = float(scores[index])
-            ranked.append(item)
-        return ranked
+        rank_fn: RankFn,
+        text_key: str = "summary",
+        timeout_seconds: float | None = None,
+    ) -> None:
+        super().__init__(FunctionRerankerClient(rank_fn, timeout_seconds=timeout_seconds), text_key=text_key)
+
+    def rerank(self, **kwargs):
+        try:
+            return super().rerank(**kwargs)
+        except TimeoutError as exc:
+            raise SearchableMirrorUnavailable("reranker timed out") from exc
+
+
+class _QdrantLiveReranker(CandidateReranker):
+    def rerank(self, **kwargs):
+        try:
+            return super().rerank(**kwargs)
+        except TimeoutError as exc:
+            raise SearchableMirrorUnavailable("reranker timed out") from exc
+        except ModelConnectorConfigError as exc:
+            raise SearchableMirrorUnavailable(str(exc)) from exc
 
 
 def resolve_reranker_config(environ: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Reuse the same OpenAI-compatible LLM endpoint as the graph adapter.
+    """공유 reranker 연결 config를 기존 Qdrant 호출부 형태로 반환한다."""
 
-    api_key is NOT returned (read only at client-build time) so logging this
-    config object cannot leak the secret.
-    """
-
-    env = environ if environ is not None else os.environ
-    return {
-        "model": env.get("LLM_BRAIN_LLM_MODEL") or env.get("MODEL_NAME") or "",
-        "base_url": env.get("LLM_BRAIN_LLM_BASE_URL") or env.get("OPENAI_BASE_URL") or "",
-    }
+    return _resolve_reranker_config(environ)
 
 
 def build_openai_reranker(
     *,
     environ: Mapping[str, str] | None = None,
     rank_fn: RankFn | None = None,
-) -> OpenAICompatibleReranker:
-    """Build the reranker. ``rank_fn`` is injectable for tests/local."""
+) -> CandidateReranker:
+    """Qdrant mirror hit에 적용할 공유 candidate reranker를 만든다."""
 
-    if rank_fn is None:
-        rank_fn = _openai_rank_fn(resolve_reranker_config(environ))
-    return OpenAICompatibleReranker(rank_fn=rank_fn)
-
-
-def _openai_rank_fn(config: dict[str, str]) -> RankFn:  # pragma: no cover - live path only
-    model = str(config.get("model") or "")
-    if not model:
+    env = os.environ if environ is None else environ
+    timeout_seconds = _positive_float(env.get("LLM_BRAIN_RERANK_TIMEOUT_SECONDS"))
+    if rank_fn is not None:
+        return OpenAICompatibleReranker(rank_fn=rank_fn, timeout_seconds=timeout_seconds)
+    if not _truthy(env.get("LLM_BRAIN_QDRANT_RERANK_ENABLED", "")):
         raise SearchableMirrorUnavailable(
-            "reranker model not configured (set LLM_BRAIN_LLM_MODEL)"
+            "reranker disabled (set LLM_BRAIN_QDRANT_RERANK_ENABLED=1)"
         )
-    raise SearchableMirrorUnavailable(
-        "live OpenAI-compatible reranker wiring is a follow-on; inject rank_fn for now"
-    )
+    try:
+        client = build_reranker_client(
+            resolve_model_connection_config(env),
+            api_key=_value(env, "LLM_BRAIN_LLM_API_KEY", "OPENAI_API_KEY"),
+            timeout_seconds=timeout_seconds,
+        )
+    except (ModelConnectorConfigError, PolicyViolation) as exc:
+        raise SearchableMirrorUnavailable(str(exc)) from exc
+    return _QdrantLiveReranker(client)
+
+
+def _value(env: Mapping[str, str], primary: str, fallback: str) -> str:
+    return str(env.get(primary) or env.get(fallback) or "")
+
+
+def _truthy(value: str) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _positive_float(value: str | None) -> float | None:
+    try:
+        parsed = float(str(value or "").strip()) if str(value or "").strip() else 30.0
+    except ValueError:
+        return 30.0
+    return parsed if math.isfinite(parsed) and parsed > 0 else 30.0
 
 
 __all__ = [
