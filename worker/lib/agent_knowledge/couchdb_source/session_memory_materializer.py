@@ -13,6 +13,7 @@ the CouchDB source intact.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -272,8 +273,13 @@ def project_session_memory(
                 body=materialized.body,
                 memory_id=ref,
             )
-        except Exception:  # best-effort: canonical projection already committed
+        except Exception as exc:  # best-effort: canonical projection already committed
             mirror_failed = True
+            # Redaction-safe observability: exception type only (no message/payload),
+            # so a silently-failing forward mirror is debuggable in operation.
+            logging.getLogger(__name__).warning(
+                "forward mirror submit failed: %s", type(exc).__name__
+            )
 
     return {
         "status": ProjectionStatus.PROJECTED,

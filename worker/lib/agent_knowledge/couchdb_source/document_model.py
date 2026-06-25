@@ -475,6 +475,10 @@ def build_projection_state_document(
     """
 
     assert_ragflow_target_allowed(target_profile)
+    if active_content_hash:
+        # Defensive: a malformed hash stored here would silently break the
+        # authority resolver's currentness match later.
+        assert_hash_like("active_content_hash", active_content_hash)
     if projection_status not in ProjectionStatus.known():
         raise ValueError(f"unknown projection_status: {projection_status}")
     doc = _base_document(
