@@ -14,6 +14,7 @@ from agent_knowledge.rag_ingress.index_backend import IndexStatus
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
     PassthroughMarkdownNormalizer,
     QdrantDoclingMirrorAdapter,
+    SearchableMirrorUnavailable,
 )
 from agent_knowledge.rag_ingress.qdrant_docling_testing import InMemoryQdrantClient
 from agent_knowledge.rag_ingress.qdrant_embedding import (
@@ -67,6 +68,7 @@ def test_resolve_embedding_config_primary_wins_and_falls_back_and_omits_secret()
             "LLM_BRAIN_EMBEDDING_DIM": "1024",
         }
     )
+    assert cfg["provider"] == "openai"
     assert cfg["model"] == "bge-m3"
     assert cfg["base_url"] == "http://primary/v1"
     assert cfg["dim"] == 1024
@@ -93,6 +95,17 @@ def test_build_provider_with_injected_embed_fn_uses_env_dim_no_network():
     assert provider.size == 16
     assert provider.model == "bge-m3"
     assert len(provider.embed("abc")) == 16
+
+
+def test_build_provider_rejects_unknown_embedding_provider():
+    with pytest.raises(SearchableMirrorUnavailable, match="provider not allowed"):
+        build_openai_embedding_provider(
+            environ={
+                "LLM_BRAIN_EMBEDDING_PROVIDER": "typo-provider",
+                "LLM_BRAIN_EMBEDDING_MODEL": "bge-m3",
+            },
+            embed_fn=_fake_embed(1024),
+        )
 
 
 def test_provider_satisfies_adapter_embedding_protocol_end_to_end():
