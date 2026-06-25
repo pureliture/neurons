@@ -52,6 +52,7 @@ class GraphitiNeo4jConfig:
     llm_reasoning_effort: str = ""
     llm_base_url: str = ""
     llm_api_key: str = field(default="", repr=False)
+    embedding_provider: str = "openai"
     embedding_model: str = ""
     embedding_base_url: str = ""
     embedding_api_key: str = field(default="", repr=False)
@@ -97,6 +98,7 @@ class GraphitiNeo4jConfig:
             ),
             llm_base_url=env.get("LLM_BRAIN_LLM_BASE_URL", env.get("OPENAI_BASE_URL", "")),
             llm_api_key=env.get("LLM_BRAIN_LLM_API_KEY", env.get("OPENAI_API_KEY", "")),
+            embedding_provider=env.get("LLM_BRAIN_EMBEDDING_PROVIDER", env.get("EMBEDDING_PROVIDER", "openai")).lower(),
             embedding_model=env.get("LLM_BRAIN_EMBEDDING_MODEL", env.get("EMBEDDING_MODEL", "")),
             embedding_base_url=env.get("LLM_BRAIN_EMBEDDING_BASE_URL", env.get("OPENAI_BASE_URL", "")),
             embedding_api_key=env.get("LLM_BRAIN_EMBEDDING_API_KEY", env.get("OPENAI_API_KEY", "")),
