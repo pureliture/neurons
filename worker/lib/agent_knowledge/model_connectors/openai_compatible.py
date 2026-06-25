@@ -42,22 +42,30 @@ def build_openai_compatible_graphiti_components(
     validator.validate(config.embedding, capability="embedding")
     validator.validate(config.reranker, capability="rerank")
 
-    provider = config.llm.provider
-    if provider != "ollama":
+    llm_provider = config.llm.provider
+    embedding_provider = config.embedding.provider
+    if llm_provider != "ollama":
         _require_configured(config.llm.model, "LLM_BRAIN_LLM_MODEL")
+    if embedding_provider != "ollama":
         _require_configured(config.embedding.model, "LLM_BRAIN_EMBEDDING_MODEL")
 
     from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
     from graphiti_core.llm_client.config import LLMConfig
     from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 
-    base_url = config.llm.base_url or ("http://localhost:11434/v1" if provider == "ollama" else "")
-    api_key = llm_api_key or ("ollama" if provider == "ollama" else "")
+    llm_base_url = config.llm.base_url or ("http://localhost:11434/v1" if llm_provider == "ollama" else "")
+    embedding_base_url = config.embedding.base_url or (
+        "http://localhost:11434/v1" if embedding_provider == "ollama" else ""
+    )
+    api_key = llm_api_key or ("ollama" if llm_provider == "ollama" else "")
+    embedding_api_key_value = embedding_api_key or ("ollama" if embedding_provider == "ollama" else api_key)
     llm_config = LLMConfig(
         api_key=api_key,
-        model=config.llm.model or ("deepseek-r1:7b" if provider == "ollama" else None),
-        small_model=config.llm.small_model or config.llm.model or ("deepseek-r1:7b" if provider == "ollama" else None),
-        base_url=base_url or None,
+        model=config.llm.model or ("deepseek-r1:7b" if llm_provider == "ollama" else None),
+        small_model=config.llm.small_model or config.llm.model or (
+            "deepseek-r1:7b" if llm_provider == "ollama" else None
+        ),
+        base_url=llm_base_url or None,
     )
 
     class _NeuronStructuredClient(OpenAIGenericClient):
@@ -71,10 +79,12 @@ def build_openai_compatible_graphiti_components(
     llm_client = _NeuronStructuredClient(config=llm_config)
     embedder = OpenAIEmbedder(
         config=OpenAIEmbedderConfig(
-            api_key=embedding_api_key or api_key,
-            embedding_model=config.embedding.model or ("nomic-embed-text" if provider == "ollama" else "text-embedding-3-small"),
+            api_key=embedding_api_key_value,
+            embedding_model=config.embedding.model or (
+                "nomic-embed-text" if embedding_provider == "ollama" else None
+            ),
             embedding_dim=config.embedding.dim,
-            base_url=config.embedding.base_url or base_url or None,
+            base_url=embedding_base_url or None,
         )
     )
     reranker = build_reranker_client(config, api_key=api_key, openai_client=llm_client.client, policy=validator)

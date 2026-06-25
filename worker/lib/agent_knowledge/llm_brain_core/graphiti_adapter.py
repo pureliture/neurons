@@ -43,6 +43,7 @@ class GraphitiNeo4jConfig:
     small_model: str = ""
     llm_base_url: str = ""
     llm_api_key: str = field(default="", repr=False)
+    embedding_provider: str = "openai"
     embedding_model: str = ""
     embedding_base_url: str = ""
     embedding_api_key: str = field(default="", repr=False)
@@ -70,6 +71,7 @@ class GraphitiNeo4jConfig:
             small_model=model_config.llm.small_model,
             llm_base_url=model_config.llm.base_url,
             llm_api_key=env.get("LLM_BRAIN_LLM_API_KEY", env.get("OPENAI_API_KEY", "")),
+            embedding_provider=model_config.embedding.provider,
             embedding_model=model_config.embedding.model,
             embedding_base_url=model_config.embedding.base_url,
             embedding_api_key=env.get("LLM_BRAIN_EMBEDDING_API_KEY", env.get("OPENAI_API_KEY", "")),
@@ -192,7 +194,14 @@ class GraphitiNeo4jGraphMemoryAdapter:
                     created_at=datetime.now(timezone.utc),
                     valid_at=_parse_datetime(episode.reference_time),
                 )
-                await graphiti_episode.save(self._graphiti.driver)
+                try:
+                    await graphiti_episode.save(self._graphiti.driver)
+                except Exception as exc:
+                    self._last_write_details = (
+                        "graphiti_neo4j",
+                        f"direct_write_error:{type(exc).__name__}",
+                    )
+                    raise
                 self._last_write_details = ("graphiti_neo4j", "episode_node_direct_write")
                 return "inserted"
 

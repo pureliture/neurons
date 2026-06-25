@@ -21,7 +21,7 @@ class ModelPolicy:
         {"openai", "openai-compatible", "openai_compatible", "ollama", "gemma4-maas"}
     )
     embedding_providers: frozenset[str] = frozenset(
-        {"openai", "openai-compatible", "openai_compatible", "ollama", "gemini", "google-gemini", "gemma4-maas"}
+        {"openai", "openai-compatible", "openai_compatible", "ollama", "gemma4-maas"}
     )
 
     def validate(self, spec: Any, *, capability: str) -> None:

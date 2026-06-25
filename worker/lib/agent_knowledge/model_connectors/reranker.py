@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-import threading
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 from .env import resolve_reranker_spec
@@ -32,13 +31,11 @@ class FunctionRerankerClient:
         self._timeout_seconds = timeout_seconds
 
     def score(self, query: str, texts: list[str]) -> list[float]:
-        if self._timeout_seconds is None:
-            scores = list(self._rank_fn(str(query or ""), list(texts)))
-        else:
-            scores = _run_callable_with_timeout(
-                lambda: list(self._rank_fn(str(query or ""), list(texts))),
-                timeout_seconds=self._timeout_seconds,
-            )
+        # Injected rank functions are test/local seams. Python cannot safely
+        # cancel an arbitrary synchronous function mid-call, so live timeout
+        # enforcement belongs to the real OpenAI-compatible client.
+        _ = self._timeout_seconds
+        scores = list(self._rank_fn(str(query or ""), list(texts)))
         _require_score_count(scores, texts)
         return [float(score) for score in scores]
 
@@ -55,6 +52,7 @@ class OpenAICompatibleRerankerClient:
         *,
         api_key: str = "",
         openai_client: Any | None = None,
+        sync_openai_client: Any | None = None,
         policy: ModelPolicy | None = None,
         timeout_seconds: float | None = None,
     ) -> None:
@@ -63,18 +61,35 @@ class OpenAICompatibleRerankerClient:
         if spec.provider != "ollama" and not str(spec.model or "").strip():
             raise ModelConnectorConfigError("model connector missing required config: LLM_BRAIN_LLM_MODEL")
 
-        from openai import AsyncOpenAI
-
         base_url = spec.base_url or ("http://localhost:11434/v1" if spec.provider == "ollama" else "")
         self._model = spec.model or ("deepseek-r1:7b" if spec.provider == "ollama" else "")
         self._timeout_seconds = timeout_seconds
-        self._client = openai_client or AsyncOpenAI(
-            api_key=api_key or ("ollama" if spec.provider == "ollama" else None),
-            base_url=base_url or None,
-        )
+        client_kwargs = {
+            "api_key": api_key or ("ollama" if spec.provider == "ollama" else None),
+            "base_url": base_url or None,
+        }
+        if timeout_seconds is not None:
+            client_kwargs["timeout"] = timeout_seconds
+        self._async_client = openai_client
+        self._sync_client = sync_openai_client
+        if self._async_client is None:
+            from openai import AsyncOpenAI
+
+            self._async_client = AsyncOpenAI(**client_kwargs)
+        if self._sync_client is None and openai_client is None:
+            from openai import OpenAI
+
+            self._sync_client = OpenAI(**client_kwargs)
 
     def score(self, query: str, texts: list[str]) -> list[float]:
-        return _run_coroutine(self.ascore(query, texts), timeout_seconds=self._timeout_seconds)
+        passages = list(texts)
+        if not passages:
+            return []
+        if self._sync_client is None:
+            raise RuntimeError("sync rerank requires a sync OpenAI client")
+        scores = [self._score_passage_sync(str(query or ""), passage) for passage in passages]
+        _require_score_count(scores, passages)
+        return [float(score) for score in scores]
 
     async def ascore(self, query: str, texts: list[str]) -> list[float]:
         passages = list(texts)
@@ -87,7 +102,31 @@ class OpenAICompatibleRerankerClient:
         return [float(score) for score in scores]
 
     async def _score_passage(self, query: str, passage: str) -> float:
-        response = await self._client.chat.completions.create(
+        response = await self._async_client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Decide whether a passage is relevant to a query. Answer True or False.",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        'Respond with "True" if PASSAGE is relevant to QUERY and "False" otherwise.\n'
+                        f"<PASSAGE>\n{passage}\n</PASSAGE>\n"
+                        f"<QUERY>\n{query}\n</QUERY>"
+                    ),
+                },
+            ],
+            temperature=0,
+            max_tokens=1,
+            logprobs=True,
+            top_logprobs=2,
+        )
+        return _score_from_response(response)
+
+    def _score_passage_sync(self, query: str, passage: str) -> float:
+        response = self._sync_client.chat.completions.create(
             model=self._model,
             messages=[
                 {
@@ -146,7 +185,8 @@ class CandidateReranker:
         _require_score_count(scores, candidates)
         order = sorted(range(len(candidates)), key=lambda index: float(scores[index]), reverse=True)
         ranked: list[dict[str, Any]] = []
-        for index in order[: max(1, int(top_n))]:
+        bounded_top_n = max(0, int(top_n))
+        for index in order[:bounded_top_n]:
             item = dict(candidates[index])
             item["rerank_score"] = float(scores[index])
             ranked.append(item)
@@ -208,59 +248,6 @@ def build_candidate_reranker(
 def _require_score_count(scores: list[Any], texts: list[Any]) -> None:
     if len(scores) != len(texts):
         raise ValueError("reranker returned wrong score count")
-
-
-def _run_coroutine(awaitable: Awaitable[list[float]], *, timeout_seconds: float | None = None) -> list[float]:
-    async def _await_with_timeout() -> list[float]:
-        if timeout_seconds is None:
-            return await awaitable
-        return await asyncio.wait_for(awaitable, timeout=timeout_seconds)
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(_await_with_timeout())
-
-    result: list[float] | None = None
-    error: BaseException | None = None
-
-    def _target() -> None:
-        nonlocal result, error
-        try:
-            result = asyncio.run(_await_with_timeout())
-        except BaseException as exc:
-            error = exc
-
-    thread = threading.Thread(target=_target, daemon=True)
-    thread.start()
-    thread.join(timeout=timeout_seconds)
-    if thread.is_alive():
-        raise TimeoutError("reranker timed out")
-    if error is not None:
-        raise error
-    return list(result or [])
-
-
-def _run_callable_with_timeout(fn: Callable[[], list[float]], *, timeout_seconds: float) -> list[float]:
-    result: list[float] | None = None
-    error: BaseException | None = None
-
-    def _target() -> None:
-        nonlocal result, error
-        try:
-            result = fn()
-        except BaseException as exc:
-            error = exc
-
-    thread = threading.Thread(target=_target, daemon=True)
-    thread.start()
-    thread.join(timeout=timeout_seconds)
-    if thread.is_alive():
-        raise TimeoutError("reranker timed out")
-    if error is not None:
-        raise error
-    return list(result or [])
-
 
 def _score_from_response(response: Any) -> float:
     choices = list(getattr(response, "choices", []) or [])
