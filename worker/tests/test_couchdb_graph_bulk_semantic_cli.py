@@ -98,6 +98,33 @@ class _BatchJsonThenSingleExtractor:
         )
 
 
+class _BatchValueThenSingleExtractor:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def extract(self, batch):  # type: ignore[no-untyped-def]
+        keys = [item.session_key for item in batch]
+        self.calls.append(keys)
+        if len(batch) > 1:
+            raise ValueError("synthetic batch value failure")
+        item = batch[0]
+        return BulkSemanticExtractionResult(
+            (
+                BulkSemanticSessionResult(
+                    session_key=item.session_key,
+                    entities=(
+                        BulkSemanticEntity(
+                            name=f"Recovered {item.session_key}",
+                            type="Concept",
+                            summary="Recovered from singleton fallback",
+                        ),
+                    ),
+                    relations=(),
+                ),
+            )
+        )
+
+
 class _FakeBulkWriter:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
@@ -304,8 +331,9 @@ def test_bulk_semantic_max_projects_caps_failed_extraction_batches(tmp_path):
     assert report["projection"]["projected"] == 0
     assert report["projection"]["failed"] == 5
     assert report["projection"]["stopped_after_max_projects"] is True
-    assert report["semantic"]["llm_batches"] == 1
-    assert extractor.calls == 1
+    assert report["semantic"]["llm_batches"] == 6
+    assert report["semantic"]["fallback_single_session_batches"] == 5
+    assert extractor.calls == 6
     assert len(dead_letter.read_text(encoding="utf-8").splitlines()) == 5
 
 
@@ -314,6 +342,37 @@ def test_bulk_semantic_json_batch_failure_falls_back_to_single_sessions(tmp_path
     for index in range(5):
         _seed_session(store, raw_id=f"json-fallback-{index}")
     extractor = _BatchJsonThenSingleExtractor()
+    writer = _FakeBulkWriter()
+    dead_letter = tmp_path / "dead-letter.jsonl"
+
+    report = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=5,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=5,
+        dead_letter_jsonl=dead_letter,
+        extractor=extractor,
+        writer=writer,
+    )
+
+    assert report["status"] == "ok"
+    assert report["projection"]["projected"] == 5
+    assert report["projection"]["failed"] == 0
+    assert report["projection"]["failure_reasons"] == {}
+    assert report["semantic"]["llm_batches"] == 6
+    assert report["semantic"]["fallback_single_session_batches"] == 5
+    assert extractor.calls == [["s1", "s2", "s3", "s4", "s5"], ["s1"], ["s2"], ["s3"], ["s4"], ["s5"]]
+    assert writer.calls == [["s1"], ["s2"], ["s3"], ["s4"], ["s5"]]
+    assert not dead_letter.exists()
+
+
+def test_bulk_semantic_value_batch_failure_falls_back_to_single_sessions(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(5):
+        _seed_session(store, raw_id=f"value-fallback-{index}")
+    extractor = _BatchValueThenSingleExtractor()
     writer = _FakeBulkWriter()
     dead_letter = tmp_path / "dead-letter.jsonl"
 

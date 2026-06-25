@@ -392,7 +392,7 @@ def _flush_batch_items(
         )
     except Exception as exc:
         reason = _reason_code(exc)
-        if isinstance(exc, json.JSONDecodeError) and len(batch_items) > 1:
+        if isinstance(exc, (json.JSONDecodeError, ValueError)) and len(batch_items) > 1:
             return _flush_batch_items_as_singletons(
                 batch_items,
                 extractor=extractor,
