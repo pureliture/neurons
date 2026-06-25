@@ -312,7 +312,7 @@ class DeterministicGraphitiSemanticWriter:
             for entity in session_result.entities:
                 entity_uuid = _entity_uuid(group_id, entity)
                 entity_uuid_by_name[_entity_key(entity.name)] = entity_uuid
-                await EntityNode(
+                entity_node = EntityNode(
                     uuid=entity_uuid,
                     name=entity.name,
                     group_id=group_id,
@@ -324,7 +324,11 @@ class DeterministicGraphitiSemanticWriter:
                         "semantic_type": entity.type,
                         "extraction_mode": "bulk_semantic",
                     },
-                ).save(self._driver)
+                )
+                if entity_node.name_embedding:
+                    await entity_node.save(self._driver)
+                else:
+                    await _save_entity_node_without_embedding(self._driver, entity_node)
                 await EpisodicEdge(
                     source_node_uuid=episode.episode_id,
                     target_node_uuid=entity_uuid,
@@ -339,7 +343,7 @@ class DeterministicGraphitiSemanticWriter:
                 target_uuid = entity_uuid_by_name.get(_entity_key(relation.target))
                 if not source_uuid or not target_uuid:
                     raise ValueError("bulk semantic relation endpoint missing entity")
-                await EntityEdge(
+                entity_edge = EntityEdge(
                     uuid=_relation_uuid(group_id, relation),
                     group_id=group_id,
                     source_node_uuid=source_uuid,
@@ -351,7 +355,11 @@ class DeterministicGraphitiSemanticWriter:
                     created_at=datetime.now(timezone.utc),
                     valid_at=reference_time,
                     reference_time=reference_time,
-                ).save(self._driver)
+                )
+                if entity_edge.fact_embedding:
+                    await entity_edge.save(self._driver)
+                else:
+                    await _save_entity_edge_without_embedding(self._driver, entity_edge)
                 relation_writes += 1
             projected += 1
         return BulkSemanticWriteReport(
@@ -569,6 +577,53 @@ def _relation_key(relation: BulkSemanticRelation) -> str:
             _entity_key(relation.target),
             " ".join(relation.fact.lower().split()),
         ]
+    )
+
+
+async def _save_entity_node_without_embedding(driver: Any, node: Any) -> None:
+    data = {
+        "uuid": node.uuid,
+        "name": node.name,
+        "group_id": node.group_id,
+        "summary": node.summary,
+        "created_at": node.created_at,
+        **dict(node.attributes or {}),
+    }
+    await driver.execute_query(
+        """
+        MERGE (n:Entity {uuid: $entity_data.uuid})
+        SET n:Entity
+        SET n += $entity_data
+        RETURN n.uuid AS uuid
+        """,
+        entity_data=data,
+    )
+
+
+async def _save_entity_edge_without_embedding(driver: Any, edge: Any) -> None:
+    data = {
+        "uuid": edge.uuid,
+        "source_uuid": edge.source_node_uuid,
+        "target_uuid": edge.target_node_uuid,
+        "name": edge.name,
+        "fact": edge.fact,
+        "group_id": edge.group_id,
+        "episodes": edge.episodes,
+        "created_at": edge.created_at,
+        "expired_at": edge.expired_at,
+        "valid_at": edge.valid_at,
+        "invalid_at": edge.invalid_at,
+        "reference_time": edge.reference_time,
+    }
+    await driver.execute_query(
+        """
+        MATCH (source:Entity {uuid: $edge_data.source_uuid})
+        MATCH (target:Entity {uuid: $edge_data.target_uuid})
+        MERGE (source)-[e:RELATES_TO {uuid: $edge_data.uuid}]->(target)
+        SET e += $edge_data
+        RETURN e.uuid AS uuid
+        """,
+        edge_data=data,
     )
 
 
