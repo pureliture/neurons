@@ -10,6 +10,13 @@ from .graphiti_adapter import (
     GraphitiNeo4jGraphMemoryAdapter,
     probe_graphiti_connectivity,
 )
+from .hybrid_graph import (
+    HybridTextMirrorHit,
+    InMemoryHybridTextMirror,
+    METADATA_FIRST_HYBRID_GRAPH_SCHEMA,
+    MetadataFirstHybridGraphAdapter,
+    metadata_first_episode,
+)
 from .ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
 from .models import (
     BrainEventEnvelope,
@@ -50,9 +57,13 @@ __all__ = [
     "GraphProjectionWorker",
     "GraphitiNeo4jConfig",
     "GraphitiNeo4jGraphMemoryAdapter",
+    "HybridTextMirrorHit",
     "InMemorySessionMemoryArtifactStore",
+    "InMemoryHybridTextMirror",
     "LedgerSessionMemoryArtifactStore",
     "LedgerSourceRefCatalog",
+    "METADATA_FIRST_HYBRID_GRAPH_SCHEMA",
+    "MetadataFirstHybridGraphAdapter",
     "NullGraphMemoryAdapter",
     "OntologyEpisode",
     "OntologyEpisodeBatch",
@@ -66,5 +77,6 @@ __all__ = [
     "episode_from_session_artifact",
     "episode_from_source_ref",
     "graph_env_enabled",
+    "metadata_first_episode",
     "probe_graphiti_connectivity",
 ]
