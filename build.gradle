@@ -16,7 +16,7 @@ java {
 
 pmd {
     toolVersion = '7.3.0'
-    ruleSetFiles = files('config/pmd/ruleset.xml')
+    ruleSetFiles = files('.github/pmd/ruleset.xml')
     ruleSets = []
     ignoreFailures = true
     consoleOutput = false
@@ -62,10 +62,17 @@ tasks.register('cpdCheck', JavaExec) {
     ]
     ignoreExitValue = true
 
+    def cpdOutput = null
     doFirst {
         def reportDir = file("$buildDir/reports/cpd")
         reportDir.mkdirs()
-        standardOutput = new FileOutputStream(new File(reportDir, 'cpd.xml'))
+        cpdOutput = new FileOutputStream(new File(reportDir, 'cpd.xml'))
+        standardOutput = cpdOutput
+    }
+    doLast {
+        if (cpdOutput != null) {
+            cpdOutput.close()
+        }
     }
 }
 

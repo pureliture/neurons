@@ -3,6 +3,13 @@ name: PMD Static Analysis
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "src/main/java/**"
+      - "build.gradle"
+      - "settings.gradle"
+      - "gradle/**"
+      - ".github/pmd/**"
+      - ".github/workflows/pmd.yml"
 
 permissions:
   contents: read
@@ -49,17 +56,17 @@ jobs:
           echo "count=${#files[@]}" >> "$GITHUB_OUTPUT"
           echo "Changed Java files: ${#files[@]}"
 
-      - name: Generate report HTML and LLM PR comment
+      - name: Generate report HTML and PR comment
         run: |
           set -euo pipefail
           artifact_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           if [ -s changed-files.txt ]; then
             mapfile -t changed < changed-files.txt
-            python3 config/pmd/generate_report.py \
+            python3 .github/pmd/generate_report.py \
               --changed-files "${changed[@]}" \
               --artifact-url "$artifact_url"
           else
-            python3 config/pmd/generate_report.py \
+            python3 .github/pmd/generate_report.py \
               --changed-files \
               --artifact-url "$artifact_url"
           fi
@@ -70,7 +77,7 @@ jobs:
         with:
           issue-number: ${{ github.event.pull_request.number }}
           comment-author: github-actions[bot]
-          body-includes: rag-ingress-queue:pmd-pr-comment:v1
+          body-includes: neurons:pmd-pr-comment:v1
 
       - name: Post or update PR comment
         uses: peter-evans/create-or-update-comment@v4

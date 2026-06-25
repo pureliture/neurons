@@ -1,10 +1,10 @@
 <?xml version="1.0"?>
-<ruleset name="rag-ingress-queue PMD ruleset"
+<ruleset name="neurons PMD ruleset"
          xmlns="http://pmd.sourceforge.net/ruleset/2.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://pmd.sourceforge.net/ruleset/2.0.0 https://pmd.sourceforge.io/ruleset_2_0_0.xsd">
 
-    <description>Report-only design and complexity signal rules for PR review.</description>
+    <description>Report-only design and complexity signals for PR review.</description>
 
     <rule ref="category/java/design.xml/CyclomaticComplexity">
         <properties>
