@@ -112,7 +112,9 @@ def ensure_public_safe(value: Any, field: str = "value") -> None:
         for item in value:
             ensure_public_safe(item, field)
     else:
-        _scan_public_safe_text(str(value or ""), field)
+        # str(value) (not ``value or ""``) so falsy scalars like 0/False are scanned
+        # as their real text rather than collapsed to "".
+        _scan_public_safe_text(str(value) if value is not None else "", field)
 
 
 def public_dict(value: dict[str, Any], *, field: str = "value") -> dict[str, Any]:

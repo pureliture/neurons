@@ -516,6 +516,12 @@ def rollback_submitted(*, adapter: Any, submitted: list[dict[str, Any]]) -> Roll
     error_count = 0
     statuses: list[dict[str, Any]] = []
     for triple in requested:
+        if not isinstance(triple, dict):
+            # A malformed jsonl line could load as a non-dict; skip it safely
+            # instead of aborting the whole rollback with an AttributeError.
+            error_count += 1
+            statuses.append({"status": "invalid_key", "content_hash": ""})
+            continue
         target_profile = str(triple.get("target_profile") or "")
         idempotency_key = str(triple.get("idempotency_key") or "")
         content_hash = str(triple.get("content_hash") or "")

@@ -106,12 +106,19 @@ def run_parity_soak(
     cohort = list(queries or [])
     cohort_size = len(cohort)
 
-    # Probe primary coverage BEFORE trusting any recall number. compare_recall
-    # re-fetches internally; primary_fetch is a read so a second call is safe.
+    # Memoize primary_fetch so the coverage probe below and compare_recall's own
+    # internal fetch don't hit the (RAGFlow) primary twice per query.
+    _primary_cache: dict[str, list[dict[str, Any]]] = {}
+
+    def cached_primary_fetch(query: str) -> list[dict[str, Any]]:
+        if query not in _primary_cache:
+            _primary_cache[query] = list(primary_fetch(query) or [])
+        return _primary_cache[query]
+
+    # Probe primary coverage BEFORE trusting any recall number.
     nonempty_primary = 0
     for query in cohort:
-        primary_hits = list(primary_fetch(query) or [])
-        if primary_hits:
+        if cached_primary_fetch(query):
             nonempty_primary += 1
 
     fraction = (nonempty_primary / cohort_size) if cohort_size else 0.0
@@ -130,7 +137,7 @@ def run_parity_soak(
             report={},
         )
 
-    report = compare_recall(cohort, primary_fetch=primary_fetch, mirror_fetch=mirror_fetch, k=k)
+    report = compare_recall(cohort, primary_fetch=cached_primary_fetch, mirror_fetch=mirror_fetch, k=k)
     passed = recall_parity_passes(
         report,
         min_mean_recall_at_k=float(min_mean_recall_at_k),
