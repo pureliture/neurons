@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from dataclasses import replace
 
 from .specs import EmbeddingSpec, ModelConnectionConfig, ModelEndpointSpec, RerankerSpec
 
@@ -17,6 +18,13 @@ def resolve_model_connection_config(
     provider = _value(env, "LLM_BRAIN_GRAPH_LLM_PROVIDER", "GRAPHITI_LLM_PROVIDER", default="openai").lower()
     llm_model = _value(env, "LLM_BRAIN_LLM_MODEL", "MODEL_NAME")
     llm_base_url = _value(env, "LLM_BRAIN_LLM_BASE_URL", "OPENAI_BASE_URL")
+    embedding = resolve_embedding_spec(env)
+    if not _has_value(env, "LLM_BRAIN_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER") and not _has_value(
+        env, "LLM_BRAIN_EMBEDDING_BASE_URL"
+    ):
+        embedding = replace(embedding, provider=provider)
+    if not _has_value(env, "LLM_BRAIN_EMBEDDING_BASE_URL"):
+        embedding = replace(embedding, base_url=llm_base_url)
     return ModelConnectionConfig(
         llm=ModelEndpointSpec(
             provider=provider,
@@ -24,7 +32,7 @@ def resolve_model_connection_config(
             small_model=_value(env, "LLM_BRAIN_SMALL_LLM_MODEL", "SMALL_MODEL_NAME"),
             base_url=llm_base_url,
         ),
-        embedding=resolve_embedding_spec(env),
+        embedding=embedding,
         reranker=resolve_reranker_spec(env, provider=provider, model=llm_model, base_url=llm_base_url),
         fallback_llm_model=_value(
             env,
@@ -79,6 +87,10 @@ def _value(env: Mapping[str, str], primary: str, fallback: str | None = None, *,
         if fallback_value:
             return fallback_value
     return default
+
+
+def _has_value(env: Mapping[str, str], *names: str) -> bool:
+    return any(str(env.get(name) or "").strip() for name in names)
 
 
 def _positive_int(value: str, *, default: int) -> int:
