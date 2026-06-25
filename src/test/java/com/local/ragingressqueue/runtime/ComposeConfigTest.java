@@ -44,12 +44,29 @@ class ComposeConfigTest {
         assertThat(compose).contains("neuron-knowledge couchdb-graph-trigger");
         assertThat(compose).contains("LLM_BRAIN_GRAPH_TRIGGER_INTERVAL_SECONDS");
         assertThat(compose).contains("LLM_BRAIN_GRAPH_TRIGGER_LIMIT");
+        // Hot path is episode-only by default: entity extraction must default off.
+        assertThat(compose).contains("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES: ${LLM_BRAIN_GRAPH_EXTRACT_ENTITIES:-false}");
+        assertThat(compose).doesNotContain("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES: ${LLM_BRAIN_GRAPH_EXTRACT_ENTITIES:-true}");
+        // Bulk semantic lane: off-by-default service on its own opt-in profile.
+        assertThat(compose).contains("llm-brain-bulk-semantic-trigger:");
+        assertThat(compose).contains("profiles: [\"llm-brain-bulk-semantic\"]");
+        assertThat(compose).contains("neuron-knowledge couchdb-bulk-semantic-trigger");
+        assertThat(compose).contains("LLM_BRAIN_BULK_SEMANTIC_TRIGGER_INTERVAL_SECONDS");
+        assertThat(compose).contains("LLM_BRAIN_BULK_SEMANTIC_EMBEDDINGS");
         assertThat(compose).contains("GOOGLE_APPLICATION_CREDENTIALS");
         assertThat(compose).contains("NEO4J_AUTH: ${LLM_BRAIN_NEO4J_USER:-neo4j}/${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}");
         assertThat(compose).contains("LLM_BRAIN_NEO4J_URI: ${LLM_BRAIN_NEO4J_URI:-bolt://llm-brain-neo4j:7687}");
         assertThat(compose).doesNotContain("\n      NEO4J_USER:");
         assertThat(compose).doesNotContain("gemini-3.5-flash-thinking");
-        assertThat(compose).doesNotContain("network_mode: host");
+        // Host networking is allowed for EXACTLY ONE service: neuron-knowledge-mcp
+        // (documented — reach loopback Neo4j/vertex-wrapper/PG while binding the
+        // tailnet interface). The bulk-semantic / graph-trigger lanes and every other
+        // service must stay on the bridge network. Guard the directive count so a new
+        // host-networked service cannot slip in unnoticed (comments are ignored).
+        long hostNetworkDirectives = compose.lines()
+            .filter(line -> line.strip().equals("network_mode: host"))
+            .count();
+        assertThat(hostNetworkDirectives).isEqualTo(1);
         assertThat(compose).doesNotContain("ragflow-server");
         assertThat(compose).doesNotContain("ragflow-redis");
         assertThat(compose).doesNotContain("ragflow-mysql");
@@ -67,6 +84,9 @@ class ComposeConfigTest {
         assertThat(envExample).contains("LLM_BRAIN_LLM_MODEL=gemma-4-26b-a4b-it-maas");
         assertThat(envExample).contains("LLM_BRAIN_SMALL_LLM_MODEL=gemma-4-26b-a4b-it-maas");
         assertThat(envExample).contains("LLM_BRAIN_GRAPH_TRIGGER_INTERVAL_SECONDS=300");
+        assertThat(envExample).contains("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=false");
+        assertThat(envExample).contains("LLM_BRAIN_BULK_SEMANTIC_TRIGGER_INTERVAL_SECONDS=900");
+        assertThat(envExample).contains("LLM_BRAIN_BULK_SEMANTIC_EMBEDDINGS=true");
         assertThat(envExample).doesNotContain("gemini-3.5-flash-thinking");
     }
 
