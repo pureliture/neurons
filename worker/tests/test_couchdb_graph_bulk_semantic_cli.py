@@ -604,3 +604,19 @@ def test_deterministic_writer_omits_vector_procedure_without_embeddings(tmp_path
     entity_calls = [call for call in driver.calls if "entity_data" in call["params"]]
     assert len(entity_calls) == 1
     assert "setNodeVectorProperty" not in entity_calls[0]["query"]
+
+
+@pytest.mark.parametrize(
+    "status, expected_rc",
+    [("ok", 0), ("already_running", 0), ("partial", 1), ("failed", 1)],
+)
+def test_main_exit_code_reflects_report_status(monkeypatch, status, expected_rc):
+    from agent_knowledge.llm_brain_core import bulk_semantic_cli as cli
+
+    monkeypatch.setattr(cli, "_build_source_store", lambda **kwargs: object())
+    monkeypatch.setattr(
+        cli,
+        "run_couchdb_bulk_semantic_projection",
+        lambda **kwargs: {"schema_version": "x", "status": status, "raw_paths_printed": False},
+    )
+    assert cli.main(["--ledger", "/tmp/placeholder.sqlite", "--runtime-dir", "/tmp/rt"]) == expected_rc

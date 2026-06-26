@@ -131,6 +131,8 @@ def run_migration_flow(
         approval=session_memory_approval,
         dataset_name=dataset_name,
         ragflow_url=ragflow_url,
+        project=project,
+        provider=provider,
     )
     graph_argv = _graph_argv(
         ledger_path=ledger_path,
@@ -198,6 +200,8 @@ def _session_memory_argv(
     approval: Path | None,
     dataset_name: str,
     ragflow_url: str,
+    project: str = "",
+    provider: str = "",
 ) -> list[str]:
     argv: list[str] = ["--limit", str(int(limit))]
     if not execute:
@@ -208,6 +212,12 @@ def _session_memory_argv(
         argv.extend(["--dataset-name", dataset_name])
     if ragflow_url:
         argv.extend(["--ragflow-url", ragflow_url])
+    # 흐름이 project/provider로 scope되면 session-memory 단계도 동일 scope로 제한해
+    # 범위 밖 세션을 materialize하지 않게 한다.
+    if project:
+        argv.extend(["--project", project])
+    if provider:
+        argv.extend(["--provider", provider])
     return argv
 
 

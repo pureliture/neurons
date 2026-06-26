@@ -119,7 +119,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(json.dumps(report, sort_keys=True))
-    return 0
+    # failed/partial은 non-zero로 종료해 상위 오케스트레이션(trigger wrapper 등)이
+    # 실패를 성공으로 오판하지 않게 한다. already_running은 no-op이므로 0.
+    return 0 if report.get("status") in {"ok", "already_running"} else 1
 
 
 def run_couchdb_bulk_semantic_projection(
