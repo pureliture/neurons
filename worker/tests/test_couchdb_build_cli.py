@@ -282,6 +282,32 @@ class TestSelectSessionsNeedingProjection:
         selected = _select_sessions_needing_projection(store, limit=0)
         assert len(selected) == 4
 
+    def test_scopes_selection_by_project_and_provider(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        a = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="a")
+        b = _build_synthetic_session(store, provider="codex", project="neurons", raw_id="b")
+        c = _build_synthetic_session(store, provider="claude", project="dendrite", raw_id="c")
+
+        by_project = {
+            s.get("session_id_hash")
+            for s in _select_sessions_needing_projection(store, limit=0, project="neurons")
+        }
+        assert by_project == {a, b}
+
+        by_provider = {
+            s.get("session_id_hash")
+            for s in _select_sessions_needing_projection(store, limit=0, provider="claude")
+        }
+        assert by_provider == {a, c}
+
+        scoped = {
+            s.get("session_id_hash")
+            for s in _select_sessions_needing_projection(
+                store, limit=0, project="neurons", provider="claude"
+            )
+        }
+        assert scoped == {a}
+
 
 # ---------------------------------------------------------------------------
 # Dry-run tests

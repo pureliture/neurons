@@ -6,8 +6,10 @@ from typing import Any
 
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter, UnavailableGraphMemoryAdapter
 from .graphiti_adapter import GraphitiNeo4jGraphMemoryAdapter, probe_graphiti_connectivity
+from .hybrid_graph import MetadataFirstHybridGraphAdapter
 
 _TRUTHY = {"1", "true", "yes", "on"}
+_FALSY = {"0", "false", "no", "off", ""}
 
 # Connectivity probe seam. Tests inject a failing probe to exercise the
 # required=True fail-fast path without a live Neo4j. The probe receives the
@@ -18,6 +20,14 @@ GraphConnectivityProbe = Callable[[Any], None]
 def graph_env_enabled(environ: Mapping[str, str] | None = None) -> bool:
     env = os.environ if environ is None else environ
     return str(env.get("LLM_BRAIN_GRAPH_ENABLED", "")).lower() in _TRUTHY
+
+
+def metadata_first_hybrid_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    env = os.environ if environ is None else environ
+    value = str(env.get("LLM_BRAIN_GRAPH_METADATA_FIRST_HYBRID", "")).lower()
+    if value in _FALSY:
+        return False
+    return value in _TRUTHY
 
 
 def build_graph_adapter_from_env(
@@ -63,8 +73,11 @@ def build_graph_adapter_from_env(
             raise ValueError("graph is required but not enabled")
         return NullGraphMemoryAdapter()
 
+    metadata_first = metadata_first_hybrid_enabled(env)
+    adapter_env = _metadata_first_graphiti_env(env) if metadata_first else env
+
     try:
-        adapter = GraphitiNeo4jGraphMemoryAdapter.from_env(env)
+        adapter = GraphitiNeo4jGraphMemoryAdapter.from_env(adapter_env)
     except Exception as exc:
         if require:
             raise
@@ -75,4 +88,13 @@ def build_graph_adapter_from_env(
         # instead of surfacing as a false 'available' read later.
         connectivity_probe(adapter)
 
+    if metadata_first:
+        return MetadataFirstHybridGraphAdapter(adapter)
     return adapter
+
+
+def _metadata_first_graphiti_env(env: Mapping[str, str]) -> dict[str, str]:
+    graphiti_env = dict(env)
+    graphiti_env["LLM_BRAIN_GRAPH_EXTRACT_ENTITIES"] = "false"
+    graphiti_env.pop("LLM_BRAIN_GRAPH_FORCE_REEXTRACT_ENTITIES", None)
+    return graphiti_env

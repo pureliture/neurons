@@ -20,8 +20,8 @@ from .context import BrainReadService
 from .document_bridge import DocumentBridge
 from .event_replay import BrainEventReplayStore
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
-from .models import BrainEventEnvelope, SessionMemoryArtifact, SourceRefRecord
-from .ontology import episode_from_memory_card
+from .models import BrainEventEnvelope, OntologyEpisode, SessionMemoryArtifact, SourceRefRecord
+from .ontology import episode_from_memory_card, episode_from_session_artifact
 from .source_ref import SourceRefCatalog, SourceRefResolver
 
 # `episode_from_memory_card` is a pure card->episode mapper. It lives in
@@ -31,11 +31,32 @@ from .source_ref import SourceRefCatalog, SourceRefResolver
 __all__ = [
     "episode_from_memory_card",
     "materialize_artifact_from_couchdb_source",
+    "session_episode_from_couchdb_source",
+    "extraction_text_from_couchdb_chunks",
     "brain_event_from_ingress_payload",
     "source_ref_from_catalog_event",
     "build_runtime_brain_service",
     "replay_ingress_events",
 ]
+
+# Bound the per-session extraction body. The graph entity pass (an LLM call) is
+# the cost-driver; a single session can hold many conversation chunks, so the
+# joined prose is capped here as well as in OntologyEpisode.__post_init__ to keep
+# one episode from shipping an unbounded extraction body.
+_MAX_EXTRACTION_CHARS = 8000
+_CHUNK_METADATA_HEADER_KEYS = frozenset(
+    {
+        "session_id_hash",
+        "turn_start_index",
+        "turn_end_index",
+        "turn_part_index",
+        "turn_part_count",
+        "part_index",
+        "part_count",
+        "char_start",
+        "char_end",
+    }
+)
 
 
 def materialize_artifact_from_couchdb_source(
@@ -94,6 +115,133 @@ def materialize_artifact_from_couchdb_source(
     if artifact_store is not None:
         artifact_store.upsert(artifact)
     return artifact
+
+
+def extraction_text_from_couchdb_chunks(
+    *,
+    session_id_hash: str,
+    source_store: CouchDBSourceStore,
+    max_chars: int = _MAX_EXTRACTION_CHARS,
+) -> str:
+    """Join a session's CouchDB conversation-chunk bodies into extraction prose.
+
+    The conversation_chunk ``body`` is already public-safe (built via
+    ``redact_public_ingress_text`` + ``assert_source_text_clean`` in
+    ``build_conversation_chunk_document``), so this only fetches, orders, and
+    bounds it. Chunks are ordered by ``turn_start_index`` (then ``_id``) so the
+    prose reads in conversation order. The result is the REAL conversation
+    content the entity pass should extract from -- not the statistics summary.
+
+    Returns "" when the session has no conversation chunks, which the caller can
+    treat as "no prose sourced" (the adapter then falls back to the JSON body and
+    logs the generic-only regression).
+    """
+
+    chunks = source_store.find_by_session(
+        session_id_hash=session_id_hash,
+        doc_type=SourceDocType.CONVERSATION_CHUNK,
+    )
+    chunks = sorted(chunks, key=_conversation_chunk_order_key)
+    # Accumulate against the budget and stop early so a large session never
+    # materializes the full concatenation before the cap is applied. Bounding here
+    # as well as in OntologyEpisode.__post_init__ is intentional: public_safe_text
+    # in the model is the authoritative redaction+bound, this is the early cap.
+    separator = "\n\n"
+    budget = max_chars
+    parts: list[str] = []
+    for doc in chunks:
+        if budget <= 0:
+            break
+        body = _strip_chunk_metadata_header(str(doc.get("body") or ""))
+        if not body:
+            continue
+        if parts:
+            # join() will insert a separator before this part; charge it first.
+            budget -= len(separator)
+            if budget <= 0:
+                break
+        if len(body) > budget:
+            parts.append(body[:budget])
+            break
+        parts.append(body)
+        budget -= len(body)
+    prose = separator.join(parts)
+    return prose[:max_chars]
+
+
+def _conversation_chunk_order_key(doc: Mapping[str, Any]) -> tuple[int, int, int, int, str]:
+    return (
+        _safe_int(doc.get("turn_start_index")),
+        _safe_int(doc.get("turn_end_index")),
+        _safe_int(doc.get("part_index") or doc.get("turn_part_index")),
+        _safe_int(doc.get("char_start")),
+        str(doc.get("_id") or ""),
+    )
+
+
+def _strip_chunk_metadata_header(text: str) -> str:
+    # A metadata header is a contiguous run of ``key: value`` lines whose keys are
+    # all known chunk-metadata keys, terminated by a blank separator line. Require
+    # that blank-line boundary: without it the leading lines are real conversation
+    # prose that merely happens to look like ``key: value`` (e.g. a first sentence
+    # such as "char_start: where the bug begins"), and stripping them would drop
+    # the opening of the turn.
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if not stripped:
+            break
+        key, sep, _value = stripped.partition(":")
+        if sep and key.strip() in _CHUNK_METADATA_HEADER_KEYS:
+            index += 1
+            continue
+        # First non-metadata, non-blank line -> no recognizable header block.
+        return text.strip()
+    # No header lines consumed, or the run was not closed by a blank separator
+    # before end-of-text -> not a header; keep the body intact.
+    if index == 0 or index >= len(lines):
+        return text.strip()
+    # lines[index] is the blank separator; drop the header block and that line.
+    return "\n".join(lines[index + 1 :]).strip()
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def session_episode_from_couchdb_source(
+    *,
+    session_id_hash: str,
+    source_store: CouchDBSourceStore,
+    artifact_store: SessionMemoryArtifactStore | None = None,
+    ontology_version: str = "1.0.0",
+    extractor_version: str = "runtime.1",
+) -> OntologyEpisode:
+    """Materialize a Session OntologyEpisode carrying real conversation prose.
+
+    This is the materialize-time sourcing seam: the CouchDB source store IS
+    reachable here (unlike the ledger-only projection CLI path), so the real
+    redacted conversation-chunk prose is sourced and carried on the episode's
+    transient ``extraction_text``. The stored node content stays the canonical
+    JSON (recall-safe); only the entity-pass extraction input becomes real prose.
+    """
+
+    artifact = materialize_artifact_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=source_store,
+        artifact_store=artifact_store,
+        ontology_version=ontology_version,
+        extractor_version=extractor_version,
+    )
+    extraction_text = extraction_text_from_couchdb_chunks(
+        session_id_hash=session_id_hash,
+        source_store=source_store,
+    )
+    return episode_from_session_artifact(artifact, extraction_text=extraction_text)
 
 
 def brain_event_from_ingress_payload(

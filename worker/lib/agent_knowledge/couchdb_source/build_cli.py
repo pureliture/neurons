@@ -32,8 +32,15 @@ def _build_auth_header(user: str, password: str) -> str:
     return f"Basic {token}"
 
 
-def _select_sessions_needing_projection(store, limit: int) -> list[dict]:
-    """Return transcript_session docs whose projection_state is missing or not PROJECTED."""
+def _select_sessions_needing_projection(
+    store, limit: int, *, project: str = "", provider: str = ""
+) -> list[dict]:
+    """Return transcript_session docs whose projection_state is missing or not PROJECTED.
+
+    When ``project``/``provider`` are set the selection is scoped to that subset so a
+    scoped migration flow does not materialize out-of-scope sessions in the
+    session-memory step.
+    """
     from .document_model import ProjectionStatus, SourceDocType, projection_state_doc_id
 
     sessions = store.find_by_type(
@@ -46,6 +53,10 @@ def _select_sessions_needing_projection(store, limit: int) -> list[dict]:
             break
         session_id_hash = str(session.get("session_id_hash") or "")
         if not session_id_hash:
+            continue
+        if project and str(session.get("project") or "") != project:
+            continue
+        if provider and str(session.get("provider") or "") != provider:
             continue
         state_doc = store.get(projection_state_doc_id(session_id_hash))
         if state_doc is None or str(state_doc.get("projection_status") or "") != ProjectionStatus.PROJECTED:
@@ -60,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--dry-run", action="store_true", help="Report selection counts; no RAGFlow writes.")
     parser.add_argument("--limit", type=int, default=0, help="Maximum sessions to process (0 = unlimited).")
+    parser.add_argument("--project", default="", help="Scope selection to this project (empty = all).")
+    parser.add_argument("--provider", default="", help="Scope selection to this provider (empty = all).")
     parser.add_argument("--approval", default="", help="Path to live-approval JSON (required for non-dry-run).")
     parser.add_argument("--dataset-name", default="session-memory", help="RAGFlow dataset name (default: session-memory).")
     parser.add_argument("--ragflow-url", default="", help="RAGFlow base URL (overrides RAGFLOW_URL env).")
@@ -139,7 +152,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # --- Session selection --------------------------------------------------
-    sessions = _select_sessions_needing_projection(store, limit=args.limit)
+    sessions = _select_sessions_needing_projection(
+        store, limit=args.limit, project=str(args.project or ""), provider=str(args.provider or "")
+    )
     selected_count = len(sessions)
 
     if args.dry_run:

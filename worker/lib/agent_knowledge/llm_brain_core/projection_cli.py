@@ -6,10 +6,18 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import os
+
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.brain_read_model import LegacyLedgerBrainReadModel
 
-from .ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
+from .ledger_adapter import (
+    EXTRACTION_LEVEL_ENTITY,
+    EXTRACTION_LEVEL_EPISODIC,
+    LedgerGraphProjectionStateStore,
+    LedgerSessionMemoryArtifactStore,
+    LedgerSourceRefCatalog,
+)
 from .models import PROJECTION_SCHEMA_VERSION
 from .projection import GraphProjectionWorker
 from .runtime import source_ref_from_catalog_event
@@ -37,6 +45,26 @@ def main(argv: list[str] | None = None) -> int:
             "instead of re-upserting the whole window."
         ),
     )
+    parser.add_argument(
+        "--extract-entities",
+        action="store_true",
+        help=(
+            "Run the entity pass (Graphiti add_episode -> EntityNode/RELATES_TO). "
+            "Resume is narrowed to episodes already projected at the entity level, "
+            "so an earlier episodic-only run does not block the entity pass. "
+            "Overrides LLM_BRAIN_GRAPH_EXTRACT_ENTITIES for this run."
+        ),
+    )
+    parser.add_argument(
+        "--reextract-entities",
+        action="store_true",
+        help=(
+            "Promote episodes already projected episodic-only to the entity pass. "
+            "Implies --extract-entities and bypasses the entity-level resume guard "
+            "and adapter entity-extracted guard so the entity pass re-runs even "
+            "when an episodic/entity record exists."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -51,6 +79,11 @@ def main(argv: list[str] | None = None) -> int:
             include_memory_cards=not bool(args.skip_memory_cards),
             include_source_refs=not bool(args.skip_source_refs),
             resume_projected_ids=_load_resume_ids([Path(item) for item in args.resume_projected_ids or []]),
+            # None when neither entity flag is set: keep the env-driven default
+            # (LLM_BRAIN_GRAPH_EXTRACT_ENTITIES) untouched so a plain run is
+            # behavior-preserving. A flag forces the entity pass on for this run.
+            extract_entities=(True if (args.extract_entities or args.reextract_entities) else None),
+            reextract_entities=bool(args.reextract_entities),
         )
     except Exception as exc:
         print(
@@ -83,10 +116,13 @@ def run_projection(
     include_memory_cards: bool,
     include_source_refs: bool,
     resume_projected_ids: set[str] | None = None,
+    extract_entities: bool | None = None,
+    reextract_entities: bool = False,
 ) -> dict[str, Any]:
     ledger = Ledger(ledger_path)
     artifact_store = LedgerSessionMemoryArtifactStore(ledger)
     source_catalog = LedgerSourceRefCatalog(ledger)
+    projection_state_store = LedgerGraphProjectionStateStore(ledger)
     imported, import_failures, imported_records = _import_source_refs(source_catalog, source_ref_jsonl)
     if import_failures:
         return {
@@ -136,16 +172,53 @@ def run_projection(
     source_refs = imported_records if include_source_refs else []
     artifacts_truncated = include_artifacts and len(artifacts) >= artifact_bound
     cards_truncated = include_memory_cards and len(cards) >= max(1, int(limit))
+    # The entity pass on/off default stays env-driven
+    # (LLM_BRAIN_GRAPH_EXTRACT_ENTITIES); --extract-entities / --reextract-entities
+    # force it on for this run by overlaying the env the adapter reads. None means
+    # "no override": keep the existing env default (behavior-preserving). Reextract
+    # also tells the adapter to bypass its already-MENTIONS guard; otherwise the
+    # durable projection resume would be bypassed but Graphiti would still return
+    # adapter-level duplicates for already-extracted episodes.
+    graph_environ = None
+    if extract_entities is not None or reextract_entities:
+        graph_environ = dict(os.environ)
+        if extract_entities is not None:
+            graph_environ["LLM_BRAIN_GRAPH_EXTRACT_ENTITIES"] = "true" if extract_entities else "false"
+        if reextract_entities:
+            graph_environ["LLM_BRAIN_GRAPH_EXTRACT_ENTITIES"] = "true"
+            graph_environ["LLM_BRAIN_GRAPH_FORCE_REEXTRACT_ENTITIES"] = "true"
     graph_adapter = build_graph_adapter_from_env(
+        environ=graph_environ,
         enable_flag=True if enable_graph else None,
         required_flag=bool(graph_required),
     )
-    projection = GraphProjectionWorker(graph_adapter).project_batch(
+    # Read seam: union the durable projection_state SoT with the file-based
+    # resume hint. The --resume-projected-ids file stays backward-compatible; the
+    # store adds durability so a re-run resumes even without a resume file.
+    #
+    # Level-narrowed resume: an entity pass resumes only on ids already projected
+    # AT the entity level, so an earlier episodic-only run does not skip the entity
+    # pass. --reextract-entities bypasses the entity-level resume entirely so the
+    # entity pass re-runs over episodic-only episodes (the file-based resume hint
+    # is still honored as an explicit user-supplied skip list).
+    target_level = (
+        EXTRACTION_LEVEL_ENTITY
+        if bool(getattr(graph_adapter, "_extract_entities", False))
+        else EXTRACTION_LEVEL_EPISODIC
+    )
+    resume_union: set[str] = set(resume_projected_ids or set())
+    if not reextract_entities:
+        resume_union |= projection_state_store.list_projected_ids(
+            project, extraction_level=target_level
+        )
+    projection = GraphProjectionWorker(
+        graph_adapter, projection_state_store=projection_state_store
+    ).project_batch(
         artifacts=artifacts,
         memory_cards=cards,
         source_refs=source_refs,
         project=project,
-        resume_projected_ids=resume_projected_ids,
+        resume_projected_ids=resume_union,
     )
     projection_dict = projection.to_dict()
     status = "ok" if projection.status == "succeeded" and not import_failures else "failed"

@@ -4,8 +4,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_knowledge.llm_brain_core.graph import NullGraphMemoryAdapter, UnavailableGraphMemoryAdapter
-from agent_knowledge.llm_brain_core.runtime_graph import build_graph_adapter_from_env, graph_env_enabled
+from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter, NullGraphMemoryAdapter, UnavailableGraphMemoryAdapter
+from agent_knowledge.llm_brain_core.models import OntologyEpisode
+from agent_knowledge.llm_brain_core.runtime_graph import (
+    build_graph_adapter_from_env,
+    graph_env_enabled,
+    metadata_first_hybrid_enabled,
+)
 
 
 def test_graph_env_enabled_reads_explicit_switch():
@@ -24,6 +29,58 @@ def test_graph_env_enabled_respects_explicit_empty_environment(monkeypatch):
 
     assert graph_env_enabled({}) is False
     assert isinstance(build_graph_adapter_from_env({}, required=False), NullGraphMemoryAdapter)
+
+
+def test_metadata_first_hybrid_env_enabled_reads_explicit_switch():
+    assert metadata_first_hybrid_enabled({"LLM_BRAIN_GRAPH_METADATA_FIRST_HYBRID": "true"}) is True
+    assert metadata_first_hybrid_enabled({"LLM_BRAIN_GRAPH_METADATA_FIRST_HYBRID": "1"}) is True
+    assert metadata_first_hybrid_enabled({"LLM_BRAIN_GRAPH_METADATA_FIRST_HYBRID": "on"}) is True
+    assert metadata_first_hybrid_enabled({"LLM_BRAIN_GRAPH_METADATA_FIRST_HYBRID": "false"}) is False
+    assert metadata_first_hybrid_enabled({"LLM_BRAIN_GRAPH_METADATA_FIRST_HYBRID": "0"}) is False
+    assert metadata_first_hybrid_enabled({}) is False
+
+
+def test_graph_builder_wraps_metadata_first_hybrid_and_disables_entity_extraction(monkeypatch):
+    graph = FakeGraphMemoryAdapter()
+    captured_env: list[dict[str, str]] = []
+
+    def _fake_from_env(env):
+        captured_env.append(dict(env))
+        return graph
+
+    monkeypatch.setattr(
+        "agent_knowledge.llm_brain_core.runtime_graph.GraphitiNeo4jGraphMemoryAdapter.from_env",
+        staticmethod(_fake_from_env),
+    )
+
+    adapter = build_graph_adapter_from_env(
+        {
+            "LLM_BRAIN_GRAPH_METADATA_FIRST_HYBRID": "true",
+            "LLM_BRAIN_GRAPH_EXTRACT_ENTITIES": "true",
+            "LLM_BRAIN_GRAPH_FORCE_REEXTRACT_ENTITIES": "true",
+        },
+        enable_flag=True,
+    )
+    episode = OntologyEpisode.from_payload(
+        event_id="evt_hybrid_runtime",
+        entity_type="Task",
+        natural_id="task:hybrid-runtime",
+        payload={
+            "brain_id": "/project/neurons",
+            "title": "Run expensive semantic extraction",
+            "typed_payload": {"next_action": "Use metadata-first graph"},
+        },
+        source_event_ids=["evt_hybrid_runtime"],
+        source_ref_ids=["src_hybrid_runtime"],
+        observed_at="2026-06-22T00:00:00+00:00",
+    )
+
+    assert adapter.upsert_episode(episode) == "inserted"
+    stored = graph.get_episodes_by_ids([episode.episode_id], brain_id="/project/neurons")[0]
+    assert stored.payload["metadata_first"] is True
+    assert "typed_payload" not in stored.payload
+    assert captured_env[0]["LLM_BRAIN_GRAPH_EXTRACT_ENTITIES"] == "false"
+    assert "LLM_BRAIN_GRAPH_FORCE_REEXTRACT_ENTITIES" not in captured_env[0]
 
 
 def test_graph_adapter_required_but_disabled_fails_before_backend_initialization():

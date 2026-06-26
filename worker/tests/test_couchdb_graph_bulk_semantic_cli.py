@@ -1,0 +1,622 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+
+from agent_knowledge.couchdb_source import document_model as dm
+from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
+from agent_knowledge.llm_brain_core.bulk_semantic import (
+    BulkSemanticEntity,
+    BulkSemanticExtractionResult,
+    BulkSemanticRelation,
+    BulkSemanticSessionResult,
+    BulkSemanticWriteReport,
+    DeterministicGraphitiSemanticWriter,
+    OpenAICompatibleBulkSemanticExtractor,
+    make_bulk_session_input,
+    parse_bulk_semantic_result,
+)
+from agent_knowledge.llm_brain_core.bulk_semantic_cli import run_couchdb_bulk_semantic_projection
+from agent_knowledge.llm_brain_core.graph_projection_status_cli import build_graph_projection_status
+from agent_knowledge.llm_brain_core.runtime import session_episode_from_couchdb_source
+from agent_knowledge.session_memory.transcript_model import TranscriptChunk, TranscriptSession
+
+PROVIDER = "codex"
+PROJECT = "neurons"
+
+
+class _FakeBulkExtractor:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def extract(self, batch):  # type: ignore[no-untyped-def]
+        self.calls.append([item.session_key for item in batch])
+        sessions = []
+        for item in batch:
+            sessions.append(
+                BulkSemanticSessionResult(
+                    session_key=item.session_key,
+                    entities=(
+                        BulkSemanticEntity(name=f"Neo4j {item.session_key}", type="Tool", summary="Graph backend"),
+                        BulkSemanticEntity(name=f"Graphiti {item.session_key}", type="Library", summary="Graph layer"),
+                    ),
+                    relations=(
+                        BulkSemanticRelation(
+                            source=f"Graphiti {item.session_key}",
+                            target=f"Neo4j {item.session_key}",
+                            type="stores_in",
+                            fact="Graphiti stores semantic graph data in Neo4j.",
+                        ),
+                    ),
+                )
+            )
+        return BulkSemanticExtractionResult(tuple(sessions))
+
+
+class _ExplodingExtractor:
+    def extract(self, batch):  # type: ignore[no-untyped-def]
+        _ = batch
+        raise AssertionError("extractor should not run")
+
+
+class _FailingExtractor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def extract(self, batch):  # type: ignore[no-untyped-def]
+        _ = batch
+        self.calls += 1
+        raise ValueError("synthetic extraction failure")
+
+
+class _BatchJsonThenSingleExtractor:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def extract(self, batch):  # type: ignore[no-untyped-def]
+        keys = [item.session_key for item in batch]
+        self.calls.append(keys)
+        if len(batch) > 1:
+            raise json.JSONDecodeError("synthetic batch parse failure", "", 0)
+        item = batch[0]
+        return BulkSemanticExtractionResult(
+            (
+                BulkSemanticSessionResult(
+                    session_key=item.session_key,
+                    entities=(
+                        BulkSemanticEntity(
+                            name=f"Recovered {item.session_key}",
+                            type="Concept",
+                            summary="Recovered from singleton fallback",
+                        ),
+                    ),
+                    relations=(),
+                ),
+            )
+        )
+
+
+class _BatchValueThenSingleExtractor:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def extract(self, batch):  # type: ignore[no-untyped-def]
+        keys = [item.session_key for item in batch]
+        self.calls.append(keys)
+        if len(batch) > 1:
+            raise ValueError("synthetic batch value failure")
+        item = batch[0]
+        return BulkSemanticExtractionResult(
+            (
+                BulkSemanticSessionResult(
+                    session_key=item.session_key,
+                    entities=(
+                        BulkSemanticEntity(
+                            name=f"Recovered {item.session_key}",
+                            type="Concept",
+                            summary="Recovered from singleton fallback",
+                        ),
+                    ),
+                    relations=(),
+                ),
+            )
+        )
+
+
+class _FakeBulkWriter:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def write_batch(self, inputs, extraction, *, allow_empty_sessions=False):  # type: ignore[no-untyped-def]
+        _ = allow_empty_sessions
+        self.calls.append([item.session_key for item in inputs])
+        sessions = extraction.by_session_key()
+        return BulkSemanticWriteReport(
+            projected=len(inputs),
+            entities_written=sum(len(sessions[item.session_key].entities) for item in inputs),
+            relations_written=sum(len(sessions[item.session_key].relations) for item in inputs),
+            projected_natural_ids=tuple(item.episode.natural_id for item in inputs),
+        )
+
+
+class _PartialBulkWriter:
+    """Writer that only durably writes a prefix of the batch and reports it honestly."""
+
+    def __init__(self, write_count: int) -> None:
+        self.write_count = write_count
+        self.calls: list[list[str]] = []
+
+    def write_batch(self, inputs, extraction, *, allow_empty_sessions=False):  # type: ignore[no-untyped-def]
+        _ = allow_empty_sessions
+        self.calls.append([item.session_key for item in inputs])
+        sessions = extraction.by_session_key()
+        written = list(inputs)[: self.write_count]
+        return BulkSemanticWriteReport(
+            projected=len(written),
+            entities_written=sum(len(sessions[item.session_key].entities) for item in written),
+            relations_written=sum(len(sessions[item.session_key].relations) for item in written),
+            projected_natural_ids=tuple(item.episode.natural_id for item in written),
+        )
+
+
+class _FakeEmbedder:
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        self.texts = list(texts)
+        return [[float(index), float(index) + 0.5] for index, _text in enumerate(texts)]
+
+
+class _FakeAsyncDriver:
+    graph_operations_interface = None
+
+    def __init__(self) -> None:
+        from graphiti_core.driver.driver import GraphProvider
+
+        self.provider = GraphProvider.NEO4J
+        self.calls: list[dict[str, Any]] = []
+
+    async def execute_query(self, query, **params):  # type: ignore[no-untyped-def]
+        self.calls.append({"query": str(query), "params": dict(params)})
+        return ([], None, None)
+
+
+def _seed_session(
+    store: InMemoryCouchDBSourceStore,
+    *,
+    raw_id: str,
+    body: str = "Graphiti writes semantic entities into Neo4j using MENTIONS and RELATES_TO edges.",
+) -> str:
+    sid = dm.build_session_id_hash(PROVIDER, raw_id)
+    session = TranscriptSession(
+        session_id_hash=sid,
+        provider=PROVIDER,
+        project=PROJECT,
+        started_at="2026-06-21T00:00:00Z",
+    )
+    store.put(dm.build_transcript_session_document(session=session))
+    chunk = TranscriptChunk.from_text(
+        chunk_id=f"chunk_{raw_id}",
+        session_id_hash=sid,
+        provider=PROVIDER,
+        project=PROJECT,
+        turn_start_index=0,
+        turn_end_index=0,
+        text=body,
+    )
+    chunk_doc = dm.build_conversation_chunk_document(chunk=chunk)
+    store.put(chunk_doc)
+    store.put(
+        dm.build_coverage_manifest_document(
+            session_id_hash=sid,
+            provider=PROVIDER,
+            project=PROJECT,
+            conversation_chunk_count=1,
+            tool_evidence_bundle_count=0,
+            conversation_content_hashes=[chunk_doc["content_hash"]],
+            tool_evidence_coverage_hashes=[],
+            project_authority={
+                "project": PROJECT,
+                "ambiguous": False,
+                "eligible_for_retirement": True,
+            },
+        )
+    )
+    return sid
+
+
+def test_bulk_semantic_projects_five_sessions_per_llm_call_and_marks_entity_state(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(6):
+        _seed_session(store, raw_id=f"bulk-{index}")
+    extractor = _FakeBulkExtractor()
+    writer = _FakeBulkWriter()
+
+    report = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=6,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=5,
+        max_projects=5,
+        extractor=extractor,
+        writer=writer,
+    )
+
+    assert report["status"] == "ok"
+    assert report["projection"]["attempted"] == 5
+    assert report["projection"]["projected"] == 5
+    assert report["projection"]["failed"] == 0
+    assert report["semantic"]["llm_batches"] == 1
+    assert extractor.calls == [["s1", "s2", "s3", "s4", "s5"]]
+    assert writer.calls == [["s1", "s2", "s3", "s4", "s5"]]
+    assert report["semantic"]["entities_written"] == 10
+    assert report["semantic"]["relations_written"] == 5
+    assert report["raw_paths_printed"] is False
+
+    status = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+    )
+    assert status["projection_state"]["entity_session_projected"] == 5
+    assert status["projection_state"]["entity_session_backlog"] == 1
+
+
+def test_bulk_semantic_marks_only_writer_confirmed_episodes(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(5):
+        _seed_session(store, raw_id=f"partial-{index}")
+    extractor = _FakeBulkExtractor()
+    writer = _PartialBulkWriter(write_count=3)
+
+    report = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=5,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=5,
+        extractor=extractor,
+        writer=writer,
+    )
+
+    # writer only durably wrote 3 of 5; only those may be marked projected.
+    assert report["projection"]["projected"] == 3
+
+    status = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+    )
+    assert status["projection_state"]["entity_session_projected"] == 3
+    assert status["projection_state"]["entity_session_backlog"] == 2
+
+    # the 2 unwritten sessions must NOT be durably skipped on resume.
+    resume_writer = _FakeBulkWriter()
+    resume = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=5,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=5,
+        extractor=_FakeBulkExtractor(),
+        writer=resume_writer,
+    )
+    assert resume["projection"]["skipped_resumed"] == 3
+    assert resume["projection"]["projected"] == 2
+    assert resume_writer.calls and len(resume_writer.calls[0]) == 2
+
+
+def test_bulk_semantic_resume_skips_without_llm_call(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(3):
+        _seed_session(store, raw_id=f"resume-{index}")
+
+    first = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=3,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=3,
+        extractor=_FakeBulkExtractor(),
+        writer=_FakeBulkWriter(),
+    )
+    assert first["projection"]["projected"] == 3
+
+    second = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=3,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=3,
+        extractor=_ExplodingExtractor(),
+        writer=_FakeBulkWriter(),
+    )
+
+    assert second["projection"]["projected"] == 0
+    assert second["projection"]["skipped_resumed"] == 3
+    assert second["semantic"]["llm_batches"] == 0
+    assert second["projection"]["failed"] == 0
+
+
+def test_bulk_semantic_max_projects_caps_below_batch_size(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(4):
+        _seed_session(store, raw_id=f"cap-{index}")
+    extractor = _FakeBulkExtractor()
+
+    report = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=4,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=5,
+        max_projects=2,
+        extractor=extractor,
+        writer=_FakeBulkWriter(),
+    )
+
+    assert report["projection"]["attempted"] == 2
+    assert report["projection"]["projected"] == 2
+    assert report["projection"]["stopped_after_max_projects"] is True
+    assert extractor.calls == [["s1", "s2"]]
+
+
+def test_bulk_semantic_max_projects_caps_failed_extraction_batches(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(10):
+        _seed_session(store, raw_id=f"failing-cap-{index}")
+    extractor = _FailingExtractor()
+    dead_letter = tmp_path / "dead-letter.jsonl"
+
+    report = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=10,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=5,
+        max_projects=5,
+        dead_letter_jsonl=dead_letter,
+        extractor=extractor,
+        writer=_FakeBulkWriter(),
+    )
+
+    assert report["status"] == "failed"
+    assert report["projection"]["attempted"] == 5
+    assert report["projection"]["materialized"] == 5
+    assert report["projection"]["projected"] == 0
+    assert report["projection"]["failed"] == 5
+    assert report["projection"]["stopped_after_max_projects"] is True
+    assert report["semantic"]["llm_batches"] == 6
+    assert report["semantic"]["fallback_single_session_batches"] == 5
+    assert extractor.calls == 6
+    assert len(dead_letter.read_text(encoding="utf-8").splitlines()) == 5
+
+
+def test_bulk_semantic_json_batch_failure_falls_back_to_single_sessions(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(5):
+        _seed_session(store, raw_id=f"json-fallback-{index}")
+    extractor = _BatchJsonThenSingleExtractor()
+    writer = _FakeBulkWriter()
+    dead_letter = tmp_path / "dead-letter.jsonl"
+
+    report = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=5,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=5,
+        dead_letter_jsonl=dead_letter,
+        extractor=extractor,
+        writer=writer,
+    )
+
+    assert report["status"] == "ok"
+    assert report["projection"]["projected"] == 5
+    assert report["projection"]["failed"] == 0
+    assert report["projection"]["failure_reasons"] == {}
+    assert report["semantic"]["llm_batches"] == 6
+    assert report["semantic"]["fallback_single_session_batches"] == 5
+    assert extractor.calls == [["s1", "s2", "s3", "s4", "s5"], ["s1"], ["s2"], ["s3"], ["s4"], ["s5"]]
+    assert writer.calls == [["s1"], ["s2"], ["s3"], ["s4"], ["s5"]]
+    assert not dead_letter.exists()
+
+
+def test_bulk_semantic_value_batch_failure_falls_back_to_single_sessions(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(5):
+        _seed_session(store, raw_id=f"value-fallback-{index}")
+    extractor = _BatchValueThenSingleExtractor()
+    writer = _FakeBulkWriter()
+    dead_letter = tmp_path / "dead-letter.jsonl"
+
+    report = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=5,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=5,
+        dead_letter_jsonl=dead_letter,
+        extractor=extractor,
+        writer=writer,
+    )
+
+    assert report["status"] == "ok"
+    assert report["projection"]["projected"] == 5
+    assert report["projection"]["failed"] == 0
+    assert report["projection"]["failure_reasons"] == {}
+    assert report["semantic"]["llm_batches"] == 6
+    assert report["semantic"]["fallback_single_session_batches"] == 5
+    assert extractor.calls == [["s1", "s2", "s3", "s4", "s5"], ["s1"], ["s2"], ["s3"], ["s4"], ["s5"]]
+    assert writer.calls == [["s1"], ["s2"], ["s3"], ["s4"], ["s5"]]
+    assert not dead_letter.exists()
+
+
+def test_bulk_semantic_parse_accepts_aliases_and_rejects_private_output():
+    parsed = parse_bulk_semantic_result(
+        {
+            "sessions": [
+                {
+                    "session_key": "s1",
+                    "entities": [{"entity_name": "Neo4j", "entity_type": "Tool"}],
+                    "relations": [],
+                }
+            ]
+        }
+    )
+    assert parsed.sessions[0].entities[0].name == "Neo4j"
+    assert parsed.sessions[0].entities[0].type == "Tool"
+
+    with pytest.raises(ValueError):
+        parse_bulk_semantic_result(
+            {
+                "sessions": [
+                    {
+                        "session_key": "s1",
+                        "entities": [{"name": "/Users/example/private.txt", "type": "File"}],
+                        "relations": [],
+                    }
+                ]
+            }
+        )
+
+
+def test_openai_bulk_extractor_accepts_json_wrapped_in_prose():
+    captured = {}
+
+    def fake_post(url, *, headers, body, timeout):  # type: ignore[no-untyped-def]
+        _ = (url, headers, timeout)
+        captured.update(json.loads(body))
+        return json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": 'Here is the JSON:\\n{"sessions":[{"session_key":"s1","entities":[{"name":"Graphiti","type":"Library","summary":""}],"relations":[]}]}',
+                        }
+                    }
+                ]
+            }
+        )
+
+    extractor = OpenAICompatibleBulkSemanticExtractor(
+        base_url="http://example.test/v1",
+        model="gemma-4-26b-a4b-it-maas",
+        post_fn=fake_post,
+    )
+    result = extractor.extract([])
+
+    assert result.sessions[0].entities[0].name == "Graphiti"
+    assert "strict" not in captured["response_format"]["json_schema"]
+    properties = captured["response_format"]["json_schema"]["schema"]["properties"]
+    assert properties["sessions"]["items"]["properties"]["entities"]["minItems"] == 1
+
+
+def test_deterministic_writer_uses_graphiti_compatible_nodes_and_edges(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    sid = _seed_session(store, raw_id="writer")
+    episode = session_episode_from_couchdb_source(session_id_hash=sid, source_store=store)
+    item = make_bulk_session_input(session_key="s1", episode=episode, max_chars=800)
+    extraction = BulkSemanticExtractionResult(
+        (
+            BulkSemanticSessionResult(
+                session_key="s1",
+                entities=(
+                    BulkSemanticEntity(name="Graphiti", type="Library", summary="Temporal graph library"),
+                    BulkSemanticEntity(name="Neo4j", type="Database", summary="Graph database"),
+                ),
+                relations=(
+                    BulkSemanticRelation(
+                        source="Graphiti",
+                        target="Neo4j",
+                        type="stores_in",
+                        fact="Graphiti stores extracted facts in Neo4j.",
+                    ),
+                ),
+            ),
+        )
+    )
+    driver = _FakeAsyncDriver()
+    embedder = _FakeEmbedder()
+    writer = DeterministicGraphitiSemanticWriter(driver, embedder=embedder)
+
+    report = writer.write_batch([item], extraction)
+
+    assert report == BulkSemanticWriteReport(
+        projected=1,
+        entities_written=2,
+        relations_written=1,
+        projected_natural_ids=(episode.natural_id,),
+    )
+    assert any(call["params"].get("uuid") == episode.episode_id for call in driver.calls)
+    entity_calls = [call for call in driver.calls if "entity_data" in call["params"]]
+    mention_calls = [call for call in driver.calls if "episode_uuid" in call["params"]]
+    relation_calls = [call for call in driver.calls if "edge_data" in call["params"]]
+    assert len(entity_calls) == 2
+    assert len(mention_calls) == 2
+    assert len(relation_calls) == 1
+    assert embedder.texts == ["Graphiti", "Neo4j", "Graphiti stores extracted facts in Neo4j."]
+    assert entity_calls[0]["params"]["entity_data"]["name_embedding"] == [0.0, 0.5]
+    assert relation_calls[0]["params"]["edge_data"]["fact_embedding"] == [2.0, 2.5]
+    assert relation_calls[0]["params"]["edge_data"]["extraction_mode"] == "bulk_semantic"
+
+
+def test_deterministic_writer_omits_vector_procedure_without_embeddings(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    sid = _seed_session(store, raw_id="writer-noembed")
+    episode = session_episode_from_couchdb_source(session_id_hash=sid, source_store=store)
+    item = make_bulk_session_input(session_key="s1", episode=episode, max_chars=800)
+    extraction = BulkSemanticExtractionResult(
+        (
+            BulkSemanticSessionResult(
+                session_key="s1",
+                entities=(BulkSemanticEntity(name="Graphiti", type="Library", summary="Temporal graph library"),),
+                relations=(),
+            ),
+        )
+    )
+    driver = _FakeAsyncDriver()
+    writer = DeterministicGraphitiSemanticWriter(driver)
+
+    report = writer.write_batch([item], extraction)
+
+    assert report == BulkSemanticWriteReport(
+        projected=1,
+        entities_written=1,
+        relations_written=0,
+        projected_natural_ids=(episode.natural_id,),
+    )
+    entity_calls = [call for call in driver.calls if "entity_data" in call["params"]]
+    assert len(entity_calls) == 1
+    assert "setNodeVectorProperty" not in entity_calls[0]["query"]
+
+
+@pytest.mark.parametrize(
+    "status, expected_rc",
+    [("ok", 0), ("already_running", 0), ("partial", 1), ("failed", 1)],
+)
+def test_main_exit_code_reflects_report_status(monkeypatch, status, expected_rc):
+    from agent_knowledge.llm_brain_core import bulk_semantic_cli as cli
+
+    monkeypatch.setattr(cli, "_build_source_store", lambda **kwargs: object())
+    monkeypatch.setattr(
+        cli,
+        "run_couchdb_bulk_semantic_projection",
+        lambda **kwargs: {"schema_version": "x", "status": status, "raw_paths_printed": False},
+    )
+    assert cli.main(["--ledger", "/tmp/placeholder.sqlite", "--runtime-dir", "/tmp/rt"]) == expected_rc
