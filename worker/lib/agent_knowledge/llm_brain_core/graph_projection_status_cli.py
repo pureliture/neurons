@@ -95,6 +95,11 @@ def build_graph_projection_status(
         project=project,
         extraction_level=EXTRACTION_LEVEL_ENTITY,
     )
+    # The ledger projection_state table has no provider column, so provider
+    # scoping only happens via intersection with the selected source set.
+    # Restrict entity_rows to the selected sources before computing
+    # provider-scoped recency/latest metrics below.
+    scoped_entity_rows = _rows_for_sessions(entity_rows, source_natural_ids)
     episodic_ids = _projected_session_natural_ids(episodic_rows)
     invalid_entity_ids = source_natural_ids & _source_invalid_session_natural_ids(entity_rows)
     valid_source_natural_ids = source_natural_ids - invalid_entity_ids
@@ -132,9 +137,9 @@ def build_graph_projection_status(
             "entity_source_invalid": len(invalid_entity_ids),
             "entity_valid_source_sessions": valid_source_count,
             "entity_coverage_ratio": (entity_projected / valid_source_count) if valid_source_count else 0.0,
-            "latest_entity_projected_at": _latest_projected_at(entity_rows),
-            "entity_projected_last_1h": _recent_count(entity_rows, now=now, seconds=3600),
-            "entity_projected_last_24h": _recent_count(entity_rows, now=now, seconds=86400),
+            "latest_entity_projected_at": _latest_projected_at(scoped_entity_rows),
+            "entity_projected_last_1h": _recent_count(scoped_entity_rows, now=now, seconds=3600),
+            "entity_projected_last_24h": _recent_count(scoped_entity_rows, now=now, seconds=86400),
         },
         "lag": {
             "oldest_unprojected_started_at": min(unprojected_started_at) if unprojected_started_at else "",
@@ -192,6 +197,12 @@ def _projection_rows(
         }
         for row in rows
     ]
+
+
+def _rows_for_sessions(
+    rows: list[dict[str, str]], natural_ids: set[str]
+) -> list[dict[str, str]]:
+    return [row for row in rows if str(row.get("natural_id") or "") in natural_ids]
 
 
 def _projected_session_natural_ids(rows: list[dict[str, str]]) -> set[str]:

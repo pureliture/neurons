@@ -111,16 +111,18 @@ def run_graph_trigger(
         }
 
     step = _call_child(graph_main, child_argv)
-    child_status = str((step.get("report") or {}).get("status") or "")
+    child_report = step.get("report") if isinstance(step.get("report"), dict) else {}
+    child_status = str(child_report.get("status") or "")
     status = "already_running" if child_status == "already_running" else ("ok" if step["exit_code"] == 0 else "failed")
+    mutation_performed, network_used = _derive_side_effects(child_report)
     return {
         "schema_version": GRAPH_TRIGGER_SCHEMA_VERSION,
         "status": status,
         "execute": True,
         "plan": plan,
         "step": step,
-        "mutation_performed": bool(status == "ok"),
-        "network_used": bool(status == "ok"),
+        "mutation_performed": mutation_performed,
+        "network_used": network_used,
         "raw_paths_printed": False,
     }
 
@@ -194,6 +196,33 @@ def _call_child(child_main: ChildMain, argv: list[str]) -> dict[str, Any]:
         "report": _parse_json(stdout.getvalue()),
         "stderr_present": bool(stderr.getvalue().strip()),
     }
+
+
+def _coerce_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _derive_side_effects(report: dict[str, Any]) -> tuple[bool, bool]:
+    """child report의 실제 카운터에서 mutation/network 여부를 유도한다.
+
+    status 문자열은 신뢰할 수 없다: 부분 write 후 실패(status=failed)면 side-effect를
+    거짓 음성으로, 0건 write 성공(status=ok)이면 거짓 양성으로 보고하기 때문이다.
+    그래프에 실제로 기록(projected)했거나 백엔드에 접촉(projected/duplicates/failed)한
+    신호로 판정한다.
+    """
+    projection = report.get("projection")
+    projection = projection if isinstance(projection, dict) else {}
+    projected = _coerce_int(projection.get("projected"))
+    duplicates = _coerce_int(projection.get("duplicates"))
+    failed = _coerce_int(projection.get("failed"))
+    # 그래프에 새 에피소드가 기록됐으면 mutation.
+    mutation_performed = projected > 0
+    # projected/duplicate/failed 어느 쪽이든 그래프 백엔드에 접촉했으면 network.
+    network_used = mutation_performed or duplicates > 0 or failed > 0
+    return mutation_performed, network_used
 
 
 def _parse_json(value: str) -> dict[str, Any]:

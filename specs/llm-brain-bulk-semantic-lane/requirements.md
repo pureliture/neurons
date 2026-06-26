@@ -21,12 +21,13 @@ episode-only projection만 담당하고, 비싼 entity/relation 의미추출은 
 - bulk 비용: Gemma-4 chat 615 calls / 약 2.6M tokens / 약 $0.28, 약 735 tokens/session.
 - 기존 qwen accumulated semantic window 대비 약 91% token / 90% cost 절감.
 
-## 현재 상태 (코드 기준 grounding)
+## 현재 상태 (코드 기준 grounding, 이 PR 적용 전 baseline)
 
 - Hot-path 트리거 `llm-brain-graph-trigger` → `couchdb-graph-trigger --execute`
   → child `couchdb-graph-project`에 **항상 `--extract-entities`** 를 넘긴다.
   즉 운영 트리거가 per-session Graphiti 의미추출을 inline으로 돌리고 있다
   (compose `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=true`).
+  **이 PR에서 기본값을 false로 flip하므로, 머지 후에는 이 상태가 해소된다.**
 - Bulk lane 코어는 이미 branch에 착륙:
   `bulk_semantic.py`, `bulk_semantic_cli.py`, 테스트 `test_couchdb_graph_bulk_semantic_cli.py`.
   CLI `couchdb-graph-bulk-semantic`로 등록됨. 이미
@@ -60,7 +61,7 @@ lock 점유 시간을 짧게 유지한다. `already_running`은 skip + report로
 **결정: 트리거 기본 episode-only + env opt-in.** hot-path 트리거 wrapper가 기본적으로
 `--extract-entities`를 넘기지 않는다. compose `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES`
 기본값을 false로 flip한다. per-session 의미추출은 debug/manual opt-in
-(env 플래그 또는 직접 CLY)에서만 켜진다.
+(env 플래그 또는 직접 CLI)에서만 켜진다.
 
 ## 기능 요구사항
 
@@ -158,7 +159,9 @@ lock 점유 시간을 짧게 유지한다. `already_running`은 skip + report로
 
 ## 범위 밖 (Out of Scope)
 
-- 기존 `bulk_semantic.py` / `bulk_semantic_cli.py` 내부 로직 변경(동결, 재사용만).
+- 기존 `bulk_semantic.py` / `bulk_semantic_cli.py` 코어 로직은 재사용하되,
+  리뷰에서 드러난 #12(writer durability) / #13(entity UUID) / #14(endpoint allowlist/SSRF)는
+  사용자 승인 하에 이 PR에서 수정한다.
 - 14건 `inconsistent project` CouchDB source materialization 버그 수정(별도 작업).
 
 ## 미결정 / 제안 기본값 (승인 시 확정)

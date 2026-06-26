@@ -16,11 +16,15 @@ from agent_knowledge.llm_brain_core.graphiti_adapter import (
     GraphitiNeo4jConfig,
     GraphitiNeo4jGraphMemoryAdapter,
     _AsyncLoopRunner,
+    _is_list_annotation,
+    _placeholder_api_key,
     _ReasoningOpenAIGenericClient,
+    _resolve_embedding_dim,
     _datetime_to_iso,
     _episode_node_to_ontology,
     _existing_fact_idx_values_from_messages,
     _normalize_structured_response,
+    _uses_configured_llm_client,
 )
 from agent_knowledge.llm_brain_core.models import OntologyEpisode
 
@@ -513,6 +517,44 @@ async def test_reasoning_openai_generic_client_omits_reasoning_effort_when_unset
     assert "reasoning_effort" not in captured
 
 
+@pytest.mark.anyio
+async def test_reasoning_openai_generic_client_maps_assistant_and_unknown_roles():
+    # #4: standard roles beyond user/system (assistant) must survive instead of
+    # being silently dropped, and an unrecognized role degrades to 'user' so its
+    # content is never lost.
+    from graphiti_core.llm_client.config import LLMConfig
+    from graphiti_core.prompts.models import Message
+
+    captured: dict[str, object] = {}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok": true}'))]
+            )
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions()))
+    client = _ReasoningOpenAIGenericClient(
+        config=LLMConfig(api_key="unit-test", model="ollama:qwen3.5:cloud"),
+        client=fake_client,
+    )
+
+    await client.generate_response(
+        [
+            Message(role="system", content="sys"),
+            Message(role="assistant", content="prior answer"),
+            Message(role="user", content="now"),
+            Message(role="reviewer", content="unknown role payload"),
+        ]
+    )
+
+    roles = [message["role"] for message in captured["messages"]]
+    assert roles == ["system", "assistant", "user", "user"]
+    # No message was dropped: every input turn produced a request message.
+    assert len(captured["messages"]) == 4
+
+
 def test_graphiti_config_defaults_to_episode_only_storage():
     config = GraphitiNeo4jConfig.from_env({})
 
@@ -783,6 +825,135 @@ def test_graphiti_datetime_conversion_does_not_fabricate_missing_times():
     assert _datetime_to_iso("not-a-datetime") == ""
 
 
+def test_resolve_embedding_dim_matches_nomic_native_dim_by_default():
+    # #1: nomic-embed-text (the ollama default) is natively 768-dim; the generic
+    # 1024 default must not be paired with it (index/query dimension mismatch).
+    assert _resolve_embedding_dim("nomic-embed-text", 1024) == 768
+    # An explicit non-default dim is always honored.
+    assert _resolve_embedding_dim("nomic-embed-text", 384) == 384
+    # Unknown / openai default models keep the configured dim untouched.
+    assert _resolve_embedding_dim("text-embedding-3-small", 1024) == 1024
+
+
+def test_is_list_annotation_recognizes_builtin_and_typing_list():
+    # #3: both the builtin generic ('list[...]') and 'typing.List[...]' spellings
+    # must be recognized as list-typed annotations.
+    assert _is_list_annotation("list[str]") is True
+    assert _is_list_annotation("typing.List[dict]") is True
+    assert _is_list_annotation("int") is False
+    assert _is_list_annotation(None) is False
+
+
+def test_structured_response_wraps_single_typing_list_field():
+    # #3: a response model declaring its single list field with typing.List must
+    # still get a bare list wrapped under that field name.
+    from typing import List
+
+    from pydantic import BaseModel
+
+    class _LegacyListModel(BaseModel):
+        items: List[dict]
+
+    normalized = _normalize_structured_response([{"entity_name": "Neo4j"}], _LegacyListModel)
+
+    assert normalized == {"items": [{"name": "Neo4j"}]}
+
+
+def test_default_openai_provider_uses_configured_client_path():
+    # #7/#28: the documented default provider 'openai' must route through the
+    # configured OpenAI-compatible client path, so episode-only operation never
+    # constructs Graphiti's built-in default OpenAI client (zero-LLM guarantee).
+    assert _uses_configured_llm_client("openai") is True
+    assert _uses_configured_llm_client("OpenAI-Compatible") is True
+    assert _uses_configured_llm_client("ollama") is True
+    assert _uses_configured_llm_client("mock") is False
+
+
+def test_placeholder_api_key_is_non_secret_for_adc_backends():
+    # #27: ADC-backed openai-compatible endpoints (vertex-wrapper) authenticate
+    # out of band; an empty key falls back to a non-secret placeholder, never a
+    # real credential.
+    assert _placeholder_api_key("ollama") == "ollama"
+    placeholder = _placeholder_api_key("openai-compatible")
+    assert placeholder and "sk-" not in placeholder
+    assert _placeholder_api_key("openai") == placeholder
+
+
+def test_entity_path_rolls_back_persisted_extraction_on_unsafe_text():
+    # #6/#19: add_episode persists Entity/RELATES_TO BEFORE the redaction gate
+    # runs. When the gate rejects unsafe synthesized text, the just-persisted
+    # elements must be deleted (edge first, then node) so the private/secret
+    # content does not survive in the graph.
+    graphiti = _FakeGraphiti()
+    deleted: list[str] = []
+
+    async def _delete_node(driver):
+        _ = driver
+        deleted.append("node")
+
+    async def _delete_edge(driver):
+        _ = driver
+        deleted.append("edge")
+
+    async def _not_extracted(driver, episode_id):
+        _ = (driver, episode_id)
+        return False
+
+    async def _add_episode_with_private(**kwargs):
+        return SimpleNamespace(
+            nodes=[SimpleNamespace(name="Entity", summary="see /Users/secret/notes", delete=_delete_node)],
+            edges=[SimpleNamespace(fact="benign", delete=_delete_edge)],
+        )
+
+    graphiti.add_episode = _add_episode_with_private  # type: ignore[method-assign]
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        entity_extracted=_not_extracted,
+    )
+    episode = _episode("Task", "task:rollback", {"brain_id": "/project/neurons", "task": "rollback"})
+
+    with pytest.raises(ValueError):
+        adapter.upsert_episode(episode)
+
+    assert deleted == ["edge", "node"]
+
+
+def test_entity_path_skips_retry_after_timeout_when_extraction_already_landed():
+    # #20 idempotency: a per-attempt timeout cancels the local await, but the
+    # remote add_episode may still complete. Before re-firing for the same
+    # episode_id, the adapter re-probes the entity pass; once it has landed, it
+    # stops instead of double-extracting.
+    graphiti = _SlowAddGraphiti(delay_seconds=1.0)
+    probe_calls = {"n": 0}
+
+    async def _landed_after_attempt(driver, episode_id):
+        _ = (driver, episode_id)
+        probe_calls["n"] += 1
+        # False at the pre-extraction guard (no attempt yet); True once the first
+        # attempt has run (and timed out), so the retry is skipped.
+        return len(graphiti.added) >= 1
+
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        primary_attempts=3,
+        primary_attempt_timeout_seconds=0.01,
+        entity_extracted=_landed_after_attempt,
+    )
+    episode = _episode("Task", "task:timeout-idem", {"brain_id": "/project/neurons", "task": "idem"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "inserted"
+    # Exactly one add_episode fired: the post-timeout probe stopped the retry.
+    assert len(graphiti.added) == 1
+    # Probe ran at the pre-extraction guard and again after the timeout.
+    assert probe_calls["n"] == 2
+
+
 def test_fake_adapter_simulates_episode_id_merge_on_reupsert():
     # Production default (extract_entities=False) MERGEs on episode_id: a second
     # upsert of the same episode is a duplicate, not a new row.
@@ -977,3 +1148,54 @@ def _episode(entity_type: str, natural_id: str, payload: dict) -> OntologyEpisod
         observed_at="2026-06-19T00:00:00+00:00",
         reference_time="2026-06-19T00:00:00+00:00",
     )
+
+
+def test_bulk_semantic_entity_uuid_is_name_based_and_type_independent():
+    from agent_knowledge.llm_brain_core import bulk_semantic as bs
+
+    same_name_other_type = bs._entity_uuid(
+        "g", bs.BulkSemanticEntity(name="Vertex Wrapper", type="Tool", summary="")
+    )
+    placeholder_type = bs._entity_uuid(
+        "g", bs.BulkSemanticEntity(name="vertex   wrapper", type="Concept", summary="")
+    )
+    # Same normalized name must collapse to one UUID regardless of extracted type,
+    # matching the name-based relation endpoint lookup.
+    assert same_name_other_type == placeholder_type
+    other_name = bs._entity_uuid(
+        "g", bs.BulkSemanticEntity(name="Other", type="Tool", summary="")
+    )
+    assert same_name_other_type != other_name
+
+
+def test_urllib_post_endpoint_allowlist_blocks_ssrf():
+    from agent_knowledge.llm_brain_core import bulk_semantic as bs
+
+    # Loopback / internal endpoints stay valid.
+    bs._validate_endpoint_url("http://127.0.0.1:8930/v1/chat/completions")
+    bs._validate_endpoint_url("https://vertex-wrapper/v1/embeddings")
+
+    for blocked in (
+        "file:///etc/passwd",
+        "gopher://internal/x",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://metadata.google.internal/computeMetadata/v1/",
+        "http:///no-host/path",
+    ):
+        with pytest.raises(ValueError):
+            bs._validate_endpoint_url(blocked)
+
+    # An explicit env allowlist further restricts permitted hosts.
+    allow = bs._endpoint_allowed_hosts({"LLM_BRAIN_ENDPOINT_ALLOWED_HOSTS": "api.internal"})
+    bs._validate_endpoint_url("https://api.internal/v1/chat/completions", allowed_hosts=allow)
+    with pytest.raises(ValueError):
+        bs._validate_endpoint_url("https://evil.example.com/v1", allowed_hosts=allow)
+
+    # _urllib_post rejects a poisoned base URL before any network call.
+    with pytest.raises(ValueError):
+        bs._urllib_post(
+            "file:///etc/passwd",
+            headers={"Authorization": "Bearer secret"},
+            body="{}",
+            timeout=1,
+        )

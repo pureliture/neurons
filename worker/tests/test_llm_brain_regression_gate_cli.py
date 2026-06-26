@@ -85,6 +85,20 @@ def test_regression_gate_blocks_memory_count_drop_and_low_coverage():
     assert "entity_coverage_below_minimum" in report["blockers"]
 
 
+def test_regression_gate_blocks_raw_paths_printed_from_graph_status_input():
+    report = evaluate_regression_gate(
+        before=_context_pack(graph_status="available"),
+        after=_context_pack(graph_status="available"),
+        graph_status={
+            "projection_state": {"entity_coverage_ratio": 0.95},
+            "raw_paths_printed": True,
+        },
+    )
+
+    assert report["status"] == "blocked"
+    assert "raw_paths_printed" in report["blockers"]
+
+
 def test_regression_gate_report_never_echoes_raw_path():
     after = _context_pack(graph_status="available")
     report = evaluate_regression_gate(

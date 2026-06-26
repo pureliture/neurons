@@ -142,11 +142,30 @@ def extraction_text_from_couchdb_chunks(
         doc_type=SourceDocType.CONVERSATION_CHUNK,
     )
     chunks = sorted(chunks, key=_conversation_chunk_order_key)
-    bodies = [_strip_chunk_metadata_header(str(doc.get("body") or "")) for doc in chunks]
-    prose = "\n\n".join(body for body in bodies if body)
-    # Bound here as well as in OntologyEpisode.__post_init__; public_safe_text in
-    # the model is the authoritative redaction+bound, this is an early cap so the
-    # join itself never builds a huge string.
+    # Accumulate against the budget and stop early so a large session never
+    # materializes the full concatenation before the cap is applied. Bounding here
+    # as well as in OntologyEpisode.__post_init__ is intentional: public_safe_text
+    # in the model is the authoritative redaction+bound, this is the early cap.
+    separator = "\n\n"
+    budget = max_chars
+    parts: list[str] = []
+    for doc in chunks:
+        if budget <= 0:
+            break
+        body = _strip_chunk_metadata_header(str(doc.get("body") or ""))
+        if not body:
+            continue
+        if parts:
+            # join() will insert a separator before this part; charge it first.
+            budget -= len(separator)
+            if budget <= 0:
+                break
+        if len(body) > budget:
+            parts.append(body[:budget])
+            break
+        parts.append(body)
+        budget -= len(body)
+    prose = separator.join(parts)
     return prose[:max_chars]
 
 
@@ -161,19 +180,30 @@ def _conversation_chunk_order_key(doc: Mapping[str, Any]) -> tuple[int, int, int
 
 
 def _strip_chunk_metadata_header(text: str) -> str:
+    # A metadata header is a contiguous run of ``key: value`` lines whose keys are
+    # all known chunk-metadata keys, terminated by a blank separator line. Require
+    # that blank-line boundary: without it the leading lines are real conversation
+    # prose that merely happens to look like ``key: value`` (e.g. a first sentence
+    # such as "char_start: where the bug begins"), and stripping them would drop
+    # the opening of the turn.
     lines = text.splitlines()
     index = 0
     while index < len(lines):
         stripped = lines[index].strip()
         if not stripped:
-            index += 1
-            continue
+            break
         key, sep, _value = stripped.partition(":")
         if sep and key.strip() in _CHUNK_METADATA_HEADER_KEYS:
             index += 1
             continue
-        break
-    return "\n".join(lines[index:]).strip()
+        # First non-metadata, non-blank line -> no recognizable header block.
+        return text.strip()
+    # No header lines consumed, or the run was not closed by a blank separator
+    # before end-of-text -> not a header; keep the body intact.
+    if index == 0 or index >= len(lines):
+        return text.strip()
+    # lines[index] is the blank separator; drop the header block and that line.
+    return "\n".join(lines[index + 1 :]).strip()
 
 
 def _safe_int(value: Any) -> int:

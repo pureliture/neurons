@@ -137,6 +137,27 @@ class _FakeBulkWriter:
             projected=len(inputs),
             entities_written=sum(len(sessions[item.session_key].entities) for item in inputs),
             relations_written=sum(len(sessions[item.session_key].relations) for item in inputs),
+            projected_natural_ids=tuple(item.episode.natural_id for item in inputs),
+        )
+
+
+class _PartialBulkWriter:
+    """Writer that only durably writes a prefix of the batch and reports it honestly."""
+
+    def __init__(self, write_count: int) -> None:
+        self.write_count = write_count
+        self.calls: list[list[str]] = []
+
+    def write_batch(self, inputs, extraction, *, allow_empty_sessions=False):  # type: ignore[no-untyped-def]
+        _ = allow_empty_sessions
+        self.calls.append([item.session_key for item in inputs])
+        sessions = extraction.by_session_key()
+        written = list(inputs)[: self.write_count]
+        return BulkSemanticWriteReport(
+            projected=len(written),
+            entities_written=sum(len(sessions[item.session_key].entities) for item in written),
+            relations_written=sum(len(sessions[item.session_key].relations) for item in written),
+            projected_natural_ids=tuple(item.episode.natural_id for item in written),
         )
 
 
@@ -245,6 +266,53 @@ def test_bulk_semantic_projects_five_sessions_per_llm_call_and_marks_entity_stat
     )
     assert status["projection_state"]["entity_session_projected"] == 5
     assert status["projection_state"]["entity_session_backlog"] == 1
+
+
+def test_bulk_semantic_marks_only_writer_confirmed_episodes(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(5):
+        _seed_session(store, raw_id=f"partial-{index}")
+    extractor = _FakeBulkExtractor()
+    writer = _PartialBulkWriter(write_count=3)
+
+    report = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=5,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=5,
+        extractor=extractor,
+        writer=writer,
+    )
+
+    # writer only durably wrote 3 of 5; only those may be marked projected.
+    assert report["projection"]["projected"] == 3
+
+    status = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+    )
+    assert status["projection_state"]["entity_session_projected"] == 3
+    assert status["projection_state"]["entity_session_backlog"] == 2
+
+    # the 2 unwritten sessions must NOT be durably skipped on resume.
+    resume_writer = _FakeBulkWriter()
+    resume = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=5,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=5,
+        extractor=_FakeBulkExtractor(),
+        writer=resume_writer,
+    )
+    assert resume["projection"]["skipped_resumed"] == 3
+    assert resume["projection"]["projected"] == 2
+    assert resume_writer.calls and len(resume_writer.calls[0]) == 2
 
 
 def test_bulk_semantic_resume_skips_without_llm_call(tmp_path):
@@ -489,7 +557,12 @@ def test_deterministic_writer_uses_graphiti_compatible_nodes_and_edges(tmp_path)
 
     report = writer.write_batch([item], extraction)
 
-    assert report == BulkSemanticWriteReport(projected=1, entities_written=2, relations_written=1)
+    assert report == BulkSemanticWriteReport(
+        projected=1,
+        entities_written=2,
+        relations_written=1,
+        projected_natural_ids=(episode.natural_id,),
+    )
     assert any(call["params"].get("uuid") == episode.episode_id for call in driver.calls)
     entity_calls = [call for call in driver.calls if "entity_data" in call["params"]]
     mention_calls = [call for call in driver.calls if "episode_uuid" in call["params"]]
@@ -522,7 +595,12 @@ def test_deterministic_writer_omits_vector_procedure_without_embeddings(tmp_path
 
     report = writer.write_batch([item], extraction)
 
-    assert report == BulkSemanticWriteReport(projected=1, entities_written=1, relations_written=0)
+    assert report == BulkSemanticWriteReport(
+        projected=1,
+        entities_written=1,
+        relations_written=0,
+        projected_natural_ids=(episode.natural_id,),
+    )
     entity_calls = [call for call in driver.calls if "entity_data" in call["params"]]
     assert len(entity_calls) == 1
     assert "setNodeVectorProperty" not in entity_calls[0]["query"]

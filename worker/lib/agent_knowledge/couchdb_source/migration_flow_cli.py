@@ -36,7 +36,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-graph", action="store_true")
     parser.add_argument("--dataset-name", default="session-memory")
     parser.add_argument("--ragflow-url", default="")
-    parser.add_argument("--token-env", default="RAGFLOW_API_KEY")
     parser.add_argument("--enable-graph", action="store_true", default=True)
     parser.add_argument("--graph-required", action="store_true")
     parser.add_argument("--reextract-entities", action="store_true")
@@ -65,7 +64,6 @@ def main(argv: list[str] | None = None) -> int:
             skip_graph=bool(args.skip_graph),
             dataset_name=str(args.dataset_name or "session-memory"),
             ragflow_url=str(args.ragflow_url or ""),
-            token_env=str(args.token_env or "RAGFLOW_API_KEY"),
             enable_graph=bool(args.enable_graph),
             graph_required=bool(args.graph_required),
             reextract_entities=bool(args.reextract_entities),
@@ -112,7 +110,6 @@ def run_migration_flow(
     skip_graph: bool = False,
     dataset_name: str = "session-memory",
     ragflow_url: str = "",
-    token_env: str = "RAGFLOW_API_KEY",
     enable_graph: bool = True,
     graph_required: bool = False,
     reextract_entities: bool = False,
@@ -134,7 +131,6 @@ def run_migration_flow(
         approval=session_memory_approval,
         dataset_name=dataset_name,
         ragflow_url=ragflow_url,
-        token_env=token_env,
     )
     graph_argv = _graph_argv(
         ledger_path=ledger_path,
@@ -202,7 +198,6 @@ def _session_memory_argv(
     approval: Path | None,
     dataset_name: str,
     ragflow_url: str,
-    token_env: str,
 ) -> list[str]:
     argv: list[str] = ["--limit", str(int(limit))]
     if not execute:
@@ -213,8 +208,6 @@ def _session_memory_argv(
         argv.extend(["--dataset-name", dataset_name])
     if ragflow_url:
         argv.extend(["--ragflow-url", ragflow_url])
-    if token_env:
-        argv.extend(["--token-env", token_env])
     return argv
 
 
@@ -323,17 +316,25 @@ def _executed_report(status: str, *, plan: dict[str, Any], steps: list[dict[str,
 def _call_json_child(name: str, child_main: ChildMain, argv: list[str]) -> dict[str, Any]:
     stdout = io.StringIO()
     stderr = io.StringIO()
+    error_class = ""
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         try:
             exit_code = int(child_main(list(argv)) or 0)
         except SystemExit as exc:
             exit_code = exc.code if isinstance(exc.code, int) else 1
-    return {
+        except Exception as exc:  # noqa: BLE001 - child crash는 flow 전체를 중단시키지 않는다.
+            # ValueError/ConnectionError 등 일반 예외도 실패 step으로 보고하고 안전하게 종료한다.
+            exit_code = 1
+            error_class = type(exc).__name__
+    step: dict[str, Any] = {
         "name": name,
         "exit_code": exit_code,
         "report": _parse_json(stdout.getvalue()),
-        "stderr_present": bool(stderr.getvalue().strip()),
+        "stderr_present": bool(stderr.getvalue().strip()) or bool(error_class),
     }
+    if error_class:
+        step["error_class"] = error_class
+    return step
 
 
 def _parse_json(value: str) -> dict[str, Any]:

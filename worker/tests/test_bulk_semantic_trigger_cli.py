@@ -33,7 +33,20 @@ def test_bulk_semantic_trigger_execute_calls_child_with_lock_and_redacted_plan(t
 
     def _child(argv):  # type: ignore[no-untyped-def]
         calls.append(list(argv or []))
-        print(json.dumps({"schema_version": "child.bulk", "status": "ok"}))
+        print(
+            json.dumps(
+                {
+                    "schema_version": "child.bulk",
+                    "status": "ok",
+                    "projection": {"materialized": 2, "projected": 2, "failed": 0},
+                    "semantic": {
+                        "entities_written": 5,
+                        "relations_written": 3,
+                        "llm_batches": 1,
+                    },
+                }
+            )
+        )
         return 0
 
     report = run_bulk_semantic_trigger(
@@ -119,6 +132,71 @@ def test_bulk_semantic_trigger_failed_child_returns_failed_status(tmp_path):
 
     assert report["status"] == "failed"
     assert report["step"]["exit_code"] == 1
+
+
+def test_bulk_semantic_trigger_partial_write_then_failure_still_reports_side_effects(tmp_path):
+    # 부분 write 후 child가 실패(status=failed, exit 1)해도 실제 기록 신호가 있으면
+    # mutation/network를 거짓 음성으로 숨기지 않는다.
+    def _child(argv):  # type: ignore[no-untyped-def]
+        _ = argv
+        print(
+            json.dumps(
+                {
+                    "schema_version": "child.bulk",
+                    "status": "failed",
+                    "projection": {"materialized": 1, "projected": 1, "failed": 2},
+                    "semantic": {
+                        "entities_written": 4,
+                        "relations_written": 0,
+                        "llm_batches": 1,
+                    },
+                }
+            )
+        )
+        return 1
+
+    report = run_bulk_semantic_trigger(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        runtime_dir=tmp_path / "runtime",
+        execute=True,
+        bulk_main=_child,
+    )
+
+    assert report["status"] == "failed"
+    assert report["mutation_performed"] is True
+    assert report["network_used"] is True
+
+
+def test_bulk_semantic_trigger_ok_with_zero_writes_reports_no_side_effects(tmp_path):
+    # status=ok이지만 0건 write면 mutation/network를 거짓 양성으로 보고하지 않는다.
+    def _child(argv):  # type: ignore[no-untyped-def]
+        _ = argv
+        print(
+            json.dumps(
+                {
+                    "schema_version": "child.bulk",
+                    "status": "ok",
+                    "projection": {"materialized": 0, "projected": 0, "failed": 0},
+                    "semantic": {
+                        "entities_written": 0,
+                        "relations_written": 0,
+                        "llm_batches": 0,
+                    },
+                }
+            )
+        )
+        return 0
+
+    report = run_bulk_semantic_trigger(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        runtime_dir=tmp_path / "runtime",
+        execute=True,
+        bulk_main=_child,
+    )
+
+    assert report["status"] == "ok"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
 
 
 def _exploding_child(argv):  # type: ignore[no-untyped-def]

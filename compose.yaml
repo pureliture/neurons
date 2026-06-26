@@ -170,8 +170,8 @@ services:
     restart: unless-stopped
     environment:
       COUCHDB_USER: ${LLM_BRAIN_COUCHDB_USER:-neurons}
-      COUCHDB_PASSWORD: ${LLM_BRAIN_COUCHDB_PASSWORD:-llmbrain}
-      COUCHDB_SECRET: ${LLM_BRAIN_COUCHDB_SECRET:-llmbrain-cookie-secret}
+      COUCHDB_PASSWORD: ${LLM_BRAIN_COUCHDB_PASSWORD:?set LLM_BRAIN_COUCHDB_PASSWORD}
+      COUCHDB_SECRET: ${LLM_BRAIN_COUCHDB_SECRET:?set LLM_BRAIN_COUCHDB_SECRET}
       NODENAME: llm-brain-couchdb
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:5984/_up || exit 1"]
@@ -190,7 +190,7 @@ services:
     environment:
       POSTGRES_DB: ${LLM_BRAIN_LEDGER_POSTGRES_DB:-neurons_ledger}
       POSTGRES_USER: ${LLM_BRAIN_LEDGER_POSTGRES_USER:-neurons}
-      POSTGRES_PASSWORD: ${LLM_BRAIN_LEDGER_POSTGRES_PASSWORD:-llmbrain}
+      POSTGRES_PASSWORD: ${LLM_BRAIN_LEDGER_POSTGRES_PASSWORD:?set LLM_BRAIN_LEDGER_POSTGRES_PASSWORD}
     healthcheck:
       test:
         [
@@ -230,12 +230,12 @@ services:
       COUCHDB_URL: http://llm-brain-couchdb:5984
       COUCHDB_DB: ${LLM_BRAIN_COUCHDB_DB:-transcript_source}
       COUCHDB_USER: ${LLM_BRAIN_COUCHDB_USER:-neurons}
-      COUCHDB_PASSWORD: ${LLM_BRAIN_COUCHDB_PASSWORD:-llmbrain}
-      NEURON_LEDGER_PG_DSN: postgresql://${LLM_BRAIN_LEDGER_POSTGRES_USER:-neurons}:${LLM_BRAIN_LEDGER_POSTGRES_PASSWORD:-llmbrain}@llm-brain-ledger-postgres:5432/${LLM_BRAIN_LEDGER_POSTGRES_DB:-neurons_ledger}
+      COUCHDB_PASSWORD: ${LLM_BRAIN_COUCHDB_PASSWORD:?set LLM_BRAIN_COUCHDB_PASSWORD}
+      NEURON_LEDGER_PG_DSN: postgresql://${LLM_BRAIN_LEDGER_POSTGRES_USER:-neurons}:${LLM_BRAIN_LEDGER_POSTGRES_PASSWORD:?set LLM_BRAIN_LEDGER_POSTGRES_PASSWORD}@llm-brain-ledger-postgres:5432/${LLM_BRAIN_LEDGER_POSTGRES_DB:-neurons_ledger}
       LLM_BRAIN_GRAPH_ENABLED: "true"
       LLM_BRAIN_NEO4J_URI: bolt://llm-brain-neo4j:7687
       LLM_BRAIN_NEO4J_USER: ${LLM_BRAIN_NEO4J_USER:-neo4j}
-      LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}
+      LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:?set LLM_BRAIN_NEO4J_PASSWORD}
       LLM_BRAIN_GRAPH_LLM_PROVIDER: openai-compatible
       LLM_BRAIN_LLM_BASE_URL: http://llm-brain-vertex-wrapper:${LLM_BRAIN_VERTEX_WRAPPER_CONTAINER_PORT:-8080}/v1
       LLM_BRAIN_LLM_MODEL: ${LLM_BRAIN_LLM_MODEL:-gemma-4-26b-a4b-it-maas}
@@ -284,12 +284,12 @@ services:
       COUCHDB_URL: http://llm-brain-couchdb:5984
       COUCHDB_DB: ${LLM_BRAIN_COUCHDB_DB:-transcript_source}
       COUCHDB_USER: ${LLM_BRAIN_COUCHDB_USER:-neurons}
-      COUCHDB_PASSWORD: ${LLM_BRAIN_COUCHDB_PASSWORD:-llmbrain}
-      NEURON_LEDGER_PG_DSN: postgresql://${LLM_BRAIN_LEDGER_POSTGRES_USER:-neurons}:${LLM_BRAIN_LEDGER_POSTGRES_PASSWORD:-llmbrain}@llm-brain-ledger-postgres:5432/${LLM_BRAIN_LEDGER_POSTGRES_DB:-neurons_ledger}
+      COUCHDB_PASSWORD: ${LLM_BRAIN_COUCHDB_PASSWORD:?set LLM_BRAIN_COUCHDB_PASSWORD}
+      NEURON_LEDGER_PG_DSN: postgresql://${LLM_BRAIN_LEDGER_POSTGRES_USER:-neurons}:${LLM_BRAIN_LEDGER_POSTGRES_PASSWORD:?set LLM_BRAIN_LEDGER_POSTGRES_PASSWORD}@llm-brain-ledger-postgres:5432/${LLM_BRAIN_LEDGER_POSTGRES_DB:-neurons_ledger}
       LLM_BRAIN_GRAPH_ENABLED: "true"
       LLM_BRAIN_NEO4J_URI: bolt://llm-brain-neo4j:7687
       LLM_BRAIN_NEO4J_USER: ${LLM_BRAIN_NEO4J_USER:-neo4j}
-      LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}
+      LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:?set LLM_BRAIN_NEO4J_PASSWORD}
       LLM_BRAIN_GRAPH_LLM_PROVIDER: openai-compatible
       LLM_BRAIN_LLM_BASE_URL: http://llm-brain-vertex-wrapper:${LLM_BRAIN_VERTEX_WRAPPER_CONTAINER_PORT:-8080}/v1
       LLM_BRAIN_LLM_MODEL: ${LLM_BRAIN_LLM_MODEL:-gemma-4-26b-a4b-it-maas}
@@ -349,12 +349,12 @@ services:
       COUCHDB_URL: http://llm-brain-couchdb:5984
       COUCHDB_DB: ${LLM_BRAIN_COUCHDB_DB:-transcript_source}
       COUCHDB_USER: ${LLM_BRAIN_COUCHDB_USER:-neurons}
-      COUCHDB_PASSWORD: ${LLM_BRAIN_COUCHDB_PASSWORD:-llmbrain}
-      NEURON_LEDGER_PG_DSN: postgresql://${LLM_BRAIN_LEDGER_POSTGRES_USER:-neurons}:${LLM_BRAIN_LEDGER_POSTGRES_PASSWORD:-llmbrain}@llm-brain-ledger-postgres:5432/${LLM_BRAIN_LEDGER_POSTGRES_DB:-neurons_ledger}
+      COUCHDB_PASSWORD: ${LLM_BRAIN_COUCHDB_PASSWORD:?set LLM_BRAIN_COUCHDB_PASSWORD}
+      NEURON_LEDGER_PG_DSN: postgresql://${LLM_BRAIN_LEDGER_POSTGRES_USER:-neurons}:${LLM_BRAIN_LEDGER_POSTGRES_PASSWORD:?set LLM_BRAIN_LEDGER_POSTGRES_PASSWORD}@llm-brain-ledger-postgres:5432/${LLM_BRAIN_LEDGER_POSTGRES_DB:-neurons_ledger}
       LLM_BRAIN_GRAPH_ENABLED: "true"
       LLM_BRAIN_NEO4J_URI: bolt://llm-brain-neo4j:7687
       LLM_BRAIN_NEO4J_USER: ${LLM_BRAIN_NEO4J_USER:-neo4j}
-      LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}
+      LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:?set LLM_BRAIN_NEO4J_PASSWORD}
       LLM_BRAIN_GRAPH_LLM_PROVIDER: openai-compatible
       LLM_BRAIN_LLM_BASE_URL: http://llm-brain-vertex-wrapper:${LLM_BRAIN_VERTEX_WRAPPER_CONTAINER_PORT:-8080}/v1
       LLM_BRAIN_LLM_MODEL: ${LLM_BRAIN_LLM_MODEL:-gemma-4-26b-a4b-it-maas}
@@ -393,12 +393,12 @@ services:
     image: neo4j:5.26-community
     restart: unless-stopped
     environment:
-      NEO4J_AUTH: ${LLM_BRAIN_NEO4J_USER:-neo4j}/${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}
+      NEO4J_AUTH: ${LLM_BRAIN_NEO4J_USER:-neo4j}/${LLM_BRAIN_NEO4J_PASSWORD:?set LLM_BRAIN_NEO4J_PASSWORD}
       # Adapter/client-facing env uses LLM_BRAIN_* keys; avoid unsupported
       # NEO4J_USER/NEO4J_PASSWORD container config keys.
       LLM_BRAIN_NEO4J_URI: ${LLM_BRAIN_NEO4J_URI:-bolt://llm-brain-neo4j:7687}
       LLM_BRAIN_NEO4J_USER: ${LLM_BRAIN_NEO4J_USER:-neo4j}
-      LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}
+      LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:?set LLM_BRAIN_NEO4J_PASSWORD}
       NEO4J_server_memory_heap_initial__size: ${LLM_BRAIN_NEO4J_HEAP_INITIAL:-512m}
       NEO4J_server_memory_heap_max__size: ${LLM_BRAIN_NEO4J_HEAP_MAX:-1g}
       NEO4J_server_memory_pagecache_size: ${LLM_BRAIN_NEO4J_PAGECACHE:-512m}

@@ -99,6 +99,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(json.dumps(report, sort_keys=True))
+    # 실패/부분실패는 non-zero exit로 알린다. ok/already_running은 정상 종료.
+    if report.get("status") in ("failed", "partial"):
+        return 1
     return 0
 
 
@@ -124,46 +127,48 @@ def run_couchdb_projection(
     lock_handle, locked_report = _acquire_runtime_lock(runtime_dir)
     if locked_report is not None:
         return locked_report
-    ledger = Ledger(ledger_path)
-    artifact_store = LedgerSessionMemoryArtifactStore(ledger)
-    projection_state_store = LedgerGraphProjectionStateStore(ledger)
-    graph = graph_adapter or build_graph_adapter_from_env(
-        environ=_graph_environ(extract_entities=extract_entities, reextract_entities=reextract_entities),
-        enable_flag=True if enable_graph else None,
-        required_flag=bool(graph_required),
-    )
-    worker = GraphProjectionWorker(graph, projection_state_store=projection_state_store)
-    target_level = (
-        EXTRACTION_LEVEL_ENTITY
-        if bool(getattr(graph, "_extract_entities", False))
-        else EXTRACTION_LEVEL_EPISODIC
-    )
-    sessions = _select_sessions(source_store, project=project, provider=provider, limit=limit)
-    total_available = _count_sessions(source_store, project=project, provider=provider)
-    report_every = max(1, int(report_every))
-    max_projects = max(0, int(max_projects))
-
-    projected_cache: dict[str, set[str]] = {}
-    durations: list[int] = []
-    by_provider: Counter[str] = Counter()
-    by_project: Counter[str] = Counter()
-    failure_reasons: Counter[str] = Counter()
-    projected = duplicates = failed = skipped_resumed = 0
-    processed = 0
-    stopped_after_max_projects = False
-    started = time.monotonic()
-
-    _write_jsonl(
-        progress_jsonl,
-        {
-            "event": "start",
-            "selected": len(sessions),
-            "total_available": total_available,
-            "limit": int(limit),
-        },
-    )
-
+    # lock 획득 직후부터 전체를 try/finally로 감싸 Ledger/store/adapter/selection
+    # 구성 중 예외가 나도 lock file handle release를 보장한다.
     try:
+        ledger = Ledger(ledger_path)
+        artifact_store = LedgerSessionMemoryArtifactStore(ledger)
+        projection_state_store = LedgerGraphProjectionStateStore(ledger)
+        graph = graph_adapter or build_graph_adapter_from_env(
+            environ=_graph_environ(extract_entities=extract_entities, reextract_entities=reextract_entities),
+            enable_flag=True if enable_graph else None,
+            required_flag=bool(graph_required),
+        )
+        worker = GraphProjectionWorker(graph, projection_state_store=projection_state_store)
+        target_level = (
+            EXTRACTION_LEVEL_ENTITY
+            if bool(getattr(graph, "_extract_entities", False))
+            else EXTRACTION_LEVEL_EPISODIC
+        )
+        sessions = _select_sessions(source_store, project=project, provider=provider, limit=limit)
+        total_available = _count_sessions(source_store, project=project, provider=provider)
+        report_every = max(1, int(report_every))
+        max_projects = max(0, int(max_projects))
+
+        projected_cache: dict[str, set[str]] = {}
+        durations: list[int] = []
+        by_provider: Counter[str] = Counter()
+        by_project: Counter[str] = Counter()
+        failure_reasons: Counter[str] = Counter()
+        projected = duplicates = failed = skipped_resumed = skipped_disabled = 0
+        processed = 0
+        stopped_after_max_projects = False
+        started = time.monotonic()
+
+        _write_jsonl(
+            progress_jsonl,
+            {
+                "event": "start",
+                "selected": len(sessions),
+                "total_available": total_available,
+                "limit": int(limit),
+            },
+        )
+
         for index, session in enumerate(sessions, start=1):
             processed = index
             item_started = time.monotonic()
@@ -194,16 +199,18 @@ def run_couchdb_projection(
                         skipped_resumed += 1
                         status = "skipped_resumed"
                     else:
-                        status, reason, p, d, f = _project_one(worker, episode)
+                        status, reason, p, d, sd, f = _project_one(worker, episode)
                         projected += p
                         duplicates += d
+                        skipped_disabled += sd
                         failed += f
-                        if not f:
+                        if not f and not sd:
                             projected_cache[session_project].add(episode.natural_id)
                 else:
-                    status, reason, p, d, f = _project_one(worker, episode)
+                    status, reason, p, d, sd, f = _project_one(worker, episode)
                     projected += p
                     duplicates += d
+                    skipped_disabled += sd
                     failed += f
                 if reason:
                     failure_reasons[reason] += 1
@@ -242,58 +249,60 @@ def run_couchdb_projection(
                         "duplicates": duplicates,
                         "failed": failed,
                         "skipped_resumed": skipped_resumed,
+                        "skipped_disabled": skipped_disabled,
                     },
                 )
             if max_projects and (projected + duplicates) >= max_projects:
                 stopped_after_max_projects = True
                 break
+
+        elapsed_total_ms = int((time.monotonic() - started) * 1000)
+        attempted = processed
+        status = "ok" if failed == 0 else ("partial" if projected or duplicates or skipped_resumed else "failed")
+        return {
+            "schema_version": COUCHDB_GRAPH_PROJECTION_SCHEMA_VERSION,
+            "projection_schema_version": PROJECTION_SCHEMA_VERSION,
+            "status": status,
+            "canonical_counts": {
+                "source_sessions": total_available,
+                "selected_sessions": len(sessions),
+            },
+            "filters": {
+                "project_set": bool(project),
+                "project_ref": _project_ref(project),
+                "provider": provider,
+            },
+            "limit": int(limit),
+            "truncated": bool((limit > 0 and total_available > len(sessions)) or stopped_after_max_projects),
+            "graph_enabled": bool(enable_graph),
+            "target_extraction_level": target_level,
+            "runtime_lock": {
+                "enabled": runtime_dir is not None,
+                "acquired": runtime_dir is not None,
+            },
+            "projection": {
+                "attempted": attempted,
+                "projected": projected,
+                "duplicates": duplicates,
+                "skipped_resumed": skipped_resumed,
+                "skipped_disabled": skipped_disabled,
+                "failed": failed,
+                "failure_rate": (failed / attempted) if attempted else 0.0,
+                "failure_reasons": dict(sorted(failure_reasons.items())),
+                "stopped_after_max_projects": stopped_after_max_projects,
+            },
+            "metrics": {
+                "avg_ms": int(sum(durations) / len(durations)) if durations else 0,
+                "p95_ms": _p95(durations),
+                "elapsed_total_ms": elapsed_total_ms,
+            },
+            "by_provider": dict(sorted(by_provider.items())),
+            "project_count": len(by_project),
+            "raw_paths_printed": False,
+        }
     finally:
         if lock_handle is not None:
             _release_runtime_lock(lock_handle)
-
-    elapsed_total_ms = int((time.monotonic() - started) * 1000)
-    attempted = processed
-    status = "ok" if failed == 0 else ("partial" if projected or duplicates or skipped_resumed else "failed")
-    return {
-        "schema_version": COUCHDB_GRAPH_PROJECTION_SCHEMA_VERSION,
-        "projection_schema_version": PROJECTION_SCHEMA_VERSION,
-        "status": status,
-        "canonical_counts": {
-            "source_sessions": total_available,
-            "selected_sessions": len(sessions),
-        },
-        "filters": {
-            "project_set": bool(project),
-            "project_ref": _project_ref(project),
-            "provider": provider,
-        },
-        "limit": int(limit),
-        "truncated": bool((limit > 0 and total_available > len(sessions)) or stopped_after_max_projects),
-        "graph_enabled": bool(enable_graph),
-        "target_extraction_level": target_level,
-        "runtime_lock": {
-            "enabled": runtime_dir is not None,
-            "acquired": runtime_dir is not None,
-        },
-        "projection": {
-            "attempted": attempted,
-            "projected": projected,
-            "duplicates": duplicates,
-            "skipped_resumed": skipped_resumed,
-            "failed": failed,
-            "failure_rate": (failed / attempted) if attempted else 0.0,
-            "failure_reasons": dict(sorted(failure_reasons.items())),
-            "stopped_after_max_projects": stopped_after_max_projects,
-        },
-        "metrics": {
-            "avg_ms": int(sum(durations) / len(durations)) if durations else 0,
-            "p95_ms": _p95(durations),
-            "elapsed_total_ms": elapsed_total_ms,
-        },
-        "by_provider": dict(sorted(by_provider.items())),
-        "project_count": len(by_project),
-        "raw_paths_printed": False,
-    }
 
 
 def _acquire_runtime_lock(runtime_dir: Path | None) -> tuple[Any | None, dict[str, Any] | None]:
@@ -413,7 +422,7 @@ def _session_sort_key(session: dict[str, Any]) -> tuple[str, str, str]:
     )
 
 
-def _project_one(worker: GraphProjectionWorker, episode: Any) -> tuple[str, str, int, int, int]:
+def _project_one(worker: GraphProjectionWorker, episode: Any) -> tuple[str, str, int, int, int, int]:
     report = worker.project_episodes([episode], resume_projected_ids=set())
     if report.failed:
         return (
@@ -421,13 +430,26 @@ def _project_one(worker: GraphProjectionWorker, episode: Any) -> tuple[str, str,
             str(report.failures[0].get("reason_code") or "projection_failed"),
             int(report.projected),
             int(report.duplicates),
+            int(report.skipped_disabled),
             int(report.failed),
+        )
+    # graph disabled면 upsert가 일어나지 않으므로 projected/duplicates가 0이다.
+    # 이를 "duplicate"로 오보고하지 않고 skipped_disabled로 정확히 분류한다.
+    if report.skipped_disabled:
+        return (
+            "skipped_disabled",
+            "",
+            int(report.projected),
+            int(report.duplicates),
+            int(report.skipped_disabled),
+            0,
         )
     return (
         "projected" if report.projected else "duplicate",
         "",
         int(report.projected),
         int(report.duplicates),
+        0,
         0,
     )
 

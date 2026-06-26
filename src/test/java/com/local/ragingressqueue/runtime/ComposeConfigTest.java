@@ -54,10 +54,18 @@ class ComposeConfigTest {
         assertThat(compose).contains("LLM_BRAIN_BULK_SEMANTIC_TRIGGER_INTERVAL_SECONDS");
         assertThat(compose).contains("LLM_BRAIN_BULK_SEMANTIC_EMBEDDINGS");
         assertThat(compose).contains("GOOGLE_APPLICATION_CREDENTIALS");
-        assertThat(compose).contains("NEO4J_AUTH: ${LLM_BRAIN_NEO4J_USER:-neo4j}/${LLM_BRAIN_NEO4J_PASSWORD:-llmbrain}");
+        assertThat(compose).contains("NEO4J_AUTH: ${LLM_BRAIN_NEO4J_USER:-neo4j}/${LLM_BRAIN_NEO4J_PASSWORD:?set LLM_BRAIN_NEO4J_PASSWORD}");
         assertThat(compose).contains("LLM_BRAIN_NEO4J_URI: ${LLM_BRAIN_NEO4J_URI:-bolt://llm-brain-neo4j:7687}");
         assertThat(compose).doesNotContain("\n      NEO4J_USER:");
         assertThat(compose).doesNotContain("gemini-3.5-flash-thinking");
+        // Secrets must be required (${VAR:?...}) — no checked-in shared password/secret
+        // fallback may let the stack boot with public credentials and bypass the
+        // .env.example placeholder contract.
+        assertThat(compose).doesNotContain(":-llmbrain");
+        assertThat(compose).contains("LLM_BRAIN_COUCHDB_PASSWORD:?set LLM_BRAIN_COUCHDB_PASSWORD");
+        assertThat(compose).contains("LLM_BRAIN_COUCHDB_SECRET:?set LLM_BRAIN_COUCHDB_SECRET");
+        assertThat(compose).contains("LLM_BRAIN_LEDGER_POSTGRES_PASSWORD:?set LLM_BRAIN_LEDGER_POSTGRES_PASSWORD");
+        assertThat(compose).contains("LLM_BRAIN_NEO4J_PASSWORD:?set LLM_BRAIN_NEO4J_PASSWORD");
         // Host networking is allowed for EXACTLY ONE service: neuron-knowledge-mcp
         // (documented — reach loopback Neo4j/vertex-wrapper/PG while binding the
         // tailnet interface). The bulk-semantic / graph-trigger lanes and every other
