@@ -187,6 +187,14 @@ class MetadataFirstHybridGraphAdapter:
         self._graph_adapter = graph_adapter
         self._text_mirror = text_mirror
         self._mirror_required = bool(mirror_required)
+        # metadata-first는 항상 episodic 레벨이다. metadata_first_episode가 graph
+        # payload를 metadata-only로 깎고, 팩토리(create_graph_memory_adapter)는
+        # 감싼 Graphiti adapter의 entity 추출을 끈다. 이 adapter는 episode-only
+        # 어댑터이므로 projection의 _adapter_extraction_level이 읽는
+        # ``_extract_entities`` 인터페이스를 getattr 기본값에 의존하지 않고
+        # 명시적으로 False로 노출해 추출 레벨 분류(즉 projection_state 레벨
+        # 스코프)가 흔들리지 않게 한다.
+        self._extract_entities = False
 
     def upsert_episode(self, episode: OntologyEpisode) -> UpsertEpisodeResult:
         graph_result = self._graph_adapter.upsert_episode(metadata_first_episode(episode))

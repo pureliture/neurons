@@ -81,7 +81,11 @@ def evaluate_regression_gate(
     entity_coverage = _entity_coverage(graph_status or {})
     if float(min_entity_coverage) > 0 and entity_coverage < float(min_entity_coverage):
         blockers.append("entity_coverage_below_minimum")
-    if _raw_paths_printed(after):
+    if (
+        _raw_paths_printed(before)
+        or _raw_paths_printed(after)
+        or (graph_status is not None and _raw_paths_printed(graph_status))
+    ):
         blockers.append("raw_paths_printed")
 
     return {

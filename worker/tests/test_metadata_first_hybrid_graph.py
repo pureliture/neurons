@@ -160,6 +160,21 @@ def test_hybrid_join_uses_episode_id_lookup_not_bounded_metadata_pool():
     assert not any(item.startswith("metadata_join_missing") for item in result.details)
 
 
+def test_hybrid_adapter_is_classified_episodic_by_projection_level():
+    from agent_knowledge.llm_brain_core.ledger_adapter import (
+        EXTRACTION_LEVEL_EPISODIC,
+    )
+    from agent_knowledge.llm_brain_core.projection import (
+        _adapter_extraction_level,
+    )
+
+    # episode-only 어댑터는 ``_extract_entities`` 인터페이스를 명시적으로 False로
+    # 노출해야 한다. getattr 기본값이 아니라 실제 속성으로 노출되는지 확인한다.
+    adapter = MetadataFirstHybridGraphAdapter(FakeGraphMemoryAdapter())
+    assert adapter._extract_entities is False
+    assert _adapter_extraction_level(adapter) == EXTRACTION_LEVEL_EPISODIC
+
+
 def _task_episode() -> OntologyEpisode:
     return _episode_with(
         "hybrid_task",

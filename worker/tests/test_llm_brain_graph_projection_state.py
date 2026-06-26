@@ -20,6 +20,7 @@ from agent_knowledge.llm_brain_core.graphiti_adapter import (
 )
 from agent_knowledge.llm_brain_core.ledger_adapter import (
     LedgerGraphProjectionStateStore,
+    _migrate_extraction_level,
 )
 from agent_knowledge.llm_brain_core.models import OntologyEpisode
 
@@ -160,6 +161,62 @@ def test_schema_single_source_initialize_matches_store(tmp_path: Path):
     assert initialize_columns == expected
     assert store_columns == expected
     assert initialize_columns == store_columns
+
+
+def test_pre_m2_rebuild_keeps_indexes_on_new_table(tmp_path: Path):
+    # The pre-M2 -> composite rebuild renames the legacy table to *_pre_m2 before
+    # recreating the table. RENAME leaves the legacy indexes attached under their
+    # original names, so a naive CREATE INDEX IF NOT EXISTS would skip (name still
+    # occupied) and the indexes would then vanish with DROP TABLE *_pre_m2. We call
+    # the migration block in isolation (not via _ensure_schema, which re-runs the
+    # schema afterward and would mask the bug) and assert the new table carries the
+    # explicit indexes.
+    ledger = _ledger(tmp_path)
+    table = "llm_brain_graph_projection_state"
+    with ledger._connect() as connection:
+        connection.execute(f"DROP TABLE IF EXISTS {table}")
+        # Legacy pre-M2 shape: sole episode_id PRIMARY KEY, no extraction_level,
+        # plus the original named indexes.
+        connection.executescript(
+            f"""
+            CREATE TABLE {table} (
+                episode_id TEXT PRIMARY KEY,
+                project TEXT NOT NULL DEFAULT '',
+                entity_type TEXT NOT NULL DEFAULT '',
+                natural_id TEXT NOT NULL DEFAULT '',
+                group_id TEXT NOT NULL DEFAULT '',
+                brain_id TEXT DEFAULT '',
+                content_hash TEXT NOT NULL DEFAULT '',
+                ontology_version TEXT NOT NULL DEFAULT '',
+                extractor_version TEXT NOT NULL DEFAULT '',
+                upsert_result TEXT NOT NULL DEFAULT '',
+                projected_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX idx_{table}_project_projected ON {table}(project, projected_at);
+            CREATE INDEX idx_{table}_group ON {table}(group_id);
+            INSERT INTO {table} (episode_id, projected_at, updated_at)
+                VALUES ('evt:legacy', '2026-01-01', '2026-01-01');
+            """
+        )
+
+    with ledger._connect() as connection:
+        _migrate_extraction_level(connection)
+        index_names = {
+            str(row["name"])
+            for row in connection.execute(
+                f"PRAGMA index_list({table})"
+            ).fetchall()
+        }
+        # Row was copied into the rebuilt composite table.
+        copied = connection.execute(
+            f"SELECT extraction_level FROM {table} WHERE episode_id = 'evt:legacy'"
+        ).fetchone()
+
+    assert f"idx_{table}_project_projected" in index_names
+    assert f"idx_{table}_group" in index_names
+    assert f"idx_{table}_level" in index_names
+    assert copied is not None and copied["extraction_level"] == "episodic"
 
 
 def test_schema_migration_recorded(tmp_path: Path):

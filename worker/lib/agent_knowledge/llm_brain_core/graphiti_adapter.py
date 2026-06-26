@@ -37,6 +37,18 @@ _GEMINI_LLM_FORBIDDEN_MESSAGE = (
     "use Gemma-4 MaaS or an Ollama model instead. Gemini embeddings remain allowed."
 )
 
+# Generic fallback embedding dimension when neither the env nor a known model
+# pins one. Kept as a single source so the dataclass default, from_env default,
+# and the model/dim reconciliation in _build_graphiti cannot drift apart.
+_DEFAULT_EMBEDDING_DIM = 1024
+# Native output dimensions for embedding models whose true dimension differs from
+# the generic _DEFAULT_EMBEDDING_DIM. nomic-embed-text (the ollama default) emits
+# 768-dim vectors; pairing it with the 1024 default mismatches the index/query
+# dimension. Add only models whose native dim is known to be safe to assume.
+_KNOWN_EMBEDDING_DIMS = {
+    "nomic-embed-text": 768,
+}
+
 
 @dataclass(frozen=True)
 class GraphitiNeo4jConfig:
@@ -56,7 +68,7 @@ class GraphitiNeo4jConfig:
     embedding_model: str = ""
     embedding_base_url: str = ""
     embedding_api_key: str = field(default="", repr=False)
-    embedding_dim: int = 1024
+    embedding_dim: int = _DEFAULT_EMBEDDING_DIM
     store_raw_episode_content: bool = True
     extract_entities: bool = False
     force_reextract_entities: bool = False
@@ -102,7 +114,7 @@ class GraphitiNeo4jConfig:
             embedding_model=env.get("LLM_BRAIN_EMBEDDING_MODEL", env.get("EMBEDDING_MODEL", "")),
             embedding_base_url=env.get("LLM_BRAIN_EMBEDDING_BASE_URL", env.get("OPENAI_BASE_URL", "")),
             embedding_api_key=env.get("LLM_BRAIN_EMBEDDING_API_KEY", env.get("OPENAI_API_KEY", "")),
-            embedding_dim=_int_env(env.get("LLM_BRAIN_EMBEDDING_DIM", ""), default=1024),
+            embedding_dim=_int_env(env.get("LLM_BRAIN_EMBEDDING_DIM", ""), default=_DEFAULT_EMBEDDING_DIM),
             store_raw_episode_content=env.get("LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT", "true").lower()
             not in {"0", "false", "no"},
             extract_entities=env.get("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES", "false").lower() in {"1", "true", "yes"},
@@ -335,34 +347,78 @@ class GraphitiNeo4jGraphMemoryAdapter:
             # RELATES_TO.fact). That synthesized text is not covered by the input
             # invariant, so we postcheck it and HARD FAIL (raise) on any private
             # path / secret-assignment match rather than letting it persist.
-            _reject_unsafe_extraction(results)
+            #
+            # add_episode has ALREADY written the Entity/RELATES_TO nodes/edges to
+            # the graph by the time we get here, so a rejection alone would leave
+            # the private/secret text persisted (graph pollution, P1). Delete the
+            # just-persisted extracted elements before re-raising so the rejection
+            # never survives in the graph.
+            try:
+                _reject_unsafe_extraction(results)
+            except Exception:
+                await _delete_extracted_graph_elements(self._graphiti.driver, results)
+                raise
             return "inserted"
 
         return self._runner.run(_call, timeout=self._write_timeout_seconds)
 
     async def _add_episode_with_fallback(self, **kwargs: Any) -> Any:
+        # A per-attempt timeout cancels the local await, but the remote LLM +
+        # Neo4j write the cancelled add_episode kicked off may still be running
+        # server-side. Re-firing add_episode for the same episode_id would then
+        # double-extract. After any attempt that timed out, re-probe whether the
+        # entity pass has since landed (MENTIONS edge present) before launching
+        # another attempt; if it has, stop and treat it as done. Best-effort: the
+        # probe narrows, but cannot fully close, the in-flight race.
+        episode_uuid = kwargs.get("uuid")
         last_error: Exception | None = None
+        timed_out = False
         for _ in range(self._primary_attempts):
+            if timed_out and await self._entity_pass_already_landed(episode_uuid):
+                return None
             try:
                 return await _add_episode_with_attempt_timeout(
                     self._graphiti,
                     self._primary_attempt_timeout_seconds,
                     **kwargs,
                 )
+            except asyncio.TimeoutError as exc:
+                last_error = exc
+                timed_out = True
             except Exception as exc:
                 last_error = exc
         if self._fallback_graphiti is not None:
             for _ in range(self._fallback_attempts):
+                if timed_out and await self._entity_pass_already_landed(episode_uuid):
+                    return None
                 try:
                     return await _add_episode_with_attempt_timeout(
                         self._fallback_graphiti,
                         self._fallback_attempt_timeout_seconds,
                         **kwargs,
                     )
+                except asyncio.TimeoutError as exc:
+                    last_error = exc
+                    timed_out = True
                 except Exception as exc:
                     last_error = exc
         if last_error is not None:
             raise last_error
+
+    async def _entity_pass_already_landed(self, episode_uuid: Any) -> bool:
+        """Whether the entity pass for ``episode_uuid`` is already in the graph.
+
+        Reuses the same MENTIONS probe as the pre-extraction idempotency guard.
+        Any probe error degrades to False so a transient read failure leads to a
+        retry rather than masking a still-missing extraction.
+        """
+
+        if not episode_uuid:
+            return False
+        try:
+            return bool(await self._entity_extracted(self._graphiti.driver, str(episode_uuid)))
+        except Exception:
+            return False
 
     def search_context(
         self,
@@ -604,6 +660,19 @@ def _normalize_structured_keys(value: Any) -> Any:
     return value
 
 
+def _is_list_annotation(annotation: Any) -> bool:
+    """Whether ``annotation`` is a list-typed field annotation.
+
+    Pydantic's ``model_fields[...].annotation`` stringifies as ``list[...]`` for
+    the builtin generic but as ``typing.List[...]`` when a model declares the
+    field with ``typing.List``. Match both so a single-list response model is
+    recognized regardless of which spelling the model used.
+    """
+
+    text = str(annotation if annotation is not None else "")
+    return text.startswith("list[") or text.startswith("typing.List[")
+
+
 def _normalize_structured_response(
     value: Any,
     response_model: Any = None,
@@ -617,7 +686,7 @@ def _normalize_structured_response(
     if isinstance(normalized, list):
         list_field_names = [
             name for name, field in fields.items()
-            if str(getattr(field, "annotation", "")).startswith("list[")
+            if _is_list_annotation(getattr(field, "annotation", None))
         ]
         if len(list_field_names) == 1:
             normalized = {list_field_names[0]: normalized}
@@ -756,6 +825,37 @@ def _reject_unsafe_extraction(results: Any) -> None:
         _reject_field(getattr(edge, "fact", ""), "extracted RELATES_TO.fact")
 
 
+async def _delete_extracted_graph_elements(driver: Any, results: Any) -> None:
+    """Best-effort removal of the entities/edges add_episode just persisted.
+
+    add_episode writes EntityNode/RELATES_TO to the graph BEFORE the write-time
+    redaction gate runs, so an unsafe extraction would otherwise leave the
+    private/secret text in the graph. When the gate rejects, delete those
+    elements (DETACH DELETE on a node also drops its MENTIONS/RELATES_TO edges)
+    so the rejection does not persist polluted state. Failures here are
+    swallowed: the caller is already re-raising the rejection, and a cleanup
+    error must not mask or replace it.
+    """
+
+    if results is None:
+        return
+    for edge in _safe_iter(getattr(results, "edges", None)):
+        await _safe_delete_graph_element(edge, driver)
+    for node in _safe_iter(getattr(results, "nodes", None)):
+        await _safe_delete_graph_element(node, driver)
+
+
+async def _safe_delete_graph_element(element: Any, driver: Any) -> None:
+    delete = getattr(element, "delete", None)
+    if not callable(delete):
+        return
+    try:
+        await delete(driver)
+    except Exception:
+        # Best-effort: a delete failure must not mask the unsafe-extraction raise.
+        pass
+
+
 def _safe_iter(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -802,16 +902,65 @@ def probe_graphiti_connectivity(adapter: Any) -> None:
         )
 
 
+# Providers that build Graphiti with our configured OpenAI-compatible client
+# instead of Graphiti's built-in default OpenAI client. The documented default
+# ``openai`` is included on purpose: routing it through the configured path means
+# the episode-only operational default never constructs Graphiti's built-in
+# OpenAI LLM/embedder client (which instantiates an OpenAI SDK client and would
+# break the zero-LLM guarantee when no key is configured).
+_CONFIGURED_LLM_CLIENT_PROVIDERS = frozenset(
+    {"openai", "ollama", "openai-compatible", "openai_compatible"}
+)
+# Non-secret placeholder API key for providers that authenticate out of band
+# (e.g. the vertex-wrapper backend uses ADC, so an empty configured key is
+# intentional). Never a real credential; a genuinely required key surfaces as an
+# auth error at LLM call time, not as a construction-time failure here.
+_NON_SECRET_PLACEHOLDER_API_KEY = "not-needed"
+
+
+def _uses_configured_llm_client(provider: str) -> bool:
+    return str(provider or "").strip().lower() in _CONFIGURED_LLM_CLIENT_PROVIDERS
+
+
+def _placeholder_api_key(provider: str) -> str:
+    """Return the non-secret fallback API key for an empty configured key.
+
+    Ollama keeps its conventional ``ollama`` placeholder. Every other configured
+    provider (including ADC-backed openai-compatible endpoints such as the
+    vertex-wrapper) gets an explicit non-secret placeholder so the client
+    constructs cleanly when the key is intentionally empty.
+    """
+
+    if str(provider or "").strip().lower() == "ollama":
+        return "ollama"
+    return _NON_SECRET_PLACEHOLDER_API_KEY
+
+
+def _resolve_embedding_dim(embedding_model: str, configured_dim: int) -> int:
+    """Reconcile the embedding dimension with the resolved model's native one.
+
+    Only steps in when ``configured_dim`` is still the generic module default and
+    the model has a known native dimension, so an explicit ``LLM_BRAIN_EMBEDDING_DIM``
+    override is always honored while the ollama/nomic-embed-text default stops
+    mismatching its native 768-dim output.
+    """
+
+    native = _KNOWN_EMBEDDING_DIMS.get(str(embedding_model or "").strip().lower())
+    if native is not None and configured_dim == _DEFAULT_EMBEDDING_DIM:
+        return native
+    return configured_dim
+
+
 def _build_graphiti(config: GraphitiNeo4jConfig):
     from graphiti_core import Graphiti
 
-    if config.llm_provider in {"ollama", "openai-compatible", "openai_compatible"}:
+    if _uses_configured_llm_client(config.llm_provider):
         from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
         from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
         from graphiti_core.llm_client.config import LLMConfig
 
         base_url = config.llm_base_url or ("http://localhost:11434/v1" if config.llm_provider == "ollama" else "")
-        api_key = config.llm_api_key or ("ollama" if config.llm_provider == "ollama" else "")
+        api_key = config.llm_api_key or _placeholder_api_key(config.llm_provider)
         llm_config = LLMConfig(
             api_key=api_key,
             model=config.llm_model or ("deepseek-r1:7b" if config.llm_provider == "ollama" else None),
@@ -822,11 +971,14 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
             config=llm_config,
             reasoning_effort=config.llm_reasoning_effort,
         )
+        embedding_model = config.embedding_model or (
+            "nomic-embed-text" if config.llm_provider == "ollama" else "text-embedding-3-small"
+        )
         embedder = OpenAIEmbedder(
             config=OpenAIEmbedderConfig(
                 api_key=config.embedding_api_key or api_key,
-                embedding_model=config.embedding_model or ("nomic-embed-text" if config.llm_provider == "ollama" else "text-embedding-3-small"),
-                embedding_dim=config.embedding_dim,
+                embedding_model=embedding_model,
+                embedding_dim=_resolve_embedding_dim(embedding_model, config.embedding_dim),
                 base_url=config.embedding_base_url or base_url or None,
             )
         )
@@ -848,6 +1000,11 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
     )
 
 
+# Standard OpenAI chat roles. Any message whose role is outside this set is
+# remapped to `user` so its content survives into the request.
+_OPENAI_CHAT_ROLES = frozenset({"system", "user", "assistant", "tool", "developer", "function"})
+
+
 class _ReasoningOpenAIGenericClient(OpenAIGenericClient):
     """OpenAI-compatible Graphiti client with optional per-request reasoning."""
 
@@ -867,10 +1024,13 @@ class _ReasoningOpenAIGenericClient(OpenAIGenericClient):
         openai_messages = []
         for message in messages:
             message.content = self._clean_input(message.content)
-            if message.role == "user":
-                openai_messages.append({"role": "user", "content": message.content})
-            elif message.role == "system":
-                openai_messages.append({"role": "system", "content": message.content})
+            # Map every standard OpenAI chat role through instead of silently
+            # dropping non-user/system messages: an `assistant` turn (or `tool`/
+            # `developer`) carries real conversation context, and omitting it
+            # truncated the prompt the model actually saw. Unknown roles degrade
+            # to `user` so the content is never lost.
+            role = message.role if message.role in _OPENAI_CHAT_ROLES else "user"
+            openai_messages.append({"role": role, "content": message.content})
         valid_duplicate_fact_idxs = _existing_fact_idx_values_from_messages(openai_messages)
         request = {
             "model": self.model or DEFAULT_MODEL,

@@ -31,7 +31,15 @@ def test_graph_trigger_execute_calls_graph_project_with_lock_and_outputs_redacte
 
     def _child(argv):  # type: ignore[no-untyped-def]
         calls.append(list(argv or []))
-        print(json.dumps({"schema_version": "child.graph", "status": "ok"}))
+        print(
+            json.dumps(
+                {
+                    "schema_version": "child.graph",
+                    "status": "ok",
+                    "projection": {"projected": 3, "duplicates": 0, "failed": 0},
+                }
+            )
+        )
         return 0
 
     report = run_graph_trigger(
@@ -112,6 +120,62 @@ def test_graph_trigger_failed_child_returns_failed_status(tmp_path):
 
     assert report["status"] == "failed"
     assert report["step"]["exit_code"] == 1
+
+
+def test_graph_trigger_partial_projection_then_failure_still_reports_side_effects(tmp_path):
+    # 일부 projected 후 child가 실패(status=failed, exit 1)해도 그래프 기록 신호가
+    # 있으면 mutation/network를 거짓 음성으로 숨기지 않는다.
+    def _child(argv):  # type: ignore[no-untyped-def]
+        _ = argv
+        print(
+            json.dumps(
+                {
+                    "schema_version": "child.graph",
+                    "status": "failed",
+                    "projection": {"projected": 1, "duplicates": 0, "failed": 2},
+                }
+            )
+        )
+        return 1
+
+    report = run_graph_trigger(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        runtime_dir=tmp_path / "runtime",
+        execute=True,
+        graph_main=_child,
+    )
+
+    assert report["status"] == "failed"
+    assert report["mutation_performed"] is True
+    assert report["network_used"] is True
+
+
+def test_graph_trigger_ok_with_zero_projection_reports_no_mutation(tmp_path):
+    # status=ok이지만 projected=0이면 mutation을 거짓 양성으로 보고하지 않는다.
+    # duplicates만 있으면 그래프 백엔드에 접촉했으므로 network는 True다.
+    def _child(argv):  # type: ignore[no-untyped-def]
+        _ = argv
+        print(
+            json.dumps(
+                {
+                    "schema_version": "child.graph",
+                    "status": "ok",
+                    "projection": {"projected": 0, "duplicates": 4, "failed": 0},
+                }
+            )
+        )
+        return 0
+
+    report = run_graph_trigger(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        runtime_dir=tmp_path / "runtime",
+        execute=True,
+        graph_main=_child,
+    )
+
+    assert report["status"] == "ok"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is True
 
 
 def _exploding_child(argv):  # type: ignore[no-untyped-def]

@@ -133,8 +133,8 @@ def episode_from_memory_card(card: Mapping[str, Any], *, project: str = "") -> O
     # Build the entity-pass extraction prose from the card's MEANING text (title,
     # summary, and the typed_payload semantic fields) rather than the JSON
     # metadata blob. The payload was already public-safe redacted above, so this
-    # reuses the redacted values. OntologyEpisode.__post_init__ redacts+bounds
-    # extraction_text again as a fail-closed gate.
+    # reuses the redacted values. OntologyEpisode.__post_init__ applies a length
+    # bound ([:8000]) only; sources are already redacted at ingestion/mapping.
     extraction_text = _card_extraction_text(
         title=payload["title"],
         summary=payload["summary"],

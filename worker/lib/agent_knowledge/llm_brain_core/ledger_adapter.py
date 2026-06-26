@@ -437,6 +437,14 @@ def _migrate_extraction_level(connection: Any) -> None:
     connection.executescript(
         f"""
         ALTER TABLE {table} RENAME TO {table}_pre_m2;
+        -- RENAME keeps the legacy table's indexes under their original names
+        -- (sqlite and postgres both leave index names attached to the renamed
+        -- table). Drop them first so the schema's CREATE INDEX IF NOT EXISTS below
+        -- actually builds indexes on the NEW table instead of silently skipping on
+        -- the still-occupied names (which would then vanish with DROP TABLE _pre_m2).
+        DROP INDEX IF EXISTS idx_llm_brain_graph_projection_state_project_projected;
+        DROP INDEX IF EXISTS idx_llm_brain_graph_projection_state_group;
+        DROP INDEX IF EXISTS idx_llm_brain_graph_projection_state_level;
         {_GRAPH_PROJECTION_STATE_SCHEMA}
         INSERT INTO {table} (
             episode_id, extraction_level, project, entity_type, natural_id,

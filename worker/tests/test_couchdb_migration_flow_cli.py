@@ -153,6 +153,42 @@ def test_execute_stops_before_graph_when_session_memory_fails(tmp_path):
     assert calls["graph"] == 0
 
 
+def test_execute_child_general_exception_is_reported_not_crashed(tmp_path):
+    ledger = tmp_path / "ledger.sqlite3"
+    outer_approval = tmp_path / "flow-approval.json"
+    child_approval = tmp_path / "session-approval.json"
+    command_argv = ["--ledger", str(ledger), "--execute", "--approval", str(outer_approval)]
+    _approval(outer_approval, argv=command_argv)
+
+    def _session(argv):  # type: ignore[no-untyped-def]
+        _ = argv
+        raise ConnectionError("ragflow unreachable")
+
+    def _graph(argv):  # type: ignore[no-untyped-def]
+        _ = argv
+        raise AssertionError("graph should not run after session crash")
+
+    report = run_migration_flow(
+        ledger_path=ledger,
+        limit=1,
+        execute=True,
+        approval=outer_approval,
+        session_memory_approval=child_approval,
+        command_argv=command_argv,
+        session_memory_main=_session,
+        graph_main=_graph,
+    )
+
+    assert report["status"] == "partial"
+    assert len(report["steps"]) == 1
+    assert report["steps"][0]["name"] == "session_memory_build"
+    assert report["steps"][0]["exit_code"] == 1
+    assert report["steps"][0]["error_class"] == "ConnectionError"
+    assert report["steps"][0]["stderr_present"] is True
+    rendered = json.dumps(report, sort_keys=True)
+    assert str(tmp_path) not in rendered
+
+
 def _exploding_child(argv):  # type: ignore[no-untyped-def]
     _ = argv
     raise AssertionError("child command should not be called")

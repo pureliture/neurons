@@ -369,6 +369,60 @@ def test_session_extraction_text_strips_couchdb_chunk_metadata_headers():
     assert "char_start:" not in prose
 
 
+def test_session_extraction_text_streams_cut_at_max_chars_across_chunks():
+    # Two oversized chunks: the join must be bounded at max_chars without first
+    # concatenating both full bodies (streaming cut), and the cap holds exactly.
+    store = InMemoryCouchDBSourceStore()
+    session_id_hash = _sid()
+    store.put(
+        dm.build_transcript_session_document(
+            session=TranscriptSession(
+                session_id_hash=session_id_hash,
+                provider=PROVIDER,
+                project=PROJECT,
+                started_at="2026-06-20T00:00:00Z",
+            )
+        )
+    )
+    for part_index, marker in ((1, "A"), (2, "B")):
+        chunk = TranscriptChunk(
+            chunk_id=f"chunk_stream_{part_index}",
+            session_id_hash=session_id_hash,
+            provider=PROVIDER,
+            project=PROJECT,
+            turn_start_index=1,
+            turn_end_index=1,
+            redacted_text=marker * 6000,
+            content_hash=dm.sha256_hash(marker * 6000),
+            part_index=part_index,
+            part_count=2,
+            char_start=(part_index - 1) * 6000,
+            char_end=part_index * 6000,
+        )
+        store.put(dm.build_conversation_chunk_document(chunk=chunk))
+
+    prose = extraction_text_from_couchdb_chunks(
+        session_id_hash=session_id_hash, source_store=store, max_chars=100
+    )
+
+    assert len(prose) == 100
+    # The cut happens inside the first chunk; the second chunk never contributes.
+    assert set(prose) == {"A"}
+
+
+def test_strip_metadata_header_keeps_prose_first_line_without_blank_separator():
+    # A first sentence that merely looks like ``key: value`` (and even reuses a
+    # metadata key) must survive when there is no blank-line header boundary.
+    from agent_knowledge.llm_brain_core.runtime import _strip_chunk_metadata_header
+
+    text = "char_start: where the debugging story begins\nthen we discussed Neo4j."
+    assert _strip_chunk_metadata_header(text) == text
+
+    # A genuine header block (closed by a blank line) is still stripped.
+    headered = "\n".join(["char_start: 0", "char_end: 64", "", "user: real prose here."])
+    assert _strip_chunk_metadata_header(headered) == "user: real prose here."
+
+
 def test_session_extraction_text_is_trusted_from_source_not_re_redacted():
     # Contract: extraction_text is the entity-pass LLM INPUT and is trusted as-is.
     # Its production sources (CouchDB chunk bodies via redact_public_ingress_text;

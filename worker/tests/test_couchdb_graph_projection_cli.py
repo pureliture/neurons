@@ -37,6 +37,11 @@ class _ExplodingEntityGraph(_EntityFlagFakeGraph):
         raise AssertionError("graph adapter should not be called while locked")
 
 
+class _DisabledEntityGraph(_EntityFlagFakeGraph):
+    def upsert_episode(self, episode):  # type: ignore[no-untyped-def]
+        return "skipped_disabled"
+
+
 def _seed_session(
     store: InMemoryCouchDBSourceStore,
     *,
@@ -239,6 +244,33 @@ def test_partial_projection_continues_and_writes_dead_letter(tmp_path):
     assert lines[0]["stage"] == "project"
 
 
+def test_graph_disabled_reports_skipped_disabled_not_duplicate(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="disabled")
+    progress = tmp_path / "progress.jsonl"
+
+    report = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_DisabledEntityGraph(),
+        limit=1,
+        progress_jsonl=progress,
+    )
+
+    assert report["status"] == "ok"
+    assert report["projection"]["attempted"] == 1
+    assert report["projection"]["skipped_disabled"] == 1
+    assert report["projection"]["projected"] == 0
+    assert report["projection"]["duplicates"] == 0
+    assert report["projection"]["failed"] == 0
+
+    events = [json.loads(line) for line in progress.read_text(encoding="utf-8").splitlines()]
+    progress_events = [event for event in events if event["event"] == "progress"]
+    assert len(progress_events) == 1
+    assert progress_events[0]["status"] == "skipped_disabled"
+    assert progress_events[0]["skipped_disabled"] == 1
+
+
 def test_progress_jsonl_uses_project_ref_not_raw_project(tmp_path):
     store = InMemoryCouchDBSourceStore()
     _seed_session(store, raw_id="progress")
@@ -360,6 +392,47 @@ def test_status_excludes_source_invalid_sessions_from_valid_backlog(tmp_path):
     assert report["projection_state"]["entity_session_projected"] == 1
     assert report["projection_state"]["entity_session_backlog"] == 1
     assert report["projection_state"]["entity_coverage_ratio"] == 0.5
+
+
+def test_status_scopes_recency_metrics_to_selected_provider(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="codex-projected")
+    _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=1,
+    )
+
+    # Same project, but the natural_id belongs to a session outside the codex
+    # provider scope. The projection_state table has no provider column, so this
+    # row must be excluded via the selected source-set intersection.
+    foreign_natural_id = "claude_session_outside_scope"
+    with Ledger(tmp_path / "ledger.sqlite3")._connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO llm_brain_graph_projection_state (
+                episode_id, extraction_level, project, entity_type, natural_id,
+                group_id, brain_id, content_hash, ontology_version,
+                extractor_version, upsert_result, projected_at, updated_at
+            ) VALUES (?, 'entity', ?, 'Session', ?, '', '', '', '', '', 'inserted',
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (f"foreign:{foreign_natural_id}", PROJECT, foreign_natural_id),
+        )
+
+    report = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+    )
+
+    assert report["source"]["session_count"] == 1
+    assert report["projection_state"]["entity_session_projected"] == 1
+    # The foreign-provider row must not inflate provider-scoped recency metrics.
+    assert report["projection_state"]["entity_projected_last_24h"] == 1
+    assert report["projection_state"]["entity_projected_last_1h"] == 1
 
 
 def test_status_summarizes_progress_and_dead_letters_without_raw_project(tmp_path):

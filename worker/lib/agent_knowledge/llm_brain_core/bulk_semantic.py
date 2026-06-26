@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -69,6 +71,7 @@ class BulkSemanticWriteReport:
     projected: int
     entities_written: int
     relations_written: int
+    projected_natural_ids: tuple[str, ...] = ()
 
 
 class OpenAICompatibleBulkSemanticExtractor:
@@ -287,6 +290,7 @@ class DeterministicGraphitiSemanticWriter:
         projected = 0
         entity_writes = 0
         relation_writes = 0
+        projected_natural_ids: list[str] = []
         for item in inputs:
             session_result = normalized_results.get(item.session_key)
             if session_result is None:
@@ -363,10 +367,12 @@ class DeterministicGraphitiSemanticWriter:
                     await _save_entity_edge_without_embedding(self._driver, entity_edge)
                 relation_writes += 1
             projected += 1
+            projected_natural_ids.append(episode.natural_id)
         return BulkSemanticWriteReport(
             projected=projected,
             entities_written=entity_writes,
             relations_written=relation_writes,
+            projected_natural_ids=tuple(projected_natural_ids),
         )
 
     def _embed_normalized_results(
@@ -561,7 +567,11 @@ def _entity_key(name: str) -> str:
 
 
 def _entity_uuid(group_id: str, entity: BulkSemanticEntity) -> str:
-    return f"entity:{short_hash([group_id, _entity_key(entity.name), entity.type.lower()])}"
+    # Entity identity is name-based: normalize_session_result() dedups entities by
+    # name and relation endpoint lookup keys on name only. Mixing entity.type into
+    # the salt would split the same-named entity into separate nodes when the type
+    # differs between extraction passes, so the type is intentionally excluded.
+    return f"entity:{short_hash([group_id, _entity_key(entity.name)])}"
 
 
 def _mentions_uuid(episode_id: str, entity_uuid: str) -> str:
@@ -654,9 +664,53 @@ def _loads_json_object(value: str) -> Any:
         raise
 
 
+_ALLOWED_ENDPOINT_SCHEMES = frozenset({"http", "https"})
+_BLOCKED_ENDPOINT_HOSTS = frozenset({"metadata.google.internal"})
+
+
+def _endpoint_allowed_hosts(environ: dict[str, str] | None = None) -> frozenset[str]:
+    env = environ if environ is not None else os.environ
+    raw = env.get("LLM_BRAIN_ENDPOINT_ALLOWED_HOSTS", "")
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+def _is_blocked_endpoint_host(host: str) -> bool:
+    candidate = host.strip().strip("[]").lower()
+    if candidate in _BLOCKED_ENDPOINT_HOSTS:
+        return True
+    try:
+        ip = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    # link-local covers cloud metadata endpoints (169.254.0.0/16, fe80::/10),
+    # the highest-value SSRF target for Authorization header / session-text leakage.
+    return ip.is_link_local
+
+
+def _validate_endpoint_url(url: str, *, allowed_hosts: frozenset[str] | None = None) -> None:
+    """Allowlist the *_BASE_URL endpoint before POSTing session text + Authorization.
+
+    Rejects non-http(s) schemes and cloud-metadata/link-local hosts to block SSRF.
+    When LLM_BRAIN_ENDPOINT_ALLOWED_HOSTS is set, the host must additionally be in
+    that explicit allowlist; loopback and internal service names pass by default.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme.lower() not in _ALLOWED_ENDPOINT_SCHEMES:
+        raise ValueError("bulk semantic endpoint scheme is not allowed")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("bulk semantic endpoint host is missing")
+    if _is_blocked_endpoint_host(host):
+        raise ValueError("bulk semantic endpoint host is not allowed")
+    allow = allowed_hosts if allowed_hosts is not None else _endpoint_allowed_hosts()
+    if allow and host.lower() not in allow:
+        raise ValueError("bulk semantic endpoint host is not in the allowlist")
+
+
 def _urllib_post(url: str, *, headers: dict, body: str, timeout: int) -> str:
+    _validate_endpoint_url(url)
     request = urllib.request.Request(url, data=body.encode("utf-8"), headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - scheme validated above
         return response.read().decode("utf-8")
 
 

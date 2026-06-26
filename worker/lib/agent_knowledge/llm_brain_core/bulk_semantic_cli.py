@@ -495,8 +495,11 @@ def _extract_write_and_mark(
         extraction,
         allow_empty_sessions=allow_empty_sessions,
     )
+    written_natural_ids = set(report.projected_natural_ids)
     for item in batch_inputs:
         episode = item.episode
+        if episode.natural_id not in written_natural_ids:
+            continue
         projection_state_store.mark_projected(
             episode,
             "inserted",
