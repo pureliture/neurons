@@ -189,6 +189,53 @@ def test_execute_child_general_exception_is_reported_not_crashed(tmp_path):
     assert str(tmp_path) not in rendered
 
 
+def test_execute_scopes_session_memory_child_with_project_and_provider(tmp_path):
+    ledger = tmp_path / "ledger.sqlite3"
+    outer_approval = tmp_path / "flow-approval.json"
+    child_approval = tmp_path / "session-approval.json"
+    command_argv = [
+        "--ledger",
+        str(ledger),
+        "--execute",
+        "--approval",
+        str(outer_approval),
+        "--session-memory-approval",
+        str(child_approval),
+        "--project",
+        "neurons",
+        "--provider",
+        "codex",
+    ]
+    _approval(outer_approval, argv=command_argv)
+    calls: list[list[str]] = []
+
+    def _session(argv):  # type: ignore[no-untyped-def]
+        calls.append(list(argv or []))
+        print(json.dumps({"schema_version": "child.session", "projected": 1}))
+        return 0
+
+    def _graph(argv):  # type: ignore[no-untyped-def]
+        print(json.dumps({"schema_version": "child.graph", "projection": {"projected": 1}}))
+        return 0
+
+    run_migration_flow(
+        ledger_path=ledger,
+        limit=1,
+        project="neurons",
+        provider="codex",
+        execute=True,
+        approval=outer_approval,
+        session_memory_approval=child_approval,
+        command_argv=command_argv,
+        session_memory_main=_session,
+        graph_main=_graph,
+    )
+
+    argv = calls[0]
+    assert "--project" in argv and argv[argv.index("--project") + 1] == "neurons"
+    assert "--provider" in argv and argv[argv.index("--provider") + 1] == "codex"
+
+
 def _exploding_child(argv):  # type: ignore[no-untyped-def]
     _ = argv
     raise AssertionError("child command should not be called")
