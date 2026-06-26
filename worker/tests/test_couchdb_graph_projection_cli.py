@@ -207,12 +207,38 @@ def test_max_projects_stops_after_bounded_non_resumed_upserts(tmp_path):
 
     assert second["status"] == "ok"
     assert second["canonical_counts"]["selected_sessions"] == 5
-    assert second["projection"]["attempted"] == 4
-    assert second["projection"]["skipped_resumed"] == 2
+    assert second["projection"]["attempted"] == 2
+    assert second["projection"]["skipped_resumed"] == 0
     assert second["projection"]["projected"] == 2
     assert second["projection"]["failed"] == 0
     assert second["projection"]["stopped_after_max_projects"] is True
     assert second["truncated"] is True
+
+
+def test_limited_resume_prioritizes_unprojected_sessions(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(3):
+        _seed_session(store, raw_id=f"new-session-priority-{index}")
+
+    first = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=2,
+    )
+    assert first["projection"]["projected"] == 2
+
+    second = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=2,
+    )
+
+    assert second["projection"]["attempted"] == 2
+    assert second["projection"]["projected"] == 1
+    assert second["projection"]["skipped_resumed"] == 1
+    assert second["projection"]["failed"] == 0
 
 
 def test_partial_projection_continues_and_writes_dead_letter(tmp_path):
