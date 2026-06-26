@@ -293,6 +293,20 @@ class OntologyEpisode:
     extractor_version: str
     payload: dict[str, Any] = field(default_factory=dict)
     relations: tuple[dict[str, Any], ...] = ()
+    # Transient, derived extraction input for the graph entity pass ONLY.
+    #
+    # The stored EpisodicNode.content stays the canonical JSON (to_dict), which
+    # recall (_episode_node_to_ontology) parses with json.loads. But the LLM
+    # entity extractor reads far better signal from real redacted prose (the
+    # actual conversation / typed-payload meaning text) than from a JSON metadata
+    # blob, which only ever yields generic entities. This field carries that
+    # prose to the adapter as the `episode_body` extraction input.
+    #
+    # It is deliberately EXCLUDED from to_dict() and from content_hash (the hash
+    # is computed in from_payload over the canonical fields, never this), so a
+    # different/absent extraction_text never changes episode_id -- no node dup
+    # explosion. It is never persisted to the graph and never read back on recall.
+    extraction_text: str = field(default="", compare=False, repr=False)
 
     def __post_init__(self) -> None:
         require_opaque_id(self.episode_id, "episode_id")
@@ -304,6 +318,16 @@ class OntologyEpisode:
         object.__setattr__(self, "source_event_ids", tuple(self.source_event_ids))
         object.__setattr__(self, "source_ref_ids", tuple(self.source_ref_ids))
         object.__setattr__(self, "relations", tuple(self.relations))
+        # extraction_text is derived/transient LLM-extraction input. Its sources
+        # (CouchDB chunk bodies; card typed-payload) are ALREADY redacted at
+        # ingestion/mapping, so re-redacting here just strips legitimate technical
+        # prose and regressed extraction to generic. Bound the length only; the
+        # strict public-safe gate stays on extraction OUTPUT, not this input.
+        object.__setattr__(
+            self,
+            "extraction_text",
+            (self.extraction_text or "")[:8000],
+        )
         ensure_public_safe(self.payload, "OntologyEpisode.payload")
         ensure_public_safe(list(self.source_ref_ids), "OntologyEpisode.source_ref_ids")
 
@@ -326,7 +350,13 @@ class OntologyEpisode:
         ontology_version: str = "1.0.0",
         extractor_version: str = "0.1.0",
         relations: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
+        extraction_text: str = "",
     ) -> "OntologyEpisode":
+        # extraction_text is intentionally NOT part of this hash: episode_id /
+        # idempotency_key derive from content_hash, so including transient
+        # extraction prose would make the same canonical content map to a new node
+        # whenever the prose changed -- a node-dup explosion. The hash stays over
+        # the canonical fields only.
         content_hash = hash_payload(
             {
                 "entity_type": entity_type,
@@ -358,6 +388,7 @@ class OntologyEpisode:
             extractor_version=extractor_version,
             payload=dict(payload),
             relations=tuple(dict(relation) for relation in relations),
+            extraction_text=extraction_text,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -365,6 +396,10 @@ class OntologyEpisode:
         data["source_event_ids"] = list(self.source_event_ids)
         data["source_ref_ids"] = list(self.source_ref_ids)
         data["relations"] = [dict(relation) for relation in self.relations]
+        # extraction_text is transient extraction input, never part of the stored
+        # node content or the content_hash. Drop it from the canonical dict so the
+        # persisted EpisodicNode.content (and any hash over to_dict) is unchanged.
+        data.pop("extraction_text", None)
         return data
 
     def search_text(self) -> str:

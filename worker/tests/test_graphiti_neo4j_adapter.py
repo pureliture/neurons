@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -17,9 +16,15 @@ from agent_knowledge.llm_brain_core.graphiti_adapter import (
     GraphitiNeo4jConfig,
     GraphitiNeo4jGraphMemoryAdapter,
     _AsyncLoopRunner,
+    _is_list_annotation,
+    _placeholder_api_key,
+    _ReasoningOpenAIGenericClient,
+    _resolve_embedding_dim,
     _datetime_to_iso,
     _episode_node_to_ontology,
+    _existing_fact_idx_values_from_messages,
     _normalize_structured_response,
+    _uses_configured_llm_client,
 )
 from agent_knowledge.llm_brain_core.models import OntologyEpisode
 
@@ -71,6 +76,207 @@ def test_graphiti_adapter_default_path_inserts_then_reports_duplicate_on_reupser
     assert second == "duplicate"
     # The duplicate short-circuits before any second node save attempt.
     assert graphiti.saved_uuids == [episode.episode_id]
+
+
+def test_graphiti_adapter_default_path_does_not_build_entity_extraction_body(monkeypatch):
+    graphiti = _FakeGraphiti()
+
+    def _explode(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("episodic-only path must not prepare entity extraction input")
+
+    monkeypatch.setattr("agent_knowledge.llm_brain_core.graphiti_adapter._extraction_body_for", _explode)
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+    episode = _episode("Task", "task:metadata-first", {"brain_id": "/project/neurons", "task": "metadata-first"})
+
+    assert adapter.upsert_episode(episode) == "inserted"
+    assert graphiti.saved_uuids == [episode.episode_id]
+
+
+def test_entity_path_ensures_episode_node_before_add_episode_when_absent():
+    # Scenario (a): entity mode + episode_id node ABSENT. The live bug:
+    # add_episode(uuid=episode_id) calls graphiti get_by_uuid first, which raises
+    # NodeNotFoundError when the node was never written (entity pass run as a
+    # separate CLI invocation). The fix ensure-saves the episode_id node first,
+    # so add_episode finds it and reports 'inserted' -- no NodeNotFoundError.
+    graphiti = _FakeGraphiti()
+
+    async def _not_extracted(driver, episode_id):
+        _ = (driver, episode_id)
+        return False
+
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        entity_extracted=_not_extracted,
+    )
+    episode = _episode("Task", "task:reextract", {"brain_id": "/project/neurons", "task": "reextract"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "inserted"
+    # The entity path writes the episode_id node before add_episode, then restores
+    # canonical JSON afterward. Both writes target the same episode_id node.
+    assert graphiti.saved_uuids == [episode.episode_id, episode.episode_id]
+    assert graphiti.added[0]["uuid"] == episode.episode_id
+    assert graphiti.added[0]["name"] == episode.episode_id
+
+
+def test_both_paths_build_identical_episode_node_via_shared_helper():
+    # Scenario (b): both the episodic-only path and the entity-path ensure-save
+    # build the EpisodicNode through the SAME _build_episodic_node helper, so the
+    # MERGE key/shape is identical. Identical (uuid, name, content, source,
+    # source_description, group_id) means a 2-pass run (episodic then entity)
+    # MERGEs onto the same node -- no duplicate, no divergent Episodic node.
+    graphiti = _FakeGraphiti()
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+    )
+    episode = _episode("Task", "task:exists", {"brain_id": "/project/neurons", "task": "exists"})
+    body = json.dumps(episode.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    group_id = adapter._build_episodic_node(episode, body, "brain_x").group_id  # noqa: SLF001
+
+    node_a = adapter._build_episodic_node(episode, body, group_id)  # noqa: SLF001
+    node_b = adapter._build_episodic_node(episode, body, group_id)  # noqa: SLF001
+
+    for attr in ("uuid", "name", "content", "source", "source_description", "group_id"):
+        assert getattr(node_a, attr) == getattr(node_b, attr)
+    # MERGE key is episode_id; the same content always maps to the same node.
+    assert node_a.uuid == episode.episode_id
+    assert node_a.name == episode.episode_id
+    assert node_a.content == body
+
+
+def test_entity_path_ensure_save_and_restore_write_same_episode_id_node():
+    # Scenario (b) companion: the entity-path writes the extraction prose and
+    # final JSON restore to the same episode_id node with the normalized brain_
+    # group_id, then add_episode succeeds. No NodeNotFoundError, no duplicate.
+    graphiti = _FakeGraphiti()
+
+    async def _not_extracted(driver, episode_id):
+        _ = (driver, episode_id)
+        return False
+
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        entity_extracted=_not_extracted,
+    )
+    episode = _episode("Task", "task:exists", {"brain_id": "/project/neurons", "task": "exists"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "inserted"
+    assert graphiti.saved_uuids == [episode.episode_id, episode.episode_id]
+    entity_group_id = graphiti.added[0]["group_id"]
+    assert entity_group_id.startswith("brain_")
+    assert "/" not in entity_group_id
+
+
+def test_entity_path_short_circuits_to_duplicate_without_add_episode():
+    # Scenario (c): MENTIONS>0 (entity pass already ran). The entity-extracted
+    # guard short-circuits to 'duplicate' BEFORE any ensure-save or add_episode,
+    # so the LLM is not re-billed and no extra node is written.
+    graphiti = _FakeGraphiti()
+
+    async def _already_extracted(driver, episode_id):
+        _ = (driver, episode_id)
+        return True
+
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        entity_extracted=_already_extracted,
+    )
+    episode = _episode("Task", "task:dup-entity", {"brain_id": "/project/neurons", "task": "dup"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "duplicate"
+    # No ensure-save and no add_episode call: the duplicate short-circuits first.
+    assert graphiti.saved_uuids == []
+    assert graphiti.added == []
+
+
+def test_entity_path_force_reextract_bypasses_entity_extracted_guard():
+    # --reextract-entities must bypass the adapter-level MENTIONS guard as well
+    # as the durable projection resume guard, so an already-extracted episode can
+    # be measured/rebuilt intentionally during bounded live validation.
+    graphiti = _FakeGraphiti()
+
+    async def _already_extracted(driver, episode_id):
+        _ = (driver, episode_id)
+        return True
+
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        force_reextract_entities=True,
+        entity_extracted=_already_extracted,
+    )
+    episode = _episode("Task", "task:force-entity", {"brain_id": "/project/neurons", "task": "force"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "inserted"
+    assert graphiti.saved_uuids == [episode.episode_id, episode.episode_id]
+    assert graphiti.added[0]["uuid"] == episode.episode_id
+
+
+def test_entity_path_hard_fails_on_private_extracted_text():
+    # Scenario (d): the LLM entity extractor synthesizes private/secret text.
+    # _reject_unsafe_extraction must HARD FAIL (ValueError) so it never persists,
+    # and the message names only the field kind (no raw private value echoed).
+    graphiti = _FakeGraphiti()
+
+    async def _not_extracted(driver, episode_id):
+        _ = (driver, episode_id)
+        return False
+
+    async def _add_episode_with_private(**kwargs):
+        # Ensure-save ran first, so the node exists; simulate add_episode
+        # succeeding but returning a node whose summary leaks a private path.
+        return SimpleNamespace(
+            nodes=[SimpleNamespace(name="Entity", summary="see /Users/secret/notes")],
+            edges=[],
+        )
+
+    graphiti.add_episode = _add_episode_with_private  # type: ignore[method-assign]
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        entity_extracted=_not_extracted,
+    )
+    episode = _episode("Task", "task:leak", {"brain_id": "/project/neurons", "task": "leak"})
+
+    with pytest.raises(ValueError) as excinfo:
+        adapter.upsert_episode(episode)
+
+    message = str(excinfo.value)
+    assert "EntityNode.summary" in message
+    # The raw private path must never be echoed in the exception text.
+    assert "/Users/secret/notes" not in message
+
+
+def test_episodic_default_path_still_saves_single_node_after_helper_extraction():
+    # Scenario (e) sibling: the episodic-only path now builds its node through the
+    # shared _build_episodic_node helper. Behavior must be preserved: a single
+    # save keyed on episode_id, no add_episode call, no NodeNotFoundError.
+    graphiti = _FakeGraphiti()
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+    episode = _episode("Task", "task:episodic-helper", {"brain_id": "/project/neurons", "task": "episodic"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "inserted"
+    assert graphiti.saved_uuids == [episode.episode_id]
+    assert graphiti.added == []
 
 
 def test_graphiti_adapter_search_rehydrates_domain_episode_and_graph_fact():
@@ -149,90 +355,211 @@ def test_graphiti_config_from_env_supports_ollama_openai_compatible_defaults():
             "LLM_BRAIN_NEO4J_PASSWORD": "secret",
             "LLM_BRAIN_GRAPH_LLM_PROVIDER": "ollama",
             "LLM_BRAIN_LLM_MODEL": "llama3.1:70b",
-            "LLM_BRAIN_EMBEDDING_PROVIDER": "ollama",
             "LLM_BRAIN_EMBEDDING_MODEL": "nomic-embed-text",
             "LLM_BRAIN_EMBEDDING_DIM": "768",
             "LLM_BRAIN_GRAPH_EXTRACT_ENTITIES": "true",
+            "LLM_BRAIN_GRAPH_FORCE_REEXTRACT_ENTITIES": "true",
         }
     )
 
     assert config.uri == "bolt://neo4j:7687"
     assert config.llm_provider == "ollama"
     assert config.llm_model == "llama3.1:70b"
-    assert config.embedding_provider == "ollama"
     assert config.embedding_model == "nomic-embed-text"
     assert config.embedding_dim == 768
     assert config.extract_entities is True
+    assert config.force_reextract_entities is True
+
+
+def test_graphiti_config_reads_llm_reasoning_effort_from_env():
+    config = GraphitiNeo4jConfig.from_env(
+        {
+            "LLM_BRAIN_GRAPH_LLM_PROVIDER": "openai-compatible",
+            "LLM_BRAIN_LLM_MODEL": "ollama:qwen3.5:cloud",
+            "LLM_BRAIN_LLM_REASONING_EFFORT": "medium",
+        }
+    )
+
+    assert config.llm_reasoning_effort == "medium"
+
+
+def test_graphiti_config_rejects_invalid_llm_reasoning_effort():
+    with pytest.raises(ValueError, match="LLM_BRAIN_LLM_REASONING_EFFORT"):
+        GraphitiNeo4jConfig.from_env({"LLM_BRAIN_LLM_REASONING_EFFORT": "extreme"})
+
+
+def test_graphiti_config_rejects_gemini_llm_models_for_cost_guard():
+    with pytest.raises(ValueError, match="Gemini LLM models are forbidden"):
+        GraphitiNeo4jConfig.from_env({"LLM_BRAIN_LLM_MODEL": "gemini-3.5-flash-thinking"})
+
+
+def test_graphiti_config_rejects_legacy_gemini_llm_models_for_cost_guard():
+    with pytest.raises(ValueError, match="Gemini LLM models are forbidden"):
+        GraphitiNeo4jConfig.from_env({"MODEL_NAME": "Gemini-2.5-Pro"})
+
+
+def test_graphiti_config_rejects_gemini_small_llm_models_for_cost_guard():
+    with pytest.raises(ValueError, match="Gemini LLM models are forbidden"):
+        GraphitiNeo4jConfig.from_env({"LLM_BRAIN_SMALL_LLM_MODEL": "gemini-2.5-flash"})
+
+
+def test_graphiti_config_rejects_gemini_fallback_llm_models_for_cost_guard():
+    with pytest.raises(ValueError, match="Gemini LLM models are forbidden"):
+        GraphitiNeo4jConfig.from_env({"LLM_BRAIN_LLM_FALLBACK_MODEL": "gemini-2.5-flash"})
+
+
+def test_graphiti_config_allows_gemma4_maas_and_gemini_embedding():
+    config = GraphitiNeo4jConfig.from_env(
+        {
+            "LLM_BRAIN_LLM_MODEL": "gemma-4-26b-a4b-it-maas",
+            "LLM_BRAIN_SMALL_LLM_MODEL": "gemma-4-26b-a4b-it-maas",
+            "LLM_BRAIN_EMBEDDING_MODEL": "gemini-embedding-2",
+        }
+    )
+
+    assert config.llm_model == "gemma-4-26b-a4b-it-maas"
+    assert config.small_model == "gemma-4-26b-a4b-it-maas"
+    assert config.embedding_model == "gemini-embedding-2"
 
 
 def test_graphiti_config_from_env_supports_llm_fallback_policy():
     config = GraphitiNeo4jConfig.from_env(
         {
             "LLM_BRAIN_GRAPH_EXTRACT_ENTITIES": "true",
-            "LLM_BRAIN_LLM_MODEL": "deepseek-v4-flash:cloud",
-            "LLM_BRAIN_SMALL_LLM_MODEL": "deepseek-v4-flash:cloud",
-            "LLM_BRAIN_LLM_FALLBACK_MODEL": "gemini-3.5-flash-thinking",
-            "LLM_BRAIN_SMALL_LLM_FALLBACK_MODEL": "gemini-3.5-flash-thinking",
+            "LLM_BRAIN_LLM_MODEL": "ollama:qwen3.5:cloud",
+            "LLM_BRAIN_SMALL_LLM_MODEL": "ollama:qwen3.5:cloud",
+            "LLM_BRAIN_LLM_FALLBACK_MODEL": "ollama:gemma4:31b-cloud",
+            "LLM_BRAIN_SMALL_LLM_FALLBACK_MODEL": "ollama:gemma4:31b-cloud",
             "LLM_BRAIN_GRAPH_PRIMARY_ATTEMPTS": "3",
             "LLM_BRAIN_GRAPH_FALLBACK_ATTEMPTS": "2",
+            "LLM_BRAIN_GRAPH_PRIMARY_ATTEMPT_TIMEOUT_SECONDS": "12.5",
+            "LLM_BRAIN_GRAPH_FALLBACK_ATTEMPT_TIMEOUT_SECONDS": "45",
         }
     )
 
-    assert config.llm_model == "deepseek-v4-flash:cloud"
-    assert config.fallback_llm_model == "gemini-3.5-flash-thinking"
-    assert config.fallback_small_model == "gemini-3.5-flash-thinking"
+    assert config.llm_model == "ollama:qwen3.5:cloud"
+    assert config.fallback_llm_model == "ollama:gemma4:31b-cloud"
+    assert config.fallback_small_model == "ollama:gemma4:31b-cloud"
     assert config.primary_attempts == 3
     assert config.fallback_attempts == 2
+    assert config.primary_attempt_timeout_seconds == 12.5
+    assert config.fallback_attempt_timeout_seconds == 45.0
+
+
+@pytest.mark.anyio
+async def test_reasoning_openai_generic_client_passes_reasoning_effort_to_chat_completion():
+    from graphiti_core.llm_client.config import LLMConfig
+    from graphiti_core.prompts.models import Message
+
+    captured: dict[str, object] = {}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"ok": true}'),
+                    )
+                ]
+            )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=_FakeCompletions(),
+        )
+    )
+    client = _ReasoningOpenAIGenericClient(
+        config=LLMConfig(api_key="unit-test", model="ollama:qwen3.5:cloud"),
+        client=fake_client,
+        reasoning_effort="medium",
+    )
+
+    result = await client.generate_response(
+        [
+            Message(role="system", content="Return JSON."),
+            Message(role="user", content="Say ok."),
+        ]
+    )
+
+    assert result == {"ok": True}
+    assert captured["model"] == "ollama:qwen3.5:cloud"
+    assert captured["reasoning_effort"] == "medium"
+
+
+@pytest.mark.anyio
+async def test_reasoning_openai_generic_client_omits_reasoning_effort_when_unset():
+    from graphiti_core.llm_client.config import LLMConfig
+    from graphiti_core.prompts.models import Message
+
+    captured: dict[str, object] = {}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"ok": true}'),
+                    )
+                ]
+            )
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions()))
+    client = _ReasoningOpenAIGenericClient(
+        config=LLMConfig(api_key="unit-test", model="ollama:qwen3.5:cloud"),
+        client=fake_client,
+    )
+
+    result = await client.generate_response([Message(role="user", content="Say ok.")])
+
+    assert result == {"ok": True}
+    assert "reasoning_effort" not in captured
+
+
+@pytest.mark.anyio
+async def test_reasoning_openai_generic_client_maps_assistant_and_unknown_roles():
+    # #4: standard roles beyond user/system (assistant) must survive instead of
+    # being silently dropped, and an unrecognized role degrades to 'user' so its
+    # content is never lost.
+    from graphiti_core.llm_client.config import LLMConfig
+    from graphiti_core.prompts.models import Message
+
+    captured: dict[str, object] = {}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok": true}'))]
+            )
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions()))
+    client = _ReasoningOpenAIGenericClient(
+        config=LLMConfig(api_key="unit-test", model="ollama:qwen3.5:cloud"),
+        client=fake_client,
+    )
+
+    await client.generate_response(
+        [
+            Message(role="system", content="sys"),
+            Message(role="assistant", content="prior answer"),
+            Message(role="user", content="now"),
+            Message(role="reviewer", content="unknown role payload"),
+        ]
+    )
+
+    roles = [message["role"] for message in captured["messages"]]
+    assert roles == ["system", "assistant", "user", "user"]
+    # No message was dropped: every input turn produced a request message.
+    assert len(captured["messages"]) == 4
 
 
 def test_graphiti_config_defaults_to_episode_only_storage():
     config = GraphitiNeo4jConfig.from_env({})
 
     assert config.extract_entities is False
-
-
-def test_graphiti_config_from_env_respects_explicit_empty_environment(monkeypatch):
-    monkeypatch.setenv("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES", "true")
-    monkeypatch.setenv("LLM_BRAIN_LLM_MODEL", "should-not-leak")
-
-    config = GraphitiNeo4jConfig.from_env({})
-
-    assert config.extract_entities is False
-    assert config.llm_model == ""
-
-
-def test_graphiti_from_config_delegates_backend_building(monkeypatch):
-    built_configs: list[GraphitiNeo4jConfig] = []
-    built_graphiti: list[object] = []
-
-    def _fake_build(config):
-        built_configs.append(config)
-        graphiti = object()
-        built_graphiti.append(graphiti)
-        return graphiti
-
-    monkeypatch.setattr(
-        "agent_knowledge.llm_brain_core.graphiti_adapter.build_graphiti_from_config",
-        _fake_build,
-    )
-    config = GraphitiNeo4jConfig(
-        extract_entities=True,
-        fallback_llm_model="fallback-main",
-        fallback_small_model="fallback-small",
-        primary_attempts=3,
-        fallback_attempts=2,
-    )
-
-    adapter = GraphitiNeo4jGraphMemoryAdapter.from_config(config)
-
-    assert built_configs[0].llm_model == "fallback-main"
-    assert built_configs[0].small_model == "fallback-small"
-    assert built_configs[0].fallback_llm_model == ""
-    assert built_configs[1] is config
-    assert adapter._graphiti is built_graphiti[1]
-    assert adapter._fallback_graphiti is built_graphiti[0]
-    assert adapter._primary_attempts == 3
-    assert adapter._fallback_attempts == 2
+    assert config.force_reextract_entities is False
 
 
 def test_structured_response_normalizes_entity_name_alias():
@@ -287,9 +614,46 @@ def test_structured_response_normalizes_episode_indices():
     assert normalized["edges"][0]["episode_indices"] == [0, 1]
 
 
+def test_structured_response_drops_invalid_duplicate_fact_idxs_only():
+    from graphiti_core.prompts.dedupe_edges import EdgeDuplicate
+
+    normalized = _normalize_structured_response(
+        {
+            "duplicate_facts": [0, "2", 6, -1, "bad"],
+            "contradicted_facts": [0, 2, 6],
+        },
+        EdgeDuplicate,
+        valid_duplicate_fact_idxs={0, 2},
+    )
+
+    assert normalized["duplicate_facts"] == [0, 2]
+    assert normalized["contradicted_facts"] == [0, 2, 6]
+
+
+def test_existing_fact_idx_values_parse_only_existing_facts_block():
+    from graphiti_core.prompts.models import Message
+
+    messages = [
+        Message(
+            role="user",
+            content="""
+<EXISTING FACTS>
+[{'idx': 0, 'fact': 'kept'}, {'idx': 2, 'fact': 'kept'}]
+</EXISTING FACTS>
+<FACT INVALIDATION CANDIDATES>
+[{'idx': 6, 'fact': 'not a duplicate candidate'}]
+</FACT INVALIDATION CANDIDATES>
+""",
+        )
+    ]
+
+    assert _existing_fact_idx_values_from_messages(messages) == {0, 2}
+
+
 def test_graphiti_adapter_retries_primary_then_fallback_for_entity_extraction():
     primary = _FailingGraphiti(RuntimeError("primary failed"))
     fallback = _FakeGraphiti()
+    fallback.driver = primary.driver
     adapter = GraphitiNeo4jGraphMemoryAdapter(
         primary,
         fallback_graphiti=fallback,
@@ -305,11 +669,27 @@ def test_graphiti_adapter_retries_primary_then_fallback_for_entity_extraction():
     assert len(primary.added) == 3
     assert len(fallback.added) == 1
     assert fallback.added[0]["name"] == episode.episode_id
-    assert adapter.last_write_details == (
-        "graphiti_neo4j",
-        "fallback_used",
-        "primary_error:RuntimeError",
+
+
+def test_graphiti_adapter_bounds_primary_attempt_timeout_before_fallback():
+    primary = _SlowAddGraphiti(delay_seconds=1.0)
+    fallback = _FakeGraphiti()
+    fallback.driver = primary.driver
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        primary,
+        fallback_graphiti=fallback,
+        extract_entities=True,
+        primary_attempts=2,
+        fallback_attempts=1,
+        primary_attempt_timeout_seconds=0.01,
     )
+    episode = _episode("Task", "task:timeout-fallback", {"brain_id": "/project/neurons", "task": "fallback"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "inserted"
+    assert len(primary.added) == 2
+    assert len(fallback.added) == 1
 
 
 def test_graphiti_adapter_raises_after_primary_attempts_without_fallback():
@@ -325,21 +705,6 @@ def test_graphiti_adapter_raises_after_primary_attempts_without_fallback():
         adapter.upsert_episode(episode)
 
     assert len(primary.added) == 2
-    assert adapter.last_write_details == ("graphiti_neo4j", "primary_error:RuntimeError")
-
-
-def test_graphiti_adapter_replaces_last_write_details_after_direct_write_failure():
-    graphiti = _FakeGraphiti()
-    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
-    adapter.upsert_episode(_episode("Task", "task:ok", {"brain_id": "/project/neurons", "task": "ok"}))
-    graphiti.driver.raise_on_execute = RuntimeError("direct write failed")
-
-    with pytest.raises(RuntimeError, match="direct write failed"):
-        adapter.upsert_episode(
-            _episode("Task", "task:fail", {"brain_id": "/project/neurons", "task": "fail"})
-        )
-
-    assert adapter.last_write_details == ("graphiti_neo4j", "direct_write_error:RuntimeError")
 
 
 def test_graphiti_adapters_share_single_async_loop_runner():
@@ -460,6 +825,135 @@ def test_graphiti_datetime_conversion_does_not_fabricate_missing_times():
     assert _datetime_to_iso("not-a-datetime") == ""
 
 
+def test_resolve_embedding_dim_matches_nomic_native_dim_by_default():
+    # #1: nomic-embed-text (the ollama default) is natively 768-dim; the generic
+    # 1024 default must not be paired with it (index/query dimension mismatch).
+    assert _resolve_embedding_dim("nomic-embed-text", 1024) == 768
+    # An explicit non-default dim is always honored.
+    assert _resolve_embedding_dim("nomic-embed-text", 384) == 384
+    # Unknown / openai default models keep the configured dim untouched.
+    assert _resolve_embedding_dim("text-embedding-3-small", 1024) == 1024
+
+
+def test_is_list_annotation_recognizes_builtin_and_typing_list():
+    # #3: both the builtin generic ('list[...]') and 'typing.List[...]' spellings
+    # must be recognized as list-typed annotations.
+    assert _is_list_annotation("list[str]") is True
+    assert _is_list_annotation("typing.List[dict]") is True
+    assert _is_list_annotation("int") is False
+    assert _is_list_annotation(None) is False
+
+
+def test_structured_response_wraps_single_typing_list_field():
+    # #3: a response model declaring its single list field with typing.List must
+    # still get a bare list wrapped under that field name.
+    from typing import List
+
+    from pydantic import BaseModel
+
+    class _LegacyListModel(BaseModel):
+        items: List[dict]
+
+    normalized = _normalize_structured_response([{"entity_name": "Neo4j"}], _LegacyListModel)
+
+    assert normalized == {"items": [{"name": "Neo4j"}]}
+
+
+def test_default_openai_provider_uses_configured_client_path():
+    # #7/#28: the documented default provider 'openai' must route through the
+    # configured OpenAI-compatible client path, so episode-only operation never
+    # constructs Graphiti's built-in default OpenAI client (zero-LLM guarantee).
+    assert _uses_configured_llm_client("openai") is True
+    assert _uses_configured_llm_client("OpenAI-Compatible") is True
+    assert _uses_configured_llm_client("ollama") is True
+    assert _uses_configured_llm_client("mock") is False
+
+
+def test_placeholder_api_key_is_non_secret_for_adc_backends():
+    # #27: ADC-backed openai-compatible endpoints (vertex-wrapper) authenticate
+    # out of band; an empty key falls back to a non-secret placeholder, never a
+    # real credential.
+    assert _placeholder_api_key("ollama") == "ollama"
+    placeholder = _placeholder_api_key("openai-compatible")
+    assert placeholder and "sk-" not in placeholder
+    assert _placeholder_api_key("openai") == placeholder
+
+
+def test_entity_path_rolls_back_persisted_extraction_on_unsafe_text():
+    # #6/#19: add_episode persists Entity/RELATES_TO BEFORE the redaction gate
+    # runs. When the gate rejects unsafe synthesized text, the just-persisted
+    # elements must be deleted (edge first, then node) so the private/secret
+    # content does not survive in the graph.
+    graphiti = _FakeGraphiti()
+    deleted: list[str] = []
+
+    async def _delete_node(driver):
+        _ = driver
+        deleted.append("node")
+
+    async def _delete_edge(driver):
+        _ = driver
+        deleted.append("edge")
+
+    async def _not_extracted(driver, episode_id):
+        _ = (driver, episode_id)
+        return False
+
+    async def _add_episode_with_private(**kwargs):
+        return SimpleNamespace(
+            nodes=[SimpleNamespace(name="Entity", summary="see /Users/secret/notes", delete=_delete_node)],
+            edges=[SimpleNamespace(fact="benign", delete=_delete_edge)],
+        )
+
+    graphiti.add_episode = _add_episode_with_private  # type: ignore[method-assign]
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        entity_extracted=_not_extracted,
+    )
+    episode = _episode("Task", "task:rollback", {"brain_id": "/project/neurons", "task": "rollback"})
+
+    with pytest.raises(ValueError):
+        adapter.upsert_episode(episode)
+
+    assert deleted == ["edge", "node"]
+
+
+def test_entity_path_skips_retry_after_timeout_when_extraction_already_landed():
+    # #20 idempotency: a per-attempt timeout cancels the local await, but the
+    # remote add_episode may still complete. Before re-firing for the same
+    # episode_id, the adapter re-probes the entity pass; once it has landed, it
+    # stops instead of double-extracting.
+    graphiti = _SlowAddGraphiti(delay_seconds=1.0)
+    probe_calls = {"n": 0}
+
+    async def _landed_after_attempt(driver, episode_id):
+        _ = (driver, episode_id)
+        probe_calls["n"] += 1
+        # False at the pre-extraction guard (no attempt yet); True once the first
+        # attempt has run (and timed out), so the retry is skipped.
+        return len(graphiti.added) >= 1
+
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        extract_entities=True,
+        primary_attempts=3,
+        primary_attempt_timeout_seconds=0.01,
+        entity_extracted=_landed_after_attempt,
+    )
+    episode = _episode("Task", "task:timeout-idem", {"brain_id": "/project/neurons", "task": "idem"})
+
+    result = adapter.upsert_episode(episode)
+
+    assert result == "inserted"
+    # Exactly one add_episode fired: the post-timeout probe stopped the retry.
+    assert len(graphiti.added) == 1
+    # Probe ran at the pre-extraction guard and again after the timeout.
+    assert probe_calls["n"] == 2
+
+
 def test_fake_adapter_simulates_episode_id_merge_on_reupsert():
     # Production default (extract_entities=False) MERGEs on episode_id: a second
     # upsert of the same episode is a duplicate, not a new row.
@@ -534,54 +1028,14 @@ def test_graphiti_neo4j_round_trip_against_live_backend():
     assert search.status in {"available", "degraded"}
 
 
-@pytest.mark.skipif(
-    os.environ.get("LLM_BRAIN_GRAPHITI_EXTRACTION_CANARY") != "1",
-    reason="requires explicit canary opt-in",
-)
-@pytest.mark.skipif(
-    not os.environ.get("LLM_BRAIN_NEO4J_URI") and not os.environ.get("NEO4J_URI"),
-    reason="requires a live Neo4j (set NEO4J_URI / LLM_BRAIN_NEO4J_URI to run)",
-)
-def test_graphiti_neo4j_synthetic_schema_extraction_canary():
-    """Gated live Graphiti extraction canary over one public-safe synthetic episode."""
-
-    group_id = f"/project/neurons-model-connector-canary-{os.getpid()}"
-    config = replace(
-        GraphitiNeo4jConfig.from_env(),
-        default_group_id=group_id,
-        extract_entities=True,
-        store_raw_episode_content=True,
-    )
-    adapter = GraphitiNeo4jGraphMemoryAdapter.from_config(config)
-    natural_id = f"task:model-connector-canary-{os.getpid()}"
-    episode = _episode(
-        "Task",
-        natural_id,
-        {
-            "brain_id": group_id,
-            "task": "model connector synthetic canary",
-            "decision": "compatibility-first model connector boundary",
-        },
-    )
-
-    result = adapter.upsert_episode(episode)
-    assert result == "inserted"
-
-    search = adapter.search_context(
-        brain_id=group_id,
-        query="model connector synthetic canary",
-        entity_types=["Task"],
-        limit=10,
-    )
-    assert search.status in {"available", "degraded"}
-    assert any(item.natural_id == natural_id for item in search.episodes)
-
-
 class _FakeDriver:
     """Minimal async driver stand-in for EpisodicNode.save() in tests.
 
     EpisodicNode.save() issues a single execute_query MERGE; record the saved
     uuid so the default-path upsert test can assert exactly one node was written.
+    The set of saved uuids also backs a get_by_uuid simulation so the entity
+    path's NodeNotFoundError (node absent) vs. success (node present) can be
+    reproduced and verified without a live Neo4j.
     """
 
     provider = None
@@ -589,15 +1043,19 @@ class _FakeDriver:
 
     def __init__(self) -> None:
         self.saved_uuids: list[str] = []
-        self.raise_on_execute: Exception | None = None
 
     async def execute_query(self, query, **params):
-        if self.raise_on_execute is not None:
-            raise self.raise_on_execute
-        uuid = params.get("uuid") or params.get("episode_uuid")
-        if uuid:
-            self.saved_uuids.append(str(uuid))
+        # Record only WRITE queries (MERGE/save). graphiti reads pass routing_='r'
+        # (e.g. EpisodicNode.get_by_uuid); recording those would wrongly count a
+        # read probe as a node save. Saves omit routing_, so gate on its absence.
+        if "routing_" not in params:
+            uuid = params.get("uuid") or params.get("episode_uuid")
+            if uuid:
+                self.saved_uuids.append(str(uuid))
         return ([], None, None)
+
+    def has_node(self, uuid: str) -> bool:
+        return str(uuid) in self.saved_uuids
 
 
 class _FakeGraphiti:
@@ -614,9 +1072,19 @@ class _FakeGraphiti:
         return self.driver.saved_uuids
 
     async def add_episode(self, **kwargs):
+        # Mirror graphiti_core add_episode's "Get or create episode": when a uuid
+        # is supplied it does get_by_uuid(uuid) FIRST, which raises
+        # NodeNotFoundError if that node was never saved. This reproduces the
+        # M2 reextract bug -- the entity pass passes uuid=episode_id, and unless
+        # the node exists, add_episode fails before any entity is extracted.
+        uuid = kwargs.get("uuid")
+        if uuid is not None and not self.driver.has_node(uuid):
+            from graphiti_core.errors import NodeNotFoundError
+
+            raise NodeNotFoundError(uuid)
         self.added.append(dict(kwargs, source=kwargs["source"].value))
         self.episodes.append(SimpleNamespace(content=kwargs["episode_body"]))
-        return SimpleNamespace(uuid=f"graph:{kwargs['name']}")
+        return SimpleNamespace(uuid=f"graph:{kwargs['name']}", nodes=[], edges=[])
 
     async def search(self, query, *, group_ids=None, num_results=10):
         self.search_calls.append({"query": query, "group_ids": group_ids, "num_results": num_results})
@@ -638,6 +1106,17 @@ class _FailingGraphiti(_FakeGraphiti):
     async def add_episode(self, **kwargs):
         self.added.append(dict(kwargs, source=kwargs["source"].value))
         raise self._exc
+
+
+class _SlowAddGraphiti(_FakeGraphiti):
+    def __init__(self, *, delay_seconds: float) -> None:
+        super().__init__()
+        self._delay_seconds = delay_seconds
+
+    async def add_episode(self, **kwargs):
+        self.added.append(dict(kwargs, source=kwargs["source"].value))
+        await asyncio.sleep(self._delay_seconds)
+        return None
 
 
 class _SlowGraphiti:
@@ -669,3 +1148,54 @@ def _episode(entity_type: str, natural_id: str, payload: dict) -> OntologyEpisod
         observed_at="2026-06-19T00:00:00+00:00",
         reference_time="2026-06-19T00:00:00+00:00",
     )
+
+
+def test_bulk_semantic_entity_uuid_is_name_based_and_type_independent():
+    from agent_knowledge.llm_brain_core import bulk_semantic as bs
+
+    same_name_other_type = bs._entity_uuid(
+        "g", bs.BulkSemanticEntity(name="Vertex Wrapper", type="Tool", summary="")
+    )
+    placeholder_type = bs._entity_uuid(
+        "g", bs.BulkSemanticEntity(name="vertex   wrapper", type="Concept", summary="")
+    )
+    # Same normalized name must collapse to one UUID regardless of extracted type,
+    # matching the name-based relation endpoint lookup.
+    assert same_name_other_type == placeholder_type
+    other_name = bs._entity_uuid(
+        "g", bs.BulkSemanticEntity(name="Other", type="Tool", summary="")
+    )
+    assert same_name_other_type != other_name
+
+
+def test_urllib_post_endpoint_allowlist_blocks_ssrf():
+    from agent_knowledge.llm_brain_core import bulk_semantic as bs
+
+    # Loopback / internal endpoints stay valid.
+    bs._validate_endpoint_url("http://127.0.0.1:8930/v1/chat/completions")
+    bs._validate_endpoint_url("https://vertex-wrapper/v1/embeddings")
+
+    for blocked in (
+        "file:///etc/passwd",
+        "gopher://internal/x",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://metadata.google.internal/computeMetadata/v1/",
+        "http:///no-host/path",
+    ):
+        with pytest.raises(ValueError):
+            bs._validate_endpoint_url(blocked)
+
+    # An explicit env allowlist further restricts permitted hosts.
+    allow = bs._endpoint_allowed_hosts({"LLM_BRAIN_ENDPOINT_ALLOWED_HOSTS": "api.internal"})
+    bs._validate_endpoint_url("https://api.internal/v1/chat/completions", allowed_hosts=allow)
+    with pytest.raises(ValueError):
+        bs._validate_endpoint_url("https://evil.example.com/v1", allowed_hosts=allow)
+
+    # _urllib_post rejects a poisoned base URL before any network call.
+    with pytest.raises(ValueError):
+        bs._urllib_post(
+            "file:///etc/passwd",
+            headers={"Authorization": "Bearer secret"},
+            body="{}",
+            timeout=1,
+        )

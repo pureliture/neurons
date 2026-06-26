@@ -283,6 +283,10 @@ join those hits back onto graph metadata episodes through the
 bounded and public-safe. This preserves ContextPack ergonomics while keeping
 graph storage metadata-first.
 
+런타임 선택은 명시적이다: `LLM_BRAIN_GRAPH_METADATA_FIRST_HYBRID=true`는
+Graphiti 어댑터를 감싸고 해당 메타데이터 우선 경로에서 Graphiti 엔티티 추출을
+비활성화한다.
+
 Rules:
 - artifact and MemoryCard ledger remain canonical winners;
 - graph and text mirror are both derived indexes;

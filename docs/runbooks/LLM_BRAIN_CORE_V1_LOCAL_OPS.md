@@ -86,8 +86,9 @@ the `--enable-graph` / `--graph-required` CLI flags plus
 | `LLM_BRAIN_NEO4J_PASSWORD` | `NEO4J_PASSWORD` | `` | Neo4j password (secret; never echoed to public output). |
 | `LLM_BRAIN_GRAPH_GROUP_ID` | — | `` | Default Graphiti `group_id`. Usually left empty; the per-project group key `/project/<project>` is passed explicitly. |
 | `LLM_BRAIN_GRAPH_LLM_PROVIDER` | `GRAPHITI_LLM_PROVIDER` | `openai` | Graphiti LLM provider id (lowercased). |
-| `LLM_BRAIN_LLM_MODEL` | `MODEL_NAME` | `` | Graphiti LLM model name. |
-| `LLM_BRAIN_SMALL_LLM_MODEL` | `SMALL_MODEL_NAME` | `` | Graphiti small/cheap model name. |
+| `LLM_BRAIN_LLM_MODEL` | `MODEL_NAME` | `` | Graphiti LLM model name. Gemini chat/extraction models are forbidden; use Gemma-4 MaaS or Ollama instead. |
+| `LLM_BRAIN_SMALL_LLM_MODEL` | `SMALL_MODEL_NAME` | `` | Graphiti small/cheap model name. Gemini chat/extraction models are forbidden here too. |
+| `LLM_BRAIN_LLM_REASONING_EFFORT` | — | `` | Optional per-request reasoning override for OpenAI-compatible LLM calls. Allowed: `high`, `medium`, `low`, `none`. Empty preserves provider defaults. |
 | `LLM_BRAIN_LLM_BASE_URL` | `OPENAI_BASE_URL` | `` | LLM API base URL (OpenAI-compatible). |
 | `LLM_BRAIN_LLM_API_KEY` | `OPENAI_API_KEY` | `` | LLM API key (secret). |
 | `LLM_BRAIN_EMBEDDING_MODEL` | `EMBEDDING_MODEL` | `` | Embedding model name. |
@@ -96,6 +97,13 @@ the `--enable-graph` / `--graph-required` CLI flags plus
 | `LLM_BRAIN_EMBEDDING_DIM` | — | `1024` | Embedding dimension (int). |
 | `LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT` | — | `true` | Store raw episode content (off only for `0`/`false`/`no`). |
 | `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES` | — | `false` | Run Graphiti entity extraction (truthy: `1`/`true`/`yes`). Production default is episode-only. |
+| `LLM_BRAIN_GRAPH_METADATA_FIRST_HYBRID` | — | `false` | Wrap Graphiti with the metadata-first hybrid adapter. This stores metadata-only graph episodes and forces `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=false` for that runtime path. |
+| `LLM_BRAIN_BULK_SEMANTIC_MAX_SESSIONS_PER_CALL` | — | `5` | `couchdb-graph-bulk-semantic` canary/production batch size: how many sessions are packed into one structured semantic extraction call. Start at 5, then raise after quality/cost evidence. |
+| `LLM_BRAIN_BULK_SEMANTIC_MAX_SESSION_CHARS` | — | `1600` | Per-session compact extraction body size for bulk semantic extraction. Uses head/tail sampling instead of the 8000-char Graphiti entity body. |
+| `LLM_BRAIN_BULK_SEMANTIC_MAX_TOKENS` | — | `4096` | Completion token cap for one bulk semantic extraction call. |
+| `LLM_BRAIN_BULK_SEMANTIC_TIMEOUT_SECONDS` | — | `600` | OpenAI-compatible HTTP timeout for one bulk semantic extraction call. |
+| `LLM_BRAIN_BULK_SEMANTIC_ALLOW_EMPTY_SESSIONS` | — | `false` | When false, a model response with no entities for a session fails that batch instead of marking semantic coverage complete with an empty graph. |
+| `LLM_BRAIN_BULK_SEMANTIC_EMBEDDINGS` | — | `true` | If embedding env is configured, batch-embed extracted entity names and relation facts before deterministic write. Set to `false` for count-only/cost smoke. |
 | `LLM_BRAIN_GRAPH_READ_TIMEOUT_SECONDS` | — | `30` | Per-call wait (s) for graph reads (search/retrieve). Non-positive or non-numeric falls back to default. A read past this bound degrades to `graph_status.status == "error"`, never a false `available`. |
 | `LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS` | — | `300` | Per-call wait (s) for graph writes (`upsert_episode`; longer because `extract_entities=true` runs an LLM). A write past this bound fails the upsert (counted as `failed`), not a silent hang. |
 
@@ -155,7 +163,8 @@ LLM_BRAIN_NEO4J_URI=bolt://127.0.0.1:17687 \
 LLM_BRAIN_NEO4J_USER=neo4j \
 LLM_BRAIN_NEO4J_PASSWORD="$NEO4J_PASSWORD" \
 LLM_BRAIN_LLM_BASE_URL=http://172.26.0.1:8930/v1 \
-LLM_BRAIN_LLM_MODEL=gemini-3.5-flash-thinking \
+LLM_BRAIN_LLM_MODEL=gemma-4-26b-a4b-it-maas \
+LLM_BRAIN_LLM_REASONING_EFFORT=none \
 LLM_BRAIN_EMBEDDING_BASE_URL=http://172.26.0.1:8930/v1 \
 LLM_BRAIN_EMBEDDING_MODEL=gemini-embedding-2 \
 LLM_BRAIN_EMBEDDING_DIM=3072 \
@@ -256,6 +265,101 @@ Rule of thumb: `available` is the only healthy state; `degraded` and
 `error`/`unavailable` are gate failures for promotion but are NOT, by themselves,
 permission to restart a running backend. Diagnose first, restart only with
 evidence and intent.
+
+## Graph Trigger Scheduler
+
+`llm-brain-graph-trigger` is the M4 timer-facing service in the
+`llm-brain-core` compose profile. It runs `couchdb-graph-trigger` on a bounded
+interval and uses `graph-project.lock` to avoid pileups with manual/full batches.
+It is **metadata-first / episode-only by default**: it does not run per-session
+Graphiti `add_episode` entity extraction inline. Operational semantic enrichment
+is the trailing bulk lane (see Bulk Semantic Trigger Scheduler below).
+Per-session entity extraction is debug/manual opt-in only via
+`couchdb-graph-trigger --extract-entities` (or `--reextract-entities`); the env
+default `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=false` must not regress to on.
+
+Default knobs in `.env.example`:
+
+```text
+LLM_BRAIN_LLM_MODEL=gemma-4-26b-a4b-it-maas
+LLM_BRAIN_SMALL_LLM_MODEL=gemma-4-26b-a4b-it-maas
+LLM_BRAIN_LLM_REASONING_EFFORT=none
+LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS=1200
+LLM_BRAIN_GRAPH_TRIGGER_INTERVAL_SECONDS=300
+LLM_BRAIN_GRAPH_TRIGGER_LIMIT=25
+LLM_BRAIN_GRAPH_TRIGGER_PROJECT=
+LLM_BRAIN_GRAPH_TRIGGER_PROVIDER=
+LLM_BRAIN_GRAPH_TRIGGER_REPORT_EVERY=25
+```
+
+Dry-run the trigger before enabling the scheduler. A passing dry-run reports a
+bounded plan, no mutation, no network use, and no raw paths.
+
+Live enablement is a compose/runtime mutation. Before starting the service,
+record current `couchdb-graph-status`, confirm no full batch runner is active,
+and set rollback to stopping only `llm-brain-graph-trigger`. Do not restart
+Neo4j, CouchDB, RAGFlow, or the bridge just because the trigger reports
+`already_running` or a bounded window has no backlog.
+
+## Bulk Semantic Trigger Scheduler
+
+`llm-brain-bulk-semantic-trigger` is the trailing semantic enrichment lane. It is
+**off by default**: it lives in its own `llm-brain-bulk-semantic` compose profile,
+so neither a bare `docker compose up` nor `--profile llm-brain-core up` starts it.
+Activate it explicitly only after a passing dry-run:
+
+```text
+docker compose --profile llm-brain-bulk-semantic up -d llm-brain-bulk-semantic-trigger
+```
+
+It runs `couchdb-bulk-semantic-trigger`, a thin wrapper over
+`couchdb-graph-bulk-semantic`, on a bounded interval. It shares the same
+`--runtime-dir` (`/var/lib/agent-knowledge/llm-brain/graph-trigger`) and thus the
+same `graph-project.lock` as `llm-brain-graph-trigger` and any manual full batch,
+so the bulk batch and the episodic hot path serialize on one lock (no concurrent
+Neo4j writes). On lock contention the wrapper reports `already_running` and sleeps.
+
+Allowed models: Cloud Vertex AI Model Garden MaaS Gemma-4 (chat/extraction) and the
+configured embedding model only. Gemini / Gemini Flash chat/extraction is forbidden.
+
+Default knobs in `.env.example`:
+
+```text
+LLM_BRAIN_BULK_SEMANTIC_MAX_SESSIONS_PER_CALL=5
+LLM_BRAIN_BULK_SEMANTIC_MAX_SESSION_CHARS=1600
+LLM_BRAIN_BULK_SEMANTIC_MAX_TOKENS=4096
+LLM_BRAIN_BULK_SEMANTIC_TIMEOUT_SECONDS=600
+LLM_BRAIN_BULK_SEMANTIC_EMBEDDINGS=true
+LLM_BRAIN_BULK_SEMANTIC_ALLOW_EMPTY_SESSIONS=false
+LLM_BRAIN_BULK_SEMANTIC_TRIGGER_ENABLE=false
+LLM_BRAIN_BULK_SEMANTIC_TRIGGER_INTERVAL_SECONDS=900
+LLM_BRAIN_BULK_SEMANTIC_TRIGGER_LIMIT=100
+LLM_BRAIN_BULK_SEMANTIC_TRIGGER_MAX_PROJECTS=5
+LLM_BRAIN_BULK_SEMANTIC_TRIGGER_PROJECT=
+LLM_BRAIN_BULK_SEMANTIC_TRIGGER_PROVIDER=
+LLM_BRAIN_BULK_SEMANTIC_TRIGGER_REPORT_EVERY=25
+```
+
+`LLM_BRAIN_BULK_SEMANTIC_TRIGGER_ENABLE` is advisory only — the real off-switch is
+the compose profile (startup is profile-gated, not env-gated).
+
+Dry-run the wrapper before enabling the scheduler. A passing dry-run reports a
+bounded plan (`child_command: couchdb-graph-bulk-semantic`,
+`runtime_lock: graph-project.lock`), no mutation, no network use, and no raw paths.
+The frozen child has no zero-mutation dry-run; the wrapper supplies it. For a real
+selected/skipped read, use a tiny bounded execute (`--max-projects 1`).
+
+Monitoring caveat: `--max-projects` counts materialized, not projected, sessions.
+A tick where every LLM call fails can report `stopped_after_max_projects=true` with
+`projected=0`, so alert on `projection.failed`, not the budget flag alone. The
+`by_provider` keys and the progress-jsonl `provider` field are raw — keep the
+runtime-volume JSONL internal; never forward to a public sink without redaction.
+
+Live enablement is a compose/runtime mutation. Before starting the service, record
+current `couchdb-graph-status`, confirm no full batch runner is active, and set
+rollback to stopping only `llm-brain-bulk-semantic-trigger`. Do not restart Neo4j,
+CouchDB, RAGFlow, or the bridge just because the wrapper reports `already_running`
+or a bounded window has no backlog.
 
 ## Public Output Safety Checklist
 
@@ -358,6 +462,7 @@ Two operational levers matter for cost and re-run time.
 | --- | --- | --- | --- |
 | Episode-only (production default) | `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=false` | 0 | No LLM. One `EpisodicNode` MERGE per episode. Write time is backend I/O only; the write timeout's lower end applies. |
 | Entity extraction | `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=true` | Multiple per episode (Graphiti `add_episode`: entity extraction + dedupe + edge extraction; embeddings if configured) | Each episode triggers several LLM completions plus embedding calls. Cost and latency scale with episode count, so a full project window of N episodes is roughly N × (per-episode extraction calls). This is why the write timeout default (300s) is far larger than the read timeout. |
+| Bulk semantic extraction | `neuron-knowledge couchdb-graph-bulk-semantic` | ~1 / `LLM_BRAIN_BULK_SEMANTIC_MAX_SESSIONS_PER_CALL` sessions | One structured extraction call packs several compact session bodies, then a deterministic Graphiti-compatible writer stores `Episodic`, `Entity`, `MENTIONS`, and `RELATES_TO` without additional LLM calls. This is the lower-token semantic lane; validate quality before raising the batch size. |
 
 Cost rule of thumb: a reproject of a project with N artifacts/cards/source-refs
 issues ~N graph writes. In episode-only mode that is ~N backend writes and **no
@@ -365,6 +470,14 @@ LLM spend**. In `extract_entities=true` mode that is ~N × (entity + edge
 extraction + embedding) LLM calls — budget and rate-limit accordingly before
 enabling it on a large window, and prefer resume (below) to avoid paying for
 already-extracted episodes again.
+
+Bulk semantic extraction is the cost-control path for semantic coverage. Start
+with `--max-projects 5 --max-sessions-per-call 5`; if entity/relation quality and
+JSON failure rate are acceptable, increase to 10 sessions per call. The
+deterministic writer can still batch-embed entity names and relation facts so
+Graphiti hybrid search keeps useful vector recall, but it avoids Graphiti's
+per-session chat extraction/dedupe calls. Keep `--max-projects` bounded during
+canary so one command cannot silently consume the whole backlog.
 
 ### Resume (skip already-projected episodes)
 

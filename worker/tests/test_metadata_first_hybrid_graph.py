@@ -60,6 +60,9 @@ def test_hybrid_adapter_stores_metadata_in_graph_and_joins_text_mirror_on_search
     assert "metadata_first_hybrid" in result.details
     assert "text_mirror_hits:1" in result.details
 
+    exact = adapter.get_episodes_by_ids([_task_episode().episode_id], brain_id="/project/neurons")
+    assert exact[0].payload["metadata_first"] is True
+
 
 def test_contextpack_can_restore_task_from_metadata_first_hybrid_graph():
     adapter = MetadataFirstHybridGraphAdapter(
@@ -155,6 +158,21 @@ def test_hybrid_join_uses_episode_id_lookup_not_bounded_metadata_pool():
     assert [item.episode_id for item in result.episodes] == [target.episode_id]
     assert "metadata_exact_join" in result.details
     assert not any(item.startswith("metadata_join_missing") for item in result.details)
+
+
+def test_hybrid_adapter_is_classified_episodic_by_projection_level():
+    from agent_knowledge.llm_brain_core.ledger_adapter import (
+        EXTRACTION_LEVEL_EPISODIC,
+    )
+    from agent_knowledge.llm_brain_core.projection import (
+        _adapter_extraction_level,
+    )
+
+    # episode-only 어댑터는 ``_extract_entities`` 인터페이스를 명시적으로 False로
+    # 노출해야 한다. getattr 기본값이 아니라 실제 속성으로 노출되는지 확인한다.
+    adapter = MetadataFirstHybridGraphAdapter(FakeGraphMemoryAdapter())
+    assert adapter._extract_entities is False
+    assert _adapter_extraction_level(adapter) == EXTRACTION_LEVEL_EPISODIC
 
 
 def _task_episode() -> OntologyEpisode:

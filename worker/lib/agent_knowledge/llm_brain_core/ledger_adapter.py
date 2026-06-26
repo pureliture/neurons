@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import asdict
 from typing import Any
 
+from agent_knowledge.ledger_base import _ensure_column, _table_exists
+
 from .artifact_store import _reject_external_index_fields
-from .models import SessionMemoryArtifact, SourceRefRecord
+from .graphiti_adapter import _graphiti_group_id, _group_id_for_episode
+from .models import OntologyEpisode, SessionMemoryArtifact, SourceRefRecord
 from .source_ref import SourceRefResolver
+
+# Default extraction pass for a projected episode. The episodic-only pass
+# (raw EpisodicNode, no entity extraction) is the production default; the entity
+# pass runs add_episode so Graphiti extracts EntityNode/RELATES_TO. Recording the
+# level lets a re-run resume per-pass instead of skipping the entity pass just
+# because the episodic pass already ran (composite (episode_id, extraction_level)
+# idempotency).
+EXTRACTION_LEVEL_EPISODIC = "episodic"
+EXTRACTION_LEVEL_ENTITY = "entity"
 
 
 class LedgerSessionMemoryArtifactStore:
@@ -55,42 +66,40 @@ class LedgerSessionMemoryArtifactStore:
             raise ValueError("artifact id collision with different content_hash")
 
     def get(self, artifact_id: str) -> SessionMemoryArtifact | None:
-        try:
-            with self._ledger._connect() as connection:
-                row = connection.execute(
-                    """
-                    SELECT artifact_json
-                    FROM llm_brain_session_memory_artifacts
-                    WHERE artifact_id = ?
-                    """,
-                    (artifact_id,),
-                ).fetchone()
-        except sqlite3.OperationalError as exc:
-            if _missing_table(exc, "llm_brain_session_memory_artifacts"):
+        with self._ledger._connect() as connection:
+            # Dialect-aware pre-check: an absent table is an empty result, not an
+            # error. _table_exists branches on sqlite vs postgres, so we never
+            # rely on a caught sqlite3.OperationalError (which would let a
+            # postgres UndefinedTable propagate instead of degrading cleanly).
+            if not _table_exists(connection, "llm_brain_session_memory_artifacts"):
                 return None
-            raise
+            row = connection.execute(
+                """
+                SELECT artifact_json
+                FROM llm_brain_session_memory_artifacts
+                WHERE artifact_id = ?
+                """,
+                (artifact_id,),
+            ).fetchone()
         if not row:
             return None
         return _artifact_from_json(str(row["artifact_json"]))
 
     def list_recent(self, *, project: str, limit: int = 10) -> list[SessionMemoryArtifact]:
         bounded = max(1, min(int(limit), 100))
-        try:
-            with self._ledger._connect() as connection:
-                rows = connection.execute(
-                    """
-                    SELECT artifact_json
-                    FROM llm_brain_session_memory_artifacts
-                    WHERE project = ?
-                    ORDER BY created_at DESC, artifact_id DESC
-                    LIMIT ?
-                    """,
-                    (project, bounded),
-                ).fetchall()
-        except sqlite3.OperationalError as exc:
-            if _missing_table(exc, "llm_brain_session_memory_artifacts"):
+        with self._ledger._connect() as connection:
+            if not _table_exists(connection, "llm_brain_session_memory_artifacts"):
                 return []
-            raise
+            rows = connection.execute(
+                """
+                SELECT artifact_json
+                FROM llm_brain_session_memory_artifacts
+                WHERE project = ?
+                ORDER BY created_at DESC, artifact_id DESC
+                LIMIT ?
+                """,
+                (project, bounded),
+            ).fetchall()
         return [_artifact_from_json(str(row["artifact_json"])) for row in rows]
 
     def _ensure_schema(self) -> None:
@@ -157,38 +166,32 @@ class LedgerSourceRefCatalog:
         )
 
     def get(self, source_ref_id: str) -> SourceRefRecord | None:
-        try:
-            with self._ledger._connect() as connection:
-                row = connection.execute(
-                    """
-                    SELECT record_json
-                    FROM llm_brain_source_refs
-                    WHERE source_ref_id = ?
-                    """,
-                    (source_ref_id,),
-                ).fetchone()
-        except sqlite3.OperationalError as exc:
-            if _missing_table(exc, "llm_brain_source_refs"):
+        with self._ledger._connect() as connection:
+            if not _table_exists(connection, "llm_brain_source_refs"):
                 return None
-            raise
+            row = connection.execute(
+                """
+                SELECT record_json
+                FROM llm_brain_source_refs
+                WHERE source_ref_id = ?
+                """,
+                (source_ref_id,),
+            ).fetchone()
         if not row:
             return None
         return _source_ref_from_json(str(row["record_json"]))
 
     def list_all(self) -> list[SourceRefRecord]:
-        try:
-            with self._ledger._connect() as connection:
-                rows = connection.execute(
-                    """
-                    SELECT record_json
-                    FROM llm_brain_source_refs
-                    ORDER BY last_seen_at DESC, source_ref_id
-                    """
-                ).fetchall()
-        except sqlite3.OperationalError as exc:
-            if _missing_table(exc, "llm_brain_source_refs"):
+        with self._ledger._connect() as connection:
+            if not _table_exists(connection, "llm_brain_source_refs"):
                 return []
-            raise
+            rows = connection.execute(
+                """
+                SELECT record_json
+                FROM llm_brain_source_refs
+                ORDER BY last_seen_at DESC, source_ref_id
+                """
+            ).fetchall()
         return [_source_ref_from_json(str(row["record_json"])) for row in rows]
 
     def resolver(self) -> SourceRefResolver:
@@ -199,6 +202,135 @@ class LedgerSourceRefCatalog:
             return
         with self._ledger._connect() as connection:
             connection.executescript(_SOURCE_REF_SCHEMA)
+
+
+class LedgerGraphProjectionStateStore:
+    """Durable SoT for which OntologyEpisodes have been projected to the graph.
+
+    Same shape as LedgerSourceRefCatalog / LedgerSessionMemoryArtifactStore: it
+    ensures its schema on construction (skipped for a read-only ledger) and uses
+    the ledger's own connection. It records only successful projections (inserted
+    / duplicate); skips and failures live on a different plane and are not stored
+    here. A re-run reads list_projected_ids to resume without an upsert round-trip.
+    """
+
+    def __init__(self, ledger: Any) -> None:
+        self._ledger = ledger
+        self._ensure_schema()
+
+    def mark_projected(
+        self,
+        episode: OntologyEpisode,
+        upsert_result: str,
+        extraction_level: str = EXTRACTION_LEVEL_EPISODIC,
+    ) -> None:
+        # group_id is derived with the graphiti helpers (not reimplemented) so the
+        # stored group key matches exactly what the graph adapter writes.
+        group_id = _graphiti_group_id(_group_id_for_episode(episode, ""))
+        project = str(episode.payload.get("project") or "")
+        brain_id = str(episode.payload.get("brain_id") or "")
+        level = str(extraction_level or EXTRACTION_LEVEL_EPISODIC)
+        with self._ledger._connect() as connection:
+            # Conflict target is the composite (episode_id, extraction_level): the
+            # episodic and entity passes of the SAME episode are tracked as two
+            # rows, so a re-run can resume per-pass instead of skipping the entity
+            # pass just because the episodic pass already ran.
+            connection.execute(
+                """
+                INSERT INTO llm_brain_graph_projection_state (
+                    episode_id, extraction_level, project, entity_type,
+                    natural_id, group_id, brain_id, content_hash,
+                    ontology_version, extractor_version, upsert_result,
+                    projected_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(episode_id, extraction_level) DO UPDATE SET
+                    upsert_result=excluded.upsert_result,
+                    projected_at=excluded.projected_at,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    episode.episode_id,
+                    level,
+                    project,
+                    episode.entity_type,
+                    episode.natural_id,
+                    group_id,
+                    brain_id,
+                    episode.content_hash,
+                    episode.ontology_version,
+                    episode.extractor_version,
+                    str(upsert_result or ""),
+                ),
+            )
+
+    def list_projected_ids(
+        self,
+        project: str | None = None,
+        *,
+        extraction_level: str | None = None,
+    ) -> set[str]:
+        # `extraction_level=None` returns episode_ids projected at ANY level
+        # (backward-compatible: the episodic-only resume set). A specific level
+        # narrows the resume set to that pass, so the entity pass resumes only on
+        # ids already projected at the entity level.
+        clauses: list[str] = []
+        params: list[str] = []
+        if project is not None:
+            clauses.append("project = ?")
+            params.append(project)
+        if extraction_level is not None:
+            clauses.append("extraction_level = ?")
+            params.append(str(extraction_level))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._ledger._connect() as connection:
+            # Dialect-aware pre-check: an absent table degrades to an empty set
+            # without letting a postgres UndefinedTable propagate.
+            if not _table_exists(connection, "llm_brain_graph_projection_state"):
+                return set()
+            rows = connection.execute(
+                "SELECT episode_id FROM llm_brain_graph_projection_state" + where,
+                tuple(params),
+            ).fetchall()
+        return {str(row["episode_id"]) for row in rows}
+
+    def list_projected_natural_ids(
+        self,
+        project: str | None = None,
+        *,
+        extraction_level: str | None = None,
+        entity_type: str | None = None,
+    ) -> set[str]:
+        clauses: list[str] = []
+        params: list[str] = []
+        if project is not None:
+            clauses.append("project = ?")
+            params.append(project)
+        if extraction_level is not None:
+            clauses.append("extraction_level = ?")
+            params.append(str(extraction_level))
+        if entity_type is not None:
+            clauses.append("entity_type = ?")
+            params.append(str(entity_type))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._ledger._connect() as connection:
+            if not _table_exists(connection, "llm_brain_graph_projection_state"):
+                return set()
+            rows = connection.execute(
+                "SELECT natural_id FROM llm_brain_graph_projection_state" + where,
+                tuple(params),
+            ).fetchall()
+        return {str(row["natural_id"]) for row in rows if str(row["natural_id"])}
+
+    def _ensure_schema(self) -> None:
+        if getattr(self._ledger, "read_only", False):
+            return
+        with self._ledger._connect() as connection:
+            # Migrate FIRST: a pre-M2 table lacks the extraction_level column, so
+            # the schema's level index must not run before the migration adds it.
+            # On a brand-new ledger the migration is a no-op (table absent) and the
+            # schema below creates the table + indexes.
+            _migrate_extraction_level(connection)
+            connection.executescript(_GRAPH_PROJECTION_STATE_SCHEMA)
 
 
 _ARTIFACT_SCHEMA = """
@@ -236,6 +368,129 @@ CREATE INDEX IF NOT EXISTS idx_llm_brain_source_refs_device_root
 CREATE INDEX IF NOT EXISTS idx_llm_brain_source_refs_content_hash
     ON llm_brain_source_refs(content_hash);
 """
+
+
+# Single source of truth for the graph projection_state table. Ledger._initialize
+# imports and installs this exact constant so the schema is declared once and the
+# store + ledger can never drift. Standard SQL only (TEXT / UNIQUE /
+# CREATE INDEX IF NOT EXISTS) so it works on both sqlite and postgres.
+#
+# Idempotency key is the COMPOSITE (episode_id, extraction_level), enforced by a
+# UNIQUE constraint rather than a sole episode_id PRIMARY KEY, so the episodic and
+# entity passes of the same episode coexist as two rows. extraction_level carries
+# a NOT NULL DEFAULT so a legacy episodic-only insert (no level) backfills to
+# 'episodic'.
+_GRAPH_PROJECTION_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS llm_brain_graph_projection_state (
+    episode_id TEXT NOT NULL,
+    extraction_level TEXT NOT NULL DEFAULT 'episodic',
+    project TEXT NOT NULL DEFAULT '',
+    entity_type TEXT NOT NULL DEFAULT '',
+    natural_id TEXT NOT NULL DEFAULT '',
+    group_id TEXT NOT NULL DEFAULT '',
+    brain_id TEXT DEFAULT '',
+    content_hash TEXT NOT NULL DEFAULT '',
+    ontology_version TEXT NOT NULL DEFAULT '',
+    extractor_version TEXT NOT NULL DEFAULT '',
+    upsert_result TEXT NOT NULL DEFAULT '',
+    projected_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(episode_id, extraction_level)
+);
+CREATE INDEX IF NOT EXISTS idx_llm_brain_graph_projection_state_project_projected
+    ON llm_brain_graph_projection_state(project, projected_at);
+CREATE INDEX IF NOT EXISTS idx_llm_brain_graph_projection_state_group
+    ON llm_brain_graph_projection_state(group_id);
+CREATE INDEX IF NOT EXISTS idx_llm_brain_graph_projection_state_level
+    ON llm_brain_graph_projection_state(extraction_level);
+"""
+
+
+def _migrate_extraction_level(connection: Any) -> None:
+    """Lazily bring a pre-M2 projection_state table up to the composite schema.
+
+    A pre-M2 table has ``episode_id`` as a sole PRIMARY KEY and no
+    ``extraction_level`` column, so it cannot hold both passes of one episode.
+    This migration is non-destructive: it adds the column (defaulting existing
+    rows to 'episodic') and, only when the legacy sole-PK shape is detected,
+    rebuilds the table into the composite-unique shape, copying every row. The
+    table is derived resume state (re-derivable from the graph), so the rebuild
+    carries no authoritative data loss risk.
+
+    On a freshly-created table (already the new shape) this is a no-op: the column
+    exists and there is no sole episode_id PRIMARY KEY to migrate.
+    """
+
+    table = "llm_brain_graph_projection_state"
+    if not _table_exists(connection, table):
+        return
+    # Step 1 (always safe / idempotent): ensure the column exists and backfill.
+    _ensure_column(connection, table, "extraction_level", "TEXT NOT NULL DEFAULT 'episodic'")
+    connection.execute(
+        f"UPDATE {table} SET extraction_level = 'episodic' "
+        "WHERE extraction_level IS NULL OR extraction_level = ''"
+    )
+    # Step 2 (only for the legacy sole-PK shape): rebuild so the composite
+    # (episode_id, extraction_level) uniqueness replaces episode_id-as-sole-PK.
+    if not _episode_id_is_sole_primary_key(connection, table):
+        return
+    connection.executescript(
+        f"""
+        ALTER TABLE {table} RENAME TO {table}_pre_m2;
+        -- RENAME keeps the legacy table's indexes under their original names
+        -- (sqlite and postgres both leave index names attached to the renamed
+        -- table). Drop them first so the schema's CREATE INDEX IF NOT EXISTS below
+        -- actually builds indexes on the NEW table instead of silently skipping on
+        -- the still-occupied names (which would then vanish with DROP TABLE _pre_m2).
+        DROP INDEX IF EXISTS idx_llm_brain_graph_projection_state_project_projected;
+        DROP INDEX IF EXISTS idx_llm_brain_graph_projection_state_group;
+        DROP INDEX IF EXISTS idx_llm_brain_graph_projection_state_level;
+        {_GRAPH_PROJECTION_STATE_SCHEMA}
+        INSERT INTO {table} (
+            episode_id, extraction_level, project, entity_type, natural_id,
+            group_id, brain_id, content_hash, ontology_version,
+            extractor_version, upsert_result, projected_at, updated_at
+        )
+        SELECT
+            episode_id,
+            COALESCE(NULLIF(extraction_level, ''), 'episodic'),
+            project, entity_type, natural_id, group_id, brain_id, content_hash,
+            ontology_version, extractor_version, upsert_result, projected_at,
+            updated_at
+        FROM {table}_pre_m2;
+        DROP TABLE {table}_pre_m2;
+        """
+    )
+
+
+def _episode_id_is_sole_primary_key(connection: Any, table: str) -> bool:
+    """Return True when ``episode_id`` is the table's only PRIMARY KEY column.
+
+    Detects the pre-M2 schema shape so the composite-unique rebuild runs at most
+    once. Dialect-aware (sqlite PRAGMA vs postgres information_schema); a backend
+    whose PK introspection is unavailable degrades to False (skip the rebuild)
+    rather than risk an unnecessary destructive table swap.
+    """
+
+    if getattr(connection, "dialect", "sqlite") == "postgres":
+        rows = connection.execute(
+            """
+            SELECT kcu.column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_name = kcu.constraint_name
+                AND tc.table_schema = kcu.table_schema
+            WHERE tc.constraint_type = 'PRIMARY KEY'
+                AND tc.table_schema = 'public'
+                AND tc.table_name = ?
+            """,
+            (table,),
+        ).fetchall()
+        pk_columns = [str(row["column_name"]) for row in rows]
+    else:
+        rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+        pk_columns = [str(row["name"]) for row in rows if row["pk"]]
+    return pk_columns == ["episode_id"]
 
 
 def _artifact_from_json(value: str) -> SessionMemoryArtifact:
@@ -278,7 +533,3 @@ def _source_ref_from_json(value: str) -> SourceRefRecord:
         derived_summary=str(parsed.get("derived_summary") or ""),
         redacted_content=str(parsed.get("redacted_content") or ""),
     )
-
-
-def _missing_table(exc: sqlite3.OperationalError, table_name: str) -> bool:
-    return f"no such table: {table_name}" in str(exc)
