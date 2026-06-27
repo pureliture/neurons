@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import copy
 import hashlib
-from dataclasses import asdict, dataclass
+import json
+from dataclasses import asdict, dataclass, fields
+from pathlib import Path
 
 
 DATASET_CONTRACT_VERSION = "agent_knowledge_dataset_contract.v2"
@@ -313,6 +316,193 @@ for _role in _LOGICAL_ROLES:
     _ROLE_BY_NAME.setdefault(_role.recommended_name, _role)
     for _alias in _role.aliases:
         _ROLE_BY_NAME.setdefault(_alias, _role)
+
+_DATASET_CONTRACT_CONFIG_CACHE: dict | None = None
+_DATASET_CONTRACT_CONFIG_SCHEMA_VERSION = "agent_knowledge_dataset_contract_config.v1"
+_FORBIDDEN_CONFIG_FIELD_NAMES = {
+    "api_key",
+    "bearer",
+    "credential",
+    "dataset_id",
+    "dataset_ids",
+    "document_id",
+    "document_ids",
+    "secret",
+    "token",
+}
+_DATASET_CONTRACT_CONFIG_REQUIRED_FIELDS = (
+    "schema_version",
+    "contract_version",
+    "split_criteria",
+    "current_runtime_dataset_names",
+    "canonical_ragflow_dataset_names",
+    "deprecated_ragflow_dataset_prefixes",
+    "logical_roles",
+    "load_policy",
+    "orchestration_rollout",
+    "abort_criteria",
+)
+
+
+def dataset_contract_config_schema() -> dict:
+    """Return the M3 startup config schema summary."""
+
+    return {
+        "schema_version": _DATASET_CONTRACT_CONFIG_SCHEMA_VERSION,
+        "required_fields": list(_DATASET_CONTRACT_CONFIG_REQUIRED_FIELDS),
+        "logical_role_fields": [field.name for field in fields(LogicalDatasetRole)],
+        "load_policy": {
+            "mode": "process_start_once",
+            "hot_reload": False,
+            "default_fallback": "code_defined",
+        },
+        "forbidden_field_names": sorted(_FORBIDDEN_CONFIG_FIELD_NAMES),
+        "external_activation": {
+            "runtime_hot_reload": False,
+            "live_mutation_allowed": False,
+            "k3s_apply_in_scope": False,
+        },
+    }
+
+
+def build_default_dataset_contract_config() -> dict:
+    """Build the code-defined M3 external-config fixture."""
+
+    return {
+        "schema_version": _DATASET_CONTRACT_CONFIG_SCHEMA_VERSION,
+        "contract_version": DATASET_CONTRACT_VERSION,
+        "split_criteria": list(DATASET_SPLIT_CRITERIA),
+        "current_runtime_dataset_names": dict(CURRENT_RUNTIME_DATASET_NAMES),
+        "canonical_ragflow_dataset_names": dict(CANONICAL_RAGFLOW_DATASET_NAMES),
+        "deprecated_ragflow_dataset_prefixes": list(DEPRECATED_RAGFLOW_DATASET_PREFIXES),
+        "logical_roles": [role.to_plan_record() for role in _LOGICAL_ROLES],
+        "load_policy": {
+            "mode": "process_start_once",
+            "hot_reload": False,
+            "default_fallback": "code_defined",
+        },
+        "orchestration_rollout": {
+            "activation_owner": "orchestration_restart_or_rolling_update",
+            "compose_ready": True,
+            "configmap_shape_ready": True,
+            "k3s_apply_in_scope": False,
+            "runtime_hot_reload": False,
+            "live_mutation_allowed": False,
+        },
+        "abort_criteria": [
+            "runtime hot reload would be required",
+            "credential or raw dataset id access would be required",
+            "live RAGFlow mutation would be required",
+            "dataset contract semantics would drift from code-defined fallback",
+        ],
+    }
+
+
+def validate_dataset_contract_config(config: dict) -> dict:
+    """Validate and normalize an M3 dataset contract config.
+
+    Validation is intentionally startup-oriented: the accepted shape is complete,
+    contains no secret/raw-id shaped fields, and maps runtime names to logical
+    roles without requiring live RAGFlow or orchestration mutation.
+    """
+
+    if not isinstance(config, dict):
+        raise ValueError("dataset contract config must be an object")
+    _reject_forbidden_config_fields(config)
+    required = set(dataset_contract_config_schema()["required_fields"])
+    missing = sorted(required - set(config))
+    if missing:
+        raise ValueError(f"missing dataset contract config field: {missing[0]}")
+    if config["schema_version"] != _DATASET_CONTRACT_CONFIG_SCHEMA_VERSION:
+        raise ValueError("unsupported dataset contract config schema_version")
+    if not isinstance(config["logical_roles"], list):
+        raise ValueError("logical_roles must be a list")
+
+    role_field_names = {field.name for field in fields(LogicalDatasetRole)}
+    roles_by_role: dict[str, dict] = {}
+    role_lookup: dict[str, dict] = {}
+    for raw_role in config["logical_roles"]:
+        if not isinstance(raw_role, dict):
+            raise ValueError("logical dataset role must be an object")
+        unknown_fields = sorted(set(raw_role) - role_field_names)
+        if unknown_fields:
+            raise ValueError(f"unknown logical dataset role field: {unknown_fields[0]}")
+        missing_role_fields = sorted(role_field_names - set(raw_role))
+        if missing_role_fields:
+            raise ValueError(f"missing logical dataset role field: {missing_role_fields[0]}")
+        role_name = str(raw_role["role"])
+        roles_by_role[role_name] = raw_role
+        role_lookup.setdefault(role_name, raw_role)
+        role_lookup.setdefault(str(raw_role["recommended_name"]), raw_role)
+        aliases = raw_role.get("aliases") or []
+        if not isinstance(aliases, list):
+            raise ValueError("logical dataset role aliases must be a list")
+        for alias in aliases:
+            role_lookup.setdefault(str(alias), raw_role)
+
+    for expected_role in sorted(role.role for role in _LOGICAL_ROLES):
+        if expected_role not in roles_by_role:
+            raise ValueError(f"missing logical dataset role: {expected_role}")
+
+    for runtime_name in config["current_runtime_dataset_names"].values():
+        if runtime_name not in role_lookup:
+            raise ValueError(f"runtime dataset name is not covered by logical roles: {runtime_name}")
+
+    load_policy = config["load_policy"]
+    if not isinstance(load_policy, dict):
+        raise ValueError("load_policy must be an object")
+    if load_policy.get("mode") != "process_start_once" or load_policy.get("hot_reload") is not False:
+        raise ValueError("dataset contract config must be process_start_once without hot reload")
+
+    rollout = config["orchestration_rollout"]
+    if not isinstance(rollout, dict):
+        raise ValueError("orchestration_rollout must be an object")
+    if rollout.get("live_mutation_allowed") is not False:
+        raise ValueError("dataset contract config must not allow live mutation")
+    if rollout.get("runtime_hot_reload") is not False:
+        raise ValueError("dataset contract config must not require runtime hot reload")
+
+    return copy.deepcopy(config)
+
+
+def load_dataset_contract_config_once(config_path: str | Path | None = None) -> dict:
+    """Load dataset contract config once per process, falling back to code defaults."""
+
+    global _DATASET_CONTRACT_CONFIG_CACHE
+    if _DATASET_CONTRACT_CONFIG_CACHE is not None:
+        return copy.deepcopy(_DATASET_CONTRACT_CONFIG_CACHE)
+    if config_path is None:
+        config = build_default_dataset_contract_config()
+    else:
+        config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    _DATASET_CONTRACT_CONFIG_CACHE = validate_dataset_contract_config(config)
+    return copy.deepcopy(_DATASET_CONTRACT_CONFIG_CACHE)
+
+
+def clear_dataset_contract_config_cache() -> None:
+    """Clear the process-load cache for tests and controlled startup checks."""
+
+    global _DATASET_CONTRACT_CONFIG_CACHE
+    _DATASET_CONTRACT_CONFIG_CACHE = None
+
+
+def _reject_forbidden_config_fields(value: object) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key)
+            key_lower = key_text.lower()
+            if (
+                key_lower in _FORBIDDEN_CONFIG_FIELD_NAMES
+                or key_lower.endswith("_token")
+                or "secret" in key_lower
+                or "credential" in key_lower
+            ):
+                raise ValueError(f"forbidden dataset contract field: {key_text}")
+            _reject_forbidden_config_fields(child)
+        return
+    if isinstance(value, list):
+        for child in value:
+            _reject_forbidden_config_fields(child)
 
 
 def list_logical_dataset_roles() -> list[LogicalDatasetRole]:
