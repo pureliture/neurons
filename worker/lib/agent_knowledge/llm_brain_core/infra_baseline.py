@@ -14,6 +14,7 @@ K3S_POC_OPERATOR_APPROVAL_PACKET_SCHEMA = "k3s_poc_operator_approval_packet.v1"
 K3S_POC_EXECUTION_EVIDENCE_SCHEMA = "k3s_poc_execution_evidence.v1"
 
 _PASS_OUTCOMES = {"ok", "pass", "passed", "success", "succeeded"}
+_K3S_CANARY_ACCESS_POLICIES = {"tailscale_private"}
 
 
 def compose_baseline_report(
@@ -46,7 +47,7 @@ def compose_baseline_report(
     warnings = [f"service_missing_healthcheck:{name}" for name in service_names if name not in healthchecked]
     safe_defaults = _safe_delivery_defaults(services)
     loopback_ports = _loopback_published_ports(services)
-    ready = bool(service_names) and loopback_ports and safe_defaults["allow_live_queue_default"] == "0"
+    ready = bool(service_names) and loopback_ports and safe_defaults["allow_live_queue_default"] == "0" and not warnings
     report = {
         "schema_version": COMPOSE_BASELINE_REPORT_SCHEMA,
         "status": "ready" if ready else "needs_attention",
@@ -74,9 +75,9 @@ def k3s_poc_canary_plan(
     rollback_target: str,
 ) -> dict[str, Any]:
     safe_namespace = public_safe_text(namespace, max_chars=120)
-    safe_access = public_safe_text(access_policy, max_chars=120)
+    safe_access = public_safe_text(access_policy, max_chars=120).strip().lower()
     safe_rollback = public_safe_text(rollback_target, max_chars=120)
-    if safe_namespace in {"default", "prod", "production"} or safe_access == "public":
+    if safe_namespace in {"default", "prod", "production"} or safe_access not in _K3S_CANARY_ACCESS_POLICIES:
         raise ValueError("production k3s migration is not part of this roadmap")
     if safe_rollback != "compose":
         raise ValueError("k3s PoC rollback target must be compose")
@@ -153,7 +154,6 @@ def k3s_poc_canary_manifest_bundle(
     rollback_commands.extend(
         [
             "docker compose up -d",
-            "neuron-knowledge brain-context-resolve --response-mode compact",
         ]
     )
     bundle = {
@@ -350,6 +350,8 @@ def _canary_workload(workload: Mapping[str, Any]) -> dict[str, Any]:
     name = public_safe_text(str(workload.get("name") or ""), max_chars=120)
     kind = public_safe_text(str(workload.get("kind") or "Deployment"), max_chars=80)
     stateful = bool(workload.get("stateful")) or kind == "StatefulSet"
+    if not stateful and kind != "Deployment":
+        raise ValueError("k3s PoC canary workloads currently support Deployment only")
     return {"name": name, "kind": kind, "stateful": stateful}
 
 

@@ -61,6 +61,19 @@ def test_workflow_default_model_is_evidence_backed_and_read_only():
         "exceptions": ["SoT change required"],
         "auto_update_allowed": False,
     }
+    assert workflow_contract_cards_from_memory_cards([card]) == []
+
+
+def test_workflow_contract_model_excludes_stale_or_superseded_cards():
+    stale = _card(
+        "mem_old_workflow",
+        "workflow_contract",
+        "Old workflow contract",
+        {"rule": "Use the retired workflow.", "applies_to": "code-changing work"},
+    )
+    stale["currentness"] = "superseded"
+
+    assert workflow_contract_cards_from_memory_cards([stale]) == []
 
 
 def test_skill_evolution_model_captures_evidence_without_proposal_loop():

@@ -13,10 +13,10 @@ def build_markdown_authority_bundle(
     *,
     root: str = "context-authority",
 ) -> dict[str, str]:
-    """Render a reviewable Markdown/OKF-style bundle from a ContextPack.
+    """ContextPack에서 검토 가능한 Markdown/OKF-style bundle을 만든다.
 
-    This is a pure builder: it returns target paths and file bodies but does not
-    write to disk. Runtime authority remains in the ContextPack/source stores.
+    순수 builder라 target path와 file body만 반환하고 disk에는 쓰지 않는다.
+    runtime authority는 ContextPack/source store에 남는다.
     """
 
     data = pack.to_dict() if isinstance(pack, ContextPack) else dict(pack)
@@ -165,10 +165,13 @@ def _yaml_lines(key: str, value: Any) -> list[str]:
 
 
 def _yaml_scalar(value: Any) -> str:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
     text = public_safe_text(str(value if value is not None else ""), max_chars=512)
     if text == "":
         return '""'
-    return text
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def _items(value: Any) -> list[Mapping[str, Any]]:

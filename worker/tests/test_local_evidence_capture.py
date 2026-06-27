@@ -75,6 +75,22 @@ def test_local_evidence_capture_rejects_raw_file_body_fields():
         )
 
 
+def test_local_evidence_capture_rejects_unknown_evidence_type():
+    with pytest.raises(ValueError, match="evidence_type must be session_file or commit_file"):
+        local_evidence_edges_from_capture(
+            [
+                {
+                    "evidence_type": "unknown_file",
+                    "session_id_hash": _h("session-a"),
+                    "device_id_hash": _h("device-a"),
+                    "relative_path_hash": _h("file-a"),
+                    "content_hash": _h("content-a"),
+                    "sync_policy": "metadata_only",
+                }
+            ]
+        )
+
+
 def test_local_evidence_capture_projects_edges_without_raw_bodies():
     session_id = _h("session-a")
     relative_path = _h("worker/lib/agent_knowledge/context.py")

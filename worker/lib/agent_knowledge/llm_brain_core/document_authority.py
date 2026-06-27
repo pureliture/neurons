@@ -75,7 +75,7 @@ def document_authority_cards_from_memory_cards(
     for card in cards:
         payload = card.get("typed_payload") if isinstance(card.get("typed_payload"), Mapping) else {}
         ref = safe_authority_ref(payload.get("authority_ref"))
-        if not ref or ref in seen:
+        if not ref or ref in seen or not _is_document_path(ref):
             continue
         status, reason = classify_document_card(card, ref)
         edges = document_evidence_edges_from_memory_card(card, document_path=ref)

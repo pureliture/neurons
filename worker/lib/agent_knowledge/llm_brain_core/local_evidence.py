@@ -51,6 +51,8 @@ def local_evidence_edges_from_capture(records: list[Mapping[str, Any]]) -> list[
             edges.append(_session_file_edge(record).to_dict())
         elif evidence_type == "commit_file":
             edges.append(_commit_file_edge(record).to_dict())
+        else:
+            raise ValueError("evidence_type must be session_file or commit_file")
     return edges
 
 

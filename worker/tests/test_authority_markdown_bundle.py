@@ -64,15 +64,44 @@ def test_markdown_authority_bundle_exports_context_pack_sections():
         "context-authority/workflows/mem_worktree.md",
     ]
     assert "schema_version: context_authority_pack.v1" in files["context-authority/index.md"]
-    assert "status: source_of_truth" in files["context-authority/documents/e5ada5d392a3.md"]
+    assert 'status: "source_of_truth"' in files["context-authority/documents/e5ada5d392a3.md"]
     assert "confidence: 0.9" in files["context-authority/documents/e5ada5d392a3.md"]
-    assert "evidence_refs:\n  - mem_design" in files["context-authority/documents/e5ada5d392a3.md"]
+    assert 'evidence_refs:\n  - "mem_design"' in files["context-authority/documents/e5ada5d392a3.md"]
     assert "generated_artifact: true" in files["context-authority/documents/8f0721c15046.md"]
     assert "auto_update_allowed: false" in files["context-authority/workflows/mem_worktree.md"]
-    assert "scope: natural_language_response" in files["context-authority/preferences/mem_language.md"]
-    assert "next_action: verify_against_approved_ubuntu_runtime_surface" in files[
+    assert 'scope: "natural_language_response"' in files["context-authority/preferences/mem_language.md"]
+    assert 'next_action: "verify_against_approved_ubuntu_runtime_surface"' in files[
         "context-authority/evidence-gaps/runtime_evidence_unverified.md"
     ]
+
+
+def test_markdown_authority_bundle_quotes_yaml_strings_with_special_characters():
+    service = BrainReadService(
+        memory_cards=[
+            _card(
+                "mem_rule",
+                "workflow_contract",
+                "Use quoted YAML",
+                {
+                    "rule": 'Use key: "value" in examples.',
+                    "reason": "Colon: hash # dash - must not break frontmatter.",
+                },
+            )
+        ],
+    )
+    pack = service.brain_context_resolve(
+        repository="neurons",
+        branch="codex/context-authority-roadmap",
+        current_files=[],
+        current_request="export authority bundle",
+        project="neurons",
+    )
+
+    files = build_markdown_authority_bundle(pack)
+    workflow = next(body for path, body in files.items() if path.startswith("context-authority/workflows/"))
+
+    assert 'reason: "Colon: hash # dash - must not break frontmatter."' in workflow
+    assert '# Workflow Contract\n\nUse key: "value" in examples.' in workflow
 
 
 def test_markdown_authority_bundle_drift_check_reports_missing_extra_and_changed_files():

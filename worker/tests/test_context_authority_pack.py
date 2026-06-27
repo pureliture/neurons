@@ -254,6 +254,20 @@ def test_context_pack_flags_named_runtime_system_claims_without_evidence():
     assert "runtime_evidence_unverified" in pack["gaps"]
 
 
+def test_context_pack_runtime_gap_uses_token_matching_not_substrings():
+    service = BrainReadService()
+
+    pack = service.brain_context_resolve(
+        repository="neurons",
+        branch="codex/context-authority-roadmap",
+        current_files=["docs/delivery-healthcare-copy.md"],
+        current_request="deliver healthcare copy edits",
+        project="neurons",
+    ).to_dict()
+
+    assert "runtime_evidence_unverified" not in pack["gaps"]
+
+
 def test_context_pack_response_modes_preserve_required_status_fields():
     service = BrainReadService()
     pack = service.brain_context_resolve(
