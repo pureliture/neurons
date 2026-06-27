@@ -59,3 +59,17 @@ def test_private_transaction_rejects_content_hash_owned_by_different_knowledge_i
 
     assert ledger.get_by_knowledge_id("mem_conflicting_id") is None
     assert ledger.get_by_knowledge_id(card["memory_id"])["content_hash"] == card["content_hash"]
+
+
+def test_private_transaction_upsert_prepared_is_idempotent_for_same_card(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    card = build_memory_card(_candidate(), approved_by="ddalkak")
+
+    with ledger._transaction() as tx:
+        tx.upsert_memory_card(card)
+    with ledger._transaction() as tx:
+        stored = tx.upsert_memory_card(card)
+
+    assert stored["memory_id"] == card["memory_id"]
+    assert stored["content_hash"] == card["content_hash"]
+    assert stored["ledger_status"] == "indexed"
