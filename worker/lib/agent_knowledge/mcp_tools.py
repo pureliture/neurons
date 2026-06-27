@@ -16,7 +16,7 @@ def list_tools() -> list[dict]:
     return [
         {
             "name": TOOL_NAME,
-            "description": "서버가 소유한 RAGFlow 기반 neuron 지식을 검색한다.",
+            "description": "legacy/external RAGFlow bridge를 검색한다. Context Authority 기본 경로는 brain_context_resolve다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -65,6 +65,16 @@ def list_tools() -> list[dict]:
                     "current_request": {"type": "string"},
                     "project": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
+                    "response_mode": {
+                        "type": "string",
+                        "enum": ["full", "compact", "degraded"],
+                        "default": "full",
+                    },
+                    "consumer": {
+                        "type": "string",
+                        "enum": ["unspecified", "codex", "claude-code", "hermes"],
+                        "default": "unspecified",
+                    },
                 },
                 "required": ["repository", "branch", "current_request"],
                 "additionalProperties": False,

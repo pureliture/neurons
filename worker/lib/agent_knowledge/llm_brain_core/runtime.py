@@ -320,6 +320,7 @@ def build_runtime_brain_service(
     source_catalog: SourceRefCatalog | Any | None = None,
     graph_adapter: GraphMemoryAdapter | None = None,
     document_bridge: DocumentBridge | None = None,
+    search_mirror_status: Mapping[str, Any] | None = None,
     card_limit: int = 100,
 ) -> BrainReadService:
     cards = []
@@ -333,6 +334,7 @@ def build_runtime_brain_service(
         graph_adapter=graph,
         source_resolver=resolver,
         document_bridge=document_bridge,
+        search_mirror_status=search_mirror_status,
     )
 
 

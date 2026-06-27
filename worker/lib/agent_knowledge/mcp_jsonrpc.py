@@ -5,7 +5,8 @@ import sys
 from typing import TextIO
 
 from .knowledge_search_service import KnowledgeSearchService
-from .llm_brain_core.context import _project_from_repository
+from .llm_brain_core.context import project_from_repository
+from .llm_brain_core.context_builder import normalize_context_consumer
 from .llm_brain_core.models import EvidenceRequest
 from .mcp_tools import (
     BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
@@ -93,7 +94,8 @@ def dispatch_tool_call(params: dict, service: KnowledgeSearchService) -> dict:
             current_request=current_request,
             project=project or None,
             limit=_bounded_limit(arguments.get("limit"), default=8, maximum=20),
-        ).to_dict()
+            consumer=_consumer(arguments),
+        ).to_dict(mode=_response_mode(arguments))
         return _tool_result(result)
     if tool_name == BRAIN_MEMORY_SEARCH_TOOL_NAME:
         query = _require_non_empty_string(arguments, "query", tool_name=tool_name)
@@ -198,6 +200,17 @@ def _bounded_limit(value, *, default: int, maximum: int) -> int:
     return max(1, min(maximum, int(value)))
 
 
+def _response_mode(arguments: dict) -> str:
+    mode = str(arguments.get("response_mode") or "full")
+    if mode not in {"full", "compact", "degraded"}:
+        raise ValueError("response_mode must be full, compact, or degraded")
+    return mode
+
+
+def _consumer(arguments: dict) -> str:
+    return normalize_context_consumer(str(arguments.get("consumer") or "unspecified"))
+
+
 def _knowledge_search_limit(arguments: dict) -> int:
     return max(1, min(10, int(arguments.get("limit", 10))))
 
@@ -223,7 +236,7 @@ def _project_arg(arguments: dict) -> str:
     repository = str(arguments.get("repository") or "").strip().rstrip("/\\")
     if not repository:
         return ""
-    project = _project_from_repository(repository.replace("\\", "/"))
+    project = project_from_repository(repository.replace("\\", "/"))
     return "" if project == "unknown" else project
 
 

@@ -125,7 +125,8 @@ def _service(tmp_path: Path) -> KnowledgeSearchService:
 
 
 def test_mcp_tool_list_exposes_neuron_owned_tools():
-    names = [tool["name"] for tool in list_tools()]
+    tools = list_tools()
+    names = [tool["name"] for tool in tools]
 
     assert TOOL_NAME in names
     assert BRAIN_QUERY_TOOL_NAME in names
@@ -133,6 +134,9 @@ def test_mcp_tool_list_exposes_neuron_owned_tools():
     assert BRAIN_CONTEXT_RESOLVE_TOOL_NAME in names
     assert BRAIN_PERSONA_CHECK_TOOL_NAME in names
     assert BRAIN_EVIDENCE_GET_TOOL_NAME in names
+    legacy_search = next(tool for tool in tools if tool["name"] == TOOL_NAME)
+    assert "legacy/external RAGFlow bridge" in legacy_search["description"]
+    assert "brain_context_resolve" in legacy_search["description"]
 
 
 def test_brain_memory_search_schema_matches_repository_project_derivation():
@@ -143,6 +147,22 @@ def test_brain_memory_search_schema_matches_repository_project_derivation():
     assert "project" in schema["properties"]
     assert schema["required"] == ["query"]
     assert schema["anyOf"] == [{"required": ["project"]}, {"required": ["repository"]}]
+
+
+def test_brain_context_resolve_schema_exposes_response_mode():
+    tools = {tool["name"]: tool for tool in list_tools()}
+    schema = tools[BRAIN_CONTEXT_RESOLVE_TOOL_NAME]["inputSchema"]
+
+    assert schema["properties"]["response_mode"] == {
+        "type": "string",
+        "enum": ["full", "compact", "degraded"],
+        "default": "full",
+    }
+    assert schema["properties"]["consumer"] == {
+        "type": "string",
+        "enum": ["unspecified", "codex", "claude-code", "hermes"],
+        "default": "unspecified",
+    }
 
 
 def test_project_deriving_brain_tool_schemas_allow_repository():
@@ -253,6 +273,99 @@ def test_mcp_brain_context_resolve_roundtrip_uses_core_without_ragflow(tmp_path:
     assert result["schema_version"] == CONTEXT_PACK_SCHEMA_VERSION
     assert json.loads(response["result"]["content"][0]["text"]) == result
     assert "/Users/" not in json.dumps(result, sort_keys=True)
+
+
+def test_mcp_brain_context_resolve_carries_context_authority_block(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 14,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "current_request": "Context Authority Pack",
+                    "current_files": ["specs/context-authority-roadmap/design.md"],
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    authority = result["authority"]
+    assert authority["schema_version"] == "context_authority_pack.v1"
+    assert authority["preferences"][0]["rule"] == "한국어로 응답한다"
+    assert authority["projection"]["neo4j"]["authority"] == "derived_authority_graph"
+    assert authority["search_mirror"]["qdrant_docling"]["status"] == "unverified"
+    assert "agents_use_brain_context_resolve" in authority["boundary_guardrails"]
+
+
+def test_mcp_brain_context_resolve_reports_configured_unverified_search_mirror(tmp_path: Path):
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        ragflow=DisabledRagflowClient(),
+        dataset_ids=[],
+        mirror_search=lambda query, brain_id: [],
+    )
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 15,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "current_request": "Context Authority Pack",
+                    "current_files": [],
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    mirror = response["result"]["structuredContent"]["authority"]["search_mirror"]["qdrant_docling"]
+    assert mirror["status"] == "configured_unverified"
+    assert mirror["evidence_ref"] == "service:mirror_search_configured"
+    assert mirror["requires_document_authority_join"] is True
+
+
+def test_mcp_brain_context_resolve_can_emit_compact_response(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "current_request": "compact context for agent",
+                    "current_files": [],
+                    "project": PROJECT,
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["response_mode"] == "compact"
+    assert result["schema_version"] == CONTEXT_PACK_SCHEMA_VERSION
+    assert "graph_status" in result
+    assert "bridge_status" in result
+    assert "authority" in result
+    assert "relevant_decisions" not in result
 
 
 def test_session_card_cache_collapses_repeated_accepted_card_reads(tmp_path: Path):
@@ -813,8 +926,8 @@ def test_mcp_stdio_ledger_open_error_does_not_leak_raw_path(tmp_path: Path, monk
     assert "missing-ledger" not in output.err
 
 
-@pytest.mark.parametrize("agent_name", ["codex", "claude-code"])
-def test_mcp_stdio_cli_serves_contextpack_for_codex_and_claude_code_agents(
+@pytest.mark.parametrize("agent_name", ["codex", "claude-code", "hermes"])
+def test_mcp_stdio_cli_serves_contextpack_for_codex_claude_code_and_hermes_agents(
     tmp_path: Path,
     monkeypatch,
     capsys,
@@ -853,6 +966,7 @@ def test_mcp_stdio_cli_serves_contextpack_for_codex_and_claude_code_agents(
                     "current_request": f"{agent_name} Brain MCP ContextPack",
                     "current_files": [],
                     "project": PROJECT,
+                    "consumer": agent_name,
                 },
             },
         },
@@ -867,6 +981,12 @@ def test_mcp_stdio_cli_serves_contextpack_for_codex_and_claude_code_agents(
     result = responses[1]["result"]["structuredContent"]
     assert result["current_task"] == f"{agent_name} agent reads Brain MCP ContextPack"
     assert result["graph_status"]["status"] == "available"
+    assert result["authority"]["consumer_contract"] == {
+        "consumer": agent_name,
+        "read_only": True,
+        "mutation_allowed": False,
+        "default_agent_api": "brain_context_resolve",
+    }
 
 
 def _h(value):

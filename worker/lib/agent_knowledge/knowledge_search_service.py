@@ -124,7 +124,23 @@ class KnowledgeSearchService:
             source_catalog=LedgerSourceRefCatalog(self.ledger),
             graph_adapter=self.graph_adapter,
             document_bridge=RagFlowDocumentBridge(ragflow=self.ragflow, dataset_ids=self.dataset_ids),
+            search_mirror_status=self._search_mirror_status(),
         )
+
+    def _search_mirror_status(self) -> dict:
+        if self._mirror_search is None:
+            return {
+                "status": "unverified",
+                "last_verified_at": "",
+                "evidence_ref": "",
+                "details": ["mirror_search_not_configured_for_context_authority"],
+            }
+        return {
+            "status": "configured_unverified",
+            "last_verified_at": "",
+            "evidence_ref": "service:mirror_search_configured",
+            "details": ["mirror_search_callable_configured_without_live_probe"],
+        }
 
     def search(
         self,
