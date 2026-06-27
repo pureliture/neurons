@@ -445,6 +445,7 @@ class ContextPack:
     memory_status: dict[str, Any]
     graph_status: dict[str, Any]
     bridge_status: dict[str, Any]
+    authority: dict[str, Any] = field(default_factory=dict)
     bridge_evidence: tuple[dict[str, Any], ...] = ()
     gaps: tuple[str, ...] = ()
     audit: dict[str, Any] = field(default_factory=dict)
@@ -452,7 +453,7 @@ class ContextPack:
     def __post_init__(self) -> None:
         ensure_public_safe(self.to_dict(), "ContextPack")
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, mode: Literal["full", "compact", "degraded"] = "full") -> dict[str, Any]:
         data = asdict(self)
         for key in (
             "unfinished_items",
@@ -465,4 +466,33 @@ class ContextPack:
         ):
             data[key] = list(data[key])
         data["schema_version"] = CONTEXT_PACK_SCHEMA_VERSION
-        return data
+        if mode == "full":
+            return data
+        if mode not in {"compact", "degraded"}:
+            raise ValueError("ContextPack mode must be full, compact, or degraded")
+        compact_keys = (
+            "schema_version",
+            "brain_id",
+            "current_task",
+            "last_stopped_at",
+            "memory_status",
+            "graph_status",
+            "bridge_status",
+            "authority",
+            "gaps",
+            "audit",
+        )
+        response = {key: data[key] for key in compact_keys}
+        response["response_mode"] = mode
+        omitted = [
+            "unfinished_items",
+            "relevant_decisions",
+            "similar_incidents",
+            "persona_constraints",
+            "source_refs",
+            "bridge_evidence",
+        ]
+        if mode == "degraded":
+            response["status"] = "degraded"
+            response["omitted_sections"] = omitted
+        return response
