@@ -5,7 +5,7 @@ import pytest
 
 from agent_knowledge.curation import CurationService
 from agent_knowledge.ledger import Ledger
-from agent_knowledge.memory_card import build_memory_candidate
+from agent_knowledge.memory_card import build_memory_candidate, build_memory_card
 
 
 PROJECT = "workspace-ragflow-advisor"
@@ -34,6 +34,9 @@ def test_curation_approves_candidate_into_auditable_memory_card(tmp_path):
 
     assert stored_candidate["approval_state"] == "approved"
     assert stored_card["state"] == "active"
+    assert card["ragflow_dataset_id"] == "local-approved-memory-cards"
+    assert card["ragflow_document_id"] == f"memdoc_{card['memory_id']}"
+    assert card["ledger_status"] == "indexed"
     assert item["type"] == "memory_card"
     assert item["status"] == "indexed"
     assert ledger.list_memory_card_evidence(card["memory_id"]) == [
@@ -64,7 +67,7 @@ def test_curation_approve_rolls_back_partial_card_state_when_evidence_write_fail
         service.approve(candidate["candidate_id"], approved_by="ddalkak")
 
     stored_candidate = ledger.get_memory_candidate(candidate["candidate_id"])
-    memory_id = "mem_" + candidate["content_hash"].split(":", 1)[1][:16]
+    memory_id = build_memory_card(candidate, approved_by="ddalkak")["memory_id"]
 
     assert stored_candidate["approval_state"] == "pending"
     assert ledger.get_memory_card(memory_id) is None

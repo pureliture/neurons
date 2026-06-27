@@ -20,11 +20,12 @@ from .ledger_native_memory_mixin import NativeMemoryMixin
 
 
 class _LedgerTransaction:
-    """Private M1 transaction-bound facade for multi-write ledger workflows."""
+    """다중 write ledger workflow를 위한 M1 private transaction-bound facade."""
 
     def __init__(self, ledger: "Ledger", connection):
         self._ledger = ledger
         self._connection = connection
+        self._indexed_knowledge_ids: list[str] = []
 
     def upsert_memory_card(self, card: dict) -> dict:
         self._connection.execute(
@@ -141,7 +142,12 @@ class _LedgerTransaction:
 
     def get_memory_card(self, memory_id: str) -> dict | None:
         row = self._connection.execute(
-            "SELECT * FROM memory_cards WHERE memory_id = ?",
+            """
+            SELECT mc.*, ki.ragflow_dataset_id, ki.ragflow_document_id, ki.status AS ledger_status
+            FROM memory_cards mc
+            LEFT JOIN knowledge_items ki ON ki.knowledge_id = mc.memory_id
+            WHERE mc.memory_id = ?
+            """,
             (memory_id,),
         ).fetchone()
         return dict(row) if row else None
@@ -218,6 +224,12 @@ class _LedgerTransaction:
                 ),
             )
             return self._get_by_knowledge_id(knowledge_id) or {}
+        content_owner = self._connection.execute(
+            "SELECT knowledge_id FROM knowledge_items WHERE content_hash = ?",
+            (content_hash,),
+        ).fetchone()
+        if content_owner is not None and content_owner["knowledge_id"] != knowledge_id:
+            raise ValueError("content hash already belongs to another knowledge item")
         self._connection.execute(
             """
             INSERT INTO knowledge_items (
@@ -275,6 +287,12 @@ class _LedgerTransaction:
             ragflow_progress=1.0,
             indexed_at=datetime.now(timezone.utc).isoformat(),
         )
+        self._indexed_knowledge_ids.append(knowledge_id)
+
+    def _run_after_commit_hooks(self) -> None:
+        for knowledge_id in self._indexed_knowledge_ids:
+            self._ledger._maybe_mark_session_memory_dirty_for_indexed_item(knowledge_id)
+            self._ledger._maybe_mark_project_memory_dirty_for_indexed_item(knowledge_id)
 
     def _update_status(self, knowledge_id: str, status: str, **fields) -> None:
         assignments = ["status = ?"]
@@ -376,13 +394,16 @@ class Ledger(
     @contextmanager
     def _transaction(self):
         if self.read_only:
-            raise sqlite3.OperationalError("read-only ledger does not allow write transactions")
+            raise sqlite3.OperationalError("read-only ledger는 write transaction을 허용하지 않습니다")
         if self._transaction_active:
-            raise RuntimeError("nested ledger transactions are not supported")
+            raise RuntimeError("중첩 ledger transaction은 지원하지 않습니다")
         self._transaction_active = True
+        tx = None
         try:
             with self._connect() as connection:
-                yield _LedgerTransaction(self, connection)
+                tx = _LedgerTransaction(self, connection)
+                yield tx
+            tx._run_after_commit_hooks()
         finally:
             self._transaction_active = False
 
@@ -1861,9 +1882,6 @@ class Ledger(
                 (data["evidence_id_hash"],),
             ).fetchone()
         return dict(row) if row is not None else {}
-
-
-
 
 
 

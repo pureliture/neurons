@@ -34,3 +34,28 @@ def test_private_transaction_rolls_back_memory_card_partial_writes(tmp_path):
     assert ledger.get_memory_card(card["memory_id"]) is None
     assert ledger.get_by_knowledge_id(card["memory_id"]) is None
     assert ledger.list_memory_card_evidence(card["memory_id"]) == []
+
+
+def test_private_transaction_rejects_content_hash_owned_by_different_knowledge_id(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    card = build_memory_card(_candidate(), approved_by="ddalkak")
+
+    with ledger._transaction() as tx:
+        tx.upsert_memory_card(card)
+
+    with pytest.raises(ValueError, match="content hash already belongs"):
+        with ledger._transaction() as tx:
+            tx._upsert_prepared(
+                knowledge_id="mem_conflicting_id",
+                content_hash=card["content_hash"],
+                provider=card["provider"],
+                project=card["project"],
+                domain="agent_memory",
+                type="memory_card",
+                title="Conflicting memory",
+                summary="Conflicting memory",
+                privacy_level="private",
+            )
+
+    assert ledger.get_by_knowledge_id("mem_conflicting_id") is None
+    assert ledger.get_by_knowledge_id(card["memory_id"])["content_hash"] == card["content_hash"]
