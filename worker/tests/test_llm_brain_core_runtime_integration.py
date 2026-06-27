@@ -254,6 +254,40 @@ def test_brain_context_resolve_cli_reads_ledger_backed_core(tmp_path, capsys):
     assert "/Users/" not in json.dumps(report, sort_keys=True)
 
 
+def test_brain_context_resolve_cli_can_emit_compact_context_pack(tmp_path, capsys):
+    ledger_path = tmp_path / "ledger.sqlite3"
+    ledger = Ledger(ledger_path)
+    _upsert_runtime_cards(ledger)
+
+    rc = neuron_main(
+        [
+            "brain-context-resolve",
+            "--ledger",
+            str(ledger_path),
+            "--project",
+            PROJECT,
+            "--repository",
+            "neurons",
+            "--branch",
+            "codex/context-authority-roadmap",
+            "--current-request",
+            "continue compact context",
+            "--response-mode",
+            "compact",
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    pack = report["context_pack"]
+    assert pack["response_mode"] == "compact"
+    assert pack["schema_version"] == "llm_brain_context_resolve.v1"
+    assert "graph_status" in pack
+    assert "bridge_status" in pack
+    assert "authority" in pack
+    assert "relevant_decisions" not in pack
+
+
 def test_brain_context_resolve_cli_failure_does_not_leak_raw_exception(tmp_path, monkeypatch, capsys):
     def _raise(**kwargs):
         _ = kwargs

@@ -93,7 +93,8 @@ def dispatch_tool_call(params: dict, service: KnowledgeSearchService) -> dict:
             current_request=current_request,
             project=project or None,
             limit=_bounded_limit(arguments.get("limit"), default=8, maximum=20),
-        ).to_dict()
+            consumer=_consumer(arguments),
+        ).to_dict(mode=_response_mode(arguments))
         return _tool_result(result)
     if tool_name == BRAIN_MEMORY_SEARCH_TOOL_NAME:
         query = _require_non_empty_string(arguments, "query", tool_name=tool_name)
@@ -196,6 +197,20 @@ def _bounded_limit(value, *, default: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return default
     return max(1, min(maximum, int(value)))
+
+
+def _response_mode(arguments: dict) -> str:
+    mode = str(arguments.get("response_mode") or "full")
+    if mode not in {"full", "compact", "degraded"}:
+        raise ValueError("response_mode must be full, compact, or degraded")
+    return mode
+
+
+def _consumer(arguments: dict) -> str:
+    consumer = str(arguments.get("consumer") or "unspecified").lower()
+    if consumer not in {"unspecified", "codex", "claude-code", "hermes"}:
+        raise ValueError("consumer must be unspecified, codex, claude-code, or hermes")
+    return consumer
 
 
 def _knowledge_search_limit(arguments: dict) -> int:

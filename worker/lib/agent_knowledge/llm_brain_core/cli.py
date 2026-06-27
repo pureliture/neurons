@@ -22,6 +22,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--current-file", action="append", default=[])
     parser.add_argument("--current-request", required=True)
     parser.add_argument("--limit", type=int, default=8)
+    parser.add_argument("--response-mode", choices=["full", "compact", "degraded"], default="full")
+    parser.add_argument("--consumer", choices=["unspecified", "codex", "claude-code", "hermes"], default="unspecified")
     parser.add_argument("--enable-graph", action="store_true")
     parser.add_argument("--graph-required", action="store_true")
     args = parser.parse_args(argv)
@@ -48,7 +50,8 @@ def main(argv: list[str] | None = None) -> int:
             current_request=args.current_request,
             project=args.project,
             limit=args.limit,
-        ).to_dict()
+            consumer=args.consumer,
+        ).to_dict(mode=args.response_mode)
     except Exception as exc:
         print(
             json.dumps(

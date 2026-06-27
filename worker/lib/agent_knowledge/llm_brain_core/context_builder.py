@@ -5,11 +5,15 @@ from collections.abc import Mapping
 from typing import Any
 
 from ._util import ensure_public_safe, public_safe_text, short_hash
+from .document_authority import document_authority_cards_from_memory_cards
 from .models import ContextPack, GraphMemoryResult
+from .preference_authority import preference_rule_cards_from_memory_cards
+from .workflow_authority import workflow_contract_cards_from_memory_cards
 
 # Task statuses that mean a task is no longer open work. Kept here with the
 # ranking/merge logic so the "is this still unfinished" rule lives in one place.
 TERMINAL_TASK_STATUSES = {"done", "resolved", "closed", "cancelled"}
+CONTEXT_AUTHORITY_CONSUMERS = {"unspecified", "codex", "claude-code", "hermes"}
 
 
 class ContextPackBuilder:
@@ -42,7 +46,9 @@ class ContextPackBuilder:
         incidents: tuple[dict[str, Any], ...],
         bridge_status: dict[str, Any],
         bridge_evidence: tuple[dict[str, Any], ...],
+        consumer: str = "unspecified",
     ) -> ContextPack:
+        safe_consumer = normalize_context_consumer(consumer)
         task_card = select_current_task(cards, current_request)
 
         # current_task: card > artifact > graph.
@@ -71,6 +77,16 @@ class ContextPackBuilder:
             gaps.append("graph_edge_degraded")
         elif graph_result.status != "available":
             gaps.append("graph_unavailable")
+        if needs_runtime_evidence(current_request, current_files):
+            gaps.append("runtime_evidence_unverified")
+        authority = authority_block(
+            cards,
+            graph_result=graph_result,
+            gaps=gaps,
+            current_files=current_files,
+            current_request=current_request,
+            consumer=safe_consumer,
+        )
 
         pack = ContextPack(
             brain_id=brain_id,
@@ -93,15 +109,133 @@ class ContextPackBuilder:
                 "details": list(graph_result.details),
             },
             bridge_status=bridge_status,
+            authority=authority,
             bridge_evidence=bridge_evidence,
             gaps=tuple(gaps),
             audit={
                 "request_hash": short_hash([repository, branch, current_files, current_request]),
                 "source": "llm_brain_core",
+                "consumer": safe_consumer,
             },
         )
         ensure_public_safe(pack.to_dict(), "ContextPack")
         return pack
+
+
+def authority_block(
+    cards: list[dict[str, Any]],
+    *,
+    graph_result: GraphMemoryResult,
+    gaps: list[str],
+    current_files: list[str] | tuple[str, ...] = (),
+    current_request: str = "",
+    consumer: str = "unspecified",
+) -> dict[str, Any]:
+    safe_consumer = normalize_context_consumer(consumer)
+    block = {
+        "schema_version": "context_authority_pack.v1",
+        "documents": document_authority_cards(cards, current_files=current_files),
+        "workflow_contracts": workflow_contract_cards(cards),
+        "preferences": preference_rule_cards(cards, current_request=current_request, current_files=current_files),
+        "evidence_gaps": evidence_gap_cards(gaps),
+        "boundary_guardrails": [
+            "agents_use_brain_context_resolve",
+            "neo4j_is_derived_authority_workbench",
+            "graphiti_is_projection_path",
+            "qdrant_is_document_mirror",
+            "dendrite_is_evidence_sensor",
+            "retired_document_bridge_not_context_authority_dependency",
+        ],
+        "consumer_contract": {
+            "consumer": safe_consumer,
+            "read_only": True,
+            "mutation_allowed": False,
+            "default_agent_api": "brain_context_resolve",
+        },
+        "projection": {
+            "neo4j": {
+                "status": graph_result.status,
+                "authority": "derived_authority_graph",
+                "default_agent_api": "brain_context_resolve",
+                "details": list(graph_result.details),
+            }
+        },
+        "search_mirror": {
+            "qdrant_docling": {
+                "status": "unavailable",
+                "authority": "searchable_document_mirror",
+                "canonical_memory": False,
+                "product_use": "candidate_only_requires_document_authority_join",
+                "degraded_if_unavailable": True,
+            }
+        },
+    }
+    ensure_public_safe(block, "context_authority")
+    return block
+
+
+def normalize_context_consumer(consumer: str) -> str:
+    safe = public_safe_text(str(consumer or "unspecified"), max_chars=80).lower()
+    if safe not in CONTEXT_AUTHORITY_CONSUMERS:
+        raise ValueError("consumer must be unspecified, codex, claude-code, or hermes")
+    return safe
+
+
+def document_authority_cards(
+    cards: list[dict[str, Any]],
+    *,
+    current_files: list[str] | tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    return document_authority_cards_from_memory_cards(cards, inventory_paths=current_files)
+
+
+def workflow_contract_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return workflow_contract_cards_from_memory_cards(cards)
+
+
+def preference_rule_cards(
+    cards: list[dict[str, Any]],
+    *,
+    current_request: str = "",
+    current_files: list[str] | tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    return preference_rule_cards_from_memory_cards(
+        cards,
+        current_request=current_request,
+        current_files=current_files,
+    )
+
+
+def evidence_gap_cards(gaps: list[str]) -> list[dict[str, Any]]:
+    actions = {
+        "no_canonical_memory": "add_or_accept_authority_cards",
+        "graph_unavailable": "verify_neo4j_projection_or_mark_workbench_degraded",
+        "graph_edge_degraded": "inspect_graphiti_neo4j_edge_search",
+        "runtime_evidence_unverified": "verify_against_approved_ubuntu_runtime_surface",
+    }
+    return [
+        {
+            "code": gap,
+            "severity": "medium" if gap == "no_canonical_memory" else "low",
+            "next_action": actions.get(gap, "inspect_context_authority_evidence"),
+        }
+        for gap in gaps
+    ]
+
+
+def needs_runtime_evidence(current_request: str, current_files: list[str]) -> bool:
+    text = " ".join([current_request, *current_files]).lower()
+    terms = (
+        "runtime",
+        "deploy",
+        "deployed",
+        "ubuntu",
+        "compose",
+        "container",
+        "production",
+        "k3s",
+    )
+    return any(term in text for term in terms)
 
 
 def select_current_task(cards: list[dict[str, Any]], request: str) -> dict[str, Any] | None:
