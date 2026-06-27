@@ -125,7 +125,8 @@ def _service(tmp_path: Path) -> KnowledgeSearchService:
 
 
 def test_mcp_tool_list_exposes_neuron_owned_tools():
-    names = [tool["name"] for tool in list_tools()]
+    tools = list_tools()
+    names = [tool["name"] for tool in tools]
 
     assert TOOL_NAME in names
     assert BRAIN_QUERY_TOOL_NAME in names
@@ -133,6 +134,9 @@ def test_mcp_tool_list_exposes_neuron_owned_tools():
     assert BRAIN_CONTEXT_RESOLVE_TOOL_NAME in names
     assert BRAIN_PERSONA_CHECK_TOOL_NAME in names
     assert BRAIN_EVIDENCE_GET_TOOL_NAME in names
+    legacy_search = next(tool for tool in tools if tool["name"] == TOOL_NAME)
+    assert "legacy/external RAGFlow bridge" in legacy_search["description"]
+    assert "brain_context_resolve" in legacy_search["description"]
 
 
 def test_brain_memory_search_schema_matches_repository_project_derivation():
@@ -297,7 +301,40 @@ def test_mcp_brain_context_resolve_carries_context_authority_block(tmp_path: Pat
     assert authority["schema_version"] == "context_authority_pack.v1"
     assert authority["preferences"][0]["rule"] == "한국어로 응답한다"
     assert authority["projection"]["neo4j"]["authority"] == "derived_authority_graph"
+    assert authority["search_mirror"]["qdrant_docling"]["status"] == "unverified"
     assert "agents_use_brain_context_resolve" in authority["boundary_guardrails"]
+
+
+def test_mcp_brain_context_resolve_reports_configured_unverified_search_mirror(tmp_path: Path):
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        ragflow=DisabledRagflowClient(),
+        dataset_ids=[],
+        mirror_search=lambda query, brain_id: [],
+    )
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 15,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "current_request": "Context Authority Pack",
+                    "current_files": [],
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    mirror = response["result"]["structuredContent"]["authority"]["search_mirror"]["qdrant_docling"]
+    assert mirror["status"] == "configured_unverified"
+    assert mirror["evidence_ref"] == "service:mirror_search_configured"
+    assert mirror["requires_document_authority_join"] is True
 
 
 def test_mcp_brain_context_resolve_can_emit_compact_response(tmp_path: Path):

@@ -40,12 +40,14 @@ class BrainReadService:
         graph_adapter: GraphMemoryAdapter | None = None,
         source_resolver: SourceRefResolver | None = None,
         document_bridge: DocumentBridge | None = None,
+        search_mirror_status: Mapping[str, Any] | None = None,
     ) -> None:
         self.artifact_store = artifact_store or InMemorySessionMemoryArtifactStore()
         self.memory_cards = [dict(card) for card in memory_cards or [] if _is_accepted_card(card)]
         self.graph_adapter = graph_adapter or NullGraphMemoryAdapter()
         self.source_resolver = source_resolver or SourceRefResolver()
         self.document_bridge = document_bridge or DisabledDocumentBridge()
+        self.search_mirror_status = dict(search_mirror_status or {})
         # The merge/ranking policy (card > artifact > graph) lives in the builder;
         # the service stays the I/O + seam layer.
         self._context_builder = ContextPackBuilder()
@@ -61,7 +63,7 @@ class BrainReadService:
         limit: int = 8,
         consumer: str = "unspecified",
     ) -> ContextPack:
-        project_name = project or _project_from_repository(repository)
+        project_name = project or project_from_repository(repository)
         brain_id = f"/project/{project_name}"
         artifacts = self.artifact_store.list_recent(project=project_name, limit=limit)
         cards = _project_cards(self.memory_cards, project_name)
@@ -97,6 +99,7 @@ class BrainReadService:
             },
             bridge_evidence=bridge_result.evidence,
             consumer=consumer,
+            search_mirror_status=self.search_mirror_status,
         )
 
     def brain_memory_search(
@@ -391,12 +394,15 @@ class BrainReadService:
         return self.source_resolver.resolve(request).to_dict()
 
 
-def _project_from_repository(repository: str) -> str:
+def project_from_repository(repository: str) -> str:
     value = str(repository or "").rstrip("/")
     if not value:
         return "unknown"
     name = value.split("/")[-1]
     return name.removesuffix(".git") or "unknown"
+
+
+_project_from_repository = project_from_repository
 
 
 def _authority_documents(pack: Mapping[str, Any]) -> list[dict[str, Any]]:

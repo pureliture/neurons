@@ -90,7 +90,7 @@
 
 ## M6.3 Search mirror status in Context Authority Pack
 - status: done
-- evidence: RED ContextPack authority block did not expose the Qdrant/Docling searchable mirror role required by the design; GREEN `authority.search_mirror.qdrant_docling` reports searchable mirror status as candidate-only, not canonical memory, and requiring document authority join before product use; focused ContextPack/bundle/projection/MCP tests passed with 9 passed.
+- evidence: RED ContextPack authority block did not expose the Qdrant/Docling searchable mirror role required by the design; GREEN `authority.search_mirror.qdrant_docling` reports searchable mirror status as candidate-only, not canonical memory, and requiring document authority join before product use. Status is no longer hardcoded as unavailable: unset mirror status is `unverified`, configured-without-live-probe is `configured_unverified`, and future probe paths can supply `available`, `degraded`, or `unavailable`; focused ContextPack/bundle/projection/MCP tests cover the contract.
 
 ## M6.4 Consumer read-only contract
 - status: done
@@ -98,7 +98,7 @@
 
 ## M6 Context Pack API Hardening
 - status: done
-- evidence: Codex/Claude/Hermes MCP smokes pass, compact/full/degraded response contracts are tested through model/CLI/MCP paths, authority projection consistency remains covered by focused projection tests, Qdrant/Docling mirror status is explicit as candidate-only/non-canonical, consumer contracts remain read-only, and backend boundary guardrails pass in the full worker suite.
+- evidence: Codex/Claude/Hermes MCP smokes pass, compact/full/degraded response contracts are tested through model/CLI/MCP paths, authority projection consistency remains covered by focused projection tests, Qdrant/Docling mirror status is explicit as candidate-only/non-canonical and unverified unless a status seam supplies evidence, consumer contracts remain read-only, and backend boundary guardrails pass in the full worker suite.
 
 ## M7.1 Dendrite local evidence edge input contract
 - status: done
@@ -166,8 +166,8 @@
 
 ## Infra-B.5 live k3s canary and rollback proof
 - status: done
-- evidence: Ubuntu `ops-host` k3s was verified active with one Ready control-plane node and only system workloads before the PoC. A `neurons-canary` namespace was created, a stateless `llm-brain-mcp` Deployment was rolled out first with a public stateless image and then with the actual `neurons-mcp-neuron-knowledge-mcp:latest` image distributed through a temporary local registry. The actual neurons-image canary reached 1/1 Ready, `neuron-knowledge --help` succeeded inside the pod, local HTTP postcheck succeeded, rollback scaled the Deployment to 0 replicas, existing compose services stayed running and healthy, the canary namespace was deleted, and the temporary registry container was removed. No DB, Neo4j, Qdrant, CouchDB, or production k3s migration was performed.
+- evidence: recorded operator claim, not a durable current-runtime proof artifact. The claimed run says Ubuntu `ops-host` k3s had one Ready control-plane node before the PoC, a temporary `neurons-canary` namespace ran a stateless `llm-brain-mcp` canary first with a public stateless image and then with `neurons-mcp-neuron-knowledge-mcp:latest` via a temporary local registry, `neuron-knowledge --help` and local HTTP postcheck succeeded, rollback scaled the Deployment to 0, compose stayed healthy, and the namespace plus temporary registry were removed. `current_runtime_verified=false` until a redacted execution evidence artifact records timestamp, approval, image digest, namespace cleanup, compose postcheck, and rollback proof. No DB, Neo4j, Qdrant, CouchDB, or production k3s migration was performed.
 
 ## Infra-B k3s PoC
 - status: done
-- evidence: Repo-local canary plan, manifest bundle, operator approval packet, and execution evidence verifier exist, and live Ubuntu k3s canary execution proved non-production orchestration fit for a stateless `llm-brain-mcp` workload. Stateful DB migration was not attempted. Rollback scaled the canary down, compose runtime remained healthy, and all canary resources plus the temporary image registry were cleaned up.
+- evidence: Repo-local canary plan, manifest bundle, operator approval packet, and execution evidence verifier exist. The live Ubuntu k3s canary entry is recorded as an operator claim that supports follow-up hardening, not as current production migration readiness. Stateful DB migration was not attempted, and `current_runtime_verified=false` until durable redacted evidence is checked in or attached through the evidence lane.
