@@ -17,17 +17,32 @@ class CurationService:
         if candidate is None:
             raise ValueError(f"unknown memory candidate: {candidate_id}")
         card = build_memory_card(candidate, approved_by=approved_by, supersedes=supersedes)
-        stored = self.ledger.upsert_memory_card(card)
-        self.ledger.add_memory_card_evidence(card["memory_id"], candidate["evidence_refs"])
-        self.ledger.update_memory_candidate_state(candidate_id, "approved", reviewed_by=approved_by)
-        if candidate["candidate_type"] == "user_preference":
-            self.ledger.upsert_profile_fact(
-                memory_id=card["memory_id"],
-                project=card["project"],
-                fact_type=card["card_type"],
-                content_hash=card["content_hash"],
-                state=card["state"],
-            )
+        transaction_factory = getattr(self.ledger, "_transaction", None)
+        if transaction_factory is None:
+            stored = self.ledger.upsert_memory_card(card)
+            self.ledger.add_memory_card_evidence(card["memory_id"], candidate["evidence_refs"])
+            self.ledger.update_memory_candidate_state(candidate_id, "approved", reviewed_by=approved_by)
+            if candidate["candidate_type"] == "user_preference":
+                self.ledger.upsert_profile_fact(
+                    memory_id=card["memory_id"],
+                    project=card["project"],
+                    fact_type=card["card_type"],
+                    content_hash=card["content_hash"],
+                    state=card["state"],
+                )
+            return stored
+        with transaction_factory() as tx:
+            stored = tx.upsert_memory_card(card)
+            tx.add_memory_card_evidence(card["memory_id"], candidate["evidence_refs"])
+            tx.update_memory_candidate_state(candidate_id, "approved", reviewed_by=approved_by)
+            if candidate["candidate_type"] == "user_preference":
+                tx.upsert_profile_fact(
+                    memory_id=card["memory_id"],
+                    project=card["project"],
+                    fact_type=card["card_type"],
+                    content_hash=card["content_hash"],
+                    state=card["state"],
+                )
         return stored
 
     def reject(self, candidate_id: str, *, reviewed_by: str, reason: str) -> dict:
