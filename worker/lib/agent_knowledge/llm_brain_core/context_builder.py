@@ -263,9 +263,11 @@ def needs_runtime_evidence(current_request: str, current_files: list[str]) -> bo
         "rag" + "flow",
         "live",
     )
-    if any(term in text for term in terms):
+    tokens = set(re.findall(r"[a-z0-9]+", text))
+    if any(term in tokens for term in terms):
         return True
-    return "worker" in request_text and any(term in request_text for term in ("running", "status", "healthy", "deployed"))
+    request_tokens = set(re.findall(r"[a-z0-9]+", request_text))
+    return "worker" in request_tokens and bool(request_tokens & {"running", "status", "healthy", "deployed"})
 
 
 def select_current_task(cards: list[dict[str, Any]], request: str) -> dict[str, Any] | None:

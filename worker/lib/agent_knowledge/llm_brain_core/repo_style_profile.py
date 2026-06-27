@@ -37,7 +37,7 @@ def repo_style_profile_from_memory_cards(
         commits = _safe_list(payload.get("commits"), max_chars=160)
         sessions = _safe_list(payload.get("sessions"), max_chars=160)
         memory_id = str(card.get("memory_id") or "")
-        evidence_refs = [memory_id, *files, *commits, *sessions]
+        evidence_refs = [ref for ref in [memory_id, *files, *commits, *sessions] if ref]
         claims.append(
             {
                 "memory_id": memory_id,

@@ -150,6 +150,17 @@ def test_document_authority_memory_card_evidence_wins_over_inventory_duplicate()
     assert doc["evidence_refs"] == ["mem_design"]
 
 
+def test_document_authority_memory_card_ignores_non_document_authority_ref():
+    card = _card(
+        "mem_task",
+        "decision",
+        "Task authority ref is not a document",
+        {"authority_ref": "memory-card:task-123"},
+    )
+
+    assert document_authority_cards_from_memory_cards([card]) == []
+
+
 def test_document_authority_inventory_only_markdown_is_not_source_of_truth():
     [doc] = document_authority_cards_from_memory_cards(
         [],

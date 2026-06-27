@@ -72,6 +72,8 @@ def workflow_contract_cards_from_memory_cards(cards: list[dict[str, Any]]) -> li
     contracts: list[dict[str, Any]] = []
     for card in cards:
         payload = card.get("typed_payload") if isinstance(card.get("typed_payload"), Mapping) else {}
+        if str(card.get("currentness") or "unknown") not in {"current", "unknown", ""}:
+            continue
         if not _is_workflow_card(card, payload):
             continue
         rule = public_safe_text(
@@ -151,9 +153,7 @@ def skill_evolution_cards_from_memory_cards(cards: list[dict[str, Any]]) -> list
 
 def _is_workflow_card(card: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
     card_type = str(card.get("card_type") or "")
-    return card_type in {"workflow", "workflow_contract", "workflow_default"} or bool(
-        payload.get("workflow_contract") or payload.get("default") or payload.get("workflow_default")
-    )
+    return card_type in {"workflow", "workflow_contract"} or bool(payload.get("workflow_contract"))
 
 
 def _is_workflow_default_card(card: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:

@@ -37,7 +37,8 @@ def federate_neurons_local_artifacts(artifacts: list[Mapping[str, Any]]) -> dict
             _reject_forbidden_residue(edge)
             target_ref = str(edge.get("target_ref") or "")
             content_hash = str(edge.get("content_hash") or "")
-            key = (target_ref, content_hash)
+            sync_policy = str(edge.get("sync_policy") or "metadata_only")
+            key = (target_ref, content_hash, sync_policy)
             entry = merged.setdefault(
                 key,
                 {
@@ -45,7 +46,7 @@ def federate_neurons_local_artifacts(artifacts: list[Mapping[str, Any]]) -> dict
                     "target_ref": target_ref,
                     "relative_path_hash": edge.get("relative_path_hash") or "",
                     "content_hash": content_hash,
-                    "sync_policy": edge.get("sync_policy") or "metadata_only",
+                    "sync_policy": sync_policy,
                     "source_refs": [],
                     "device_id_hashes": [],
                 },

@@ -10,10 +10,10 @@ CONTEXT_AUTHORITY_PROJECTION_VERSION = "context_authority_projection.v1"
 
 
 def authority_episodes_from_context_pack(pack: ContextPack | Mapping[str, Any]) -> tuple[OntologyEpisode, ...]:
-    """Build derived graph episodes for the Context Authority workbench.
+    """Context Authority workbench용 derived graph episode를 만든다.
 
-    The returned episodes are projection payloads only. They do not become raw
-    truth, and direct graph edits still do not change product authority.
+    반환되는 episode는 projection payload일 뿐 raw truth가 아니다.
+    graph 직접 수정도 product authority를 바꾸지 않는다.
     """
 
     data = pack.to_dict() if isinstance(pack, ContextPack) else dict(pack)

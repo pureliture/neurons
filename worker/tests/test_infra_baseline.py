@@ -47,7 +47,7 @@ def test_compose_baseline_report_keeps_compose_target_and_safe_delivery_defaults
 
     assert report == {
         "schema_version": "compose_baseline_report.v1",
-        "status": "ready",
+        "status": "needs_attention",
         "runtime_target": "compose",
         "k3s_migration_implied": False,
         "dockerfiles": ["Dockerfile", "worker/Dockerfile"],
@@ -64,6 +64,25 @@ def test_compose_baseline_report_keeps_compose_target_and_safe_delivery_defaults
         },
         "warnings": ["service_missing_healthcheck:ingress-worker-py", "service_missing_healthcheck:qdrant"],
     }
+
+
+def test_compose_baseline_report_requires_healthchecks_for_ready_status():
+    compose = {
+        "services": {
+            "ingress-worker-py": {
+                "healthcheck": {"test": ["CMD", "true"]},
+                "environment": {
+                    "ALLOW_LIVE_QUEUE": "${RAG_INGRESS_ALLOW_LIVE_QUEUE:-0}",
+                },
+                "ports": ["127.0.0.1:8080:8080"],
+            }
+        }
+    }
+
+    report = compose_baseline_report(compose, dockerfiles=["worker/Dockerfile"])
+
+    assert report["status"] == "ready"
+    assert report["warnings"] == []
 
 
 def test_k3s_poc_canary_plan_is_non_production_stateless_and_rollbackable():
@@ -115,6 +134,22 @@ def test_k3s_poc_canary_plan_rejects_stateful_or_production_migration():
             namespace="production",
             canary_workloads=[{"name": "llm-brain-mcp", "kind": "Deployment", "stateful": False}],
             access_policy="public",
+            rollback_target="compose",
+        )
+
+    with pytest.raises(ValueError, match="production k3s migration is not part of this roadmap"):
+        k3s_poc_canary_plan(
+            namespace="neurons-canary",
+            canary_workloads=[{"name": "llm-brain-mcp", "kind": "Deployment", "stateful": False}],
+            access_policy="nodeport",
+            rollback_target="compose",
+        )
+
+    with pytest.raises(ValueError, match="k3s PoC canary workloads currently support Deployment only"):
+        k3s_poc_canary_plan(
+            namespace="neurons-canary",
+            canary_workloads=[{"name": "batch-canary", "kind": "Job", "stateful": False}],
+            access_policy="tailscale_private",
             rollback_target="compose",
         )
 
@@ -200,7 +235,6 @@ def test_k3s_poc_canary_manifest_bundle_keeps_canary_stateless_private_and_rollb
         "rollback_commands": [
             "kubectl -n neurons-canary scale deployment/llm-brain-mcp --replicas=0",
             "docker compose up -d",
-            "neuron-knowledge brain-context-resolve --response-mode compact",
         ],
         "requires_operator_approval": True,
     }
@@ -243,7 +277,6 @@ def test_k3s_poc_operator_approval_packet_lists_dry_run_apply_postcheck_and_roll
         "rollback_commands": [
             "kubectl -n neurons-canary scale deployment/llm-brain-mcp --replicas=0",
             "docker compose up -d",
-            "neuron-knowledge brain-context-resolve --response-mode compact",
             "docker compose ps",
         ],
         "rollback_proof_required": True,
@@ -295,12 +328,6 @@ def test_k3s_poc_execution_evidence_proves_approved_canary_and_rollback():
                 "exit_code": 0,
                 "outcome": "pass",
             },
-            {
-                "phase": "rollback",
-                "command": packet["rollback_commands"][3],
-                "exit_code": 0,
-                "outcome": "pass",
-            },
         ],
     )
 
@@ -330,7 +357,6 @@ def test_k3s_poc_execution_evidence_proves_approved_canary_and_rollback():
             "kubectl -n neurons-canary get pods",
             "kubectl -n neurons-canary scale deployment/llm-brain-mcp --replicas=0",
             "docker compose up -d",
-            "neuron-knowledge brain-context-resolve --response-mode compact",
             "docker compose ps",
         ],
         "blocking_codes": [],
@@ -367,7 +393,6 @@ def test_k3s_poc_execution_evidence_requires_rollback_proof():
     assert evidence["blocking_codes"] == [
         "rollback_proof_missing:kubectl -n neurons-canary scale deployment/llm-brain-mcp --replicas=0",
         "rollback_proof_missing:docker compose up -d",
-        "rollback_proof_missing:neuron-knowledge brain-context-resolve --response-mode compact",
         "rollback_proof_missing:docker compose ps",
     ]
 
@@ -408,12 +433,6 @@ def test_k3s_poc_execution_evidence_requires_explicit_operator_approval():
             {
                 "phase": "rollback",
                 "command": packet["rollback_commands"][2],
-                "exit_code": 0,
-                "outcome": "pass",
-            },
-            {
-                "phase": "rollback",
-                "command": packet["rollback_commands"][3],
                 "exit_code": 0,
                 "outcome": "pass",
             },

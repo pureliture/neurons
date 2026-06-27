@@ -56,3 +56,20 @@ def test_repo_style_profile_links_claims_to_files_commits_sessions_and_repo_scop
             {"memory_id": "mem_old_code", "reason": "insufficient_style_authority"},
         ],
     }
+
+
+def test_repo_style_profile_omits_empty_memory_id_from_evidence_refs():
+    style = _card(
+        "",
+        "repo_style",
+        "Use explicit tests",
+        {
+            "claim": "Use explicit tests.",
+            "files": ["worker/tests/test_repo_style_profile.py"],
+        },
+    )
+
+    profile = repo_style_profile_from_memory_cards([style], repository="neurons")
+
+    assert profile["claims"][0]["memory_id"] == ""
+    assert profile["claims"][0]["evidence_refs"] == ["worker/tests/test_repo_style_profile.py"]
