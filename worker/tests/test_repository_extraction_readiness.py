@@ -11,6 +11,8 @@ def test_m2_repository_extraction_plan_selects_memory_curation_candidate():
     assert plan["milestone"] == "M2"
     assert plan["first_candidate"]["name"] == "memory_curation"
     assert plan["first_candidate"]["activation_state"] == "readiness_only"
+    assert plan["first_candidate"]["public_import_contract"] is False
+    assert plan["first_candidate"]["protocol_definition_stable"] is False
     assert plan["first_candidate"]["tables"] == [
         "memory_candidates",
         "memory_cards",

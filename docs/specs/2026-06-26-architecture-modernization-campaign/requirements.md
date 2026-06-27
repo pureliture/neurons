@@ -7,7 +7,7 @@
 
 ## 입력 맥락
 
-- 시작 문서: `/Users/example/Projects/neurons/docs/architecture-review-summary.md`
+- 시작 문서: `docs/architecture-review-summary.md`
 - 요약된 아키텍처 축:
   - Database dialect isolation, Repository pattern, Unit of Work
   - Immutable external configuration for dataset contracts

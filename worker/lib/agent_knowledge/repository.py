@@ -33,7 +33,7 @@ class MemoryCurationRepository(Protocol):
     ) -> None: ...
 
 
-class MemoryCardRepository(Protocol):
+class _MemoryCardRepositoryCandidate(Protocol):
     """MemoryCard lifecycle data를 다루는 repository port 후보."""
 
     def get_by_id(self, memory_id: str) -> Mapping[str, Any] | None: ...
@@ -41,7 +41,7 @@ class MemoryCardRepository(Protocol):
     def get_state(self, memory_id: str) -> str | None: ...
 
 
-class SessionRepository(Protocol):
+class _SessionRepositoryCandidate(Protocol):
     """Transcript session과 chunk 조회를 다루는 repository port 후보."""
 
     def get_session(self, session_id_hash: str) -> Mapping[str, Any] | None: ...
@@ -49,11 +49,11 @@ class SessionRepository(Protocol):
     def iter_chunks(self, session_id_hash: str) -> Iterable[Mapping[str, Any]]: ...
 
 
-class TranscriptRepository(Protocol):
+class _TranscriptRepositoryCandidate(Protocol):
     """Transcript lookup index와 raw transcript metadata를 다루는 repository port 후보."""
 
 
-class KnowledgeItemRepository(Protocol):
+class _KnowledgeItemRepositoryCandidate(Protocol):
     """Base knowledge item lifecycle을 다루는 repository port 후보."""
 
     def get_by_id(self, knowledge_id: str) -> Mapping[str, Any] | None: ...
@@ -61,15 +61,15 @@ class KnowledgeItemRepository(Protocol):
     def update_status(self, knowledge_id: str, status: str) -> None: ...
 
 
-class UnitOfWork(Protocol):
-    """Transaction boundary와 domain repository 접근을 묶는 port 후보."""
+class _UnitOfWorkCandidate(Protocol):
+    """Future transaction boundary candidate; not a public M2 contract."""
 
-    memory_cards: MemoryCardRepository
-    sessions: SessionRepository
-    transcripts: TranscriptRepository
-    knowledge_items: KnowledgeItemRepository
+    memory_cards: _MemoryCardRepositoryCandidate
+    sessions: _SessionRepositoryCandidate
+    transcripts: _TranscriptRepositoryCandidate
+    knowledge_items: _KnowledgeItemRepositoryCandidate
 
-    def __enter__(self) -> UnitOfWork: ...
+    def __enter__(self) -> _UnitOfWorkCandidate: ...
 
     def __exit__(
         self,
@@ -139,6 +139,8 @@ def build_repository_extraction_plan() -> dict[str, Any]:
             "name": "memory_curation",
             "port": "MemoryCurationRepository",
             "activation_state": "readiness_only",
+            "public_import_contract": False,
+            "protocol_definition_stable": False,
             "tables": [
                 "memory_candidates",
                 "memory_cards",

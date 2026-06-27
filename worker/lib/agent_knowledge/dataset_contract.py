@@ -318,6 +318,7 @@ for _role in _LOGICAL_ROLES:
         _ROLE_BY_NAME.setdefault(_alias, _role)
 
 _DATASET_CONTRACT_CONFIG_CACHE: dict | None = None
+_DATASET_CONTRACT_CONFIG_CACHE_SOURCE: str | None = None
 _DATASET_CONTRACT_CONFIG_SCHEMA_VERSION = "agent_knowledge_dataset_contract_config.v1"
 _FORBIDDEN_CONFIG_FIELD_NAMES = {
     "api_key",
@@ -342,6 +343,25 @@ _DATASET_CONTRACT_CONFIG_REQUIRED_FIELDS = (
     "orchestration_rollout",
     "abort_criteria",
 )
+_DATASET_CONTRACT_LOAD_POLICY = {
+    "mode": "process_start_once",
+    "hot_reload": False,
+    "default_fallback": "code_defined",
+}
+_DATASET_CONTRACT_EXTERNAL_ACTIVATION = {
+    "runtime_hot_reload": False,
+    "live_mutation_allowed": False,
+    "k3s_apply_in_scope": False,
+}
+_DATASET_CONTRACT_ROLLOUT_POLICY = {
+    "activation_owner": "orchestration_restart_or_rolling_update",
+    "code_default_fallback_ready": True,
+    "configmap_shape_ready": True,
+    "compose_runtime_wiring_ready": False,
+    "config_path_env_var": "",
+    **_DATASET_CONTRACT_EXTERNAL_ACTIVATION,
+}
+_DATASET_CONTRACT_DEFAULT_SOURCE = "code_defined_default"
 
 
 def dataset_contract_config_schema() -> dict:
@@ -351,17 +371,9 @@ def dataset_contract_config_schema() -> dict:
         "schema_version": _DATASET_CONTRACT_CONFIG_SCHEMA_VERSION,
         "required_fields": list(_DATASET_CONTRACT_CONFIG_REQUIRED_FIELDS),
         "logical_role_fields": [field.name for field in fields(LogicalDatasetRole)],
-        "load_policy": {
-            "mode": "process_start_once",
-            "hot_reload": False,
-            "default_fallback": "code_defined",
-        },
+        "load_policy": dict(_DATASET_CONTRACT_LOAD_POLICY),
         "forbidden_field_names": sorted(_FORBIDDEN_CONFIG_FIELD_NAMES),
-        "external_activation": {
-            "runtime_hot_reload": False,
-            "live_mutation_allowed": False,
-            "k3s_apply_in_scope": False,
-        },
+        "external_activation": dict(_DATASET_CONTRACT_EXTERNAL_ACTIVATION),
     }
 
 
@@ -376,19 +388,8 @@ def build_default_dataset_contract_config() -> dict:
         "canonical_ragflow_dataset_names": dict(CANONICAL_RAGFLOW_DATASET_NAMES),
         "deprecated_ragflow_dataset_prefixes": list(DEPRECATED_RAGFLOW_DATASET_PREFIXES),
         "logical_roles": [role.to_plan_record() for role in _LOGICAL_ROLES],
-        "load_policy": {
-            "mode": "process_start_once",
-            "hot_reload": False,
-            "default_fallback": "code_defined",
-        },
-        "orchestration_rollout": {
-            "activation_owner": "orchestration_restart_or_rolling_update",
-            "compose_ready": True,
-            "configmap_shape_ready": True,
-            "k3s_apply_in_scope": False,
-            "runtime_hot_reload": False,
-            "live_mutation_allowed": False,
-        },
+        "load_policy": dict(_DATASET_CONTRACT_LOAD_POLICY),
+        "orchestration_rollout": dict(_DATASET_CONTRACT_ROLLOUT_POLICY),
         "abort_criteria": [
             "runtime hot reload would be required",
             "credential or raw dataset id access would be required",
@@ -413,6 +414,9 @@ def validate_dataset_contract_config(config: dict) -> dict:
     missing = sorted(required - set(config))
     if missing:
         raise ValueError(f"missing dataset contract config field: {missing[0]}")
+    extra = sorted(set(config) - required)
+    if extra:
+        raise ValueError(f"unknown dataset contract config field: {extra[0]}")
     if config["schema_version"] != _DATASET_CONTRACT_CONFIG_SCHEMA_VERSION:
         raise ValueError("unsupported dataset contract config schema_version")
     if not isinstance(config["logical_roles"], list):
@@ -444,9 +448,14 @@ def validate_dataset_contract_config(config: dict) -> dict:
         if expected_role not in roles_by_role:
             raise ValueError(f"missing logical dataset role: {expected_role}")
 
-    for runtime_name in config["current_runtime_dataset_names"].values():
+    runtime_dataset_names = config["current_runtime_dataset_names"]
+    if not isinstance(runtime_dataset_names, dict):
+        raise ValueError("current_runtime_dataset_names must be an object")
+    for runtime_role, runtime_name in runtime_dataset_names.items():
+        if not isinstance(runtime_name, str) or not runtime_name:
+            raise ValueError(f"runtime dataset mapping must use non-empty string values: {runtime_role}")
         if runtime_name not in role_lookup:
-            raise ValueError(f"runtime dataset name is not covered by logical roles: {runtime_name}")
+            raise ValueError(f"runtime dataset mapping is not covered by logical roles: {runtime_role}")
 
     load_policy = config["load_policy"]
     if not isinstance(load_policy, dict):
@@ -468,22 +477,33 @@ def validate_dataset_contract_config(config: dict) -> dict:
 def load_dataset_contract_config_once(config_path: str | Path | None = None) -> dict:
     """Load dataset contract config once per process, falling back to code defaults."""
 
-    global _DATASET_CONTRACT_CONFIG_CACHE
+    global _DATASET_CONTRACT_CONFIG_CACHE, _DATASET_CONTRACT_CONFIG_CACHE_SOURCE
+    source = _dataset_contract_config_source(config_path)
     if _DATASET_CONTRACT_CONFIG_CACHE is not None:
+        if source != _DATASET_CONTRACT_CONFIG_CACHE_SOURCE:
+            raise ValueError("dataset contract config already loaded from a different source")
         return copy.deepcopy(_DATASET_CONTRACT_CONFIG_CACHE)
     if config_path is None:
         config = build_default_dataset_contract_config()
     else:
         config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     _DATASET_CONTRACT_CONFIG_CACHE = validate_dataset_contract_config(config)
+    _DATASET_CONTRACT_CONFIG_CACHE_SOURCE = source
     return copy.deepcopy(_DATASET_CONTRACT_CONFIG_CACHE)
 
 
 def clear_dataset_contract_config_cache() -> None:
     """Clear the process-load cache for tests and controlled startup checks."""
 
-    global _DATASET_CONTRACT_CONFIG_CACHE
+    global _DATASET_CONTRACT_CONFIG_CACHE, _DATASET_CONTRACT_CONFIG_CACHE_SOURCE
     _DATASET_CONTRACT_CONFIG_CACHE = None
+    _DATASET_CONTRACT_CONFIG_CACHE_SOURCE = None
+
+
+def _dataset_contract_config_source(config_path: str | Path | None) -> str:
+    if config_path is None:
+        return _DATASET_CONTRACT_DEFAULT_SOURCE
+    return str(Path(config_path).expanduser().resolve())
 
 
 def _reject_forbidden_config_fields(value: object) -> None:
