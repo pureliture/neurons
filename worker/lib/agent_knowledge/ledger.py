@@ -171,27 +171,64 @@ class _LedgerTransaction:
             "SELECT * FROM knowledge_items WHERE knowledge_id = ?",
             (knowledge_id,),
         ).fetchone()
-        if existing is not None and existing["content_hash"] != content_hash:
-            if (
-                existing["status"] != "prepared"
-                or existing["ragflow_dataset_id"]
-                or existing["ragflow_document_id"]
-                or existing["ingress_job_id"]
-                or existing["queued_at"]
-                or existing["indexed_at"]
-            ):
-                raise ValueError("cannot change content hash for a delivered knowledge item")
-            content_owner = self._connection.execute(
-                "SELECT knowledge_id FROM knowledge_items WHERE content_hash = ?",
-                (content_hash,),
-            ).fetchone()
-            if content_owner is not None and content_owner["knowledge_id"] != knowledge_id:
-                raise ValueError("content hash already belongs to another knowledge item")
+        if existing is not None:
+            if existing["content_hash"] != content_hash:
+                if (
+                    existing["status"] != "prepared"
+                    or existing["ragflow_dataset_id"]
+                    or existing["ragflow_document_id"]
+                    or existing["ingress_job_id"]
+                    or existing["queued_at"]
+                    or existing["indexed_at"]
+                ):
+                    raise ValueError("cannot change content hash for a delivered knowledge item")
+                content_owner = self._connection.execute(
+                    "SELECT knowledge_id FROM knowledge_items WHERE content_hash = ?",
+                    (content_hash,),
+                ).fetchone()
+                if content_owner is not None and content_owner["knowledge_id"] != knowledge_id:
+                    raise ValueError("content hash already belongs to another knowledge item")
+                self._connection.execute(
+                    """
+                    UPDATE knowledge_items
+                    SET content_hash=?,
+                        provider=?,
+                        project=?,
+                        domain=?,
+                        type=?,
+                        title=?,
+                        summary=?,
+                        privacy_level=?,
+                        status='prepared',
+                        ragflow_dataset_id='',
+                        ragflow_document_id='',
+                        ingress_target_profile='',
+                        ingress_job_id='',
+                        queued_at='',
+                        ragflow_run='',
+                        ragflow_progress=0,
+                        indexed_at='',
+                        disabled_at='',
+                        authorization_status='active'
+                    WHERE knowledge_id=?
+                    """,
+                    (
+                        content_hash,
+                        provider,
+                        project,
+                        domain,
+                        type,
+                        title,
+                        bounded_summary,
+                        privacy_level,
+                        knowledge_id,
+                    ),
+                )
+                return self._get_by_knowledge_id(knowledge_id) or {}
             self._connection.execute(
                 """
                 UPDATE knowledge_items
-                SET content_hash=?,
-                    provider=?,
+                SET provider=?,
                     project=?,
                     domain=?,
                     type=?,
@@ -212,7 +249,6 @@ class _LedgerTransaction:
                 WHERE knowledge_id=?
                 """,
                 (
-                    content_hash,
                     provider,
                     project,
                     domain,
@@ -236,20 +272,6 @@ class _LedgerTransaction:
                 knowledge_id, content_hash, provider, project, domain, type,
                 title, summary, privacy_level, metadata_json, status
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared')
-            ON CONFLICT(content_hash) DO UPDATE SET
-                title=excluded.title,
-                summary=excluded.summary,
-                status='prepared',
-                ragflow_dataset_id='',
-                ragflow_document_id='',
-                ingress_target_profile='',
-                ingress_job_id='',
-                queued_at='',
-                ragflow_run='',
-                ragflow_progress=0,
-                indexed_at='',
-                disabled_at='',
-                authorization_status='active'
             """,
             (
                 knowledge_id,
@@ -1882,7 +1904,6 @@ class Ledger(
                 (data["evidence_id_hash"],),
             ).fetchone()
         return dict(row) if row is not None else {}
-
 
 
 

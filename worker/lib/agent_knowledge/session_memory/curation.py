@@ -28,7 +28,7 @@ class CurationService:
                     project=card["project"],
                     fact_type=card["card_type"],
                     content_hash=card["content_hash"],
-                    state=card["state"],
+                    state=card.get("state", "active"),
                 )
             return stored
         with transaction_factory() as tx:
@@ -41,7 +41,7 @@ class CurationService:
                     project=card["project"],
                     fact_type=card["card_type"],
                     content_hash=card["content_hash"],
-                    state=card["state"],
+                    state=card.get("state", "active"),
                 )
         return stored
 
@@ -83,6 +83,6 @@ class CurationService:
                 project=card["project"],
                 fact_type=card["card_type"],
                 content_hash=card["content_hash"],
-                state=card["state"],
+                state=card.get("state", "active"),
             )
         return stored

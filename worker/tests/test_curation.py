@@ -3,6 +3,7 @@ import sqlite3
 
 import pytest
 
+import agent_knowledge.curation as curation_module
 from agent_knowledge.curation import CurationService
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.memory_card import build_memory_candidate, build_memory_card
@@ -114,6 +115,25 @@ def test_profile_fact_is_visible_but_never_auto_approved(tmp_path):
     ]
 
 
+def test_approve_defaults_profile_fact_state_when_card_state_is_absent(tmp_path, monkeypatch):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    service = CurationService(ledger)
+    candidate = service.add_candidate(_candidate("User prefers concise answers.", "user_preference"))
+    original_build_memory_card = curation_module.build_memory_card
+
+    def build_card_without_state(candidate, *, approved_by: str, supersedes: str = ""):
+        card = original_build_memory_card(candidate, approved_by=approved_by, supersedes=supersedes)
+        card.pop("state", None)
+        return card
+
+    monkeypatch.setattr(curation_module, "build_memory_card", build_card_without_state)
+
+    card = service.approve(candidate["candidate_id"], approved_by="ddalkak")
+
+    assert ledger.get_memory_card(card["memory_id"])["state"] == "active"
+    assert ledger.list_profile_facts()[0]["state"] == "active"
+
+
 def test_approve_with_supersedes_is_rejected_in_favor_of_supersede_transition(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite")
     service = CurationService(ledger)
@@ -163,6 +183,36 @@ def test_superseding_profile_fact_marks_old_profile_fact_superseded(tmp_path):
     )
 
     profile_facts = {fact["memory_id"]: fact for fact in ledger.list_profile_facts()}
+    assert profile_facts[old["memory_id"]]["state"] == "superseded"
+    assert profile_facts[new_card["memory_id"]]["state"] == "active"
+
+
+def test_supersede_defaults_profile_fact_state_when_card_state_is_absent(tmp_path, monkeypatch):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    service = CurationService(ledger)
+    old = service.approve(
+        service.add_candidate(_candidate("User prefers old concise answers.", "user_preference"))["candidate_id"],
+        approved_by="ddalkak",
+    )
+    new_candidate = service.add_candidate(_candidate("User prefers updated concise answers.", "user_preference"))
+    original_build_memory_card = curation_module.build_memory_card
+
+    def build_card_without_state(candidate, *, approved_by: str, supersedes: str = ""):
+        card = original_build_memory_card(candidate, approved_by=approved_by, supersedes=supersedes)
+        card.pop("state", None)
+        return card
+
+    monkeypatch.setattr(curation_module, "build_memory_card", build_card_without_state)
+
+    new_card = service.supersede(
+        old["memory_id"],
+        new_candidate["candidate_id"],
+        approved_by="ddalkak",
+        reason="updated preference",
+    )
+
+    profile_facts = {fact["memory_id"]: fact for fact in ledger.list_profile_facts()}
+    assert ledger.get_memory_card(new_card["memory_id"])["state"] == "active"
     assert profile_facts[old["memory_id"]]["state"] == "superseded"
     assert profile_facts[new_card["memory_id"]]["state"] == "active"
 
