@@ -40,12 +40,14 @@ class BrainReadService:
         graph_adapter: GraphMemoryAdapter | None = None,
         source_resolver: SourceRefResolver | None = None,
         document_bridge: DocumentBridge | None = None,
+        search_mirror_status: Mapping[str, Any] | None = None,
     ) -> None:
         self.artifact_store = artifact_store or InMemorySessionMemoryArtifactStore()
         self.memory_cards = [dict(card) for card in memory_cards or [] if _is_accepted_card(card)]
         self.graph_adapter = graph_adapter or NullGraphMemoryAdapter()
         self.source_resolver = source_resolver or SourceRefResolver()
         self.document_bridge = document_bridge or DisabledDocumentBridge()
+        self.search_mirror_status = dict(search_mirror_status or {})
         # The merge/ranking policy (card > artifact > graph) lives in the builder;
         # the service stays the I/O + seam layer.
         self._context_builder = ContextPackBuilder()
@@ -59,8 +61,9 @@ class BrainReadService:
         current_request: str,
         project: str | None = None,
         limit: int = 8,
+        consumer: str = "unspecified",
     ) -> ContextPack:
-        project_name = project or _project_from_repository(repository)
+        project_name = project or project_from_repository(repository)
         brain_id = f"/project/{project_name}"
         artifacts = self.artifact_store.list_recent(project=project_name, limit=limit)
         cards = _project_cards(self.memory_cards, project_name)
@@ -95,6 +98,8 @@ class BrainReadService:
                 "details": list(bridge_result.details),
             },
             bridge_evidence=bridge_result.evidence,
+            consumer=consumer,
+            search_mirror_status=self.search_mirror_status,
         )
 
     def brain_memory_search(
@@ -126,6 +131,161 @@ class BrainReadService:
             "graph_results": [episode.to_dict() for episode in graph.episodes],
         }
         ensure_public_safe(result, "brain_memory_search")
+        return result
+
+    def brain_docs_current(
+        self,
+        *,
+        repository: str,
+        branch: str,
+        current_files: list[str],
+        current_request: str,
+        project: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        pack = self.brain_context_resolve(
+            repository=repository,
+            branch=branch,
+            current_files=current_files,
+            current_request=current_request,
+            project=project,
+            limit=limit,
+        ).to_dict()
+        documents = [
+            doc
+            for doc in _authority_documents(pack)
+            if str(doc.get("status") or "") not in {"archive_candidate", "historical", "superseded", "stale"}
+        ]
+        result = {
+            "documents": documents,
+            "memory_status": pack.get("memory_status", {}),
+            "graph_status": pack.get("graph_status", {}),
+        }
+        ensure_public_safe(result, "brain_docs_current")
+        return result
+
+    def brain_docs_explain(
+        self,
+        *,
+        document_path: str,
+        repository: str,
+        branch: str,
+        current_files: list[str],
+        current_request: str,
+        project: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        files = list(current_files or [])
+        if document_path not in files:
+            files.append(document_path)
+        pack = self.brain_context_resolve(
+            repository=repository,
+            branch=branch,
+            current_files=files,
+            current_request=current_request,
+            project=project,
+            limit=limit,
+        ).to_dict()
+        document = next((doc for doc in _authority_documents(pack) if doc.get("path") == document_path), None)
+        result = {
+            "document": document or {},
+            "memory_status": pack.get("memory_status", {}),
+            "graph_status": pack.get("graph_status", {}),
+        }
+        ensure_public_safe(result, "brain_docs_explain")
+        return result
+
+    def brain_docs_archive_candidates(
+        self,
+        *,
+        repository: str,
+        branch: str,
+        current_files: list[str],
+        current_request: str,
+        project: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        pack = self.brain_context_resolve(
+            repository=repository,
+            branch=branch,
+            current_files=current_files,
+            current_request=current_request,
+            project=project,
+            limit=limit,
+        ).to_dict()
+        documents = [doc for doc in _authority_documents(pack) if doc.get("status") == "archive_candidate"]
+        result = {
+            "documents": documents,
+            "archive_proposal_only": True,
+            "memory_status": pack.get("memory_status", {}),
+            "graph_status": pack.get("graph_status", {}),
+        }
+        ensure_public_safe(result, "brain_docs_archive_candidates")
+        return result
+
+    def brain_workflows_current(
+        self,
+        *,
+        repository: str,
+        branch: str,
+        current_files: list[str],
+        current_request: str,
+        project: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        pack = self.brain_context_resolve(
+            repository=repository,
+            branch=branch,
+            current_files=current_files,
+            current_request=current_request,
+            project=project,
+            limit=limit,
+        ).to_dict()
+        contracts = _authority_workflow_contracts(pack)
+        result = {
+            "workflow_contracts": contracts,
+            "auto_update_allowed": bool(contracts)
+            and all(bool(contract.get("auto_update_allowed")) for contract in contracts),
+            "memory_status": pack.get("memory_status", {}),
+            "graph_status": pack.get("graph_status", {}),
+        }
+        ensure_public_safe(result, "brain_workflows_current")
+        return result
+
+    def brain_workflows_explain(
+        self,
+        *,
+        rule: str,
+        repository: str,
+        branch: str,
+        current_files: list[str],
+        current_request: str,
+        project: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        pack = self.brain_context_resolve(
+            repository=repository,
+            branch=branch,
+            current_files=current_files,
+            current_request=current_request,
+            project=project,
+            limit=limit,
+        ).to_dict()
+        target = public_safe_text(rule, max_chars=360)
+        contract = next(
+            (
+                item
+                for item in _authority_workflow_contracts(pack)
+                if _workflow_rule_matches(str(item.get("rule") or ""), target)
+            ),
+            None,
+        )
+        result = {
+            "workflow_contract": contract or {},
+            "memory_status": pack.get("memory_status", {}),
+            "graph_status": pack.get("graph_status", {}),
+        }
+        ensure_public_safe(result, "brain_workflows_explain")
         return result
 
     def brain_incident_search(self, *, symptom: str, project: str, limit: int = 5) -> dict[str, Any]:
@@ -234,12 +394,43 @@ class BrainReadService:
         return self.source_resolver.resolve(request).to_dict()
 
 
-def _project_from_repository(repository: str) -> str:
+def project_from_repository(repository: str) -> str:
     value = str(repository or "").rstrip("/")
     if not value:
         return "unknown"
     name = value.split("/")[-1]
     return name.removesuffix(".git") or "unknown"
+
+
+_project_from_repository = project_from_repository
+
+
+def _authority_documents(pack: Mapping[str, Any]) -> list[dict[str, Any]]:
+    authority = pack.get("authority") if isinstance(pack.get("authority"), Mapping) else {}
+    documents = authority.get("documents") if isinstance(authority.get("documents"), list) else []
+    return [dict(doc) for doc in documents if isinstance(doc, Mapping)]
+
+
+def _authority_workflow_contracts(pack: Mapping[str, Any]) -> list[dict[str, Any]]:
+    authority = pack.get("authority") if isinstance(pack.get("authority"), Mapping) else {}
+    contracts = authority.get("workflow_contracts") if isinstance(authority.get("workflow_contracts"), list) else []
+    return [dict(contract) for contract in contracts if isinstance(contract, Mapping)]
+
+
+def _workflow_rule_matches(rule: str, target: str) -> bool:
+    candidate = _normalize_workflow_rule(rule)
+    wanted = _normalize_workflow_rule(target)
+    if not candidate or not wanted:
+        return False
+    if candidate == wanted or wanted in candidate:
+        return True
+    candidate_terms = set(_terms(candidate))
+    wanted_terms = set(_terms(wanted))
+    return bool(wanted_terms and wanted_terms.issubset(candidate_terms))
+
+
+def _normalize_workflow_rule(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_가-힣]+", " ", value).strip().casefold()
 
 
 def _is_accepted_card(card: Mapping[str, Any]) -> bool:

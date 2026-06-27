@@ -5,11 +5,16 @@ from collections.abc import Mapping
 from typing import Any
 
 from ._util import ensure_public_safe, public_safe_text, short_hash
+from .document_authority import document_authority_cards_from_memory_cards
 from .models import ContextPack, GraphMemoryResult
+from .preference_authority import preference_rule_cards_from_memory_cards
+from .workflow_authority import workflow_contract_cards_from_memory_cards
 
 # Task statuses that mean a task is no longer open work. Kept here with the
 # ranking/merge logic so the "is this still unfinished" rule lives in one place.
 TERMINAL_TASK_STATUSES = {"done", "resolved", "closed", "cancelled"}
+CONTEXT_AUTHORITY_CONSUMERS = {"unspecified", "codex", "claude-code", "hermes"}
+SEARCH_MIRROR_STATUSES = {"unverified", "configured_unverified", "available", "degraded", "unavailable"}
 
 
 class ContextPackBuilder:
@@ -42,7 +47,10 @@ class ContextPackBuilder:
         incidents: tuple[dict[str, Any], ...],
         bridge_status: dict[str, Any],
         bridge_evidence: tuple[dict[str, Any], ...],
+        consumer: str = "unspecified",
+        search_mirror_status: Mapping[str, Any] | None = None,
     ) -> ContextPack:
+        safe_consumer = normalize_context_consumer(consumer)
         task_card = select_current_task(cards, current_request)
 
         # current_task: card > artifact > graph.
@@ -71,6 +79,17 @@ class ContextPackBuilder:
             gaps.append("graph_edge_degraded")
         elif graph_result.status != "available":
             gaps.append("graph_unavailable")
+        if needs_runtime_evidence(current_request, current_files):
+            gaps.append("runtime_evidence_unverified")
+        authority = authority_block(
+            cards,
+            graph_result=graph_result,
+            gaps=gaps,
+            current_files=current_files,
+            current_request=current_request,
+            consumer=safe_consumer,
+            search_mirror_status=search_mirror_status,
+        )
 
         pack = ContextPack(
             brain_id=brain_id,
@@ -93,15 +112,162 @@ class ContextPackBuilder:
                 "details": list(graph_result.details),
             },
             bridge_status=bridge_status,
+            authority=authority,
             bridge_evidence=bridge_evidence,
             gaps=tuple(gaps),
             audit={
                 "request_hash": short_hash([repository, branch, current_files, current_request]),
                 "source": "llm_brain_core",
+                "consumer": safe_consumer,
             },
         )
         ensure_public_safe(pack.to_dict(), "ContextPack")
         return pack
+
+
+def authority_block(
+    cards: list[dict[str, Any]],
+    *,
+    graph_result: GraphMemoryResult,
+    gaps: list[str],
+    current_files: list[str] | tuple[str, ...] = (),
+    current_request: str = "",
+    consumer: str = "unspecified",
+    search_mirror_status: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    safe_consumer = normalize_context_consumer(consumer)
+    block = {
+        "schema_version": "context_authority_pack.v1",
+        "documents": document_authority_cards(cards, current_files=current_files),
+        "workflow_contracts": workflow_contract_cards(cards),
+        "preferences": preference_rule_cards(cards, current_request=current_request, current_files=current_files),
+        "evidence_gaps": evidence_gap_cards(gaps),
+        "boundary_guardrails": [
+            "agents_use_brain_context_resolve",
+            "neo4j_is_derived_authority_workbench",
+            "graphiti_is_projection_path",
+            "qdrant_is_document_mirror",
+            "dendrite_is_evidence_sensor",
+            "retired_document_bridge_not_context_authority_dependency",
+        ],
+        "consumer_contract": {
+            "consumer": safe_consumer,
+            "read_only": True,
+            "mutation_allowed": False,
+            "default_agent_api": "brain_context_resolve",
+        },
+        "projection": {
+            "neo4j": {
+                "status": graph_result.status,
+                "authority": "derived_authority_graph",
+                "default_agent_api": "brain_context_resolve",
+                "details": list(graph_result.details),
+            }
+        },
+        "search_mirror": {
+            "qdrant_docling": search_mirror_status_block(search_mirror_status)
+        },
+    }
+    ensure_public_safe(block, "context_authority")
+    return block
+
+
+def search_mirror_status_block(status: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    provided = status if isinstance(status, Mapping) else {}
+    raw_status = str(provided.get("status") or "unverified").lower()
+    safe_status = raw_status if raw_status in SEARCH_MIRROR_STATUSES else "unverified"
+    raw_details = provided.get("details")
+    details = raw_details if isinstance(raw_details, (list, tuple)) else ()
+    block = {
+        "status": safe_status,
+        "authority": "searchable_document_mirror",
+        "canonical_memory": False,
+        "product_use": "candidate_only_requires_document_authority_join",
+        "requires_document_authority_join": True,
+        "degraded_if_unavailable": True,
+        "last_verified_at": public_safe_text(str(provided.get("last_verified_at") or ""), max_chars=80),
+        "evidence_ref": public_safe_text(str(provided.get("evidence_ref") or ""), max_chars=160),
+        "details": [public_safe_text(str(item or ""), max_chars=160) for item in details if str(item or "")],
+    }
+    ensure_public_safe(block, "search_mirror_status")
+    return block
+
+
+def normalize_context_consumer(consumer: str) -> str:
+    safe = public_safe_text(str(consumer or "unspecified"), max_chars=80).lower()
+    if safe not in CONTEXT_AUTHORITY_CONSUMERS:
+        raise ValueError("consumer must be unspecified, codex, claude-code, or hermes")
+    return safe
+
+
+def document_authority_cards(
+    cards: list[dict[str, Any]],
+    *,
+    current_files: list[str] | tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    return document_authority_cards_from_memory_cards(cards, inventory_paths=current_files)
+
+
+def workflow_contract_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return workflow_contract_cards_from_memory_cards(cards)
+
+
+def preference_rule_cards(
+    cards: list[dict[str, Any]],
+    *,
+    current_request: str = "",
+    current_files: list[str] | tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    return preference_rule_cards_from_memory_cards(
+        cards,
+        current_request=current_request,
+        current_files=current_files,
+    )
+
+
+def evidence_gap_cards(gaps: list[str]) -> list[dict[str, Any]]:
+    actions = {
+        "no_canonical_memory": "add_or_accept_authority_cards",
+        "graph_unavailable": "verify_neo4j_projection_or_mark_workbench_degraded",
+        "graph_edge_degraded": "inspect_graphiti_neo4j_edge_search",
+        "runtime_evidence_unverified": "verify_against_approved_ubuntu_runtime_surface",
+    }
+    return [
+        {
+            "code": gap,
+            "severity": "medium" if gap == "no_canonical_memory" else "low",
+            "next_action": actions.get(gap, "inspect_context_authority_evidence"),
+        }
+        for gap in gaps
+    ]
+
+
+def needs_runtime_evidence(current_request: str, current_files: list[str]) -> bool:
+    request_text = str(current_request or "").lower()
+    text = " ".join([current_request, *current_files]).lower()
+    terms = (
+        "runtime",
+        "deploy",
+        "deployed",
+        "ubuntu",
+        "compose",
+        "container",
+        "production",
+        "k3s",
+        "cluster",
+        "canary",
+        "health",
+        "graphiti",
+        "neo4j",
+        "qdrant",
+        "rag" + "flow",
+        "live",
+    )
+    tokens = set(re.findall(r"[a-z0-9]+", text))
+    if any(term in tokens for term in terms):
+        return True
+    request_tokens = set(re.findall(r"[a-z0-9]+", request_text))
+    return "worker" in request_tokens and bool(request_tokens & {"running", "status", "healthy", "deployed"})
 
 
 def select_current_task(cards: list[dict[str, Any]], request: str) -> dict[str, Any] | None:
