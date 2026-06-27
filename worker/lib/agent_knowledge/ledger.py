@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
 import shutil
 import tempfile
 import uuid
 from pathlib import Path
-from .db_adapter import ClosingSqliteConnection, SqliteLedgerDbAdapter
 
 from .db_adapter import ClosingSqliteConnection, SqliteLedgerDbAdapter
 from .ledger_base import *  # noqa: F401,F403 (상수/helper re-export 호환)
@@ -20,6 +19,323 @@ from .ledger_memory_promotion_mixin import MemoryPromotionMixin
 from .ledger_native_memory_mixin import NativeMemoryMixin
 
 
+class _LedgerTransaction:
+    """다중 write ledger workflow를 위한 M1 private transaction-bound facade."""
+
+    def __init__(self, ledger: "Ledger", connection):
+        self._ledger = ledger
+        self._connection = connection
+        self._indexed_knowledge_ids: list[str] = []
+
+    def upsert_memory_card(self, card: dict) -> dict:
+        self._connection.execute(
+            """
+            INSERT INTO memory_cards (
+                memory_id, candidate_id, card_type, project, provider, title,
+                summary, content_hash, state, approved_by, approved_at, supersedes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(memory_id) DO UPDATE SET
+                candidate_id=excluded.candidate_id,
+                card_type=excluded.card_type,
+                project=excluded.project,
+                provider=excluded.provider,
+                title=excluded.title,
+                summary=excluded.summary,
+                content_hash=excluded.content_hash,
+                state=excluded.state,
+                approved_by=excluded.approved_by,
+                approved_at=excluded.approved_at,
+                supersedes=excluded.supersedes
+            """,
+            (
+                card["memory_id"],
+                card["candidate_id"],
+                card["card_type"],
+                card["project"],
+                card["provider"],
+                card["title"],
+                card["summary"],
+                card["content_hash"],
+                card.get("state", "active"),
+                card["approved_by"],
+                card["approved_at"],
+                card.get("supersedes", ""),
+            ),
+        )
+        self._upsert_prepared(
+            knowledge_id=card["memory_id"],
+            content_hash=card["content_hash"],
+            provider=card["provider"],
+            project=card["project"],
+            domain="agent_memory",
+            type="memory_card",
+            title=card["title"],
+            summary=card["summary"],
+            privacy_level="private",
+        )
+        self._mark_uploaded(
+            card["memory_id"],
+            dataset_id=card.get("ragflow_dataset_id") or "local-approved-memory-cards",
+            document_id=card.get("ragflow_document_id") or f"memdoc_{card['memory_id']}",
+            run="LOCAL",
+        )
+        self._mark_indexed(card["memory_id"], run="LOCAL")
+        return self.get_memory_card(card["memory_id"])
+
+    def add_memory_card_evidence(self, memory_id: str, evidence_refs: list[dict]) -> None:
+        for ref in evidence_refs:
+            self._connection.execute(
+                """
+                INSERT INTO memory_card_evidence (memory_id, knowledge_id, content_hash)
+                VALUES (?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                (memory_id, ref["knowledge_id"], ref["content_hash"]),
+            )
+
+    def update_memory_candidate_state(
+        self,
+        candidate_id: str,
+        state: str,
+        *,
+        reviewed_by: str = "",
+        reason: str = "",
+    ) -> dict:
+        reviewed_at = datetime.now(timezone.utc).isoformat()
+        self._connection.execute(
+            """
+            UPDATE memory_candidates
+            SET approval_state = ?, reviewed_at = ?, reviewed_by = ?, review_reason = ?
+            WHERE candidate_id = ?
+            """,
+            (state, reviewed_at, reviewed_by, reason, candidate_id),
+        )
+        row = self._connection.execute(
+            "SELECT * FROM memory_candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown memory candidate: {candidate_id}")
+        return _memory_candidate_from_row(row)
+
+    def upsert_profile_fact(
+        self,
+        *,
+        memory_id: str,
+        project: str,
+        fact_type: str,
+        content_hash: str,
+        state: str,
+    ) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO profile_facts (memory_id, project, fact_type, content_hash, state)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(memory_id) DO UPDATE SET
+                project=excluded.project,
+                fact_type=excluded.fact_type,
+                content_hash=excluded.content_hash,
+                state=excluded.state
+            """,
+            (memory_id, project, fact_type, content_hash, state),
+        )
+
+    def get_memory_card(self, memory_id: str) -> dict | None:
+        row = self._connection.execute(
+            """
+            SELECT mc.*, ki.ragflow_dataset_id, ki.ragflow_document_id, ki.status AS ledger_status
+            FROM memory_cards mc
+            LEFT JOIN knowledge_items ki ON ki.knowledge_id = mc.memory_id
+            WHERE mc.memory_id = ?
+            """,
+            (memory_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def _upsert_prepared(
+        self,
+        *,
+        knowledge_id: str,
+        content_hash: str,
+        provider: str,
+        project: str,
+        domain: str,
+        type: str,
+        title: str,
+        summary: str,
+        privacy_level: str = "normal",
+    ) -> dict:
+        metadata_json = _normalize_metadata_json(None)
+        bounded_summary = summary[:500]
+        existing = self._connection.execute(
+            "SELECT * FROM knowledge_items WHERE knowledge_id = ?",
+            (knowledge_id,),
+        ).fetchone()
+        if existing is not None:
+            if existing["content_hash"] != content_hash:
+                if (
+                    existing["status"] != "prepared"
+                    or existing["ragflow_dataset_id"]
+                    or existing["ragflow_document_id"]
+                    or existing["ingress_job_id"]
+                    or existing["queued_at"]
+                    or existing["indexed_at"]
+                ):
+                    raise ValueError("cannot change content hash for a delivered knowledge item")
+                content_owner = self._connection.execute(
+                    "SELECT knowledge_id FROM knowledge_items WHERE content_hash = ?",
+                    (content_hash,),
+                ).fetchone()
+                if content_owner is not None and content_owner["knowledge_id"] != knowledge_id:
+                    raise ValueError("content hash already belongs to another knowledge item")
+                self._connection.execute(
+                    """
+                    UPDATE knowledge_items
+                    SET content_hash=?,
+                        provider=?,
+                        project=?,
+                        domain=?,
+                        type=?,
+                        title=?,
+                        summary=?,
+                        privacy_level=?,
+                        status='prepared',
+                        ragflow_dataset_id='',
+                        ragflow_document_id='',
+                        ingress_target_profile='',
+                        ingress_job_id='',
+                        queued_at='',
+                        ragflow_run='',
+                        ragflow_progress=0,
+                        indexed_at='',
+                        disabled_at='',
+                        authorization_status='active'
+                    WHERE knowledge_id=?
+                    """,
+                    (
+                        content_hash,
+                        provider,
+                        project,
+                        domain,
+                        type,
+                        title,
+                        bounded_summary,
+                        privacy_level,
+                        knowledge_id,
+                    ),
+                )
+                return self._get_by_knowledge_id(knowledge_id) or {}
+            self._connection.execute(
+                """
+                UPDATE knowledge_items
+                SET provider=?,
+                    project=?,
+                    domain=?,
+                    type=?,
+                    title=?,
+                    summary=?,
+                    privacy_level=?,
+                    status='prepared',
+                    ragflow_dataset_id='',
+                    ragflow_document_id='',
+                    ingress_target_profile='',
+                    ingress_job_id='',
+                    queued_at='',
+                    ragflow_run='',
+                    ragflow_progress=0,
+                    indexed_at='',
+                    disabled_at='',
+                    authorization_status='active'
+                WHERE knowledge_id=?
+                """,
+                (
+                    provider,
+                    project,
+                    domain,
+                    type,
+                    title,
+                    bounded_summary,
+                    privacy_level,
+                    knowledge_id,
+                ),
+            )
+            return self._get_by_knowledge_id(knowledge_id) or {}
+        content_owner = self._connection.execute(
+            "SELECT knowledge_id FROM knowledge_items WHERE content_hash = ?",
+            (content_hash,),
+        ).fetchone()
+        if content_owner is not None and content_owner["knowledge_id"] != knowledge_id:
+            raise ValueError("content hash already belongs to another knowledge item")
+        self._connection.execute(
+            """
+            INSERT INTO knowledge_items (
+                knowledge_id, content_hash, provider, project, domain, type,
+                title, summary, privacy_level, metadata_json, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared')
+            """,
+            (
+                knowledge_id,
+                content_hash,
+                provider,
+                project,
+                domain,
+                type,
+                title,
+                bounded_summary,
+                privacy_level,
+                metadata_json,
+            ),
+        )
+        return self._get_by_knowledge_id(knowledge_id) or {}
+
+    def _mark_uploaded(self, knowledge_id: str, *, dataset_id: str, document_id: str, run: str) -> None:
+        self._update_status(
+            knowledge_id,
+            "uploaded_unparsed",
+            ragflow_dataset_id=dataset_id,
+            ragflow_document_id=document_id,
+            ingress_target_profile="",
+            ingress_job_id="",
+            queued_at="",
+            ragflow_run=run,
+            indexed_at="",
+        )
+
+    def _mark_indexed(self, knowledge_id: str, *, run: str) -> None:
+        self._update_status(
+            knowledge_id,
+            "indexed",
+            ragflow_run=run,
+            ragflow_progress=1.0,
+            indexed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self._indexed_knowledge_ids.append(knowledge_id)
+
+    def _run_after_commit_hooks(self) -> None:
+        for knowledge_id in self._indexed_knowledge_ids:
+            self._ledger._maybe_mark_session_memory_dirty_for_indexed_item(knowledge_id)
+            self._ledger._maybe_mark_project_memory_dirty_for_indexed_item(knowledge_id)
+
+    def _update_status(self, knowledge_id: str, status: str, **fields) -> None:
+        assignments = ["status = ?"]
+        values = [status]
+        for key, value in fields.items():
+            assignments.append(f"{key} = ?")
+            values.append(value)
+        values.append(knowledge_id)
+        self._connection.execute(
+            f"UPDATE knowledge_items SET {', '.join(assignments)} WHERE knowledge_id = ?",
+            values,
+        )
+
+    def _get_by_knowledge_id(self, knowledge_id: str) -> dict | None:
+        row = self._connection.execute(
+            "SELECT * FROM knowledge_items WHERE knowledge_id = ?",
+            (knowledge_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 class Ledger(
     IngressStatusMixin, GcSafetyMixin, MemoryPromotionMixin, NativeMemoryMixin,
 ):
@@ -27,6 +343,7 @@ class Ledger(
         self.path = Path(path)
         self.read_only = bool(read_only)
         self._temp_dir: Path | None = None
+        self._transaction_active = False
         # B: DB 엔진 접근 seam. None이면 현행 SQLite 어댑터를 lazy 생성(behavior-preserving).
         self._db_adapter = db_adapter
         # C cutover switch: 명시 어댑터가 없고 NEURON_LEDGER_PG_DSN 이 설정돼 있으면 PostgreSQL
@@ -95,6 +412,22 @@ class Ledger(
         if self._db_adapter is None:
             self._db_adapter = SqliteLedgerDbAdapter(self.path, read_only=self.read_only)
         return self._db_adapter.connect(configure_journal=configure_journal)
+
+    @contextmanager
+    def _transaction(self):
+        if self.read_only:
+            raise sqlite3.OperationalError("read-only ledger는 write transaction을 허용하지 않습니다")
+        if self._transaction_active:
+            raise RuntimeError("중첩 ledger transaction은 지원하지 않습니다")
+        self._transaction_active = True
+        tx = None
+        try:
+            with self._connect() as connection:
+                tx = _LedgerTransaction(self, connection)
+                yield tx
+            tx._run_after_commit_hooks()
+        finally:
+            self._transaction_active = False
 
     def _initialize(self) -> None:
         # Lazy import to avoid a module-load circular import: ledger_adapter lives
@@ -1571,11 +1904,6 @@ class Ledger(
                 (data["evidence_id_hash"],),
             ).fetchone()
         return dict(row) if row is not None else {}
-
-
-
-
-
 
 
 
