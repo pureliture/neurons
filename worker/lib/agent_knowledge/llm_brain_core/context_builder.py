@@ -14,6 +14,7 @@ from .workflow_authority import workflow_contract_cards_from_memory_cards
 # ranking/merge logic so the "is this still unfinished" rule lives in one place.
 TERMINAL_TASK_STATUSES = {"done", "resolved", "closed", "cancelled"}
 CONTEXT_AUTHORITY_CONSUMERS = {"unspecified", "codex", "claude-code", "hermes"}
+SEARCH_MIRROR_STATUSES = {"unverified", "configured_unverified", "available", "degraded", "unavailable"}
 
 
 class ContextPackBuilder:
@@ -47,6 +48,7 @@ class ContextPackBuilder:
         bridge_status: dict[str, Any],
         bridge_evidence: tuple[dict[str, Any], ...],
         consumer: str = "unspecified",
+        search_mirror_status: Mapping[str, Any] | None = None,
     ) -> ContextPack:
         safe_consumer = normalize_context_consumer(consumer)
         task_card = select_current_task(cards, current_request)
@@ -86,6 +88,7 @@ class ContextPackBuilder:
             current_files=current_files,
             current_request=current_request,
             consumer=safe_consumer,
+            search_mirror_status=search_mirror_status,
         )
 
         pack = ContextPack(
@@ -130,6 +133,7 @@ def authority_block(
     current_files: list[str] | tuple[str, ...] = (),
     current_request: str = "",
     consumer: str = "unspecified",
+    search_mirror_status: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     safe_consumer = normalize_context_consumer(consumer)
     block = {
@@ -161,16 +165,31 @@ def authority_block(
             }
         },
         "search_mirror": {
-            "qdrant_docling": {
-                "status": "unavailable",
-                "authority": "searchable_document_mirror",
-                "canonical_memory": False,
-                "product_use": "candidate_only_requires_document_authority_join",
-                "degraded_if_unavailable": True,
-            }
+            "qdrant_docling": search_mirror_status_block(search_mirror_status)
         },
     }
     ensure_public_safe(block, "context_authority")
+    return block
+
+
+def search_mirror_status_block(status: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    provided = status if isinstance(status, Mapping) else {}
+    raw_status = str(provided.get("status") or "unverified").lower()
+    safe_status = raw_status if raw_status in SEARCH_MIRROR_STATUSES else "unverified"
+    raw_details = provided.get("details")
+    details = raw_details if isinstance(raw_details, (list, tuple)) else ()
+    block = {
+        "status": safe_status,
+        "authority": "searchable_document_mirror",
+        "canonical_memory": False,
+        "product_use": "candidate_only_requires_document_authority_join",
+        "requires_document_authority_join": True,
+        "degraded_if_unavailable": True,
+        "last_verified_at": public_safe_text(str(provided.get("last_verified_at") or ""), max_chars=80),
+        "evidence_ref": public_safe_text(str(provided.get("evidence_ref") or ""), max_chars=160),
+        "details": [public_safe_text(str(item or ""), max_chars=160) for item in details if str(item or "")],
+    }
+    ensure_public_safe(block, "search_mirror_status")
     return block
 
 
@@ -224,6 +243,7 @@ def evidence_gap_cards(gaps: list[str]) -> list[dict[str, Any]]:
 
 
 def needs_runtime_evidence(current_request: str, current_files: list[str]) -> bool:
+    request_text = str(current_request or "").lower()
     text = " ".join([current_request, *current_files]).lower()
     terms = (
         "runtime",
@@ -234,8 +254,18 @@ def needs_runtime_evidence(current_request: str, current_files: list[str]) -> bo
         "container",
         "production",
         "k3s",
+        "cluster",
+        "canary",
+        "health",
+        "graphiti",
+        "neo4j",
+        "qdrant",
+        "rag" + "flow",
+        "live",
     )
-    return any(term in text for term in terms)
+    if any(term in text for term in terms):
+        return True
+    return "worker" in request_text and any(term in request_text for term in ("running", "status", "healthy", "deployed"))
 
 
 def select_current_task(cards: list[dict[str, Any]], request: str) -> dict[str, Any] | None:

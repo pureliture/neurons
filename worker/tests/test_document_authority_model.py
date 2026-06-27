@@ -148,3 +148,14 @@ def test_document_authority_memory_card_evidence_wins_over_inventory_duplicate()
 
     assert doc["confidence"] == 0.9
     assert doc["evidence_refs"] == ["mem_design"]
+
+
+def test_document_authority_inventory_only_markdown_is_not_source_of_truth():
+    [doc] = document_authority_cards_from_memory_cards(
+        [],
+        inventory_paths=["specs/context-authority-roadmap/design.md"],
+    )
+
+    assert doc["status"] == "active"
+    assert doc["reason"] == "inventory_markdown_candidate"
+    assert doc["evidence_edges"][0]["evidence_type"] == "file_inventory"

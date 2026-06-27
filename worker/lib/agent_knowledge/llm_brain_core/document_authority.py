@@ -94,7 +94,7 @@ def document_authority_cards_from_memory_cards(
         ref = safe_authority_ref(path)
         if not ref or ref in seen or not _is_document_path(ref):
             continue
-        status, reason = classify_document_path(ref)
+        status, reason = classify_document_path(ref, approval_evidence=False)
         evidence_ref = f"file_inventory:{ref}"
         edge = DocumentEvidenceEdge(
             document_path=ref,
@@ -116,11 +116,13 @@ def document_authority_cards_from_memory_cards(
     return documents
 
 
-def classify_document_path(path: str) -> tuple[DocumentStatus, str]:
+def classify_document_path(path: str, *, approval_evidence: bool = False) -> tuple[DocumentStatus, str]:
     text = str(path or "").lower()
     name = text.rsplit("/", 1)[-1]
     if name in {"requirements.md", "design.md", "roadmap.md"}:
-        return "source_of_truth", "approved_markdown_source"
+        if approval_evidence:
+            return "source_of_truth", "approved_markdown_source"
+        return "active", "inventory_markdown_candidate"
     if text.endswith(".html"):
         return "generated_companion", "html_preview_or_generated_companion"
     if text.endswith(".md"):
@@ -132,7 +134,24 @@ def classify_document_card(card: Mapping[str, Any], path: str) -> tuple[Document
     currentness = str(card.get("currentness") or "").lower()
     if currentness in {"stale", "superseded", "archive_candidate"}:
         return "archive_candidate", "stale_or_superseded_memory_card"
-    return classify_document_path(path)
+    return classify_document_path(path, approval_evidence=_has_document_approval_evidence(card))
+
+
+def _has_document_approval_evidence(card: Mapping[str, Any]) -> bool:
+    lifecycle = str(card.get("lifecycle_state") or "").lower()
+    approval = str(card.get("approval_state") or "").lower()
+    if lifecycle in {"accepted", "human_accepted", "auto_accepted"} and approval in {"approved", "auto_accepted"}:
+        return True
+    if str(card.get("state") or "").lower() == "active" and approval in {"approved", "auto_accepted"}:
+        return True
+    for ref in card.get("evidence_refs") or []:
+        if isinstance(ref, Mapping):
+            kind = str(ref.get("kind") or ref.get("type") or ref.get("source_type") or "").lower()
+            if kind in {"approval", "approval_record", "human_approval"}:
+                return True
+        elif str(ref or "").lower().startswith(("approval:", "approved:")):
+            return True
+    return False
 
 
 def _is_document_path(path: str) -> bool:

@@ -5,7 +5,8 @@ import sys
 from typing import TextIO
 
 from .knowledge_search_service import KnowledgeSearchService
-from .llm_brain_core.context import _project_from_repository
+from .llm_brain_core.context import project_from_repository
+from .llm_brain_core.context_builder import normalize_context_consumer
 from .llm_brain_core.models import EvidenceRequest
 from .mcp_tools import (
     BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
@@ -207,10 +208,7 @@ def _response_mode(arguments: dict) -> str:
 
 
 def _consumer(arguments: dict) -> str:
-    consumer = str(arguments.get("consumer") or "unspecified").lower()
-    if consumer not in {"unspecified", "codex", "claude-code", "hermes"}:
-        raise ValueError("consumer must be unspecified, codex, claude-code, or hermes")
-    return consumer
+    return normalize_context_consumer(str(arguments.get("consumer") or "unspecified"))
 
 
 def _knowledge_search_limit(arguments: dict) -> int:
@@ -238,7 +236,7 @@ def _project_arg(arguments: dict) -> str:
     repository = str(arguments.get("repository") or "").strip().rstrip("/\\")
     if not repository:
         return ""
-    project = _project_from_repository(repository.replace("\\", "/"))
+    project = project_from_repository(repository.replace("\\", "/"))
     return "" if project == "unknown" else project
 
 

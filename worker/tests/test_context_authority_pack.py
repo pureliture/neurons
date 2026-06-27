@@ -79,11 +79,15 @@ def test_context_pack_exposes_m1_authority_sections_and_guardrails():
     assert authority["preferences"][0]["rule"] == "자연어 응답과 문서는 한국어로 작성한다."
     assert authority["projection"]["neo4j"]["authority"] == "derived_authority_graph"
     assert authority["search_mirror"]["qdrant_docling"] == {
-        "status": "unavailable",
+        "status": "unverified",
         "authority": "searchable_document_mirror",
         "canonical_memory": False,
         "product_use": "candidate_only_requires_document_authority_join",
+        "requires_document_authority_join": True,
         "degraded_if_unavailable": True,
+        "last_verified_at": "",
+        "evidence_ref": "",
+        "details": [],
     }
     assert "graph_unavailable" in [gap["code"] for gap in authority["evidence_gaps"]]
     assert "agents_use_brain_context_resolve" in authority["boundary_guardrails"]
@@ -133,8 +137,8 @@ def test_context_pack_builds_document_authority_from_current_file_inventory_with
     assert pack["authority"]["documents"] == [
         {
             "path": "specs/context-authority-roadmap/design.md",
-            "status": "source_of_truth",
-            "reason": "approved_markdown_source",
+            "status": "active",
+            "reason": "inventory_markdown_candidate",
             "confidence": 0.5,
             "evidence_refs": ["file_inventory:specs/context-authority-roadmap/design.md"],
             "evidence_edges": [
@@ -209,6 +213,45 @@ def test_context_pack_applies_only_relevant_preferences_for_current_request():
 
     assert [item["memory_id"] for item in ordinary["authority"]["preferences"]] == ["mem_language"]
     assert [item["memory_id"] for item in runtime["authority"]["preferences"]] == ["mem_language", "mem_runtime"]
+
+
+def test_context_pack_uses_injected_search_mirror_status_without_claiming_authority():
+    service = BrainReadService(
+        search_mirror_status={
+            "status": "configured_unverified",
+            "last_verified_at": "",
+            "evidence_ref": "service:mirror_search_configured",
+            "details": ["mirror_search_callable_configured_without_live_probe"],
+        }
+    )
+
+    pack = service.brain_context_resolve(
+        repository="neurons",
+        branch="codex/context-authority-roadmap",
+        current_files=[],
+        current_request="resolve docs",
+        project="neurons",
+    ).to_dict()
+
+    mirror = pack["authority"]["search_mirror"]["qdrant_docling"]
+    assert mirror["status"] == "configured_unverified"
+    assert mirror["evidence_ref"] == "service:mirror_search_configured"
+    assert mirror["requires_document_authority_join"] is True
+    assert mirror["canonical_memory"] is False
+
+
+def test_context_pack_flags_named_runtime_system_claims_without_evidence():
+    service = BrainReadService()
+
+    pack = service.brain_context_resolve(
+        repository="neurons",
+        branch="codex/context-authority-roadmap",
+        current_files=["docs/graphiti-canary.md"],
+        current_request="Graphiti canary passed and Neo4j projection is healthy",
+        project="neurons",
+    ).to_dict()
+
+    assert "runtime_evidence_unverified" in pack["gaps"]
 
 
 def test_context_pack_response_modes_preserve_required_status_fields():
