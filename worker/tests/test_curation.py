@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 import pytest
 
@@ -39,6 +40,36 @@ def test_curation_approves_candidate_into_auditable_memory_card(tmp_path):
         {"memory_id": card["memory_id"], "knowledge_id": "kn_chunk", "content_hash": "sha256:chunk"}
     ]
     assert "raw transcript" not in json.dumps(stored_card, sort_keys=True).lower()
+
+
+def test_curation_approve_rolls_back_partial_card_state_when_evidence_write_fails(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    service = CurationService(ledger)
+    candidate = service.add_candidate(_candidate())
+
+    with ledger._connect() as connection:
+        connection.execute(
+            """
+            UPDATE memory_candidates
+            SET evidence_refs_json = ?
+            WHERE candidate_id = ?
+            """,
+            (
+                json.dumps([{"knowledge_id": None, "content_hash": "sha256:bad-evidence"}]),
+                candidate["candidate_id"],
+            ),
+        )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        service.approve(candidate["candidate_id"], approved_by="ddalkak")
+
+    stored_candidate = ledger.get_memory_candidate(candidate["candidate_id"])
+    memory_id = "mem_" + candidate["content_hash"].split(":", 1)[1][:16]
+
+    assert stored_candidate["approval_state"] == "pending"
+    assert ledger.get_memory_card(memory_id) is None
+    assert ledger.get_by_knowledge_id(memory_id) is None
+    assert ledger.list_memory_card_evidence(memory_id) == []
 
 
 def test_curation_rejects_disables_and_supersedes_cards(tmp_path):
