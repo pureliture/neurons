@@ -220,6 +220,7 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=mcp_http_server.DEFAULT_PORT)
     parser.add_argument("--allow-non-loopback", action="store_true")
+    parser.add_argument("--allow-kubernetes-pod-ip", action="store_true")
     args = parser.parse_args(argv)
     _ = args.state_db_recall
     _ = args.ragflow_direct_recall
@@ -233,6 +234,7 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
         host=args.host,
         port=args.port,
         allow_non_loopback=args.allow_non_loopback,
+        allow_kubernetes_pod_ip=args.allow_kubernetes_pod_ip,
     )
     return 0
 

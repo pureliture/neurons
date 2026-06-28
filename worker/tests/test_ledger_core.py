@@ -130,6 +130,29 @@ def test_ledger_read_only_snapshot_rejects_writes_without_mutating_source(tmp_pa
     assert Ledger(path).get_by_knowledge_id("kn_ro")["authorization_status"] == "active"
 
 
+def test_server_backed_read_only_ledger_does_not_snapshot_path(tmp_path: Path):
+    class ServerBackedAdapter:
+        is_file_backed = False
+
+    path = tmp_path / "missing" / "ledger.sqlite"
+
+    ledger = Ledger(path, read_only=True, db_adapter=ServerBackedAdapter())
+
+    assert ledger.path == path
+
+
+def test_open_read_only_allows_missing_path_when_pg_env_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    path = tmp_path / "missing" / "ledger.sqlite"
+    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", "postgresql://user:pass@example.invalid/db")
+
+    ledger = Ledger.open_read_only(path)
+
+    assert ledger.path == path
+    assert getattr(ledger._db_adapter, "is_file_backed") is False
+
+
 def test_ledger_transcript_tables_store_sessions_and_chunks(tmp_path: Path):
     ledger = _ledger(tmp_path)
     session = FakeTranscriptSession()

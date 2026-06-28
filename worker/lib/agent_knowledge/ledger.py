@@ -369,11 +369,12 @@ class Ledger(
                     except OSError:
                         pass
             return
-        self.path = self._snapshot_read_only_copy(self.path)
+        if file_backed:
+            self.path = self._snapshot_read_only_copy(self.path)
 
     @classmethod
     def open_read_only(cls, path: Path | str) -> "Ledger":
-        if not Path(path).exists():
+        if not Path(path).exists() and not os.environ.get("NEURON_LEDGER_PG_DSN", ""):
             raise ValueError(f"ledger path does not exist: {path}")
         return cls(path, read_only=True)
 
@@ -1904,6 +1905,3 @@ class Ledger(
                 (data["evidence_id_hash"],),
             ).fetchone()
         return dict(row) if row is not None else {}
-
-
-

@@ -1,0 +1,171 @@
+package com.local.ragingressqueue.runtime;
+
+import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class K3sMigrationContractTest {
+    private static final Path SPEC_DIR = Path.of("docs/specs/2026-06-27-neurons-k3s-migration");
+    private static final Path CONTRACT_DIR = Path.of("deploy/k3s/public-contract");
+
+    @Test
+    void approvedSpecKeepsPublicPrivateBoundaryAndLiveMutationGates() throws IOException {
+        String requirements = Files.readString(SPEC_DIR.resolve("requirements.md"));
+        String design = Files.readString(SPEC_DIR.resolve("design.md"));
+
+        assertThat(requirements).contains("neurons", "compose 전체", "removed legacy external-memory surface");
+        assertThat(requirements).contains("Tailscale subnet router", "backup/restore rehearsal", "neurons-ops");
+        assertThat(requirements).contains("safety window", "24h", "abort");
+        assertThat(design).contains("public contract + private ops overlay");
+        assertThat(design).contains("Live apply, secret mutation, compose stop, and primary cutover remain approval-gated");
+        assertThat(design).contains("NetworkPolicy", "kube-apiserver", "egress");
+    }
+
+    @Test
+    void workloadInventoryCoversComposeOwnedServicesAndExclusions() throws IOException {
+        String inventory = Files.readString(CONTRACT_DIR.resolve("workload-inventory.yaml"));
+        Set<String> rootServices = composeServices(Path.of("compose.yaml"));
+        Set<String> sessionMemoryServices = composeServices(Path.of("worker/deploy/session-memory/compose.yaml"));
+        Set<String> inventoryComposeServices = listedValues(inventory, "composeServices");
+
+        assertThat(inventoryComposeServices).containsAll(rootServices);
+        assertThat(inventoryComposeServices).containsAll(sessionMemoryServices);
+
+        assertThat(inventory).contains("removed-legacy-external-memory-surface");
+        assertThat(inventory).contains("dendrite");
+        assertThat(inventory).contains("backupRestoreRequired: true");
+        assertThat(inventory).contains("activation: profile-gated");
+        assertThat(inventory).contains("enabledOnlyWhenSourceProfileEnabled: true");
+    }
+
+    @Test
+    void publicContractDelegatesSecretsAndHostSpecificOverlayToPrivateOpsRepo() throws IOException {
+        String readme = Files.readString(Path.of("deploy/k3s/README.md"));
+        String overlayContract = Files.readString(CONTRACT_DIR.resolve("ops-overlay-contract.yaml"));
+        String allPublicK3sArtifacts = readPublicK3sArtifacts();
+
+        assertThat(readme).contains("neurons-ops");
+        assertThat(overlayContract).contains("privateRepo: neurons-ops");
+        assertThat(overlayContract).contains("tailscale");
+        assertThat(overlayContract).contains("backupRestore");
+        assertThat(overlayContract).contains("networkPolicy");
+        assertThat(overlayContract).contains("workQueueIsolation");
+        assertThat(overlayContract).contains("maxCanaryWindowHours: 24");
+        assertThat(allPublicK3sArtifacts).contains("kind: Namespace");
+        assertThat(allPublicK3sArtifacts).contains("kind: ConfigMap");
+        assertThat(allPublicK3sArtifacts).doesNotContain("kind: Secret");
+        assertThat(allPublicK3sArtifacts).doesNotContain("/Users/");
+        assertThat(allPublicK3sArtifacts).doesNotContain("/home/");
+        assertThat(allPublicK3sArtifacts).doesNotContain("dataset_id:");
+        assertThat(allPublicK3sArtifacts).doesNotContain("document_id:");
+    }
+
+    @Test
+    void runbooksRequireDryRunBackupRestoreCanaryAndApprovalBeforeMutation() throws IOException {
+        String backup = Files.readString(SPEC_DIR.resolve("backup-restore-rehearsal.md"));
+        String canary = Files.readString(SPEC_DIR.resolve("canary-cutover-runbook.md"));
+
+        assertThat(backup).contains("CouchDB");
+        assertThat(backup).contains("Postgres ledger");
+        assertThat(backup).contains("Neo4j");
+        assertThat(backup).contains("Qdrant");
+        assertThat(backup).contains("restore rehearsal");
+        assertThat(backup).contains("redacted evidence");
+
+        assertThat(canary).contains("client dry-run");
+        assertThat(canary).contains("server dry-run");
+        assertThat(canary).contains("explicit approval");
+        assertThat(canary).contains("compose retire");
+        assertThat(canary).contains("read/write canary");
+        assertThat(canary).contains("public-safe synthetic");
+        assertThat(canary).contains("shadow stream");
+        assertThat(canary).contains("separate durable");
+        assertThat(canary).contains("24h");
+        assertThat(canary).contains("NetworkPolicy");
+        assertThat(canary).contains("kube-apiserver");
+    }
+
+    @Test
+    void singleGoalCutoverControlKeepsFullTransitionGateBounded() throws IOException {
+        String control = Files.readString(SPEC_DIR.resolve("single-goal-cutover-control.md"));
+
+        assertThat(control).contains("single agentic-execution goal");
+        assertThat(control).contains("Gate 0");
+        assertThat(control).contains("Gate 1");
+        assertThat(control).contains("Gate 2");
+        assertThat(control).contains("Gate 3");
+        assertThat(control).contains("Gate 4");
+        assertThat(control).contains("Gate 5");
+        assertThat(control).contains("Gate 6");
+        assertThat(control).contains("rollback");
+        assertThat(control).contains("WorkQueue isolation");
+        assertThat(control).contains("backup/restore rehearsal");
+        assertThat(control).contains("read/write canary");
+        assertThat(control).contains("compose retire");
+        assertThat(control).contains("stop and ask");
+        assertThat(control).contains("do not mark complete");
+    }
+
+    private String readPublicK3sArtifacts() throws IOException {
+        StringBuilder output = new StringBuilder();
+        for (Path path : List.of(
+            Path.of("deploy/k3s/README.md"),
+            CONTRACT_DIR.resolve("workload-inventory.yaml"),
+            CONTRACT_DIR.resolve("ops-overlay-contract.yaml"),
+            CONTRACT_DIR.resolve("base/namespace.yaml"),
+            CONTRACT_DIR.resolve("base/config-contract.yaml"),
+            CONTRACT_DIR.resolve("base/kustomization.yaml")
+        )) {
+            output.append(Files.readString(path)).append('\n');
+        }
+        return output.toString();
+    }
+
+    private Set<String> composeServices(Path path) throws IOException {
+        Set<String> services = new LinkedHashSet<>();
+        boolean inServices = false;
+        Pattern servicePattern = Pattern.compile("^  ([A-Za-z0-9_-]+):\\s*$");
+        for (String line : Files.readAllLines(path)) {
+            if (line.equals("services:")) {
+                inServices = true;
+                continue;
+            }
+            if (inServices && !line.isBlank() && !line.startsWith(" ") && !line.startsWith("#")) {
+                break;
+            }
+            Matcher matcher = servicePattern.matcher(line);
+            if (inServices && matcher.matches()) {
+                services.add(matcher.group(1));
+            }
+        }
+        return services;
+    }
+
+    private Set<String> listedValues(String yaml, String listKey) {
+        Set<String> values = new LinkedHashSet<>();
+        boolean inList = false;
+        for (String line : yaml.lines().toList()) {
+            String stripped = line.strip();
+            if (stripped.equals(listKey + ":")) {
+                inList = true;
+                continue;
+            }
+            if (inList && !line.startsWith("      - ")) {
+                inList = false;
+            }
+            if (inList && stripped.startsWith("- ")) {
+                values.add(stripped.substring(2));
+            }
+        }
+        return values;
+    }
+}
