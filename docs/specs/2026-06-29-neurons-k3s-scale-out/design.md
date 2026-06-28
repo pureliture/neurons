@@ -227,5 +227,8 @@ agentic-execution이 act→observe→adjust 루프로 소비하는 검증 단위
   따라서 정수 가드는 그 함수가 아니라 별도 `reject_capacity_integers`로 신설한다 — 확정.
 - HPA를 public skeleton(annotation 마커)으로 둘지, 아예 overlay-only로 두고 public엔 PDB/StatefulSet/
   affinity만 둘지 — M2에서 `reject_capacity_integers` 통과를 기준으로 최종 결정(기본안: annotation 마커).
-- 생성 매니페스트를 tracked YAML로 직렬화해 Java 테스트가 읽게 할지, Python 테스트에만 맡길지 — 기본안은
-  Python 전담(FR6b). tracked 직렬화 시 kustomization 등록 추가.
+- 생성 매니페스트를 tracked YAML로 직렬화해 Java 테스트가 읽게 할지, Python 테스트에만 맡길지 — **해소**:
+  Python 전담을 유지하되 `load_scale_out_workloads(inventory)`가 inventory(SoT)를 읽어 분류를 검증하고
+  `scale_out_manifest_bundle`이 그 결과를 소비한다. 실제 inventory를 caller로 쓰는 round-trip 테스트
+  (`test_inventory_classification_round_trips_to_a_clean_scale_out_bundle`)가 YAML↔코드 drift를
+  fail-closed로 차단한다. tracked YAML 직렬화/kustomization 등록은 불필요.

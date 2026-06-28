@@ -30,6 +30,16 @@ _CAPACITY_KEYS = {
     "maxUnavailable",
 }
 
+# The scale-out classification vocabulary. workload-inventory.yaml is the single source of
+# truth; load_scale_out_workloads validates every workload against this set, so a missing or
+# mistyped scaleCategory fails closed instead of silently drifting from the generator.
+_SCALE_CATEGORIES = {
+    "horizontally-scalable",
+    "serialized-worker",
+    "singleton-stateful",
+    "not-a-target",
+}
+
 
 def compose_baseline_report(
     compose: Mapping[str, Any],
@@ -309,6 +319,30 @@ def k3s_poc_execution_evidence(
     return evidence
 
 
+def load_scale_out_workloads(inventory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Classify workloads from a parsed workload-inventory.yaml mapping.
+
+    Reads each ``workloads[].id`` with its ``scaleCategory``/``replicaPolicy`` and validates
+    the category against ``_SCALE_CATEGORIES``. This is the seam that ties the inventory SoT to
+    ``scale_out_manifest_bundle``: an unclassified or mistyped workload raises here rather than
+    drifting from the generator's routing.
+    """
+    entries = inventory.get("workloads") if isinstance(inventory.get("workloads"), list) else []
+    classified: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        name = public_safe_text(str(entry.get("id") or ""), max_chars=120)
+        category = public_safe_text(str(entry.get("scaleCategory") or ""), max_chars=80)
+        policy = public_safe_text(str(entry.get("replicaPolicy") or ""), max_chars=40)
+        if not name:
+            continue
+        if category not in _SCALE_CATEGORIES:
+            raise ValueError(f"workload {name} has unknown or missing scaleCategory: {category!r}")
+        classified.append({"name": name, "scaleCategory": category, "replicaPolicy": policy})
+    return classified
+
+
 def reject_capacity_integers(resource: Any) -> None:
     """Reject 2+ digit integer literals under capacity keys in a public manifest.
 
@@ -339,13 +373,17 @@ def scale_out_manifest_bundle(
     workloads: list[Mapping[str, Any]],
     namespace: str,
     access_policy: str,
+    image_by_workload: Mapping[str, str],
+    container_port_by_workload: Mapping[str, int],
 ) -> dict[str, Any]:
     """Build a public, count-free scale-out manifest skeleton from classified workloads.
 
-    Separate from the canary bundle: it never embeds real replica/HPA/PDB counts (those
-    are overlay-owned) and routes each workload by its scaleCategory. not-a-target is
-    excluded; singleton-stateful becomes a single-writer StatefulSet (never a multi-replica
-    Deployment).
+    ``workloads`` is the classification (name/scaleCategory/replicaPolicy) produced by
+    ``load_scale_out_workloads``; images and ports are supplied separately (the same
+    overlay-owned mapping pattern as the canary bundle). Separate from the canary bundle: it
+    never embeds real replica/HPA/PDB counts, routes each workload by its scaleCategory,
+    excludes not-a-target, and makes singleton-stateful a single-writer StatefulSet (never a
+    multi-replica Deployment).
     """
     safe_namespace = public_safe_text(str(namespace or ""), max_chars=120)
     if safe_namespace in {"default", "prod", "production"}:
@@ -357,12 +395,14 @@ def scale_out_manifest_bundle(
         name = public_safe_text(str(workload.get("name") or ""), max_chars=120)
         category = public_safe_text(str(workload.get("scaleCategory") or ""), max_chars=80)
         replica_policy = public_safe_text(str(workload.get("replicaPolicy") or ""), max_chars=40)
-        image = public_safe_text(str(workload.get("image") or ""), max_chars=240)
-        port = int(workload.get("container_port") or 0)
         if category == "not-a-target":
             continue
         if not name:
             raise ValueError("scale-out workload name is required")
+        if category not in _SCALE_CATEGORIES:
+            raise ValueError(f"unknown scaleCategory: {category!r}")
+        image = public_safe_text(str(image_by_workload.get(name) or ""), max_chars=240)
+        port = int(container_port_by_workload.get(name) or 0)
         if category == "singleton-stateful":
             _require_image_and_port(image, port)
             resources.append(_statefulset_resource(name=name, namespace=safe_namespace, image=image, container_port=port))
@@ -398,8 +438,6 @@ def scale_out_manifest_bundle(
                 # single replica (e.g. mcp-http until host networking is removed):
                 # maxUnavailable:1 would permit evicting the only Pod, so guard with minAvailable.
                 resources.append(_pdb_resource(name=name, namespace=safe_namespace, mode="minAvailable"))
-        else:
-            raise ValueError(f"unknown scaleCategory: {category}")
     if access_policy == "tailscale_private":
         # NOTE: the default k3s flannel backend parses but does NOT enforce NetworkPolicy.
         # Enforcement (CNI selection) is a private ops-overlay concern (cniSelection).
