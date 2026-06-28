@@ -292,7 +292,9 @@ def _normalize_query_memory_card(*, brain_id: str, card: dict) -> dict:
         "brain_id": str(normalized.get("brain_id") or brain_id),
         "memory_id": str(normalized.get("memory_id") or ""),
         "card_type": str(normalized.get("card_type") or ""),
-        "title": str(normalized.get("title") or ""),
+        "title": redact_and_bound_evidence_text(
+            str(normalized.get("title") or ""), MAX_TRANSCRIPT_SNIPPET_CHARS
+        ),
         "summary": summary,
         "render_text": render_text,
         "lifecycle_state": lifecycle_state,
@@ -301,7 +303,9 @@ def _normalize_query_memory_card(*, brain_id: str, card: dict) -> dict:
         "freshness": freshness,
         "currentness": currentness,
         "confidence": confidence,
-        "confidence_basis": str(normalized.get("confidence_basis") or ""),
+        "confidence_basis": redact_and_bound_evidence_text(
+            str(normalized.get("confidence_basis") or ""), MAX_TRANSCRIPT_SNIPPET_CHARS
+        ),
         "typed_payload": typed_payload,
         "source_refs": _sanitize_public_refs(source_refs),
         "evidence_hashes": [str(item) for item in evidence_hashes],

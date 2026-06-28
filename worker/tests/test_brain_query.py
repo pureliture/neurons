@@ -207,6 +207,22 @@ def test_summary_is_redacted_and_bounded():
     assert TRUNCATED_TEXT_MARKER in env["summary"]
 
 
+def test_public_card_redacts_title_and_confidence_basis():
+    # defense-in-depth: 이미 저장된 legacy card 의 title/confidence_basis 에 사적 경로가
+    # 들어 있어도 brain_query 읽기 표면으로 raw 가 새지 않는다.
+    from agent_knowledge.session_memory.brain_query import _normalize_query_memory_card
+
+    env = _normalize_query_memory_card(
+        brain_id="/project/p",
+        card=_card(
+            title="/Users/example/.ssh/id_rsa",
+            confidence_basis="proof at /Volumes/usb/secret",
+        ),
+    )
+    assert "/Users/example" not in env["title"]
+    assert "/Volumes/usb" not in env["confidence_basis"]
+
+
 def test_session_tag_included_when_hit_present():
     from agent_knowledge.session_memory.brain_query import build_card_envelope
 
