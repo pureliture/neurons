@@ -4,10 +4,79 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from .memory_card import validate_feedback_record, validate_memory_card_envelope
+from ..redaction import redact_text_v2
+from .memory_card import (
+    MAX_MEMORY_STATEMENT_CHARS,
+    validate_feedback_record,
+    validate_memory_card_envelope,
+)
+from .transcript_model import bound_text
 
 
 ACCEPTED_EVIDENCE_KINDS = ("commit", "merge", "runtime", "runtime_verification")
+
+
+def build_stale_proposal_card(
+    target_card: Mapping[str, Any],
+    *,
+    reason: str,
+    timestamp: str | None = None,
+) -> dict:
+    """target accepted card 가 stale 하다는 reference-only proposal envelope 를 만든다.
+
+    target 의 raw typed_payload / source_refs / render_text 를 복제하지 않는다. 가장 가벼운
+    card_type='status' 로 최소 envelope 를 새로 빌드하고, target 은 derived_from 과
+    typed_payload.current_authority 로 참조만 한다. write 는 하지 않는다(순수 dict 반환).
+    """
+
+    source = validate_memory_card_envelope(target_card)
+    if not reason or not reason.strip():
+        raise ValueError("stale proposal requires a reason")
+    bounded_reason = bound_text(" ".join(redact_text_v2(reason).split()), MAX_MEMORY_STATEMENT_CHARS)
+    observed_at = timestamp or _now()
+    target_id = str(source.get("memory_id") or "")
+    card = {
+        # memory_id 는 호출부(steward)가 proposal 전용 id 로 재발급한다. validate 통과용 placeholder.
+        "memory_id": "mem_stale_proposal_pending",
+        "brain_id": str(source.get("brain_id") or ""),
+        "card_type": "status",
+        "scope": str(source.get("scope") or "project"),
+        "project": str(source.get("project") or ""),
+        "provider": str(source.get("provider") or ""),
+        "title": "stale proposal",
+        "summary": bounded_reason,
+        "render_text": "",
+        "lifecycle_state": "needs_review",
+        "judgment_state": "needs_review",
+        "status": "needs_review",
+        "approval_state": "needs_review",
+        "governance_tier": "low",
+        "freshness": "historical",
+        "currentness": "stale",
+        "confidence": 0.0,
+        "confidence_basis": "",
+        "source_refs": [],
+        "evidence_refs": [],
+        "evidence_hashes": [],
+        "derived_from": [target_id],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflicts": [],
+        "active_until": None,
+        "typed_payload": {
+            "status_value": "stale",
+            "observed_at": observed_at,
+            "expires_at": "",
+            "current_authority": target_id,
+        },
+        "reason_capsule": _reason_capsule(
+            model_reason=bounded_reason,
+            deterministic_signals=[{"kind": "stale_proposal", "target_memory_id": target_id}],
+            review_block_reason="initial_policy_human_approval_required",
+        ),
+    }
+    validate_memory_card_envelope(card)
+    return card
 
 
 def human_approve_memory_card_candidate(
@@ -239,6 +308,25 @@ def commit_supersession(
             "superseded_by": [superseded_by],
         }
     )
+    validate_memory_card_envelope(demoted)
+    return demoted
+
+
+def commit_stale(
+    accepted_card: Mapping[str, Any],
+    *,
+    timestamp: str | None = None,
+) -> dict:
+    """Demote an accepted card to stale current-truth (committing, not proposing).
+
+    commit_supersession 의 stale 변종. superseded 와 달리 대체 카드가 없으므로 superseded_by 를
+    설정하지 않는다(상태 불변식상 stale 은 superseded_by 를 요구하지 않는다). currentness 가
+    stale 로 바뀌어 current/authority lane 에서 빠지고, lifecycle 은 원래 accepted 를 유지한다.
+    """
+
+    source = validate_memory_card_envelope(accepted_card)
+    demoted = deepcopy(source)
+    demoted.update({"currentness": "stale", "freshness": "historical"})
     validate_memory_card_envelope(demoted)
     return demoted
 

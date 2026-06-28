@@ -91,6 +91,29 @@ def _text(tool_result: dict) -> dict:
 # --------------------------------------------------------------- tool surface
 
 
+def test_review_lifecycle_states_single_source():
+    from agent_knowledge.session_memory import brain_steward, memory_card
+
+    assert memory_card.REVIEW_LIFECYCLE_STATES == frozenset(
+        {"candidate", "suggested_accept", "needs_review"}
+    )
+    # the service and the model share one definition (no drift vs the ledger filter).
+    assert brain_steward.REVIEW_LIFECYCLE_STATES is memory_card.REVIEW_LIFECYCLE_STATES
+
+
+def test_review_queue_lists_only_review_lifecycles(tmp_path):
+    from agent_knowledge.session_memory.memory_card import REVIEW_LIFECYCLE_STATES
+
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger)
+    _accept_card(ledger)  # accepted card must NOT appear in the queue
+    steward.candidate_create(source_span=_span(content_hash="sha256:q"))
+    rows = ledger.list_llm_brain_review_queue(project=PROJECT, limit=50)
+    assert rows  # the candidate is present
+    for card in rows:
+        assert card["lifecycle_state"] in REVIEW_LIFECYCLE_STATES
+
+
 def test_list_tools_exposes_steward_surface():
     tools = {tool["name"]: tool for tool in list_tools()}
     for name in (
@@ -169,6 +192,39 @@ def test_stale_mark_unknown_target_is_rejected(tmp_path):
     steward = BrainStewardService(_ledger(tmp_path))
     with pytest.raises(ValueError):
         steward.stale_mark(memory_id="mem_missing", reason="x")
+
+
+def test_stale_proposal_is_reference_only_not_a_target_copy(tmp_path):
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger)
+    target = _accept_card(ledger)
+    target_id = target["memory_id"]
+
+    result = steward.stale_mark(memory_id=target_id, reason="근거 문서 교체로 stale")
+    stored = ledger.get_llm_brain_memory_card(result["proposal"]["memory_id"])
+
+    # the proposal does NOT copy the target's raw refs / typed_payload.
+    assert stored["card_type"] == "status"
+    assert stored["source_refs"] == []
+    assert stored["evidence_refs"] == []
+    assert stored["evidence_hashes"] == []
+    assert "preference" not in stored["typed_payload"]  # target's preference payload not copied
+    assert stored["typed_payload"]["status_value"] == "stale"
+    assert stored["typed_payload"]["current_authority"] == target_id
+    assert stored["derived_from"] == [target_id]
+    assert stored["currentness"] == "stale"
+
+
+def test_stale_proposal_id_is_idempotent_per_target_and_reason(tmp_path):
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger)
+    target_id = _accept_card(ledger)["memory_id"]
+
+    a1 = steward.stale_mark(memory_id=target_id, reason="reason one")["proposal"]["memory_id"]
+    a2 = steward.stale_mark(memory_id=target_id, reason="reason one")["proposal"]["memory_id"]
+    b = steward.stale_mark(memory_id=target_id, reason="a different reason")["proposal"]["memory_id"]
+    assert a1 == a2  # same (target, reason) → same proposal
+    assert a1 != b  # different reason → distinct proposal (reason is not silently overwritten)
 
 
 def test_supersede_propose_does_not_replace_target(tmp_path):
@@ -397,6 +453,75 @@ def test_stale_and_rejected_proposals_are_not_approvable(tmp_path):
     steward.candidate_reject(candidate_memory_id=cand_id, rejected_by="a", decision_id="d", reason="no")
     with pytest.raises(ValueError):
         steward.candidate_approve(candidate_memory_id=cand_id, approved_by="a", decision_id="d2")
+
+
+def _supersede_span():
+    return _span(
+        content_hash="sha256:replacement",
+        redacted_summary="이제는 영어로 응답한다",
+        typed_payload={
+            "preference": "영어로 응답한다",
+            "explicitness": "explicit",
+            "repeated_count": 1,
+            "confirmation_status": "confirmed",
+            "applies_to": "natural_language_response",
+        },
+    )
+
+
+def test_stale_commit_blocked_by_default(tmp_path):
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger)  # allow_restricted defaults False
+    target_id = _accept_card(ledger)["memory_id"]
+    prop = steward.stale_mark(memory_id=target_id, reason="stale 사유")["proposal"]["memory_id"]
+    with pytest.raises(StewardPermissionError):
+        steward.stale_commit(proposal_memory_id=prop, approved_by="op", decision_id="d")
+    # target untouched.
+    assert ledger.get_llm_brain_memory_card(target_id)["currentness"] == "current"
+
+
+def test_stale_commit_demotes_target_and_clears_queue(tmp_path):
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger, allow_restricted=True)
+    target_id = _accept_card(ledger)["memory_id"]
+    prop_id = steward.stale_mark(memory_id=target_id, reason="stale 사유")["proposal"]["memory_id"]
+
+    steward.stale_commit(proposal_memory_id=prop_id, approved_by="op", decision_id="d")
+
+    # target accepted card is demoted to stale → leaves the authority pack.
+    assert ledger.get_llm_brain_memory_card(target_id)["currentness"] == "stale"
+    assert target_id not in [i["memory_id"] for i in steward.authority_pack_read(project=PROJECT)["items"]]
+    # the proposal leaves the review queue.
+    assert prop_id not in [i["memory_id"] for i in steward.review_queue_list(project=PROJECT)["items"]]
+
+
+def test_supersede_commit_accepts_new_and_demotes_old(tmp_path):
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger, allow_restricted=True)
+    old_id = _accept_card(ledger)["memory_id"]
+    prop_id = steward.supersede_propose(old_memory_id=old_id, source_span=_supersede_span())["proposal"]["memory_id"]
+
+    steward.supersede_commit(proposal_memory_id=prop_id, approved_by="op", decision_id="d")
+
+    old = ledger.get_llm_brain_memory_card(old_id)
+    assert old["currentness"] == "superseded"
+    assert prop_id in old["superseded_by"]
+    # the new (replacement) card is now accepted+current authority; old is not.
+    pack_ids = [i["memory_id"] for i in steward.authority_pack_read(project=PROJECT)["items"]]
+    assert prop_id in pack_ids
+    assert old_id not in pack_ids
+    # the proposal is no longer pending in the review queue.
+    assert prop_id not in [i["memory_id"] for i in steward.review_queue_list(project=PROJECT)["items"]]
+
+
+def test_commit_rejects_mismatched_proposal_kind(tmp_path):
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger, allow_restricted=True)
+    cand_id = steward.candidate_create(source_span=_span(content_hash="sha256:mk"))["proposal"]["memory_id"]
+    with pytest.raises(ValueError):
+        steward.stale_commit(proposal_memory_id=cand_id, approved_by="op", decision_id="d")
+    with pytest.raises(ValueError):
+        steward.supersede_commit(proposal_memory_id=cand_id, approved_by="op", decision_id="d")
 
 
 def test_dispatch_round_trip_read_and_proposal(tmp_path):

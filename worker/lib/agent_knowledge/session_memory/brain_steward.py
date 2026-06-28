@@ -25,16 +25,19 @@ from typing import Any, Mapping
 from .llm_brain_service import LLMBrainMemoryService
 from .memory_card import (
     _ensure_no_forbidden_content,  # 기존 validator 와 동일한 forbidden-content 규칙 재사용
+    REVIEW_LIFECYCLE_STATES,  # review queue 조회와 적격성이 공유하는 단일 정의
     validate_memory_card_envelope,
 )
 from .memory_miner import build_memory_card_candidate_from_source_span
-from .memory_promotion import mark_candidate_needs_review
+from .memory_promotion import (
+    build_stale_proposal_card,
+    commit_stale,
+    mark_candidate_needs_review,
+)
 
 # 승인/현행 lane 정의는 ledger.list_llm_brain_memory_cards 와 동일하게 유지한다.
 ACCEPTED_LIFECYCLE_STATES = frozenset({"accepted", "human_accepted", "auto_accepted"})
 ACCEPTED_APPROVAL_STATES = frozenset({"approved", "auto_accepted"})
-# review queue 에 노출되는 pending proposal lifecycle.
-REVIEW_LIFECYCLE_STATES = frozenset({"candidate", "suggested_accept", "needs_review"})
 
 STEWARD_PROPOSAL_PREFIX = "mem_steward_"
 
@@ -221,12 +224,12 @@ class BrainStewardService:
         target = self.ledger.get_llm_brain_memory_card(memory_id)
         if target is None:
             raise ValueError("unknown target memory card")
-        review = mark_candidate_needs_review(target, reason=reason, decision_id=decision_id)
-        proposal = review["review_card"]
-        proposal["freshness"] = "historical"
-        proposal["currentness"] = "stale"
-        proposal["derived_from"] = [memory_id]
-        proposal = self._stamp_proposal(proposal, kind="stale", target_memory_id=memory_id)
+        # reference-only proposal: target 의 raw payload 를 복제하지 않는다(M2).
+        proposal = build_stale_proposal_card(target, reason=reason)
+        # id 는 (target, reason) 에 멱등이다. reason 을 무시해 첫 reason 을 덮어쓰지 않는다(M2).
+        proposal["memory_id"] = STEWARD_PROPOSAL_PREFIX + _sha16(memory_id, "stale", _sha16(reason))
+        proposal["steward_proposal_kind"] = "stale"
+        proposal["steward_target_memory_id"] = memory_id
         stored = self._persist_proposal(proposal)
         return self._proposal_result(kind="stale_mark", card=stored, target_memory_id=memory_id)
 
@@ -300,7 +303,72 @@ class BrainStewardService:
             candidate, evaluation, operator_approval_ref=operator_approval_ref
         )
 
+    def supersede_commit(
+        self, *, proposal_memory_id: str, approved_by: str, decision_id: str
+    ) -> dict:
+        """supersede proposal 을 확정한다: 교체 후보를 accept 하고 old card 를 demote 한다."""
+
+        self._guard_restricted("memory_supersede_commit")
+        self._guard_writable()
+        proposal = self._load_proposal_of_kind(proposal_memory_id, "supersede")
+        old_id = str(proposal.get("steward_target_memory_id") or "")
+        old = self.ledger.get_llm_brain_memory_card(old_id)
+        if old is None:
+            raise ValueError("unknown supersede target memory card")
+        # 교체 후보(proposal)를 accept 하면서 old card 를 superseded 로 atomically demote 한다.
+        return LLMBrainMemoryService(self.ledger).supersede_accepted_card(
+            old_card=old,
+            new_candidate=proposal,
+            approved_by=approved_by,
+            decision_id=decision_id,
+        )
+
+    def stale_commit(
+        self, *, proposal_memory_id: str, approved_by: str, decision_id: str
+    ) -> dict:
+        """stale proposal 을 확정한다: target accepted card 를 currentness=stale 로 demote 한다."""
+
+        self._guard_restricted("memory_stale_commit")
+        self._guard_writable()
+        proposal = self._load_proposal_of_kind(proposal_memory_id, "stale")
+        target_id = str(proposal.get("steward_target_memory_id") or "")
+        target = self.ledger.get_llm_brain_memory_card(target_id)
+        if target is None:
+            raise ValueError("unknown stale target memory card")
+        if not _is_accepted(target):
+            raise ValueError("stale commit target is not an accepted card")
+        demoted = self.ledger.upsert_llm_brain_memory_card(commit_stale(target))
+        # proposal 을 검토 큐에서 제거하기 위해 종료(committed) 상태로 전이한다. currentness=stale 은
+        # 유지되어 authority/recall lane 에는 들어가지 않는다.
+        committed = dict(proposal)
+        committed.update(
+            {
+                "lifecycle_state": "human_accepted",
+                "judgment_state": "none",
+                "status": "accepted",
+                "approval_state": "approved",
+                "steward_commit_state": "committed",
+            }
+        )
+        stored_proposal = self.ledger.upsert_llm_brain_memory_card(committed)
+        return {
+            "schema_version": "brain_steward_stale_commit.v1",
+            "canonical_write_performed": True,
+            "demoted_card": demoted,
+            "committed_proposal": self._review_item(stored_proposal),
+        }
+
     # -------------------------------------------------------------- internals
+
+    def _load_proposal_of_kind(self, proposal_memory_id: str, kind: str) -> dict:
+        card = self.ledger.get_llm_brain_memory_card(proposal_memory_id)
+        if card is None:
+            raise ValueError("unknown proposal memory card")
+        if str(card.get("lifecycle_state") or "") not in REVIEW_LIFECYCLE_STATES:
+            raise ValueError("only pending review-queue proposals can be committed")
+        if str(card.get("steward_proposal_kind") or "") != kind:
+            raise ValueError(f"proposal is not a {kind} proposal")
+        return card
 
     def _guard_restricted(self, tool_name: str) -> None:
         if not self.allow_restricted:

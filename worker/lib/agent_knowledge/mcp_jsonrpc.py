@@ -24,7 +24,9 @@ from .mcp_tools import (
     MEMORY_CANDIDATE_CREATE_TOOL_NAME,
     MEMORY_CANDIDATE_REJECT_TOOL_NAME,
     MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
+    MEMORY_STALE_COMMIT_TOOL_NAME,
     MEMORY_STALE_MARK_TOOL_NAME,
+    MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
     MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
     STEWARD_RESTRICTED_TOOL_NAMES,
     TOOL_NAME,
@@ -296,6 +298,18 @@ def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSe
                 candidate_memory_id=_require_non_empty_string(arguments, "candidate_memory_id", tool_name=tool_name),
                 evaluation=evaluation,
                 operator_approval_ref=_require_non_empty_string(arguments, "operator_approval_ref", tool_name=tool_name),
+            )
+        elif tool_name == MEMORY_SUPERSEDE_COMMIT_TOOL_NAME:
+            result = steward.supersede_commit(
+                proposal_memory_id=_require_non_empty_string(arguments, "proposal_memory_id", tool_name=tool_name),
+                approved_by=_require_non_empty_string(arguments, "approved_by", tool_name=tool_name),
+                decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
+            )
+        elif tool_name == MEMORY_STALE_COMMIT_TOOL_NAME:
+            result = steward.stale_commit(
+                proposal_memory_id=_require_non_empty_string(arguments, "proposal_memory_id", tool_name=tool_name),
+                approved_by=_require_non_empty_string(arguments, "approved_by", tool_name=tool_name),
+                decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
             )
         else:
             # 새 restricted tool 이 분기 없이 auto_accept 로직으로 흘러드는 것을 막는다.
