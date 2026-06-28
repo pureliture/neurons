@@ -189,6 +189,7 @@ _FORBIDDEN_TEXT_PATTERNS = (
     re.compile(r"/Users/", re.IGNORECASE),
     re.compile(r"(^|\s)~/"),
     re.compile(r"(^|\s)/private/", re.IGNORECASE),
+    re.compile(r"/Volumes/", re.IGNORECASE),
     re.compile(r"\braw[_ -]?transcript[_ -]?(body|text|content)?\b", re.IGNORECASE),
     re.compile(r"\b(private transcript|transcript excerpt)\b", re.IGNORECASE),
     re.compile(r"\bBearer\s+[A-Za-z0-9._-]{8,}", re.IGNORECASE),
@@ -265,6 +266,9 @@ def validate_memory_card_envelope(card: Mapping[str, Any]) -> dict:
     _require_number(normalized.get("confidence"), "confidence")
     _ensure_no_forbidden_content(normalized.get("summary"), "summary")
     _ensure_no_forbidden_content(normalized.get("render_text"), "render_text")
+    # title/confidence_basis 도 agent-supplied free text 라 raw/private 누출 경로다.
+    _ensure_no_forbidden_content(normalized.get("title"), "title")
+    _ensure_no_forbidden_content(normalized.get("confidence_basis"), "confidence_basis")
     _validate_locator_list(normalized.get("source_refs"), "source_refs")
     _validate_locator_list(normalized.get("evidence_refs"), "evidence_refs")
     _validate_hash_list(normalized.get("evidence_hashes"), "evidence_hashes")
