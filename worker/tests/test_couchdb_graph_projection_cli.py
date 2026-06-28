@@ -241,6 +241,48 @@ def test_limited_resume_prioritizes_unprojected_sessions(tmp_path):
     assert second["projection"]["failed"] == 0
 
 
+def test_reextract_does_not_deprioritize_already_projected_sessions(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    sids = [_seed_session(store, raw_id=f"reextract-{index}") for index in range(3)]
+    # canonical selection order is (project, provider, session_id_hash); same project/
+    # provider here, so the canonically-last sid stays unprojected after a limit=2 pass.
+    last_unprojected = sorted(sids)[-1]
+
+    first = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=2,
+    )
+    assert first["projection"]["projected"] == 2
+
+    reextract_graph = _EntityFlagFakeGraph()
+    second = run_couchdb_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=2,
+        project=PROJECT,
+        provider=PROVIDER,
+        enable_graph=True,
+        graph_required=False,
+        extract_entities=True,
+        reextract_entities=True,
+        resume=True,
+        report_every=100,
+        max_projects=0,
+        graph_adapter=reextract_graph,
+    )
+
+    touched = {
+        str(episode.payload.get("session_id_hash") or "")
+        for episode in reextract_graph._episodes.values()
+    }
+    # reextract must re-extract the already-projected backlog under canonical order, not
+    # jump to the still-unprojected tail session and starve the projected sessions.
+    assert second["projection"]["attempted"] == 2
+    assert last_unprojected not in touched
+
+
 def test_partial_projection_continues_and_writes_dead_letter(tmp_path):
     store = InMemoryCouchDBSourceStore()
     _seed_session(store, raw_id="good")

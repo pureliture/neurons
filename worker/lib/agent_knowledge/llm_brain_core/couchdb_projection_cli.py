@@ -150,8 +150,12 @@ def run_couchdb_projection(
             project=project,
             provider=provider,
             limit=limit,
-            projection_state_store=projection_state_store if resume else None,
-            extraction_level=target_level if resume else None,
+            projection_state_store=(
+                projection_state_store if (resume and not reextract_entities) else None
+            ),
+            extraction_level=(
+                target_level if (resume and not reextract_entities) else None
+            ),
         )
         total_available = _count_sessions(source_store, project=project, provider=provider)
         report_every = max(1, int(report_every))
@@ -459,11 +463,11 @@ def _processed_session_natural_ids_by_project(
     if projection_state_store is None or extraction_level is None:
         return {}
     projects = sorted({str(session.get("project") or "") for session in sessions})
-    processed: dict[str, set[str]] = {}
-    for session_project in projects:
+
+    def _processed_for(query_project: str | None) -> set[str]:
         natural_ids = set(
             projection_state_store.list_projected_natural_ids(
-                session_project,
+                query_project,
                 extraction_level=extraction_level,
                 entity_type="Session",
             )
@@ -474,14 +478,21 @@ def _processed_session_natural_ids_by_project(
             # forever after the valid-source ceiling has been reached.
             natural_ids.update(
                 projection_state_store.list_natural_ids(
-                    session_project,
+                    query_project,
                     extraction_level=EXTRACTION_LEVEL_ENTITY,
                     entity_type="Session",
                     upsert_results=SOURCE_INVALID_UPSERT_RESULTS,
                 )
             )
-        processed[session_project] = natural_ids
-    return processed
+        return natural_ids
+
+    # `natural_id` is globally unique per session, so for multi-project selections a
+    # single global query (project=None) is equivalent to per-project queries and
+    # avoids an N+1 round-trip; a session's id only appears under its own project.
+    if len(projects) > 1:
+        shared = _processed_for(None)
+        return {session_project: shared for session_project in projects}
+    return {session_project: _processed_for(session_project) for session_project in projects}
 
 
 def _project_one(worker: GraphProjectionWorker, episode: Any) -> tuple[str, str, int, int, int, int]:
