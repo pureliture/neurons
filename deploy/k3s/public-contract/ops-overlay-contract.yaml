@@ -34,7 +34,10 @@ requiredPrivateInputs:
     description: k3s agent node join inputs (server URL, node token, unique node name) for scale-out
     publicSafe: false
   cniSelection:
-    description: CNI choice and NetworkPolicy enforcement decision (flannel default does not enforce policy)
+    description: >-
+      CNI choice and NetworkPolicy enforcement decision. flannel default parses but does not
+      enforce NetworkPolicy; if cniSelection is not an enforcing CNI (Calico/Cilium), a
+      NetworkPolicy object's existence is not accepted as promotion evidence.
     publicSafe: false
   replicaCounts:
     description: real per-workload replica counts and HPA min/max bounds

@@ -378,18 +378,26 @@ def scale_out_manifest_bundle(
             resources.append(_pdb_resource(name=name, namespace=safe_namespace, mode="minAvailable"))
         elif category == "horizontally-scalable":
             _require_image_and_port(image, port)
+            # One effective policy drives both the Deployment shape and the HPA/PDB choice,
+            # so a blank policy can't yield an ops-defined Deployment without its HPA.
+            effective_policy = replica_policy or "ops-defined"
             deployment = _deployment_resource(
                 name=name,
                 namespace=safe_namespace,
                 image=image,
                 container_port=port,
-                replica_policy=replica_policy or "ops-defined",
+                replica_policy=effective_policy,
             )
             deployment["spec"]["template"]["spec"]["affinity"] = _pod_anti_affinity(name)
             resources.append(deployment)
-            if replica_policy == "ops-defined":
+            if effective_policy == "ops-defined":
                 resources.append(_hpa_resource(name=name, namespace=safe_namespace))
-            resources.append(_pdb_resource(name=name, namespace=safe_namespace, mode="maxUnavailable"))
+                # multi-replica: maxUnavailable keeps at least N-1 Pods during disruption.
+                resources.append(_pdb_resource(name=name, namespace=safe_namespace, mode="maxUnavailable"))
+            else:
+                # single replica (e.g. mcp-http until host networking is removed):
+                # maxUnavailable:1 would permit evicting the only Pod, so guard with minAvailable.
+                resources.append(_pdb_resource(name=name, namespace=safe_namespace, mode="minAvailable"))
         else:
             raise ValueError(f"unknown scaleCategory: {category}")
     if access_policy == "tailscale_private":

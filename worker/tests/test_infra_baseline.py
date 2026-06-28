@@ -545,10 +545,12 @@ def test_scale_out_manifest_bundle_classifies_workloads_without_leaking_counts()
     api_pdb = _resource(bundle, "PodDisruptionBudget", "ingress-api")
     assert api_pdb["spec"].get("maxUnavailable") == 1
 
-    # single horizontally-scalable (mcp-http until host-networking removed): replicas:1, no HPA.
+    # single horizontally-scalable (mcp-http until host-networking removed): replicas:1, no HPA,
+    # and a minAvailable PDB (maxUnavailable:1 on a single replica gives no protection).
     mcp_deploy = _resource(bundle, "Deployment", "mcp-http")
     assert mcp_deploy["spec"]["replicas"] == 1
     assert _resource(bundle, "HorizontalPodAutoscaler", "mcp-http") is None
+    assert _resource(bundle, "PodDisruptionBudget", "mcp-http")["spec"].get("minAvailable") == 1
 
     # serialized-worker: fixed single Deployment + minAvailable PDB, no HPA.
     worker_deploy = _resource(bundle, "Deployment", "ingress-worker")
@@ -564,6 +566,29 @@ def test_scale_out_manifest_bundle_classifies_workloads_without_leaking_counts()
     # tailscale_private still attaches the namespace-scoped NetworkPolicy.
     assert _resource(bundle, "NetworkPolicy", "tailscale-private-only") is not None
     assert _resource(bundle, "Namespace", "neurons-scale") is not None
+
+
+def test_scale_out_horizontally_scalable_blank_policy_defaults_to_ops_defined_with_hpa():
+    # A blank replicaPolicy must resolve consistently: the Deployment and the HPA decision
+    # use the SAME effective policy (no ops-defined Deployment without its HPA).
+    bundle = scale_out_manifest_bundle(
+        workloads=[
+            {
+                "name": "ingress-api",
+                "scaleCategory": "horizontally-scalable",
+                "replicaPolicy": "",
+                "image": "neurons-api:scale",
+                "container_port": 8080,
+            }
+        ],
+        namespace="neurons-scale",
+        access_policy="tailscale_private",
+    )
+    deploy = _resource(bundle, "Deployment", "ingress-api")
+    assert "replicas" not in deploy["spec"]
+    assert deploy["metadata"]["annotations"]["neurons.scale/replica-policy"] == "ops-defined"
+    assert _resource(bundle, "HorizontalPodAutoscaler", "ingress-api") is not None
+    assert _resource(bundle, "PodDisruptionBudget", "ingress-api")["spec"].get("maxUnavailable") == 1
 
 
 def _k3s_operator_packet():

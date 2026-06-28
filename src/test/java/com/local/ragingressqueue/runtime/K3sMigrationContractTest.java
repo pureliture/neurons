@@ -77,9 +77,12 @@ class K3sMigrationContractTest {
         );
         assertThat(inventory).doesNotContain("scaleCategory: competing-consumer");
 
-        // Public artifacts carry policy labels, never production replica counts. The
-        // canary Deployment uses a single-digit replicas: 1, so a 2+ digit count is a leak.
-        assertThat(readPublicK3sArtifacts()).doesNotContainPattern("replicas:\\s*[0-9]{2,}");
+        // Public artifacts carry policy labels, never production capacity counts. Single-digit
+        // policy invariants (replicas: 1, minAvailable: 1) are fine; a 2+ digit value under any
+        // capacity key is a leak. Keep this key set in sync with infra_baseline._CAPACITY_KEYS.
+        assertThat(readPublicK3sArtifacts()).doesNotContainPattern(
+            "(replicas|minReplicas|maxReplicas|averageUtilization|minAvailable|maxUnavailable):\\s*[0-9]{2,}"
+        );
     }
 
     @Test
