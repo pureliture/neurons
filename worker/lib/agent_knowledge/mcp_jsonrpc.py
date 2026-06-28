@@ -18,9 +18,19 @@ from .mcp_tools import (
     BRAIN_PERSONA_GET_TOOL_NAME,
     BRAIN_QUERY_TOOL_NAME,
     BRAIN_RESOLVE_TOOL_NAME,
+    MEMORY_AUTHORITY_PACK_READ_TOOL_NAME,
+    MEMORY_CANDIDATE_APPROVE_TOOL_NAME,
+    MEMORY_CANDIDATE_AUTO_ACCEPT_TOOL_NAME,
+    MEMORY_CANDIDATE_CREATE_TOOL_NAME,
+    MEMORY_CANDIDATE_REJECT_TOOL_NAME,
+    MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
+    MEMORY_STALE_MARK_TOOL_NAME,
+    MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
+    STEWARD_RESTRICTED_TOOL_NAMES,
     TOOL_NAME,
     list_tools,
 )
+from .session_memory.brain_steward import StewardPermissionError
 
 
 def handle_jsonrpc_message(message: dict, service: KnowledgeSearchService) -> dict | None:
@@ -173,6 +183,8 @@ def dispatch_tool_call(params: dict, service: KnowledgeSearchService) -> dict:
     if tool_name == BRAIN_RESOLVE_TOOL_NAME:
         result = service.brain_resolve(query=str(arguments.get("query") or ""))
         return _tool_result(result)
+    if tool_name in _STEWARD_TOOL_NAMES:
+        return _dispatch_steward_tool(tool_name, arguments, service)
     if tool_name != TOOL_NAME:
         raise ValueError(f"unknown tool: {tool_name}")
     query = arguments.get("query")
@@ -192,6 +204,113 @@ def dispatch_tool_call(params: dict, service: KnowledgeSearchService) -> dict:
 
 def _call_tool(params: dict, service: KnowledgeSearchService) -> dict:
     return dispatch_tool_call(params, service)
+
+
+_STEWARD_SOURCE_SPAN_KEYS = (
+    "card_type",
+    "project",
+    "provider",
+    "scope",
+    "title",
+    "redacted_summary",
+    "summary",
+    "typed_payload",
+    "content_hash",
+    "source_ref",
+    "span_ref",
+    "confidence",
+    "confidence_basis",
+    "governance_tier",
+)
+_STEWARD_TOOL_NAMES = frozenset(
+    {
+        MEMORY_AUTHORITY_PACK_READ_TOOL_NAME,
+        MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
+        MEMORY_CANDIDATE_CREATE_TOOL_NAME,
+        MEMORY_STALE_MARK_TOOL_NAME,
+        MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
+        *STEWARD_RESTRICTED_TOOL_NAMES,
+    }
+)
+
+
+def _steward_source_span(arguments: dict) -> dict:
+    return {key: arguments[key] for key in _STEWARD_SOURCE_SPAN_KEYS if key in arguments}
+
+
+def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    steward = service.brain_steward()
+    if tool_name == MEMORY_AUTHORITY_PACK_READ_TOOL_NAME:
+        project = _require_project_scope(arguments, tool_name=tool_name)
+        result = steward.authority_pack_read(
+            project=project,
+            limit=_bounded_limit(arguments.get("limit"), default=8, maximum=50),
+        )
+        return _tool_result(result)
+    if tool_name == MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME:
+        result = steward.review_queue_list(
+            project=_project_arg(arguments),
+            limit=_bounded_limit(arguments.get("limit"), default=20, maximum=100),
+        )
+        return _tool_result(result)
+    if tool_name == MEMORY_CANDIDATE_CREATE_TOOL_NAME:
+        result = steward.candidate_create(
+            source_span=_steward_source_span(arguments),
+            mark_needs_review=bool(arguments.get("mark_needs_review", False)),
+            review_reason=str(arguments.get("review_reason") or ""),
+        )
+        return _tool_result(result)
+    if tool_name == MEMORY_STALE_MARK_TOOL_NAME:
+        result = steward.stale_mark(
+            memory_id=_require_non_empty_string(arguments, "memory_id", tool_name=tool_name),
+            reason=_require_non_empty_string(arguments, "reason", tool_name=tool_name),
+        )
+        return _tool_result(result)
+    if tool_name == MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME:
+        result = steward.supersede_propose(
+            old_memory_id=_require_non_empty_string(arguments, "old_memory_id", tool_name=tool_name),
+            source_span=_steward_source_span(arguments),
+        )
+        return _tool_result(result)
+    # restricted tools: 기본 권한에서는 어떤 write 도 하지 않고 거부한다.
+    try:
+        if tool_name == MEMORY_CANDIDATE_APPROVE_TOOL_NAME:
+            result = steward.candidate_approve(
+                candidate_memory_id=_require_non_empty_string(arguments, "candidate_memory_id", tool_name=tool_name),
+                approved_by=_require_non_empty_string(arguments, "approved_by", tool_name=tool_name),
+                decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
+            )
+        elif tool_name == MEMORY_CANDIDATE_REJECT_TOOL_NAME:
+            result = steward.candidate_reject(
+                candidate_memory_id=_require_non_empty_string(arguments, "candidate_memory_id", tool_name=tool_name),
+                rejected_by=_require_non_empty_string(arguments, "rejected_by", tool_name=tool_name),
+                decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
+                reason=_require_non_empty_string(arguments, "reason", tool_name=tool_name),
+            )
+        elif tool_name == MEMORY_CANDIDATE_AUTO_ACCEPT_TOOL_NAME:
+            evaluation = arguments.get("evaluation")
+            if not isinstance(evaluation, dict):
+                raise ValueError("memory_candidate_auto_accept requires an evaluation object")
+            result = steward.candidate_auto_accept(
+                candidate_memory_id=_require_non_empty_string(arguments, "candidate_memory_id", tool_name=tool_name),
+                evaluation=evaluation,
+                operator_approval_ref=_require_non_empty_string(arguments, "operator_approval_ref", tool_name=tool_name),
+            )
+        else:
+            # 새 restricted tool 이 분기 없이 auto_accept 로직으로 흘러드는 것을 막는다.
+            raise ValueError(f"unhandled steward tool: {tool_name}")
+    except StewardPermissionError:
+        return _tool_result(
+            {
+                "schema_version": "brain_steward_restricted_denied.v1",
+                "tool": tool_name,
+                "permission": "denied",
+                "reason": "restricted_tool_requires_human_gate",
+                "write_performed": False,
+                "authoritative_memory_changed": False,
+            }
+        )
+    return _tool_result(result)
 
 
 def _bounded_limit(value, *, default: int, maximum: int) -> int:

@@ -199,6 +199,36 @@ class NativeMemoryMixin:
                 values,
             ).fetchall()
         return [json.loads(row["envelope_json"]) for row in rows]
+    def list_llm_brain_review_queue(
+        self,
+        *,
+        project: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """검토 대기(pending) MemoryCard proposal 만 반환한다.
+
+        accepted/rejected lane 은 제외하고, 사람이 봐야 할 candidate / suggested_accept /
+        needs_review lifecycle 만 노출한다. 읽기 전용이며 어떤 상태도 바꾸지 않는다.
+        """
+
+        filters = ["lifecycle_state IN ('candidate', 'suggested_accept', 'needs_review')"]
+        values: list[object] = []
+        if project:
+            filters.append("project = ?")
+            values.append(project)
+        where = "WHERE " + " AND ".join(filters)
+        values.append(max(int(limit), 1))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT envelope_json FROM llm_brain_memory_cards
+                {where}
+                ORDER BY updated_at DESC, memory_id
+                LIMIT ?
+                """,
+                values,
+            ).fetchall()
+        return [json.loads(row["envelope_json"]) for row in rows]
     def upsert_llm_brain_feedback_record(self, record: dict) -> dict:
         from .session_memory.memory_card import validate_feedback_record
 
