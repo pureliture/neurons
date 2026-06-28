@@ -95,8 +95,17 @@ sha256 `content_hash`, opaque `source_ref`/`span_ref`, 그리고 `redacted_summa
   `session_memory/llm_brain_service.py`)
 - tests: `worker/tests/test_brain_steward.py`
 
+## Transport / writability
+
+라이브 recall MCP transport는 read-only ledger(`Ledger.open_read_only`)로 서비스를 만든다.
+proposal/restricted write는 read-only ledger 위에서 fail-closed로 거부된다(`_guard_writable`).
+라이브 proposal write를 켜려면 writable ledger를 쓰는 별도 transport 배선이 필요하다 — 이는
+의도적 다음 단계이며, read 경로(authority pack/review queue)는 read-only transport에서 그대로
+동작한다.
+
 ## Next steps (out of scope for v1)
 
+- proposal write를 위한 writable transport 배선
 - human/manual approval gate UI 또는 operator 경로 연결
 - restricted flag를 runtime feature flag/permission profile로 승격
 - review queue의 사람-검토 후 supersede commit(old card demotion) 연결

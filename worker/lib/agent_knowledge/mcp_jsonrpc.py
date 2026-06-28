@@ -287,7 +287,7 @@ def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSe
                 decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
                 reason=_require_non_empty_string(arguments, "reason", tool_name=tool_name),
             )
-        else:  # MEMORY_CANDIDATE_AUTO_ACCEPT_TOOL_NAME
+        elif tool_name == MEMORY_CANDIDATE_AUTO_ACCEPT_TOOL_NAME:
             evaluation = arguments.get("evaluation")
             if not isinstance(evaluation, dict):
                 raise ValueError("memory_candidate_auto_accept requires an evaluation object")
@@ -296,6 +296,9 @@ def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSe
                 evaluation=evaluation,
                 operator_approval_ref=_require_non_empty_string(arguments, "operator_approval_ref", tool_name=tool_name),
             )
+        else:
+            # 새 restricted tool 이 분기 없이 auto_accept 로직으로 흘러드는 것을 막는다.
+            raise ValueError(f"unhandled steward tool: {tool_name}")
     except StewardPermissionError:
         return _tool_result(
             {

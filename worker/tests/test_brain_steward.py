@@ -363,6 +363,42 @@ def test_proposal_persist_guard_refuses_to_overwrite_accepted(tmp_path):
     assert ledger.get_llm_brain_memory_card(accepted["memory_id"])["lifecycle_state"] == accepted["lifecycle_state"]
 
 
+def test_proposal_write_fails_closed_on_read_only_ledger(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.read_only = True  # mirror the live recall MCP transport
+    steward = BrainStewardService(ledger, allow_restricted=True)
+    with pytest.raises(ValueError):
+        steward.candidate_create(source_span=_span())
+    with pytest.raises(ValueError):
+        steward.candidate_approve(candidate_memory_id="x", approved_by="a", decision_id="d")
+
+
+def test_assert_public_safe_blocks_credential_output_keys():
+    for key in ("password", "passwd", "authorization", "bearer", "cookie", "api_key"):
+        with pytest.raises(ValueError):
+            assert_public_safe({key: "anything"})
+
+
+def test_stale_and_rejected_proposals_are_not_approvable(tmp_path):
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger, allow_restricted=True)
+    target = _accept_card(ledger)
+
+    stale = steward.stale_mark(memory_id=target["memory_id"], reason="근거 교체로 stale")
+    with pytest.raises(ValueError):
+        steward.candidate_approve(
+            candidate_memory_id=stale["proposal"]["memory_id"], approved_by="a", decision_id="d"
+        )
+    # the stale proposal is untouched and the target stays current.
+    assert ledger.get_llm_brain_memory_card(target["memory_id"])["currentness"] == "current"
+
+    created = steward.candidate_create(source_span=_span(content_hash="sha256:rej"))
+    cand_id = created["proposal"]["memory_id"]
+    steward.candidate_reject(candidate_memory_id=cand_id, rejected_by="a", decision_id="d", reason="no")
+    with pytest.raises(ValueError):
+        steward.candidate_approve(candidate_memory_id=cand_id, approved_by="a", decision_id="d2")
+
+
 def test_dispatch_round_trip_read_and_proposal(tmp_path):
     service = _service(tmp_path)
     _accept_card(service.ledger)

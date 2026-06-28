@@ -62,7 +62,16 @@ _FORBIDDEN_OUTPUT_KEYS = frozenset(
         "url",
         "path",
         "token",
+        "access_token",
         "secret",
+        "api_key",
+        "apikey",
+        "password",
+        "passwd",
+        "bearer",
+        "cookie",
+        "authorization",
+        "credential",
     }
 )
 
@@ -235,6 +244,7 @@ class BrainStewardService:
         self, *, candidate_memory_id: str, approved_by: str, decision_id: str
     ) -> dict:
         self._guard_restricted("memory_candidate_approve")
+        self._guard_writable()
         candidate = self._load_pending_candidate(candidate_memory_id)
         return LLMBrainMemoryService(self.ledger).accept_human_approved_candidate(
             candidate, approved_by=approved_by, decision_id=decision_id
@@ -244,6 +254,7 @@ class BrainStewardService:
         self, *, candidate_memory_id: str, rejected_by: str, decision_id: str, reason: str
     ) -> dict:
         self._guard_restricted("memory_candidate_reject")
+        self._guard_writable()
         from .memory_promotion import human_reject_memory_card_candidate
 
         candidate = self._load_pending_candidate(candidate_memory_id)
@@ -265,6 +276,7 @@ class BrainStewardService:
         operator_approval_ref: str,
     ) -> dict:
         self._guard_restricted("memory_candidate_auto_accept")
+        self._guard_writable()
         candidate = self._load_pending_candidate(candidate_memory_id)
         return LLMBrainMemoryService(self.ledger).accept_auto_policy_candidate(
             candidate, evaluation, operator_approval_ref=operator_approval_ref
@@ -278,12 +290,26 @@ class BrainStewardService:
                 f"{tool_name} is restricted and requires a human/manual gate"
             )
 
+    def _guard_writable(self) -> None:
+        # 라이브 recall MCP transport 는 read-only ledger 로 서비스를 만든다. 그 위에서
+        # proposal/restricted write 를 시도하면 sqlite 가 깨지므로, write 이전에
+        # 명확한 메시지로 fail-closed 한다(라이브 enablement 는 writable transport 필요).
+        if getattr(self.ledger, "read_only", False):
+            raise ValueError(
+                "brain steward writes require a writable ledger; this transport is read-only"
+            )
+
     def _load_pending_candidate(self, candidate_memory_id: str) -> dict:
         card = self.ledger.get_llm_brain_memory_card(candidate_memory_id)
         if card is None:
             raise ValueError("unknown candidate memory card")
-        if _is_accepted(card):
-            raise ValueError("candidate is already accepted")
+        if str(card.get("lifecycle_state") or "") not in REVIEW_LIFECYCLE_STATES:
+            # accepted / human_rejected / rejected 등은 승인·거부 대상이 아니다.
+            raise ValueError("only pending review-queue candidates are eligible")
+        kind = str(card.get("steward_proposal_kind") or "candidate")
+        if kind in {"stale", "supersede"}:
+            # stale 주장과 supersede 제안은 plain approve/reject 대상이 아니다(전용 경로 필요).
+            raise ValueError(f"{kind} proposal is not an approvable candidate")
         return card
 
     def _stamp_proposal(
@@ -301,6 +327,7 @@ class BrainStewardService:
         return card
 
     def _persist_proposal(self, card: dict) -> dict:
+        self._guard_writable()
         validate_memory_card_envelope(card)
         if _is_accepted(card):
             # 안전망: proposal 은 절대 accepted lane 으로 들어가지 않는다.
