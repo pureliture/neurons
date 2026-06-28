@@ -46,19 +46,14 @@ spec:
     }
 
     environment {
-        // 로컬 레지스트리 (k3s-master-01 에서 접근)
-        REGISTRY       = "localhost:5000"
-        IMAGE_NAME     = "neurons/ingress-api"
-        // neurons-ops GitOps 레포
-        GITOPS_REPO    = "https://github.com/pureliture/neurons-ops.git"
-        GITOPS_BRANCH  = "main"
-        GITOPS_PATH    = "k3s/neurons/overlays/workload-canary-preview/ingress-api.yaml"
+        // k3s-master-01 로컬 레지스트리
+        REGISTRY      = "localhost:5000"
+        GITOPS_REPO   = "https://github.com/pureliture/neurons-ops.git"
+        GITOPS_BRANCH = "main"
+        GITOPS_ROOT   = "k3s/neurons/overlays/workload-canary-preview"
     }
 
     stages {
-        // -------------------------------------------------------
-        // Stage 1: 소스 체크아웃
-        // -------------------------------------------------------
         stage('Checkout') {
             steps {
                 checkout scm
@@ -67,21 +62,16 @@ spec:
                     // Git 2.35+ safe.directory 검증에 걸릴 수 있다. 현재 workspace만 신뢰 대상으로 등록한다.
                     sh 'git config --global --add safe.directory "$WORKSPACE"'
 
-                    // 짧은 커밋 해시 (이미지 태그로 사용)
                     env.GIT_SHORT = sh(
                         script: 'git rev-parse --short HEAD',
                         returnStdout: true
                     ).trim()
-                    env.IMAGE_TAG  = "sha-${env.GIT_SHORT}"
-                    env.IMAGE_FULL = "${env.REGISTRY}/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
-                    echo "이미지 태그: ${env.IMAGE_FULL}"
+                    env.IMAGE_TAG = "sha-${env.GIT_SHORT}"
+                    echo "공통 이미지 태그: ${env.IMAGE_TAG}"
                 }
             }
         }
 
-        // -------------------------------------------------------
-        // Stage 2: 빌드 & 테스트
-        // -------------------------------------------------------
         stage('Build & Test') {
             steps {
                 container('builder') {
@@ -93,40 +83,67 @@ spec:
             }
             post {
                 always {
-                    // 테스트 리포트 수집
                     junit allowEmptyResults: true,
                           testResults: '**/build/test-results/test/*.xml'
                 }
             }
         }
 
-        // -------------------------------------------------------
-        // Stage 3: Docker 이미지 빌드 & 로컬 레지스트리 Push
-        // -------------------------------------------------------
-        stage('Docker Build & Push') {
+        stage('Docker Build & Push All Neurons Images') {
             steps {
                 container('docker') {
                     sh """
-                        echo "=== Docker 이미지 빌드 ==="
-                        docker build -t ${env.IMAGE_FULL} .
+                        set -eu
+
+                        echo "=== Java ingress-api 이미지 빌드 ==="
+                        docker build \
+                          -t ${env.REGISTRY}/neurons/ingress-api:${env.IMAGE_TAG} \
+                          -t ${env.REGISTRY}/neurons/ingress-api:latest \
+                          .
+
+                        echo "=== Python worker 공통 이미지 빌드 ==="
+                        docker build -f worker/Dockerfile \
+                          -t ${env.REGISTRY}/neurons/ingress-worker:${env.IMAGE_TAG} \
+                          -t ${env.REGISTRY}/neurons/ingress-worker:latest \
+                          -t ${env.REGISTRY}/neurons/llm-brain-tools:${env.IMAGE_TAG} \
+                          -t ${env.REGISTRY}/neurons/llm-brain-tools:latest \
+                          -t ${env.REGISTRY}/neurons/graph-trigger:${env.IMAGE_TAG} \
+                          -t ${env.REGISTRY}/neurons/graph-trigger:latest \
+                          -t ${env.REGISTRY}/neurons/bulk-semantic-trigger:${env.IMAGE_TAG} \
+                          -t ${env.REGISTRY}/neurons/bulk-semantic-trigger:latest \
+                          worker
+
+                        echo "=== MCP HTTP 이미지 빌드 ==="
+                        docker build -f worker/Dockerfile.mcp-http \
+                          -t ${env.REGISTRY}/neurons/mcp-http:${env.IMAGE_TAG} \
+                          -t ${env.REGISTRY}/neurons/mcp-http:latest \
+                          worker
+
+                        echo "=== Session memory worker 이미지 빌드 ==="
+                        docker build -f worker/Dockerfile.session-memory \
+                          -t ${env.REGISTRY}/neurons/session-memory-worker:${env.IMAGE_TAG} \
+                          -t ${env.REGISTRY}/neurons/session-memory-worker:latest \
+                          worker
 
                         echo "=== 로컬 레지스트리 Push ==="
-                        docker push ${env.IMAGE_FULL}
-
-                        echo "=== latest 태그도 Push ==="
-                        docker tag ${env.IMAGE_FULL} ${env.REGISTRY}/${env.IMAGE_NAME}:latest
-                        docker push ${env.REGISTRY}/${env.IMAGE_NAME}:latest
+                        for image in \
+                          neurons/ingress-api \
+                          neurons/ingress-worker \
+                          neurons/llm-brain-tools \
+                          neurons/graph-trigger \
+                          neurons/bulk-semantic-trigger \
+                          neurons/mcp-http \
+                          neurons/session-memory-worker
+                        do
+                          docker push ${env.REGISTRY}/\${image}:${env.IMAGE_TAG}
+                          docker push ${env.REGISTRY}/\${image}:latest
+                        done
                     """
                 }
             }
         }
 
-        // -------------------------------------------------------
-        // Stage 4: GitOps 레포 이미지 태그 업데이트
-        // neurons-ops 레포의 YAML 파일에서 이미지 태그를 새 버전으로 교체
-        // ArgoCD가 변경 감지 → 자동 배포
-        // -------------------------------------------------------
-        stage('GitOps Update') {
+        stage('GitOps Update Preview Images') {
             steps {
                 container('git-tools') {
                     withCredentials([usernamePassword(
@@ -135,6 +152,8 @@ spec:
                         passwordVariable: 'GIT_TOKEN'
                     )]) {
                         sh """
+                            set -eu
+
                             echo "=== neurons-ops 레포 클론 (${env.GITOPS_BRANCH}) ==="
                             rm -rf /tmp/neurons-ops
                             git clone --branch ${env.GITOPS_BRANCH} --single-branch https://\${GIT_USER}:\${GIT_TOKEN}@github.com/pureliture/neurons-ops.git /tmp/neurons-ops
@@ -143,24 +162,48 @@ spec:
                             git config user.email "jenkins@k3s-master-01"
                             git config user.name "Jenkins CI"
 
-                            echo "=== 이미지 태그 업데이트 ==="
-                            OLD_TAG=\$(grep -Eo 'sha-[a-f0-9]+' ${env.GITOPS_PATH} | head -1)
-                            echo "이전 태그: \$OLD_TAG → 새 태그: ${env.IMAGE_TAG}"
+                            update_image() {
+                              image="\$1"
+                              file="\$2"
+                              old="\$(grep -Eo "${env.REGISTRY}/\${image}:sha-[a-f0-9]+" "\$file" | head -1 || true)"
+                              new="${env.REGISTRY}/\${image}:${env.IMAGE_TAG}"
+                              echo "\$file: \${old:-<none>} -> \$new"
+                              sed -i "s|${env.REGISTRY}/\${image}:sha-[a-f0-9]*|\$new|g" "\$file"
+                            }
 
-                            sed -i "s|${env.REGISTRY}/${env.IMAGE_NAME}:sha-[a-f0-9]*|${env.IMAGE_FULL}|g" ${env.GITOPS_PATH}
+                            update_image "neurons/ingress-api" "${env.GITOPS_ROOT}/ingress-api.yaml"
+                            update_image "neurons/ingress-worker" "${env.GITOPS_ROOT}/ingress-worker-health-only.yaml"
+                            update_image "neurons/mcp-http" "${env.GITOPS_ROOT}/mcp-http.yaml"
+                            update_image "neurons/graph-trigger" "${env.GITOPS_ROOT}/graph-workers-paused.yaml"
+                            update_image "neurons/bulk-semantic-trigger" "${env.GITOPS_ROOT}/graph-workers-paused.yaml"
 
                             echo "=== 변경 확인 ==="
-                            git diff ${env.GITOPS_PATH}
+                            git diff -- \
+                              "${env.GITOPS_ROOT}/ingress-api.yaml" \
+                              "${env.GITOPS_ROOT}/ingress-worker-health-only.yaml" \
+                              "${env.GITOPS_ROOT}/mcp-http.yaml" \
+                              "${env.GITOPS_ROOT}/graph-workers-paused.yaml"
 
-                            echo "=== Git Push ==="
-                            git add ${env.GITOPS_PATH}
-                            git commit -m "ci: neurons-ingress-api 이미지 태그 업데이트
+                            if git diff --quiet -- \
+                              "${env.GITOPS_ROOT}/ingress-api.yaml" \
+                              "${env.GITOPS_ROOT}/ingress-worker-health-only.yaml" \
+                              "${env.GITOPS_ROOT}/mcp-http.yaml" \
+                              "${env.GITOPS_ROOT}/graph-workers-paused.yaml"; then
+                              echo "변경 없음 — GitOps push 생략"
+                            else
+                              echo "=== Git Push ==="
+                              git add \
+                                "${env.GITOPS_ROOT}/ingress-api.yaml" \
+                                "${env.GITOPS_ROOT}/ingress-worker-health-only.yaml" \
+                                "${env.GITOPS_ROOT}/mcp-http.yaml" \
+                                "${env.GITOPS_ROOT}/graph-workers-paused.yaml"
+                              git commit -m "ci: neurons preview 이미지 태그 업데이트
 
-이미지: ${env.IMAGE_FULL}
+이미지 태그: ${env.IMAGE_TAG}
 빌드: Jenkins #\${BUILD_NUMBER}
 소스: ${env.GIT_SHORT}"
-
-                            git push origin ${env.GITOPS_BRANCH}
+                              git push origin ${env.GITOPS_BRANCH}
+                            fi
                         """
                     }
                 }
@@ -168,15 +211,14 @@ spec:
         }
     }
 
-    // -------------------------------------------------------
-    // 파이프라인 완료 후 알림
-    // -------------------------------------------------------
     post {
         success {
             echo """
-            ✅ 배포 완료!
-            이미지: ${env.IMAGE_FULL}
-            ArgoCD가 변경을 감지해 자동 배포합니다.
+            ✅ neurons multi-image CI 완료!
+            태그: ${env.IMAGE_TAG}
+            대상: ingress-api, ingress-worker, llm-brain-tools, graph-trigger,
+                  bulk-semantic-trigger, mcp-http, session-memory-worker
+            GitOps: workload-canary-preview 이미지 태그 업데이트
             확인: https://llm-brain-server.tailbf74be.ts.net:9443/
             """
         }
