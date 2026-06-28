@@ -25,12 +25,11 @@ spec:
         cpu: "2"
         memory: "4Gi"
   - name: docker
-    image: docker:27-dind
+    image: docker:27-cli
+    command: ['sleep']
+    args: ['infinity']
     securityContext:
-      privileged: true
-    env:
-    - name: DOCKER_TLS_CERTDIR
-      value: ""
+      runAsGroup: 973
     volumeMounts:
     - name: docker-sock
       mountPath: /var/run/docker.sock
