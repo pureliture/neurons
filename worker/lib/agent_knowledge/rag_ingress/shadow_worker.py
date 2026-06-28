@@ -451,9 +451,9 @@ def main() -> int:
     deliver = os.environ.get("SHADOW_DELIVER", "0") == "1"
     broad_scan_pages = int(os.environ.get("NATURAL_KEY_BROAD_SCAN_PAGES", "0"))
     backend = None
+    delivery_backend = os.environ.get("INGRESS_DELIVERY_BACKEND", "ragflow").strip().lower()
     if deliver:
-        _delivery_backend = os.environ.get("INGRESS_DELIVERY_BACKEND", "ragflow").strip().lower()
-        if _delivery_backend == "couchdb":
+        if delivery_backend == "couchdb":
             # CouchDB sink: construct CouchDBIndexBackendAdapter.
             # ragflow_client is NOT imported for this path.
             from .couchdb_index_backend import build_couchdb_index_backend
@@ -488,7 +488,7 @@ def main() -> int:
     fetch_batch = int(os.environ.get("WORKER_FETCH_BATCH", "1"))
     concurrency = int(os.environ.get("WORKER_CONCURRENCY", "1"))
     pressure_url = os.environ.get("RAG_INGRESS_PRESSURE_URL", "")
-    pressure_open = build_pressure_check(pressure_url) if pressure_url else None
+    pressure_open = build_delivery_pressure_check(pressure_url, delivery_backend=delivery_backend)
     if args.mode == "smoke":
         result = asyncio.run(run_smoke(
             nats_url=nats_url, stream=stream, subject=subject, durable=durable,
@@ -505,6 +505,20 @@ def main() -> int:
         ))
     print(json.dumps(result, sort_keys=True))
     return 0
+
+
+def build_delivery_pressure_check(status_url: str, *, delivery_backend: str) -> Callable[[], bool] | None:
+    """Return the live pressure gate for backends that are governed by /status.
+
+    The /status endpoint reports the legacy RAGFlow target pressure. A CouchDB
+    sink must not pause behind that signal, or CouchDB-native ingest deadlocks
+    whenever RAGFlow is intentionally unconfigured.
+    """
+    if str(delivery_backend or "").strip().lower() == "couchdb":
+        return None
+    if not status_url:
+        return None
+    return build_pressure_check(status_url)
 
 
 def build_pressure_check(status_url: str, *, ttl: float = 10.0) -> Callable[[], bool]:

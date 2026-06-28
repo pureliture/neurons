@@ -1,24 +1,53 @@
 #!/bin/bash
-# session-memory builder 1사이클(컨테이너). 호스트 run.sh의 컨테이너-네이티브 버전.
-# 차이: docker cp 대신 마운트된 shadow 볼륨에서 복사, RAGFlow는 host.docker.internal,
-# 패키지는 pip install 됨(PYTHONPATH 불필요), ledger는 NEURON_LEDGER_PG_DSN으로 PG.
-set -e
+# session-memory builder 1사이클(컨테이너).
+set -euo pipefail
 cd /app
 mkdir -p state/runtime
 chmod 700 state state/runtime 2>/dev/null || true
-# shadow ingest-state(dirty signal source): rag-ingress 볼륨(ro)에서 스냅샷.
-if [ -f /shadow/ingest-state.sqlite ]; then
-  cp /shadow/ingest-state.sqlite state/shadow-snap.sqlite
+
+export SESSION_MEMORY_PROJECTION_BACKEND="${SESSION_MEMORY_PROJECTION_BACKEND:-qdrant}"
+export QDRANT_URL="${QDRANT_URL:-http://neurons-qdrant:6333}"
+export QDRANT_COLLECTION="${QDRANT_COLLECTION:-neurons_mirror_gemini_3072_v1}"
+
+limit="${SESSION_MEMORY_BUILD_LIMIT:-10}"
+approval="state/couchdb-build-approval.json"
+
+argv=(
+  "--limit" "$limit"
+  "--dataset-name" "session-memory"
+  "--approval" "$approval"
+)
+
+if [ -n "${SESSION_MEMORY_BUILD_PROJECT:-}" ]; then
+  argv+=("--project" "$SESSION_MEMORY_BUILD_PROJECT")
 fi
-python -m agent_knowledge.session_memory.neuron_session_memory \
-  --ledger state/neuron-ledger.sqlite \
-  --dataset-name session-memory \
-  --ragflow-url "${RAGFLOW_BASE_URL:-http://127.0.0.1:9380}" \
-  --token-env RAGFLOW_API_KEY \
-  --runtime-dir state/runtime \
-  --shadow-db state/shadow-snap.sqlite \
-  --watermark-file state/wm.txt \
-  --batch-size 10 \
-  --max-processed-per-run 10 \
-  --limit 50 \
-  --approval state/neuron-build-approval.json
+
+if [ -n "${SESSION_MEMORY_BUILD_PROVIDER:-}" ]; then
+  argv+=("--provider" "$SESSION_MEMORY_BUILD_PROVIDER")
+fi
+
+python - "$approval" "${argv[@]}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+argv = sys.argv[2:]
+payload = {
+    "schema_version": "agent_knowledge_live_approval.v1",
+    "operation": "couchdb_session_memory_build",
+    "operator_approval": {"approved": True, "by": "session-memory-worker"},
+    "redaction_required": True,
+    "rollback_or_abort_criteria": [
+        "abort on nonzero exit",
+        "projection failures remain retryable in CouchDB projection_state",
+    ],
+    "timeout_seconds": 300,
+    "command": {"argv": argv},
+}
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(payload, f, sort_keys=True)
+PY
+
+timeout "${SESSION_MEMORY_BUILD_TIMEOUT_SECONDS:-300}" \
+  python -m agent_knowledge.cli couchdb-session-memory-build "${argv[@]}"

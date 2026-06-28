@@ -12,6 +12,7 @@ import pytest
 
 from agent_knowledge.rag_ingress.shadow_worker import (
     IngestStateStore,
+    build_delivery_pressure_check,
     build_synthetic_event,
     process_payload,
 )
@@ -240,6 +241,14 @@ def test_default_transport_closure_resolves():
 
     client = rc.RagflowHttpClient(base_url="http://example", bearer_token="t")
     assert client.transport is rc._urllib_transport
+
+
+# --- backend pressure gate -------------------------------------------------
+
+def test_couchdb_delivery_backend_disables_legacy_ragflow_pressure_gate():
+    assert build_delivery_pressure_check("http://ingress/status", delivery_backend="couchdb") is None
+    assert build_delivery_pressure_check("", delivery_backend="couchdb") is None
+    assert build_delivery_pressure_check("http://ingress/status", delivery_backend="ragflow") is not None
 
 
 # --- natural-key match fail-safe -------------------------------------------
