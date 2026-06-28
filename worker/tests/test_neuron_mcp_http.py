@@ -17,6 +17,11 @@ from agent_knowledge import mcp_http_server as mh  # noqa: E402
 from agent_knowledge.mcp_server import list_tools  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _default_kubernetes_pod_cidr(monkeypatch):
+    monkeypatch.delenv("KUBERNETES_POD_CIDR", raising=False)
+
+
 # --- 테스트용 stub service (transport 경로만 검증; 실 ledger/graph 불필요) ---
 
 
@@ -94,6 +99,34 @@ def test_build_app_allows_kubernetes_pod_ip_with_specific_flag():
     )
     paths = {r.path for r in app.routes}
     assert "/healthz" in paths and "/mcp" in paths
+
+
+def test_build_app_allows_configured_kubernetes_pod_cidr(monkeypatch):
+    monkeypatch.setenv("KUBERNETES_POD_CIDR", "10.244.0.0/16, fd00:10:42::/64")
+
+    app = mh.build_app(
+        _StubService(),
+        host="10.244.3.31",
+        allow_non_loopback=True,
+        allow_kubernetes_pod_ip=True,
+    )
+
+    paths = {r.path for r in app.routes}
+    assert "/healthz" in paths and "/mcp" in paths
+    assert mh._is_kubernetes_pod_address("fd00:10:42::31") is True
+    assert mh._is_kubernetes_pod_address("10.42.0.31") is False
+
+
+def test_build_app_rejects_invalid_configured_kubernetes_pod_cidr(monkeypatch):
+    monkeypatch.setenv("KUBERNETES_POD_CIDR", "not-a-cidr")
+
+    with pytest.raises(ValueError, match="invalid KUBERNETES_POD_CIDR"):
+        mh.build_app(
+            _StubService(),
+            host="10.42.0.31",
+            allow_non_loopback=True,
+            allow_kubernetes_pod_ip=True,
+        )
 
 
 def test_build_app_allows_whole_loopback_subnet_without_flag():

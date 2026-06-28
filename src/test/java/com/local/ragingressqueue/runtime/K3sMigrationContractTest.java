@@ -3,6 +3,7 @@ package com.local.ragingressqueue.runtime;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashSet;
@@ -19,8 +20,8 @@ class K3sMigrationContractTest {
 
     @Test
     void approvedSpecKeepsPublicPrivateBoundaryAndLiveMutationGates() throws IOException {
-        String requirements = Files.readString(SPEC_DIR.resolve("requirements.md"));
-        String design = Files.readString(SPEC_DIR.resolve("design.md"));
+        String requirements = Files.readString(SPEC_DIR.resolve("requirements.md"), StandardCharsets.UTF_8);
+        String design = Files.readString(SPEC_DIR.resolve("design.md"), StandardCharsets.UTF_8);
 
         assertThat(requirements).contains("neurons", "compose 전체", "removed legacy external-memory surface");
         assertThat(requirements).contains("Tailscale subnet router", "backup/restore rehearsal", "neurons-ops");
@@ -32,7 +33,10 @@ class K3sMigrationContractTest {
 
     @Test
     void workloadInventoryCoversComposeOwnedServicesAndExclusions() throws IOException {
-        String inventory = Files.readString(CONTRACT_DIR.resolve("workload-inventory.yaml"));
+        String inventory = Files.readString(
+            CONTRACT_DIR.resolve("workload-inventory.yaml"),
+            StandardCharsets.UTF_8
+        );
         Set<String> rootServices = composeServices(Path.of("compose.yaml"));
         Set<String> sessionMemoryServices = composeServices(Path.of("worker/deploy/session-memory/compose.yaml"));
         Set<String> inventoryComposeServices = listedValues(inventory, "composeServices");
@@ -48,9 +52,32 @@ class K3sMigrationContractTest {
     }
 
     @Test
+    void listedValuesReadsOnlyTheRequestedListWithoutFixedIndent() {
+        String yaml = String.join("\n",
+            "workloads:",
+            "  - id: api",
+            "    composeServices:",
+            "      - ingress-api",
+            "    otherServices:",
+            "      - not-compose",
+            "  - id: worker",
+            "    composeServices:",
+            "        - ingress-worker-py",
+            "nextTopLevel:",
+            "  - not-compose-either"
+        );
+
+        assertThat(listedValues(yaml, "composeServices"))
+            .containsExactly("ingress-api", "ingress-worker-py");
+    }
+
+    @Test
     void publicContractDelegatesSecretsAndHostSpecificOverlayToPrivateOpsRepo() throws IOException {
-        String readme = Files.readString(Path.of("deploy/k3s/README.md"));
-        String overlayContract = Files.readString(CONTRACT_DIR.resolve("ops-overlay-contract.yaml"));
+        String readme = Files.readString(Path.of("deploy/k3s/README.md"), StandardCharsets.UTF_8);
+        String overlayContract = Files.readString(
+            CONTRACT_DIR.resolve("ops-overlay-contract.yaml"),
+            StandardCharsets.UTF_8
+        );
         String allPublicK3sArtifacts = readPublicK3sArtifacts();
 
         assertThat(readme).contains("neurons-ops");
@@ -71,8 +98,14 @@ class K3sMigrationContractTest {
 
     @Test
     void runbooksRequireDryRunBackupRestoreCanaryAndApprovalBeforeMutation() throws IOException {
-        String backup = Files.readString(SPEC_DIR.resolve("backup-restore-rehearsal.md"));
-        String canary = Files.readString(SPEC_DIR.resolve("canary-cutover-runbook.md"));
+        String backup = Files.readString(
+            SPEC_DIR.resolve("backup-restore-rehearsal.md"),
+            StandardCharsets.UTF_8
+        );
+        String canary = Files.readString(
+            SPEC_DIR.resolve("canary-cutover-runbook.md"),
+            StandardCharsets.UTF_8
+        );
 
         assertThat(backup).contains("CouchDB");
         assertThat(backup).contains("Postgres ledger");
@@ -96,7 +129,10 @@ class K3sMigrationContractTest {
 
     @Test
     void singleGoalCutoverControlKeepsFullTransitionGateBounded() throws IOException {
-        String control = Files.readString(SPEC_DIR.resolve("single-goal-cutover-control.md"));
+        String control = Files.readString(
+            SPEC_DIR.resolve("single-goal-cutover-control.md"),
+            StandardCharsets.UTF_8
+        );
 
         assertThat(control).contains("single agentic-execution goal");
         assertThat(control).contains("Gate 0");
@@ -125,7 +161,7 @@ class K3sMigrationContractTest {
             CONTRACT_DIR.resolve("base/config-contract.yaml"),
             CONTRACT_DIR.resolve("base/kustomization.yaml")
         )) {
-            output.append(Files.readString(path)).append('\n');
+            output.append(Files.readString(path, StandardCharsets.UTF_8)).append('\n');
         }
         return output.toString();
     }
@@ -134,7 +170,7 @@ class K3sMigrationContractTest {
         Set<String> services = new LinkedHashSet<>();
         boolean inServices = false;
         Pattern servicePattern = Pattern.compile("^  ([A-Za-z0-9_-]+):\\s*$");
-        for (String line : Files.readAllLines(path)) {
+        for (String line : Files.readAllLines(path, StandardCharsets.UTF_8)) {
             if (line.equals("services:")) {
                 inServices = true;
                 continue;
@@ -153,19 +189,37 @@ class K3sMigrationContractTest {
     private Set<String> listedValues(String yaml, String listKey) {
         Set<String> values = new LinkedHashSet<>();
         boolean inList = false;
+        int listKeyIndent = -1;
         for (String line : yaml.lines().toList()) {
             String stripped = line.strip();
             if (stripped.equals(listKey + ":")) {
                 inList = true;
+                listKeyIndent = leadingWhitespaceLength(line);
                 continue;
             }
-            if (inList && !line.startsWith("      - ")) {
-                inList = false;
+            if (!inList) {
+                continue;
             }
-            if (inList && stripped.startsWith("- ")) {
-                values.add(stripped.substring(2));
+            if (line.isBlank()) {
+                continue;
+            }
+            int indent = leadingWhitespaceLength(line);
+            if (indent <= listKeyIndent) {
+                inList = false;
+                continue;
+            }
+            if (stripped.startsWith("- ")) {
+                values.add(stripped.substring(2).strip());
             }
         }
         return values;
+    }
+
+    private int leadingWhitespaceLength(String line) {
+        int count = 0;
+        while (count < line.length() && Character.isWhitespace(line.charAt(count))) {
+            count++;
+        }
+        return count;
     }
 }
