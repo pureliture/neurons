@@ -12,9 +12,23 @@ K3S_POC_CANARY_PLAN_SCHEMA = "k3s_poc_canary_plan.v1"
 K3S_POC_MANIFEST_BUNDLE_SCHEMA = "k3s_poc_manifest_bundle.v1"
 K3S_POC_OPERATOR_APPROVAL_PACKET_SCHEMA = "k3s_poc_operator_approval_packet.v1"
 K3S_POC_EXECUTION_EVIDENCE_SCHEMA = "k3s_poc_execution_evidence.v1"
+K3S_SCALE_OUT_BUNDLE_SCHEMA = "k3s_scale_out_bundle.v1"
 
 _PASS_OUTCOMES = {"ok", "pass", "passed", "success", "succeeded"}
 _K3S_CANARY_ACCESS_POLICIES = {"tailscale_private"}
+
+# Manifest keys whose value is a capacity count owned by the private ops overlay.
+# Public scale-out templates must not embed real counts; a 2+ digit literal under any
+# of these keys is a leak. Single-digit policy invariants (replicas: 1, minAvailable: 1)
+# are allowed; ports/weights live under other keys and are never inspected here.
+_CAPACITY_KEYS = {
+    "replicas",
+    "minReplicas",
+    "maxReplicas",
+    "averageUtilization",
+    "minAvailable",
+    "maxUnavailable",
+}
 
 
 def compose_baseline_report(
@@ -295,12 +309,178 @@ def k3s_poc_execution_evidence(
     return evidence
 
 
-def _deployment_resource(*, name: str, namespace: str, image: str, container_port: int) -> dict[str, Any]:
+def reject_capacity_integers(resource: Any) -> None:
+    """Reject 2+ digit integer literals under capacity keys in a public manifest.
+
+    Real replica/HPA/PDB counts are owned by the private ops overlay and must never
+    appear in a public scale-out template. This is a key-scoped guard (not a blanket
+    integer scan) so legitimate ``containerPort: 8080`` / ``weight: 100`` values pass.
+    """
+    if isinstance(resource, Mapping):
+        for key, value in resource.items():
+            if (
+                key in _CAPACITY_KEYS
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+                and value >= 10
+            ):
+                raise ValueError(
+                    f"public scale-out manifest must not embed capacity counts: "
+                    f"{key}={value} is overlay-owned"
+                )
+            reject_capacity_integers(value)
+    elif isinstance(resource, (list, tuple)):
+        for item in resource:
+            reject_capacity_integers(item)
+
+
+def scale_out_manifest_bundle(
+    *,
+    workloads: list[Mapping[str, Any]],
+    namespace: str,
+    access_policy: str,
+) -> dict[str, Any]:
+    """Build a public, count-free scale-out manifest skeleton from classified workloads.
+
+    Separate from the canary bundle: it never embeds real replica/HPA/PDB counts (those
+    are overlay-owned) and routes each workload by its scaleCategory. not-a-target is
+    excluded; singleton-stateful becomes a single-writer StatefulSet (never a multi-replica
+    Deployment).
+    """
+    safe_namespace = public_safe_text(str(namespace or ""), max_chars=120)
+    if safe_namespace in {"default", "prod", "production"}:
+        raise ValueError("production k3s migration is not part of this roadmap")
+    resources: list[dict[str, Any]] = [_namespace_resource(safe_namespace)]
+    for workload in workloads:
+        if not isinstance(workload, Mapping):
+            continue
+        name = public_safe_text(str(workload.get("name") or ""), max_chars=120)
+        category = public_safe_text(str(workload.get("scaleCategory") or ""), max_chars=80)
+        replica_policy = public_safe_text(str(workload.get("replicaPolicy") or ""), max_chars=40)
+        image = public_safe_text(str(workload.get("image") or ""), max_chars=240)
+        port = int(workload.get("container_port") or 0)
+        if category == "not-a-target":
+            continue
+        if not name:
+            raise ValueError("scale-out workload name is required")
+        if category == "singleton-stateful":
+            _require_image_and_port(image, port)
+            resources.append(_statefulset_resource(name=name, namespace=safe_namespace, image=image, container_port=port))
+            resources.append(_headless_service_resource(name=name, namespace=safe_namespace, container_port=port))
+            resources.append(_pdb_resource(name=name, namespace=safe_namespace, mode="minAvailable"))
+        elif category == "serialized-worker":
+            _require_image_and_port(image, port)
+            resources.append(
+                _deployment_resource(
+                    name=name, namespace=safe_namespace, image=image, container_port=port, replica_policy="single"
+                )
+            )
+            resources.append(_pdb_resource(name=name, namespace=safe_namespace, mode="minAvailable"))
+        elif category == "horizontally-scalable":
+            _require_image_and_port(image, port)
+            deployment = _deployment_resource(
+                name=name,
+                namespace=safe_namespace,
+                image=image,
+                container_port=port,
+                replica_policy=replica_policy or "ops-defined",
+            )
+            deployment["spec"]["template"]["spec"]["affinity"] = _pod_anti_affinity(name)
+            resources.append(deployment)
+            if replica_policy == "ops-defined":
+                resources.append(_hpa_resource(name=name, namespace=safe_namespace))
+            resources.append(_pdb_resource(name=name, namespace=safe_namespace, mode="maxUnavailable"))
+        else:
+            raise ValueError(f"unknown scaleCategory: {category}")
+    if access_policy == "tailscale_private":
+        # NOTE: the default k3s flannel backend parses but does NOT enforce NetworkPolicy.
+        # Enforcement (CNI selection) is a private ops-overlay concern (cniSelection).
+        resources.append(_tailscale_private_network_policy(safe_namespace))
+    for resource in resources:
+        reject_capacity_integers(resource)
+    bundle = {
+        "schema_version": K3S_SCALE_OUT_BUNDLE_SCHEMA,
+        "status": "ready_for_operator_review",
+        "namespace": safe_namespace,
+        "production_migration_implied": False,
+        "resources": resources,
+        "requires_operator_approval": True,
+    }
+    ensure_public_safe(bundle, "K3sScaleOutBundle")
+    return bundle
+
+
+def _require_image_and_port(image: str, port: int) -> None:
+    if not image:
+        raise ValueError("scale-out workload image is required")
+    if port <= 0:
+        raise ValueError("scale-out workload port is required")
+
+
+def _namespace_resource(namespace: str) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": namespace,
+            "labels": {
+                "neurons.openclaw.dev/purpose": "context-authority-scale-out",
+                "neurons.openclaw.dev/production": "false",
+            },
+        },
+    }
+
+
+def _deployment_resource(
+    *,
+    name: str,
+    namespace: str,
+    image: str,
+    container_port: int,
+    replica_policy: str = "canary",
+) -> dict[str, Any]:
+    runtime_mode = "k3s-canary" if replica_policy == "canary" else "k3s"
+    metadata: dict[str, Any] = {"name": name, "namespace": namespace}
+    spec: dict[str, Any] = {
+        "selector": {"matchLabels": {"app": name}},
+        "template": {
+            "metadata": {"labels": {"app": name}},
+            "spec": {
+                "containers": [
+                    {
+                        "name": name,
+                        "image": image,
+                        "ports": [{"containerPort": container_port}],
+                        "env": [
+                            {"name": "NEURONS_RUNTIME_MODE", "value": runtime_mode},
+                            {"name": "NEURONS_STATEFUL_DB_MIGRATION", "value": "false"},
+                        ],
+                    }
+                ]
+            },
+        },
+    }
+    if replica_policy == "ops-defined":
+        # replicas count is overlay-owned; mark policy and let the overlay patch it in.
+        metadata["annotations"] = {"neurons.scale/replica-policy": "ops-defined"}
+    else:
+        spec = {"replicas": 1, **spec}
+        if replica_policy != "canary":
+            metadata["annotations"] = {"neurons.scale/replica-policy": replica_policy}
+    return {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": metadata, "spec": spec}
+
+
+def _statefulset_resource(*, name: str, namespace: str, image: str, container_port: int) -> dict[str, Any]:
     return {
         "apiVersion": "apps/v1",
-        "kind": "Deployment",
-        "metadata": {"name": name, "namespace": namespace},
+        "kind": "StatefulSet",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "annotations": {"neurons.scale/replica-policy": "singleton"},
+        },
         "spec": {
+            "serviceName": f"{name}-headless",
             "replicas": 1,
             "selector": {"matchLabels": {"app": name}},
             "template": {
@@ -311,15 +491,80 @@ def _deployment_resource(*, name: str, namespace: str, image: str, container_por
                             "name": name,
                             "image": image,
                             "ports": [{"containerPort": container_port}],
-                            "env": [
-                                {"name": "NEURONS_RUNTIME_MODE", "value": "k3s-canary"},
-                                {"name": "NEURONS_STATEFUL_DB_MIGRATION", "value": "false"},
-                            ],
                         }
                     ]
                 },
             },
+            "volumeClaimTemplates": [
+                {
+                    "metadata": {
+                        "name": f"{name}-data",
+                        "annotations": {"neurons.scale/storage": "ops-defined"},
+                    },
+                    # storageClassName + request size are overlay-owned (PVC sizing).
+                    "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {}}},
+                }
+            ],
         },
+    }
+
+
+def _headless_service_resource(*, name: str, namespace: str, container_port: int) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": f"{name}-headless", "namespace": namespace},
+        "spec": {
+            "clusterIP": "None",
+            "selector": {"app": name},
+            "ports": [{"port": container_port, "targetPort": container_port}],
+        },
+    }
+
+
+def _hpa_resource(*, name: str, namespace: str) -> dict[str, Any]:
+    # Skeleton only: minReplicas/maxReplicas/metric targets are overlay-owned counts and
+    # are intentionally omitted so the public template carries no capacity numbers.
+    return {
+        "apiVersion": "autoscaling/v2",
+        "kind": "HorizontalPodAutoscaler",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "annotations": {"neurons.scale/hpa": "ops-defined"},
+        },
+        "spec": {
+            "scaleTargetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": name},
+        },
+    }
+
+
+def _pdb_resource(*, name: str, namespace: str, mode: str) -> dict[str, Any]:
+    if mode not in {"minAvailable", "maxUnavailable"}:
+        raise ValueError("pdb mode must be minAvailable or maxUnavailable")
+    return {
+        "apiVersion": "policy/v1",
+        "kind": "PodDisruptionBudget",
+        "metadata": {"name": name, "namespace": namespace},
+        "spec": {mode: 1, "selector": {"matchLabels": {"app": name}}},
+    }
+
+
+def _pod_anti_affinity(name: str) -> dict[str, Any]:
+    # preferred (not required): on a single node, required anti-affinity would leave
+    # replicas Pending. Spread is best-effort until ops adds agent nodes.
+    return {
+        "podAntiAffinity": {
+            "preferredDuringSchedulingIgnoredDuringExecution": [
+                {
+                    "weight": 100,
+                    "podAffinityTerm": {
+                        "labelSelector": {"matchLabels": {"app": name}},
+                        "topologyKey": "kubernetes.io/hostname",
+                    },
+                }
+            ]
+        }
     }
 
 

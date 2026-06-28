@@ -16,18 +16,26 @@ workloads:
     stateful: true
     backupRestoreRequired: true
     k3sContract: stateful workload with persistent storage and health checks
+    scaleCategory: singleton-stateful
+    replicaPolicy: singleton
   - id: ingress-api
     composeServices:
       - ingress-api
     stateful: false
     backupRestoreRequired: false
     k3sContract: api workload with readiness and redacted health checks
+    scaleCategory: horizontally-scalable
+    replicaPolicy: ops-defined
   - id: ingress-worker
     composeServices:
       - ingress-worker-py
     stateful: true
     backupRestoreRequired: true
     k3sContract: single-consumer worker lane with durable state preservation
+    scaleCategory: serialized-worker
+    replicaPolicy: single
+    # scale-out precondition: WorkQueue retention/consumer fan-out 전환 + shared state store + ack 튜닝 후에만 다중 replica
+    scaleOutPrecondition: workqueue-fanout-and-shared-state-store-required
   - id: retired-java-ingress-worker
     composeServices:
       - ingress-worker
@@ -36,6 +44,8 @@ workloads:
     activation: retired-profile
     migrateToK3s: false
     k3sContract: documented retired compose surface, not a k3s workload target
+    scaleCategory: not-a-target
+    replicaPolicy: singleton
   - id: searchable-mirror
     composeServices:
       - qdrant
@@ -44,36 +54,48 @@ workloads:
     activation: profile-gated
     enabledOnlyWhenSourceProfileEnabled: true
     k3sContract: profile-gated vector store with restore rehearsal
+    scaleCategory: singleton-stateful
+    replicaPolicy: singleton
   - id: couchdb-source-store
     composeServices:
       - llm-brain-couchdb
     stateful: true
     backupRestoreRequired: true
     k3sContract: source store with restore rehearsal and redacted counts
+    scaleCategory: singleton-stateful
+    replicaPolicy: singleton
   - id: ledger-postgres
     composeServices:
       - llm-brain-ledger-postgres
     stateful: true
     backupRestoreRequired: true
     k3sContract: ledger store with restore rehearsal and schema readiness checks
+    scaleCategory: singleton-stateful
+    replicaPolicy: singleton
   - id: vertex-wrapper
     composeServices:
       - llm-brain-vertex-wrapper
     stateful: false
     backupRestoreRequired: false
     k3sContract: model gateway workload with private credential mount owned by ops overlay
+    scaleCategory: horizontally-scalable
+    replicaPolicy: ops-defined
   - id: llm-brain-tools
     composeServices:
       - llm-brain-tools
     stateful: true
     backupRestoreRequired: true
     k3sContract: operator tooling workload with runtime volume preservation
+    scaleCategory: not-a-target
+    replicaPolicy: singleton
   - id: graph-trigger
     composeServices:
       - llm-brain-graph-trigger
     stateful: true
     backupRestoreRequired: true
     k3sContract: scheduled graph lane with graph lock/runtime preservation
+    scaleCategory: serialized-worker
+    replicaPolicy: single
   - id: bulk-semantic-trigger
     composeServices:
       - llm-brain-bulk-semantic-trigger
@@ -82,24 +104,34 @@ workloads:
     activation: profile-gated
     enabledOnlyWhenSourceProfileEnabled: true
     k3sContract: opt-in semantic lane with graph lock/runtime preservation
+    scaleCategory: serialized-worker
+    replicaPolicy: single
   - id: neo4j-graph-store
     composeServices:
       - llm-brain-neo4j
     stateful: true
     backupRestoreRequired: true
     k3sContract: graph store with restore rehearsal and index/readiness checks
+    scaleCategory: singleton-stateful
+    replicaPolicy: singleton
   - id: mcp-http
     composeServices:
       - neuron-knowledge-mcp
     stateful: false
     backupRestoreRequired: false
     k3sContract: tailnet-reachable read surface with no broad bind by default
+    scaleCategory: horizontally-scalable
+    replicaPolicy: single
+    # scale-out precondition: host networking 제거 + pod-ip bind 전환 후 replicas>1
+    scaleOutPrecondition: host-networking-removal-required
   - id: session-memory-worker
     composeServices:
       - session-memory-worker
     stateful: true
     backupRestoreRequired: true
     k3sContract: repo-owned worker compose surface with shared state volume contract
+    scaleCategory: serialized-worker
+    replicaPolicy: single
 canarySafety:
   workQueueIsolation:
     required: true

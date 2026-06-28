@@ -30,6 +30,21 @@ requiredPrivateInputs:
   canaryRouting:
     description: canary endpoint, traffic choice, health checks, and promotion switch
     publicSafe: false
+  agentNodeJoin:
+    description: k3s agent node join inputs (server URL, node token, unique node name) for scale-out
+    publicSafe: false
+  cniSelection:
+    description: CNI choice and NetworkPolicy enforcement decision (flannel default does not enforce policy)
+    publicSafe: false
+  replicaCounts:
+    description: real per-workload replica counts and HPA min/max bounds
+    publicSafe: false
+  hpaTargets:
+    description: HorizontalPodAutoscaler target utilization and custom metric thresholds
+    publicSafe: false
+  nodeSpecs:
+    description: node labels, taints, and resource requests/limits tied to host hardware
+    publicSafe: false
 publicOutputs:
   workloadInventory: deploy/k3s/public-contract/workload-inventory.yaml
   validationContract: public tests and redacted runbooks
