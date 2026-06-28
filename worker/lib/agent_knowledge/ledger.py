@@ -25,13 +25,151 @@ _READ_ONLY_SQL_KEYWORD_RE = re.compile(
     re.DOTALL,
 )
 _READ_ONLY_SQL_ALLOWED_KEYWORDS = {"EXPLAIN", "PRAGMA", "SELECT"}
+_READ_ONLY_SQL_CTE_FINAL_KEYWORDS = {"SELECT"}
 
 
 def _read_only_sql_allowed(sql: str) -> bool:
     match = _READ_ONLY_SQL_KEYWORD_RE.match(sql)
     if match is None:
         return not sql.strip()
-    return match.group(1).upper() in _READ_ONLY_SQL_ALLOWED_KEYWORDS
+    keyword = match.group(1).upper()
+    if keyword in _READ_ONLY_SQL_ALLOWED_KEYWORDS:
+        return True
+    if keyword == "WITH":
+        return _read_only_cte_sql_allowed(sql[match.start(1):])
+    return False
+
+
+def _read_only_cte_sql_allowed(sql: str) -> bool:
+    """Allow read-only CTE queries without allowing write CTE statements.
+
+    SQLite permits `WITH ... SELECT` and `WITH ... INSERT/UPDATE/DELETE`.
+    The read-only ledger guard therefore cannot treat every statement starting
+    with WITH as safe. This scanner follows the CTE declarations and allows
+    only a final read statement.
+    """
+
+    index = _skip_sql_keyword(sql, 0, "WITH")
+    if index is None:
+        return False
+    index = _skip_sql_ws_and_comments(sql, index)
+    recursive_index = _skip_sql_keyword(sql, index, "RECURSIVE")
+    if recursive_index is not None:
+        index = _skip_sql_ws_and_comments(sql, recursive_index)
+    while True:
+        index = _skip_sql_identifier(sql, index)
+        if index is None:
+            return False
+        index = _skip_sql_ws_and_comments(sql, index)
+        if index < len(sql) and sql[index] == "(":
+            index = _scan_sql_balanced_parentheses(sql, index)
+            if index is None:
+                return False
+            index = _skip_sql_ws_and_comments(sql, index)
+        index = _skip_sql_keyword(sql, index, "AS")
+        if index is None:
+            return False
+        index = _skip_sql_ws_and_comments(sql, index)
+        if index >= len(sql) or sql[index] != "(":
+            return False
+        index = _scan_sql_balanced_parentheses(sql, index)
+        if index is None:
+            return False
+        index = _skip_sql_ws_and_comments(sql, index)
+        if index < len(sql) and sql[index] == ",":
+            index = _skip_sql_ws_and_comments(sql, index + 1)
+            continue
+        match = re.match(r"([A-Za-z]+)", sql[index:])
+        if match is None:
+            return False
+        return match.group(1).upper() in _READ_ONLY_SQL_CTE_FINAL_KEYWORDS
+
+
+def _skip_sql_ws_and_comments(sql: str, index: int) -> int:
+    while index < len(sql):
+        if sql[index].isspace():
+            index += 1
+            continue
+        if sql.startswith("--", index):
+            newline = sql.find("\n", index + 2)
+            return len(sql) if newline == -1 else _skip_sql_ws_and_comments(sql, newline + 1)
+        if sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            return len(sql) if end == -1 else _skip_sql_ws_and_comments(sql, end + 2)
+        break
+    return index
+
+
+def _skip_sql_keyword(sql: str, index: int, keyword: str) -> int | None:
+    match = re.match(r"([A-Za-z]+)", sql[index:])
+    if match is None or match.group(1).upper() != keyword:
+        return None
+    end = index + len(match.group(1))
+    if end < len(sql) and (sql[end].isalnum() or sql[end] == "_"):
+        return None
+    return end
+
+
+def _skip_sql_identifier(sql: str, index: int) -> int | None:
+    if index >= len(sql):
+        return None
+    quote_pairs = {'"': '"', "`": "`", "[": "]"}
+    if sql[index] in quote_pairs:
+        closing = quote_pairs[sql[index]]
+        cursor = index + 1
+        while cursor < len(sql):
+            if sql[cursor] == closing:
+                return cursor + 1
+            cursor += 1
+        return None
+    match = re.match(r"[A-Za-z_][A-Za-z0-9_.$]*", sql[index:])
+    return index + len(match.group(0)) if match is not None else None
+
+
+def _scan_sql_balanced_parentheses(sql: str, index: int) -> int | None:
+    if index >= len(sql) or sql[index] != "(":
+        return None
+    depth = 0
+    quote = ""
+    cursor = index
+    while cursor < len(sql):
+        char = sql[cursor]
+        if quote:
+            if char == quote:
+                if quote == "'" and cursor + 1 < len(sql) and sql[cursor + 1] == "'":
+                    cursor += 2
+                    continue
+                quote = ""
+            cursor += 1
+            continue
+        if sql.startswith("--", cursor):
+            newline = sql.find("\n", cursor + 2)
+            cursor = len(sql) if newline == -1 else newline + 1
+            continue
+        if sql.startswith("/*", cursor):
+            end = sql.find("*/", cursor + 2)
+            if end == -1:
+                return None
+            cursor = end + 2
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            cursor += 1
+            continue
+        if char == "[":
+            quote = "]"
+            cursor += 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return cursor + 1
+            if depth < 0:
+                return None
+        cursor += 1
+    return None
 
 
 class _ReadOnlyLedgerConnection:

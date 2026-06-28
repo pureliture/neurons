@@ -242,6 +242,41 @@ def test_mcp_brain_resolve_roundtrip(tmp_path: Path):
     assert candidates[0]["brain_id"] == f"/project/{PROJECT}"
 
 
+def test_mcp_brain_resolve_works_with_open_read_only_ledger(tmp_path: Path):
+    ledger = _ledger(tmp_path)
+    curation = CurationService(ledger)
+    candidate = curation.add_candidate(
+        build_memory_candidate(
+            candidate_type="user_preference",
+            statement="한국어로 응답한다",
+            project=PROJECT,
+            provider="codex",
+            evidence_refs=[{"knowledge_id": "kn", "content_hash": "sha256:c"}],
+        )
+    )
+    curation.approve(candidate["candidate_id"], approved_by="ddalkak")
+    service = KnowledgeSearchService(
+        ledger=Ledger.open_read_only(ledger.path),
+        ragflow=DisabledRagflowClient(),
+        dataset_ids=[],
+        allow_private_results=True,
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": BRAIN_RESOLVE_TOOL_NAME, "arguments": {"query": PROJECT}},
+        },
+        service,
+    )
+
+    assert "error" not in response
+    candidates = response["result"]["structuredContent"]["candidates"]
+    assert candidates == [{"brain_id": f"/project/{PROJECT}", "kind": "project", "card_count": 1, "hint": ""}]
+
+
 def test_mcp_brain_context_resolve_roundtrip_uses_core_without_ragflow(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
