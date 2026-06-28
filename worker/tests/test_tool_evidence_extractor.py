@@ -14,8 +14,8 @@ import hashlib
 import json
 from pathlib import Path
 
-from agent_knowledge.transcript_model import ToolEvidenceSummaryRecord
-from agent_knowledge.transcript_parsers import extract_codex_tool_evidence
+from agent_knowledge.session_memory.transcript_model import ToolEvidenceSummaryRecord
+from agent_knowledge.session_memory.transcript_parsers import extract_codex_tool_evidence
 
 
 PROJECT = "workspace-ragflow-advisor"

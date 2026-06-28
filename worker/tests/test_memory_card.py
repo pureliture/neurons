@@ -1,6 +1,6 @@
 import json
 
-from agent_knowledge.memory_card import (
+from agent_knowledge.session_memory.memory_card import (
     CANDIDATE_TYPES,
     build_memory_candidate,
     build_memory_card,

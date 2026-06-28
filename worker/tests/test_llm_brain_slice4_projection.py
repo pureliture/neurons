@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_knowledge.memory_miner import build_memory_card_candidate_from_source_span
+from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
 from agent_knowledge.session_memory.memory_promotion import human_approve_memory_card_candidate
 from agent_knowledge.session_memory.ragflow_projection import (
     RagflowMemoryCardProjectionClient,

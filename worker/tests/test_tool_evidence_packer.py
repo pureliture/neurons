@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import json
 
-from agent_knowledge.transcript_model import REDACTION_VERSION, TranscriptSession, ToolEvidenceSummaryRecord
-from agent_knowledge.transcript_packer import (
+from agent_knowledge.session_memory.transcript_model import REDACTION_VERSION, TranscriptSession, ToolEvidenceSummaryRecord
+from agent_knowledge.session_memory.transcript_packer import (
     PackedTranscriptDocument,
     chunk_tool_evidence_records,
     pack_tool_evidence_summary_document,
