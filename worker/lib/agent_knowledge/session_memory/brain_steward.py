@@ -91,6 +91,24 @@ def _is_accepted(card: Mapping[str, Any]) -> bool:
     )
 
 
+def _text(card: Mapping[str, Any], key: str) -> str:
+    """card 필드를 빈 문자열 fallback 으로 안전하게 문자열화한다."""
+
+    return str(card.get(key) or "")
+
+
+def _str_list(card: Mapping[str, Any], key: str) -> list[str]:
+    """card 의 list 필드를 문자열 리스트로 정규화한다(누락 시 빈 리스트)."""
+
+    return [str(item) for item in (card.get(key) or [])]
+
+
+def _count(card: Mapping[str, Any], key: str) -> int:
+    """card 의 list 필드 길이를 반환한다(원소 자체는 출력에 노출하지 않는다)."""
+
+    return len(card.get(key) or [])
+
+
 def assert_public_safe(payload: Any, field_name: str = "steward_response") -> Any:
     """projection 결과가 raw/private/secret 을 담고 있지 않은지 fail-closed 로 검증한다.
 
@@ -360,24 +378,24 @@ class BrainStewardService:
 
     def _authority_item(self, card: Mapping[str, Any]) -> dict:
         return {
-            "memory_id": str(card.get("memory_id") or ""),
-            "card_type": str(card.get("card_type") or ""),
-            "scope": str(card.get("scope") or ""),
-            "project": str(card.get("project") or ""),
-            "provider": str(card.get("provider") or ""),
-            "title": str(card.get("title") or ""),
-            "summary": str(card.get("summary") or ""),
-            "lifecycle_state": str(card.get("lifecycle_state") or ""),
-            "approval_state": str(card.get("approval_state") or ""),
-            "freshness": str(card.get("freshness") or ""),
-            "currentness": str(card.get("currentness") or ""),
-            "governance_tier": str(card.get("governance_tier") or ""),
+            "memory_id": _text(card, "memory_id"),
+            "card_type": _text(card, "card_type"),
+            "scope": _text(card, "scope"),
+            "project": _text(card, "project"),
+            "provider": _text(card, "provider"),
+            "title": _text(card, "title"),
+            "summary": _text(card, "summary"),
+            "lifecycle_state": _text(card, "lifecycle_state"),
+            "approval_state": _text(card, "approval_state"),
+            "freshness": _text(card, "freshness"),
+            "currentness": _text(card, "currentness"),
+            "governance_tier": _text(card, "governance_tier"),
             "confidence": card.get("confidence"),
-            "confidence_basis": str(card.get("confidence_basis") or ""),
-            "supersedes": [str(item) for item in (card.get("supersedes") or [])],
-            "superseded_by": [str(item) for item in (card.get("superseded_by") or [])],
-            "source_ref_count": len(card.get("source_refs") or []),
-            "evidence_hash_count": len(card.get("evidence_hashes") or []),
+            "confidence_basis": _text(card, "confidence_basis"),
+            "supersedes": _str_list(card, "supersedes"),
+            "superseded_by": _str_list(card, "superseded_by"),
+            "source_ref_count": _count(card, "source_refs"),
+            "evidence_hash_count": _count(card, "evidence_hashes"),
         }
 
     def _review_item(self, card: Mapping[str, Any]) -> dict:
@@ -386,24 +404,24 @@ class BrainStewardService:
         if isinstance(capsule, Mapping):
             reason = str(capsule.get("model_reason") or "")
         return {
-            "memory_id": str(card.get("memory_id") or ""),
+            "memory_id": _text(card, "memory_id"),
             "proposal_kind": str(card.get("steward_proposal_kind") or "candidate"),
-            "target_memory_id": str(card.get("steward_target_memory_id") or ""),
-            "card_type": str(card.get("card_type") or ""),
-            "scope": str(card.get("scope") or ""),
-            "project": str(card.get("project") or ""),
-            "provider": str(card.get("provider") or ""),
-            "title": str(card.get("title") or ""),
-            "summary": str(card.get("summary") or ""),
-            "lifecycle_state": str(card.get("lifecycle_state") or ""),
-            "judgment_state": str(card.get("judgment_state") or ""),
-            "approval_state": str(card.get("approval_state") or ""),
-            "currentness": str(card.get("currentness") or ""),
-            "freshness": str(card.get("freshness") or ""),
-            "governance_tier": str(card.get("governance_tier") or ""),
+            "target_memory_id": _text(card, "steward_target_memory_id"),
+            "card_type": _text(card, "card_type"),
+            "scope": _text(card, "scope"),
+            "project": _text(card, "project"),
+            "provider": _text(card, "provider"),
+            "title": _text(card, "title"),
+            "summary": _text(card, "summary"),
+            "lifecycle_state": _text(card, "lifecycle_state"),
+            "judgment_state": _text(card, "judgment_state"),
+            "approval_state": _text(card, "approval_state"),
+            "currentness": _text(card, "currentness"),
+            "freshness": _text(card, "freshness"),
+            "governance_tier": _text(card, "governance_tier"),
             "confidence": card.get("confidence"),
             "reason": reason,
-            "supersedes": [str(item) for item in (card.get("supersedes") or [])],
-            "source_ref_count": len(card.get("source_refs") or []),
-            "evidence_hash_count": len(card.get("evidence_hashes") or []),
+            "supersedes": _str_list(card, "supersedes"),
+            "source_ref_count": _count(card, "source_refs"),
+            "evidence_hash_count": _count(card, "evidence_hashes"),
         }

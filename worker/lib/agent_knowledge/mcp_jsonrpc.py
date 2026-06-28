@@ -32,6 +32,35 @@ from .mcp_tools import (
 )
 from .session_memory.brain_steward import StewardPermissionError
 
+# candidate / supersede proposal 이 받는 redacted source_span 입력 키.
+# dispatch 가 arguments 에서 이 키만 골라 steward 로 넘긴다.
+_STEWARD_SOURCE_SPAN_KEYS = (
+    "card_type",
+    "project",
+    "provider",
+    "scope",
+    "title",
+    "redacted_summary",
+    "summary",
+    "typed_payload",
+    "content_hash",
+    "source_ref",
+    "span_ref",
+    "confidence",
+    "confidence_basis",
+    "governance_tier",
+)
+_STEWARD_TOOL_NAMES = frozenset(
+    {
+        MEMORY_AUTHORITY_PACK_READ_TOOL_NAME,
+        MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
+        MEMORY_CANDIDATE_CREATE_TOOL_NAME,
+        MEMORY_STALE_MARK_TOOL_NAME,
+        MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
+        *STEWARD_RESTRICTED_TOOL_NAMES,
+    }
+)
+
 
 def handle_jsonrpc_message(message: dict, service: KnowledgeSearchService) -> dict | None:
     request_id = message.get("id")
@@ -204,34 +233,6 @@ def dispatch_tool_call(params: dict, service: KnowledgeSearchService) -> dict:
 
 def _call_tool(params: dict, service: KnowledgeSearchService) -> dict:
     return dispatch_tool_call(params, service)
-
-
-_STEWARD_SOURCE_SPAN_KEYS = (
-    "card_type",
-    "project",
-    "provider",
-    "scope",
-    "title",
-    "redacted_summary",
-    "summary",
-    "typed_payload",
-    "content_hash",
-    "source_ref",
-    "span_ref",
-    "confidence",
-    "confidence_basis",
-    "governance_tier",
-)
-_STEWARD_TOOL_NAMES = frozenset(
-    {
-        MEMORY_AUTHORITY_PACK_READ_TOOL_NAME,
-        MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
-        MEMORY_CANDIDATE_CREATE_TOOL_NAME,
-        MEMORY_STALE_MARK_TOOL_NAME,
-        MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
-        *STEWARD_RESTRICTED_TOOL_NAMES,
-    }
-)
 
 
 def _steward_source_span(arguments: dict) -> dict:
