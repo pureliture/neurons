@@ -40,6 +40,7 @@ class OpenAICompatibleEmbeddingProvider:
         self._embed_fn = embed_fn
         self._size = int(size)
         self._model = str(model or "")
+        self._close_fn = getattr(embed_fn, "close", None)
 
     @property
     def size(self) -> int:
@@ -54,6 +55,10 @@ class OpenAICompatibleEmbeddingProvider:
         if len(vector) != self._size:
             raise ValueError("embedding endpoint returned wrong vector size")
         return vector
+
+    def close(self) -> None:
+        if callable(self._close_fn):
+            self._close_fn()
 
 
 def resolve_embedding_config(environ: Mapping[str, str] | None = None) -> dict[str, object]:
@@ -124,6 +129,10 @@ def _openai_embed_fn(*, model: str, base_url: str, api_key: str) -> EmbedFn:
     def _embed(text: str) -> list[float]:
         response = client.embeddings.create(model=model, input=text)
         return list(response.data[0].embedding)
+
+    close = getattr(client, "close", None)
+    if callable(close):
+        _embed.close = close  # type: ignore[attr-defined]
 
     return _embed
 
