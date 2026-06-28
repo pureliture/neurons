@@ -292,6 +292,11 @@ class QdrantSessionMemoryMirrorSink:
         )
         self._adapter.submit_document(document)
 
+    def close(self) -> None:
+        closer = getattr(self._adapter, "close", None)
+        if callable(closer):
+            closer()
+
 
 class QdrantSessionMemoryProjector:
     """``SessionMemoryProjector`` that writes to the Qdrant mirror as the CANONICAL
@@ -323,6 +328,11 @@ class QdrantSessionMemoryProjector:
             body=str(document.get("body") or ""),
         )
         return ref
+
+    def close(self) -> None:
+        closer = getattr(self._sink, "close", None)
+        if callable(closer):
+            closer()
 
 
 # --------------------------------------------------------------- dim guard (write)

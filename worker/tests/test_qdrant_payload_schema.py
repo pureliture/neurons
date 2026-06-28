@@ -50,6 +50,33 @@ def test_payload_indexes_declared_at_collection_create():
         assert field in declared
 
 
+def test_adapter_close_closes_client_and_embedding_provider():
+    events: list[str] = []
+
+    class _Client(InMemoryQdrantClient):
+        def close(self):
+            events.append("client")
+
+    class _Embedding:
+        @property
+        def size(self):
+            return 32
+
+        def embed(self, text: str):
+            return [0.0] * 32
+
+        def close(self):
+            events.append("embedding")
+
+    QdrantDoclingMirrorAdapter(
+        client=_Client(),
+        normalizer=PassthroughMarkdownNormalizer(),
+        embedding_provider=_Embedding(),
+    ).close()
+
+    assert events == ["client", "embedding"]
+
+
 def test_filter_fields_promoted_to_top_level_payload():
     client = InMemoryQdrantClient()
     adapter, _ = _adapter(client)

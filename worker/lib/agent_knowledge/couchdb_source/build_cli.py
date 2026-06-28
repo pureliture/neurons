@@ -262,28 +262,32 @@ def main(argv: list[str] | None = None) -> int:
     failed = 0
     skipped = 0
 
-    for session in sessions:
-        session_id_hash = str(session.get("session_id_hash") or "")
-        if not session_id_hash:
-            skipped += 1
-            continue
-        try:
-            result = materialize_and_project(
-                session_id_hash=session_id_hash,
-                store=store,
-                projector=projector,
-                mirror_sink=mirror_sink,
-            )
-            projection = result.get("projection") or {}
-            status = str(projection.get("status") or "")
-            if status == "projected":
-                projected += 1
-            elif not result.get("fully_materialized"):
+    try:
+        for session in sessions:
+            session_id_hash = str(session.get("session_id_hash") or "")
+            if not session_id_hash:
                 skipped += 1
-            else:
+                continue
+            try:
+                result = materialize_and_project(
+                    session_id_hash=session_id_hash,
+                    store=store,
+                    projector=projector,
+                    mirror_sink=mirror_sink,
+                )
+                projection = result.get("projection") or {}
+                status = str(projection.get("status") or "")
+                if status == "projected":
+                    projected += 1
+                elif not result.get("fully_materialized"):
+                    skipped += 1
+                else:
+                    failed += 1
+            except Exception:
                 failed += 1
-        except Exception:
-            failed += 1
+    finally:
+        _close_if_supported(mirror_sink)
+        _close_if_supported(projector)
 
     print(
         json.dumps(
@@ -299,6 +303,16 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     return 0 if failed == 0 else 1
+
+
+def _close_if_supported(resource) -> None:
+    closer = getattr(resource, "close", None)
+    if not callable(closer):
+        return
+    try:
+        closer()
+    except Exception:
+        return
 
 
 def _build_forward_mirror_sink(environ):

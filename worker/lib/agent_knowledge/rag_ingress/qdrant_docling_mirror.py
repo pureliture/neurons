@@ -387,6 +387,15 @@ class QdrantDoclingMirrorAdapter:
             hits.append(_hit_from_payload(payload, score=_point_score(point)).to_dict())
         return hits
 
+    def close(self) -> None:
+        """Close live network clients held by the adapter when supported."""
+
+        for resource in (self._client, self._embedding):
+            closer = getattr(resource, "close", None)
+            if not callable(closer):
+                continue
+            closer()
+
     def _ensure_collection(self) -> None:
         exists = False
         if hasattr(self._client, "collection_exists"):

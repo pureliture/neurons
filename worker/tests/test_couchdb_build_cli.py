@@ -21,6 +21,7 @@ import pytest
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.build_cli import (
     BUILD_CLI_SCHEMA_VERSION,
+    _close_if_supported,
     _select_sessions_needing_projection,
     main,
 )
@@ -560,6 +561,27 @@ class TestLiveRun:
         _run(argv, store, projector=projector)
 
         assert projector.calls[0]["target_profile"] == dm.RAGFLOW_RECALL_PROFILE
+
+
+class TestProjectorCleanup:
+    def test_close_if_supported_calls_close_once(self) -> None:
+        calls = []
+
+        class _Closable:
+            def close(self):
+                calls.append("closed")
+
+        _close_if_supported(_Closable())
+
+        assert calls == ["closed"]
+
+    def test_close_if_supported_ignores_missing_or_failing_close(self) -> None:
+        class _Failing:
+            def close(self):
+                raise RuntimeError("close failed")
+
+        _close_if_supported(object())
+        _close_if_supported(_Failing())
 
 
 # ---------------------------------------------------------------------------
