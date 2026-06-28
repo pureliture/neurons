@@ -300,6 +300,20 @@ class LedgerGraphProjectionStateStore:
         extraction_level: str | None = None,
         entity_type: str | None = None,
     ) -> set[str]:
+        return self.list_natural_ids(
+            project,
+            extraction_level=extraction_level,
+            entity_type=entity_type,
+        )
+
+    def list_natural_ids(
+        self,
+        project: str | None = None,
+        *,
+        extraction_level: str | None = None,
+        entity_type: str | None = None,
+        upsert_results: set[str] | frozenset[str] | None = None,
+    ) -> set[str]:
         clauses: list[str] = []
         params: list[str] = []
         if project is not None:
@@ -311,6 +325,10 @@ class LedgerGraphProjectionStateStore:
         if entity_type is not None:
             clauses.append("entity_type = ?")
             params.append(str(entity_type))
+        if upsert_results:
+            placeholders = ", ".join("?" for _ in upsert_results)
+            clauses.append(f"upsert_result IN ({placeholders})")
+            params.extend(sorted(str(item) for item in upsert_results))
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._ledger._connect() as connection:
             if not _table_exists(connection, "llm_brain_graph_projection_state"):

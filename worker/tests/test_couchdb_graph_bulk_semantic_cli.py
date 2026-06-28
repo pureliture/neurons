@@ -349,6 +349,42 @@ def test_bulk_semantic_resume_skips_without_llm_call(tmp_path):
     assert second["projection"]["failed"] == 0
 
 
+def test_bulk_semantic_limited_resume_prioritizes_unprojected_sessions(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(4):
+        _seed_session(store, raw_id=f"bulk-new-session-priority-{index}")
+
+    first = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=3,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=3,
+        extractor=_FakeBulkExtractor(),
+        writer=_FakeBulkWriter(),
+    )
+    assert first["projection"]["projected"] == 3
+
+    writer = _FakeBulkWriter()
+    second = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=2,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=2,
+        extractor=_FakeBulkExtractor(),
+        writer=writer,
+    )
+
+    assert second["projection"]["attempted"] == 2
+    assert second["projection"]["projected"] == 1
+    assert second["projection"]["skipped_resumed"] == 1
+    assert second["projection"]["failed"] == 0
+    assert writer.calls and len(writer.calls[0]) == 1
+
+
 def test_bulk_semantic_max_projects_caps_below_batch_size(tmp_path):
     store = InMemoryCouchDBSourceStore()
     for index in range(4):

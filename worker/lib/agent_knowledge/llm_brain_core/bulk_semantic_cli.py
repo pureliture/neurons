@@ -160,7 +160,14 @@ def run_couchdb_bulk_semantic_projection(
     extractor = extractor or OpenAICompatibleBulkSemanticExtractor.from_env()
     writer = writer or DeterministicGraphitiSemanticWriter.from_env()
 
-    selected = _select_sessions(source_store, project=project, provider=provider, limit=limit)
+    selected = _select_sessions(
+        source_store,
+        project=project,
+        provider=provider,
+        limit=limit,
+        projection_state_store=projection_state_store,
+        extraction_level=EXTRACTION_LEVEL_ENTITY,
+    )
     total_available = _count_sessions(source_store, project=project, provider=provider)
     max_sessions_per_call = max(1, int(max_sessions_per_call))
     max_session_chars = max(200, int(max_session_chars))

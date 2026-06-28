@@ -29,6 +29,7 @@ from .runtime import session_episode_from_couchdb_source
 from .runtime_graph import build_graph_adapter_from_env
 
 COUCHDB_GRAPH_PROJECTION_SCHEMA_VERSION = "llm_brain_couchdb_graph_projection.v1"
+SOURCE_INVALID_UPSERT_RESULTS = frozenset({"source_invalid", "invalid_source"})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -144,7 +145,18 @@ def run_couchdb_projection(
             if bool(getattr(graph, "_extract_entities", False))
             else EXTRACTION_LEVEL_EPISODIC
         )
-        sessions = _select_sessions(source_store, project=project, provider=provider, limit=limit)
+        sessions = _select_sessions(
+            source_store,
+            project=project,
+            provider=provider,
+            limit=limit,
+            projection_state_store=(
+                projection_state_store if (resume and not reextract_entities) else None
+            ),
+            extraction_level=(
+                target_level if (resume and not reextract_entities) else None
+            ),
+        )
         total_available = _count_sessions(source_store, project=project, provider=provider)
         report_every = max(1, int(report_every))
         max_projects = max(0, int(max_projects))
@@ -380,13 +392,29 @@ def _select_sessions(
     project: str,
     provider: str,
     limit: int,
+    projection_state_store: LedgerGraphProjectionStateStore | None = None,
+    extraction_level: str | None = None,
 ) -> list[dict[str, Any]]:
     sessions = source_store.find_by_type(
         SourceDocType.TRANSCRIPT_SESSION,
         fields=["session_id_hash", "project", "provider"],
     )
     filtered = _filter_sessions(sessions, project=project, provider=provider)
-    filtered.sort(key=_session_sort_key)
+    processed_by_project = _processed_session_natural_ids_by_project(
+        filtered,
+        projection_state_store=projection_state_store,
+        extraction_level=extraction_level,
+    )
+    if processed_by_project:
+        filtered.sort(
+            key=lambda session: (
+                _session_natural_id(str(session.get("session_id_hash") or ""))
+                in processed_by_project.get(str(session.get("project") or ""), set()),
+                *_session_sort_key(session),
+            )
+        )
+    else:
+        filtered.sort(key=_session_sort_key)
     if limit <= 0:
         return filtered
     return filtered[: int(limit)]
@@ -420,6 +448,51 @@ def _session_sort_key(session: dict[str, Any]) -> tuple[str, str, str]:
         str(session.get("provider") or ""),
         str(session.get("session_id_hash") or ""),
     )
+
+
+def _session_natural_id(session_id_hash: str) -> str:
+    return str(session_id_hash or "").replace(":", "_")
+
+
+def _processed_session_natural_ids_by_project(
+    sessions: list[dict[str, Any]],
+    *,
+    projection_state_store: LedgerGraphProjectionStateStore | None,
+    extraction_level: str | None,
+) -> dict[str, set[str]]:
+    if projection_state_store is None or extraction_level is None:
+        return {}
+    projects = sorted({str(session.get("project") or "") for session in sessions})
+
+    def _processed_for(query_project: str | None) -> set[str]:
+        natural_ids = set(
+            projection_state_store.list_projected_natural_ids(
+                query_project,
+                extraction_level=extraction_level,
+                entity_type="Session",
+            )
+        )
+        if extraction_level != EXTRACTION_LEVEL_ENTITY:
+            # Source-invalid sessions are classified at the semantic/entity pass,
+            # but the lightweight episodic trigger must not keep selecting them
+            # forever after the valid-source ceiling has been reached.
+            natural_ids.update(
+                projection_state_store.list_natural_ids(
+                    query_project,
+                    extraction_level=EXTRACTION_LEVEL_ENTITY,
+                    entity_type="Session",
+                    upsert_results=SOURCE_INVALID_UPSERT_RESULTS,
+                )
+            )
+        return natural_ids
+
+    # `natural_id` is globally unique per session, so for multi-project selections a
+    # single global query (project=None) is equivalent to per-project queries and
+    # avoids an N+1 round-trip; a session's id only appears under its own project.
+    if len(projects) > 1:
+        shared = _processed_for(None)
+        return {session_project: shared for session_project in projects}
+    return {session_project: _processed_for(session_project) for session_project in projects}
 
 
 def _project_one(worker: GraphProjectionWorker, episode: Any) -> tuple[str, str, int, int, int, int]:
