@@ -238,6 +238,11 @@ def _steward_source_span(arguments: dict) -> dict:
     return {key: arguments[key] for key in _STEWARD_SOURCE_SPAN_KEYS if key in arguments}
 
 
+def _steward_proposer(arguments: dict) -> str:
+    """제안 actor 라벨(예: hermes). card subject provider 와 다른 식별 축이며 advisory 다."""
+    return normalize_context_consumer(str(arguments.get("proposer") or "unspecified"))
+
+
 def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
     steward = service.brain_steward()
     if tool_name == MEMORY_AUTHORITY_PACK_READ_TOOL_NAME:
@@ -258,18 +263,21 @@ def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSe
             source_span=_steward_source_span(arguments),
             mark_needs_review=bool(arguments.get("mark_needs_review", False)),
             review_reason=str(arguments.get("review_reason") or ""),
+            proposer=_steward_proposer(arguments),
         )
         return _tool_result(result)
     if tool_name == MEMORY_STALE_MARK_TOOL_NAME:
         result = steward.stale_mark(
             memory_id=_require_non_empty_string(arguments, "memory_id", tool_name=tool_name),
             reason=_require_non_empty_string(arguments, "reason", tool_name=tool_name),
+            proposer=_steward_proposer(arguments),
         )
         return _tool_result(result)
     if tool_name == MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME:
         result = steward.supersede_propose(
             old_memory_id=_require_non_empty_string(arguments, "old_memory_id", tool_name=tool_name),
             source_span=_steward_source_span(arguments),
+            proposer=_steward_proposer(arguments),
         )
         return _tool_result(result)
     # restricted tools: 기본 권한에서는 어떤 write 도 하지 않고 거부한다.
