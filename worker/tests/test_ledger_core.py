@@ -203,12 +203,25 @@ def test_server_backed_read_only_ledger_blocks_direct_write_sql(tmp_path: Path):
 
     with ledger._connect() as connection:
         assert connection.execute("SELECT 1").fetchone() == {"one": 1}
+    with ledger._connect() as connection:
+        assert connection.execute("WITH one AS (SELECT 1 AS one) SELECT one FROM one").fetchone() == {"one": 1}
 
     with pytest.raises(sqlite3.OperationalError, match="read-only ledger"):
         with ledger._connect() as connection:
             connection.execute("INSERT INTO knowledge_items (knowledge_id) VALUES (?)", ("kn",))
+    with pytest.raises(sqlite3.OperationalError, match="read-only ledger"):
+        with ledger._connect() as connection:
+            connection.execute(
+                "WITH target AS (SELECT ? AS id) "
+                "UPDATE knowledge_items SET authorization_status = 'disabled' "
+                "WHERE knowledge_id IN (SELECT id FROM target)",
+                ("kn",),
+            )
 
-    assert adapter.connection.executed == ["SELECT 1"]
+    assert adapter.connection.executed == [
+        "SELECT 1",
+        "WITH one AS (SELECT 1 AS one) SELECT one FROM one",
+    ]
 
 
 def test_open_read_only_allows_missing_path_when_pg_env_is_set(
