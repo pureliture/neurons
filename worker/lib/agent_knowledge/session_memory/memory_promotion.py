@@ -317,7 +317,7 @@ def commit_stale(
     *,
     timestamp: str | None = None,
 ) -> dict:
-    """Demote an accepted card to stale current-truth (committing, not proposing).
+    """accepted card 를 stale current-truth 로 demote 한다(제안이 아닌 commit 경로).
 
     commit_supersession 의 stale 변종. superseded 와 달리 대체 카드가 없으므로 superseded_by 를
     설정하지 않는다(상태 불변식상 stale 은 superseded_by 를 요구하지 않는다). currentness 가

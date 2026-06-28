@@ -295,6 +295,9 @@ def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSe
     except StewardPermissionError:
         # denied 계약은 service 가 소유한다(M5). dispatch 는 그대로 전달만 한다.
         return _tool_result(steward.restricted_denied_payload(tool_name))
+    # restricted commit 은 accepted/current authority 를 바꾼다. 같은 세션 card 캐시를
+    # 무효화해 이후 core_brain() 읽기가 demote 전 snapshot 을 반환하지 않게 한다(read-after-write).
+    service.invalidate_brain_card_cache()
     return _tool_result(result)
 
 
