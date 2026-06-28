@@ -63,6 +63,10 @@ spec:
             steps {
                 checkout scm
                 script {
+                    // Kubernetes 임시 Agent에서는 checkout 컨테이너와 빌드 컨테이너의 UID/GID가 달라
+                    // Git 2.35+ safe.directory 검증에 걸릴 수 있다. 현재 workspace만 신뢰 대상으로 등록한다.
+                    sh 'git config --global --add safe.directory "$WORKSPACE"'
+
                     // 짧은 커밋 해시 (이미지 태그로 사용)
                     env.GIT_SHORT = sh(
                         script: 'git rev-parse --short HEAD',
@@ -139,7 +143,7 @@ spec:
                             git config user.name "Jenkins CI"
 
                             echo "=== 이미지 태그 업데이트 ==="
-                            OLD_TAG=\$(grep -oP 'sha-[a-f0-9]+' ${env.GITOPS_PATH} | head -1)
+                            OLD_TAG=\$(grep -Eo 'sha-[a-f0-9]+' ${env.GITOPS_PATH} | head -1)
                             echo "이전 태그: \$OLD_TAG → 새 태그: ${env.IMAGE_TAG}"
 
                             sed -i "s|${env.REGISTRY}/${env.IMAGE_NAME}:sha-[a-f0-9]*|${env.IMAGE_FULL}|g" ${env.GITOPS_PATH}
@@ -172,14 +176,11 @@ spec:
             ✅ 배포 완료!
             이미지: ${env.IMAGE_FULL}
             ArgoCD가 변경을 감지해 자동 배포합니다.
-            확인: https://argocd.local
+            확인: https://llm-brain-server.tailbf74be.ts.net:9443/
             """
         }
         failure {
             echo "❌ 파이프라인 실패 - 로그를 확인하세요"
-        }
-        always {
-            cleanWs()
         }
     }
 }
