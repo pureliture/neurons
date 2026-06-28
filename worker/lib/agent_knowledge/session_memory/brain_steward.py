@@ -366,9 +366,7 @@ class BrainStewardService:
         self._guard_writable()
         proposal = self._load_proposal_of_kind(proposal_memory_id, "supersede")
         old_id = str(proposal.get("steward_target_memory_id") or "")
-        old = self.ledger.get_llm_brain_memory_card(old_id)
-        if old is None:
-            raise ValueError("unknown supersede target memory card")
+        old = self._load_current_target(old_id, what="supersede")
         # 교체 후보(proposal)를 accept 하면서 old card 를 superseded 로 atomically demote 한다.
         return LLMBrainMemoryService(self.ledger).supersede_accepted_card(
             old_card=old,
@@ -386,14 +384,12 @@ class BrainStewardService:
         self._guard_writable()
         proposal = self._load_proposal_of_kind(proposal_memory_id, "stale")
         target_id = str(proposal.get("steward_target_memory_id") or "")
-        target = self.ledger.get_llm_brain_memory_card(target_id)
-        if target is None:
-            raise ValueError("unknown stale target memory card")
-        if not _is_accepted(target):
-            raise ValueError("stale commit target is not an accepted card")
-        demoted = self.ledger.upsert_llm_brain_memory_card(commit_stale(target))
+        target = self._load_current_target(target_id, what="stale")
+        committed_at = datetime.now(timezone.utc).isoformat()
+        demoted = self.ledger.upsert_llm_brain_memory_card(commit_stale(target, timestamp=committed_at))
         # proposal 을 검토 큐에서 제거하기 위해 종료(committed) 상태로 전이한다. currentness=stale 은
-        # 유지되어 authority/recall lane 에는 들어가지 않는다.
+        # 유지되어 authority/recall lane 에는 들어가지 않는다. 다른 accepted card 와 일관되게
+        # approver/시각도 기록하고, audit feedback 과 같은 timestamp 를 쓴다.
         committed = dict(proposal)
         committed.update(
             {
@@ -401,6 +397,8 @@ class BrainStewardService:
                 "judgment_state": "none",
                 "status": "accepted",
                 "approval_state": "approved",
+                "approved_by": approved_by,
+                "approved_at": committed_at,
                 "steward_commit_state": "committed",
             }
         )
@@ -416,7 +414,7 @@ class BrainStewardService:
                 model_reason="stale proposal committed; target demoted to stale",
                 confidence=float(committed.get("confidence") or 0),
                 conflict_state="none",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=committed_at,
             )
         )
         return {
@@ -427,6 +425,16 @@ class BrainStewardService:
         }
 
     # -------------------------------------------------------------- internals
+
+    def _load_current_target(self, target_id: str, *, what: str) -> dict:
+        # commit 대상은 여전히 accepted + current 여야 한다. proposal 생성 후 target 이 이미
+        # stale/superseded 가 됐다면 오래된 proposal 로 새 authority 를 만들지 않도록 거부한다.
+        target = self.ledger.get_llm_brain_memory_card(target_id)
+        if target is None:
+            raise ValueError(f"unknown {what} target memory card")
+        if not _is_accepted(target) or str(target.get("currentness") or "") != "current":
+            raise ValueError(f"{what} commit target is not an accepted+current card")
+        return target
 
     def _load_proposal_of_kind(self, proposal_memory_id: str, kind: str) -> dict:
         card = self.ledger.get_llm_brain_memory_card(proposal_memory_id)

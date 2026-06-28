@@ -559,6 +559,55 @@ def test_supersede_commit_accepts_new_and_demotes_old(tmp_path):
     assert prop_id not in [i["memory_id"] for i in steward.review_queue_list(project=PROJECT)["items"]]
 
 
+def test_stale_committed_card_excluded_from_brain_query_recall(tmp_path):
+    from agent_knowledge.session_memory.brain_query import build_brain_query_response_v2
+
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger, allow_restricted=True)
+    target_id = _accept_card(ledger)["memory_id"]
+    prop = steward.stale_mark(memory_id=target_id, reason="stale 사유")["proposal"]["memory_id"]
+    steward.stale_commit(proposal_memory_id=prop, approved_by="op", decision_id="d")
+
+    demoted = ledger.get_llm_brain_memory_card(target_id)
+    resp = build_brain_query_response_v2(
+        brain_id=f"/project/{PROJECT}", query_intent="x", ledger_cards=[demoted]
+    )
+    # a stale-committed card must NOT resurface as recall evidence.
+    assert target_id not in [c["memory_id"] for c in resp["accepted"]]
+    assert target_id not in [c["memory_id"] for c in resp["current"]]
+
+
+def test_stale_commit_records_approver_and_timestamp(tmp_path):
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger, allow_restricted=True)
+    target_id = _accept_card(ledger)["memory_id"]
+    prop = steward.stale_mark(memory_id=target_id, reason="stale 사유")["proposal"]["memory_id"]
+    steward.stale_commit(proposal_memory_id=prop, approved_by="op", decision_id="d")
+    committed = ledger.get_llm_brain_memory_card(prop)
+    assert committed["approved_by"] == "op"
+    assert committed["approved_at"]
+
+
+def test_commit_rejects_non_current_target(tmp_path):
+    from agent_knowledge.session_memory.memory_promotion import commit_stale
+
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger, allow_restricted=True)
+    # supersede: target demoted to stale after the proposal exists → commit must refuse.
+    old_id = _accept_card(ledger)["memory_id"]
+    sup = steward.supersede_propose(old_memory_id=old_id, source_span=_supersede_span())["proposal"]["memory_id"]
+    ledger.upsert_llm_brain_memory_card(commit_stale(ledger.get_llm_brain_memory_card(old_id)))
+    with pytest.raises(ValueError):
+        steward.supersede_commit(proposal_memory_id=sup, approved_by="op", decision_id="d")
+
+    # stale: target already stale → commit must refuse (not re-stale a non-current card).
+    other_id = _accept_card(ledger, content_hash="sha256:other")["memory_id"]
+    st = steward.stale_mark(memory_id=other_id, reason="r")["proposal"]["memory_id"]
+    ledger.upsert_llm_brain_memory_card(commit_stale(ledger.get_llm_brain_memory_card(other_id)))
+    with pytest.raises(ValueError):
+        steward.stale_commit(proposal_memory_id=st, approved_by="op", decision_id="d")
+
+
 def test_commit_rejects_mismatched_proposal_kind(tmp_path):
     ledger = _ledger(tmp_path)
     steward = BrainStewardService(ledger, allow_restricted=True)
