@@ -34,24 +34,6 @@ from .mcp_tools import (
 )
 from .session_memory.brain_steward import StewardPermissionError
 
-# candidate / supersede proposal 이 받는 redacted source_span 입력 키.
-# dispatch 가 arguments 에서 이 키만 골라 steward 로 넘긴다.
-_STEWARD_SOURCE_SPAN_KEYS = (
-    "card_type",
-    "project",
-    "provider",
-    "scope",
-    "title",
-    "redacted_summary",
-    "summary",
-    "typed_payload",
-    "content_hash",
-    "source_ref",
-    "span_ref",
-    "confidence",
-    "confidence_basis",
-    "governance_tier",
-)
 _STEWARD_TOOL_NAMES = frozenset(
     {
         MEMORY_AUTHORITY_PACK_READ_TOOL_NAME,
@@ -237,10 +219,6 @@ def _call_tool(params: dict, service: KnowledgeSearchService) -> dict:
     return dispatch_tool_call(params, service)
 
 
-def _steward_source_span(arguments: dict) -> dict:
-    return {key: arguments[key] for key in _STEWARD_SOURCE_SPAN_KEYS if key in arguments}
-
-
 def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
     steward = service.brain_steward()
     if tool_name == MEMORY_AUTHORITY_PACK_READ_TOOL_NAME:
@@ -258,7 +236,7 @@ def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSe
         return _tool_result(result)
     if tool_name == MEMORY_CANDIDATE_CREATE_TOOL_NAME:
         result = steward.candidate_create(
-            source_span=_steward_source_span(arguments),
+            source_span=steward.select_source_span(arguments),
             mark_needs_review=bool(arguments.get("mark_needs_review", False)),
             review_reason=str(arguments.get("review_reason") or ""),
         )
@@ -272,7 +250,7 @@ def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSe
     if tool_name == MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME:
         result = steward.supersede_propose(
             old_memory_id=_require_non_empty_string(arguments, "old_memory_id", tool_name=tool_name),
-            source_span=_steward_source_span(arguments),
+            source_span=steward.select_source_span(arguments),
         )
         return _tool_result(result)
     # restricted tools: 기본 권한에서는 어떤 write 도 하지 않고 거부한다.
@@ -315,16 +293,8 @@ def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSe
             # 새 restricted tool 이 분기 없이 auto_accept 로직으로 흘러드는 것을 막는다.
             raise ValueError(f"unhandled steward tool: {tool_name}")
     except StewardPermissionError:
-        return _tool_result(
-            {
-                "schema_version": "brain_steward_restricted_denied.v1",
-                "tool": tool_name,
-                "permission": "denied",
-                "reason": "restricted_tool_requires_human_gate",
-                "write_performed": False,
-                "authoritative_memory_changed": False,
-            }
-        )
+        # denied 계약은 service 가 소유한다(M5). dispatch 는 그대로 전달만 한다.
+        return _tool_result(steward.restricted_denied_payload(tool_name))
     return _tool_result(result)
 
 

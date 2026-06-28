@@ -20,6 +20,7 @@ validation 규칙을 만들지 않는다.
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from .llm_brain_service import LLMBrainMemoryService
@@ -30,6 +31,7 @@ from .memory_card import (
 )
 from .memory_miner import build_memory_card_candidate_from_source_span
 from .memory_promotion import (
+    build_feedback_record,
     build_stale_proposal_card,
     commit_stale,
     mark_candidate_needs_review,
@@ -40,6 +42,25 @@ ACCEPTED_LIFECYCLE_STATES = frozenset({"accepted", "human_accepted", "auto_accep
 ACCEPTED_APPROVAL_STATES = frozenset({"approved", "auto_accepted"})
 
 STEWARD_PROPOSAL_PREFIX = "mem_steward_"
+
+# proposal tool 이 수용하는 redacted source_span 필드. wire 스키마(mcp_tools)와 함께 단일
+# 정의를 이룬다 — dispatch 가 별도 튜플을 들고 있지 않는다(M5).
+STEWARD_SOURCE_SPAN_KEYS = (
+    "card_type",
+    "project",
+    "provider",
+    "scope",
+    "title",
+    "redacted_summary",
+    "summary",
+    "typed_payload",
+    "content_hash",
+    "source_ref",
+    "span_ref",
+    "confidence",
+    "confidence_basis",
+    "governance_tier",
+)
 
 # read tool 응답에 절대 들어가면 안 되는 키. 안전한 projection 이면 애초에 등장하지 않지만,
 # 회귀 방지를 위해 명시적으로 거른다.
@@ -140,9 +161,40 @@ class BrainStewardService:
     위임이 열린다(기본 False).
     """
 
-    def __init__(self, ledger, *, allow_restricted: bool = False) -> None:
+    def __init__(
+        self,
+        ledger,
+        *,
+        allow_restricted: bool = False,
+        allow_auto_accept: bool = False,
+    ) -> None:
         self.ledger = ledger
-        self.allow_restricted = bool(allow_restricted)
+        # restricted 권한을 capability 별로 분리한다. review_commit 은 approve/reject/
+        # supersede_commit/stale_commit 을, auto_accept 는 가장 위험한 자동수락을 연다.
+        # auto_accept 는 review_commit 허용만으로는 열리지 않는다(별도 flag, 기본 False).
+        self.allow_review_commit = bool(allow_restricted)
+        self.allow_auto_accept = bool(allow_auto_accept)
+        # backward-compat alias.
+        self.allow_restricted = self.allow_review_commit
+
+    # --------------------------------------------------------- arg / denial
+
+    def select_source_span(self, arguments: Mapping[str, Any]) -> dict:
+        """raw arguments 에서 redacted source_span 필드만 골라낸다(service 가 소유)."""
+
+        return {key: arguments[key] for key in STEWARD_SOURCE_SPAN_KEYS if key in arguments}
+
+    def restricted_denied_payload(self, tool_name: str) -> dict:
+        """restricted tool 거부 wire 페이로드. denied 계약을 service 가 단독 소유한다(M5)."""
+
+        return {
+            "schema_version": "brain_steward_restricted_denied.v1",
+            "tool": tool_name,
+            "permission": "denied",
+            "reason": "restricted_tool_requires_human_gate",
+            "write_performed": False,
+            "authoritative_memory_changed": False,
+        }
 
     # ------------------------------------------------------------------ read
 
@@ -283,6 +335,8 @@ class BrainStewardService:
             candidate, rejected_by=rejected_by, decision_id=decision_id, reason=reason
         )
         stored = self.ledger.upsert_llm_brain_memory_card(rejection["rejected_card"])
+        # audit: authority 를 바꾸는 restricted 결정에 feedback record 를 남긴다(M4).
+        self.ledger.upsert_llm_brain_feedback_record(rejection["feedback_record"])
         return {
             "schema_version": "brain_steward_candidate_rejection.v1",
             "canonical_write_performed": True,
@@ -296,7 +350,7 @@ class BrainStewardService:
         evaluation: Mapping[str, Any],
         operator_approval_ref: str,
     ) -> dict:
-        self._guard_restricted("memory_candidate_auto_accept")
+        self._guard_restricted("memory_candidate_auto_accept", capability="auto_accept")
         self._guard_writable()
         candidate = self._load_pending_candidate(candidate_memory_id)
         return LLMBrainMemoryService(self.ledger).accept_auto_policy_candidate(
@@ -351,6 +405,20 @@ class BrainStewardService:
             }
         )
         stored_proposal = self.ledger.upsert_llm_brain_memory_card(committed)
+        # audit: stale 확정에 feedback record 를 남긴다(M4).
+        self.ledger.upsert_llm_brain_feedback_record(
+            build_feedback_record(
+                candidate=committed,
+                decision_id=decision_id,
+                proposed_status="needs_review",
+                final_status="accepted",
+                user_action="approve",
+                model_reason="stale proposal committed; target demoted to stale",
+                confidence=float(committed.get("confidence") or 0),
+                conflict_state="none",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+        )
         return {
             "schema_version": "brain_steward_stale_commit.v1",
             "canonical_write_performed": True,
@@ -370,10 +438,11 @@ class BrainStewardService:
             raise ValueError(f"proposal is not a {kind} proposal")
         return card
 
-    def _guard_restricted(self, tool_name: str) -> None:
-        if not self.allow_restricted:
+    def _guard_restricted(self, tool_name: str, *, capability: str = "review_commit") -> None:
+        allowed = self.allow_auto_accept if capability == "auto_accept" else self.allow_review_commit
+        if not allowed:
             raise StewardPermissionError(
-                f"{tool_name} is restricted and requires a human/manual gate"
+                f"{tool_name} is restricted ({capability}) and requires a human/manual gate"
             )
 
     def _guard_writable(self) -> None:
@@ -444,7 +513,9 @@ class BrainStewardService:
             result["target_memory_id"] = target_memory_id
         return assert_public_safe(result, "proposal_result")
 
-    def _authority_item(self, card: Mapping[str, Any]) -> dict:
+    def _base_projection(self, card: Mapping[str, Any]) -> dict:
+        """authority/review projection 이 공유하는 안전 필드. raw ref/payload 는 절대 포함 안 함."""
+
         return {
             "memory_id": _text(card, "memory_id"),
             "card_type": _text(card, "card_type"),
@@ -459,37 +530,25 @@ class BrainStewardService:
             "currentness": _text(card, "currentness"),
             "governance_tier": _text(card, "governance_tier"),
             "confidence": card.get("confidence"),
-            "confidence_basis": _text(card, "confidence_basis"),
             "supersedes": _str_list(card, "supersedes"),
-            "superseded_by": _str_list(card, "superseded_by"),
             "source_ref_count": _count(card, "source_refs"),
             "evidence_hash_count": _count(card, "evidence_hashes"),
         }
 
+    def _authority_item(self, card: Mapping[str, Any]) -> dict:
+        return {
+            **self._base_projection(card),
+            "confidence_basis": _text(card, "confidence_basis"),
+            "superseded_by": _str_list(card, "superseded_by"),
+        }
+
     def _review_item(self, card: Mapping[str, Any]) -> dict:
         capsule = card.get("reason_capsule")
-        reason = ""
-        if isinstance(capsule, Mapping):
-            reason = str(capsule.get("model_reason") or "")
+        reason = str(capsule.get("model_reason") or "") if isinstance(capsule, Mapping) else ""
         return {
-            "memory_id": _text(card, "memory_id"),
+            **self._base_projection(card),
             "proposal_kind": str(card.get("steward_proposal_kind") or "candidate"),
             "target_memory_id": _text(card, "steward_target_memory_id"),
-            "card_type": _text(card, "card_type"),
-            "scope": _text(card, "scope"),
-            "project": _text(card, "project"),
-            "provider": _text(card, "provider"),
-            "title": _text(card, "title"),
-            "summary": _text(card, "summary"),
-            "lifecycle_state": _text(card, "lifecycle_state"),
             "judgment_state": _text(card, "judgment_state"),
-            "approval_state": _text(card, "approval_state"),
-            "currentness": _text(card, "currentness"),
-            "freshness": _text(card, "freshness"),
-            "governance_tier": _text(card, "governance_tier"),
-            "confidence": card.get("confidence"),
             "reason": reason,
-            "supersedes": _str_list(card, "supersedes"),
-            "source_ref_count": _count(card, "source_refs"),
-            "evidence_hash_count": _count(card, "evidence_hashes"),
         }

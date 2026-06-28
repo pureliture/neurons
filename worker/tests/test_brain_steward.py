@@ -406,6 +406,51 @@ def test_restricted_approve_promotes_only_when_explicitly_enabled(tmp_path):
     assert promoted["accepted_card"]["memory_id"] in pack_ids
 
 
+def test_auto_accept_needs_its_own_capability_not_review_commit(tmp_path):
+    ledger = _ledger(tmp_path)
+    # review_commit on, auto_accept off → auto_accept stays blocked.
+    review_only = BrainStewardService(ledger, allow_restricted=True, allow_auto_accept=False)
+    cand_id = review_only.candidate_create(source_span=_span())["proposal"]["memory_id"]
+    with pytest.raises(StewardPermissionError):
+        review_only.candidate_auto_accept(
+            candidate_memory_id=cand_id, evaluation={}, operator_approval_ref="op"
+        )
+    # approve (a review_commit capability) is allowed under the same flags.
+    review_only.candidate_approve(candidate_memory_id=cand_id, approved_by="op", decision_id="d")
+
+    # explicitly enabling auto_accept passes the gate (no permission error).
+    full = BrainStewardService(ledger, allow_restricted=True, allow_auto_accept=True)
+    cand2 = full.candidate_create(source_span=_span(content_hash="sha256:aa"))["proposal"]["memory_id"]
+    result = full.candidate_auto_accept(
+        candidate_memory_id=cand2, evaluation={}, operator_approval_ref="op"
+    )
+    assert isinstance(result, dict)  # got past the gate (may be a blocked-policy result, not a raise)
+
+
+def test_commits_write_audit_feedback_records(tmp_path):
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger, allow_restricted=True)
+
+    # stale commit leaves an audit feedback record.
+    stale_target = _accept_card(ledger)["memory_id"]
+    stale_prop = steward.stale_mark(memory_id=stale_target, reason="stale 사유")["proposal"]["memory_id"]
+    steward.stale_commit(proposal_memory_id=stale_prop, approved_by="op", decision_id="d_stale")
+    assert ledger.list_llm_brain_feedback_records(limit=100)
+
+    # reject also persists a feedback record.
+    cand_id = steward.candidate_create(source_span=_span(content_hash="sha256:rj"))["proposal"]["memory_id"]
+    steward.candidate_reject(candidate_memory_id=cand_id, rejected_by="op", decision_id="d_rej", reason="no")
+    rej_records = [r for r in ledger.list_llm_brain_feedback_records(limit=100) if r["final_status"] == "rejected"]
+    assert rej_records
+
+
+def test_knowledge_service_auto_accept_flag_defaults_closed(tmp_path):
+    service = _service(tmp_path)  # no auto_accept flag
+    steward = service.brain_steward()
+    assert steward.allow_auto_accept is False
+    assert steward.allow_review_commit is False
+
+
 def test_proposal_persist_guard_refuses_to_overwrite_accepted(tmp_path):
     ledger = _ledger(tmp_path)
     steward = BrainStewardService(ledger)
@@ -522,6 +567,46 @@ def test_commit_rejects_mismatched_proposal_kind(tmp_path):
         steward.stale_commit(proposal_memory_id=cand_id, approved_by="op", decision_id="d")
     with pytest.raises(ValueError):
         steward.supersede_commit(proposal_memory_id=cand_id, approved_by="op", decision_id="d")
+
+
+def test_projection_field_sets_are_stable(tmp_path):
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger)
+    _accept_card(ledger)
+    steward.candidate_create(source_span=_span(content_hash="sha256:proj"))
+
+    auth_item = steward.authority_pack_read(project=PROJECT)["items"][0]
+    assert set(auth_item) == {
+        "memory_id", "card_type", "scope", "project", "provider", "title", "summary",
+        "lifecycle_state", "approval_state", "freshness", "currentness", "governance_tier",
+        "confidence", "confidence_basis", "supersedes", "superseded_by",
+        "source_ref_count", "evidence_hash_count",
+    }
+    review_item = next(
+        i for i in steward.review_queue_list(project=PROJECT)["items"]
+        if i["proposal_kind"] == "candidate"
+    )
+    assert set(review_item) == {
+        "memory_id", "proposal_kind", "target_memory_id", "card_type", "scope", "project",
+        "provider", "title", "summary", "lifecycle_state", "judgment_state", "approval_state",
+        "currentness", "freshness", "governance_tier", "confidence", "reason", "supersedes",
+        "source_ref_count", "evidence_hash_count",
+    }
+
+
+def test_service_owns_source_span_selection_and_denial(tmp_path):
+    steward = BrainStewardService(_ledger(tmp_path))
+    # source_span 필드 선택을 service 가 소유한다(dispatch 의 중복 튜플 제거).
+    selected = steward.select_source_span(
+        {"card_type": "status", "project": "p", "junk": 1, "limit": 5}
+    )
+    assert "junk" not in selected and "limit" not in selected
+    assert selected["card_type"] == "status" and selected["project"] == "p"
+    # denied 페이로드도 service 가 소유한다.
+    denied = steward.restricted_denied_payload("memory_candidate_approve")
+    assert denied["permission"] == "denied"
+    assert denied["write_performed"] is False
+    assert denied["tool"] == "memory_candidate_approve"
 
 
 def test_dispatch_round_trip_read_and_proposal(tmp_path):
