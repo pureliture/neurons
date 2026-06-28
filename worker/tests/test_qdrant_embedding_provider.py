@@ -8,6 +8,9 @@ EmbeddingProvider protocol end to end.
 
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 
 from agent_knowledge.rag_ingress.index_backend import IndexStatus
@@ -95,6 +98,46 @@ def test_build_provider_with_injected_embed_fn_uses_env_dim_no_network():
     assert provider.size == 16
     assert provider.model == "bge-m3"
     assert len(provider.embed("abc")) == 16
+
+
+def test_live_openai_client_uses_bounded_timeout(monkeypatch):
+    captured = {}
+
+    class _EmbeddingData:
+        embedding = [1.0, 2.0, 3.0]
+
+    class _EmbeddingResponse:
+        data = [_EmbeddingData()]
+
+    class _Embeddings:
+        def create(self, *, model, input):
+            captured["create_model"] = model
+            captured["input"] = input
+            return _EmbeddingResponse()
+
+    class _OpenAI:
+        def __init__(self, *, base_url, api_key, timeout):
+            captured["base_url"] = base_url
+            captured["api_key"] = api_key
+            captured["timeout"] = timeout
+            self.embeddings = _Embeddings()
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=_OpenAI))
+    monkeypatch.setenv("LLM_BRAIN_EMBEDDING_TIMEOUT_SECONDS", "7.5")
+
+    provider = build_openai_embedding_provider(
+        environ={
+            "LLM_BRAIN_EMBEDDING_MODEL": "bge-m3",
+            "LLM_BRAIN_EMBEDDING_DIM": "3",
+            "LLM_BRAIN_EMBEDDING_BASE_URL": "http://embedding/v1",
+            "LLM_BRAIN_EMBEDDING_API_KEY": "test-key",
+        },
+    )
+
+    assert provider.embed("bounded") == [1.0, 2.0, 3.0]
+    assert captured["timeout"] == 7.5
+    assert captured["base_url"] == "http://embedding/v1"
+    assert captured["create_model"] == "bge-m3"
 
 
 def test_build_provider_rejects_unknown_embedding_provider():

@@ -101,6 +101,8 @@ def build_openai_embedding_provider(
 
 
 def _openai_embed_fn(*, model: str, base_url: str, api_key: str) -> EmbedFn:
+    import os
+
     if not model:
         raise SearchableMirrorUnavailable(
             "embedding model not configured (set LLM_BRAIN_EMBEDDING_MODEL)"
@@ -111,7 +113,13 @@ def _openai_embed_fn(*, model: str, base_url: str, api_key: str) -> EmbedFn:
         raise SearchableMirrorUnavailable(
             "openai client is not installed; install the searchable mirror dependencies"
         ) from exc
-    client = OpenAI(base_url=base_url or None, api_key=api_key or "")
+    try:
+        timeout_seconds = float(os.environ.get("LLM_BRAIN_EMBEDDING_TIMEOUT_SECONDS", "30"))
+    except ValueError:
+        timeout_seconds = 30.0
+    if timeout_seconds <= 0:
+        timeout_seconds = 30.0
+    client = OpenAI(base_url=base_url or None, api_key=api_key or "", timeout=timeout_seconds)
 
     def _embed(text: str) -> list[float]:
         response = client.embeddings.create(model=model, input=text)

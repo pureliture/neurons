@@ -1,7 +1,6 @@
 # session-memory / ledger worker 컨테이너 (Modular Monolith 단일 컨테이너).
-# 호스트 cron + bare python3 배포를 대체. ledger(builder)·3 GC·backfill을 supercronic
-# 스케줄로 실행. ledger 엔진은 NEURON_LEDGER_PG_DSN으로 PostgreSQL. RAGFlow는
-# host.docker.internal. requirements.md §6: RAGFlow와 분리된 별도 compose project.
+# 호스트 cron + bare python3 배포를 대체. ledger(builder)·3 GC·backfill을 스케줄로
+# 실행. session-memory projection은 CouchDB source에서 Qdrant searchable mirror로 보낸다.
 FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -10,11 +9,11 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 # 스케줄링은 entrypoint의 경량 bash 루프(외부 cron 바이너리 의존 없음).
-# agent_knowledge 패키지 + psycopg 설치(pip install . → PYTHONPATH 불필요).
+# agent_knowledge 패키지 + runtime 의존성 설치(pip install . → PYTHONPATH 불필요).
 COPY pyproject.toml ./
 COPY lib ./lib
 RUN pip install --no-cache-dir . \
-    && pip install --no-cache-dir "psycopg[binary]"
+    && pip install --no-cache-dir "psycopg[binary]" "qdrant-client>=1.10" "openai>=1.0"
 
 COPY deploy/session-memory/ ./deploy/
 RUN chmod +x deploy/entrypoint.sh deploy/build-once.sh
