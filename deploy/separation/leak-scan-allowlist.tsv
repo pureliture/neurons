@@ -1,0 +1,2 @@
+# label<TAB>path-glob — known-synthetic fixtures exempt from leak-scan (no private values)
+openai-key	src/test/java/com/local/ragingressqueue/ingest/domain/validation/RedactionGuardTest.java

@@ -135,14 +135,23 @@ leak-scan green을 push 전 게이트로 강제(substitute evidence). 사적 pat
   매니페스트 + 이동 목록.
 - **M5 history rewrite dry-run (main)** — throwaway clone에서 rewrite + 전-히스토리
   scan green + diff 요약. **push 없음.** Done: dry-run clone 0건 evidence.
-- **M6 [사람 게이트·비가역] cutover** — clean main force-push → fork/캐시 확인 →
-  Tailscale rename 리마인드. Done: 사용자 승인 + push 완료 + 후속 확인.
+- **M6 [evidence-gated auto-cutover·비가역] cutover** — clean main force-push →
+  fork 자동 점검 → Tailscale rename 리마인드. 사용자 사전 승인(straight-through)으로
+  per-milestone 정지는 제거하되, **force-push는 아래 증거가 전부 green일 때만** 자동
+  실행하고 하나라도 실패하면 정지한다:
+  (1) M5 throwaway clone 전수 leak-scan(tree+history) == 0,
+  (2) rewrite 전 main의 로컬 backup bundle 생성(공개 push 금지),
+  (3) clean throwaway clone에서만 rewrite,
+  (4) push 후 fork 존재 자동 점검.
+  Done: 4개 게이트 green + force-push 완료 + fork 보고.
 - **M7 정책문서 re-land** — 6fc366b → clean main PR. Done: PR 머지.
 - **후속(비대상·deferred)** — 신규 개발 브랜치 unique 커밋을 clean main 위로 커밋별
   스캔 후 cherry-pick.
 
-agentic-execution은 **M1~M5까지(전부 reversible/로컬)** act→observe→adjust로 수행하고,
-**M6에서 정지**하여 사람 승인을 받는다. M6/M7은 게이트 통과 후 진행.
+agentic-execution은 **M1~M6를 멈춤 없이** act→observe→adjust로 수행한다(사용자
+straight-through 승인). 비가역 M6 force-push는 사람-승인 일시정지 대신 위 4개 **증거
+게이트**로 보호하며, 게이트 실패 시에만 정지한다. Tailscale rename·GitHub 캐시 purge는
+루프 밖 사용자 작업으로 남는다.
 
 ## Open Questions
 

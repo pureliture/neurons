@@ -58,6 +58,9 @@
     {"match": "worker/tests/test_llm_brain_ontology_completion_m2.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
     {"match": "worker/tests/test_llm_brain_portable_archive.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
     {"match": "worker/eval/golden/neurons.golden.draft.json", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "worker/tests/test_context_authority_pack.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "worker/tests/test_brain_steward.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "docs/specs/2026-06-17-ci-quality-signal/milestones.md", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
 
     {"match": "scripts/live-ragflow-verify.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
     {"match": "scripts/__pycache__/**", "disposition": "sanitize-then-public", "mechanic": "gitignore"}

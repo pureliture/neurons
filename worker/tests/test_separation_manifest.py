@@ -91,6 +91,10 @@ def test_exact_rules_point_at_real_files() -> None:
     stale = [
         rule["match"]
         for rule in _load_manifest()["rules"]
-        if not any(ch in rule["match"] for ch in "*?[") and rule["match"] not in tracked
+        # invert-path rules intentionally reference files removed from HEAD (kept only
+        # for the history-rewrite path list), so they are exempt from the stale check.
+        if rule["mechanic"] != "invert-path"
+        and not any(ch in rule["match"] for ch in "*?[")
+        and rule["match"] not in tracked
     ]
     assert not stale, "manifest exact rules reference missing files: " + ", ".join(sorted(stale))

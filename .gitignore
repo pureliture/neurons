@@ -6,3 +6,10 @@ graphify-out/
 .env.*
 !.env.example
 secrets/
+
+# build artifacts
+__pycache__/
+*.pyc
+
+# separation: private scan patterns (runtime-only, never commit)
+*private-patterns*.tsv

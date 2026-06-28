@@ -1,0 +1,39 @@
+name: separation-leak-scan
+
+# Fail-closed public/private boundary gate. The private pattern list is injected as a
+# repository secret (SEPARATION_LEAK_PATTERNS) and is never committed. When the secret
+# is absent the job is a no-op so forks/first-run do not hard-fail; set the secret to
+# activate enforcement.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  leak-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: write runtime pattern file from secret
+        id: patterns
+        env:
+          PATTERNS: ${{ secrets.SEPARATION_LEAK_PATTERNS }}
+        run: |
+          if [ -z "${PATTERNS}" ]; then
+            echo "SEPARATION_LEAK_PATTERNS secret not set; skipping leak-scan." >&2
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf '%s' "${PATTERNS}" > "${RUNNER_TEMP}/separation-private-patterns.tsv"
+          echo "active=true" >> "$GITHUB_OUTPUT"
+      - name: scan working tree (fail-closed)
+        if: steps.patterns.outputs.active == 'true'
+        run: |
+          python3 scripts/separation_leak_scan.py \
+            --patterns "${RUNNER_TEMP}/separation-private-patterns.tsv" \
+            --root . --mode tree \
+            --allowlist deploy/separation/leak-scan-allowlist.tsv

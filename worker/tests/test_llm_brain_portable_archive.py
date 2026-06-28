@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tarfile
 from pathlib import Path
 
@@ -80,7 +81,8 @@ def test_llm_brain_portable_archive_specs_redact_private_workstation_paths(tmp_p
         spec_members = [name for name in tar.getnames() if name.startswith("specs/llm-brain-core-v1/")]
         spec_blob = "\n".join(tar.extractfile(name).read().decode("utf-8") for name in spec_members)
 
-    assert "/Users/example" not in spec_blob
+    # exported specs must never leak the operator's real workstation home path.
+    assert os.path.expanduser("~") not in spec_blob
 
 
 def test_llm_brain_portable_extract_tar_zst_uses_real_temp_path(tmp_path: Path, monkeypatch):
