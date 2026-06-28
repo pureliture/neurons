@@ -135,8 +135,9 @@ spec:
                         passwordVariable: 'GIT_TOKEN'
                     )]) {
                         sh """
-                            echo "=== neurons-ops 레포 클론 ==="
-                            git clone https://\${GIT_USER}:\${GIT_TOKEN}@github.com/pureliture/neurons-ops.git /tmp/neurons-ops
+                            echo "=== neurons-ops 레포 클론 (${env.GITOPS_BRANCH}) ==="
+                            rm -rf /tmp/neurons-ops
+                            git clone --branch ${env.GITOPS_BRANCH} --single-branch https://\${GIT_USER}:\${GIT_TOKEN}@github.com/pureliture/neurons-ops.git /tmp/neurons-ops
                             cd /tmp/neurons-ops
 
                             git config user.email "jenkins@k3s-master-01"
