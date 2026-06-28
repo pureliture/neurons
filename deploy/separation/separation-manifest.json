@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "_doc": "Executable projection of docs/public-private-separation.md. Each tracked path resolves to the most-specific matching rule (exact > longer glob > shorter glob). disposition: public | private-neurons-ops | sanitize-then-public. mechanic: keep | replace-text | invert-path | env-stub | gitignore. New tracked files outside a rule fail the contract test (fail-closed). Real private VALUES are never stored here; private literals live in the runtime-injected scan pattern list, not in this manifest.",
+  "dispositions": ["public", "private-neurons-ops", "sanitize-then-public"],
+  "mechanics": ["keep", "replace-text", "invert-path", "env-stub", "gitignore"],
+  "rules": [
+    {"match": "src/**", "disposition": "public", "mechanic": "keep"},
+    {"match": "worker/**", "disposition": "public", "mechanic": "keep"},
+    {"match": "docs/**", "disposition": "public", "mechanic": "keep"},
+    {"match": "specs/**", "disposition": "public", "mechanic": "keep"},
+    {"match": "scripts/**", "disposition": "public", "mechanic": "keep"},
+    {"match": "deploy/**", "disposition": "public", "mechanic": "keep"},
+    {"match": ".github/**", "disposition": "public", "mechanic": "keep"},
+
+    {"match": ".env.example", "disposition": "sanitize-then-public", "mechanic": "env-stub"},
+    {"match": ".gitignore", "disposition": "public", "mechanic": "keep"},
+    {"match": "AGENTS.md", "disposition": "public", "mechanic": "keep"},
+    {"match": "CLAUDE.md", "disposition": "public", "mechanic": "keep"},
+    {"match": "GEMINI.md", "disposition": "public", "mechanic": "keep"},
+    {"match": "README.md", "disposition": "public", "mechanic": "keep"},
+    {"match": "build.gradle", "disposition": "public", "mechanic": "keep"},
+    {"match": "settings.gradle", "disposition": "public", "mechanic": "keep"},
+    {"match": "Dockerfile", "disposition": "public", "mechanic": "keep"},
+    {"match": "compose.yaml", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "Jenkinsfile", "disposition": "private-neurons-ops", "mechanic": "invert-path"},
+
+    {"match": "docs/superpowers/**", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "docs/requirements.md", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "docs/rag-ingress-queue-architecture.html", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+
+    {"match": "docs/runbooks/LLM_BRAIN_CORE_V1_LOCAL_OPS.md", "disposition": "private-neurons-ops", "mechanic": "invert-path"},
+    {"match": "docs/runbooks/2026-05-17-ubuntu-live-ragflow-verification.md", "disposition": "private-neurons-ops", "mechanic": "invert-path"},
+    {"match": "docs/runbooks/2026-05-17-ubuntu-runtime-smoke.md", "disposition": "private-neurons-ops", "mechanic": "invert-path"},
+    {"match": "docs/runbooks/agent-memory-cleanup-readiness.md", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "docs/runbooks/rag-ingress-queue-operator-runbook.md", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+
+    {"match": "docs/architecture/ledger-pg-cutover-dryrun-evidence.md", "disposition": "private-neurons-ops", "mechanic": "invert-path"},
+    {"match": "docs/architecture/2026-06-12-nats-at-least-once-vs-lease.md", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "docs/architecture/ledger-review-deepdive-20260614.html", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "docs/architecture/ledger-review-deepdive-20260617-couchdb-transcript-source.html", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "docs/architecture/ledger-review-initial-20260614.html", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+
+    {"match": "docs/specs/2026-06-27-neurons-k3s-migration/cutover-goal-evidence.md", "disposition": "private-neurons-ops", "mechanic": "invert-path"},
+    {"match": "docs/specs/2026-06-27-neurons-k3s-migration/live-canary-evidence.md", "disposition": "private-neurons-ops", "mechanic": "invert-path"},
+    {"match": "docs/specs/2026-06-27-neurons-k3s-migration/dry-run-evidence.md", "disposition": "private-neurons-ops", "mechanic": "invert-path"},
+    {"match": "docs/specs/2026-06-27-neurons-k3s-migration/milestones.md", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+
+    {"match": "specs/llm-brain-core-v1/implementation-matrix.md", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "specs/llm-brain-bulk-semantic-lane/milestones.md", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "specs/context-authority-roadmap/roadmap.md", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "specs/context-authority-roadmap/milestones.md", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+
+    {"match": "worker/deploy/session-memory/compose.yaml", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "worker/deploy/session-memory/build-once.sh", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "worker/deploy/session-memory/backfill.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "worker/deploy/session-memory/gc-run.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "worker/lib/agent_knowledge/rag_ingress/qdrant_backfill_cli.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "worker/tests/test_llm_brain_ontology_completion_m2.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "worker/tests/test_llm_brain_portable_archive.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "worker/eval/golden/neurons.golden.draft.json", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+
+    {"match": "scripts/live-ragflow-verify.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "scripts/__pycache__/**", "disposition": "sanitize-then-public", "mechanic": "gitignore"}
+  ]
+}
