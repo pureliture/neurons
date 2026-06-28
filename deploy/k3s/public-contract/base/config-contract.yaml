@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: neurons-k3s-public-contract
+  namespace: neurons
+  labels:
+    app.kubernetes.io/part-of: neurons
+    app.kubernetes.io/managed-by: neurons-ops
+    neurons.openclaw.io/public-contract: "true"
+data:
+  primary-runtime: local-ubuntu-k3s
+  source-runtime: ubuntu-compose
+  cutover-mode: compose-maintained-k3s-canary
+  coexistence: short-safety-window
+  secret-owner: neurons-ops
+  network-boundary: tailscale-subnet-router-limited-routes
+  stateful-gate: backup-restore-rehearsal-required
+  workqueue-isolation-gate: shadow-stream-or-separate-durable-required
+  max-canary-window-hours: "24"
+  no-canary-decision-action: abort-to-compose-primary
+  network-policy-gate: required-before-promotion
+  kube-apiserver-access-gate: private-ops-operator-allowlist-required
+  live-apply-gate: explicit-approval-required
+  compose-retire-gate: explicit-approval-required

@@ -1,0 +1,76 @@
+version: 1
+privateRepo: neurons-ops
+publicRepo: neurons
+approach: public-contract-private-ops-overlay
+requiredPrivateInputs:
+  images:
+    description: immutable image references or build provenance for each workload family
+    publicSafe: false
+  env:
+    description: real runtime environment values and config bindings
+    publicSafe: false
+  credentialRefs:
+    description: cluster credential references owned by the private overlay
+    publicSafe: false
+  persistentStorage:
+    description: storage class, PVC sizing, retention, and restore targets
+    publicSafe: false
+  tailscale:
+    description: subnet routes, route approval state, ACL or grants policy, allowed operators, and kube-apiserver access scope
+    publicSafe: false
+  networkPolicy:
+    description: namespace ingress/egress policy, stateful service reachability limits, and kube-apiserver operator allowlist
+    publicSafe: false
+  workQueueIsolation:
+    description: shadow stream, separate durable, or worker-disabled canary mode that avoids live durable double-consumption
+    publicSafe: false
+  backupRestore:
+    description: backup locations, restore rehearsal record, rollback record, and approval evidence
+    publicSafe: false
+  canaryRouting:
+    description: canary endpoint, traffic choice, health checks, and promotion switch
+    publicSafe: false
+publicOutputs:
+  workloadInventory: deploy/k3s/public-contract/workload-inventory.yaml
+  validationContract: public tests and redacted runbooks
+  safeDocs:
+    - docs/specs/2026-06-27-neurons-k3s-migration/requirements.md
+    - docs/specs/2026-06-27-neurons-k3s-migration/design.md
+    - docs/specs/2026-06-27-neurons-k3s-migration/backup-restore-rehearsal.md
+    - docs/specs/2026-06-27-neurons-k3s-migration/canary-cutover-runbook.md
+forbiddenPublicData:
+  - real hostnames
+  - private filesystem paths
+  - token values
+  - cookie values
+  - bearer values
+  - api key values
+  - raw transcript bodies
+  - raw dataset identifiers
+  - raw document identifiers
+gates:
+  dryRun:
+    client: required before any cluster submission
+    server: requires explicit live-cluster approval
+  backupRestore:
+    requiredBeforePrimaryCutover: true
+    evidence: redacted counts, readiness, schema/index readiness, representative query behavior
+  canary:
+    workQueueIsolation: required
+    health: required
+    apiMcpBehavior: required
+    workerBehavior: required
+    statefulReadiness: required
+    readWriteCanary: explicit approval only
+    maxCanaryWindowHours: 24
+    noDecisionAction: abort-to-compose-primary
+  network:
+    networkPolicy: required before promotion
+    kubeApiserverAccess: operator allowlist required
+    directStatefulServiceAccess: forbidden by default
+  rollback:
+    composePrimaryReturn: required
+    restoreRehearsal: required
+  promotion:
+    explicitApproval: required
+    composeRetireAfterPostcheck: required

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,51 @@ from .ledger_ingress_mixin import IngressStatusMixin
 from .ledger_gc_safety_mixin import GcSafetyMixin
 from .ledger_memory_promotion_mixin import MemoryPromotionMixin
 from .ledger_native_memory_mixin import NativeMemoryMixin
+
+
+_READ_ONLY_SQL_KEYWORD_RE = re.compile(
+    r"^\s*(?:(?:--[^\n]*\n)|(?:/\*.*?\*/))*\s*([A-Za-z]+)",
+    re.DOTALL,
+)
+_READ_ONLY_SQL_ALLOWED_KEYWORDS = {"EXPLAIN", "PRAGMA", "SELECT"}
+
+
+def _read_only_sql_allowed(sql: str) -> bool:
+    match = _READ_ONLY_SQL_KEYWORD_RE.match(sql)
+    if match is None:
+        return not sql.strip()
+    return match.group(1).upper() in _READ_ONLY_SQL_ALLOWED_KEYWORDS
+
+
+class _ReadOnlyLedgerConnection:
+    """Fail-closed guard for server-backed read-only ledger connections."""
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    def __enter__(self):
+        entered = self._connection.__enter__()
+        if entered is not None:
+            self._connection = entered
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return self._connection.__exit__(exc_type, exc, tb)
+
+    def __getattr__(self, name: str):
+        return getattr(self._connection, name)
+
+    def execute(self, sql: str, params=None):
+        if not _read_only_sql_allowed(sql):
+            raise sqlite3.OperationalError("read-only ledger는 write SQL을 허용하지 않습니다")
+        if params is None:
+            return self._connection.execute(sql)
+        return self._connection.execute(sql, params)
+
+    def executescript(self, script: str) -> None:
+        if script.strip():
+            raise sqlite3.OperationalError("read-only ledger는 SQL script execution을 허용하지 않습니다")
+        return self._connection.executescript(script)
 
 
 class _LedgerTransaction:
@@ -369,11 +415,12 @@ class Ledger(
                     except OSError:
                         pass
             return
-        self.path = self._snapshot_read_only_copy(self.path)
+        if file_backed:
+            self.path = self._snapshot_read_only_copy(self.path)
 
     @classmethod
     def open_read_only(cls, path: Path | str) -> "Ledger":
-        if not Path(path).exists():
+        if not Path(path).exists() and not os.environ.get("NEURON_LEDGER_PG_DSN", ""):
             raise ValueError(f"ledger path does not exist: {path}")
         return cls(path, read_only=True)
 
@@ -411,7 +458,10 @@ class Ledger(
         # 동일). C에서 PostgreSQL 어댑터를 주입하면 이 한 점에서 엔진이 바뀐다.
         if self._db_adapter is None:
             self._db_adapter = SqliteLedgerDbAdapter(self.path, read_only=self.read_only)
-        return self._db_adapter.connect(configure_journal=configure_journal)
+        connection = self._db_adapter.connect(configure_journal=configure_journal)
+        if self.read_only:
+            return _ReadOnlyLedgerConnection(connection)
+        return connection
 
     @contextmanager
     def _transaction(self):
@@ -1904,6 +1954,3 @@ class Ledger(
                 (data["evidence_id_hash"],),
             ).fetchone()
         return dict(row) if row is not None else {}
-
-
-

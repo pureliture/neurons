@@ -130,6 +130,99 @@ def test_ledger_read_only_snapshot_rejects_writes_without_mutating_source(tmp_pa
     assert Ledger(path).get_by_knowledge_id("kn_ro")["authorization_status"] == "active"
 
 
+def test_ledger_read_only_connection_blocks_direct_write_sql(tmp_path: Path):
+    path = _private_dir(tmp_path) / "ledger.sqlite"
+    ledger = Ledger(path)
+    ledger.upsert_prepared(
+        knowledge_id="kn_ro_sql",
+        content_hash="sha256:ro-sql",
+        provider="codex",
+        project=PROJECT,
+        domain="agent_memory",
+        type="runtime_evidence",
+        title="Read only SQL",
+        summary="Read only SQL",
+    )
+
+    read_only = Ledger.open_read_only(path)
+
+    with pytest.raises(sqlite3.OperationalError, match="read-only ledger"):
+        with read_only._connect() as connection:
+            connection.execute(
+                "UPDATE knowledge_items SET authorization_status = ? WHERE knowledge_id = ?",
+                ("disabled", "kn_ro_sql"),
+            )
+
+    assert Ledger(path).get_by_knowledge_id("kn_ro_sql")["authorization_status"] == "active"
+
+
+def test_server_backed_read_only_ledger_does_not_snapshot_path(tmp_path: Path):
+    class ServerBackedAdapter:
+        is_file_backed = False
+
+    path = tmp_path / "missing" / "ledger.sqlite"
+
+    ledger = Ledger(path, read_only=True, db_adapter=ServerBackedAdapter())
+
+    assert ledger.path == path
+
+
+def test_server_backed_read_only_ledger_blocks_direct_write_sql(tmp_path: Path):
+    class FakeResult:
+        def fetchone(self):
+            return {"one": 1}
+
+    class ServerBackedConnection:
+        def __init__(self):
+            self.executed: list[str] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql: str, params=None):
+            self.executed.append(sql)
+            return FakeResult()
+
+        def executescript(self, script: str):
+            self.executed.append(script)
+
+    class ServerBackedAdapter:
+        is_file_backed = False
+
+        def __init__(self):
+            self.connection = ServerBackedConnection()
+
+        def connect(self, *, configure_journal: bool = False):
+            return self.connection
+
+    adapter = ServerBackedAdapter()
+    ledger = Ledger(tmp_path / "missing" / "ledger.sqlite", read_only=True, db_adapter=adapter)
+
+    with ledger._connect() as connection:
+        assert connection.execute("SELECT 1").fetchone() == {"one": 1}
+
+    with pytest.raises(sqlite3.OperationalError, match="read-only ledger"):
+        with ledger._connect() as connection:
+            connection.execute("INSERT INTO knowledge_items (knowledge_id) VALUES (?)", ("kn",))
+
+    assert adapter.connection.executed == ["SELECT 1"]
+
+
+def test_open_read_only_allows_missing_path_when_pg_env_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    path = tmp_path / "missing" / "ledger.sqlite"
+    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", "postgresql://user:pass@example.invalid/db")
+
+    ledger = Ledger.open_read_only(path)
+
+    assert ledger.path == path
+    assert getattr(ledger._db_adapter, "is_file_backed") is False
+
+
 def test_ledger_transcript_tables_store_sessions_and_chunks(tmp_path: Path):
     ledger = _ledger(tmp_path)
     session = FakeTranscriptSession()

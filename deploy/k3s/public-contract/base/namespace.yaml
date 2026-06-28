@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: neurons
+  labels:
+    app.kubernetes.io/part-of: neurons
+    app.kubernetes.io/managed-by: neurons-ops
+    neurons.openclaw.io/public-contract: "true"
