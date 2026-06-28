@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
 import traceback
 from typing import Any
 
@@ -40,12 +41,16 @@ DEFAULT_PORT = 8765
 _LOGGER = logging.getLogger(__name__)
 
 # Tailscale tailnet 대역: IPv4 CGNAT 100.64.0.0/10, IPv6 ULA fd7a:115c:a1e0::/48.
-# 신뢰 경계 = tailnet 전용이므로 비-loopback bind는 이 대역만 허용한다(v1 앱 token 없음 →
+# Service가 Pod로 라우팅할 때 readiness probe가 Pod IP를 직접 때린다. k3s 기본값은
+# 10.42.0.0/16이지만 ops overlay가 다른 cluster-cidr를 쓰면 env로 주입한다.
+# 비-loopback bind는 tailnet 또는 명시 승인된 Pod IP만 허용한다(v1 앱 token 없음 →
 # 네트워크 계층이 유일 방어선이라 공개/사설 IP 오설정 노출을 코드레벨로 차단).
 _TAILNET_NETWORKS = (
     ipaddress.ip_network("100.64.0.0/10"),
     ipaddress.ip_network("fd7a:115c:a1e0::/48"),
 )
+_KUBERNETES_POD_CIDR_ENV = "KUBERNETES_POD_CIDR"
+_DEFAULT_KUBERNETES_POD_CIDRS = "10.42.0.0/16"
 
 
 def _is_tailnet_address(host: str) -> bool:
@@ -54,6 +59,27 @@ def _is_tailnet_address(host: str) -> bool:
     except ValueError:
         return False
     return any(addr in net for net in _TAILNET_NETWORKS)
+
+
+def _configured_kubernetes_pod_networks() -> tuple[
+    ipaddress.IPv4Network | ipaddress.IPv6Network, ...
+]:
+    raw_cidrs = os.environ.get(_KUBERNETES_POD_CIDR_ENV, _DEFAULT_KUBERNETES_POD_CIDRS)
+    cidrs = tuple(part.strip() for part in raw_cidrs.split(",") if part.strip())
+    if not cidrs:
+        raise ValueError(f"{_KUBERNETES_POD_CIDR_ENV} must include at least one CIDR")
+    try:
+        return tuple(ipaddress.ip_network(cidr) for cidr in cidrs)
+    except ValueError as exc:
+        raise ValueError(f"invalid {_KUBERNETES_POD_CIDR_ENV}") from exc
+
+
+def _is_kubernetes_pod_address(host: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(addr in net for net in _configured_kubernetes_pod_networks())
 
 
 def _bracket(host: str) -> str:
@@ -179,20 +205,25 @@ def build_app(
     host: str = "127.0.0.1",
     port: int = DEFAULT_PORT,
     allow_non_loopback: bool = False,
+    allow_kubernetes_pod_ip: bool = False,
     stateless_http: bool = True,
 ) -> Starlette:
     # bind 가드: 0.0.0.0은 무조건 거부(전 인터페이스 노출 차단). 비-loopback은
-    # --allow-non-loopback + tailnet 대역일 때만 허용(공개/사설 IP 오설정 노출 차단).
+    # --allow-non-loopback + tailnet 대역일 때만 허용한다. k3s canary는 추가 플래그로
+    # Pod IP bind만 열어 Kubernetes readiness/Service 라우팅을 통과시킨다.
     if host == "0.0.0.0":  # noqa: S104 - 명시적 거부 가드
         raise ValueError("mcp-http refuses 0.0.0.0 bind")
     is_loopback = _is_loopback_address(host)
     if not is_loopback:
         if not allow_non_loopback:
             raise ValueError("mcp-http must bind loopback unless --allow-non-loopback is set")
-        if not _is_tailnet_address(host):
+        if not _is_tailnet_address(host) and not (
+            allow_kubernetes_pod_ip and _is_kubernetes_pod_address(host)
+        ):
             raise ValueError(
-                "mcp-http non-loopback bind must be a Tailscale tailnet address "
-                "(100.64.0.0/10 or fd7a:115c:a1e0::/48)"
+                "mcp-http non-loopback bind must be a Tailscale tailnet or Kubernetes Pod CIDR "
+                "address (100.64.0.0/10, fd7a:115c:a1e0::/48, or approved "
+                "KUBERNETES_POD_CIDR)"
             )
 
     server: Server = Server("neurons")
@@ -234,6 +265,7 @@ def serve(
     host: str = "127.0.0.1",
     port: int = DEFAULT_PORT,
     allow_non_loopback: bool = False,
+    allow_kubernetes_pod_ip: bool = False,
 ) -> None:
     import uvicorn
 
@@ -242,6 +274,7 @@ def serve(
         host=host,
         port=port,
         allow_non_loopback=allow_non_loopback,
+        allow_kubernetes_pod_ip=allow_kubernetes_pod_ip,
         stateless_http=True,
     )
     uvicorn.run(app, host=host, port=int(port), log_level="warning")

@@ -17,6 +17,11 @@ from agent_knowledge import mcp_http_server as mh  # noqa: E402
 from agent_knowledge.mcp_server import list_tools  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _default_kubernetes_pod_cidr(monkeypatch):
+    monkeypatch.delenv("KUBERNETES_POD_CIDR", raising=False)
+
+
 # --- 테스트용 stub service (transport 경로만 검증; 실 ledger/graph 불필요) ---
 
 
@@ -80,6 +85,50 @@ def test_build_app_allows_tailnet_with_flag():
     assert "/healthz" in paths and "/mcp" in paths
 
 
+def test_build_app_rejects_kubernetes_pod_ip_without_specific_flag():
+    with pytest.raises(ValueError, match="Kubernetes Pod CIDR"):
+        mh.build_app(_StubService(), host="10.42.0.31", allow_non_loopback=True)
+
+
+def test_build_app_allows_kubernetes_pod_ip_with_specific_flag():
+    app = mh.build_app(
+        _StubService(),
+        host="10.42.0.31",
+        allow_non_loopback=True,
+        allow_kubernetes_pod_ip=True,
+    )
+    paths = {r.path for r in app.routes}
+    assert "/healthz" in paths and "/mcp" in paths
+
+
+def test_build_app_allows_configured_kubernetes_pod_cidr(monkeypatch):
+    monkeypatch.setenv("KUBERNETES_POD_CIDR", "10.244.0.0/16, fd00:10:42::/64")
+
+    app = mh.build_app(
+        _StubService(),
+        host="10.244.3.31",
+        allow_non_loopback=True,
+        allow_kubernetes_pod_ip=True,
+    )
+
+    paths = {r.path for r in app.routes}
+    assert "/healthz" in paths and "/mcp" in paths
+    assert mh._is_kubernetes_pod_address("fd00:10:42::31") is True
+    assert mh._is_kubernetes_pod_address("10.42.0.31") is False
+
+
+def test_build_app_rejects_invalid_configured_kubernetes_pod_cidr(monkeypatch):
+    monkeypatch.setenv("KUBERNETES_POD_CIDR", "not-a-cidr")
+
+    with pytest.raises(ValueError, match="invalid KUBERNETES_POD_CIDR"):
+        mh.build_app(
+            _StubService(),
+            host="10.42.0.31",
+            allow_non_loopback=True,
+            allow_kubernetes_pod_ip=True,
+        )
+
+
 def test_build_app_allows_whole_loopback_subnet_without_flag():
     app = mh.build_app(_StubService(), host="127.0.0.2", allow_non_loopback=False)
     paths = {r.path for r in app.routes}
@@ -88,13 +137,23 @@ def test_build_app_allows_whole_loopback_subnet_without_flag():
 
 def test_build_app_rejects_public_ip_even_with_flag():
     # tailnet 밖 공개 IP는 --allow-non-loopback이 있어도 거부(신뢰 경계 = tailnet 전용).
-    with pytest.raises(ValueError, match="tailnet"):
+    with pytest.raises(ValueError, match="tailnet or Kubernetes Pod CIDR"):
         mh.build_app(_StubService(), host="8.8.8.8", allow_non_loopback=True)
 
 
 def test_build_app_rejects_private_lan_ip_even_with_flag():
-    with pytest.raises(ValueError, match="tailnet"):
+    with pytest.raises(ValueError, match="tailnet or Kubernetes Pod CIDR"):
         mh.build_app(_StubService(), host="192.168.1.10", allow_non_loopback=True)
+
+
+def test_build_app_rejects_service_cidr_even_with_kubernetes_pod_flag():
+    with pytest.raises(ValueError, match="tailnet or Kubernetes Pod CIDR"):
+        mh.build_app(
+            _StubService(),
+            host="10.43.0.10",
+            allow_non_loopback=True,
+            allow_kubernetes_pod_ip=True,
+        )
 
 
 def test_is_tailnet_address():
@@ -104,6 +163,14 @@ def test_is_tailnet_address():
     assert mh._is_tailnet_address("8.8.8.8") is False
     assert mh._is_tailnet_address("192.168.1.1") is False
     assert mh._is_tailnet_address("example.com") is False
+
+
+def test_is_kubernetes_pod_address():
+    assert mh._is_kubernetes_pod_address("10.42.0.1") is True
+    assert mh._is_kubernetes_pod_address("10.42.255.254") is True
+    assert mh._is_kubernetes_pod_address("10.43.0.1") is False
+    assert mh._is_kubernetes_pod_address("192.168.1.1") is False
+    assert mh._is_kubernetes_pod_address("example.com") is False
 
 
 def test_bracket_ipv6_and_ipv4():

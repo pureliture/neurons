@@ -1,0 +1,120 @@
+version: 1
+scope: neurons-repo-owned-compose
+primaryRuntime: local-ubuntu-k3s
+sourceRuntime: ubuntu-compose
+cutoverMode: compose-maintained-k3s-canary
+coexistence: short-safety-window
+excludedWorkloads:
+  - id: removed-legacy-external-memory-surface
+    reason: already removed from the target runtime; legacy source references are not k3s workloads
+  - id: dendrite
+    reason: mac host-native thin client, not a containerization target
+workloads:
+  - id: ingress-queue
+    composeServices:
+      - nats-jetstream
+    stateful: true
+    backupRestoreRequired: true
+    k3sContract: stateful workload with persistent storage and health checks
+  - id: ingress-api
+    composeServices:
+      - ingress-api
+    stateful: false
+    backupRestoreRequired: false
+    k3sContract: api workload with readiness and redacted health checks
+  - id: ingress-worker
+    composeServices:
+      - ingress-worker-py
+    stateful: true
+    backupRestoreRequired: true
+    k3sContract: single-consumer worker lane with durable state preservation
+  - id: retired-java-ingress-worker
+    composeServices:
+      - ingress-worker
+    stateful: false
+    backupRestoreRequired: false
+    activation: retired-profile
+    migrateToK3s: false
+    k3sContract: documented retired compose surface, not a k3s workload target
+  - id: searchable-mirror
+    composeServices:
+      - qdrant
+    stateful: true
+    backupRestoreRequired: true
+    activation: profile-gated
+    enabledOnlyWhenSourceProfileEnabled: true
+    k3sContract: profile-gated vector store with restore rehearsal
+  - id: couchdb-source-store
+    composeServices:
+      - llm-brain-couchdb
+    stateful: true
+    backupRestoreRequired: true
+    k3sContract: source store with restore rehearsal and redacted counts
+  - id: ledger-postgres
+    composeServices:
+      - llm-brain-ledger-postgres
+    stateful: true
+    backupRestoreRequired: true
+    k3sContract: ledger store with restore rehearsal and schema readiness checks
+  - id: vertex-wrapper
+    composeServices:
+      - llm-brain-vertex-wrapper
+    stateful: false
+    backupRestoreRequired: false
+    k3sContract: model gateway workload with private credential mount owned by ops overlay
+  - id: llm-brain-tools
+    composeServices:
+      - llm-brain-tools
+    stateful: true
+    backupRestoreRequired: true
+    k3sContract: operator tooling workload with runtime volume preservation
+  - id: graph-trigger
+    composeServices:
+      - llm-brain-graph-trigger
+    stateful: true
+    backupRestoreRequired: true
+    k3sContract: scheduled graph lane with graph lock/runtime preservation
+  - id: bulk-semantic-trigger
+    composeServices:
+      - llm-brain-bulk-semantic-trigger
+    stateful: true
+    backupRestoreRequired: true
+    activation: profile-gated
+    enabledOnlyWhenSourceProfileEnabled: true
+    k3sContract: opt-in semantic lane with graph lock/runtime preservation
+  - id: neo4j-graph-store
+    composeServices:
+      - llm-brain-neo4j
+    stateful: true
+    backupRestoreRequired: true
+    k3sContract: graph store with restore rehearsal and index/readiness checks
+  - id: mcp-http
+    composeServices:
+      - neuron-knowledge-mcp
+    stateful: false
+    backupRestoreRequired: false
+    k3sContract: tailnet-reachable read surface with no broad bind by default
+  - id: session-memory-worker
+    composeServices:
+      - session-memory-worker
+    stateful: true
+    backupRestoreRequired: true
+    k3sContract: repo-owned worker compose surface with shared state volume contract
+canarySafety:
+  workQueueIsolation:
+    required: true
+    allowedModes:
+      - shadow stream
+      - separate durable
+      - worker disabled health-only validation
+    sameLiveDurableAsCompose: forbidden
+  safetyWindow:
+    maxCanaryWindowHours: 24
+    noDecisionAction: abort-to-compose-primary
+  networkPolicy:
+    requiredBeforePromotion: true
+    kubeApiOperatorAllowlistRequired: true
+externalBoundaries:
+  - id: tailscale-subnet-router
+    mode: limited-route-access-policy
+    ownedBy: neurons-ops
