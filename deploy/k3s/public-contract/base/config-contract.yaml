@@ -14,6 +14,7 @@ data:
   coexistence: short-safety-window
   secret-owner: neurons-ops
   network-boundary: tailscale-subnet-router-limited-routes
+  replica-policy: ops-defined
   stateful-gate: backup-restore-rehearsal-required
   workqueue-isolation-gate: shadow-stream-or-separate-durable-required
   max-canary-window-hours: "24"

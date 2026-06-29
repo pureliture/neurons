@@ -1,4 +1,7 @@
+from pathlib import Path
+
 import pytest
+import yaml
 
 from agent_knowledge.llm_brain_core.infra_baseline import (
     compose_baseline_report,
@@ -6,7 +9,25 @@ from agent_knowledge.llm_brain_core.infra_baseline import (
     k3s_poc_execution_evidence,
     k3s_poc_operator_approval_packet,
     k3s_poc_canary_plan,
+    load_scale_out_workloads,
+    reject_capacity_integers,
+    scale_out_manifest_bundle,
 )
+
+_INVENTORY = (
+    Path(__file__).resolve().parents[2]
+    / "deploy"
+    / "k3s"
+    / "public-contract"
+    / "workload-inventory.yaml"
+)
+
+
+def _resource(bundle, kind, name):
+    for resource in bundle["resources"]:
+        if resource.get("kind") == kind and resource.get("metadata", {}).get("name") == name:
+            return resource
+    return None
 
 
 def test_compose_baseline_report_keeps_compose_target_and_safe_delivery_defaults():
@@ -443,6 +464,203 @@ def test_k3s_poc_execution_evidence_requires_explicit_operator_approval():
     assert evidence["canary_proved"] is False
     assert evidence["rollback_proved"] is False
     assert evidence["blocking_codes"] == ["operator_approval_missing"]
+
+
+def test_reject_capacity_integers_blocks_multi_digit_counts_but_allows_ports():
+    bad_resources = [
+        {"spec": {"replicas": 12}},
+        {"spec": {"minReplicas": 10}},
+        {"spec": {"maxReplicas": 50}},
+        {"spec": {"minAvailable": 12}},
+        {"spec": {"maxUnavailable": 33}},
+        {"spec": {"metrics": [{"resource": {"target": {"averageUtilization": 80}}}]}},
+    ]
+    for resource in bad_resources:
+        with pytest.raises(ValueError, match="capacity"):
+            reject_capacity_integers(resource)
+
+    # Ports and single-digit policy values are legitimate and must pass.
+    reject_capacity_integers(
+        {
+            "spec": {
+                "replicas": 1,
+                "minAvailable": 1,
+                "template": {"spec": {"containers": [{"ports": [{"containerPort": 8080}]}]}},
+            }
+        }
+    )
+    reject_capacity_integers({"ports": [{"containerPort": 6333}]})
+
+
+def test_scale_out_manifest_bundle_classifies_workloads_without_leaking_counts():
+    bundle = scale_out_manifest_bundle(
+        workloads=[
+            {"name": "ingress-api", "scaleCategory": "horizontally-scalable", "replicaPolicy": "ops-defined"},
+            {"name": "mcp-http", "scaleCategory": "horizontally-scalable", "replicaPolicy": "single"},
+            {"name": "ingress-worker", "scaleCategory": "serialized-worker", "replicaPolicy": "single"},
+            {"name": "ledger-postgres", "scaleCategory": "singleton-stateful", "replicaPolicy": "singleton"},
+            {"name": "llm-brain-tools", "scaleCategory": "not-a-target", "replicaPolicy": "singleton"},
+        ],
+        namespace="neurons-scale",
+        access_policy="tailscale_private",
+        image_by_workload={
+            "ingress-api": "neurons-api:scale",
+            "mcp-http": "neurons-mcp:scale",
+            "ingress-worker": "neurons-worker:scale",
+            "ledger-postgres": "postgres:17-alpine",
+        },
+        container_port_by_workload={
+            "ingress-api": 8080,
+            "mcp-http": 8765,
+            "ingress-worker": 8080,
+            "ledger-postgres": 5432,
+        },
+    )
+
+    assert bundle["schema_version"] == "k3s_scale_out_bundle.v1"
+    assert bundle["production_migration_implied"] is False
+    assert bundle["requires_operator_approval"] is True
+
+    # not-a-target is excluded entirely.
+    assert all(
+        resource["metadata"].get("name") != "llm-brain-tools" for resource in bundle["resources"]
+    )
+
+    # ops-defined horizontally-scalable: Deployment without a replicas count, policy marker,
+    # anti-affinity, plus an HPA skeleton and a maxUnavailable PDB.
+    api_deploy = _resource(bundle, "Deployment", "ingress-api")
+    assert "replicas" not in api_deploy["spec"]
+    assert api_deploy["metadata"]["annotations"]["neurons.scale/replica-policy"] == "ops-defined"
+    assert "podAntiAffinity" in api_deploy["spec"]["template"]["spec"]["affinity"]
+    affinity = api_deploy["spec"]["template"]["spec"]["affinity"]["podAntiAffinity"]
+    assert "preferredDuringSchedulingIgnoredDuringExecution" in affinity
+    assert "requiredDuringSchedulingIgnoredDuringExecution" not in affinity
+    assert _resource(bundle, "HorizontalPodAutoscaler", "ingress-api") is not None
+    api_pdb = _resource(bundle, "PodDisruptionBudget", "ingress-api")
+    assert api_pdb["spec"].get("maxUnavailable") == 1
+    # HPA carries a single-digit maxReplicas so the autoscaling/v2 schema validates;
+    # the real bound is overlay-patched.
+    assert _resource(bundle, "HorizontalPodAutoscaler", "ingress-api")["spec"]["maxReplicas"] == 1
+
+    # single horizontally-scalable (mcp-http until host-networking removed): replicas:1, no HPA,
+    # and a minAvailable PDB (maxUnavailable:1 on a single replica gives no protection).
+    mcp_deploy = _resource(bundle, "Deployment", "mcp-http")
+    assert mcp_deploy["spec"]["replicas"] == 1
+    assert _resource(bundle, "HorizontalPodAutoscaler", "mcp-http") is None
+    assert _resource(bundle, "PodDisruptionBudget", "mcp-http")["spec"].get("minAvailable") == 1
+
+    # serialized-worker: fixed single Deployment + minAvailable PDB, no HPA.
+    worker_deploy = _resource(bundle, "Deployment", "ingress-worker")
+    assert worker_deploy["spec"]["replicas"] == 1
+    assert _resource(bundle, "HorizontalPodAutoscaler", "ingress-worker") is None
+    assert _resource(bundle, "PodDisruptionBudget", "ingress-worker")["spec"].get("minAvailable") == 1
+
+    # singleton-stateful: StatefulSet single-writer + headless Service, never a Deployment.
+    sts = _resource(bundle, "StatefulSet", "ledger-postgres")
+    assert sts is not None
+    assert _resource(bundle, "Deployment", "ledger-postgres") is None
+    assert _resource(bundle, "Service", "ledger-postgres-headless")["spec"]["clusterIP"] == "None"
+    # PVC carries NO storage size: size is overlay-owned. Leaving requests empty makes a
+    # bare base apply fail closed (overlay must patch the size in) rather than leaking a count.
+    assert "storage" not in sts["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]
+
+    # tailscale_private still attaches the namespace-scoped NetworkPolicy.
+    assert _resource(bundle, "NetworkPolicy", "tailscale-private-only") is not None
+    assert _resource(bundle, "Namespace", "neurons-scale") is not None
+
+
+def test_inventory_classification_round_trips_to_a_clean_scale_out_bundle():
+    # The real workload-inventory.yaml is the single source of truth: every workload must
+    # classify into a known scaleCategory, and that classification must build a public-safe,
+    # count-free bundle. This wires the inventory directly to the generator so a drift
+    # (missing/typo scaleCategory, a new unclassified workload) fails closed here.
+    inventory = yaml.safe_load(_INVENTORY.read_text(encoding="utf-8"))
+    classified = load_scale_out_workloads(inventory)
+
+    assert len(classified) == len(inventory["workloads"])
+    assert {w["scaleCategory"] for w in classified} <= {
+        "horizontally-scalable",
+        "serialized-worker",
+        "singleton-stateful",
+        "not-a-target",
+    }
+    # ingress-worker stays serialized (no competing-consumer); mcp-http stays single.
+    by_name = {w["name"]: w for w in classified}
+    assert by_name["ingress-worker"]["scaleCategory"] == "serialized-worker"
+    assert by_name["mcp-http"]["replicaPolicy"] == "single"
+
+    bundle = scale_out_manifest_bundle(
+        workloads=classified,
+        namespace="neurons-scale",
+        access_policy="tailscale_private",
+        image_by_workload={w["name"]: f"neurons-{w['name']}:scale" for w in classified},
+        container_port_by_workload={w["name"]: 8080 for w in classified},
+    )
+    assert bundle["schema_version"] == "k3s_scale_out_bundle.v1"
+    # not-a-target workloads never produce resources.
+    not_targets = {w["name"] for w in classified if w["scaleCategory"] == "not-a-target"}
+    resource_names = {r["metadata"].get("name") for r in bundle["resources"]}
+    assert not (not_targets & resource_names)
+
+
+def test_reject_capacity_integers_blocks_quoted_and_float_capacity():
+    # Bypass attempts: a quoted string or float-typed capacity must also be rejected.
+    for bad in [
+        {"spec": {"replicas": "10"}},
+        {"spec": {"minReplicas": 10.0}},
+        {"spec": {"maxReplicas": "50"}},
+    ]:
+        with pytest.raises(ValueError, match="capacity"):
+            reject_capacity_integers(bad)
+    # Non-numeric strings and single-digit values still pass.
+    reject_capacity_integers({"spec": {"replicas": "ops-defined"}})
+    reject_capacity_integers({"spec": {"minAvailable": "1"}})
+
+
+def test_scale_out_manifest_bundle_rejects_unsupported_access_policy():
+    with pytest.raises(ValueError, match="access"):
+        scale_out_manifest_bundle(
+            workloads=[{"name": "ingress-api", "scaleCategory": "horizontally-scalable", "replicaPolicy": "ops-defined"}],
+            namespace="neurons-scale",
+            access_policy="public",
+            image_by_workload={"ingress-api": "neurons-api:scale"},
+            container_port_by_workload={"ingress-api": 8080},
+        )
+
+
+def test_scale_out_manifest_bundle_rejects_unknown_replica_policy():
+    with pytest.raises(ValueError, match="replicaPolicy"):
+        scale_out_manifest_bundle(
+            workloads=[{"name": "ingress-api", "scaleCategory": "horizontally-scalable", "replicaPolicy": "ops-define"}],
+            namespace="neurons-scale",
+            access_policy="tailscale_private",
+            image_by_workload={"ingress-api": "neurons-api:scale"},
+            container_port_by_workload={"ingress-api": 8080},
+        )
+
+
+def test_load_scale_out_workloads_rejects_unknown_category():
+    with pytest.raises(ValueError, match="scaleCategory"):
+        load_scale_out_workloads(
+            {"workloads": [{"id": "mystery", "scaleCategory": "warp-drive", "replicaPolicy": "single"}]}
+        )
+
+
+def test_scale_out_horizontally_scalable_blank_policy_defaults_to_ops_defined_with_hpa():
+    # A blank replicaPolicy must resolve consistently: the Deployment and the HPA decision
+    # use the SAME effective policy (no ops-defined Deployment without its HPA).
+    bundle = scale_out_manifest_bundle(
+        workloads=[{"name": "ingress-api", "scaleCategory": "horizontally-scalable", "replicaPolicy": ""}],
+        namespace="neurons-scale",
+        access_policy="tailscale_private",
+        image_by_workload={"ingress-api": "neurons-api:scale"},
+        container_port_by_workload={"ingress-api": 8080},
+    )
+    deploy = _resource(bundle, "Deployment", "ingress-api")
+    assert "replicas" not in deploy["spec"]
+    assert deploy["metadata"]["annotations"]["neurons.scale/replica-policy"] == "ops-defined"
+    assert _resource(bundle, "HorizontalPodAutoscaler", "ingress-api") is not None
+    assert _resource(bundle, "PodDisruptionBudget", "ingress-api")["spec"].get("maxUnavailable") == 1
 
 
 def _k3s_operator_packet():
