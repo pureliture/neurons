@@ -52,6 +52,40 @@ class K3sMigrationContractTest {
     }
 
     @Test
+    void workloadInventoryClassifiesScaleOutWithoutLeakingReplicaCounts() throws IOException {
+        String inventory = Files.readString(
+            CONTRACT_DIR.resolve("workload-inventory.yaml"),
+            StandardCharsets.UTF_8
+        );
+
+        // Each k3s workload (one composeServices: block per workload; excludedWorkloads
+        // carry none) must declare a scaleCategory and a replicaPolicy.
+        long workloadBlocks = inventory.lines().filter(line -> line.strip().equals("composeServices:")).count();
+        long scaleCategoryCount = inventory.lines().filter(line -> line.strip().startsWith("scaleCategory:")).count();
+        long replicaPolicyCount = inventory.lines().filter(line -> line.strip().startsWith("replicaPolicy:")).count();
+        assertThat(workloadBlocks).isEqualTo(14L);
+        assertThat(scaleCategoryCount).isEqualTo(workloadBlocks);
+        assertThat(replicaPolicyCount).isEqualTo(workloadBlocks);
+
+        // Only the agreed category vocabulary is used (no competing-consumer: the worker
+        // lane stays serialized until the WorkQueue/shared-store preconditions ship).
+        assertThat(inventory).contains(
+            "scaleCategory: horizontally-scalable",
+            "scaleCategory: serialized-worker",
+            "scaleCategory: singleton-stateful",
+            "scaleCategory: not-a-target"
+        );
+        assertThat(inventory).doesNotContain("scaleCategory: competing-consumer");
+
+        // Public artifacts carry policy labels, never production capacity counts. Single-digit
+        // policy invariants (replicas: 1, minAvailable: 1) are fine; a 2+ digit value under any
+        // capacity key is a leak. Keep this key set in sync with infra_baseline._CAPACITY_KEYS.
+        assertThat(readPublicK3sArtifacts()).doesNotContainPattern(
+            "(replicas|minReplicas|maxReplicas|averageUtilization|minAvailable|maxUnavailable):\\s*['\"]?[0-9]{2,}"
+        );
+    }
+
+    @Test
     void listedValuesReadsOnlyTheRequestedListWithoutFixedIndent() {
         String yaml = String.join("\n",
             "workloads:",

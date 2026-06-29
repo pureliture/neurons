@@ -12,9 +12,33 @@ K3S_POC_CANARY_PLAN_SCHEMA = "k3s_poc_canary_plan.v1"
 K3S_POC_MANIFEST_BUNDLE_SCHEMA = "k3s_poc_manifest_bundle.v1"
 K3S_POC_OPERATOR_APPROVAL_PACKET_SCHEMA = "k3s_poc_operator_approval_packet.v1"
 K3S_POC_EXECUTION_EVIDENCE_SCHEMA = "k3s_poc_execution_evidence.v1"
+K3S_SCALE_OUT_BUNDLE_SCHEMA = "k3s_scale_out_bundle.v1"
 
 _PASS_OUTCOMES = {"ok", "pass", "passed", "success", "succeeded"}
 _K3S_CANARY_ACCESS_POLICIES = {"tailscale_private"}
+
+# Manifest keys whose value is a capacity count owned by the private ops overlay.
+# Public scale-out templates must not embed real counts; a 2+ digit literal under any
+# of these keys is a leak. Single-digit policy invariants (replicas: 1, minAvailable: 1)
+# are allowed; ports/weights live under other keys and are never inspected here.
+_CAPACITY_KEYS = {
+    "replicas",
+    "minReplicas",
+    "maxReplicas",
+    "averageUtilization",
+    "minAvailable",
+    "maxUnavailable",
+}
+
+# The scale-out classification vocabulary. workload-inventory.yaml is the single source of
+# truth; load_scale_out_workloads validates every workload against this set, so a missing or
+# mistyped scaleCategory fails closed instead of silently drifting from the generator.
+_SCALE_CATEGORIES = {
+    "horizontally-scalable",
+    "serialized-worker",
+    "singleton-stateful",
+    "not-a-target",
+}
 
 
 def compose_baseline_report(
@@ -295,12 +319,235 @@ def k3s_poc_execution_evidence(
     return evidence
 
 
-def _deployment_resource(*, name: str, namespace: str, image: str, container_port: int) -> dict[str, Any]:
+def load_scale_out_workloads(inventory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Classify workloads from a parsed workload-inventory.yaml mapping.
+
+    Reads each ``workloads[].id`` with its ``scaleCategory``/``replicaPolicy`` and validates
+    the category against ``_SCALE_CATEGORIES``. This is the seam that ties the inventory SoT to
+    ``scale_out_manifest_bundle``: an unclassified or mistyped workload raises here rather than
+    drifting from the generator's routing.
+    """
+    entries = inventory.get("workloads") if isinstance(inventory.get("workloads"), list) else []
+    classified: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        name = public_safe_text(str(entry.get("id") or ""), max_chars=120)
+        category = public_safe_text(str(entry.get("scaleCategory") or ""), max_chars=80)
+        policy = public_safe_text(str(entry.get("replicaPolicy") or ""), max_chars=40)
+        if not name:
+            continue
+        if category not in _SCALE_CATEGORIES:
+            raise ValueError(f"workload {name} has unknown or missing scaleCategory: {category!r}")
+        classified.append({"name": name, "scaleCategory": category, "replicaPolicy": policy})
+    return classified
+
+
+def reject_capacity_integers(resource: Any) -> None:
+    """Reject 2+ digit integer literals under capacity keys in a public manifest.
+
+    Real replica/HPA/PDB counts are owned by the private ops overlay and must never
+    appear in a public scale-out template. This is a key-scoped guard (not a blanket
+    integer scan) so legitimate ``containerPort: 8080`` / ``weight: 100`` values pass.
+    """
+    if isinstance(resource, Mapping):
+        for key, value in resource.items():
+            if key in _CAPACITY_KEYS and _is_leaked_capacity_count(value):
+                raise ValueError(
+                    f"public scale-out manifest must not embed capacity counts: "
+                    f"{key}={value!r} is overlay-owned"
+                )
+            reject_capacity_integers(value)
+    elif isinstance(resource, (list, tuple)):
+        for item in resource:
+            reject_capacity_integers(item)
+
+
+def _is_leaked_capacity_count(value: Any) -> bool:
+    """True if value is a 2+ digit capacity count in int, float, or quoted-string form.
+
+    Covers bypass shapes (``"10"``, ``10.0``) as well as plain ints. bool is excluded
+    (True/False are not counts) and non-numeric strings (e.g. a policy marker) pass.
+    """
+    if isinstance(value, bool):
+        return False
+    try:
+        as_float = float(value)
+    except (TypeError, ValueError):
+        return False
+    return as_float.is_integer() and as_float >= 10
+
+
+def scale_out_manifest_bundle(
+    *,
+    workloads: list[Mapping[str, Any]],
+    namespace: str,
+    access_policy: str,
+    image_by_workload: Mapping[str, str],
+    container_port_by_workload: Mapping[str, int],
+) -> dict[str, Any]:
+    """Build a public, count-free scale-out manifest skeleton from classified workloads.
+
+    ``workloads`` is the classification (name/scaleCategory/replicaPolicy) produced by
+    ``load_scale_out_workloads``; images and ports are supplied separately (the same
+    overlay-owned mapping pattern as the canary bundle). Separate from the canary bundle: it
+    never embeds real replica/HPA/PDB counts, routes each workload by its scaleCategory,
+    excludes not-a-target, and makes singleton-stateful a single-writer StatefulSet (never a
+    multi-replica Deployment).
+    """
+    safe_namespace = public_safe_text(str(namespace or ""), max_chars=120)
+    if safe_namespace in {"default", "prod", "production"}:
+        raise ValueError("production k3s migration is not part of this roadmap")
+    safe_access = public_safe_text(str(access_policy or ""), max_chars=120).strip().lower()
+    if safe_access not in _K3S_CANARY_ACCESS_POLICIES:
+        # tailnet-only NetworkPolicy is the isolation gate; an unsupported access policy must
+        # fail closed rather than emit a bundle without isolation (mirrors the canary plan).
+        raise ValueError("scale-out access_policy must be tailscale_private")
+    resources: list[dict[str, Any]] = [_namespace_resource(safe_namespace)]
+    for workload in workloads:
+        if not isinstance(workload, Mapping):
+            continue
+        name = public_safe_text(str(workload.get("name") or ""), max_chars=120)
+        category = public_safe_text(str(workload.get("scaleCategory") or ""), max_chars=80)
+        replica_policy = public_safe_text(str(workload.get("replicaPolicy") or ""), max_chars=40)
+        if category == "not-a-target":
+            continue
+        if not name:
+            raise ValueError("scale-out workload name is required")
+        if category not in _SCALE_CATEGORIES:
+            raise ValueError(f"unknown scaleCategory: {category!r}")
+        image = public_safe_text(str(image_by_workload.get(name) or ""), max_chars=240)
+        port = int(container_port_by_workload.get(name) or 0)
+        if category == "singleton-stateful":
+            _require_image_and_port(image, port)
+            resources.append(_statefulset_resource(name=name, namespace=safe_namespace, image=image, container_port=port))
+            resources.append(_headless_service_resource(name=name, namespace=safe_namespace, container_port=port))
+            resources.append(_pdb_resource(name=name, namespace=safe_namespace, mode="minAvailable"))
+        elif category == "serialized-worker":
+            _require_image_and_port(image, port)
+            resources.append(
+                _deployment_resource(
+                    name=name, namespace=safe_namespace, image=image, container_port=port, replica_policy="single"
+                )
+            )
+            resources.append(_pdb_resource(name=name, namespace=safe_namespace, mode="minAvailable"))
+        elif category == "horizontally-scalable":
+            _require_image_and_port(image, port)
+            # One effective policy drives both the Deployment shape and the HPA/PDB choice,
+            # so a blank policy can't yield an ops-defined Deployment without its HPA.
+            effective_policy = replica_policy or "ops-defined"
+            if effective_policy not in {"ops-defined", "single"}:
+                # A typo (e.g. "ops-define") would silently fall through to single-replica;
+                # fail closed instead so a horizontally-scalable workload can't be demoted.
+                raise ValueError(
+                    f"unknown replicaPolicy for horizontally-scalable workload {name}: {effective_policy!r}"
+                )
+            deployment = _deployment_resource(
+                name=name,
+                namespace=safe_namespace,
+                image=image,
+                container_port=port,
+                replica_policy=effective_policy,
+            )
+            deployment["spec"]["template"]["spec"]["affinity"] = _pod_anti_affinity(name)
+            resources.append(deployment)
+            if effective_policy == "ops-defined":
+                resources.append(_hpa_resource(name=name, namespace=safe_namespace))
+                # multi-replica: maxUnavailable keeps at least N-1 Pods during disruption.
+                resources.append(_pdb_resource(name=name, namespace=safe_namespace, mode="maxUnavailable"))
+            else:
+                # single replica (e.g. mcp-http until host networking is removed):
+                # maxUnavailable:1 would permit evicting the only Pod, so guard with minAvailable.
+                resources.append(_pdb_resource(name=name, namespace=safe_namespace, mode="minAvailable"))
+    if safe_access == "tailscale_private":
+        # NOTE: the default k3s flannel backend parses but does NOT enforce NetworkPolicy.
+        # Enforcement (CNI selection) is a private ops-overlay concern (cniSelection).
+        resources.append(_tailscale_private_network_policy(safe_namespace))
+    for resource in resources:
+        reject_capacity_integers(resource)
+    bundle = {
+        "schema_version": K3S_SCALE_OUT_BUNDLE_SCHEMA,
+        "status": "ready_for_operator_review",
+        "namespace": safe_namespace,
+        "production_migration_implied": False,
+        "resources": resources,
+        "requires_operator_approval": True,
+    }
+    ensure_public_safe(bundle, "K3sScaleOutBundle")
+    return bundle
+
+
+def _require_image_and_port(image: str, port: int) -> None:
+    if not image:
+        raise ValueError("scale-out workload image is required")
+    if port <= 0:
+        raise ValueError("scale-out workload port is required")
+
+
+def _namespace_resource(namespace: str) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": namespace,
+            "labels": {
+                "neurons.openclaw.dev/purpose": "context-authority-scale-out",
+                "neurons.openclaw.dev/production": "false",
+            },
+        },
+    }
+
+
+def _deployment_resource(
+    *,
+    name: str,
+    namespace: str,
+    image: str,
+    container_port: int,
+    replica_policy: str = "canary",
+) -> dict[str, Any]:
+    runtime_mode = "k3s-canary" if replica_policy == "canary" else "k3s"
+    metadata: dict[str, Any] = {"name": name, "namespace": namespace}
+    spec: dict[str, Any] = {
+        "selector": {"matchLabels": {"app": name}},
+        "template": {
+            "metadata": {"labels": {"app": name}},
+            "spec": {
+                "containers": [
+                    {
+                        "name": name,
+                        "image": image,
+                        "ports": [{"containerPort": container_port}],
+                        "env": [
+                            {"name": "NEURONS_RUNTIME_MODE", "value": runtime_mode},
+                            {"name": "NEURONS_STATEFUL_DB_MIGRATION", "value": "false"},
+                        ],
+                    }
+                ]
+            },
+        },
+    }
+    if replica_policy == "ops-defined":
+        # replicas count is overlay-owned; mark policy and let the overlay patch it in.
+        metadata["annotations"] = {"neurons.scale/replica-policy": "ops-defined"}
+    else:
+        spec = {"replicas": 1, **spec}
+        if replica_policy != "canary":
+            metadata["annotations"] = {"neurons.scale/replica-policy": replica_policy}
+    return {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": metadata, "spec": spec}
+
+
+def _statefulset_resource(*, name: str, namespace: str, image: str, container_port: int) -> dict[str, Any]:
     return {
         "apiVersion": "apps/v1",
-        "kind": "Deployment",
-        "metadata": {"name": name, "namespace": namespace},
+        "kind": "StatefulSet",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "annotations": {"neurons.scale/replica-policy": "singleton"},
+        },
         "spec": {
+            "serviceName": f"{name}-headless",
             "replicas": 1,
             "selector": {"matchLabels": {"app": name}},
             "template": {
@@ -311,15 +558,85 @@ def _deployment_resource(*, name: str, namespace: str, image: str, container_por
                             "name": name,
                             "image": image,
                             "ports": [{"containerPort": container_port}],
-                            "env": [
-                                {"name": "NEURONS_RUNTIME_MODE", "value": "k3s-canary"},
-                                {"name": "NEURONS_STATEFUL_DB_MIGRATION", "value": "false"},
-                            ],
                         }
                     ]
                 },
             },
+            "volumeClaimTemplates": [
+                {
+                    "metadata": {
+                        "name": f"{name}-data",
+                        "annotations": {"neurons.scale/storage": "ops-defined"},
+                    },
+                    # storageClassName + request size are overlay-owned (PVC sizing). The size is
+                    # left out on purpose: a public count is never embedded, and a bare base apply
+                    # fails closed until the overlay patches storage in.
+                    "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {}}},
+                }
+            ],
         },
+    }
+
+
+def _headless_service_resource(*, name: str, namespace: str, container_port: int) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": f"{name}-headless", "namespace": namespace},
+        "spec": {
+            "clusterIP": "None",
+            "selector": {"app": name},
+            "ports": [{"port": container_port, "targetPort": container_port}],
+        },
+    }
+
+
+def _hpa_resource(*, name: str, namespace: str) -> dict[str, Any]:
+    # Skeleton only: minReplicas/metric targets are overlay-owned counts and are omitted.
+    # maxReplicas is required by the autoscaling/v2 schema, so a single-digit safe default (1)
+    # keeps the template valid (kubectl/ArgoCD) while leaking no production count; the real
+    # bound is overlay-patched.
+    return {
+        "apiVersion": "autoscaling/v2",
+        "kind": "HorizontalPodAutoscaler",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "annotations": {"neurons.scale/hpa": "ops-defined"},
+        },
+        "spec": {
+            "scaleTargetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": name},
+            "maxReplicas": 1,
+        },
+    }
+
+
+def _pdb_resource(*, name: str, namespace: str, mode: str) -> dict[str, Any]:
+    if mode not in {"minAvailable", "maxUnavailable"}:
+        raise ValueError("pdb mode must be minAvailable or maxUnavailable")
+    return {
+        "apiVersion": "policy/v1",
+        "kind": "PodDisruptionBudget",
+        "metadata": {"name": name, "namespace": namespace},
+        "spec": {mode: 1, "selector": {"matchLabels": {"app": name}}},
+    }
+
+
+def _pod_anti_affinity(name: str) -> dict[str, Any]:
+    # preferred (not required): on a single node, required anti-affinity would leave
+    # replicas Pending. Spread is best-effort until ops adds agent nodes.
+    return {
+        "podAntiAffinity": {
+            "preferredDuringSchedulingIgnoredDuringExecution": [
+                {
+                    "weight": 100,
+                    "podAffinityTerm": {
+                        "labelSelector": {"matchLabels": {"app": name}},
+                        "topologyKey": "kubernetes.io/hostname",
+                    },
+                }
+            ]
+        }
     }
 
 
