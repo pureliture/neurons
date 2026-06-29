@@ -18,6 +18,7 @@
 - Claude provider overlay: `CLAUDE.md`
 - Gemini/Antigravity provider overlay: `GEMINI.md`
 - repo boundary와 command surface: `README.md`, `worker/README.md`
+- public/private repo split boundary: `docs/public-private-separation.md`
 - server boundary regression guard: `worker/tests/test_server_boundary.py`,
   `worker/tests/test_repo_instructions.py`
 
@@ -45,6 +46,10 @@ Those client responsibilities belong to `dendrite`.
 
 ## Runtime And Safety Lines
 
+- Public repo에는 제품 코드, local/dev compose, sample config, contract tests,
+  sanitized docs만 둔다. 실제 운영값, private ledger, raw transcript,
+  live evidence, host topology, secret, raw `dataset_id`, raw `document_id`는
+  `neurons-ops` 또는 private storage에 둔다.
 - Keep RAGFlow credential env name to `RAGFLOW_API_KEY`; do not introduce
   `RAGFLOW_WRITE_TOKEN` or `RAGFLOW_READ_TOKEN`.
 - Do not print raw host, private path, token, cookie, bearer string, API key,

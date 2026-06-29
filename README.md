@@ -91,6 +91,16 @@ Python and Java imports from the `dendrite` client surface.
 `neuron-knowledge` also owns fail-closed pending server commands for monolith
 subcommands whose full implementation is still being extracted.
 
+Public/private split:
+
+- `neurons` public is product source, local bootstrap, sample adapters,
+  contract tests, and sanitized docs.
+- `neurons-ops` private is production config, live rollout evidence, secret
+  loading policy, backup/restore, GC approval records, and private authority
+  ledger evidence.
+- The boundary contract lives in
+  [`docs/public-private-separation.md`](docs/public-private-separation.md).
+
 > 📖 **이 README의 범위.** 아래는 ingress lane만이 아니라 server-brain **전체
 > plane**(ingress · ledger/state authority · CouchDB pipeline · session/native-memory ·
 > brain query · graph-memory · GC safety)을 다룬다. 단, 계약·SSOT·enum 세부는
