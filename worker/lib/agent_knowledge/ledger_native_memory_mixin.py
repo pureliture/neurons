@@ -84,6 +84,10 @@ def upsert_llm_brain_memory_card_on(connection, card: dict) -> dict:
         "SELECT envelope_json FROM llm_brain_memory_cards WHERE memory_id = ?",
         (validated["memory_id"],),
     ).fetchone()
+    if row is None:
+        # 방금 upsert 한 행이라 정상 경로에선 발생하지 않는다. 이상 상태는 opaque TypeError 대신
+        # 명확한 에러로 fail-closed 한다.
+        raise ValueError("llm_brain memory card not found after upsert")
     return json.loads(row["envelope_json"])
 
 
@@ -127,6 +131,8 @@ def upsert_llm_brain_feedback_record_on(connection, record: dict) -> dict:
         "SELECT record_json FROM llm_brain_feedback_records WHERE feedback_id = ?",
         (validated["feedback_id"],),
     ).fetchone()
+    if row is None:
+        raise ValueError("llm_brain feedback record not found after upsert")
     return json.loads(row["record_json"])
 
 
