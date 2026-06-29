@@ -222,6 +222,32 @@ def test_restricted_write_response_is_public_safe(tmp_path):
         assert forbidden not in serialized
 
 
+def test_safe_restricted_result_drops_nested_application_card(tmp_path):
+    # auto_accept 성공 경로는 top-level accepted_card 외에 application.accepted_card(full
+    # MemoryCard)도 담는다. nested full card 가 projection 누락되면 assert_public_safe 가
+    # raise 해 write 는 됐는데 호출은 실패처럼 보인다 — application 을 떨궈 fail-closed 회피.
+    steward = BrainStewardService(_ledger(tmp_path), allow_restricted=True)
+    raw = {
+        "schema_version": "llm_brain_auto_acceptance_commit.v1",
+        "canonical_write_performed": True,
+        "accepted_card": {"memory_id": "m1", "lifecycle_state": "auto_accepted"},
+        "application": {
+            "status": "auto_accepted",
+            "accepted_card": {
+                "memory_id": "m1",
+                "typed_payload": {"k": "v"},
+                "source_refs": [{"source_id": "s"}],
+            },
+        },
+    }
+    safe = steward._safe_restricted_result(raw)
+    serialized = json.dumps(safe, ensure_ascii=False)
+    for forbidden in ("source_refs", "typed_payload"):
+        assert forbidden not in serialized
+    assert "application" not in safe
+    assert safe["accepted_card"]["memory_id"] == "m1"
+
+
 # ------------------------------------------------------------ M3 Korean round-trip
 
 

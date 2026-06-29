@@ -114,3 +114,6 @@ def test_hermes_provider_casing_yields_stable_identity(tmp_path):
     assert mixed.status == ImportStatus.IMPORTED
     # "Hermes"와 "hermes"는 동일 identity로 정규화된다(casing drift 없음).
     assert lower.session_id_hash == mixed.session_id_hash
+    # 결과 라벨도 정규화값을 반환해 다운스트림 coverage/stability 집계가 갈리지 않는다.
+    assert mixed.provider == "hermes"
+    assert lower.provider == "hermes"

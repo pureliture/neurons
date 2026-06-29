@@ -106,13 +106,13 @@ def import_historical_source(
     provider = canonicalize_provider(locator.provider)
     lane = PROVIDER_LANES.get(provider)
     if lane is None:
-        return ImportResult(provider=locator.provider, status=ImportStatus.UNKNOWN_PROVIDER, notes=("provider_not_in_migration_scope",))
+        return ImportResult(provider=provider, status=ImportStatus.UNKNOWN_PROVIDER, notes=("provider_not_in_migration_scope",))
     if locator.scope == "live" and not lane.live_allowed:
         # Gemini CLI is historical-only; a live event is a scope violation.
-        return ImportResult(provider=locator.provider, status=ImportStatus.SCOPE_VIOLATION, notes=("live_scope_not_allowed_for_provider",))
+        return ImportResult(provider=provider, status=ImportStatus.SCOPE_VIOLATION, notes=("live_scope_not_allowed_for_provider",))
     if lane.parser is None:
         return ImportResult(
-            provider=locator.provider,
+            provider=provider,
             status=ImportStatus.PARSER_UNAVAILABLE,
             notes=("parser_not_vendored", "excluded_from_retirement"),
         )
@@ -138,7 +138,7 @@ def import_historical_source(
         )
     except ValueError as exc:
         return ImportResult(
-            provider=locator.provider,
+            provider=provider,
             status=ImportStatus.SOURCE_UNAVAILABLE,
             project=resolution.project,
             project_source=resolution.source,
@@ -156,7 +156,7 @@ def import_historical_source(
     except SourceRedactionLeak as exc:
         # Fail closed: a still-leaking chunk blocks the whole session write.
         return ImportResult(
-            provider=locator.provider,
+            provider=provider,
             status=ImportStatus.LEAK_BLOCKED,
             session_id_hash=parsed.session.session_id_hash,
             project=resolution.project,
@@ -189,7 +189,7 @@ def import_historical_source(
     store.put(coverage_doc)
 
     return ImportResult(
-        provider=locator.provider,
+        provider=provider,
         status=ImportStatus.IMPORTED,
         session_id_hash=parsed.session.session_id_hash,
         project=resolution.project,

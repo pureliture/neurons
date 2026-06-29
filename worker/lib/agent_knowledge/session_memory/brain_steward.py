@@ -316,7 +316,10 @@ class BrainStewardService:
             card = safe.get(field)
             if isinstance(card, Mapping):
                 safe[field] = self._authority_item(card)
+        # operator-internal 부가 레코드는 nested full MemoryCard(typed_payload/source_refs)를
+        # 담을 수 있다. 안전 top-level projection 으로 결과는 이미 전달되므로 통째로 떨군다.
         safe.pop("feedback_record", None)
+        safe.pop("application", None)
         return assert_public_safe(safe, "restricted_result")
 
     def _guard_restricted(self, tool_name: str) -> None:
