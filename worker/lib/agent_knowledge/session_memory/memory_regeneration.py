@@ -18,6 +18,7 @@ from .chunk_overlap import (
     canonicalize_chunk_views,
     sanitize_session_memory_chunk_text as _sanitize_session_memory_chunk_text,
 )
+
 SESSION_MEMORY_KIND = "session_memory"
 SESSION_RECAP_KIND = "session_recap"
 TASK_SUMMARY_KIND = "task_summary"
@@ -1721,9 +1722,10 @@ def _canonicalize_session_chunks_for_memory(
     # chunk_overlap module so M3 materialization and regeneration stay identical.
     normalized = _normalize_session_chunks_for_memory(chunks)
     views = [_record_to_chunk_view(record) for record in normalized]
-    kept_views, report = canonicalize_chunk_views(views)
-    kept_ids = {id(view) for view in kept_views}
-    canonical = tuple(record for record, view in zip(normalized, views) if id(view) in kept_ids)
+    _kept_views, report = canonicalize_chunk_views(views)
+    # Map survivors back to source records by index (report["kept_indexes"]), not by
+    # object identity — survives a future view-copy refactor inside the shared module.
+    canonical = tuple(normalized[index] for index in report["kept_indexes"])
     return canonical, {
         "input_source_chunk_count": report["input_count"],
         "canonical_source_chunk_count": report["kept_count"],

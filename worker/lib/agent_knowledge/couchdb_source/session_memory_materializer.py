@@ -175,7 +175,7 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
     # De-overlap same-session chunks for the body only: a re-shipped grown session can
     # store a longer chunk that subsumes an earlier shorter one. Counts/coverage below
     # stay on the STORED `chunks`, so the coverage gate is unaffected.
-    body_views, _overlap = canonicalize_chunk_views([_chunk_to_view(chunk) for chunk in chunks])
+    body_views, overlap_report = canonicalize_chunk_views([_chunk_to_view(chunk) for chunk in chunks])
 
     lines = [
         f"# session-memory {provider} {project}",
@@ -195,6 +195,10 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
     body = "\n".join(lines).rstrip() + "\n"
 
     notes: list[str] = []
+    if overlap_report["dropped_count"]:
+        # Audit counter: how many stored chunks were de-overlapped out of the body
+        # (subsumed/exact-dup). Counts/coverage below stay on the stored chunk list.
+        notes.append(f"deoverlapped_{overlap_report['dropped_count']}")
     fully_materialized = True
     if coverage is not None:
         expected_chunks = int(coverage.get("conversation_chunk_count", 0))

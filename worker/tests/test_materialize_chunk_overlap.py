@@ -73,6 +73,8 @@ def test_materialize_drops_subsumed_overlapping_chunk():
     assert mat.body.count("beta gamma") == 1
     # coverage uses the STORED count (2 chunks both present), so still fully materialized
     assert mat.fully_materialized is True
+    # the de-overlap is auditable via a note (one chunk dropped from the body)
+    assert any(note.startswith("deoverlapped_") for note in mat.notes)
 
 
 def test_materialize_keeps_non_overlapping_chunks():

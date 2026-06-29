@@ -71,6 +71,24 @@ def test_partial_overlap_without_containment_keeps_both():
     assert set(kept) == {a, b}
 
 
+def test_report_kept_indexes_map_subsumption_back_to_input():
+    shorter = _view("beta gamma", turn_start=2, turn_end=3)
+    longer = _view("alpha beta gamma delta", turn_start=1, turn_end=4)
+    views = [shorter, longer]
+    kept, report = canonicalize_chunk_views(views)
+    # only the longer (input index 1) survives; indexes map back to the input
+    assert report["kept_indexes"] == [1]
+    assert [views[i] for i in report["kept_indexes"]] == kept
+
+
+def test_report_kept_indexes_for_exact_duplicate_keeps_first():
+    a = _view("same body", turn_start=1, turn_end=2, content_hash="sha256:" + "a" * 64)
+    b = _view("same body", turn_start=1, turn_end=2, content_hash="sha256:" + "a" * 64)
+    views = [a, b]
+    _kept, report = canonicalize_chunk_views(views)
+    assert report["kept_indexes"] == [0]
+
+
 def test_window_contained_but_text_not_contained_keeps_both():
     # longer window contains shorter window, but the shorter's text is NOT inside the
     # longer's text -> conservative: not subsumed, both kept.

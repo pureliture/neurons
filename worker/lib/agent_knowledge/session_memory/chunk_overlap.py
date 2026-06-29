@@ -43,8 +43,16 @@ _SESSION_MEMORY_CHUNK_HEADER_LABELS = (
     "access_token",
     "api_key",
 )
+_SESSION_MEMORY_HEADER_LABEL_ALTERNATION = "|".join(
+    re.escape(label) for label in _SESSION_MEMORY_CHUNK_HEADER_LABELS
+)
 _SESSION_MEMORY_HEADER_LINE_RE = re.compile(
-    rf"^\s*(?:{'|'.join(re.escape(label) for label in _SESSION_MEMORY_CHUNK_HEADER_LABELS)})\s*[:=]\s*.*$",
+    rf"^\s*(?:{_SESSION_MEMORY_HEADER_LABEL_ALTERNATION})\s*[:=]\s*.*$",
+    flags=re.IGNORECASE,
+)
+# Same labels as the line matcher, but stripping inline ``label: value`` spans.
+_SESSION_MEMORY_HEADER_FIELD_RE = re.compile(
+    rf"\b(?:{_SESSION_MEMORY_HEADER_LABEL_ALTERNATION})\s*[:=]\s*[^\s,;\]\)\n]+",
     flags=re.IGNORECASE,
 )
 
@@ -52,13 +60,7 @@ _SESSION_MEMORY_HEADER_LINE_RE = re.compile(
 def sanitize_session_memory_chunk_text(raw_text: str) -> str:
     text = str(raw_text)
     text = "\n".join(line for line in text.splitlines() if not _SESSION_MEMORY_HEADER_LINE_RE.match(line))
-    text = re.sub(
-        r"\b(?:session_id_hash|source_locator_hash|turn_start_index|turn_end_index|turn_part_index|turn_part_count|part_index|part_count|char_start|char_end|content_hash|knowledge_id|chunk_id|dataset_id|dataset_ref|datasetId|dataset_ids|document_id|document_ref|documentId|document_ids|token|access_token|api_key)"
-        r"\s*[:=]\s*[^\s,;\]\)\n]+",
-        "<redacted:private-field>",
-        text,
-        flags=re.IGNORECASE,
-    )
+    text = _SESSION_MEMORY_HEADER_FIELD_RE.sub("<redacted:private-field>", text)
     text = re.sub(
         r"\b(?:ds_[A-Za-z0-9_-]+|doc_[A-Za-z0-9_-]+|kn_[A-Za-z0-9_-]+|chunk_[A-Za-z0-9_-]+)\b",
         "<redacted:private-field>",
@@ -107,13 +109,17 @@ def canonicalize_chunk_views(views) -> tuple[list[ChunkView], dict]:
     """Drop exact duplicates and subsumed (shorter, contained) chunks.
 
     Returns (kept_views_in_input_order, report). Input order of survivors is
-    preserved so a pre-sorted sequence stays sorted.
+    preserved so a pre-sorted sequence stays sorted. ``report["kept_indexes"]``
+    holds each survivor's index into the input sequence, so callers can map back to
+    their own records by index (no object-identity dependency).
     """
     views = list(views)
-    deduped: list[ChunkView] = []
+    # Carry each survivor's original index so callers can map back by index
+    # (report["kept_indexes"]) rather than by object identity.
+    deduped: list[tuple[int, ChunkView]] = []
     seen_exact: set[tuple[object, ...]] = set()
     exact_duplicate_count = 0
-    for view in views:
+    for original_index, view in enumerate(views):
         source_key = (
             view.content_hash,
             view.turn_start_index,
@@ -128,31 +134,34 @@ def canonicalize_chunk_views(views) -> tuple[list[ChunkView], dict]:
             exact_duplicate_count += 1
             continue
         seen_exact.add(source_key)
-        deduped.append(view)
+        deduped.append((original_index, view))
 
-    sanitized_by_index = {
-        index: sanitize_session_memory_chunk_text(view.text).strip()
-        for index, view in enumerate(deduped)
+    sanitized_by_position = {
+        position: sanitize_session_memory_chunk_text(view.text).strip()
+        for position, (_, view) in enumerate(deduped)
     }
-    subsumed_indexes: set[int] = set()
-    for container_index, container in enumerate(deduped):
-        container_text = sanitized_by_index[container_index]
+    subsumed_positions: set[int] = set()
+    for container_position, (_, container) in enumerate(deduped):
+        container_text = sanitized_by_position[container_position]
         if not container_text:
             continue
-        for candidate_index, candidate in enumerate(deduped):
-            if container_index == candidate_index or candidate_index in subsumed_indexes:
+        for candidate_position, (_, candidate) in enumerate(deduped):
+            if container_position == candidate_position or candidate_position in subsumed_positions:
                 continue
             if not chunk_turn_window_strictly_contains(container, candidate):
                 continue
-            candidate_text = sanitized_by_index[candidate_index]
+            candidate_text = sanitized_by_position[candidate_position]
             if candidate_text and candidate_text in container_text:
-                subsumed_indexes.add(candidate_index)
+                subsumed_positions.add(candidate_position)
 
-    kept = [view for index, view in enumerate(deduped) if index not in subsumed_indexes]
+    kept_pairs = [pair for position, pair in enumerate(deduped) if position not in subsumed_positions]
+    kept = [view for _, view in kept_pairs]
+    kept_indexes = [original_index for original_index, _ in kept_pairs]
     return kept, {
         "input_count": len(views),
         "kept_count": len(kept),
+        "kept_indexes": kept_indexes,
         "exact_duplicate_count": exact_duplicate_count,
-        "subsumed_overlap_count": len(subsumed_indexes),
+        "subsumed_overlap_count": len(subsumed_positions),
         "dropped_count": len(views) - len(kept),
     }
