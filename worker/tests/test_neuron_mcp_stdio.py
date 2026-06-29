@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from agent_knowledge.cli import main
-from agent_knowledge.curation import CurationService
+from agent_knowledge.session_memory.curation import CurationService
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.mcp_server import (
     BRAIN_QUERY_TOOL_NAME,
@@ -33,8 +33,8 @@ from agent_knowledge.mcp_server import (
     handle_jsonrpc_message,
     list_tools,
 )
-from agent_knowledge.memory_card import build_memory_candidate
-from agent_knowledge.memory_miner import build_memory_card_candidate_from_source_span
+from agent_knowledge.session_memory.memory_card import build_memory_candidate
+from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
 from agent_knowledge.llm_brain_core.ledger_adapter import LedgerSourceRefCatalog
 from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
 from agent_knowledge.llm_brain_core.models import CONTEXT_PACK_SCHEMA_VERSION, OntologyEpisode

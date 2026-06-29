@@ -106,4 +106,32 @@ class ComposeConfigTest {
         assertThat(dockerfile).contains("gradle");
         assertThat(dockerfile).contains("COPY scripts ./scripts");
     }
+
+    @Test
+    void envExampleCoversAllRequiredComposeVars() throws IOException {
+        // Every hard-required compose var (${VAR:?...}) must be documented in
+        // .env.example so an operator copying the sample cannot miss a fail-closed var.
+        String compose = Files.readString(Path.of("compose.yaml"));
+        String envExample = Files.readString(Path.of(".env.example"));
+
+        java.util.Set<String> required = new java.util.TreeSet<>();
+        var requiredMatcher =
+            java.util.regex.Pattern.compile("\\$\\{([A-Z0-9_]+):\\?").matcher(compose);
+        while (requiredMatcher.find()) {
+            required.add(requiredMatcher.group(1));
+        }
+
+        java.util.Set<String> documented = new java.util.TreeSet<>();
+        var documentedMatcher =
+            java.util.regex.Pattern.compile("(?m)^\\s*([A-Z0-9_]+)\\s*=").matcher(envExample);
+        while (documentedMatcher.find()) {
+            documented.add(documentedMatcher.group(1));
+        }
+
+        java.util.Set<String> missing = new java.util.TreeSet<>(required);
+        missing.removeAll(documented);
+        assertThat(missing)
+            .as("required ${VAR:?} compose vars missing from .env.example")
+            .isEmpty();
+    }
 }

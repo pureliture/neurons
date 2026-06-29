@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
-from ..memory_card import MEMORY_CARD_TYPES
+from .memory_card import MEMORY_CARD_TYPES
 from .memory_miner import _parse_candidate_items, build_memory_card_candidate_from_source_span
 
 
