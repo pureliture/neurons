@@ -51,6 +51,16 @@ _STEWARD_SOURCE_SPAN_PROPERTIES = {
 }
 _STEWARD_SOURCE_SPAN_REQUIRED = ["card_type", "project", "provider", "typed_payload", "content_hash", "source_ref", "span_ref"]
 
+# 제안 actor(예: hermes) 식별 라벨. card subject 의 provider 와는 다른 축이며 advisory 다.
+# read consumer 와 동일 vocabulary 로 제약해 임의 라벨/누설을 막는다.
+_STEWARD_PROPOSER_PROPERTY = {
+    "proposer": {
+        "type": "string",
+        "enum": ["unspecified", "codex", "claude-code", "hermes"],
+        "default": "unspecified",
+    },
+}
+
 
 def list_tools() -> list[dict]:
     return [
@@ -245,6 +255,7 @@ def list_tools() -> list[dict]:
                 "type": "object",
                 "properties": {
                     **_STEWARD_SOURCE_SPAN_PROPERTIES,
+                    **_STEWARD_PROPOSER_PROPERTY,
                     "mark_needs_review": {"type": "boolean", "default": False},
                     "review_reason": {"type": "string"},
                 },
@@ -260,6 +271,7 @@ def list_tools() -> list[dict]:
                 "properties": {
                     "memory_id": {"type": "string"},
                     "reason": {"type": "string"},
+                    **_STEWARD_PROPOSER_PROPERTY,
                 },
                 "required": ["memory_id", "reason"],
                 "additionalProperties": False,
@@ -273,6 +285,7 @@ def list_tools() -> list[dict]:
                 "properties": {
                     "old_memory_id": {"type": "string"},
                     **_STEWARD_SOURCE_SPAN_PROPERTIES,
+                    **_STEWARD_PROPOSER_PROPERTY,
                 },
                 "required": ["old_memory_id", *_STEWARD_SOURCE_SPAN_REQUIRED],
                 "additionalProperties": False,

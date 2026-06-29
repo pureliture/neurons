@@ -36,6 +36,7 @@ from .memory_promotion import (
     commit_stale,
     mark_candidate_needs_review,
 )
+from .transcript_model import canonicalize_provider
 
 # 승인/현행 lane 정의는 ledger.list_llm_brain_memory_cards 와 동일하게 유지한다.
 ACCEPTED_LIFECYCLE_STATES = frozenset({"accepted", "human_accepted", "auto_accepted"})
@@ -245,6 +246,7 @@ class BrainStewardService:
         mark_needs_review: bool = False,
         review_reason: str = "",
         decision_id: str = "steward_candidate",
+        proposer: str = "unspecified",
     ) -> dict:
         """새 MemoryCard 후보를 만든다. accepted 가 아니라 candidate / needs_review 로만 남는다."""
 
@@ -262,11 +264,18 @@ class BrainStewardService:
             )
             card = review["review_card"]
             kind = "needs_review"
-        card = self._stamp_proposal(card, kind=kind, target_memory_id="")
+        card = self._stamp_proposal(card, kind=kind, target_memory_id="", proposer=proposer)
         stored = self._persist_proposal(card)
         return self._proposal_result(kind="candidate_create", card=stored)
 
-    def stale_mark(self, *, memory_id: str, reason: str, decision_id: str = "steward_stale") -> dict:
+    def stale_mark(
+        self,
+        *,
+        memory_id: str,
+        reason: str,
+        decision_id: str = "steward_stale",
+        proposer: str = "unspecified",
+    ) -> dict:
         """특정 MemoryCard 가 stale 하다는 proposal 을 남긴다. 원본은 삭제/수정하지 않는다."""
 
         if not memory_id:
@@ -282,6 +291,8 @@ class BrainStewardService:
         proposal["memory_id"] = STEWARD_PROPOSAL_PREFIX + _sha16(memory_id, "stale", _sha16(reason))
         proposal["steward_proposal_kind"] = "stale"
         proposal["steward_target_memory_id"] = memory_id
+        # proposer 귀속: ref-only 경로는 _stamp_proposal 을 거치지 않으므로 직접 stamp 한다.
+        proposal["steward_proposed_by"] = canonicalize_provider(proposer) or "unspecified"
         stored = self._persist_proposal(proposal)
         return self._proposal_result(kind="stale_mark", card=stored, target_memory_id=memory_id)
 
@@ -291,6 +302,7 @@ class BrainStewardService:
         old_memory_id: str,
         source_span: Mapping[str, Any],
         refresh_watermark: str = "steward_supersede",
+        proposer: str = "unspecified",
     ) -> dict:
         """기존 MemoryCard 를 새 후보로 대체하자는 proposal. 기존 card 를 즉시 교체하지 않는다."""
 
@@ -305,7 +317,9 @@ class BrainStewardService:
             mining_reason="steward_supersede",
         )
         card["supersedes"] = [old_memory_id]
-        card = self._stamp_proposal(card, kind="supersede", target_memory_id=old_memory_id)
+        card = self._stamp_proposal(
+            card, kind="supersede", target_memory_id=old_memory_id, proposer=proposer
+        )
         stored = self._persist_proposal(card)
         return self._proposal_result(
             kind="supersede_propose", card=stored, target_memory_id=old_memory_id
@@ -319,9 +333,10 @@ class BrainStewardService:
         self._guard_restricted("memory_candidate_approve")
         self._guard_writable()
         candidate = self._load_pending_candidate(candidate_memory_id)
-        return LLMBrainMemoryService(self.ledger).accept_human_approved_candidate(
+        result = LLMBrainMemoryService(self.ledger).accept_human_approved_candidate(
             candidate, approved_by=approved_by, decision_id=decision_id
         )
+        return self._safe_restricted_result(result)
 
     def candidate_reject(
         self, *, candidate_memory_id: str, rejected_by: str, decision_id: str, reason: str
@@ -337,11 +352,13 @@ class BrainStewardService:
         stored = self.ledger.upsert_llm_brain_memory_card(rejection["rejected_card"])
         # audit: authority 를 바꾸는 restricted 결정에 feedback record 를 남긴다(M4).
         self.ledger.upsert_llm_brain_feedback_record(rejection["feedback_record"])
-        return {
-            "schema_version": "brain_steward_candidate_rejection.v1",
-            "canonical_write_performed": True,
-            "rejected_card": stored,
-        }
+        return self._safe_restricted_result(
+            {
+                "schema_version": "brain_steward_candidate_rejection.v1",
+                "canonical_write_performed": True,
+                "rejected_card": stored,
+            }
+        )
 
     def candidate_auto_accept(
         self,
@@ -353,9 +370,10 @@ class BrainStewardService:
         self._guard_restricted("memory_candidate_auto_accept", capability="auto_accept")
         self._guard_writable()
         candidate = self._load_pending_candidate(candidate_memory_id)
-        return LLMBrainMemoryService(self.ledger).accept_auto_policy_candidate(
+        result = LLMBrainMemoryService(self.ledger).accept_auto_policy_candidate(
             candidate, evaluation, operator_approval_ref=operator_approval_ref
         )
+        return self._safe_restricted_result(result)
 
     def supersede_commit(
         self, *, proposal_memory_id: str, approved_by: str, decision_id: str
@@ -426,6 +444,26 @@ class BrainStewardService:
 
     # -------------------------------------------------------------- internals
 
+    def _safe_restricted_result(self, result: Mapping[str, Any]) -> dict:
+        """restricted write 응답을 public-safe 로 projection 한다.
+
+        accept/reject 원본 결과는 full MemoryCard(source_refs / typed_payload / render_text
+        등 forbidden 필드 포함)를 담는다. 이 표면은 raw/private 를 노출하지 않으므로 card 류는
+        안전 요약(_authority_item)으로 바꾸고 operator-internal 부가 레코드는 떨군 뒤,
+        마지막에 forbidden-content scan 으로 fail-closed 검증한다.
+        """
+
+        safe = dict(result)
+        for field in ("accepted_card", "rejected_card", "new_card"):
+            card = safe.get(field)
+            if isinstance(card, Mapping):
+                safe[field] = self._authority_item(card)
+        # operator-internal 부가 레코드는 nested full MemoryCard(typed_payload/source_refs)를
+        # 담을 수 있다. 안전 top-level projection 으로 결과는 이미 전달되므로 통째로 떨군다.
+        safe.pop("feedback_record", None)
+        safe.pop("application", None)
+        return assert_public_safe(safe, "restricted_result")
+
     def _load_current_target(self, target_id: str, *, what: str) -> dict:
         # commit 대상은 여전히 accepted + current 여야 한다. proposal 생성 후 target 이 이미
         # stale/superseded 가 됐다면 오래된 proposal 로 새 authority 를 만들지 않도록 거부한다.
@@ -476,15 +514,20 @@ class BrainStewardService:
         return card
 
     def _stamp_proposal(
-        self, card: dict, *, kind: str, target_memory_id: str
+        self, card: dict, *, kind: str, target_memory_id: str, proposer: str = "unspecified"
     ) -> dict:
-        """proposal 전용 memory_id 로 재발급해 accepted/miner candidate id 와 분리한다."""
+        """proposal 전용 memory_id 로 재발급해 accepted/miner candidate id 와 분리한다.
+
+        proposer 는 제안 actor(예: hermes)의 정규화된 advisory label 이다. card subject 의
+        ``provider`` 와는 다른 식별 축이며, redaction fail-closed 를 통과해야 한다.
+        """
 
         idempotency_key = str(card.get("idempotency_key") or card.get("memory_id") or "")
         card["memory_id"] = STEWARD_PROPOSAL_PREFIX + _sha16(
             idempotency_key, kind, target_memory_id
         )
         card["steward_proposal_kind"] = kind
+        card["steward_proposed_by"] = canonicalize_provider(proposer) or "unspecified"
         if target_memory_id:
             card["steward_target_memory_id"] = target_memory_id
         return card
@@ -556,6 +599,7 @@ class BrainStewardService:
         return {
             **self._base_projection(card),
             "proposal_kind": str(card.get("steward_proposal_kind") or "candidate"),
+            "proposed_by": str(card.get("steward_proposed_by") or "unspecified"),
             "target_memory_id": _text(card, "steward_target_memory_id"),
             "judgment_state": _text(card, "judgment_state"),
             "reason": reason,

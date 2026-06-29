@@ -32,6 +32,17 @@ def _sha256(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def canonicalize_provider(provider: str) -> str:
+    """Normalize a provider/source label into a stable lowercase identity token.
+
+    Provider feeds ``build_session_id_hash`` (``sha256(f"{provider}:{id}")``), so
+    casing/whitespace drift ("Hermes" vs "hermes") would fork session identity.
+    Existing providers (codex/claude/gemini/antigravity) are already lowercase, so
+    this is a no-op for them and stays backward compatible.
+    """
+    return str(provider or "").strip().lower()
+
+
 def canonicalize_project(project: str) -> str:
     """Collapse observed transcript source path variants into a stable project label."""
     value = str(project or "")
@@ -142,6 +153,7 @@ class TranscriptSession:
     source_locator_hash: str = ""
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "provider", canonicalize_provider(self.provider))
         object.__setattr__(self, "project", canonicalize_project(self.project))
 
     def to_record(self) -> dict:
@@ -203,6 +215,7 @@ class TranscriptChunk:
 
     def __post_init__(self) -> None:
         redacted_text = redact_text_v2(self.redacted_text)
+        object.__setattr__(self, "provider", canonicalize_provider(self.provider))
         object.__setattr__(self, "project", canonicalize_project(self.project))
         object.__setattr__(self, "redacted_text", redacted_text)
         object.__setattr__(self, "content_hash", _sha256(redacted_text))
@@ -271,6 +284,7 @@ class ToolEvidenceSummaryRecord:
     def __post_init__(self) -> None:
         command_summary = redact_and_bound_evidence_text(self.command_summary, MAX_TOOL_EVIDENCE_COMMAND_CHARS)
         redacted_summary = redact_and_bound_evidence_text(self.redacted_summary, MAX_TOOL_EVIDENCE_SUMMARY_CHARS)
+        object.__setattr__(self, "provider", canonicalize_provider(self.provider))
         object.__setattr__(self, "project", canonicalize_project(self.project))
         object.__setattr__(self, "command_summary", command_summary)
         object.__setattr__(self, "redacted_summary", redacted_summary)

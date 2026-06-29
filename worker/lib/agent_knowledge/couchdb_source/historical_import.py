@@ -37,6 +37,7 @@ from .document_model import (
 from .project_authority import ProjectAuthorityInput, resolve_project
 from .source_store import CouchDBSourceStore
 from ..session_memory.transcript_chunking import build_transcript_chunks
+from ..session_memory.transcript_model import canonicalize_provider
 from ..session_memory.transcript_parsers import ParsedTranscript, parse_transcript_source
 
 
@@ -55,6 +56,9 @@ PROVIDER_LANES: dict[str, ProviderLane] = {
     # antigravity covers its headless CLI (agy), which dendrite captures as antigravity.
     "antigravity": ProviderLane("antigravity", live_allowed=True, parser=parse_transcript_source),
     "gemini": ProviderLane("gemini", live_allowed=False, parser=parse_transcript_source),
+    # hermes attaches as a first-class provider; it ingests via the generic
+    # provider_transcript_fixture.v1 path (no native parser yet).
+    "hermes": ProviderLane("hermes", live_allowed=True, parser=parse_transcript_source),
 }
 
 
@@ -99,15 +103,16 @@ def import_historical_source(
     server_inference: Callable[[], str] | None = None,
     ledger_comparison: Mapping[str, object] | None = None,
 ) -> ImportResult:
-    lane = PROVIDER_LANES.get(locator.provider)
+    provider = canonicalize_provider(locator.provider)
+    lane = PROVIDER_LANES.get(provider)
     if lane is None:
-        return ImportResult(provider=locator.provider, status=ImportStatus.UNKNOWN_PROVIDER, notes=("provider_not_in_migration_scope",))
+        return ImportResult(provider=provider, status=ImportStatus.UNKNOWN_PROVIDER, notes=("provider_not_in_migration_scope",))
     if locator.scope == "live" and not lane.live_allowed:
         # Gemini CLI is historical-only; a live event is a scope violation.
-        return ImportResult(provider=locator.provider, status=ImportStatus.SCOPE_VIOLATION, notes=("live_scope_not_allowed_for_provider",))
+        return ImportResult(provider=provider, status=ImportStatus.SCOPE_VIOLATION, notes=("live_scope_not_allowed_for_provider",))
     if lane.parser is None:
         return ImportResult(
-            provider=locator.provider,
+            provider=provider,
             status=ImportStatus.PARSER_UNAVAILABLE,
             notes=("parser_not_vendored", "excluded_from_retirement"),
         )
@@ -126,14 +131,14 @@ def import_historical_source(
     source_locator_hash = build_source_locator_hash(locator.source_path)
     try:
         parsed = lane.parser(
-            locator.provider,
+            provider,
             locator.source_path,
             project=resolution.project,
             source_locator_hash=source_locator_hash,
         )
     except ValueError as exc:
         return ImportResult(
-            provider=locator.provider,
+            provider=provider,
             status=ImportStatus.SOURCE_UNAVAILABLE,
             project=resolution.project,
             project_source=resolution.source,
@@ -151,7 +156,7 @@ def import_historical_source(
     except SourceRedactionLeak as exc:
         # Fail closed: a still-leaking chunk blocks the whole session write.
         return ImportResult(
-            provider=locator.provider,
+            provider=provider,
             status=ImportStatus.LEAK_BLOCKED,
             session_id_hash=parsed.session.session_id_hash,
             project=resolution.project,
@@ -184,7 +189,7 @@ def import_historical_source(
     store.put(coverage_doc)
 
     return ImportResult(
-        provider=locator.provider,
+        provider=provider,
         status=ImportStatus.IMPORTED,
         session_id_hash=parsed.session.session_id_hash,
         project=resolution.project,
