@@ -213,7 +213,7 @@ def test_transcript_ingest_worker_is_server_only_boundary(tmp_path):
     else:
         raise AssertionError("expected missing enqueue sink to fail")
 
-    import agent_knowledge.transcript_ingest as top_level
+    import agent_knowledge.session_memory.transcript_ingest as top_level
 
     assert top_level.TranscriptIngestWorker is TranscriptIngestWorker
     assert not hasattr(top_level, "IngressQueueClient")

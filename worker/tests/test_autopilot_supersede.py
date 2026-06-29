@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from agent_knowledge.ledger import Ledger
-from agent_knowledge.memory_miner import build_memory_card_candidate_from_source_span
+from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
 from agent_knowledge.session_memory.brain_query import run_brain_query_v2
 from agent_knowledge.session_memory.brain_read_model import LegacyLedgerBrainReadModel
 from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService

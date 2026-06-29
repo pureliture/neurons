@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from agent_knowledge.memory_miner import (
+from agent_knowledge.session_memory.memory_miner import (
     build_immediate_candidate_enqueue,
     build_memory_card_candidate_from_source_span,
     memory_card_candidate_idempotency_key,

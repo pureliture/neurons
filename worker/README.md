@@ -48,13 +48,15 @@ vendored (`lib/agent_knowledge/`):
   compatibility command for replay delivery planning, queue backfill planning,
   delivery drain dry-run, and delivery reconcile dry-run. Live approval-execute
   wiring and RAGFlow/ingress POST clients remain excluded.
-- `session_memory/memory_card.py` / `session_memory/transcript_model.py` plus
-  top-level compatibility aliases — server/brain-side MemoryCard candidate,
-  envelope validation, redaction, and text-bound helpers used by `ledger.py`.
-- `session_memory/curation.py` plus top-level compatibility alias — core
-  ledger-backed MemoryCard candidate approval/reject/disable/supersede
-  transitions. CLI/MCP search product surfaces remain out of this slice.
-- `session_memory/memory_miner.py` plus top-level compatibility alias —
+- `session_memory/memory_card.py` / `session_memory/transcript_model.py` —
+  server/brain-side MemoryCard candidate, envelope validation, redaction, and
+  text-bound helpers used by `ledger.py`. Import via
+  `agent_knowledge.session_memory.*` (the former top-level compatibility aliases
+  were removed).
+- `session_memory/curation.py` — core ledger-backed MemoryCard candidate
+  approval/reject/disable/supersede transitions. CLI/MCP search product surfaces
+  remain out of this slice.
+- `session_memory/memory_miner.py` —
   injected-completion and source-span MemoryCard candidate mining. It performs
   no ledger write, queue write, RAGFlow dataset write, or raw transcript lookup.
 - `session_memory/brain_query.py` / `query_planner.py` /

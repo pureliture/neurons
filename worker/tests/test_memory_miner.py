@@ -1,6 +1,6 @@
 import json
 
-from agent_knowledge.memory_miner import FakeMemoryMiner, LlmMemoryMiner, build_ragflow_completion_fn
+from agent_knowledge.session_memory.memory_miner import FakeMemoryMiner, LlmMemoryMiner, build_ragflow_completion_fn
 
 
 PROJECT = "workspace-ragflow-advisor"

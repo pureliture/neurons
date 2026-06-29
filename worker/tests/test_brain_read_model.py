@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from agent_knowledge.curation import CurationService
+from agent_knowledge.session_memory.curation import CurationService
 from agent_knowledge.ledger import Ledger
-from agent_knowledge.memory_card import build_memory_candidate
+from agent_knowledge.session_memory.memory_card import build_memory_candidate
 from agent_knowledge.session_memory.brain_query import BrainReadModel
 from agent_knowledge.session_memory.brain_read_model import (
     LegacyLedgerBrainReadModel,

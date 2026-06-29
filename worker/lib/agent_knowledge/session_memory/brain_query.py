@@ -15,7 +15,7 @@ import re
 from collections.abc import Mapping
 from typing import Any, Callable, Protocol, runtime_checkable
 
-from ..memory_card import CANDIDATE_TYPES
+from .memory_card import CANDIDATE_TYPES
 from .native_memory_governance import HIGH_RISK_CARD_TYPES
 from .query_planner import MAX_QUERY_CHARS
 from .transcript_model import MAX_TRANSCRIPT_SNIPPET_CHARS, redact_and_bound_evidence_text

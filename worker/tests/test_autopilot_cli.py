@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from agent_knowledge.ledger import Ledger
-from agent_knowledge.memory_miner import build_memory_card_candidate_from_source_span
+from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
 from agent_knowledge.session_memory.autopilot_cli import (
     main,
     mine_live_candidates,

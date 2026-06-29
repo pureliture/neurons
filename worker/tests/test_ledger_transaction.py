@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 
 from agent_knowledge.ledger import Ledger
-from agent_knowledge.memory_card import build_memory_candidate, build_memory_card
+from agent_knowledge.session_memory.memory_card import build_memory_candidate, build_memory_card
 
 
 PROJECT = "workspace-ragflow-advisor"
