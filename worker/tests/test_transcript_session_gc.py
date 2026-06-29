@@ -11,7 +11,7 @@ from agent_knowledge.session_memory.transcript_session_gc import (
 
 SM = "ds_sm"
 TX = "ds_tx"
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
 def _sha(x):
@@ -59,14 +59,14 @@ def _cfg(tmp_path, *, execute=False, backup=True):
     return TranscriptSessionGcConfig(
         transcript_dataset_id=TX,
         session_memory_dataset_id=SM,
-        ragflow_url="http://localhost:9380",
+        index_url="http://localhost:9380",
         backup_dir=str(tmp_path / "gc-backup") if backup else "",
         execute=execute,
     )
 
 
 def _patch(monkeypatch, fake):
-    monkeypatch.setattr(sgc, "RagflowHttpClient", lambda **k: fake)
+    monkeypatch.setattr(sgc, "RetiredIndexBridgeHttpClient", lambda **k: fake)
 
 
 def test_dryrun_counts_transcript_of_summarized_sessions(tmp_path, monkeypatch):
@@ -191,7 +191,7 @@ def test_transcript_session_gc_characterization_order(tmp_path):
     rec = _RecordingSessClient(sm_docs=[_sm("S1")], tx_docs=[_tx("S1", doc_id="t1")])
 
     report = TranscriptSessionGcRunner(
-        config=_cfg(tmp_path, execute=True), token="t", ragflow_client=rec
+        config=_cfg(tmp_path, execute=True), token="t", index_client=rec
     ).run()
 
     assert report["deleted_count"] == 1

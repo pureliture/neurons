@@ -1,7 +1,7 @@
-"""Recall-time ledger filter for RAGFlow-native memory (Option A, slice1).
+"""Recall-time ledger filter for RetiredIndexBridge-native memory (Option A, slice1).
 
-이 모듈은 RAGFlow Memory search hits 를 ledger active-set 으로 필터해 **현재 유효한
-기억만** 반환한다(superseded / 미등록=미승인 제외). RAGFlow 항목은 건드리지 않는다
+이 모듈은 RetiredIndexBridge Memory search hits 를 ledger active-set 으로 필터해 **현재 유효한
+기억만** 반환한다(superseded / 미등록=미승인 제외). RetiredIndexBridge 항목은 건드리지 않는다
 (supersede 는 ledger status 만 바꾸는 Option A; 실제 disable 은 후속 Option C reconcile).
 
 서버측 session_id 필터는 동작하지 않으므로(라이브 사실 #5) 항상 클라이언트측 fetch 후
@@ -12,7 +12,7 @@ broker seam (follow-up, spec §12.2):
     `filter_active_native_memory` / `recall_active_native_memory` 가 반환하는 dict 는
     `ContextBroker._active_*_items` item shape(`kind` / `currentness` / `policy_reason` /
     `content` / `score`)와 호환된다. broker 깊은 배선(`_active_native_memory_items` 추가,
-    `ragflow.search_messages` 바인딩 — broker 의 dataset retrieval `ragflow.retrieve` 와
+    `index.search_messages` 바인딩 — broker 의 dataset retrieval `index.retrieve` 와
     다른 호출 —, memory_id 바인딩, over-fetch 루프 broker 통합, MCP 노출)은 **follow-up**
     이다. 이 슬라이스는 broker 코드를 변경하지 않고 호환 seam 만 보장한다.
 """
@@ -32,7 +32,7 @@ def filter_active_native_memory(
     *,
     brain_id: str = "",
 ) -> list[dict]:
-    """search hits(RAGFlow item dict들) → active 기억만, 메타 부착해 반환.
+    """search hits(RetiredIndexBridge item dict들) → active 기억만, 메타 부착해 반환.
 
     keep/drop 판정은 session_tag↔active join. 미등록 tag = 미승인 = DROP,
     superseded = DROP. brain_id 가 주어지면 그 brain_id(=`/project/<project>`) 의 active 만
@@ -63,7 +63,7 @@ def filter_active_native_memory(
                 "policy_reason": "native_memory_active_mirror_match",
                 "currentness": "active_native_memory",
                 # tier 는 mirror row 의 card_type(miner 어휘)으로만 계산한다.
-                # hit.get("message_type")(RAGFlow 어휘: raw/semantic/...)로 계산하지 않는다 — 별개 어휘.
+                # hit.get("message_type")(RetiredIndexBridge 어휘: raw/semantic/...)로 계산하지 않는다 — 별개 어휘.
                 "tier": governance_tier(row.get("card_type", "")),
                 "message_type": hit.get("message_type"),
                 "content": hit.get("content"),
@@ -105,7 +105,7 @@ def _extract_hits(search_result: dict) -> list[dict]:
 
 def recall_active_native_memory(
     *,
-    ragflow,                       # search_messages 덕타입. 테스트=fake.
+    retired_index_bridge,                       # search_messages 덕타입. 테스트=fake.
     store: NativeMemoryMirrorStore,
     memory_id: str,
     query: str,
@@ -116,16 +116,16 @@ def recall_active_native_memory(
 ) -> list[dict]:
     """search → filter → (포화 시 top_n 확대 1회 재조회) → filter.
 
-    라이브 호출은 주입된 ragflow.search_messages(fake). 서버측 session_id 필터 미사용
+    라이브 호출은 주입된 retired_index_bridge.search_messages(fake). 서버측 session_id 필터 미사용
     (사실 #5). 재조회는 **최대 1회**, 2차 top_n 은 정확히 `max_top_n`. store 예외는
     그대로 전파(fail-closed; filter_active_native_memory 가 던지는 예외를 흡수하지 않음).
     """
-    search_result = ragflow.search_messages(
+    search_result = retired_index_bridge.search_messages(
         query=query, memory_id=memory_id, top_n=base_top_n
     )
     filtered = filter_active_native_memory(_extract_hits(search_result), store, brain_id=brain_id)
     if _needs_overfetch(filtered, threshold=overfetch_threshold) and max_top_n > base_top_n:
-        search_result = ragflow.search_messages(
+        search_result = retired_index_bridge.search_messages(
             query=query, memory_id=memory_id, top_n=max_top_n
         )
         filtered = filter_active_native_memory(_extract_hits(search_result), store, brain_id=brain_id)

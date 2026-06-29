@@ -34,7 +34,7 @@ class NatsIngestPublisherTest {
 
         publisher.publish(job);
 
-        assertThat(gateway.messageId).isEqualTo("ragflow-transcript-memory:conversation_chunk:" + job.contentHash());
+        assertThat(gateway.messageId).isEqualTo("index-transcript-memory:conversation_chunk:" + job.contentHash());
     }
 
     @Test
@@ -68,7 +68,7 @@ class NatsIngestPublisherTest {
             redacted body
             """;
         return new IngestJob(
-            Map.of("provider", "codex", "project", "workspace-ragflow-advisor"),
+            Map.of("provider", "codex", "project", "workspace-index-advisor"),
             new DocumentPayload(
                 "redacted_rag_ready_document",
                 "redaction.v2",
@@ -78,7 +78,7 @@ class NatsIngestPublisherTest {
                 Map.of("schema_version", "agent_knowledge_document.v2", "result_type", "conversation_chunk")
             ),
             ContentHashVerifier.sha256Hex(body),
-            "ragflow-transcript-memory",
+            "index-transcript-memory",
             "conversation_chunk",
             idempotencyKey
         );

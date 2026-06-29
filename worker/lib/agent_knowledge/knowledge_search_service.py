@@ -4,17 +4,17 @@ import copy
 import sqlite3
 
 from .ledger import Ledger
-from .llm_brain_core.document_bridge import RagFlowDocumentBridge
+from .llm_brain_core.document_bridge import RetiredIndexBridgeDocumentBridge
 from .llm_brain_core.graph import GraphMemoryAdapter
 from .llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
 from .llm_brain_core.runtime import build_runtime_brain_service
 from .memory_read_pipeline import AuthorizedMemoryReader, MemoryReadPipeline, MemorySearchQuery
-from .ragflow_client import RagflowHttpClient
+from .index_client import RetiredIndexBridgeHttpClient
 from .session_memory.brain_query import resolve_brain_ids, run_brain_query_v2
 from .session_memory.brain_read_model import LegacyLedgerBrainReadModel, build_semantic_recall
 
 
-class DisabledRagflowClient:
+class DisabledRetiredIndexBridgeClient:
     def retrieve(self, *args, **kwargs) -> list[dict]:
         return []
 
@@ -22,17 +22,14 @@ class DisabledRagflowClient:
         return {"status_code": 200, "json": {"code": 0, "data": []}}
 
 
-def build_ragflow_client(
+def build_index_client(
     *,
-    ragflow_url: str = "",
+    index_url: str = "",
     token: str = "",
     policy_proxy_url: str = "",
-) -> RagflowHttpClient | DisabledRagflowClient:
-    if policy_proxy_url:
-        return RagflowHttpClient(base_url=policy_proxy_url, bearer_token="")
-    if ragflow_url and token:
-        return RagflowHttpClient(base_url=ragflow_url, bearer_token=token)
-    return DisabledRagflowClient()
+) -> DisabledRetiredIndexBridgeClient:
+    _ = (index_url, token, policy_proxy_url)
+    return DisabledRetiredIndexBridgeClient()
 
 
 class _SessionCardCache:
@@ -81,7 +78,7 @@ class KnowledgeSearchService:
         self,
         *,
         ledger: Ledger,
-        ragflow,
+        retired_index_bridge,
         dataset_ids: list[str],
         allow_private_results: bool = False,
         native_memory_id: str = "",
@@ -93,7 +90,7 @@ class KnowledgeSearchService:
         allow_steward_auto_accept: bool = False,
     ):
         self.ledger = ledger
-        self.ragflow = ragflow
+        self.retired_index_bridge = retired_index_bridge
         self.dataset_ids = dataset_ids
         self.allow_private_results = bool(allow_private_results)
         self.native_memory_id = native_memory_id
@@ -105,12 +102,12 @@ class KnowledgeSearchService:
         self.allow_steward_auto_accept = bool(allow_steward_auto_accept)
         # M8 read cutover: a Qdrant-backed (query, brain_id) -> list[dict] callable
         # that fills brain.query's archive/evidence lanes from the Qdrant searchable
-        # mirror. When set it REPLACES the RAGFlow archive search (which is off in the
-        # live MCP anyway). None -> legacy behaviour (RAGFlow if dataset_ids, else empty).
+        # mirror. When set it REPLACES the RetiredIndexBridge archive search (which is off in the
+        # live MCP anyway). None -> legacy behaviour (RetiredIndexBridge if dataset_ids, else empty).
         self._mirror_search = mirror_search
         self.authorized_reader = authorized_reader or read_pipeline or MemoryReadPipeline(
             ledger=ledger,
-            ragflow=ragflow,
+            retired_index_bridge=retired_index_bridge,
             dataset_ids=dataset_ids,
             allow_private_results=allow_private_results,
         )
@@ -141,7 +138,7 @@ class KnowledgeSearchService:
             read_model=self._brain_card_cache,
             source_catalog=LedgerSourceRefCatalog(self.ledger),
             graph_adapter=self.graph_adapter,
-            document_bridge=RagFlowDocumentBridge(ragflow=self.ragflow, dataset_ids=self.dataset_ids),
+            document_bridge=RetiredIndexBridgeDocumentBridge(retired_index_bridge=self.retired_index_bridge, dataset_ids=self.dataset_ids),
             search_mirror_status=self._search_mirror_status(),
         )
 
@@ -211,12 +208,12 @@ class KnowledgeSearchService:
 
     def brain_query(self, *, brain_id: str, query: str, limit: int = 8) -> dict:
         read_model = LegacyLedgerBrainReadModel(self.ledger)
-        ragflow_search = self._mirror_search or (
-            self._brain_query_ragflow_search if self.dataset_ids else None
+        index_search = self._mirror_search or (
+            self._brain_query_index_search if self.dataset_ids else None
         )
         result = run_brain_query_v2(
             read_model=read_model,
-            ragflow_search=ragflow_search,
+            index_search=index_search,
             brain_id=brain_id,
             query=query,
             query_intent="session_context",
@@ -225,7 +222,7 @@ class KnowledgeSearchService:
         if self.native_memory_id:
             semantic = build_semantic_recall(
                 ledger=self.ledger,
-                ragflow=self.ragflow,
+                retired_index_bridge=self.retired_index_bridge,
                 memory_id=self.native_memory_id,
             )
             semantic_failure_type = ""
@@ -242,12 +239,12 @@ class KnowledgeSearchService:
             result["audit"] = audit
         return result
 
-    def _brain_query_ragflow_search(self, query: str, brain_id: str) -> list[dict]:
+    def _brain_query_index_search(self, query: str, brain_id: str) -> list[dict]:
         from .session_memory.brain_query import project_from_brain_id
 
         project = project_from_brain_id(brain_id)
         filters = {"project": project} if project else None
-        chunks = self.ragflow.retrieve(query, self.dataset_ids, filters=filters, limit=8)
+        chunks = self.retired_index_bridge.retrieve(query, self.dataset_ids, filters=filters, limit=8)
         results: list[dict] = []
         for chunk in chunks:
             if not isinstance(chunk, dict):
@@ -255,7 +252,7 @@ class KnowledgeSearchService:
             metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
             results.append(
                 {
-                    "result_type": str(chunk.get("result_type") or metadata.get("result_type") or "ragflow_mirror"),
+                    "result_type": str(chunk.get("result_type") or metadata.get("result_type") or "index_mirror"),
                     "memory_id": str(
                         chunk.get("memory_id")
                         or metadata.get("memory_id")

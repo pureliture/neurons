@@ -16,9 +16,9 @@ from collections import defaultdict
 from pathlib import Path
 
 from ..ledger import Ledger
-from ..ragflow_client import _transcript_memory_meta_for_document
+from ..index_client import _transcript_memory_meta_for_document
 
-TRANSCRIPT_MEMORY_TARGET_PROFILE = "ragflow-transcript-memory"
+TRANSCRIPT_MEMORY_TARGET_PROFILE = "index-transcript-memory"
 SCHEMA_VERSION = "agent_knowledge_neuron_session_memory.v1"
 COMMAND = "neuron-session-memory-build"
 NEURON_SESSION_MEMORY_BUILD_OPERATION = "neuron_session_memory_build"
@@ -57,13 +57,13 @@ def read_recent_transcript_deliveries(
 def seed_dirty_session_memory_from_deliveries(
     deliveries,
     *,
-    ragflow,
+    retired_index_bridge,
     ledger: Ledger,
     dataset_ids,
 ) -> dict:
     """Seed neuron-local dirty session-memory rows behind delivered documents.
 
-    Per-document meta lookups dominate the seed wall-clock (one RAGFlow query
+    Per-document meta lookups dominate the seed wall-clock (one RetiredIndexBridge query
     each, no batch endpoint). They are stateless reads, so fetch them
     concurrently; ledger writes stay serial in delivery order with the same
     session dedup, so the result is identical to the prior sequential scan.
@@ -78,7 +78,7 @@ def seed_dirty_session_memory_from_deliveries(
     refs = list(dict.fromkeys(ref for ref, _ in items if ref))  # unique, order-preserving
 
     def _meta(ref: str):
-        return ref, _transcript_memory_meta_for_document(ragflow, dataset_ids, ref)
+        return ref, _transcript_memory_meta_for_document(retired_index_bridge, dataset_ids, ref)
 
     meta_by_ref: dict[str, dict | None] = {}
     if refs:
@@ -125,7 +125,7 @@ def public_seed_report(seed: dict, *, scanned: int) -> dict:
     }
 
 
-def probe_transcript_delivery_meta(deliveries, *, ragflow, dataset_ids) -> dict:
+def probe_transcript_delivery_meta(deliveries, *, retired_index_bridge, dataset_ids) -> dict:
     """Read transcript-memory metadata for delivered docs without ledger writes.
 
     The report intentionally returns only counts and project/provider buckets.
@@ -150,7 +150,7 @@ def probe_transcript_delivery_meta(deliveries, *, ragflow, dataset_ids) -> dict:
     project_provider_sessions: dict[tuple[str, str], set[str]] = defaultdict(set)
     project_provider_documents: dict[tuple[str, str], int] = defaultdict(int)
     for ref in refs:
-        meta = _transcript_memory_meta_for_document(ragflow, dataset_ids, ref)
+        meta = _transcript_memory_meta_for_document(retired_index_bridge, dataset_ids, ref)
         if not meta:
             counts["missing_meta"] += 1
             continue
@@ -221,20 +221,20 @@ def run_neuron_session_memory_build_once(
 ) -> dict:
     """One neuron build cycle: seed dirty from the worker shadow log, then build.
 
-    ``config`` must carry ``transcript_read_source="ragflow_read_sot"`` and a
+    ``config`` must carry ``transcript_read_source="index_read_sot"`` and a
     *neuron-local* ``ledger_path`` (build-state only; the Mac ledger is not
     used). Reuses :class:`DirtySessionMemorySyncRunner` to build + promote the
-    seeded sessions from RAGFlow read-SoT. The watermark advances only after a
+    seeded sessions from RetiredIndexBridge read-SoT. The watermark advances only after a
     successful seed scan so deliveries are processed at-least-once.
     """
-    from ..ragflow_client import RagflowHttpClient
+    from ..index_client import RetiredIndexBridgeHttpClient
     from .dirty_session_memory_sync import DirtySessionMemorySyncRunner
 
     emit = log or (lambda event: None)
-    ragflow = RagflowHttpClient(base_url=config.ragflow_url, bearer_token=token, request_timeout_seconds=30)
+    retired_index_bridge = RetiredIndexBridgeHttpClient(base_url=config.index_url, bearer_token=token, request_timeout_seconds=30)
     dataset_ids = [
         str(dataset.get("id") or "")
-        for dataset in ragflow.list_datasets(name=transcript_dataset_name)
+        for dataset in retired_index_bridge.list_datasets(name=transcript_dataset_name)
         if dataset.get("id")
     ]
     watermark = read_watermark(watermark_path)
@@ -245,7 +245,7 @@ def run_neuron_session_memory_build_once(
     )
     ledger = Ledger(config.ledger_path)
     seed = seed_dirty_session_memory_from_deliveries(
-        deliveries, ragflow=ragflow, ledger=ledger, dataset_ids=dataset_ids
+        deliveries, retired_index_bridge=retired_index_bridge, ledger=ledger, dataset_ids=dataset_ids
     )
     public_seed = public_seed_report(seed, scanned=len(deliveries))
     emit({"event": "neuron_seed", **public_seed})
@@ -276,8 +276,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-id", default="")
     parser.add_argument("--dataset-name", default="session-memory")
     parser.add_argument("--transcript-dataset-name", default="transcript-memory")
-    parser.add_argument("--ragflow-url", default="")
-    parser.add_argument("--token-env", default="")
+    parser.add_argument("--retired-index-bridge-url", default="")
+    parser.add_argument("--retired-index-bridge-token-env", default="")
     parser.add_argument("--runtime-dir", default="")
     parser.add_argument("--batch-size", type=int, default=25)
     parser.add_argument("--max-processed-per-run", type=int, default=25)
@@ -298,7 +298,7 @@ def _blocked_report(reason: str) -> dict:
         "mode": "blocked",
         "mutation_performed": False,
         "network_used": False,
-        "ragflow_write_performed": False,
+        "index_write_performed": False,
         "raw_ids_printed": False,
         "raw_paths_printed": False,
     }
@@ -309,8 +309,8 @@ def _has_live_args(args: argparse.Namespace) -> bool:
         [
             args.ledger,
             args.dataset_id,
-            args.ragflow_url,
-            args.token_env,
+            args.retired_index_bridge_url,
+            args.retired_index_bridge_token_env,
             args.runtime_dir,
             args.approval,
         ]
@@ -333,8 +333,8 @@ def _run_dry_run(args: argparse.Namespace) -> int:
                 )
             )
             return 1
-        if not args.ragflow_url or not args.token_env:
-            print("--ragflow-url and --token-env are required with --probe-meta", file=sys.stderr)
+        if not args.retired_index_bridge_url or not args.retired_index_bridge_token_env:
+            print("--retired-index-bridge-url and --retired-index-bridge-token-env are required with --probe-meta", file=sys.stderr)
             return 2
     elif _has_live_args(args):
         _print_report(
@@ -355,25 +355,25 @@ def _run_dry_run(args: argparse.Namespace) -> int:
     )
     meta_probe = None
     if args.probe_meta:
-        from ..ragflow_client import RagflowHttpClient
+        from ..index_client import RetiredIndexBridgeHttpClient
 
-        token = os.environ.get(args.token_env, "")
+        token = os.environ.get(args.retired_index_bridge_token_env, "")
         if not token:
             print("token env is not set", file=sys.stderr)
             return 2
-        ragflow = RagflowHttpClient(
-            base_url=args.ragflow_url,
+        retired_index_bridge = RetiredIndexBridgeHttpClient(
+            base_url=args.retired_index_bridge_url,
             bearer_token=token,
             request_timeout_seconds=30,
         )
         dataset_ids = [
             str(dataset.get("id") or "")
-            for dataset in ragflow.list_datasets(name=args.transcript_dataset_name)
+            for dataset in retired_index_bridge.list_datasets(name=args.transcript_dataset_name)
             if dataset.get("id")
         ]
         meta_probe = probe_transcript_delivery_meta(
             deliveries,
-            ragflow=ragflow,
+            retired_index_bridge=retired_index_bridge,
             dataset_ids=dataset_ids,
         )
     _print_report(
@@ -385,7 +385,7 @@ def _run_dry_run(args: argparse.Namespace) -> int:
             "meta_probe": meta_probe,
             "mutation_performed": False,
             "network_used": bool(args.probe_meta),
-            "ragflow_write_performed": False,
+            "index_write_performed": False,
             "raw_ids_printed": False,
             "raw_paths_printed": False,
             "target_profile": args.target_profile,
@@ -401,27 +401,27 @@ def _run_dry_run(args: argparse.Namespace) -> int:
 def _run_live(args: argparse.Namespace, raw_argv: list[str]) -> int:
     """Approved live build: validate the runtime contract, take a non-blocking
     flock, then seed+build via the vendored :class:`DirtySessionMemorySyncRunner`
-    (RAGFlow read-SoT). The flock lives in the build entrypoint so cron
+    (RetiredIndexBridge read-SoT). The flock lives in the build entrypoint so cron
     re-invocations skip instead of piling up -- the prior pileup came from the
     build path bypassing the lock.
     """
     import fcntl
     import os
 
-    from ..ragflow_client import RagflowHttpClient
+    from ..index_client import RetiredIndexBridgeHttpClient
     from .dirty_session_memory_sync import DirtySessionMemorySyncConfig, resolve_dataset_id
     from .native_memory_sync_approval import ApprovalError, validate_memory_enqueue_approval
 
-    for required in ("ledger", "ragflow_url", "token_env", "runtime_dir", "shadow_db", "watermark_file", "approval"):
+    for required in ("ledger", "retired_index_bridge_url", "retired_index_bridge_token_env", "runtime_dir", "shadow_db", "watermark_file", "approval"):
         if not getattr(args, required):
             print(f"--{required.replace('_', '-')} is required for live build", file=sys.stderr)
             return 2
-    token = os.environ.get(args.token_env)
+    token = os.environ.get(args.retired_index_bridge_token_env)
     if not token:
         print("token env is not set", file=sys.stderr)
         return 2
     # Validate the runtime contract before any network so an unapproved or
-    # mismatched invocation fails closed without touching RAGFlow.
+    # mismatched invocation fails closed without touching RetiredIndexBridge.
     try:
         validate_memory_enqueue_approval(
             args.approval,
@@ -431,9 +431,9 @@ def _run_live(args: argparse.Namespace, raw_argv: list[str]) -> int:
     except (ApprovalError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    resolver = RagflowHttpClient(base_url=args.ragflow_url, bearer_token=token, request_timeout_seconds=15)
+    resolver = RetiredIndexBridgeHttpClient(base_url=args.retired_index_bridge_url, bearer_token=token, request_timeout_seconds=15)
     try:
-        dataset_id = resolve_dataset_id(ragflow=resolver, dataset_id=args.dataset_id, dataset_name=args.dataset_name)
+        dataset_id = resolve_dataset_id(retired_index_bridge=resolver, dataset_id=args.dataset_id, dataset_name=args.dataset_name)
     except Exception as exc:  # noqa: BLE001 - resolution failure must fail closed, not crash
         print(f"dataset resolution failed: {exc}", file=sys.stderr)
         return 2
@@ -458,11 +458,11 @@ def _run_live(args: argparse.Namespace, raw_argv: list[str]) -> int:
     config = DirtySessionMemorySyncConfig(
         ledger_path=Path(args.ledger),
         dataset_id=dataset_id,
-        ragflow_url=args.ragflow_url,
+        index_url=args.retired_index_bridge_url,
         runtime_dir=runtime_dir,
         batch_size=args.batch_size,
         max_processed_per_run=args.max_processed_per_run,
-        transcript_read_source="ragflow_read_sot",
+        transcript_read_source="index_read_sot",
     )
     report = run_neuron_session_memory_build_once(
         config=config,

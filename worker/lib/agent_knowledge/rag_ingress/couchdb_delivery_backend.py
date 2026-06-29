@@ -1,7 +1,7 @@
 """CouchDB DeliveryBackend: routes live ingress payloads into the CouchDB source plane.
 
 This module is the live-pipeline counterpart to :mod:`.delivery_backend`
-(``RagflowDeliveryBackend``) and the migration-built
+(``RetiredIndexBridgeDeliveryBackend``) and the migration-built
 :mod:`..couchdb_source.historical_import`.
 
 Architecture note
@@ -30,12 +30,12 @@ Gap handling
 - ``transcript_session`` upsert: the store's idempotent put ensures the session
   doc is created on first chunk arrival and unchanged on subsequent chunks.
 
-Fail-closed gate (mirrors RagflowDeliveryBackend)
+Fail-closed gate (mirrors RetiredIndexBridgeDeliveryBackend)
 -------------------------------------------------
 1. resolve_delivery_payload: gate = PAYLOAD_OK or early return evidence.
 2. apply_server_redaction: full public-ingress redaction on the body/meta.
 3. public_ingress_leak_violations on the redacted body: any hit -> quarantine
-   (status="quarantined").  This mirrors the RAGFlow delivery path.
+   (status="quarantined").  This mirrors the RetiredIndexBridge delivery path.
 4. build_conversation_chunk_document calls assert_source_text_clean internally.
 5. Any CouchDBError or unexpected exception mid-flight -> DeliveryOutcomeUncertain
    (the PUT may have succeeded before the exception).
@@ -90,7 +90,7 @@ class CouchDBDeliveryBackend:
     plane using the same document builders as the historical import path, so
     live-ingested docs are structurally identical to migration-built ones.
 
-    ``state_db`` is the same :class:`.RAGIngressStateDB` used by the RAGFlow
+    ``state_db`` is the same :class:`.RAGIngressStateDB` used by the RetiredIndexBridge
     backend for payload resolution.  ``store`` is a :class:`CouchDBSourceStore`
     (typically :class:`CouchDBHttpSourceStore` in production, the in-memory
     fake in tests).
@@ -352,7 +352,7 @@ def build_couchdb_delivery_backend(
     """Factory used by the env-switch wiring in state_cli to build the backend.
 
     Kept in this module so :mod:`.state_cli` does not import couchdb_http_store
-    directly (a RAGFlow-free boundary).
+    directly (a retired-index-bridge-free boundary).
     """
     import base64
 

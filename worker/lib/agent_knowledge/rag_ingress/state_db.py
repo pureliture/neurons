@@ -209,9 +209,9 @@ class RAGIngressStateDB:
                     next_retry_at TEXT DEFAULT '',
                     lease_owner TEXT DEFAULT '',
                     lease_until TEXT DEFAULT '',
-                    ragflow_dataset_id TEXT DEFAULT '',
-                    ragflow_document_id TEXT DEFAULT '',
-                    ragflow_run TEXT DEFAULT '',
+                    index_target_id TEXT DEFAULT '',
+                    index_document_id TEXT DEFAULT '',
+                    index_run_id TEXT DEFAULT '',
                     last_error_class TEXT DEFAULT '',
                     last_reconciled_at TEXT DEFAULT '',
                     created_at TEXT NOT NULL,
@@ -235,6 +235,7 @@ class RAGIngressStateDB:
                 );
                 """
             )
+            _migrate_backend_neutral_delivery_schema(connection)
 
     def command_transaction(self) -> "CommandTransaction":
         return CommandTransaction(self)
@@ -573,8 +574,8 @@ class RAGIngressStateDB:
             connection.execute(
                 """
                 UPDATE delivery_jobs
-                SET status = ?, ragflow_dataset_id = ?, ragflow_document_id = ?,
-                    ragflow_run = ?, last_error_class = ?, last_reconciled_at = ?,
+                SET status = ?, index_target_id = ?, index_document_id = ?,
+                    index_run_id = ?, last_error_class = ?, last_reconciled_at = ?,
                     updated_at = ?
                 WHERE job_id = ?
                 """,
@@ -618,8 +619,8 @@ class RAGIngressStateDB:
             connection.execute(
                 """
                 UPDATE delivery_jobs
-                SET status = ?, ragflow_dataset_id = ?, ragflow_document_id = ?,
-                    ragflow_run = ?, last_error_class = ?, last_reconciled_at = ?,
+                SET status = ?, index_target_id = ?, index_document_id = ?,
+                    index_run_id = ?, last_error_class = ?, last_reconciled_at = ?,
                     updated_at = ?
                 WHERE job_id = ?
                 """,
@@ -673,7 +674,7 @@ class RAGIngressStateDB:
                 """
                 UPDATE delivery_jobs
                 SET status = ?, attempt_count = ?, next_retry_at = ?,
-                    ragflow_dataset_id = ?, ragflow_document_id = ?, ragflow_run = ?,
+                    index_target_id = ?, index_document_id = ?, index_run_id = ?,
                     last_error_class = ?, last_reconciled_at = ?, updated_at = ?
                 WHERE job_id = ?
                 """,
@@ -1217,3 +1218,75 @@ def _iso(value: datetime | None = None) -> str:
 def _assert_safe_identifier(value: str) -> None:
     if not value.replace("_", "").isalnum():
         raise ValueError("unsafe SQL identifier")
+
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _column_names(connection: sqlite3.Connection, table: str) -> set[str]:
+    if not _table_exists(connection, table):
+        return set()
+    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    _assert_safe_identifier(table)
+    _assert_safe_identifier(column)
+    if column in _column_names(connection, table):
+        return
+    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _copy_column_if_present(
+    connection: sqlite3.Connection,
+    table: str,
+    *,
+    old_column: str,
+    new_column: str,
+) -> None:
+    _assert_safe_identifier(table)
+    _assert_safe_identifier(old_column)
+    _assert_safe_identifier(new_column)
+    columns = _column_names(connection, table)
+    if old_column not in columns or new_column not in columns:
+        return
+    connection.execute(
+        f"""
+        UPDATE {table}
+        SET {new_column} = {old_column}
+        WHERE ({new_column} IS NULL OR {new_column} = '')
+          AND {old_column} IS NOT NULL
+          AND {old_column} != ''
+        """
+    )
+
+
+def _migrate_backend_neutral_delivery_schema(connection: sqlite3.Connection) -> None:
+    _ensure_column(connection, "delivery_jobs", "index_target_id", "TEXT DEFAULT ''")
+    _ensure_column(connection, "delivery_jobs", "index_document_id", "TEXT DEFAULT ''")
+    _ensure_column(connection, "delivery_jobs", "index_run_id", "TEXT DEFAULT ''")
+    for old_column in ("ragflow_dataset_id", "index_dataset_id"):
+        _copy_column_if_present(
+            connection,
+            "delivery_jobs",
+            old_column=old_column,
+            new_column="index_target_id",
+        )
+    _copy_column_if_present(
+        connection,
+        "delivery_jobs",
+        old_column="ragflow_document_id",
+        new_column="index_document_id",
+    )
+    for old_column in ("ragflow_run", "index_run"):
+        _copy_column_if_present(
+            connection,
+            "delivery_jobs",
+            old_column=old_column,
+            new_column="index_run_id",
+        )

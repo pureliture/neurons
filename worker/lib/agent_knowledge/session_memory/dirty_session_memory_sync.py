@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Callable
 
 from ..ledger import Ledger
-from ..ragflow_client import RagflowHttpClient
+from ..index_client import RetiredIndexBridgeHttpClient
 from .memory_regeneration import (
     LedgerTranscriptMemorySource,
-    RagflowTranscriptMemorySource,
+    RetiredIndexBridgeTranscriptMemorySource,
     SessionMemoryRegenerationRunner,
 )
 from .sync_roundtrip import (
@@ -44,7 +44,7 @@ NON_RETRY_EXCEPTION_MESSAGES = {
 class DirtySessionMemorySyncConfig:
     ledger_path: Path
     dataset_id: str
-    ragflow_url: str
+    index_url: str
     runtime_dir: Path
     batch_size: int = 25
     max_processed_per_run: int = 25
@@ -52,8 +52,8 @@ class DirtySessionMemorySyncConfig:
     retry_backoff_seconds: tuple[int, ...] = (60, 180)
     poll_attempts: int = 60
     poll_interval_seconds: float = 1.0
-    # "ledger" (default) reads the Mac status mirror; "ragflow_read_sot" reads
-    # RAGFlow transcript-memory as source-of-truth (neuron, Mac-ledger-free).
+    # "ledger" (default) reads the Mac status mirror; "index_read_sot" reads
+    # RetiredIndexBridge transcript-memory as source-of-truth (neuron, Mac-ledger-free).
     transcript_read_source: str = "ledger"
 
 
@@ -61,24 +61,24 @@ def row_key(row: dict) -> str:
     return "\x1f".join([str(row["provider"]), str(row["project"]), str(row["session_id_hash"])])
 
 
-def _select_transcript_source(config: DirtySessionMemorySyncConfig, ledger: Ledger, ragflow: RagflowHttpClient):
+def _select_transcript_source(config: DirtySessionMemorySyncConfig, ledger: Ledger, retired_index_bridge: RetiredIndexBridgeHttpClient):
     """Pick the transcript-memory read source per config (default: Mac ledger mirror).
 
-    ``ragflow_read_sot`` selects the RAGFlow read-SoT path used by the neuron
-    builder so the build reconstructs from RAGFlow transcript-memory without the
+    ``index_read_sot`` selects the RetiredIndexBridge read-SoT path used by the neuron
+    builder so the build reconstructs from RetiredIndexBridge transcript-memory without the
     Mac ledger (AC4). Default preserves the legacy ledger-mirror behavior.
     """
-    if config.transcript_read_source == "ragflow_read_sot":
-        return RagflowTranscriptMemorySource(ragflow)
+    if config.transcript_read_source == "index_read_sot":
+        return RetiredIndexBridgeTranscriptMemorySource(retired_index_bridge)
     return LedgerTranscriptMemorySource(ledger)
 
 
-def resolve_dataset_id(*, ragflow: RagflowHttpClient, dataset_id: str = "", dataset_name: str = "") -> str:
+def resolve_dataset_id(*, retired_index_bridge: RetiredIndexBridgeHttpClient, dataset_id: str = "", dataset_name: str = "") -> str:
     if dataset_name:
-        datasets = ragflow.list_datasets(name=dataset_name)
+        datasets = retired_index_bridge.list_datasets(name=dataset_name)
         exact = [item for item in datasets if str(item.get("name") or "") == dataset_name and item.get("id")]
         if len(exact) != 1:
-            raise ValueError(f"expected exactly one RAGFlow dataset named {dataset_name!r}, got {len(exact)}")
+            raise ValueError(f"expected exactly one RetiredIndexBridge dataset named {dataset_name!r}, got {len(exact)}")
         return str(exact[0]["id"])
     if not dataset_id:
         raise ValueError("dataset_id or dataset_name is required")
@@ -228,13 +228,13 @@ class DirtySessionMemorySyncRunner:
         fragment = str(session_id_hash).split(":", 1)[-1][:12]
         started = time.time()
         ledger = Ledger(self.config.ledger_path)
-        ragflow = RagflowHttpClient(base_url=self.config.ragflow_url, bearer_token=self.token, request_timeout_seconds=45)
-        source = _select_transcript_source(self.config, ledger, ragflow)
+        retired_index_bridge = RetiredIndexBridgeHttpClient(base_url=self.config.index_url, bearer_token=self.token, request_timeout_seconds=45)
+        source = _select_transcript_source(self.config, ledger, retired_index_bridge)
         runner = SessionMemoryRegenerationRunner(
             source=source,
             sync=True,
             ledger=ledger,
-            ragflow=ragflow,
+            retired_index_bridge=retired_index_bridge,
             dataset_id=self.config.dataset_id,
             runtime_dir=self.config.runtime_dir / "tmp",
             max_poll_attempts=self.config.poll_attempts,
@@ -243,7 +243,7 @@ class DirtySessionMemorySyncRunner:
         try:
             report = runner.run(project=project, provider=provider, session_id_hash=session_id_hash)
         except RuntimeError:
-            rollback = rollback_session_memory_document(ledger, ragflow, self.config.dataset_id, session_id_hash)
+            rollback = rollback_session_memory_document(ledger, retired_index_bridge, self.config.dataset_id, session_id_hash)
             raise RuntimeError(f"live_sync_runtime_error:{rollback.get('disable_status', '')}")
         skipped_sessions = report.get("skipped_sessions") or []
         memory_rows = report.get("would_write_session_memory") or []
@@ -258,7 +258,7 @@ class DirtySessionMemorySyncRunner:
                 "coverage_gap_count": int(skipped.get("coverage_gap_count") or 0),
                 "coverage_duplicate_count": int(skipped.get("coverage_duplicate_count") or 0),
                 "active_promoted": False,
-                "ragflow_write_performed": False,
+                "index_write_performed": False,
                 "seconds": round(time.time() - started, 1),
             }
         if not memory_rows:
@@ -269,12 +269,12 @@ class DirtySessionMemorySyncRunner:
                 "ok": False,
                 "reason": "source_session_unresolved",
                 "active_promoted": False,
-                "ragflow_write_performed": False,
+                "index_write_performed": False,
                 "seconds": round(time.time() - started, 1),
             }
         roundtrip = verify_session_memory_sync_roundtrip(
             ledger=ledger,
-            ragflow=ragflow,
+            retired_index_bridge=retired_index_bridge,
             dataset_id=self.config.dataset_id,
             session_id_hash=session_id_hash,
             source=source,
@@ -304,7 +304,7 @@ class DirtySessionMemorySyncRunner:
         except Exception as exc:
             rollback = rollback_session_memory_document_by_knowledge_id(
                 ledger,
-                ragflow,
+                retired_index_bridge,
                 self.config.dataset_id,
                 knowledge_id,
             )

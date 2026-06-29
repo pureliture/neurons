@@ -9,7 +9,7 @@ from agent_knowledge.session_memory.transcript_ingest import (
 )
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
 class _FakeCaptureSpool:

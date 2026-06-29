@@ -101,7 +101,7 @@ def test_conversation_chunk_uses_repo_project_and_capture_agent_id():
     assert packed.metadata["project"] == PROJECT
     assert packed.metadata["agent_id"] == "codex-transcript-capture"
     assert "- project: neurons" in packed.body
-    assert "ragflow-advisor" not in serialized
+    assert "index-advisor" not in serialized
 
 
 def test_tool_evidence_uses_repo_project_and_tool_agent_id():
@@ -111,7 +111,7 @@ def test_tool_evidence_uses_repo_project_and_tool_agent_id():
     assert packed.metadata["project"] == PROJECT
     assert packed.metadata["agent_id"] == "codex-tool-evidence"
     assert "- project: neurons" in packed.body
-    assert "ragflow-advisor" not in serialized
+    assert "index-advisor" not in serialized
 
 
 def test_derived_memory_uses_repo_project_and_producer_agent_ids():
@@ -134,4 +134,4 @@ def test_derived_memory_uses_repo_project_and_producer_agent_ids():
         },
         sort_keys=True,
     )
-    assert "ragflow-advisor" not in serialized
+    assert "index-advisor" not in serialized

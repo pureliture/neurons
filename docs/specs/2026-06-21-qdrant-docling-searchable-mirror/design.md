@@ -2,17 +2,17 @@
 
 ## Overview
 
-Qdrant+Docling은 RAGFlow의 searchable mirror 역할만 대체하는 PoC다. Canonical authority는 CouchDB/ledger PG/Neo4j에 남고, RAGFlow failover는 digest-bound dual-write/read-compare evidence packet과 operator approval 전까지 금지한다.
+Qdrant+Docling은 RetiredIndexBridge의 searchable mirror 역할만 대체하는 PoC다. Canonical authority는 CouchDB/ledger PG/Neo4j에 남고, RetiredIndexBridge failover는 digest-bound dual-write/read-compare evidence packet과 operator approval 전까지 금지한다.
 
 ## Requirements Reference
 
 - Phase 1 source: `requirements.md`
-- 핵심: searchable mirror only, local-first, `IndexBackendAdapter` 호환, evidence packet gate, production `NO-GO`
+- 핵심: searchable mirror only, local-first, `RetiredIndexBridgeAdapter` 호환, evidence packet gate, production `NO-GO`
 
 ## Audit Summary
 
 - Java `RagTargetAdapter` contract는 `pressureSnapshot`, `deliver`, `getStatus` 3개 메서드와 logical `targetProfile` routing을 보존해야 한다.
-- Python `rag_ingress.index_backend.IndexBackendAdapter`는 이미 future Qdrant/OpenSearch/LanceDB adapter를 전제로 한 가장 얇은 PoC seam이다.
+- Python `rag_ingress.retired_index_bridge.RetiredIndexBridgeAdapter`는 이미 future Qdrant/OpenSearch/LanceDB adapter를 전제로 한 가장 얇은 PoC seam이다.
 - `RagReadyDocument`는 backend-neutral이며 physical dataset/resource id를 알면 안 된다.
 - `session_memory.brain_query`는 local ledger precedence를 유지하고 mirror hit은 archive/evidence lane으로만 취급한다.
 - `llm_brain_core.ontology`는 graph/ontology projection 전에 public-safe redaction과 project brain_id scoping을 강제한다.
@@ -24,7 +24,7 @@ Qdrant+Docling은 RAGFlow의 searchable mirror 역할만 대체하는 PoC다. Ca
 RagReadyDocument
     |
     v
-QdrantDoclingMirrorAdapter  (IndexBackendAdapter)
+QdrantDoclingMirrorAdapter  (RetiredIndexBridgeAdapter)
     |-- Docling normalizer   body/html/md -> markdown
     |-- EmbeddingProvider    markdown -> vector
     |-- Qdrant client        local :memory:/path or remote client
@@ -53,7 +53,7 @@ Canonical authorities stay outside this adapter:
 
 | Component | Responsibility | Non-authority guard |
 | --- | --- | --- |
-| `QdrantDoclingMirrorAdapter` | `IndexBackendAdapter` implementation over Qdrant | no canonical writes, no failover |
+| `QdrantDoclingMirrorAdapter` | `RetiredIndexBridgeAdapter` implementation over Qdrant | no canonical writes, no failover |
 | `DoclingMarkdownNormalizer` | optional Docling conversion to markdown | import only on PoC path |
 | `HashEmbeddingProvider` | deterministic local vector for tests/smoke | PoC quality only |
 | `query_mirror_candidates` | filtered Qdrant candidate lookup | requires later canonical join |
@@ -99,7 +99,7 @@ Canonical authorities stay outside this adapter:
 - M4: Digest-bound dual-write/read-compare gate report
 - M5: Apple Silicon local-first smoke shape
 - M6: Ubuntu host production-gate report shape
-- M7: RAGFlow failover blocked until approval
+- M7: RetiredIndexBridge failover blocked until approval
 
 ## Open Questions
 

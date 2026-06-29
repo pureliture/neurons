@@ -6,7 +6,7 @@ from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.memory_regeneration_cli import main
 from agent_knowledge.session_memory.transcript_model import TranscriptChunk, TranscriptSession, TranscriptTurn
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 PROVIDER = "codex"
 
 

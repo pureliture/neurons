@@ -7,7 +7,7 @@ from agent_knowledge.session_memory.memory_card import (
 )
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
 def test_memory_candidate_has_deterministic_id_hash_and_manual_approval_policy():
@@ -38,7 +38,7 @@ def test_memory_candidate_has_deterministic_id_hash_and_manual_approval_policy()
 def test_approved_memory_card_uses_deterministic_memory_id_without_raw_evidence_body():
     candidate = build_memory_candidate(
         candidate_type="project_decision",
-        statement="Keep RAGFlow core unmodified for the Knowledge Server program.",
+        statement="Keep RetiredIndexBridge core unmodified for the Knowledge Server program.",
         project=PROJECT,
         provider="claude",
         evidence_refs=[{"knowledge_id": "kn_decision", "content_hash": "sha256:decision"}],
@@ -51,7 +51,7 @@ def test_approved_memory_card_uses_deterministic_memory_id_without_raw_evidence_
     assert card["state"] == "active"
     assert card["card_type"] == "project_decision"
     assert card["title"] == "Project decision"
-    assert card["summary"] == "Keep RAGFlow core unmodified for the Knowledge Server program."
+    assert card["summary"] == "Keep RetiredIndexBridge core unmodified for the Knowledge Server program."
     assert "kn_decision" not in card["summary"]
     assert "raw_text" not in json.dumps(card, sort_keys=True)
 
@@ -59,7 +59,7 @@ def test_approved_memory_card_uses_deterministic_memory_id_without_raw_evidence_
 def test_memory_candidate_redacts_secret_and_private_path_before_storage():
     candidate = build_memory_candidate(
         candidate_type="procedural_rule",
-        statement="Rule: use RAGFLOW_TOKEN=live-secret from /Users/example/.openclaw/" + "private/runtime/x",
+        statement="Rule: use RETIRED_INDEX_BRIDGE_TOKEN=live-secret from /Users/example/.openclaw/" + "private/runtime/x",
         project=PROJECT,
         provider="claude",
         evidence_refs=[{"knowledge_id": "kn_secret", "content_hash": "sha256:secret"}],

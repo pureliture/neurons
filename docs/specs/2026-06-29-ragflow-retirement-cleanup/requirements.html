@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAGFlow Retirement Cleanup Requirements</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17201a;
+      --muted: #5b655e;
+      --line: #d8ded8;
+      --paper: #fbfcf8;
+      --panel: #ffffff;
+      --accent: #245c46;
+    }
+    body {
+      margin: 0;
+      font-family: ui-serif, Georgia, "Times New Roman", serif;
+      background: var(--paper);
+      color: var(--ink);
+      line-height: 1.62;
+    }
+    main {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 48px 24px 72px;
+    }
+    h1 {
+      font-size: 34px;
+      line-height: 1.16;
+      margin: 0 0 8px;
+    }
+    h2 {
+      border-top: 1px solid var(--line);
+      margin-top: 36px;
+      padding-top: 24px;
+      font-size: 22px;
+    }
+    h3 {
+      font-size: 17px;
+      margin-top: 24px;
+    }
+    p, li, td, th {
+      font-size: 15px;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #edf2ec;
+      border: 1px solid #dce4dc;
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--line);
+    }
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    th {
+      color: var(--accent);
+      font-weight: 700;
+    }
+    .note {
+      color: var(--muted);
+      margin: 0 0 28px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>RAGFlow Retirement Cleanup Requirements</h1>
+    <p class="note">Generated companion preview. Source of truth is <code>requirements.md</code>.</p>
+
+    <h2>승인 대상</h2>
+    <ul>
+      <li>Source of truth: <code>requirements.md</code></li>
+      <li>Preview companion: <code>requirements.html</code></li>
+      <li>Phase 1 status: ready for approval</li>
+    </ul>
+
+    <h2>확정 요약</h2>
+    <ul>
+      <li>RAGFlow는 <code>neurons</code> active/runtime 선택지에서 완전 퇴역한다.</li>
+      <li>1차 범위는 <code>neurons</code> repo와 Mac local MCP surface다.</li>
+      <li>보존 예외는 <code>docs/retired/index-retirement.md</code> 하나뿐이다.</li>
+      <li>최종 repo-wide 검색 결과는 퇴역 기록 문서 외 0개를 목표로 한다.</li>
+      <li>기존 <code>index_*</code> state/schema 이름은 backend-neutral 이름으로 migration한다.</li>
+      <li>기존 데이터는 backup/snapshot 기반 보존 migration으로 옮긴다.</li>
+      <li>stale local MCP 프로세스와 설정은 승인 후 정리한다.</li>
+      <li>실제 종료, 수정, 삭제, migration은 승인된 <code>design.md</code> 이후에만 수행한다.</li>
+    </ul>
+
+    <h2>비기능 요구사항</h2>
+    <table>
+      <thead>
+        <tr><th>항목</th><th>요구값</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Source of truth</td><td><code>requirements.md</code></td></tr>
+        <tr><td>Approval gate</td><td><code>requirements.md</code> 승인 전 <code>design.md</code> 작성 금지</td></tr>
+        <tr><td>Execution gate</td><td><code>design.md</code> 승인 전 kill/edit/delete/migration 실행 금지</td></tr>
+        <tr><td>Runtime 기준</td><td>Qdrant/graph 기반 <code>neurons</code> live runtime</td></tr>
+        <tr><td>보존 예외</td><td><code>docs/retired/index-retirement.md</code></td></tr>
+        <tr><td>검색 키워드</td><td><code>RAGFlow</code>, <code>ragflow</code>, <code>RAGFLOW_API_KEY</code>, <code>RAGFLOW_</code>, <code>--ragflow-url</code>, <code>--ragflow-token-env</code></td></tr>
+        <tr><td>진행 단위</td><td>감사 -> 삭제 -> migration -> local cleanup</td></tr>
+        <tr><td>감사 산출물</td><td>삭제/변경/종료 목록표</td></tr>
+      </tbody>
+    </table>
+
+    <h2>승인 상태</h2>
+    <p>미결정 항목은 없다. 사용자가 <code>requirements.md</code>를 승인하면 Phase 2에서 approach proposal과 <code>design.md</code>를 작성한다.</p>
+  </main>
+</body>
+</html>

@@ -31,7 +31,7 @@ class TargetProfileRegistryTest {
         TargetProfileRegistry empty = new TargetProfileRegistry(null);
 
         assertThat(empty.knownProfileIds()).isEmpty();
-        assertThat(empty.isKnown("ragflow-transcript-memory")).isFalse();
+        assertThat(empty.isKnown("index-transcript-memory")).isFalse();
         assertThatThrownBy(empty::primaryProfileId)
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("no profiles");
@@ -40,7 +40,7 @@ class TargetProfileRegistryTest {
     @Test
     void rejectsNullProfileValue() {
         Map<String, TargetProfile> malformed = new java.util.HashMap<>();
-        malformed.put("ragflow-transcript-memory", null);
+        malformed.put("index-transcript-memory", null);
 
         assertThatThrownBy(() -> new TargetProfileRegistry(malformed))
             .isInstanceOf(IllegalArgumentException.class)
@@ -50,18 +50,18 @@ class TargetProfileRegistryTest {
     @Test
     void rejectsProfileKeyMismatch() {
         assertThatThrownBy(() -> new TargetProfileRegistry(Map.of(
-            "ragflow-transcript-memory",
-            new TargetProfile("ragflow-session-memory", BackendKind.RAGFLOW, "transcript-memory")
+            "index-transcript-memory",
+            new TargetProfile("index-session-memory", BackendKind.RETIRED_INDEX_BRIDGE, "transcript-memory")
         )))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("key must match");
     }
 
     @Test
-    void knownProfilesRouteToRagflowBackendKind() {
+    void knownProfilesRouteToRetiredIndexBridgeBackendKind() {
         assertThat(registry.knownProfileIds()).isNotEmpty();
         for (String id : registry.knownProfileIds()) {
-            assertThat(registry.backendKind(id)).contains(BackendKind.RAGFLOW);
+            assertThat(registry.backendKind(id)).contains(BackendKind.RETIRED_INDEX_BRIDGE);
         }
     }
 
@@ -74,10 +74,10 @@ class TargetProfileRegistryTest {
 
     @Test
     void exposesLogicalDatasetRoleButNeverPhysicalResourceId() {
-        TargetProfile profile = registry.find("ragflow-transcript-memory").orElseThrow();
+        TargetProfile profile = registry.find("index-transcript-memory").orElseThrow();
 
         assertThat(profile.datasetRole()).isEqualTo("transcript-memory");
-        assertThat(profile.backendKind()).isEqualTo(BackendKind.RAGFLOW);
+        assertThat(profile.backendKind()).isEqualTo(BackendKind.RETIRED_INDEX_BRIDGE);
         // The routing value object must not carry any physical backend resource id (dataset id/token).
         assertThat(TargetProfile.class.getRecordComponents())
             .extracting(RecordComponent::getName)

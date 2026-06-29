@@ -103,8 +103,8 @@ def test_brain_query_archive_lane_filled_by_qdrant_recall():
             return []
 
     resp = run_brain_query_v2(
-        read_model=_ReadModel(), brain_id="/project/neurons", query=mat.body, ragflow_search=search
+        read_model=_ReadModel(), brain_id="/project/neurons", query=mat.body, index_search=search
     )
-    assert resp["audit"]["ragflow_bound"] is True
+    assert resp["audit"]["index_bound"] is True
     # the session-memory hit lands in the archive lane (no ledger card to dedup against)
     assert any(it.get("content_hash") == mat.content_hash for it in resp["archive"])

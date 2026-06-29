@@ -11,7 +11,7 @@ from agent_knowledge.rag_ingress.state_cli import main
 from agent_knowledge.rag_ingress.state_db import RAGIngressStateDB
 from agent_knowledge.session_memory.transcript_model import TranscriptChunk
 
-DEFAULT_TRANSCRIPT_TARGET_PROFILE = "ragflow-transcript-memory"
+DEFAULT_TRANSCRIPT_TARGET_PROFILE = "index-transcript-memory"
 
 
 def _payload(*, key: str = "k1", body: str = "hello body") -> dict:
@@ -64,7 +64,7 @@ def _replay_requested_ledger(tmp_path):
         chunk_id="chunk_cli_replay",
         session_id_hash="sha256:cli_replay",
         provider="codex",
-        project="workspace-ragflow-advisor",
+        project="workspace-index-advisor",
         turn_start_index=1,
         turn_end_index=2,
         redacted_text="replay chunk redacted text",

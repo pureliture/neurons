@@ -1,9 +1,9 @@
 import json
 
-from agent_knowledge.session_memory.memory_miner import FakeMemoryMiner, LlmMemoryMiner, build_ragflow_completion_fn
+from agent_knowledge.session_memory.memory_miner import FakeMemoryMiner, LlmMemoryMiner, build_index_completion_fn
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
 def _chunk(text, *, knowledge_id="kn_x", content_hash="sha256:x"):
@@ -23,7 +23,7 @@ def test_llm_memory_miner_parses_json_array_into_typed_candidates():
         captured["messages"] = messages
         return json.dumps(
             [
-                {"type": "project_decision", "statement": "Keep RAGFlow core unmodified."},
+                {"type": "project_decision", "statement": "Keep RetiredIndexBridge core unmodified."},
                 {"type": "procedural_rule", "statement": "Approval before live mutation."},
             ]
         )
@@ -41,7 +41,7 @@ def test_llm_memory_miner_parses_json_array_into_typed_candidates():
 
 
 def test_llm_memory_miner_repeats_json_directive_in_user_message():
-    # Live finding: RAGFlow native chat/completions dilutes a system-only JSON
+    # Live finding: RetiredIndexBridge native chat/completions dilutes a system-only JSON
     # directive (deepseek returned prose). Reinforcing it in the user turn makes
     # JSON output reliable, so the user message must carry the directive too.
     captured = {}
@@ -58,16 +58,16 @@ def test_llm_memory_miner_repeats_json_directive_in_user_message():
     assert user_content != "raw session body"
 
 
-def test_build_ragflow_completion_fn_wires_client_chat_completion():
+def test_build_index_completion_fn_wires_client_chat_completion():
     calls = {}
 
     class FakeClient:
         def chat_completion(self, messages, *, llm_id="", stream=False):
             calls["messages"] = messages
             calls["llm_id"] = llm_id
-            return json.dumps([{"type": "project_decision", "statement": "Wired through RAGFlow."}])
+            return json.dumps([{"type": "project_decision", "statement": "Wired through RetiredIndexBridge."}])
 
-    completion_fn = build_ragflow_completion_fn(FakeClient())
+    completion_fn = build_index_completion_fn(FakeClient())
     candidates = LlmMemoryMiner(completion_fn=completion_fn).mine_chunk(_chunk("body"))
 
     assert [c["candidate_type"] for c in candidates] == ["project_decision"]
@@ -75,7 +75,7 @@ def test_build_ragflow_completion_fn_wires_client_chat_completion():
     assert calls["llm_id"] == ""
 
 
-def test_build_ragflow_completion_fn_passes_llm_id_when_set():
+def test_build_index_completion_fn_passes_llm_id_when_set():
     seen = {}
 
     class FakeClient:
@@ -83,7 +83,7 @@ def test_build_ragflow_completion_fn_passes_llm_id_when_set():
             seen["llm_id"] = llm_id
             return "[]"
 
-    build_ragflow_completion_fn(FakeClient(), llm_id="m@F")([{"role": "user", "content": "x"}])
+    build_index_completion_fn(FakeClient(), llm_id="m@F")([{"role": "user", "content": "x"}])
 
     assert seen["llm_id"] == "m@F"
 
@@ -163,7 +163,7 @@ def test_llm_memory_miner_batch_dry_run_emits_candidates_without_live_write():
 
     assert len(all_candidates) == 2
     assert calls["completion"] == 2
-    # dry-run: miner only calls the injected completion_fn, never a RAGFlow dataset write client.
+    # dry-run: miner only calls the injected completion_fn, never a RetiredIndexBridge dataset write client.
     assert all(c["approval_state"] == "pending" for c in all_candidates)
 
 
@@ -188,7 +188,7 @@ def test_fake_memory_miner_extracts_bounded_candidates_from_transcript_chunk():
         "redacted_text": "\n".join(
             [
                 "Preference: User wants implementation and runtime verification progress separated.",
-                "Decision: Keep RAGFlow core unmodified.",
+                "Decision: Keep RetiredIndexBridge core unmodified.",
                 "Rule: Do not run live scheduler mutation without approval.",
                 "Ignored raw body: " + ("A" * 5000),
             ]

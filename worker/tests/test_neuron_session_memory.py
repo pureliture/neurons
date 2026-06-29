@@ -22,14 +22,14 @@ def _meta(**overrides):
         "result_type": "conversation_chunk",
         "type": "conversation_chunk",
         "provider": "codex",
-        "project": "workspace-ragflow-advisor",
+        "project": "workspace-index-advisor",
         "session_id_hash": "sha256:sess",
     }
     meta.update(overrides)
     return meta
 
 
-class _FakeRagflow:
+class _FakeRetiredIndexBridge:
     def __init__(self, docs):
         self._docs = docs
         self.meta_calls = []
@@ -39,7 +39,7 @@ class _FakeRagflow:
         return self._docs.get(document_id)
 
 
-class _FakeProbeRagflow(_FakeRagflow):
+class _FakeProbeRetiredIndexBridge(_FakeRetiredIndexBridge):
     def list_datasets(self, *, name="", **_kwargs):
         return [{"name": name, "id": "ds_1"}]
 
@@ -55,11 +55,11 @@ def _shadow_db(tmp_path: Path) -> Path:
             delivered INTEGER NOT NULL DEFAULT 0, recorded_at TEXT NOT NULL, updated_at TEXT NOT NULL)"""
     )
     rows = [
-        ("k1", "h1", "conv", "ragflow-transcript-memory", "delivered", "", "doc1", 1, "t0", "2026-06-13T00:02:00Z"),
-        ("k2", "h2", "conv", "ragflow-transcript-memory", "delivered", "", "doc2", 1, "t0", "2026-06-13T00:01:00Z"),
-        ("k3", "h3", "conv", "ragflow-session-memory", "delivered", "", "docX", 1, "t0", "2026-06-13T00:05:00Z"),
-        ("k4", "h4", "conv", "ragflow-transcript-memory", "pending", "", "", 0, "t0", "2026-06-13T00:06:00Z"),
-        ("k5", "h5", "conv", "ragflow-transcript-memory", "delivered", "", "doc5", 1, "t0", "2026-06-13T00:00:30Z"),
+        ("k1", "h1", "conv", "index-transcript-memory", "delivered", "", "doc1", 1, "t0", "2026-06-13T00:02:00Z"),
+        ("k2", "h2", "conv", "index-transcript-memory", "delivered", "", "doc2", 1, "t0", "2026-06-13T00:01:00Z"),
+        ("k3", "h3", "conv", "index-session-memory", "delivered", "", "docX", 1, "t0", "2026-06-13T00:05:00Z"),
+        ("k4", "h4", "conv", "index-transcript-memory", "pending", "", "", 0, "t0", "2026-06-13T00:06:00Z"),
+        ("k5", "h5", "conv", "index-transcript-memory", "delivered", "", "doc5", 1, "t0", "2026-06-13T00:00:30Z"),
     ]
     connection.executemany("INSERT INTO shadow_ingest_log VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
     connection.commit()
@@ -69,7 +69,7 @@ def _shadow_db(tmp_path: Path) -> Path:
 
 def test_seed_marks_distinct_sessions_and_advances_watermark(tmp_path):
     ledger = Ledger(tmp_path / "neuron.sqlite")
-    ragflow = _FakeRagflow(
+    retired_index_bridge = _FakeRetiredIndexBridge(
         docs={
             "doc_a": {"id": "doc_a", "meta_fields": _meta(session_id_hash="sha256:s1", knowledge_id="kn_a")},
             "doc_b": {"id": "doc_b", "meta_fields": _meta(session_id_hash="sha256:s2", knowledge_id="kn_b")},
@@ -82,7 +82,7 @@ def test_seed_marks_distinct_sessions_and_advances_watermark(tmp_path):
         {"document_ref": "doc_a2", "updated_at": "2026-06-13T00:03:00Z"},
     ]
 
-    report = seed_dirty_session_memory_from_deliveries(deliveries, ragflow=ragflow, ledger=ledger, dataset_ids=["ds_1"])
+    report = seed_dirty_session_memory_from_deliveries(deliveries, retired_index_bridge=retired_index_bridge, ledger=ledger, dataset_ids=["ds_1"])
 
     assert report["seeded_sessions"] == 2
     assert report["new_watermark"] == "2026-06-13T00:03:00Z"
@@ -93,7 +93,7 @@ def test_seed_marks_distinct_sessions_and_advances_watermark(tmp_path):
 
 def test_seed_skips_non_conversation_and_missing_meta(tmp_path):
     ledger = Ledger(tmp_path / "neuron.sqlite")
-    ragflow = _FakeRagflow(
+    retired_index_bridge = _FakeRetiredIndexBridge(
         docs={
             "doc_ok": {"id": "doc_ok", "meta_fields": _meta(session_id_hash="sha256:ok")},
             "doc_other": {
@@ -109,7 +109,7 @@ def test_seed_skips_non_conversation_and_missing_meta(tmp_path):
         {"document_ref": "", "updated_at": "2026-06-13T00:04:00Z"},
     ]
 
-    report = seed_dirty_session_memory_from_deliveries(deliveries, ragflow=ragflow, ledger=ledger, dataset_ids=["ds_1"])
+    report = seed_dirty_session_memory_from_deliveries(deliveries, retired_index_bridge=retired_index_bridge, ledger=ledger, dataset_ids=["ds_1"])
 
     assert report["session_id_hashes"] == ["sha256:ok"]
     assert report["new_watermark"] == "2026-06-13T00:04:00Z"
@@ -118,17 +118,17 @@ def test_seed_skips_non_conversation_and_missing_meta(tmp_path):
 
 def test_seed_empty_deliveries_is_noop(tmp_path):
     ledger = Ledger(tmp_path / "neuron.sqlite")
-    ragflow = _FakeRagflow(docs={})
+    retired_index_bridge = _FakeRetiredIndexBridge(docs={})
 
-    report = seed_dirty_session_memory_from_deliveries([], ragflow=ragflow, ledger=ledger, dataset_ids=["ds_1"])
+    report = seed_dirty_session_memory_from_deliveries([], retired_index_bridge=retired_index_bridge, ledger=ledger, dataset_ids=["ds_1"])
 
     assert report["seeded_sessions"] == 0
     assert report["session_id_hashes"] == []
-    assert ragflow.meta_calls == []
+    assert retired_index_bridge.meta_calls == []
 
 
 def test_probe_transcript_delivery_meta_reports_counts_without_raw_ids():
-    ragflow = _FakeProbeRagflow(
+    retired_index_bridge = _FakeProbeRetiredIndexBridge(
         docs={
             "doc_a": {"id": "doc_a", "meta_fields": _meta(session_id_hash="sha256:s1", knowledge_id="kn_a")},
             "doc_b": {
@@ -154,7 +154,7 @@ def test_probe_transcript_delivery_meta_reports_counts_without_raw_ids():
         {"document_ref": "doc_missing", "updated_at": "2026-06-13T00:05:00Z"},
     ]
 
-    report = probe_transcript_delivery_meta(deliveries, ragflow=ragflow, dataset_ids=["ds_1"])
+    report = probe_transcript_delivery_meta(deliveries, retired_index_bridge=retired_index_bridge, dataset_ids=["ds_1"])
 
     assert report["counts"]["deliveries_seen"] == 5
     assert report["counts"]["unique_document_refs"] == 4
@@ -232,12 +232,12 @@ def test_neuron_session_memory_build_dry_run_reads_shadow_log_without_ids_or_mut
 
 
 def test_neuron_session_memory_build_probe_meta_is_read_only(tmp_path, capsys, monkeypatch):
-    import agent_knowledge.ragflow_client as ragflow_client
+    import agent_knowledge.index_client as index_client
 
     db = _shadow_db(tmp_path)
     watermark = tmp_path / "state" / "watermark.txt"
     write_watermark(watermark, "2026-06-13T00:00:45Z")
-    fake = _FakeProbeRagflow(
+    fake = _FakeProbeRetiredIndexBridge(
         docs={
             "doc1": {"id": "doc1", "meta_fields": _meta(project="neurons")},
             "doc2": {
@@ -246,8 +246,8 @@ def test_neuron_session_memory_build_probe_meta_is_read_only(tmp_path, capsys, m
             },
         }
     )
-    monkeypatch.setenv("RAGFLOW_API_KEY", "test-token")
-    monkeypatch.setattr(ragflow_client, "RagflowHttpClient", lambda **_kwargs: fake)
+    monkeypatch.setenv("RETIRED_INDEX_BRIDGE_API_KEY", "test-token")
+    monkeypatch.setattr(index_client, "RetiredIndexBridgeHttpClient", lambda **_kwargs: fake)
 
     rc = main(
         [
@@ -258,10 +258,10 @@ def test_neuron_session_memory_build_probe_meta_is_read_only(tmp_path, capsys, m
             str(db),
             "--watermark-file",
             str(watermark),
-            "--ragflow-url",
+            "--retired-index-bridge-url",
             "http://127.0.0.1:19380",
-            "--token-env",
-            "RAGFLOW_API_KEY",
+            "--retired-index-bridge-token-env",
+            "RETIRED_INDEX_BRIDGE_API_KEY",
         ]
     )
 
@@ -270,7 +270,7 @@ def test_neuron_session_memory_build_probe_meta_is_read_only(tmp_path, capsys, m
     assert report["status"] == "dry_run_complete"
     assert report["network_used"] is True
     assert report["mutation_performed"] is False
-    assert report["ragflow_write_performed"] is False
+    assert report["index_write_performed"] is False
     assert report["meta_probe"]["counts"]["conversation_chunk_meta"] == 2
     assert report["meta_probe"]["counts"]["sessions_seen"] == 1
     assert "doc1" not in json.dumps(report)
@@ -294,8 +294,8 @@ def _live_argv(tmp_path, *, approval_name: str = "approval.json", runtime: str =
         "--ledger", str(tmp_path / "neuron.sqlite"),
         "--shadow-db", str(tmp_path / "ingest.sqlite"),
         "--watermark-file", str(tmp_path / "watermark.txt"),
-        "--ragflow-url", "http://127.0.0.1:19380",
-        "--token-env", "RAGFLOW_API_KEY",
+        "--retired-index-bridge-url", "http://127.0.0.1:19380",
+        "--retired-index-bridge-token-env", "RETIRED_INDEX_BRIDGE_API_KEY",
         "--runtime-dir", str(tmp_path / runtime),
         "--approval", str(tmp_path / approval_name),
     ]
@@ -303,7 +303,7 @@ def _live_argv(tmp_path, *, approval_name: str = "approval.json", runtime: str =
 
 def test_neuron_session_memory_build_live_requires_valid_approval(tmp_path, capsys, monkeypatch):
     # 유효 approval record가 없으면 네트워크/뮤테이션 전에 fail-closed.
-    monkeypatch.setenv("RAGFLOW_API_KEY", "test-token")
+    monkeypatch.setenv("RETIRED_INDEX_BRIDGE_API_KEY", "test-token")
     rc = main(_live_argv(tmp_path, approval_name="missing-approval.json"))
     captured = capsys.readouterr()
     assert rc == 2
@@ -315,7 +315,7 @@ def test_neuron_session_memory_build_live_runs_with_valid_approval(tmp_path, cap
     import agent_knowledge.session_memory.dirty_session_memory_sync as sync
     import agent_knowledge.session_memory.neuron_session_memory as nsm
 
-    monkeypatch.setenv("RAGFLOW_API_KEY", "test-token")
+    monkeypatch.setenv("RETIRED_INDEX_BRIDGE_API_KEY", "test-token")
     monkeypatch.setattr(sync, "resolve_dataset_id", lambda **kw: "ds-session-memory")
     argv = _live_argv(tmp_path)
     argv.extend(["--limit", "50"])
@@ -345,7 +345,7 @@ def test_neuron_session_memory_build_live_skips_when_locked(tmp_path, capsys, mo
     import agent_knowledge.session_memory.dirty_session_memory_sync as sync
     import agent_knowledge.session_memory.neuron_session_memory as nsm
 
-    monkeypatch.setenv("RAGFLOW_API_KEY", "test-token")
+    monkeypatch.setenv("RETIRED_INDEX_BRIDGE_API_KEY", "test-token")
     monkeypatch.setattr(sync, "resolve_dataset_id", lambda **kw: "ds-session-memory")
     called = {"n": 0}
 
@@ -382,7 +382,7 @@ def test_neuron_session_memory_build_dry_run_rejects_live_arguments(tmp_path, ca
         str(db),
         "--watermark-file",
         str(watermark),
-        "--ragflow-url",
+        "--retired-index-bridge-url",
         "http://127.0.0.1:19380",
     ])
 

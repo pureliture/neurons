@@ -11,7 +11,7 @@ from pathlib import Path
 from ..dataset_contract import resolve_retention_policy
 from ..ledger import Ledger
 from .native_memory_sync_approval import ApprovalError, validate_goal3_live_approval
-from ..ragflow_client import RagflowHttpClient
+from ..index_client import RetiredIndexBridgeHttpClient
 from .gc_backup import write_gc_backup
 from .gc_safety_auditor import AuditContext, LedgerGCSafetyAuditor, hard_delete_documents
 
@@ -39,7 +39,7 @@ MIN_DISABLED_AGE_FLOOR_SECONDS = 86400
 class SessionMemoryGcConfig:
     ledger_path: Path
     dataset_id: str
-    ragflow_url: str
+    index_url: str
     max_items: int = 25
     min_disabled_age_seconds: int = MIN_DISABLED_AGE_FLOOR_SECONDS
     execute: bool = False
@@ -66,15 +66,15 @@ class SessionMemoryGcRunner:
         *,
         config: SessionMemoryGcConfig,
         token: str = "",
-        ragflow_client=None,
+        index_client=None,
         now_fn: Callable[[], datetime] | None = None,
     ):
         self.config = config
         self.token = token
-        # S0a 주입 seam: 기본 None이면 기존 동작(런타임에 RagflowHttpClient 생성 +
+        # S0a 주입 seam: 기본 None이면 기존 동작(런타임에 RetiredIndexBridgeHttpClient 생성 +
         # 실시간 clock). 특성화/테스트는 recording transport를 단 real client와 frozen
         # clock을 주입해 wire shape·순서를 결정적으로 고정한다(behavior-preserving).
-        self._ragflow_client = ragflow_client
+        self._index_client = index_client
         self._now_fn = now_fn
 
     def _now(self) -> datetime:
@@ -89,7 +89,7 @@ class SessionMemoryGcRunner:
                 policy = ""
             if policy not in SESSION_MEMORY_GC_ALLOWED_RETENTION_POLICIES:
                 # G-5: 선언된 policy가 허용 집합 밖(또는 unknown)이면 후보 조회·삭제
-                # 이전에 거부한다. 어떤 RAGFlow/ledger mutation도 일어나지 않는다.
+                # 이전에 거부한다. 어떤 RetiredIndexBridge/ledger mutation도 일어나지 않는다.
                 return self._blocked_retention_policy_report()
         ledger = Ledger(self.config.ledger_path)
         candidates = self._list_candidates(ledger)
@@ -101,13 +101,13 @@ class SessionMemoryGcRunner:
         backed_up_count = 0
         failed_error_class = ""
         if self.config.execute and selected:
-            ragflow = self._ragflow_client if self._ragflow_client is not None else RagflowHttpClient(
-                base_url=self.config.ragflow_url,
+            retired_index_bridge = self._index_client if self._index_client is not None else RetiredIndexBridgeHttpClient(
+                base_url=self.config.index_url,
                 bearer_token=self.token,
                 request_timeout_seconds=45,
             )
             for row in selected:
-                document_id = str(row.get("ragflow_document_id") or "")
+                document_id = str(row.get("index_document_id") or "")
                 knowledge_id = str(row.get("knowledge_id") or "")
                 session_id_hash = str(row.get("session_id_hash") or "")
                 # G-4 (M-GC §3.3 E2a/§6): intra-run TOCTOU guard. 후보는 루프 시작
@@ -127,9 +127,9 @@ class SessionMemoryGcRunner:
                 try:
                     if self.config.backup_dir:
                         # G-8: 백업이 성공해야만 삭제로 진행(백업 실패 시 예외→delete 안 함).
-                        self._backup_before_delete(ledger, ragflow, row, document_id=document_id, knowledge_id=knowledge_id, session_id_hash=session_id_hash)
+                        self._backup_before_delete(ledger, retired_index_bridge, row, document_id=document_id, knowledge_id=knowledge_id, session_id_hash=session_id_hash)
                         backed_up_count += 1
-                    hard_delete_documents(ragflow, self.config.dataset_id, [document_id])
+                    hard_delete_documents(retired_index_bridge, self.config.dataset_id, [document_id])
                     self._mark_gc_deleted(ledger, knowledge_id)
                     self._record_audit(
                         ledger,
@@ -186,12 +186,12 @@ class SessionMemoryGcRunner:
             "raw_ids_printed": False,
         }
 
-    def _backup_before_delete(self, ledger: Ledger, ragflow, row: dict, *, document_id: str, knowledge_id: str, session_id_hash: str) -> None:
+    def _backup_before_delete(self, ledger: Ledger, retired_index_bridge, row: dict, *, document_id: str, knowledge_id: str, session_id_hash: str) -> None:
         """G-8 (recoverable delete): 비가역 hard delete *직전*에 문서 본문(redacted MD)과
-        복구 메타를 private backup store에 기록한다. 본문은 RAGFlow chunks로 재구성한다.
+        복구 메타를 private backup store에 기록한다. 본문은 RetiredIndexBridge chunks로 재구성한다.
         이 단계가 예외를 던지면 호출부 try가 잡아 delete를 건너뛰므로 "백업 없는 삭제"가
         구조적으로 불가능하다. 복구 = 백업 본문을 재업로드 + 재임베딩 + ledger 복원."""
-        body = "\n".join(ragflow.list_document_chunks(self.config.dataset_id, document_id))
+        body = "\n".join(retired_index_bridge.list_document_chunks(self.config.dataset_id, document_id))
         if not body.strip():
             # 빈 본문 백업은 lossy(복구 불가). 백업이 의미 없으면 삭제를 중단한다.
             raise ValueError("empty document body; backup would be lossy, aborting delete")
@@ -209,7 +209,7 @@ class SessionMemoryGcRunner:
             provider=str(row.get("provider") or ""),
             project=str(row.get("project") or ""),
             dataset_id=self.config.dataset_id,
-            ragflow_document_id=document_id,
+            index_document_id=document_id,
             body=body,
             replacement_knowledge_id=str(snapshot.get("active_knowledge_id") or ""),
             coverage=coverage,
@@ -268,8 +268,8 @@ class SessionMemoryGcRunner:
                   AND old.authorization_status = 'disabled'
                   AND old.disabled_at != ''
                   AND old.disabled_at <= ?
-                  AND old.ragflow_dataset_id = ?
-                  AND old.ragflow_document_id != ''
+                  AND old.index_target_id = ?
+                  AND old.index_document_id != ''
                   AND d.status = 'promoted'
                   AND NOT EXISTS (
                     SELECT 1
@@ -287,8 +287,8 @@ class SessionMemoryGcRunner:
                       AND active.status IN ('indexed', 'active')
                       AND active.authorization_status = 'active'
                       AND active.disabled_at = ''
-                      AND active.ragflow_dataset_id = old.ragflow_dataset_id
-                      AND active.ragflow_document_id != ''
+                      AND active.index_target_id = old.index_target_id
+                      AND active.index_document_id != ''
                   )
                 ORDER BY old.disabled_at ASC, old.updated_at ASC
                 """,
@@ -330,7 +330,7 @@ class SessionMemoryGcRunner:
                 schema_version=SESSION_MEMORY_GC_SCHEMA_VERSION,
                 mode="execute" if self.config.execute else "dry_run",
                 knowledge_id=knowledge_id,
-                ragflow_document_id=document_id,
+                index_document_id=document_id,
                 dataset_id=self.config.dataset_id,
                 replacement_knowledge_id=str(snapshot.get("active_knowledge_id") or ""),
                 dirty_at=str(dirty.get("dirty_at") or ""),
@@ -386,7 +386,7 @@ def _replacement_is_authorized(ledger: Ledger, *, session_id_hash: str, old_know
     active = ledger.get_by_knowledge_id(active_knowledge_id)
     if not active:
         return False
-    document_id = str(active.get("ragflow_document_id") or "")
+    document_id = str(active.get("index_document_id") or "")
     if not document_id:
         return False
     authorized = ledger.authorize_document(document_id)
@@ -400,8 +400,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ledger", required=True)
     parser.add_argument("--dataset-id", required=True)
-    parser.add_argument("--ragflow-url", required=True)
-    parser.add_argument("--token-env", default="RAGFLOW_API_KEY")
+    parser.add_argument("--retired-index-bridge-url", required=True)
+    parser.add_argument("--retired-index-bridge-token-env", default="RETIRED_INDEX_BRIDGE_API_KEY")
     parser.add_argument("--max-items", type=int, default=25)
     parser.add_argument("--min-disabled-age-seconds", type=int, default=MIN_DISABLED_AGE_FLOOR_SECONDS)
     # G-5 (M-GC §6): 선언된 dataset role / retention policy. canonical 플래그는
@@ -415,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--backup-dir", dest="backup_dir", default="")
     args = parser.parse_args(raw_argv)
 
-    token = os.environ.get(args.token_env, "")
+    token = os.environ.get(args.retired_index_bridge_token_env, "")
     if args.execute:
         if not token:
             print("token env is not set", file=sys.stderr)
@@ -425,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.approval,
                 operation=SESSION_MEMORY_GC_OPERATION,
                 dataset_id=args.dataset_id,
-                ragflow_base_url=args.ragflow_url,
+                index_base_url=args.retired_index_bridge_url,
                 command_argv=["session-memory-gc", *raw_argv],
                 max_wait_seconds=900,
             )
@@ -435,7 +435,7 @@ def main(argv: list[str] | None = None) -> int:
     config = SessionMemoryGcConfig(
         ledger_path=Path(args.ledger),
         dataset_id=args.dataset_id,
-        ragflow_url=args.ragflow_url,
+        index_url=args.retired_index_bridge_url,
         max_items=args.max_items,
         min_disabled_age_seconds=args.min_disabled_age_seconds,
         declared_dataset_role=args.declared_dataset_role,

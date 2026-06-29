@@ -1,6 +1,6 @@
-"""Multi-layer RAGFlow transcript-memory retirement verifier.
+"""Multi-layer RetiredIndexBridge transcript-memory retirement verifier.
 
-Retirement of RAGFlow ``transcript-memory`` is approved only when all three
+Retirement of RetiredIndexBridge ``transcript-memory`` is approved only when all three
 independent gates pass (design "Coverage And Retirement Verifier"; requirement
 "다층 검증" -- a single gate is never sufficient):
 
@@ -13,7 +13,7 @@ independent gates pass (design "Coverage And Retirement Verifier"; requirement
 
 Ambiguous-project sessions are excluded from the irreversible retirement proof.
 
-Scope: this verifier produces a readiness *report*. It performs no live RAGFlow
+Scope: this verifier produces a readiness *report*. It performs no live RetiredIndexBridge
 mutation. The actual ``transcript-memory`` disable/delete and the removal of the
 runtime transcript-memory write/read callsites are an explicit breaking change
 and a hard-to-reverse live operation -- both are human-gated and are NOT
@@ -38,7 +38,7 @@ class SessionExpectation:
     session_id_hash: str
     expected_conversation_chunks: int
     expected_tool_evidence_bundles: int
-    ragflow_candidate_count: int = 0  # comparison only; never authority
+    index_candidate_count: int = 0  # comparison only; never authority
     recall_smoke_passed: bool | None = None  # None = smoke not run
 
 
@@ -64,7 +64,7 @@ class RetirementReadiness:
     notes: tuple[str, ...] = field(default_factory=tuple)
     # Always present so a caller cannot mistake the report for a live action.
     live_action_required: str = (
-        "live RAGFlow transcript-memory disable/delete and runtime callsite removal "
+        "live RetiredIndexBridge transcript-memory disable/delete and runtime callsite removal "
         "are human-gated and not performed by this verifier"
     )
 

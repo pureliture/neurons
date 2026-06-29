@@ -7,7 +7,7 @@ created and then parity-checked with ``rag-ingress-state shadow-readiness``.
 
 Scope and safety:
 - It writes ONLY to the new state DB candidate. It never mutates the legacy ledger,
-  the source file queue, or RAGFlow.
+  the source file queue, or RetiredIndexBridge.
 - It is idempotent: a command whose ``idempotency_key`` already exists is skipped,
   so re-running the apply against a growing source queue is a safe sync, never a
   duplicate insert or a UNIQUE violation.

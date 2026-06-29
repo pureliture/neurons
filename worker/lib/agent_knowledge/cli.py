@@ -21,7 +21,7 @@ from .llm_brain_core import portable_cli as llm_brain_portable_cli
 from .llm_brain_core import projection_cli as llm_brain_projection_cli
 from .llm_brain_core import regression_gate_cli as llm_brain_regression_gate_cli
 from .llm_brain_core.runtime_graph import build_graph_adapter_from_env
-from .mcp_server import KnowledgeSearchService, build_ragflow_client, run_stdio_server
+from .mcp_server import KnowledgeSearchService, build_index_client, run_stdio_server
 from .rag_ingress import state_cli
 from .session_memory import (
     autopilot_cli,
@@ -136,12 +136,7 @@ def _build_recall_service(args) -> KnowledgeSearchService:
         ledger = Ledger.open_read_only(args.ledger)
     except ValueError as exc:
         raise _ServiceWiringError(2, f"ledger open failed: {type(exc).__name__}") from exc
-    token = os.environ.get(args.token_env, "") if args.token_env else ""
-    ragflow = build_ragflow_client(
-        ragflow_url=args.ragflow_url,
-        token=token,
-        policy_proxy_url=args.policy_proxy_url,
-    )
+    retired_index_bridge = build_index_client()
     try:
         graph_adapter = build_graph_adapter_from_env(
             enable_flag=True if args.enable_graph else None,
@@ -151,16 +146,16 @@ def _build_recall_service(args) -> KnowledgeSearchService:
         raise _ServiceWiringError(1, f"graph adapter unavailable: {type(exc).__name__}") from exc
     # M8 read cutover: when QDRANT_URL (+ COUCHDB_URL authority store) is configured,
     # fill brain.query's archive/evidence lanes from the Qdrant searchable mirror.
-    # Additive -- the RAGFlow archive search is off in the live MCP (empty dataset_ids).
+    # Additive -- the RetiredIndexBridge archive search is off in the live MCP (empty dataset_ids).
     from .rag_ingress.qdrant_recall import build_qdrant_brain_query_search_from_env
 
     mirror_search = build_qdrant_brain_query_search_from_env(os.environ)
     return KnowledgeSearchService(
         ledger=ledger,
-        ragflow=ragflow,
+        retired_index_bridge=retired_index_bridge,
         dataset_ids=list(args.dataset_id or []),
         allow_private_results=bool(args.allow_private_results),
-        native_memory_id=args.native_memory_id or os.environ.get("RAGFLOW_NATIVE_MEMORY_ID", ""),
+        native_memory_id=args.native_memory_id,
         graph_adapter=graph_adapter,
         mirror_search=mirror_search,
     )
@@ -172,18 +167,14 @@ def _mcp_stdio_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="neuron-knowledge mcp-stdio")
     parser.add_argument("--ledger", required=True)
     parser.add_argument("--dataset-id", action="append", default=[])
-    parser.add_argument("--ragflow-url", default="")
-    parser.add_argument("--token-env", default="")
     parser.add_argument("--policy-proxy-url", default="")
     parser.add_argument("--allow-private-results", action="store_true")
     parser.add_argument("--native-memory-id", default="")
     parser.add_argument("--state-db-recall", default="")
-    parser.add_argument("--ragflow-direct-recall", action="store_true")
     parser.add_argument("--enable-graph", action="store_true")
     parser.add_argument("--graph-required", action="store_true")
     args = parser.parse_args(argv)
     _ = args.state_db_recall
-    _ = args.ragflow_direct_recall
     try:
         service = _build_recall_service(args)
     except _ServiceWiringError as exc:
@@ -207,13 +198,10 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
     # 공통 인자: _mcp_stdio_main과 1:1 동일(service 구성 동일).
     parser.add_argument("--ledger", required=True)
     parser.add_argument("--dataset-id", action="append", default=[])
-    parser.add_argument("--ragflow-url", default="")
-    parser.add_argument("--token-env", default="")
     parser.add_argument("--policy-proxy-url", default="")
     parser.add_argument("--allow-private-results", action="store_true")
     parser.add_argument("--native-memory-id", default="")
     parser.add_argument("--state-db-recall", default="")
-    parser.add_argument("--ragflow-direct-recall", action="store_true")
     parser.add_argument("--enable-graph", action="store_true")
     parser.add_argument("--graph-required", action="store_true")
     # HTTP transport 전용.
@@ -223,7 +211,6 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-kubernetes-pod-ip", action="store_true")
     args = parser.parse_args(argv)
     _ = args.state_db_recall
-    _ = args.ragflow_direct_recall
     try:
         service = _build_recall_service(args)
     except _ServiceWiringError as exc:

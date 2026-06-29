@@ -20,7 +20,7 @@
 ### All Main Source Files Read
 - [x] `RagIngressQueueApplication.java` — Spring Boot entrypoint
 - [x] `api/IngressController.java` — REST controller
-- [x] `api/StatusService.java` — Status service (RAGFlow coupled)
+- [x] `api/StatusService.java` — Status service (RetiredIndexBridge coupled)
 - [x] `api/IdempotencyStore.java` — In-memory idempotency
 - [x] `core/IngestJob.java` — Domain record
 - [x] `core/DocumentPayload.java` — Domain record
@@ -56,13 +56,13 @@
 - [x] `worker/WorkerConfiguration.java` — Worker config
 - [x] `worker/DeliveryDecision.java` — Decision record
 - [x] `target/RagTargetAdapter.java` — Port interface
-- [x] `target/RagFlowTargetAdapter.java` — Adapter implementation
-- [x] `target/HttpRagFlowGateway.java` — HTTP gateway
-- [x] `target/RagFlowGateway.java` — Gateway interface
-- [x] `target/RagFlowPressurePolicy.java` — Pressure policy
-- [x] `target/RagFlowPressureSnapshot.java` — Pressure snapshot
-- [x] `target/RagFlowDocumentRef.java` — Document ref
-- [x] `target/RagFlowDeliveryException.java` — Exception
+- [x] `target/RetiredIndexBridgeTargetAdapter.java` — Adapter implementation
+- [x] `target/HttpRetiredIndexBridgeGateway.java` — HTTP gateway
+- [x] `target/RetiredIndexBridgeGateway.java` — Gateway interface
+- [x] `target/RetiredIndexBridgePressurePolicy.java` — Pressure policy
+- [x] `target/RetiredIndexBridgePressureSnapshot.java` — Pressure snapshot
+- [x] `target/RetiredIndexBridgeDocumentRef.java` — Document ref
+- [x] `target/RetiredIndexBridgeDeliveryException.java` — Exception
 - [x] `target/DeliveryResult.java` — Result record
 - [x] `target/TargetStatusSnapshot.java` — Status snapshot
 - [x] `api/dto/EnqueueRequest.java` — Request DTO
@@ -81,8 +81,8 @@
 - [x] `queue/NatsIngestPublisherTest.java`
 - [x] `queue/SubjectRouterTest.java`
 - [x] `runtime/ComposeConfigTest.java`
-- [x] `target/HttpRagFlowGatewayTest.java`
-- [x] `target/RagFlowTargetAdapterTest.java`
+- [x] `target/HttpRetiredIndexBridgeGatewayTest.java`
+- [x] `target/RetiredIndexBridgeTargetAdapterTest.java`
 - [x] `worker/IngestWorkerTest.java`
 
 ### Build & Config Files Read
@@ -149,7 +149,7 @@ com.local.ragingressqueue
 │   ├── infra/
 │   │   └── nats/
 │   └── ext/
-│       └── ragflow/
+│       └── retired_index_bridge/
 └── common/
     ├── config/
     ├── exception/
@@ -202,7 +202,7 @@ implementation 'net.logstash.logback:logstash-logback-encoder:8.0'
 5. [ ] `common/exception/ErrorCode.java`
 6. [ ] `common/exception/GlobalExceptionHandler.java`
 7. [ ] `common/config/QueueProperties.java` (@ConfigurationProperties)
-8. [ ] `common/config/RagFlowProperties.java` (@ConfigurationProperties)
+8. [ ] `common/config/RetiredIndexBridgeProperties.java` (@ConfigurationProperties)
 9. [ ] `common/config/WorkerProperties.java` (@ConfigurationProperties)
 10. [ ] `architecture/ArchitectureTest.java`
 
@@ -244,13 +244,13 @@ implementation 'net.logstash.logback:logstash-logback-encoder:8.0'
 | 24 | `worker/WorkerConfiguration.java` | `common/config/WorkerConfiguration.java` | Or delivery/ |
 | 25 | `worker/DeliveryDecision.java` | `delivery/domain/DeliveryDecision.java` | |
 | 26 | `target/RagTargetAdapter.java` | `target/port/RagTargetAdapter.java` | Port |
-| 27 | `target/RagFlowTargetAdapter.java` | `adapter/ext/ragflow/RagFlowTargetAdapter.java` | Adapter |
-| 28 | `target/HttpRagFlowGateway.java` | `adapter/ext/ragflow/HttpRagFlowGateway.java` | Adapter |
-| 29 | `target/RagFlowGateway.java` | `adapter/ext/ragflow/RagFlowGateway.java` | Adapter |
-| 30 | `target/RagFlowPressurePolicy.java` | `adapter/ext/ragflow/RagFlowPressurePolicy.java` | Adapter |
-| 31 | `target/RagFlowPressureSnapshot.java` | `adapter/ext/ragflow/RagFlowPressureSnapshot.java` | Adapter |
-| 32 | `target/RagFlowDocumentRef.java` | `adapter/ext/ragflow/RagFlowDocumentRef.java` | Adapter |
-| 33 | `target/RagFlowDeliveryException.java` | `adapter/ext/ragflow/RagFlowDeliveryException.java` | Adapter |
+| 27 | `target/RetiredIndexBridgeTargetAdapter.java` | `adapter/ext/retired_index_bridge/RetiredIndexBridgeTargetAdapter.java` | Adapter |
+| 28 | `target/HttpRetiredIndexBridgeGateway.java` | `adapter/ext/retired_index_bridge/HttpRetiredIndexBridgeGateway.java` | Adapter |
+| 29 | `target/RetiredIndexBridgeGateway.java` | `adapter/ext/retired_index_bridge/RetiredIndexBridgeGateway.java` | Adapter |
+| 30 | `target/RetiredIndexBridgePressurePolicy.java` | `adapter/ext/retired_index_bridge/RetiredIndexBridgePressurePolicy.java` | Adapter |
+| 31 | `target/RetiredIndexBridgePressureSnapshot.java` | `adapter/ext/retired_index_bridge/RetiredIndexBridgePressureSnapshot.java` | Adapter |
+| 32 | `target/RetiredIndexBridgeDocumentRef.java` | `adapter/ext/retired_index_bridge/RetiredIndexBridgeDocumentRef.java` | Adapter |
+| 33 | `target/RetiredIndexBridgeDeliveryException.java` | `adapter/ext/retired_index_bridge/RetiredIndexBridgeDeliveryException.java` | Adapter |
 | 34 | `target/DeliveryResult.java` | `delivery/domain/DeliveryResult.java` | |
 | 35 | `target/TargetStatusSnapshot.java` | `target/port/TargetStatusSnapshot.java` | |
 
@@ -265,8 +265,8 @@ implementation 'net.logstash.logback:logstash-logback-encoder:8.0'
 | 6 | `queue/NatsIngestConsumerTest.java` | `adapter/infra/nats/NatsIngestConsumerTest.java` |
 | 7 | `queue/NatsIngestPublisherTest.java` | `adapter/infra/nats/NatsIngestPublisherTest.java` |
 | 8 | `queue/SubjectRouterTest.java` | `adapter/infra/nats/SubjectRouterTest.java` |
-| 9 | `target/HttpRagFlowGatewayTest.java` | `adapter/ext/ragflow/HttpRagFlowGatewayTest.java` |
-| 10 | `target/RagFlowTargetAdapterTest.java` | `adapter/ext/ragflow/RagFlowTargetAdapterTest.java` |
+| 9 | `target/HttpRetiredIndexBridgeGatewayTest.java` | `adapter/ext/retired_index_bridge/HttpRetiredIndexBridgeGatewayTest.java` |
+| 10 | `target/RetiredIndexBridgeTargetAdapterTest.java` | `adapter/ext/retired_index_bridge/RetiredIndexBridgeTargetAdapterTest.java` |
 | 11 | `worker/IngestWorkerTest.java` | `delivery/worker/IngestWorkerTest.java` |
 | 12 | `runtime/ComposeConfigTest.java` | (unchanged) |
 | 13 | `RagIngressQueueApplicationTests.java` | (unchanged) |
@@ -279,7 +279,7 @@ implementation 'net.logstash.logback:logstash-logback-encoder:8.0'
 - [x] Current structure analyzed
 - [x] @ConfigurationProperties binding structure planned
 - [x] Queue config: `rag-ingress.nats.*` → `queue.*`
-- [x] RagFlow config: `rag-ingress.target.ragflow.*` → `ragflow.*`
+- [x] RetiredIndexBridge config: `rag-ingress.target.index.*` → `index.*`
 - [x] Worker config: `rag-ingress.worker.*` → `worker.*`
 
 ### build.gradle Changes
@@ -336,7 +336,7 @@ bash scripts/postcheck.sh --offline --timeout 30 --evidence build/reports/rag-in
 3. `refactor: move source to component-driven layered packages` — PLANNED (single commit for all moves)
 4. `feat: add ArchUnit architecture tests` — PLANNED
 5. `feat: add exception hierarchy and GlobalExceptionHandler` — PLANNED
-6. `feat: add @ConfigurationProperties for queue and ragflow config` — PLANNED
+6. `feat: add @ConfigurationProperties for queue and retired_index_bridge config` — PLANNED
 
 ---
 

@@ -28,7 +28,7 @@
 - `ledger.py`, transcript ingest worker, replay/reconcile/backfill server state
 - session-memory/project-memory build and read surfaces
 - brain.query, MemoryCard, native-memory mirror/sync/reconcile
-- RAG target adapters, including current RAGFlow adapter
+- Qdrant/graph-backed memory projection and recall surfaces
 - GC safety planners and fail-closed GC command surfaces:
   `session-memory-gc`, `transcript-memory-gc`, `transcript-session-gc`,
   `transcript-volume-gc`, `session-memory-quarantine-terminal-skipped`,
@@ -50,13 +50,11 @@ Those client responsibilities belong to `dendrite`.
   sanitized docs만 둔다. 실제 운영값, private ledger, raw transcript,
   live evidence, host topology, secret, raw `dataset_id`, raw `document_id`는
   `neurons-ops` 또는 private storage에 둔다.
-- Keep RAGFlow credential env name to `RAGFLOW_API_KEY`; do not introduce
-  `RAGFLOW_WRITE_TOKEN` or `RAGFLOW_READ_TOKEN`.
+- Retired external index bridge credentials are not part of active runtime configuration.
 - Do not print raw host, private path, token, cookie, bearer string, API key,
   raw transcript body, raw dataset_id, or raw document_id.
-- RAGFlow compose project, DB, Redis, MinIO, Elasticsearch, and volumes are not
-  queue internals. Do not mutate them as part of ordinary code work.
-- Live RAGFlow write/delete/disable, live GC execute, Docker/systemd/firewall,
+- Retired external index bridge services and volumes are not queue internals. Do not mutate them as part of ordinary code work.
+- Retired external index bridge write/delete/disable, live GC execute, Docker/systemd/firewall,
   package install/remove, credential edit, and host mutation require current
   evidence, explicit user intent, exact argv, bounded timeout, redaction,
   postcheck, and rollback/abort criteria.

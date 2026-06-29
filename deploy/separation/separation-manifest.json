@@ -29,7 +29,7 @@
     {"match": "docs/rag-ingress-queue-architecture.html", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
 
     {"match": "docs/runbooks/LLM_BRAIN_CORE_V1_LOCAL_OPS.md", "disposition": "private-neurons-ops", "mechanic": "invert-path"},
-    {"match": "docs/runbooks/2026-05-17-ubuntu-live-ragflow-verification.md", "disposition": "private-neurons-ops", "mechanic": "invert-path"},
+    {"match": "docs/runbooks/2026-05-17-ubuntu-live-index-verification.md", "disposition": "private-neurons-ops", "mechanic": "invert-path"},
     {"match": "docs/runbooks/2026-05-17-ubuntu-runtime-smoke.md", "disposition": "private-neurons-ops", "mechanic": "invert-path"},
     {"match": "docs/runbooks/agent-memory-cleanup-readiness.md", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
     {"match": "docs/runbooks/rag-ingress-queue-operator-runbook.md", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
@@ -63,7 +63,7 @@
     {"match": "worker/tests/test_hermes_brain_steward.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
     {"match": "docs/specs/2026-06-17-ci-quality-signal/milestones.md", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
 
-    {"match": "scripts/live-ragflow-verify.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
+    {"match": "scripts/live-index-verify.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
     {"match": "scripts/__pycache__/**", "disposition": "sanitize-then-public", "mechanic": "gitignore"}
   ]
 }

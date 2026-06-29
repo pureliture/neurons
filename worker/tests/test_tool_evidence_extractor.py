@@ -18,7 +18,7 @@ from agent_knowledge.session_memory.transcript_model import ToolEvidenceSummaryR
 from agent_knowledge.session_memory.transcript_parsers import extract_codex_tool_evidence
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 SOURCE_LOCATOR_HASH = "sha256:" + "a" * 64
 
 # Injected leak sentinels (split so this file never matches itself in the gate).

@@ -36,7 +36,7 @@ def test_envelope_miner_emits_cycle_ready_memory_card_candidate():
     assert card["summary"]
 
 
-def _real_ragflow_chunk():
+def _real_index_chunk():
     # Real list_transcript_memory_chunks shape (probed live 2026-06-14):
     # top-level {content, content_hash, metadata{...}}, NOT a flat redacted_text/knowledge_id dict.
     return {
@@ -44,7 +44,7 @@ def _real_ragflow_chunk():
         "content_hash": "sha256:c1",
         "metadata": {
             "knowledge_id": "kid-1",
-            "project": "workspace-ragflow-advisor",
+            "project": "workspace-index-advisor",
             "provider": "codex",
             "redaction_version": "v2",
         },
@@ -59,12 +59,12 @@ def test_envelope_miner_handles_real_transcript_chunk_shape():
     )
     miner = LlmBrainEnvelopeMiner(completion_fn=lambda messages: completion)
 
-    candidates = miner.mine_chunk(_real_ragflow_chunk(), refresh_watermark="wm")
+    candidates = miner.mine_chunk(_real_index_chunk(), refresh_watermark="wm")
 
     assert len(candidates) == 1
     assert candidates[0]["card_type"] == "decision"
-    assert candidates[0]["project"] == "workspace-ragflow-advisor"
-    assert candidates[0]["brain_id"] == "/project/workspace-ragflow-advisor"
+    assert candidates[0]["project"] == "workspace-index-advisor"
+    assert candidates[0]["brain_id"] == "/project/workspace-index-advisor"
 
 
 def test_envelope_miner_skips_invalid_items_without_crashing():

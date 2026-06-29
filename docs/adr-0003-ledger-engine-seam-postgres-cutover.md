@@ -20,7 +20,7 @@ authority"), server-side ledger는 `worker/lib/agent_knowledge/ledger.py`에 산
    옮기려면 광범위한 수정과 big-bang cutover가 필요하다.
 3. **되돌리기 어려움.** in-place 재작성은 롤백 경로가 없다.
 
-> 참고: 여기서 다루는 것은 **server-side ledger**다. `workspace-ragflow-advisor`의 producer-side
+> 참고: 여기서 다루는 것은 **server-side ledger**다. `workspace-index-advisor`의 producer-side
 > advisor `ledger.py`(외부 문서 상태표, `neurons`가 소유하지 않음 — ADR-0001 참조)와는 별개다.
 > 이 ADR은 후자의 경계를 바꾸지 않는다.
 

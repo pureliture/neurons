@@ -6,7 +6,7 @@ from agent_knowledge.session_memory.zombie_snapshot_repair import (
 )
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 SESSION_ID_HASH = "sha256:session-memory-zombie-target"
 
 

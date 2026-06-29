@@ -54,7 +54,7 @@ class LegacyLedgerBrainReadModel:
         return [(str(row["project"] or ""), int(row["n"])) for row in rows]
 
 
-def build_semantic_recall(*, ledger, ragflow, memory_id: str):
+def build_semantic_recall(*, ledger, retired_index_bridge, memory_id: str):
     """(query, brain_id) -> hits 클로저. store는 lazy 생성 —
     read-only ledger 등 구성 예외가 run 시점 fallback으로 흡수되게 한다."""
 
@@ -63,7 +63,7 @@ def build_semantic_recall(*, ledger, ragflow, memory_id: str):
 
         store = NativeMemoryMirrorStore(ledger)
         return recall_active_native_memory(
-            ragflow=ragflow, store=store, memory_id=memory_id, query=query, brain_id=brain_id
+            retired_index_bridge=retired_index_bridge, store=store, memory_id=memory_id, query=query, brain_id=brain_id
         )
 
     return semantic_recall

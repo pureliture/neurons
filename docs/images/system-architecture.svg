@@ -41,7 +41,7 @@
 
     <rect x="1024" y="150" width="208" height="368" rx="16" fill="none" stroke="#f97316" stroke-width="1.4" stroke-dasharray="7 6" opacity="0.5"/>
     <rect x="1036" y="138" width="196" height="24" rx="6" fill="#0c142b"/>
-    <text x="1050" y="155" fill="#fb923c" font-size="11" font-weight="600">RAGFlow · 수정하지 않음</text>
+    <text x="1050" y="155" fill="#fb923c" font-size="11" font-weight="600">RetiredIndexBridge · 수정하지 않음</text>
   </g>
 
   <!-- connectors -->
@@ -154,13 +154,13 @@
     <text x="1004" y="352" fill="#fb923c" font-size="8" text-anchor="middle">Adapter</text>
   </g>
 
-  <!-- RAGFLOW -->
+  <!-- RETIRED_INDEX_BRIDGE -->
   <g>
     <rect x="1044" y="222" width="168" height="224" rx="13" fill="#1c1626" stroke="#f97316" stroke-width="1.3"/>
     <rect x="1044" y="222" width="168" height="34" rx="13" fill="#3a2412"/>
     <rect x="1044" y="244" width="168" height="12" fill="#3a2412"/>
     <circle cx="1064" cy="239" r="5" fill="#f97316"/>
-    <text x="1078" y="243" fill="#fdba74" font-size="12.5" font-weight="700">RAGFlow</text>
+    <text x="1078" y="243" fill="#fdba74" font-size="12.5" font-weight="700">RetiredIndexBridge</text>
     <text x="1060" y="278" fill="#9fb3d1" font-size="10">datasets · target-profile 7개 중 일부</text>
     <g font-size="10" fill="#cbb89f">
       <rect x="1060" y="284" width="136" height="20" rx="5" fill="#1c140c" opacity="0.6"/><text x="1070" y="298" fill="#6b5563" text-decoration="line-through">transcript-memory</text><text x="1184" y="298" fill="#6b5563" font-size="8" text-anchor="end">retired</text>
@@ -180,7 +180,7 @@
     <g font-size="11">
       <text x="78" y="622" fill="#9fb3d1">◆ Producer는 RAG target을 직접 write하지 않는다 — 모든 write는 queue를 통과</text>
       <text x="78" y="642" fill="#9fb3d1">◆ raw token · dataset_id · document_id · private path · transcript body는 ingress에서 차단</text>
-      <text x="652" y="622" fill="#9fb3d1">◆ Core server는 RAG target을 모른다 — RAGFlow 처리는 adapter에 격리</text>
+      <text x="652" y="622" fill="#9fb3d1">◆ Core server는 RAG target을 모른다 — RetiredIndexBridge 처리는 adapter에 격리</text>
       <text x="652" y="642" fill="#9fb3d1">◆ indexed ≠ authorized — recall/promote 권한은 external 상태표가 소유</text>
     </g>
   </g>

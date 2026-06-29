@@ -13,7 +13,7 @@ def test_provider_instruction_files_exist_and_preserve_server_boundary() -> None
         assert "한국어" in text
         assert "server/brain" in text
         assert "dendrite" in text
-        assert "RAGFLOW_API_KEY" in text
+        assert "active runtime configuration" in text
         assert "GC" in text
 
 

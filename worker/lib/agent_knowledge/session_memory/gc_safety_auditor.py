@@ -1,8 +1,8 @@
 """GC Safety Lane seam (Phase A).
 
-비가역 GC(RAGFlow hard delete + tombstone + audit)를 ``IGCSafetyAuditor`` 인터페이스
+비가역 GC(RetiredIndexBridge hard delete + tombstone + audit)를 ``IGCSafetyAuditor`` 인터페이스
 뒤로 격리한다. GC 스크립트가 audit/tombstone을 이 seam에 위임하면, "audit 없는 삭제"가
-구조적으로 어려워지고(인터페이스 한 점에 co-locate), 단위 테스트가 실제 RAGFlow/ledger
+구조적으로 어려워지고(인터페이스 한 점에 co-locate), 단위 테스트가 실제 RetiredIndexBridge/ledger
 없이 seam 상태 전이만 빠르게 검증할 수 있다.
 
 Phase A에서는 seam을 *정의*하고 tombstone/audit 소유권을 이 모듈로 가져온다. 실제 비가역
@@ -16,15 +16,15 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 
-def hard_delete_documents(ragflow, dataset_id: str, document_ids: list[str]) -> None:
+def hard_delete_documents(retired_index_bridge, dataset_id: str, document_ids: list[str]) -> None:
     """GC Safety Lane의 단일 비가역 삭제 chokepoint (A2 co-location).
 
-    모든 GC 스크립트는 ``ragflow.delete_documents``를 직접 호출하지 않고 이 함수를 경유한다.
+    모든 GC 스크립트는 ``index.delete_documents``를 직접 호출하지 않고 이 함수를 경유한다.
     그러면 비가역 삭제 사이트가 seam 한 곳으로 모여 enforcement(kill-switch)·audit·구조
     불변식 lint가 단일 지점에만 걸린다. ledger를 요구하지 않으므로 ledger 없는 GC 스크립트
     (transcript_session_gc)도 동일 chokepoint를 쓴다.
     """
-    ragflow.delete_documents(dataset_id, document_ids)
+    retired_index_bridge.delete_documents(dataset_id, document_ids)
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,7 @@ class AuditContext:
     schema_version: str
     mode: str
     knowledge_id: str
-    ragflow_document_id: str
+    index_document_id: str
     dataset_id: str
     replacement_knowledge_id: str = ""
     dirty_at: str = ""
@@ -80,7 +80,7 @@ class LedgerGCSafetyAuditor(IGCSafetyAuditor):
             schema_version=ctx.schema_version,
             mode=ctx.mode,
             knowledge_id=ctx.knowledge_id,
-            ragflow_document_id=ctx.ragflow_document_id,
+            index_document_id=ctx.index_document_id,
             dataset_id=ctx.dataset_id,
             replacement_knowledge_id=ctx.replacement_knowledge_id,
             dirty_at=ctx.dirty_at,

@@ -11,7 +11,7 @@ unresolved hits are dropped.
 from __future__ import annotations
 
 from agent_knowledge.ledger import Ledger
-from agent_knowledge.rag_ingress.index_backend import IndexStatus
+from agent_knowledge.rag_ingress.retired_index_bridge import IndexStatus
 from agent_knowledge.rag_ingress.qdrant_authority_join import (
     LedgerContentHashAuthorityResolver,
     join_mirror_hits_to_authority,
@@ -42,8 +42,8 @@ def _insert_item(ledger: Ledger, *, content_hash: str, **overrides):
         "valid_until": "",
         "privacy_level": "private",
         # non-empty unknown dataset id -> _dataset_is_enabled returns True
-        "ragflow_dataset_id": "ds1",
-        "ragflow_document_id": "doc_" + content_hash[-12:],
+        "index_target_id": "ds1",
+        "index_document_id": "doc_" + content_hash[-12:],
     }
     fields.update(overrides)
     columns = ", ".join(fields)
@@ -82,7 +82,7 @@ def test_authorize_by_content_hash_drops_superseded_and_disabled_and_unindexed(t
     _insert_item(ledger, content_hash="sha256:disabled", disabled_at="2020-01-01T00:00:00Z")
     _insert_item(ledger, content_hash="sha256:prepared", status="prepared")
     _insert_item(ledger, content_hash="sha256:revoked", authorization_status="disabled")
-    _insert_item(ledger, content_hash="sha256:nodataset", ragflow_dataset_id="")
+    _insert_item(ledger, content_hash="sha256:nodataset", index_target_id="")
 
     for ch in ("sha256:superseded", "sha256:disabled", "sha256:prepared", "sha256:revoked", "sha256:nodataset"):
         assert ledger.authorize_document_by_content_hash(ch) is None, ch

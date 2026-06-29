@@ -1,9 +1,9 @@
-"""session-memory Qdrant 미러 vs RAGFlow parity-soak 러너.
+"""session-memory Qdrant 미러 vs RetiredIndexBridge parity-soak 러너.
 
 backfill 이후 parity 게이트를 위해 순수-계산 harness :func:`compare_recall` /
 :func:`recall_parity_passes` (``qdrant_read_compare``)를 감싼다:
 
-- ``primary_fetch``는 session-memory dataset에 대한 RAGFlow retrieve이며, 각 chunk가
+- ``primary_fetch``는 session-memory dataset에 대한 RetiredIndexBridge retrieve이며, 각 chunk가
   authority-join된다(즉 primary 쪽 자체가 권위 recall 집합이다).
 - ``mirror_fetch``는 Qdrant 쿼리의 raw candidate를
   :class:`CouchDBProjectionStateAuthorityResolver`로 :func:`join_mirror_hits_to_authority`
@@ -12,7 +12,7 @@ backfill 이후 parity 게이트를 위해 순수-계산 harness :func:`compare_
 
 필수 non-emptiness 가드: :func:`compare_recall`는 primary top-k가 비면 공허하게
 recall=1.0 / exact-match로 취급한다(``qdrant_read_compare.py:89-90``). 대부분 쿼리에서
-RAGFlow가 아무것도 안 돌려주는 soak은 그래서 *거짓* green을 보고하게 된다. 이 러너는 primary
+RetiredIndexBridge가 아무것도 안 돌려주는 soak은 그래서 *거짓* green을 보고하게 된다. 이 러너는 primary
 fetch가 cohort의 최소 ``min_nonempty_fraction`` 이상에서 >0 hit을 돌려주지 않으면 실행을
 REJECT한다(``passed=False``, ``rejected_reason='insufficient_primary_coverage'``). parity
 판정은 primary coverage가 그 하한을 넘을 때만 신뢰한다.
@@ -105,7 +105,7 @@ def run_parity_soak(
     cohort_size = len(cohort)
 
     # primary_fetch를 메모이즈해, 아래 coverage probe와 compare_recall 내부 fetch가 쿼리당
-    # (RAGFlow) primary를 두 번 호출하지 않게 한다.
+    # (RetiredIndexBridge) primary를 두 번 호출하지 않게 한다.
     _primary_cache: dict[str, list[dict[str, Any]]] = {}
 
     def cached_primary_fetch(query: str) -> list[dict[str, Any]]:

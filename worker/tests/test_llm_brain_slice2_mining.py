@@ -12,7 +12,7 @@ from agent_knowledge.session_memory.memory_miner import (
 )
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
 def _decision_payload():

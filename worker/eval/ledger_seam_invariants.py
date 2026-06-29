@@ -1,9 +1,9 @@
 """GC Safety Lane seam structural invariants (Phase A lint).
 
-비가역/forbidden RAGFlow mutation(delete_documents / disable_document /
+비가역/forbidden RetiredIndexBridge mutation(delete_documents / disable_document /
 disable_message / delete_memory)의 직접 호출 사이트를 AST로 열거해 **frozen allowlist**와
 대조한다. 새 직접 호출 사이트가 생기면(= seam을 우회한 비가역 op) 위반으로 잡는다.
-또한 3개 GC runner가 ``ragflow_client`` 주입 seam을 노출하는지 확인한다.
+또한 3개 GC runner가 ``index_client`` 주입 seam을 노출하는지 확인한다.
 
 Phase A 범위 = allowlist 동결 + 주입 seam 존재. Phase A2(S8)에서 delete 사이트가 seam
 경유로만 도달하도록 allowlist를 shrink한다. 이 모듈은 product 코드가 import하지 않는다
@@ -15,16 +15,16 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-FORBIDDEN_RAGFLOW_MUTATIONS = frozenset(
+FORBIDDEN_RETIRED_INDEX_BRIDGE_MUTATIONS = frozenset(
     {"delete_documents", "disable_document", "disable_message", "delete_memory"}
 )
 
-# 비가역/forbidden RAGFlow mutation 직접 호출 사이트의 frozen allowlist.
+# 비가역/forbidden RetiredIndexBridge mutation 직접 호출 사이트의 frozen allowlist.
 # 키 = agent_knowledge 기준 상대 경로, 값 = 그 파일에서 호출되는 메서드 집합.
-# ragflow_client.py(정의)는 스캔에서 제외한다.
+# index_client.py(정의)는 스캔에서 제외한다.
 #
 # A2 shrink: GC 3 스크립트의 ``delete_documents`` 직접 호출이 GC Safety Lane seam
-# (``gc_safety_auditor.hard_delete_documents``) 경유로 라우팅됐다. 이제 비가역 RAGFlow
+# (``gc_safety_auditor.hard_delete_documents``) 경유로 라우팅됐다. 이제 비가역 RetiredIndexBridge
 # 삭제의 직접 호출은 **seam 모듈 한 곳**에만 존재한다. GC 스크립트에 delete_documents가
 # 다시 나타나면 allowlist 밖 위반으로 잡힌다(seam 우회 금지). sync_roundtrip/
 # native_memory_reconcile의 disable_*는 Phase A 밖(envelope 안)이라 allowlist 유지.
@@ -36,9 +36,9 @@ FROZEN_DELETE_ALLOWLIST: dict[str, frozenset[str]] = {
 
 # 주입 seam을 노출해야 하는 GC runner: 상대 경로 -> (클래스명, 필수 파라미터).
 REQUIRED_INJECTION_SEAMS: dict[str, tuple[str, str]] = {
-    "session_memory/session_memory_gc.py": ("SessionMemoryGcRunner", "ragflow_client"),
-    "session_memory/transcript_volume_gc.py": ("TranscriptVolumeGcRunner", "ragflow_client"),
-    "session_memory/transcript_session_gc.py": ("TranscriptSessionGcRunner", "ragflow_client"),
+    "session_memory/session_memory_gc.py": ("SessionMemoryGcRunner", "index_client"),
+    "session_memory/transcript_volume_gc.py": ("TranscriptVolumeGcRunner", "index_client"),
+    "session_memory/transcript_session_gc.py": ("TranscriptSessionGcRunner", "index_client"),
 }
 
 
@@ -54,7 +54,7 @@ def _agent_knowledge_root(start: Path | None = None) -> Path:
 def _scan_mutation_sites(root: Path) -> dict[str, set[str]]:
     sites: dict[str, set[str]] = {}
     for path in sorted(root.rglob("*.py")):
-        if path.name == "ragflow_client.py":
+        if path.name == "index_client.py":
             continue  # 정의이지 호출 사이트가 아님
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -65,7 +65,7 @@ def _scan_mutation_sites(root: Path) -> dict[str, set[str]]:
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
-                and node.func.attr in FORBIDDEN_RAGFLOW_MUTATIONS
+                and node.func.attr in FORBIDDEN_RETIRED_INDEX_BRIDGE_MUTATIONS
             ):
                 sites.setdefault(rel, set()).add(node.func.attr)
     return sites
@@ -98,7 +98,7 @@ def check_seam_invariants(root: Path | None = None) -> list[str]:
         allowed = FROZEN_DELETE_ALLOWLIST.get(rel)
         if allowed is None:
             violations.append(
-                f"{rel}: forbidden RAGFlow mutation {sorted(methods)} outside seam allowlist"
+                f"{rel}: forbidden RetiredIndexBridge mutation {sorted(methods)} outside seam allowlist"
             )
             continue
         extra = methods - set(allowed)

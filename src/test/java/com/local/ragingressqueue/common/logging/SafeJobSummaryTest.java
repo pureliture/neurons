@@ -22,7 +22,7 @@ class SafeJobSummaryTest {
             .doesNotContain("/Users/")
             .doesNotContain("dataset_id")
             .doesNotContain("document_id")
-            .contains("ragflow-transcript-memory")
+            .contains("index-transcript-memory")
             .contains("queued");
     }
 
@@ -37,7 +37,7 @@ class SafeJobSummaryTest {
             .doesNotContain("dataset_id")
             .doesNotContain("document_id")
             .doesNotContain("/Users/")
-            .doesNotContain("workspace-ragflow-advisor");
+            .doesNotContain("workspace-index-advisor");
         assertThat(job.payload().toString())
             .doesNotContain("dataset_id")
             .doesNotContain("document_id")
@@ -58,7 +58,7 @@ class SafeJobSummaryTest {
                 Map.of()
             ),
             ContentHashVerifier.sha256Hex(body),
-            "ragflow-transcript-memory",
+            "index-transcript-memory",
             "conversation_chunk",
             null
         );
@@ -71,7 +71,7 @@ class SafeJobSummaryTest {
 
     private IngestJob validJob(String body) {
         return new IngestJob(
-            Map.of("provider", "codex", "project", "workspace-ragflow-advisor"),
+            Map.of("provider", "codex", "project", "workspace-index-advisor"),
             new DocumentPayload(
                 "redacted_rag_ready_document",
                 "redaction.v2",
@@ -81,7 +81,7 @@ class SafeJobSummaryTest {
                 Map.of("dataset_id", "raw-dataset", "document_id", "raw-doc")
             ),
             ContentHashVerifier.sha256Hex(body),
-            "ragflow-transcript-memory",
+            "index-transcript-memory",
             "conversation_chunk",
             null
         );

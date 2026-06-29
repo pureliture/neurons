@@ -50,8 +50,8 @@ def _build_parser() -> argparse.ArgumentParser:
     build_session.add_argument("--max-sessions", type=int, default=0)
     build_session.add_argument("--sync", action="store_true")
     build_session.add_argument("--dataset-id")
-    build_session.add_argument("--ragflow-url")
-    build_session.add_argument("--token-env")
+    build_session.add_argument("--retired-index-bridge-url")
+    build_session.add_argument("--retired-index-bridge-token-env")
     build_session.add_argument("--approval")
 
     process_dirty = subparsers.add_parser("process-dirty")
@@ -135,7 +135,7 @@ def _run_memory_regeneration(args: argparse.Namespace) -> int:
 
 
 def _run_build_session_memory(args: argparse.Namespace) -> int:
-    if args.sync or args.dataset_id or args.ragflow_url or args.token_env or args.approval:
+    if args.sync or args.dataset_id or args.retired_index_bridge_url or args.retired_index_bridge_token_env or args.approval:
         return _print_live_blocked("build-session-memory")
     if args.all_sessions and args.session_id_hash:
         print("session-memory build requires either --session-id-hash or --all-sessions, not both", file=sys.stderr)

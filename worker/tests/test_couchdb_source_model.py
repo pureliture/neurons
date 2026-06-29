@@ -135,11 +135,11 @@ def test_coverage_manifest_holds_counts_and_coverage_hashes() -> None:
         tool_evidence_bundle_count=1,
         conversation_content_hashes=["sha256:aa", "sha256:bb"],
         tool_evidence_coverage_hashes=["sha256:cc"],
-        ledger_comparison={"ragflow_candidate_count": 2, "ledger_turn_count": 4},
+        ledger_comparison={"index_candidate_count": 2, "ledger_turn_count": 4},
     )
     assert doc["conversation_chunk_count"] == 3
     assert doc["tool_evidence_bundle_count"] == 1
-    assert doc["ledger_comparison"]["ragflow_candidate_count"] == 2
+    assert doc["ledger_comparison"]["index_candidate_count"] == 2
 
 
 # --- ownership rules ----------------------------------------------------------
@@ -164,14 +164,14 @@ def test_projection_state_rejects_transcript_memory_target() -> None:
         session_memory_knowledge_id="sha256:" + "9" * 64,
         active_content_hash="sha256:" + "9" * 64,
     )
-    assert ok["target_profile"] == dm.RAGFLOW_RECALL_PROFILE
+    assert ok["target_profile"] == dm.RETIRED_INDEX_BRIDGE_RECALL_PROFILE
     with pytest.raises(dm.OwnershipViolation):
         dm.build_projection_state_document(
             session_id_hash=sid,
             provider="codex",
             project="neurons",
             projection_status=dm.ProjectionStatus.PROJECTED,
-            target_profile=dm.RETIRED_RAGFLOW_PROFILE,
+            target_profile=dm.RETIRED_RETIRED_INDEX_BRIDGE_PROFILE,
         )
 
 

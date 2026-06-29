@@ -27,7 +27,7 @@ The ambiguous part is the network model for the remaining M5 services:
    ports.
 
 This decision must preserve the repo boundary from ADR-0001: `neurons` does not
-mutate the existing RAGFlow compose stack, its databases, or its volumes as part
+mutate the existing RetiredIndexBridge compose stack, its databases, or its volumes as part
 of ordinary LLM-Brain work.
 
 ## Decision
@@ -51,9 +51,9 @@ Host-published ports are operator and smoke-test conveniences. They must be
 bound to `127.0.0.1` unless a later ADR explicitly widens exposure. They are not
 the default path between owned services.
 
-RAGFlow remains outside this compose project. Any integration with live RAGFlow
+RetiredIndexBridge remains outside this compose project. Any integration with live RetiredIndexBridge
 uses explicit adapter configuration, bounded operator approval, and redacted
-postchecks; it is not achieved by mounting or mutating RAGFlow volumes.
+postchecks; it is not achieved by mounting or mutating RetiredIndexBridge volumes.
 
 Secrets stay in environment inputs or env files ignored by git. The checked-in
 examples may include only placeholder values. The Vertex wrapper may mount ADC
@@ -107,7 +107,7 @@ Cons:
 
 - A clean checkout has one repo-local compose entry point for LLM-Brain runtime.
 - Service-to-service URLs are stable and testable through Compose DNS.
-- Existing RAGFlow stack and volumes remain outside ordinary code work.
+- Existing RetiredIndexBridge stack and volumes remain outside ordinary code work.
 - Host ports stay loopback-only by default, reducing accidental exposure.
 
 ### Negative
@@ -136,12 +136,12 @@ Cons:
 4. Checked-in env examples contain placeholders only and no credential material.
 5. Clean-machine smoke proves healthz, tools/list or equivalent capability
    discovery, graph status, and one entity-extraction recall path without
-   mutating RAGFlow volumes.
+   mutating RetiredIndexBridge volumes.
 
 ## References
 
 - `compose.yaml`
 - `README.md` Compose isolation section
 - `docs/runbooks/LLM_BRAIN_CORE_V1_LOCAL_OPS.md`
-- ADR-0001: RAGFlow target adapter and RAGFlow compose isolation
+- ADR-0001: RetiredIndexBridge target adapter and RetiredIndexBridge compose isolation
 - ADR-0003: ledger PostgreSQL cutover and `NEURON_LEDGER_PG_DSN`

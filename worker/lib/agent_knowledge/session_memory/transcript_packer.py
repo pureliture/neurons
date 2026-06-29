@@ -252,7 +252,7 @@ def pack_tool_evidence_summary_document(
     """Pack one bounded, redacted tool_evidence_summary source document.
 
     Append-only and derived from already-redacted evidence records; the packer
-    never reintroduces raw text. Metadata is flat for RAGFlow filters and carries
+    never reintroduces raw text. Metadata is flat for RetiredIndexBridge filters and carries
     the same session_id_hash as the session's conversation_chunk documents.
     """
     if not records:
@@ -343,7 +343,7 @@ def build_tool_evidence_dry_run_manifest(
 ) -> dict:
     """Build a local-only dry-run manifest for planned tool_evidence_summary docs.
 
-    Never touches the network or RAGFlow and never echoes raw source paths,
+    Never touches the network or RetiredIndexBridge and never echoes raw source paths,
     transcript text, secrets, or raw ids; evidence records are already redacted.
     """
     ordered = list(records)
@@ -383,5 +383,5 @@ def build_tool_evidence_dry_run_manifest(
         "raw_transcript_text_printed": False,
         "network_used": False,
         "mutation_performed": False,
-        "ragflow_write_performed": False,
+        "index_write_performed": False,
     }

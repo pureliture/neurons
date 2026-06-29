@@ -172,7 +172,7 @@ def test_mask_and_store_makes_body_public_safe_keeps_content_hash():
     ch = "sha256:" + "a" * 64
     body = (
         "ran https://user:pass@host/x and ~/notes then regex \\bword and "
-        "raw_transcript C:\\tmp RAGFLOW_API_KEY=zzz Bearer abc.def end"
+        "raw_transcript C:\\tmp RETIRED_INDEX_BRIDGE_API_KEY=zzz Bearer abc.def end"
     )
     doc = build_session_memory_mirror_document(
         session_id_hash="sha256:" + "0" * 64, provider="codex", project="neurons",
@@ -358,8 +358,8 @@ def test_backfill_twice_does_not_duplicate_points():
     assert client.point_count("test_mirror") == 1
 
 
-def test_qdrant_projector_canonical_write_no_ragflow():
-    # C: builder projects session-memory straight to Qdrant (RAGFlow-free), records
+def test_qdrant_projector_canonical_write_no_retired_index_bridge():
+    # C: builder projects session-memory straight to Qdrant (retired-index-bridge-free), records
     # PROJECTED + active_content_hash, returns a qdrant_sm ref; a later backfill of
     # the same session is idempotent (same point_id).
     from agent_knowledge.rag_ingress.qdrant_backfill import (
@@ -466,7 +466,7 @@ def test_mirror_only_no_store_write_no_dual_write():
     assert not hasattr(backfill_mod, "MirrorDualWriteBackend")
     src = open(backfill_mod.__file__, encoding="utf-8").read()
     assert "MirrorDualWriteBackend" not in src
-    # no canonical-write verbs: never put/delete CouchDB, never call RAGFlow retrieve
+    # no canonical-write verbs: never put/delete CouchDB, never call RetiredIndexBridge retrieve
     for forbidden in ("store.put(", "store.delete(", ".retrieve(", "MirrorDualWriteBackend("):
         assert forbidden not in src
 

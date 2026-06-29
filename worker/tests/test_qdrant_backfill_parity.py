@@ -133,7 +133,7 @@ def _mirror_fetch_for(store, adapter):
 def test_nonempty_primary_backfilled_mirror_passes():
     store, adapter, ch_a, ch_b = _build_world()
 
-    # primary = authoritative RAGFlow recall (authority-joined hits with content_hash)
+    # primary = authoritative RetiredIndexBridge recall (authority-joined hits with content_hash)
     primary_for = {
         "alpha apple": [{"content_hash": ch_a, "canonical_resolution_required": False}],
         "beta banana": [{"content_hash": ch_b, "canonical_resolution_required": False}],

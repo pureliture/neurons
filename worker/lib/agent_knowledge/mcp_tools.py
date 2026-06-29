@@ -66,7 +66,7 @@ def list_tools() -> list[dict]:
     return [
         {
             "name": TOOL_NAME,
-            "description": "legacy/external RAGFlow bridge를 검색한다. Context Authority 기본 경로는 brain_context_resolve다.",
+            "description": "legacy external index bridge is retired; use brain_context_resolve for Context Authority.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

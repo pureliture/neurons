@@ -700,7 +700,7 @@
           <p class="lead">
             Local PC와 Mac mini에서 발생하는 redacted RAG-ready transcript, session, document ingest 요청을 단일 write path로 받아
             downstream RAG target이 감당 가능한 속도로 전달하는 범용 ingress queue 서버다.
-            RAGFlow는 core가 아니라 첫 번째 adapter이자 현재 LLM Wiki 저장소다. Summary/card 생성과 recall 판단은 queue 책임이 아니다.
+            RetiredIndexBridge는 core가 아니라 첫 번째 adapter이자 현재 LLM Wiki 저장소다. Summary/card 생성과 recall 판단은 queue 책임이 아니다.
           </p>
         </div>
         <aside class="decision-strip" aria-label="고정 기술 결정">
@@ -731,10 +731,10 @@
           <div>
             <h2>Producer는 RAG target을 직접 write하지 않는다</h2>
             <p>
-              <code>workspace-ragflow-advisor</code>의 현재 적용 대상은 Codex <code>Stop</code> hook이 남기는
+              <code>workspace-index-advisor</code>의 현재 적용 대상은 Codex <code>Stop</code> hook이 남기는
               <code>TranscriptCaptureSpool</code>과 기존 transcript worker다. 이 기존 경로를 Mac mini의
               <code>session-compactor</code>로 재분류하고, Ubuntu의 <code>memory-regeneration-runner</code>는
-              RAGFlow를 읽어 derived docs를 다시 enqueue하는 batch producer로 둔다. Core server는 enqueue,
+              RetiredIndexBridge를 읽어 derived docs를 다시 enqueue하는 batch producer로 둔다. Core server는 enqueue,
               JetStream publish, pull worker lifecycle, adapter 호출만 맡는다.
             </p>
           </div>
@@ -758,7 +758,7 @@
             <path class="wire read" d="M170 500 C396 610 772 610 1120 510"></path>
             <text class="wire-label" x="438" y="620">MCP read/tool plane, no bulk target write</text>
             <path class="wire blocked" d="M220 305 C570 90 890 88 1110 306"></path>
-            <text class="wire-label" x="522" y="106">forbidden direct RAGFlow write</text>
+            <text class="wire-label" x="522" y="106">forbidden direct RetiredIndexBridge write</text>
           </svg>
 
           <div class="architecture-grid">
@@ -790,7 +790,7 @@
               </article>
               <article class="node producer">
                 <h4>memory-regeneration-runner</h4>
-                <p>Ubuntu batch producer다. RAGFlow redacted corpus를 읽어 session/task summary와 approved memory card 후보를 만든 뒤 다시 queue에 enqueue한다.</p>
+                <p>Ubuntu batch producer다. RetiredIndexBridge redacted corpus를 읽어 session/task summary와 approved memory card 후보를 만든 뒤 다시 queue에 enqueue한다.</p>
               </article>
               <article class="node read">
                 <h4>MCP read/tool plane</h4>
@@ -798,7 +798,7 @@
               </article>
               <article class="node risk">
                 <h4>Forbidden</h4>
-                <p>Producer, MCP, migration script가 RAGFlow REST를 직접 bulk write하는 경로는 금지한다.</p>
+                <p>Producer, MCP, migration script가 RetiredIndexBridge REST를 직접 bulk write하는 경로는 금지한다.</p>
               </article>
             </div>
 
@@ -865,11 +865,11 @@
                 </div>
               </article>
               <article class="node target">
-                <h4>RAGFlowAdapter v1</h4>
-                <p>RAGFlow health, parser backlog, document status를 generic pressure와 indexing state로 변환한다.</p>
+                <h4>RetiredIndexBridgeAdapter v1</h4>
+                <p>RetiredIndexBridge health, parser backlog, document status를 generic pressure와 indexing state로 변환한다.</p>
               </article>
               <article class="node target">
-                <h4>RAGFlow LLM Wiki datasets</h4>
+                <h4>RetiredIndexBridge LLM Wiki datasets</h4>
                 <p><code>transcript-memory</code>, <code>session-summary</code>, <code>task-summary</code>, <code>approved-memory-card</code>를 dataset-first로 분리한다.</p>
               </article>
               <article class="node target">
@@ -897,10 +897,10 @@
         <div class="section-head">
           <p class="section-kicker">02. Runtime Boundary</p>
           <div>
-            <h2>RAGFlow compose project와 lifecycle을 분리한다</h2>
+            <h2>RetiredIndexBridge compose project와 lifecycle을 분리한다</h2>
             <p>
               초기 구성은 별도 Docker Compose project로 시작한다.
-              RAGFlow stack, Redis, DB, volume을 직접 조작하지 않고 host-published endpoint 또는 명시적으로 허용된 bridge만 사용한다.
+              RetiredIndexBridge stack, Redis, DB, volume을 직접 조작하지 않고 host-published endpoint 또는 명시적으로 허용된 bridge만 사용한다.
             </p>
           </div>
         </div>
@@ -908,7 +908,7 @@
         <div class="callout-grid">
           <article class="card ok">
             <h3>Separate project</h3>
-            <p><code>project: rag-ingress-queue</code>로 시작한다. RAGFlow compose file은 수정하지 않는다.</p>
+            <p><code>project: rag-ingress-queue</code>로 시작한다. RetiredIndexBridge compose file은 수정하지 않는다.</p>
           </article>
           <article class="card">
             <h3>Three services</h3>
@@ -916,7 +916,7 @@
           </article>
           <article class="card risk">
             <h3>No shared internals</h3>
-            <p>RAGFlow 내부 Redis, DB, volume, parser state를 queue engine처럼 공유하지 않는다.</p>
+            <p>RetiredIndexBridge 내부 Redis, DB, volume, parser state를 queue engine처럼 공유하지 않는다.</p>
           </article>
         </div>
       </div>
@@ -929,15 +929,15 @@
           <div>
             <h2>완성된 session compactor의 write sink만 바꾼다</h2>
             <p>
-              기존 hook 설치와 read plane은 그대로 둔다. 변경 지점은 현재 RAGFlow REST를 직접 호출하는
+              기존 hook 설치와 read plane은 그대로 둔다. 변경 지점은 현재 RetiredIndexBridge REST를 직접 호출하는
               transcript ingest worker의 sink 구간이다. Mac mini에서는 source resolve, parse, redaction, packing까지만 수행하고
-              RAGFlow upload, parse request, status polling은 <code>rag-ingress-queue</code> worker delivery로 이동시킨다.
+              RetiredIndexBridge upload, parse request, status polling은 <code>rag-ingress-queue</code> worker delivery로 이동시킨다.
             </p>
           </div>
         </div>
 
         <div class="split">
-          <table class="matrix" aria-label="workspace-ragflow-advisor spool mapping">
+          <table class="matrix" aria-label="workspace-index-advisor spool mapping">
             <thead>
               <tr>
                 <th>Existing surface</th>
@@ -954,7 +954,7 @@
               <tr>
                 <td><code>Stop</code> + <code>transcript-capture</code></td>
                 <td>session_end boundary에서 locator/hash capture request 생성.</td>
-                <td>그대로 유지한다. Hook은 RAGFlow나 NATS를 직접 호출하지 않는다.</td>
+                <td>그대로 유지한다. Hook은 RetiredIndexBridge나 NATS를 직접 호출하지 않는다.</td>
               </tr>
               <tr>
                 <td><code>TranscriptCaptureSpool</code></td>
@@ -963,12 +963,12 @@
               </tr>
               <tr>
                 <td><code>TranscriptIngestWorker</code></td>
-                <td>현재는 parse, pack, RAGFlow upload/metadata/parse request/poll까지 수행.</td>
-                <td>parse/redaction/pack은 session-compactor로 유지하고, 직접 RAGFlow upload/status poll 책임만 <code>RAGFlowAdapter</code>로 이동.</td>
+                <td>현재는 parse, pack, RetiredIndexBridge upload/metadata/parse request/poll까지 수행.</td>
+                <td>parse/redaction/pack은 session-compactor로 유지하고, 직접 RetiredIndexBridge upload/status poll 책임만 <code>RetiredIndexBridgeAdapter</code>로 이동.</td>
               </tr>
               <tr>
-                <td><code>RAGFlow document status table</code></td>
-                <td>session, turn, chunk, RAGFlow document ref, indexed status, authorization state 기록.</td>
+                <td><code>RetiredIndexBridge document status table</code></td>
+                <td>session, turn, chunk, RetiredIndexBridge document ref, indexed status, authorization state 기록.</td>
                 <td>canonical state table로 유지한다. queue ack와 authorization을 같은 상태로 취급하지 않는다.</td>
               </tr>
             </tbody>
@@ -981,20 +981,20 @@ Codex Stop hook
   -> private TranscriptCaptureSpool
   -> session-compactor resolves local source on Mac mini
   -> parse + redaction.v2 + conversation chunk pack
-  -> enqueue redacted RAGFlow-ready document
+  -> enqueue redacted RetiredIndexBridge-ready document
   -> POST /v1/ingest/enqueue
   -> JetStream publish ack
   -> local spool ack
 
-Direct RAGFlow upload from the spool worker becomes
+Direct RetiredIndexBridge upload from the spool worker becomes
 a legacy/pre-cutover path, not the steady-state path.
 
 Batch regeneration path:
 memory-regeneration-runner
-  -> read RAGFlow transcript-memory
+  -> read RetiredIndexBridge transcript-memory
   -> generate derived docs
   -> POST /v1/ingest/enqueue
-  -> RAGFlow derived datasets</pre>
+  -> RetiredIndexBridge derived datasets</pre>
           </div>
         </div>
       </div>
@@ -1008,7 +1008,7 @@ memory-regeneration-runner
             <h2>ingest write path는 하나만 허용한다</h2>
             <p>
               API accepted는 indexing 완료가 아니다. Local spool ack, JetStream publish ack, target indexed,
-              RAGFlow 문서 상태표 authorization, recall/promote eligible은 서로 다른 상태로 추적한다.
+              RetiredIndexBridge 문서 상태표 authorization, recall/promote eligible은 서로 다른 상태로 추적한다.
             </p>
           </div>
         </div>
@@ -1032,7 +1032,7 @@ memory-regeneration-runner
           </article>
           <article class="card flow-card">
             <h3>Authorize</h3>
-            <p>RAGFlow <code>DONE</code> 이후에도 문서 상태표 authorization pass 전에는 recall/promote 후보가 아니다.</p>
+            <p>RetiredIndexBridge <code>DONE</code> 이후에도 문서 상태표 authorization pass 전에는 recall/promote 후보가 아니다.</p>
           </article>
         </div>
       </div>
@@ -1069,8 +1069,8 @@ memory-regeneration-runner
             </tr>
             <tr>
               <td>memory-regeneration-runner</td>
-              <td>RAGFlow redacted corpus -> derived document on <code>rag.ingress.document</code></td>
-              <td>Batch regeneration도 direct RAGFlow write 없이 같은 ingress path를 사용한다.</td>
+              <td>RetiredIndexBridge redacted corpus -> derived document on <code>rag.ingress.document</code></td>
+              <td>Batch regeneration도 direct RetiredIndexBridge write 없이 같은 ingress path를 사용한다.</td>
               <td>Runner는 queue consumer가 아니라 producer다. Summary/card 생성은 queue 책임이 아니다.</td>
             </tr>
             <tr>
@@ -1107,9 +1107,9 @@ memory-regeneration-runner
         <div class="section-head">
           <p class="section-kicker">06. Adapter Boundary</p>
           <div>
-            <h2>Core는 RAGFlow를 모른다</h2>
+            <h2>Core는 RetiredIndexBridge를 모른다</h2>
             <p>
-              RAGFlowAdapter v1은 RAGFlow REST, parser backlog, document status를 generic pressure와 state로 바꾸는 첫 구현체다.
+              RetiredIndexBridgeAdapter v1은 RetiredIndexBridge REST, parser backlog, document status를 generic pressure와 state로 바꾸는 첫 구현체다.
               이후 target 교체는 adapter 추가로 끝나야 한다.
             </p>
           </div>
@@ -1131,7 +1131,7 @@ memory-regeneration-runner
             </article>
             <article class="card">
               <h3>deliver</h3>
-              <p>Core job을 target-specific upload와 parse request로 변환한다. <code>targetProfile</code>이 RAGFlow dataset role을 고르고, raw dataset_id와 document_id는 밖으로 내보내지 않는다.</p>
+              <p>Core job을 target-specific upload와 parse request로 변환한다. <code>targetProfile</code>이 RetiredIndexBridge dataset role을 고르고, raw dataset_id와 document_id는 밖으로 내보내지 않는다.</p>
             </article>
             <article class="card">
               <h3>getStatus</h3>
@@ -1149,47 +1149,47 @@ memory-regeneration-runner
     <section id="datasets" class="section">
       <div class="section-inner">
         <div class="section-head">
-          <p class="section-kicker">07. RAGFlow LLM Wiki Datasets</p>
+          <p class="section-kicker">07. RetiredIndexBridge LLM Wiki Datasets</p>
           <div>
-            <h2>기억 본문은 RAGFlow dataset으로 나눈다</h2>
+            <h2>기억 본문은 RetiredIndexBridge dataset으로 나눈다</h2>
             <p>
-              RAGFlow는 장기기억 본문과 검색 대상이 모이는 LLM Wiki다.
+              RetiredIndexBridge는 장기기억 본문과 검색 대상이 모이는 LLM Wiki다.
               단일 dataset에 metadata type만으로 모든 기억 데이터를 넣지 않는다.
-              <code>targetProfile</code>은 adapter가 선택할 RAGFlow dataset role을 나타낸다.
+              <code>targetProfile</code>은 adapter가 선택할 RetiredIndexBridge dataset role을 나타낸다.
             </p>
           </div>
         </div>
 
-        <table class="matrix" aria-label="RAGFlow dataset target profiles">
+        <table class="matrix" aria-label="RetiredIndexBridge dataset target profiles">
           <thead>
             <tr>
               <th>targetProfile</th>
-              <th>RAGFlow dataset</th>
+              <th>RetiredIndexBridge dataset</th>
               <th>Producer</th>
               <th>Document kind</th>
             </tr>
           </thead>
           <tbody>
             <tr>
-              <td><code>ragflow-transcript-memory</code></td>
+              <td><code>index-transcript-memory</code></td>
               <td><code>transcript-memory</code></td>
               <td>Mac mini session-compactor</td>
               <td><code>conversation_chunk</code></td>
             </tr>
             <tr>
-              <td><code>ragflow-session-summary</code></td>
+              <td><code>index-session-summary</code></td>
               <td><code>session-summary</code></td>
               <td>Ubuntu memory-regeneration-runner</td>
               <td><code>session_summary</code></td>
             </tr>
             <tr>
-              <td><code>ragflow-task-summary</code></td>
+              <td><code>index-task-summary</code></td>
               <td><code>task-summary</code></td>
               <td>Ubuntu memory-regeneration-runner</td>
               <td><code>task_summary</code></td>
             </tr>
             <tr>
-              <td><code>ragflow-approved-memory-card</code></td>
+              <td><code>index-approved-memory-card</code></td>
               <td><code>approved-memory-card</code></td>
               <td>Curation/regeneration producer</td>
               <td><code>approved_memory_card</code></td>
@@ -1206,17 +1206,17 @@ memory-regeneration-runner
           <div>
             <h2>indexed는 recall/promote eligible이 아니다</h2>
             <p>
-              여기서 말하는 gate는 별도 장기기억 저장소가 아니라 RAGFlow document id/hash/state/provenance/authorization을 기록하는 external local 문서 상태표다.
+              여기서 말하는 gate는 별도 장기기억 저장소가 아니라 RetiredIndexBridge document id/hash/state/provenance/authorization을 기록하는 external local 문서 상태표다.
               <code>rag-ingress-queue</code>는 이 상태표를 직접 소유하지 않고 redacted job/status snapshot을 제공한다.
               Queue ack와 document indexed는 같은 의미가 아니며, Target <code>INDEXED</code> 이후에도 authorization pass 전에는 transcript memory를 recall/promote에 사용하지 않는다.
             </p>
           </div>
         </div>
 
-        <div class="state-rail" aria-label="RAGFlow document status authorization state rail">
+        <div class="state-rail" aria-label="RetiredIndexBridge document status authorization state rail">
           <article class="state">
             <h3>captured</h3>
-            <p>Private spool에 locator/hash request가 기록된 상태다. RAGFlow indexing 증거가 아니다.</p>
+            <p>Private spool에 locator/hash request가 기록된 상태다. RetiredIndexBridge indexing 증거가 아니다.</p>
           </article>
           <article class="state">
             <h3>ingested</h3>
@@ -1301,7 +1301,7 @@ memory-regeneration-runner
               </tr>
               <tr>
                 <td>Producer direct write removed</td>
-                <td>Post-cutover transcript ingest no longer calls RAGFlow REST directly from the spool worker.</td>
+                <td>Post-cutover transcript ingest no longer calls RetiredIndexBridge REST directly from the spool worker.</td>
               </tr>
               <tr>
                 <td>JetStream publish ack visible</td>
@@ -1312,8 +1312,8 @@ memory-regeneration-runner
                 <td>Worker stops delivery on <code>THROTTLED</code> or <code>CLOSED</code>.</td>
               </tr>
               <tr>
-                <td>RAGFlow isolated in adapter</td>
-                <td>Core package has no RAGFlow-specific payload fields except opaque target profile names.</td>
+                <td>RetiredIndexBridge isolated in adapter</td>
+                <td>Core package has no RetiredIndexBridge-specific payload fields except opaque target profile names.</td>
               </tr>
               <tr>
                 <td>Dataset-first partitioning</td>
@@ -1331,7 +1331,7 @@ memory-regeneration-runner
 Codex Stop hook
   -> TranscriptCaptureSpool
   -> session-compactor enqueue sink
-  -> redaction.v2 + RAGFlow-ready document
+  -> redaction.v2 + RetiredIndexBridge-ready document
   -> rag-ingress-queue /enqueue
   -> NATS JetStream
   -> ingress-worker
@@ -1339,17 +1339,17 @@ Codex Stop hook
   -> downstream RAG target
 
 memory-regeneration-runner
-  -> read RAGFlow redacted corpus
+  -> read RetiredIndexBridge redacted corpus
   -> generate derived document
   -> rag-ingress-queue /enqueue
   -> downstream RAG target
 
 Forbidden write paths:
-Producer -> RAGFlow REST direct write
-MCP -> RAGFlow REST bulk ingest write
-Migration script -> RAGFlow REST direct write
-Post-cutover spool worker -> RAGFlow REST direct write
-memory-regeneration-runner -> RAGFlow REST direct write</pre>
+Producer -> RetiredIndexBridge REST direct write
+MCP -> RetiredIndexBridge REST bulk ingest write
+Migration script -> RetiredIndexBridge REST direct write
+Post-cutover spool worker -> RetiredIndexBridge REST direct write
+memory-regeneration-runner -> RetiredIndexBridge REST direct write</pre>
           </div>
         </div>
 

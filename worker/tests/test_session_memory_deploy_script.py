@@ -9,7 +9,7 @@ def test_build_once_uses_couchdb_native_builder_with_qdrant_default() -> None:
     assert "SESSION_MEMORY_PROJECTION_BACKEND" in script
     assert "QDRANT_URL" in script
     assert "neurons_mirror_gemini_3072_v1" in script
-    assert "RAGFLOW_API_KEY" not in script
+    assert "RETIRED_INDEX_BRIDGE_API_KEY" not in script
 
 
 def test_build_once_writes_matching_live_approval_for_couchdb_builder() -> None:

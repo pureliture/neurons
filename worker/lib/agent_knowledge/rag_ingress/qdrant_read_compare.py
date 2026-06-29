@@ -1,9 +1,9 @@
-"""M7 read-compare / recall-parity harness: RAGFlow vs Qdrant mirror.
+"""M7 read-compare / recall-parity harness: RetiredIndexBridge vs Qdrant mirror.
 
 Pure-compute comparison over a query cohort. For each query it takes the primary
-recall (RAGFlow retrieval, authority-joined) and the mirror recall (Qdrant query,
+recall (RetiredIndexBridge retrieval, authority-joined) and the mirror recall (Qdrant query,
 authority-joined) as already-fetched hit lists and computes top-k content_hash
-overlap, recall@k, and exact-match counts. The live fetchers (RAGFlow retrieve,
+overlap, recall@k, and exact-match counts. The live fetchers (RetiredIndexBridge retrieve,
 Qdrant query, ledger-join) are injected, so this module is fully testable with
 fakes and performs no network call itself.
 
@@ -119,7 +119,7 @@ def compare_recall(
 def recall_parity_passes(report: dict[str, Any], *, min_mean_recall_at_k: float, require_exact: bool = True) -> bool:
     """Gate helper: parity passes when exact-match holds (mismatch==0) if required,
     and mean recall@k meets the threshold. The numeric threshold is set at M7 after
-    measuring the RAGFlow baseline (left to the caller, not hard-coded)."""
+    measuring the RetiredIndexBridge baseline (left to the caller, not hard-coded)."""
 
     if require_exact and report.get("mismatch_count", 1) != 0:
         return False

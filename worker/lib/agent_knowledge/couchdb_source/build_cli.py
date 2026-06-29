@@ -1,7 +1,7 @@
 """CLI entry point: couchdb-session-memory-build.
 
 Selects CouchDB transcript_session sessions whose projection_state is missing or
-not PROJECTED, materializes each one and projects it to the RAGFlow session-memory
+not PROJECTED, materializes each one and projects it to the RetiredIndexBridge session-memory
 dataset.
 
 Approval gate (fail-closed):
@@ -69,17 +69,17 @@ def main(argv: list[str] | None = None) -> int:
         prog="neuron-knowledge couchdb-session-memory-build",
         description="Build CouchDB->session-memory live pipeline.",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Report selection counts; no RAGFlow writes.")
+    parser.add_argument("--dry-run", action="store_true", help="Report selection counts; no RetiredIndexBridge writes.")
     parser.add_argument("--limit", type=int, default=0, help="Maximum sessions to process (0 = unlimited).")
     parser.add_argument("--project", default="", help="Scope selection to this project (empty = all).")
     parser.add_argument("--provider", default="", help="Scope selection to this provider (empty = all).")
     parser.add_argument("--approval", default="", help="Path to live-approval JSON (required for non-dry-run).")
-    parser.add_argument("--dataset-name", default="session-memory", help="RAGFlow dataset name (default: session-memory).")
-    parser.add_argument("--ragflow-url", default="", help="RAGFlow base URL (overrides RAGFLOW_URL env).")
+    parser.add_argument("--dataset-name", default="session-memory", help="RetiredIndexBridge dataset name (default: session-memory).")
+    parser.add_argument("--retired-index-bridge-url", default="", help="RetiredIndexBridge base URL (overrides RETIRED_INDEX_BRIDGE_URL env).")
     parser.add_argument(
-        "--token-env",
-        default="RAGFLOW_API_KEY",
-        help="(무시됨) RAGFlow 토큰은 항상 RAGFLOW_API_KEY env에서만 읽는다.",
+        "--retired-index-bridge-token-env",
+        default="RETIRED_INDEX_BRIDGE_API_KEY",
+        help="(무시됨) RetiredIndexBridge 토큰은 항상 RETIRED_INDEX_BRIDGE_API_KEY env에서만 읽는다.",
     )
 
     args = parser.parse_args(argv)
@@ -176,17 +176,17 @@ def main(argv: list[str] | None = None) -> int:
     # --- Projector construction (live run only) ------------------------------
     from .session_memory_materializer import materialize_and_project
 
-    backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "ragflow").strip().lower()
-    # Fail-closed: 오타 등으로 알 수 없는 backend가 들어오면 ragflow로 조용히
+    backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "retired_index_bridge").strip().lower()
+    # Fail-closed: 오타 등으로 알 수 없는 backend가 들어오면 retired_index_bridge로 조용히
     # fallback하지 않고 명시적으로 거부한다.
-    if backend not in {"ragflow", "qdrant"}:
+    if backend not in {"retired_index_bridge", "qdrant"}:
         print(
             json.dumps(
                 {
                     "schema_version": BUILD_CLI_SCHEMA_VERSION,
                     "error": "env_invalid",
                     "reason": (
-                        "SESSION_MEMORY_PROJECTION_BACKEND는 'ragflow' 또는 'qdrant'여야 한다"
+                        "SESSION_MEMORY_PROJECTION_BACKEND는 'retired_index_bridge' 또는 'qdrant'여야 한다"
                     ),
                     "dry_run": False,
                     "selected": 0,
@@ -199,9 +199,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     if backend == "qdrant":
-        # Qdrant-direct write path (RAGFlow-free): project each session-memory
+        # Qdrant-direct write path (retired-index-bridge-free): project each session-memory
         # straight into the Qdrant searchable mirror as the CANONICAL target. No
-        # RAGFlow URL/token required. A submit failure marks the projection FAILED
+        # RetiredIndexBridge URL/token required. A submit failure marks the projection FAILED
         # (retried next run), not best-effort. mirror_sink stays None -- the projector
         # IS the Qdrant writer, so there is no separate best-effort forward hook.
         projector = _build_qdrant_projector(os.environ)
@@ -224,17 +224,17 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         mirror_sink = None
     else:
-        ragflow_url = args.ragflow_url or os.environ.get("RAGFLOW_URL", "")
-        # Repo guardrail: RAGFlow 토큰은 RAGFLOW_API_KEY 하나만 사용한다. args.token_env로
+        index_url = args.retired_index_bridge_url or os.environ.get("RETIRED_INDEX_BRIDGE_URL", "")
+        # Repo guardrail: RetiredIndexBridge 토큰은 RETIRED_INDEX_BRIDGE_API_KEY 하나만 사용한다. args.retired_index_bridge_token_env로
         # 임의의 env 이름을 secret 소스로 받지 않도록 하드코딩한다.
-        bearer_token = os.environ.get("RAGFLOW_API_KEY", "")
-        if not ragflow_url or not bearer_token:
+        bearer_token = os.environ.get("RETIRED_INDEX_BRIDGE_API_KEY", "")
+        if not index_url or not bearer_token:
             print(
                 json.dumps(
                     {
                         "schema_version": BUILD_CLI_SCHEMA_VERSION,
                         "error": "env_missing",
-                        "reason": "ragflow_url and token are required for live runs",
+                        "reason": "index_url and token are required for live runs",
                         "dry_run": False,
                         "selected": selected_count,
                         "projected": 0,
@@ -246,16 +246,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-        from .ragflow_projector import RagflowSessionMemoryProjector
+        from .index_projector import RetiredIndexBridgeSessionMemoryProjector
 
-        projector = RagflowSessionMemoryProjector(
-            ragflow_url=ragflow_url,
+        projector = RetiredIndexBridgeSessionMemoryProjector(
+            index_url=index_url,
             bearer_token=bearer_token,
             dataset_name=args.dataset_name,
         )
-        # Optional best-effort Qdrant forward mirror ALONGSIDE RAGFlow (legacy dual
+        # Optional best-effort Qdrant forward mirror ALONGSIDE RetiredIndexBridge (legacy dual
         # path). Off unless MIRROR_DUAL_WRITE=1 AND QDRANT_URL are set; a mirror
-        # misconfig yields a None sink and NEVER blocks the canonical RAGFlow projection.
+        # misconfig yields a None sink and NEVER blocks the canonical RetiredIndexBridge projection.
         mirror_sink = _build_forward_mirror_sink(os.environ)
 
     projected = 0

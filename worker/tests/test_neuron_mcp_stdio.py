@@ -21,7 +21,7 @@ from agent_knowledge.mcp_server import (
     BRAIN_PERSONA_CHECK_TOOL_NAME,
     BRAIN_PERSONA_GET_TOOL_NAME,
     TOOL_NAME,
-    DisabledRagflowClient,
+    DisabledRetiredIndexBridgeClient,
     KnowledgeSearchService,
     MemoryReadPipeline,
     MemoryProvenance,
@@ -41,7 +41,7 @@ from agent_knowledge.llm_brain_core.models import CONTEXT_PACK_SCHEMA_VERSION, O
 from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
 from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 FIXTURE_REPOSITORY = PROJECT
 FIXTURE_BRANCH = "fixture-branch"
 
@@ -118,7 +118,7 @@ def _service(tmp_path: Path) -> KnowledgeSearchService:
     )
     return KnowledgeSearchService(
         ledger=ledger,
-        ragflow=DisabledRagflowClient(),
+        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         allow_private_results=True,
     )
@@ -135,7 +135,7 @@ def test_mcp_tool_list_exposes_neuron_owned_tools():
     assert BRAIN_PERSONA_CHECK_TOOL_NAME in names
     assert BRAIN_EVIDENCE_GET_TOOL_NAME in names
     legacy_search = next(tool for tool in tools if tool["name"] == TOOL_NAME)
-    assert "legacy/external RAGFlow bridge" in legacy_search["description"]
+    assert "legacy external index bridge is retired" in legacy_search["description"]
     assert "brain_context_resolve" in legacy_search["description"]
 
 
@@ -233,7 +233,7 @@ def test_mcp_brain_resolve_roundtrip(tmp_path: Path):
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
-            "params": {"name": BRAIN_RESOLVE_TOOL_NAME, "arguments": {"query": "ragflow"}},
+                "params": {"name": BRAIN_RESOLVE_TOOL_NAME, "arguments": {"query": "index-advisor"}},
         },
         service,
     )
@@ -257,7 +257,7 @@ def test_mcp_brain_resolve_works_with_open_read_only_ledger(tmp_path: Path):
     curation.approve(candidate["candidate_id"], approved_by="ddalkak")
     service = KnowledgeSearchService(
         ledger=Ledger.open_read_only(ledger.path),
-        ragflow=DisabledRagflowClient(),
+        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         allow_private_results=True,
     )
@@ -277,7 +277,7 @@ def test_mcp_brain_resolve_works_with_open_read_only_ledger(tmp_path: Path):
     assert candidates == [{"brain_id": f"/project/{PROJECT}", "kind": "project", "card_count": 1, "hint": ""}]
 
 
-def test_mcp_brain_context_resolve_roundtrip_uses_core_without_ragflow(tmp_path: Path):
+def test_mcp_brain_context_resolve_roundtrip_uses_core_without_retired_index_bridge(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
         {
@@ -343,7 +343,7 @@ def test_mcp_brain_context_resolve_carries_context_authority_block(tmp_path: Pat
 def test_mcp_brain_context_resolve_reports_configured_unverified_search_mirror(tmp_path: Path):
     service = KnowledgeSearchService(
         ledger=_ledger(tmp_path),
-        ragflow=DisabledRagflowClient(),
+        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         mirror_search=lambda query, brain_id: [],
     )
@@ -521,7 +521,7 @@ def test_mcp_brain_context_resolve_reads_configured_graph_adapter(tmp_path: Path
     )
     service = KnowledgeSearchService(
         ledger=_ledger(tmp_path),
-        ragflow=DisabledRagflowClient(),
+        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         graph_adapter=graph,
     )
@@ -579,7 +579,7 @@ def test_mcp_brain_context_resolve_derives_project_when_omitted(tmp_path: Path):
 def test_mcp_brain_context_resolve_includes_configured_read_only_bridge(tmp_path: Path):
     service = KnowledgeSearchService(
         ledger=_ledger(tmp_path),
-        ragflow=_FakeBridgeRagflow(),
+        retired_index_bridge=_FakeBridgeRetiredIndexBridge(),
         dataset_ids=["ds_docs"],
         allow_private_results=True,
     )
@@ -593,7 +593,7 @@ def test_mcp_brain_context_resolve_includes_configured_read_only_bridge(tmp_path
                 "arguments": {
                     "repository": FIXTURE_REPOSITORY,
                     "branch": FIXTURE_BRANCH,
-                    "current_request": "RAGFlow bridge citation",
+                    "current_request": "RetiredIndexBridge bridge citation",
                     "current_files": [],
                 },
             },
@@ -640,7 +640,7 @@ def test_mcp_brain_memory_search_normalizes_git_repository_project(tmp_path: Pat
             "params": {
                 "name": BRAIN_MEMORY_SEARCH_TOOL_NAME,
                 "arguments": {
-                    "repository": "https://github.com/pureliture/workspace-ragflow-advisor.git",
+                    "repository": "https://github.com/pureliture/workspace-index-advisor.git",
                     "query": "한국어 응답",
                 },
             },
@@ -703,7 +703,7 @@ def test_mcp_knowledge_search_caps_limit_at_tool_layer(tmp_path: Path):
     pipeline = _RecordingReadPipeline()
     service = KnowledgeSearchService(
         ledger=_ledger(tmp_path),
-        ragflow=DisabledRagflowClient(),
+        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         read_pipeline=pipeline,
     )
@@ -729,7 +729,7 @@ def test_service_search_caps_public_limit_before_authorized_reader(tmp_path: Pat
     pipeline = _RecordingReadPipeline()
     service = KnowledgeSearchService(
         ledger=_ledger(tmp_path),
-        ragflow=DisabledRagflowClient(),
+        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         authorized_reader=pipeline,
     )
@@ -798,14 +798,14 @@ def test_service_search_returns_public_safe_provenance(tmp_path: Path):
                 currentness="server_authorized",
                 provenance=MemoryProvenance(
                     dataset="raw_dataset_id",
-                    ragflow_document_id="raw_doc_id",
+                    index_document_id="raw_doc_id",
                 ),
             )
         ]
     )
     service = KnowledgeSearchService(
         ledger=_ledger(tmp_path),
-        ragflow=DisabledRagflowClient(),
+        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         authorized_reader=pipeline,
     )
@@ -821,14 +821,14 @@ def test_service_search_returns_public_safe_provenance(tmp_path: Path):
     assert "raw_doc_id" not in serialized
 
 
-def test_brain_query_ragflow_fallback_omits_raw_document_ids_and_content(tmp_path: Path):
+def test_brain_query_index_fallback_omits_raw_document_ids_and_content(tmp_path: Path):
     service = KnowledgeSearchService(
         ledger=_ledger(tmp_path),
-        ragflow=_RawFallbackRagflow(),
+        retired_index_bridge=_RawFallbackRetiredIndexBridge(),
         dataset_ids=["ds_memory"],
     )
 
-    result = service._brain_query_ragflow_search("fallback", f"/project/{PROJECT}")
+    result = service._brain_query_index_search("fallback", f"/project/{PROJECT}")
 
     assert result[0]["memory_id"] == ""
     assert result[0]["summary"] == ""
@@ -840,7 +840,7 @@ def test_brain_query_ragflow_fallback_omits_raw_document_ids_and_content(tmp_pat
 def test_memory_read_pipeline_respects_query_limit_above_tool_cap():
     pipeline = MemoryReadPipeline(
         ledger=_AuthorizingLedger(),
-        ragflow=_ManyDocsRagflow(count=12),
+        retired_index_bridge=_ManyDocsRetiredIndexBridge(count=12),
         dataset_ids=["ds_memory"],
     )
 
@@ -853,7 +853,7 @@ def test_memory_read_pipeline_respects_query_limit_above_tool_cap():
 def test_memory_read_pipeline_normalizes_limit_before_retrieve():
     pipeline = MemoryReadPipeline(
         ledger=_AuthorizingLedger(),
-        ragflow=_ManyDocsRagflow(count=3, expected_limit=1),
+        retired_index_bridge=_ManyDocsRetiredIndexBridge(count=3, expected_limit=1),
         dataset_ids=["ds_memory"],
     )
 
@@ -926,7 +926,7 @@ def test_mcp_brain_evidence_get_roundtrip_respects_source_ref_policy(tmp_path: P
     assert result["content"] == "MCP SourceRef policy evidence is available."
 
 
-def test_mcp_stdio_cli_serves_tools_list_without_ragflow_token(tmp_path: Path, monkeypatch, capsys):
+def test_mcp_stdio_cli_serves_tools_list_without_index_token(tmp_path: Path, monkeypatch, capsys):
     ledger = _ledger(tmp_path)
     request = {"jsonrpc": "2.0", "id": 3, "method": "tools/list"}
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(request) + "\n"))
@@ -1087,15 +1087,15 @@ def _episode(entity_type: str, natural_id: str, payload: dict) -> OntologyEpisod
     )
 
 
-class _FakeBridgeRagflow:
+class _FakeBridgeRetiredIndexBridge:
     def retrieve(self, query, dataset_ids, filters=None, limit=10):
-        assert "RAGFlow bridge" in query
+        assert "RetiredIndexBridge bridge" in query
         assert dataset_ids == ["ds_docs"]
         assert filters == {"project": PROJECT}
         return [
             {
                 "title": "Bridge citation",
-                "summary": "RAGFlow bridge remains read only.",
+                "summary": "RetiredIndexBridge bridge remains read only.",
                 "score": 0.91,
                 "source_ref_id": "src_bridge_citation",
             }
@@ -1119,7 +1119,7 @@ class _StaticReadPipeline:
         return MemorySearchResponse(results=self.results[: query.limit])
 
 
-class _ManyDocsRagflow:
+class _ManyDocsRetiredIndexBridge:
     def __init__(self, *, count: int, expected_limit: int = 12):
         self.count = count
         self.expected_limit = expected_limit
@@ -1138,7 +1138,7 @@ class _ManyDocsRagflow:
         ]
 
 
-class _RawFallbackRagflow:
+class _RawFallbackRetiredIndexBridge:
     def retrieve(self, query, dataset_ids, filters=None, limit=10):
         assert query == "fallback"
         assert dataset_ids == ["ds_memory"]
@@ -1165,6 +1165,6 @@ class _AuthorizingLedger:
             "project": PROJECT,
             "provider": "codex",
             "summary": f"Summary {document_id}",
-            "ragflow_dataset_id": "ds_memory",
-            "ragflow_document_id": document_id,
+            "index_target_id": "ds_memory",
+            "index_document_id": document_id,
         }

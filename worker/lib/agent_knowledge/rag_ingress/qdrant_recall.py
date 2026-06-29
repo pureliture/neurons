@@ -1,14 +1,14 @@
 """M8 read cutover: Qdrant-backed brain.query recall.
 
 Fills brain.query's ``archive`` / ``evidence_candidates`` lanes from the Qdrant
-searchable mirror instead of RAGFlow. Returns the ``(query, brain_id) -> list[dict]``
+searchable mirror instead of RetiredIndexBridge. Returns the ``(query, brain_id) -> list[dict]``
 shape that ``session_memory.brain_query.build_brain_query_response_v2`` consumes
 (memory_id / result_type / card_type / summary / currentness / score / content_hash).
 
 Every mirror hit is authority-joined through ``CouchDBProjectionStateAuthorityResolver``
 (the go-forward CouchDB authority), so a hit only surfaces if its session is still
 PROJECTED and its content_hash matches the currently-projected body. Additive: in
-the live MCP the RAGFlow archive search is already off (dataset_ids empty), so wiring
+the live MCP the RetiredIndexBridge archive search is already off (dataset_ids empty), so wiring
 this can only ADD recall, never regress an existing surface.
 """
 
@@ -79,7 +79,7 @@ def build_qdrant_brain_query_search_from_env(environ: Any) -> BrainQuerySearch |
     "configured but construction failed" (URL present but build raised -> a
     redaction-safe warning is logged before returning None, so a real recall
     misconfig is not silently swallowed). Either way None lets the MCP fall back to
-    its prior (RAGFlow-off) recall rather than crashing.
+    its prior (RetiredIndexBridge-off) recall rather than crashing.
     """
 
     url = str(environ.get("QDRANT_URL") or "").strip()

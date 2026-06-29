@@ -1,10 +1,10 @@
-"""Real-file ingest lane — raw document upload to RAGFlow native parsing.
+"""Real-file ingest lane — raw document upload to RetiredIndexBridge native parsing.
 
 This is intentionally SEPARATE from the AI-tool session/transcript text pipeline
 (`server_runtime` + `rag_ready_document` + redaction). Real project files
-(PDF/PPTX/DOCX/...) are uploaded to RAGFlow as their original bytes and parsed
+(PDF/PPTX/DOCX/...) are uploaded to RetiredIndexBridge as their original bytes and parsed
 natively (DeepDOC layout, tables, RAPTOR, GraphRAG) — extracting/flattening to
-text first would throw away exactly what RAGFlow is for.
+text first would throw away exactly what RetiredIndexBridge is for.
 
 No redaction runs here by design: these files are user-curated uploads, not
 auto-captured session content, so the text-only redaction gate of the session
@@ -14,8 +14,8 @@ denylist pass.
 
 from __future__ import annotations
 
-# Extension -> MIME for the document types RAGFlow parses natively. Unknown
-# extensions fall back to a generic binary type (RAGFlow still dispatches by the
+# Extension -> MIME for the document types RetiredIndexBridge parses natively. Unknown
+# extensions fall back to a generic binary type (RetiredIndexBridge still dispatches by the
 # filename extension, so the real extension is what matters).
 _CONTENT_TYPES = {
     "pdf": "application/pdf",
@@ -45,9 +45,9 @@ def submit_file(
     filename: str,
     content_type: str | None = None,
 ) -> dict:
-    """Upload a raw file to a RAGFlow dataset and trigger native parsing.
+    """Upload a raw file to a RetiredIndexBridge dataset and trigger native parsing.
 
-    ``client`` is a ``RagflowHttpClient``-shaped object exposing ``upload_file``
+    ``client`` is a ``RetiredIndexBridgeHttpClient``-shaped object exposing ``upload_file``
     and ``request_parse``. The file bytes are forwarded unchanged — no text
     extraction and no redaction. Returns ``{dataset_id, document_id}``.
     """

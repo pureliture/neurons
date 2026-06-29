@@ -13,7 +13,7 @@ from agent_knowledge.session_memory.native_memory_writer import (
 FIXED = datetime(2026, 6, 8, tzinfo=timezone.utc)
 
 
-class _FakeRagflow:
+class _FakeRetiredIndexBridge:
     """add_message 덕타입. 호출 기록 + 주입 envelope 반환."""
 
     def __init__(self, add_result=None):
@@ -29,9 +29,9 @@ def _store(tmp_path) -> NativeMemoryMirrorStore:
     return NativeMemoryMirrorStore(Ledger(tmp_path / "ledger.sqlite3"))
 
 
-def _writer(ragflow, store) -> NativeMemoryMirrorWriter:
+def _writer(retired_index_bridge, store) -> NativeMemoryMirrorWriter:
     return NativeMemoryMirrorWriter(
-        ragflow=ragflow,
+        retired_index_bridge=retired_index_bridge,
         store=store,
         memory_id="mem_main",
         agent_id="agent_x",
@@ -58,15 +58,15 @@ def _stmt(**overrides) -> ApprovedStatement:
 
 
 def test_write_new_statement_calls_add_message_and_records(tmp_path):
-    ragflow = _FakeRagflow()
+    retired_index_bridge = _FakeRetiredIndexBridge()
     store = _store(tmp_path)
-    writer = _writer(ragflow, store)
+    writer = _writer(retired_index_bridge, store)
     stmt = _stmt()
 
     result = writer.write(stmt, now=FIXED)
 
-    assert len(ragflow.add_calls) == 1
-    call = ragflow.add_calls[0]
+    assert len(retired_index_bridge.add_calls) == 1
+    call = retired_index_bridge.add_calls[0]
     assert call["memory_id"] == ["mem_main"]
     assert call["agent_id"] == "agent_x"
     assert call["session_id"] == "mem:1001"
@@ -78,31 +78,31 @@ def test_write_new_statement_calls_add_message_and_records(tmp_path):
 
     rows = store.get_by_session_tags(["mem:1001"])
     assert rows["mem:1001"]["status"] == "active"
-    assert rows["mem:1001"]["ragflow_memory_id"] == ""
+    assert rows["mem:1001"]["index_memory_id"] == ""
 
 
 # --- C3.2: 원문 dedup skip ---
 
 
 def test_write_duplicate_active_skips_add_message(tmp_path):
-    ragflow = _FakeRagflow()
+    retired_index_bridge = _FakeRetiredIndexBridge()
     store = _store(tmp_path)
-    writer = _writer(ragflow, store)
+    writer = _writer(retired_index_bridge, store)
     stmt = _stmt()
 
     writer.write(stmt, now=FIXED)
     second = writer.write(stmt, now=FIXED)
 
-    assert len(ragflow.add_calls) == 1
+    assert len(retired_index_bridge.add_calls) == 1
     assert second == {"written": False, "reason": "duplicate_active"}
 
 
 def test_write_superseded_same_hash_reactivates(tmp_path):
     # dedup 은 status=='active' 인 row 에만 적용된다. superseded 상태면 hash 가 같아도
     # dedup 을 통과해 add_message 를 재호출하고 upsert_statement 가 active 로 재활성화한다.
-    ragflow = _FakeRagflow()
+    retired_index_bridge = _FakeRetiredIndexBridge()
     store = _store(tmp_path)
-    writer = _writer(ragflow, store)
+    writer = _writer(retired_index_bridge, store)
     stmt = _stmt(brain_id="/a", text="t")
 
     writer.write(stmt, now=FIXED)
@@ -110,22 +110,22 @@ def test_write_superseded_same_hash_reactivates(tmp_path):
 
     result = writer.write(stmt, now=FIXED)
 
-    assert len(ragflow.add_calls) == 2
+    assert len(retired_index_bridge.add_calls) == 2
     assert result == {"written": True, "session_tag": "mem:1001", "tier": "low"}
     assert store.get_by_session_tags(["mem:1001"])["mem:1001"]["status"] == "active"
 
 
 def test_write_same_id_different_hash_not_dedup(tmp_path):
-    ragflow = _FakeRagflow()
+    retired_index_bridge = _FakeRetiredIndexBridge()
     store = _store(tmp_path)
-    writer = _writer(ragflow, store)
+    writer = _writer(retired_index_bridge, store)
     first = _stmt()
     second = _stmt(text="prefers tabs", original_content_hash="h2")
 
     writer.write(first, now=FIXED)
     result = writer.write(second, now=FIXED)
 
-    assert len(ragflow.add_calls) == 2
+    assert len(retired_index_bridge.add_calls) == 2
     assert result == {"written": True, "session_tag": "mem:1001", "tier": "low"}
 
 
@@ -133,11 +133,11 @@ def test_write_same_id_different_hash_not_dedup(tmp_path):
 
 
 def test_write_add_message_rejected_does_not_record(tmp_path):
-    ragflow = _FakeRagflow(
+    retired_index_bridge = _FakeRetiredIndexBridge(
         add_result={"status_code": 200, "json": {"code": 101, "message": "boom"}}
     )
     store = _store(tmp_path)
-    writer = _writer(ragflow, store)
+    writer = _writer(retired_index_bridge, store)
     stmt = _stmt()
 
     result = writer.write(stmt, now=FIXED)
@@ -154,9 +154,9 @@ def test_write_add_message_rejected_does_not_record(tmp_path):
 
 
 def test_write_unapproved_rejected_no_add(tmp_path):
-    ragflow = _FakeRagflow()
+    retired_index_bridge = _FakeRetiredIndexBridge()
     store = _store(tmp_path)
-    writer = _writer(ragflow, store)
+    writer = _writer(retired_index_bridge, store)
     stmt = _stmt(text="prefers tabs", card_type="user_preference", approved=False)
     result = writer.write(stmt, now=FIXED)
     assert result == {
@@ -167,27 +167,27 @@ def test_write_unapproved_rejected_no_add(tmp_path):
         "provenance_status": "pass",
         "eval_status": "pass",
     }
-    assert ragflow.add_calls == []
+    assert retired_index_bridge.add_calls == []
     assert store.get_by_session_tags(["mem:1001"]) == {}
 
 
 def test_write_high_risk_approved_mirrors(tmp_path):
-    ragflow = _FakeRagflow()
+    retired_index_bridge = _FakeRetiredIndexBridge()
     store = _store(tmp_path)
-    writer = _writer(ragflow, store)
+    writer = _writer(retired_index_bridge, store)
     stmt = _stmt(text="prefers tabs", card_type="user_preference")
     result = writer.write(stmt, now=FIXED)
     assert result == {"written": True, "session_tag": "mem:1001", "tier": "high"}
-    assert len(ragflow.add_calls) == 1
+    assert len(retired_index_bridge.add_calls) == 1
     row = store.get_by_session_tags(["mem:1001"])["mem:1001"]
     assert row["card_type"] == "user_preference"
     assert row["search_text"] == "prefers tabs"
 
 
 def test_write_low_risk_unapproved_is_still_rejected(tmp_path):
-    ragflow = _FakeRagflow()
+    retired_index_bridge = _FakeRetiredIndexBridge()
     store = _store(tmp_path)
-    writer = _writer(ragflow, store)
+    writer = _writer(retired_index_bridge, store)
     stmt = _stmt(
         brain_id="/a",
         text="run lint before deploy",
@@ -203,27 +203,27 @@ def test_write_low_risk_unapproved_is_still_rejected(tmp_path):
         "provenance_status": "pass",
         "eval_status": "pass",
     }
-    assert ragflow.add_calls == []
+    assert retired_index_bridge.add_calls == []
     assert store.get_by_session_tags(["mem:1001"]) == {}
 
 
 def test_write_blocks_when_provenance_has_not_passed(tmp_path):
-    ragflow = _FakeRagflow()
+    retired_index_bridge = _FakeRetiredIndexBridge()
     store = _store(tmp_path)
-    writer = _writer(ragflow, store)
+    writer = _writer(retired_index_bridge, store)
     result = writer.write(_stmt(provenance_status="missing"), now=FIXED)
 
     assert result["written"] is False
     assert result["reason"] == "provenance_required"
-    assert ragflow.add_calls == []
+    assert retired_index_bridge.add_calls == []
 
 
 def test_write_blocks_when_eval_has_not_passed(tmp_path):
-    ragflow = _FakeRagflow()
+    retired_index_bridge = _FakeRetiredIndexBridge()
     store = _store(tmp_path)
-    writer = _writer(ragflow, store)
+    writer = _writer(retired_index_bridge, store)
     result = writer.write(_stmt(eval_status="fail"), now=FIXED)
 
     assert result["written"] is False
     assert result["reason"] == "eval_required"
-    assert ragflow.add_calls == []
+    assert retired_index_bridge.add_calls == []

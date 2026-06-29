@@ -4,7 +4,7 @@ from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
 from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
 from agent_knowledge.session_memory.supersede_detector import (
-    build_ragflow_judge_fn,
+    build_index_judge_fn,
     build_supersede_detector,
 )
 
@@ -31,7 +31,7 @@ def _candidate(summary: str, sid: str):
     return build_memory_card_candidate_from_source_span(span, refresh_watermark="wm")
 
 
-class _FakeRagflow:
+class _FakeRetiredIndexBridge:
     def __init__(self, hits):
         self._hits = hits
 
@@ -46,9 +46,9 @@ def test_detector_returns_old_card_when_judge_says_supersede(tmp_path):
         _candidate("Auth uses JWT.", "old"), approved_by="autopilot", decision_id="d1"
     )["accepted_card"]
 
-    ragflow = _FakeRagflow(hits=[{"memory_id": old["memory_id"], "summary": "Auth uses JWT.", "score": 0.9}])
+    retired_index_bridge = _FakeRetiredIndexBridge(hits=[{"memory_id": old["memory_id"], "summary": "Auth uses JWT.", "score": 0.9}])
     detector = build_supersede_detector(
-        ragflow=ragflow, judge_fn=lambda cand, oldc: "supersede", dataset_id="derived-memory-items", project=PROJECT
+        retired_index_bridge=retired_index_bridge, judge_fn=lambda cand, oldc: "supersede", dataset_id="derived-memory-items", project=PROJECT
     )
 
     new_candidate = _candidate("Auth now uses OAuth.", "new")
@@ -64,15 +64,15 @@ def test_detector_fails_closed_when_judge_says_distinct(tmp_path):
         _candidate("Auth uses JWT.", "old"), approved_by="autopilot", decision_id="d1"
     )["accepted_card"]
 
-    ragflow = _FakeRagflow(hits=[{"memory_id": old["memory_id"], "summary": "Auth uses JWT.", "score": 0.9}])
+    retired_index_bridge = _FakeRetiredIndexBridge(hits=[{"memory_id": old["memory_id"], "summary": "Auth uses JWT.", "score": 0.9}])
     detector = build_supersede_detector(
-        ragflow=ragflow, judge_fn=lambda cand, oldc: "distinct", dataset_id="derived-memory-items", project=PROJECT
+        retired_index_bridge=retired_index_bridge, judge_fn=lambda cand, oldc: "distinct", dataset_id="derived-memory-items", project=PROJECT
     )
 
     assert detector(_candidate("Totally unrelated CI fix.", "new"), ledger) is None
 
 
-class _FakeChatRagflow:
+class _FakeChatRetiredIndexBridge:
     def __init__(self, answer):
         self._answer = answer
 
@@ -80,9 +80,9 @@ class _FakeChatRagflow:
         return self._answer
 
 
-def test_ragflow_judge_maps_words_and_fails_closed():
+def test_index_judge_maps_words_and_fails_closed():
     cand = {"summary": "Auth now uses OAuth."}
     old = {"summary": "Auth uses JWT."}
-    assert build_ragflow_judge_fn(_FakeChatRagflow("supersede"))(cand, old) == "supersede"
-    assert build_ragflow_judge_fn(_FakeChatRagflow("CONFLICT - both valid"))(cand, old) == "conflict"
-    assert build_ragflow_judge_fn(_FakeChatRagflow("garbage answer"))(cand, old) == "distinct"
+    assert build_index_judge_fn(_FakeChatRetiredIndexBridge("supersede"))(cand, old) == "supersede"
+    assert build_index_judge_fn(_FakeChatRetiredIndexBridge("CONFLICT - both valid"))(cand, old) == "conflict"
+    assert build_index_judge_fn(_FakeChatRetiredIndexBridge("garbage answer"))(cand, old) == "distinct"

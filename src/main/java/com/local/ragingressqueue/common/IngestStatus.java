@@ -4,7 +4,7 @@ package com.local.ragingressqueue.common;
  * Backend-neutral lifecycle status for a RAG-ready document moving through the ingress bus.
  *
  * <p>This is the single public/job status vocabulary. The queue core and every public surface speak
- * only these values; backend adapters (e.g. RAGFlow) map their own run states into this enum
+ * only these values; backend adapters (e.g. RetiredIndexBridge) map their own run states into this enum
  * internally and never expose backend-specific run states past the adapter boundary.</p>
  */
 public enum IngestStatus {

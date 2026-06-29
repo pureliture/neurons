@@ -5,7 +5,7 @@ Date: 2026-05-17
 
 ## Purpose
 
-`rag-ingress-queue`는 redacted RAG-ready document ingest 요청을 받아 NATS JetStream을 거쳐 target adapter로 전달하는 write gateway다. RAGFlow는 첫 adapter일 뿐이며, core API/worker는 raw target ID나 token을 노출하지 않는다.
+`rag-ingress-queue`는 redacted RAG-ready document ingest 요청을 받아 NATS JetStream을 거쳐 target adapter로 전달하는 write gateway다. RetiredIndexBridge는 첫 adapter일 뿐이며, core API/worker는 raw target ID나 token을 노출하지 않는다.
 
 ## Runtime Worker (G2 이후)
 
@@ -22,7 +22,7 @@ Date: 2026-05-17
 - Gradle 9.x
 - Docker daemon and Docker Compose for runtime smoke
 - `jq`, `curl`, `rg` for postcheck evidence generation and redaction scan
-- Separate explicit approval before any live RAGFlow call
+- Separate explicit approval before any live RetiredIndexBridge call
 
 ## Local Build And Tests
 
@@ -30,7 +30,7 @@ Date: 2026-05-17
 JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test
 ```
 
-This proves unit/API/worker/compose-file tests only. It does not prove Docker Compose NATS runtime connectivity or live RAGFlow delivery.
+This proves unit/API/worker/compose-file tests only. It does not prove Docker Compose NATS runtime connectivity or live RetiredIndexBridge delivery.
 
 ## Offline Postcheck
 
@@ -38,7 +38,7 @@ This proves unit/API/worker/compose-file tests only. It does not prove Docker Co
 bash scripts/postcheck.sh --offline --timeout 30 --evidence build/reports/rag-ingress-queue/postcheck.json
 ```
 
-Offline postcheck proves JSON evidence formatting and redaction scan only. It does not contact API, NATS, or RAGFlow.
+Offline postcheck proves JSON evidence formatting and redaction scan only. It does not contact API, NATS, or RetiredIndexBridge.
 
 ## Compose Smoke
 
@@ -62,34 +62,34 @@ Abort criteria:
 - Worker fetches or delivers while target pressure is `THROTTLED` or `CLOSED`.
 - API returns accepted without a JetStream publish ack.
 
-## RAGFlow Pressure Gate
+## RetiredIndexBridge Pressure Gate
 
-Production runtime must not treat “RAGFlow is configured” as enough evidence to drain the spool. The API and worker both read a redacted RAGFlow document status sample and calculate pressure from parsing backlog:
+Production runtime must not treat “RetiredIndexBridge is configured” as enough evidence to drain the spool. The API and worker both read a redacted RetiredIndexBridge document status sample and calculate pressure from parsing backlog:
 
 - `OPEN`: backlog below all configured thresholds.
 - `THROTTLED`: `RUNNING` or `UNSTART` count reaches the throttle threshold. The worker must not fetch from JetStream.
-- `CLOSED`: hard threshold reached, configuration missing, or the RAGFlow pressure read fails. The worker must not fetch from JetStream.
+- `CLOSED`: hard threshold reached, configuration missing, or the RetiredIndexBridge pressure read fails. The worker must not fetch from JetStream.
 
 Default thresholds:
 
 ```text
-RAGFLOW_PRESSURE_RUNNING_THROTTLE_THRESHOLD=20
-RAGFLOW_PRESSURE_UNSTART_THROTTLE_THRESHOLD=5
-RAGFLOW_PRESSURE_RUNNING_CLOSED_THRESHOLD=100
-RAGFLOW_PRESSURE_UNSTART_CLOSED_THRESHOLD=25
+RETIRED_INDEX_BRIDGE_PRESSURE_RUNNING_THROTTLE_THRESHOLD=20
+RETIRED_INDEX_BRIDGE_PRESSURE_UNSTART_THROTTLE_THRESHOLD=5
+RETIRED_INDEX_BRIDGE_PRESSURE_RUNNING_CLOSED_THRESHOLD=100
+RETIRED_INDEX_BRIDGE_PRESSURE_UNSTART_CLOSED_THRESHOLD=25
 ```
 
-When live RAGFlow is already backlogged, run the runtime gate with the actual blocked pressure:
+When live RetiredIndexBridge is already backlogged, run the runtime gate with the actual blocked pressure:
 
 ```bash
 python3 scripts/runtime-verify.py --expected-pressure CLOSED
 ```
 
-This proves that ingest accepts a sanitized job into JetStream while the worker leaves it pending instead of adding more load to RAGFlow.
+This proves that ingest accepts a sanitized job into JetStream while the worker leaves it pending instead of adding more load to RetiredIndexBridge.
 
-## Live RAGFlow Gate
+## Live RetiredIndexBridge Gate
 
-Do not run live RAGFlow calls without a separate approval packet containing:
+Do not run live RetiredIndexBridge calls without a separate approval packet containing:
 
 - argv/request
 - timeout
@@ -99,7 +99,7 @@ Do not run live RAGFlow calls without a separate approval packet containing:
 - rollback owner
 - expected evidence
 
-Live RAGFlow smoke proves sanitized upload/status behavior only. It does not prove external authorization or recall/promote eligibility by itself. If pressure is `THROTTLED` or `CLOSED`, do not enqueue a new live write; use a previously written live document for external authorization and recall/promote verification, or wait until pressure returns to `OPEN`. Existing-document verification must be reported as existing-document recall/promote verification, not as a fresh queue-to-RAGFlow write proof.
+Live RetiredIndexBridge smoke proves sanitized upload/status behavior only. It does not prove external authorization or recall/promote eligibility by itself. If pressure is `THROTTLED` or `CLOSED`, do not enqueue a new live write; use a previously written live document for external authorization and recall/promote verification, or wait until pressure returns to `OPEN`. Existing-document verification must be reported as existing-document recall/promote verification, not as a fresh queue-to-RetiredIndexBridge write proof.
 
 ## Rollback
 
@@ -108,7 +108,7 @@ Owner: local operator.
 1. Stop the live delivery worker first (현재 `ingress-worker-py`; 은퇴한 Java `ingress-worker`는 `retired` profile이라 기동돼 있지 않다).
 2. Keep NATS volume intact until queue state is inspected.
 3. Restore previous API/worker image or config.
-4. Verify RAGFlow compose project, volumes, and direct write paths were not modified.
+4. Verify RetiredIndexBridge compose project, volumes, and direct write paths were not modified.
 
 ## Persistence Limits
 

@@ -8,7 +8,7 @@ from agent_knowledge.session_memory.terminal_skipped_quarantine import (
 )
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
 def _sha(label: str) -> str:

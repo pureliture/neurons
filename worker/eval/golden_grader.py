@@ -2,7 +2,7 @@
 
 This module is the ONLY place that reads the golden answer-key. It lives outside the
 ``agent_knowledge`` product package on purpose: no product module (brain_query,
-ragflow_projection, memory_evaluation, memory_miner, memory_promotion,
+index_projection, memory_evaluation, memory_miner, memory_promotion,
 llm_brain_service, autopilot_loop, autopilot_cli) may import it. test_golden_grader
 asserts that isolation. The golden grades the recall output of run_brain_query_v2; it
 is never an input to the producing loop (steps mine/accept/supersede/recall run blind).

@@ -63,16 +63,16 @@ def test_no_signal_is_unresolved_and_excluded() -> None:
     assert res.eligible_for_retirement is False
 
 
-def test_ragflow_mismatch_is_reported_not_trusted() -> None:
+def test_index_mismatch_is_reported_not_trusted() -> None:
     res = resolve_project(
         ProjectAuthorityInput(
             capture_metadata_project="neurons",
-            ragflow_project_hint="wrong-project",
+            index_project_hint="wrong-project",
         )
     )
     assert res.project == "neurons"
-    assert res.ragflow_mismatch is True
-    assert "ragflow_project_mismatch" in res.notes
+    assert res.index_mismatch is True
+    assert "index_project_mismatch" in res.notes
 
 
 def test_authority_block_is_public_safe() -> None:

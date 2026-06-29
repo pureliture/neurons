@@ -35,7 +35,7 @@ class TranscriptIngestWorker:
     """Server-owned transcript build + injected enqueue core.
 
     The historical monolith worker also carried client HTTP enqueue wiring and
-    direct RAGFlow indexing. This neurons slice deliberately keeps those out:
+    direct RetiredIndexBridge indexing. This neurons slice deliberately keeps those out:
     callers provide a server-owned sink such as the state-DB ingress sink, and
     this worker only parses, chunks, records ledger state, and invokes that sink.
     """

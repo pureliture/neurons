@@ -188,8 +188,8 @@ def test_batch_report_lists_project_mismatches(tmp_path):
     b = _write_codex_fixture(tmp_path, session_id="b")
     report = import_historical_sources(
         [
-            SourceLocator(provider="codex", source_path=a, capture_metadata_project="neurons", ragflow_project_hint="wrong"),
-            SourceLocator(provider="codex", source_path=b, capture_metadata_project="neurons", ragflow_project_hint="neurons"),
+            SourceLocator(provider="codex", source_path=a, capture_metadata_project="neurons", index_project_hint="wrong"),
+            SourceLocator(provider="codex", source_path=b, capture_metadata_project="neurons", index_project_hint="neurons"),
         ],
         store=store,
     )

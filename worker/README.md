@@ -3,7 +3,7 @@
 이 디렉터리는 rag-ingress-queue가 소유하는 **Python live delivery worker**다.
 G2부터 라이브 delivery는 Java `ingress-worker`가 아니라 이 Python worker가 수행하며
 (은퇴한 Java worker는 `compose.yaml`에서 `profiles: [retired]`), 그 소스가 그동안
-`workspace-ragflow-advisor`의 `agent-knowledge` lib에만 물리적으로 존재했다.
+`workspace-index-advisor`의 `agent-knowledge` lib에만 물리적으로 존재했다.
 이 패키지는 그 **delivery 서브셋을 co-locate(벤더링)** 한 것이다. Java 코드는 바뀌지 않는다.
 
 - 출처(provenance): `agent-knowledge` advisor source revision `d571800`의 벤더링 사본.
@@ -12,17 +12,17 @@ G2부터 라이브 delivery는 Java `ingress-worker`가 아니라 이 Python wor
 ## 무엇을 가져왔고(vendored) 무엇을 뺐나
 
 라이브 worker가 실제로 실행하는 경로(`shadow_worker.run_consume` →
-`process_payload` → normalize → server full redaction → leak check → RAGFlow
+`process_payload` → normalize → server full redaction → leak check → RetiredIndexBridge
 submit)와 그 의존 폐포만 가져왔다.
 
 vendored (`lib/agent_knowledge/`):
 - `ledger.py` — server/brain-side SQLite state authority for knowledge item
-  lifecycle, transcript/session-memory state, memory cards, RAGFlow projection
+  lifecycle, transcript/session-memory state, memory cards, RetiredIndexBridge projection
   audit, scheduler/GC evidence, and legacy-retirement gates. This is not a
   dendrite/client dependency.
 - `rag_ingress/shadow_worker.py` — NATS JetStream pull-consume worker 엔트리포인트
 - `rag_ingress/server_runtime.py` — `apply_server_redaction` / `normalize_ingest_job_payload` / `document_from_ingress_payload` / `public_ingress_leak_violations`
-- `rag_ingress/index_backend.py` — `RAGFlowIndexBackendAdapter` (upload/metadata/parse + `find_by_natural_key`)
+- `rag_ingress/retired_index_bridge.py` — `RetiredIndexBridgeRetiredIndexBridgeAdapter` (upload/metadata/parse + `find_by_natural_key`)
 - `rag_ingress/rag_ready_document.py` — backend-neutral 문서 모델 + content_hash/idempotency_key 빌더
 - `rag_ingress/idempotency.py` / `state_db.py` / `domain_state.py` / `ingress_journal.py`
   — server-owned durable ingress state primitives and byte-faithful replay
@@ -37,7 +37,7 @@ vendored (`lib/agent_knowledge/`):
 - `rag_ingress/product_surface_switch_plan.py` /
   `state_shadow_readiness.py` / `retirement_readiness.py` — read-only
   server-side readiness and legacy-retirement planning gates. These produce
-  dry-run/approval packets only; they do not mutate runtime, RAGFlow, GC, or
+  dry-run/approval packets only; they do not mutate runtime, RetiredIndexBridge, GC, or
   live product config.
 - `rag_ingress/replay_delivery.py` — server-owned replay-requested row
   selection, convergence-faithful payload reconstruction, byte-faithful journal
@@ -47,7 +47,7 @@ vendored (`lib/agent_knowledge/`):
 - `rag_ingress/state_cli.py` — dry-run/fail-closed `rag-ingress-state`
   compatibility command for replay delivery planning, queue backfill planning,
   delivery drain dry-run, and delivery reconcile dry-run. Live approval-execute
-  wiring and RAGFlow/ingress POST clients remain excluded.
+  wiring and RetiredIndexBridge/ingress POST clients remain excluded.
 - `session_memory/memory_card.py` / `session_memory/transcript_model.py` —
   server/brain-side MemoryCard candidate, envelope validation, redaction, and
   text-bound helpers used by `ledger.py`. Import via
@@ -58,52 +58,52 @@ vendored (`lib/agent_knowledge/`):
   remain out of this slice.
 - `session_memory/memory_miner.py` —
   injected-completion and source-span MemoryCard candidate mining. It performs
-  no ledger write, queue write, RAGFlow dataset write, or raw transcript lookup.
+  no ledger write, queue write, RetiredIndexBridge dataset write, or raw transcript lookup.
 - `session_memory/brain_query.py` / `query_planner.py` /
   `native_memory_governance.py` — pure brain query, resolve, query planning,
   and mirror-governance logic.
 - `session_memory/brain_read_model.py` / `native_memory_recall.py` /
   `native_memory_mirror.py` — server-side ledger read-model adapter plus
-  native-memory active-set filtering and local mirror store. RAGFlow access is
+  native-memory active-set filtering and local mirror store. RetiredIndexBridge access is
   injected and recall-only in this slice; writer/reconcile/regeneration upload
   or disable runners remain out.
 - `session_memory/native_memory_writer.py` / `native_memory_reconcile.py` /
   `native_memory_write_runner.py` — server-side native-memory mirror write,
-  supersede-sync, and injected RAGFlow message disable reconciliation logic.
+  supersede-sync, and injected RetiredIndexBridge message disable reconciliation logic.
   These modules are vendored with fake-client unit coverage only. The worker
   exposes a dry-run/fail-closed `native-memory-sync` console script; live
-  RAGFlow sync, approval execution, and LaunchAgent wiring remain out.
+  RetiredIndexBridge sync, approval execution, and LaunchAgent wiring remain out.
 - `session_memory/native_memory_sync_approval.py` — read-only approval-file
   validator for the future `native-memory-sync` live runner. It does not create
-  clients, read secrets, or execute RAGFlow writes/disables.
+  clients, read secrets, or execute RetiredIndexBridge writes/disables.
 - `document_envelope.py`, `session_memory/transcript_packer.py`,
   `session_memory/transcript_parsers.py`, and
   `session_memory/tool_evidence_sync.py` — server-side tool-evidence extraction,
   packing, and queue-sync core split from the historical mixed
   `transcript_ingest` module. This slice uses local ledger plus injected ingress
-  sink tests only; monolith CLI exposure and direct RAGFlow writes remain out.
+  sink tests only; monolith CLI exposure and direct RetiredIndexBridge writes remain out.
 - `session_memory/transcript_chunking.py` and
   `session_memory/transcript_ingest.py` — server-side transcript chunk build
   plus injected enqueue/state-sink core. This is not the old mixed monolith
   worker: it has no `IngressQueueClient`, client `outbox_client`, monolith CLI,
-  or direct RAGFlow upload/parse/status path.
+  or direct RetiredIndexBridge upload/parse/status path.
 - `session_memory/neuron_session_memory.py` — neuron-local session-memory build
   entrypoint. Dry-run mode reads only the worker shadow log; `--probe-meta`
-  additionally performs RAGFlow metadata reads to count project/provider source
-  coverage without ledger writes, RAGFlow writes, raw ids, or raw paths. Live
+  additionally performs RetiredIndexBridge metadata reads to count project/provider source
+  coverage without ledger writes, RetiredIndexBridge writes, raw ids, or raw paths. Live
   build remains approval-gated and fail-closed.
 - `session_memory/memory_promotion.py` / `memory_evaluation.py` /
-  `ragflow_projection.py` / `llm_brain_service.py` — LLM-brain MemoryCard
+  `index_projection.py` / `llm_brain_service.py` — LLM-brain MemoryCard
   promotion, auto-policy evaluation gates, projection job building/execution,
   and canonical ledger integration. Projection write requires explicit
   `allow_write` plus an approval record and is covered here only with fake
-  clients; live RAGFlow projection remains deployment/runtime gated.
+  clients; live RetiredIndexBridge projection remains deployment/runtime gated.
 - `session_memory/terminal_skipped_quarantine.py` /
   `session_memory/zombie_snapshot_repair.py` — local-ledger-only safety repair
-  tools. They do not call RAGFlow, network, delete, disable, or live GC APIs;
+  tools. They do not call RetiredIndexBridge, network, delete, disable, or live GC APIs;
   heavier GC/delete/disable modules remain out of this slice.
 - `session_memory/gc_backup.py` — recoverable-delete backup record store only:
-  private-directory JSON write/read/list and raw RAGFlow document-id hashing.
+  private-directory JSON write/read/list and raw RetiredIndexBridge document-id hashing.
   Restore/upload/parse CLI behavior remains out of this slice.
 - `session_memory/session_memory_gc.py`, `transcript_memory_gc.py`, and
   `transcript_volume_gc.py` — dry-run-only GC safety planners. They select
@@ -113,47 +113,47 @@ vendored (`lib/agent_knowledge/`):
   and `transcript-volume-gc` for dry-run planning and blocked-live-execution
   evidence only.
 - `session_memory/transcript_backfill.py` — server/brain-side backlog
-  promotion seed helper. It scans RAGFlow read surfaces for transcript sessions
+  promotion seed helper. It scans RetiredIndexBridge read surfaces for transcript sessions
   without an active session-memory summary, then marks those sessions dirty in
-  the neuron-local ledger. It performs no RAGFlow write/delete/disable and is
+  the neuron-local ledger. It performs no RetiredIndexBridge write/delete/disable and is
   exposed as `transcript-backfill` plus `neuron-knowledge transcript-backfill`.
 - `session_memory/memory_regeneration.py` — server-owned session/project-memory
   regeneration core. Current worker tests cover dry-run document packing,
   ledger-backed transcript source planning, and injected project-memory enqueue
-  sinks. Monolith CLI compatibility and live direct RAGFlow sync remain out of
+  sinks. Monolith CLI compatibility and live direct RetiredIndexBridge sync remain out of
   this slice.
 - `session_memory/memory_regeneration_cli.py` — dry-run/fail-closed
   `memory-regeneration` compatibility command for project-memory planning,
   session-memory build dry-run, and dirty project-memory dry-run. Enqueue,
-  sync, promotion, cleanup, disable, reset, RAGFlow read/write, and scheduler
+  sync, promotion, cleanup, disable, reset, RetiredIndexBridge read/write, and scheduler
   wiring remain excluded.
 - `session_memory/backfill.py` and `session_memory/transcript_quality.py` —
   fixture-only backfill inventory, dry-run classification, quality audit, and
-  execute-plan building. This is planning-only: Gate F execute, live RAGFlow
+  execute-plan building. This is planning-only: Gate F execute, live RetiredIndexBridge
   upload/parse, and private broad-source scans remain excluded.
 - `redaction.py` — server full public redaction 본체(inline 정규식, denylist 파일 의존 없음)
-- `events.py`, `spool.py`, `ragflow_client.py` — 위 모듈의 폐포 의존
+- `events.py`, `spool.py`, `index_client.py` — 위 모듈의 폐포 의존
 
 **의도적으로 제외(가져오지 않음):**
 - `outbox_client.py` — client(producer) 측 코드. server worker 불필요.
 - `state_store.py` (`LedgerIngestStateStore`) — Ledger 직접 의존. 가져오지 않는다.
 - `rag-ingress-state` live approval-execute wiring — the worker exposes a
   dry-run/fail-closed compatibility command, but live replay POST, state-DB
-  apply, RAGFlow drain/reconcile, and LaunchAgent/server wiring remain excluded.
+  apply, RetiredIndexBridge drain/reconcile, and LaunchAgent/server wiring remain excluded.
 - `transcript_ingest.py` monolith module — still mixed. The server-owned
   transcript worker core is present here, but the old HTTP client/outbox,
-  direct RAGFlow indexing, and public CLI compatibility wiring remain out.
+  direct RetiredIndexBridge indexing, and public CLI compatibility wiring remain out.
 - `native-memory-sync` CLI/LaunchAgent wiring and GC restore/live GC runners —
   the worker has only dry-run/fail-closed `native-memory-sync`; live
-  approval-execute/LaunchAgent wiring still includes RAGFlow upload/disable or
+  approval-execute/LaunchAgent wiring still includes RetiredIndexBridge upload/disable or
   private transcript-source surfaces and remains excluded.
-- Gate F backfill execute/live indexing — approval-gated live RAGFlow mutation
+- Gate F backfill execute/live indexing — approval-gated live RetiredIndexBridge mutation
   remains excluded; only fixture planning is present.
 - `memory-regeneration` live approval-execute wiring — the worker exposes only
   dry-run/read-only planning. Enqueue/sync/promote/cleanup/disable/reset and
   scheduler wiring remain out.
 - GC restore/upload/parse and live GC execute/disable/delete — approval-gated
-  live RAGFlow mutation remains excluded; only dry-run planners and backup store
+  live RetiredIndexBridge mutation remains excluded; only dry-run planners and backup store
   are present.
   → `rag_ingress/__init__.py`는 client/Ledger/import-heavy 모듈을 eager import하지
   않도록 유지한다(패키지 import만으로 Ledger가 끌려오지 않게).
@@ -166,7 +166,7 @@ vendored (`lib/agent_knowledge/`):
 
 1. **로컬 계층** — worker 자신의 durable `shadow_ingest_log`(idempotency_key→delivered+document_ref)를
    submit 전에 조회. 이미 delivered면 재업로드하지 않고 기존 ref 재사용. 재시작 안전.
-2. **RAGFlow 폴백** — 로컬 row가 없으면 `find_by_natural_key`로 RAGFlow에서 동일
+2. **RetiredIndexBridge 폴백** — 로컬 row가 없으면 `find_by_natural_key`로 RetiredIndexBridge에서 동일
    content_hash/idempotency_key 문서를 찾아 재사용. 첫 시도가 업로드 후 기록 전에
    죽었거나 로컬 볼륨이 소실된 경우를 커버.
 
@@ -180,8 +180,8 @@ vendored (`lib/agent_knowledge/`):
   안전하다. 라이브 배포는 env-file로 주입한다:
   `RAG_INGRESS_STREAM=RAG_INGRESS_QUEUE`, `RAG_INGRESS_SUBJECT=rag.ingress.>`,
   `RAG_INGRESS_DURABLE=rag_target_delivery_worker`, `RAG_INGRESS_ALLOW_LIVE_QUEUE=1`,
-  `RAG_INGRESS_DELIVER=1`, 7개 `RAGFLOW_*_DATASET_ID`(profile별 라우팅),
-  `RAGFLOW_BASE_URL`/`RAGFLOW_API_KEY`, `RAG_INGRESS_PRESSURE_URL`.
+  `RAG_INGRESS_DELIVER=1`, 7개 `RETIRED_INDEX_BRIDGE_*_DATASET_ID`(profile별 라우팅),
+  `RETIRED_INDEX_BRIDGE_BASE_URL`/`RETIRED_INDEX_BRIDGE_API_KEY`, `RAG_INGRESS_PRESSURE_URL`.
 - 라이브 재배포 자체는 이 작업 범위 밖(별도 goal).
 
 ## 테스트
