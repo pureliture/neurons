@@ -17,6 +17,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from ..session_memory.chunk_overlap import ChunkView, canonicalize_chunk_views
+
 from .document_model import (
     OwnershipViolation,
     ProjectionStatus,
@@ -144,6 +146,22 @@ def update_coverage_with_tool_evidence(*, session_id_hash: str, store: CouchDBSo
     return doc
 
 
+def _chunk_to_view(chunk: dict) -> ChunkView:
+    # `... or <default>` (not get's default) so a present-but-None field coerces to the
+    # default rather than the string "None"/an int error.
+    return ChunkView(
+        content_hash=str(chunk.get("content_hash") or ""),
+        turn_start_index=int(chunk.get("turn_start_index") or 0),
+        turn_end_index=int(chunk.get("turn_end_index") or 0),
+        part_index=int(chunk.get("part_index") or 1),
+        part_count=int(chunk.get("part_count") or 1),
+        char_start=int(chunk.get("char_start") or 0),
+        char_end=int(chunk.get("char_end") or 0),
+        redaction_version=str(chunk.get("redaction_version") or ""),
+        text=str(chunk.get("body") or ""),
+    )
+
+
 def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStore) -> MaterializedSessionMemory:
     sessions = _session_docs(store, session_id_hash, SourceDocType.TRANSCRIPT_SESSION)
     chunks = _session_docs(store, session_id_hash, SourceDocType.CONVERSATION_CHUNK)
@@ -156,15 +174,20 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
     chunks = sorted(chunks, key=lambda d: (d.get("turn_start_index", 0), d.get("_id", "")))
     bundles = sorted(bundles, key=lambda d: d.get("part_index", 0))
 
+    # De-overlap same-session chunks for the body only: a re-shipped grown session can
+    # store a longer chunk that subsumes an earlier shorter one. Counts/coverage below
+    # stay on the STORED `chunks`, so the coverage gate is unaffected.
+    body_views, overlap_report = canonicalize_chunk_views([_chunk_to_view(chunk) for chunk in chunks])
+
     lines = [
         f"# session-memory {provider} {project}",
         f"session_id_hash: {session_id_hash}",
         "",
         "## conversation",
     ]
-    for chunk in chunks:
+    for view in body_views:
         lines.append("")
-        lines.append(str(chunk.get("body", "")).rstrip())
+        lines.append(view.text.rstrip())
     lines.append("")
     lines.append("## tool_evidence_summary")
     for bundle in bundles:
@@ -174,6 +197,10 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
     body = "\n".join(lines).rstrip() + "\n"
 
     notes: list[str] = []
+    if overlap_report["dropped_count"]:
+        # Audit counter: how many stored chunks were de-overlapped out of the body
+        # (subsumed/exact-dup). Counts/coverage below stay on the stored chunk list.
+        notes.append(f"deoverlapped_{overlap_report['dropped_count']}")
     fully_materialized = True
     if coverage is not None:
         expected_chunks = int(coverage.get("conversation_chunk_count", 0))
