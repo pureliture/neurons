@@ -81,7 +81,7 @@ class K3sMigrationContractTest {
         // policy invariants (replicas: 1, minAvailable: 1) are fine; a 2+ digit value under any
         // capacity key is a leak. Keep this key set in sync with infra_baseline._CAPACITY_KEYS.
         assertThat(readPublicK3sArtifacts()).doesNotContainPattern(
-            "(replicas|minReplicas|maxReplicas|averageUtilization|minAvailable|maxUnavailable):\\s*[0-9]{2,}"
+            "(replicas|minReplicas|maxReplicas|averageUtilization|minAvailable|maxUnavailable):\\s*['\"]?[0-9]{2,}"
         );
     }
 

@@ -538,6 +538,9 @@ def test_scale_out_manifest_bundle_classifies_workloads_without_leaking_counts()
     assert _resource(bundle, "HorizontalPodAutoscaler", "ingress-api") is not None
     api_pdb = _resource(bundle, "PodDisruptionBudget", "ingress-api")
     assert api_pdb["spec"].get("maxUnavailable") == 1
+    # HPA carries a single-digit maxReplicas so the autoscaling/v2 schema validates;
+    # the real bound is overlay-patched.
+    assert _resource(bundle, "HorizontalPodAutoscaler", "ingress-api")["spec"]["maxReplicas"] == 1
 
     # single horizontally-scalable (mcp-http until host-networking removed): replicas:1, no HPA,
     # and a minAvailable PDB (maxUnavailable:1 on a single replica gives no protection).
@@ -553,9 +556,12 @@ def test_scale_out_manifest_bundle_classifies_workloads_without_leaking_counts()
     assert _resource(bundle, "PodDisruptionBudget", "ingress-worker")["spec"].get("minAvailable") == 1
 
     # singleton-stateful: StatefulSet single-writer + headless Service, never a Deployment.
-    assert _resource(bundle, "StatefulSet", "ledger-postgres") is not None
+    sts = _resource(bundle, "StatefulSet", "ledger-postgres")
+    assert sts is not None
     assert _resource(bundle, "Deployment", "ledger-postgres") is None
     assert _resource(bundle, "Service", "ledger-postgres-headless")["spec"]["clusterIP"] == "None"
+    # PVC carries a safe-default storage request so the schema validates; real sizing is overlay-patched.
+    assert sts["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"] == "1Gi"
 
     # tailscale_private still attaches the namespace-scoped NetworkPolicy.
     assert _resource(bundle, "NetworkPolicy", "tailscale-private-only") is not None
@@ -594,6 +600,42 @@ def test_inventory_classification_round_trips_to_a_clean_scale_out_bundle():
     not_targets = {w["name"] for w in classified if w["scaleCategory"] == "not-a-target"}
     resource_names = {r["metadata"].get("name") for r in bundle["resources"]}
     assert not (not_targets & resource_names)
+
+
+def test_reject_capacity_integers_blocks_quoted_and_float_capacity():
+    # Bypass attempts: a quoted string or float-typed capacity must also be rejected.
+    for bad in [
+        {"spec": {"replicas": "10"}},
+        {"spec": {"minReplicas": 10.0}},
+        {"spec": {"maxReplicas": "50"}},
+    ]:
+        with pytest.raises(ValueError, match="capacity"):
+            reject_capacity_integers(bad)
+    # Non-numeric strings and single-digit values still pass.
+    reject_capacity_integers({"spec": {"replicas": "ops-defined"}})
+    reject_capacity_integers({"spec": {"minAvailable": "1"}})
+
+
+def test_scale_out_manifest_bundle_rejects_unsupported_access_policy():
+    with pytest.raises(ValueError, match="access"):
+        scale_out_manifest_bundle(
+            workloads=[{"name": "ingress-api", "scaleCategory": "horizontally-scalable", "replicaPolicy": "ops-defined"}],
+            namespace="neurons-scale",
+            access_policy="public",
+            image_by_workload={"ingress-api": "neurons-api:scale"},
+            container_port_by_workload={"ingress-api": 8080},
+        )
+
+
+def test_scale_out_manifest_bundle_rejects_unknown_replica_policy():
+    with pytest.raises(ValueError, match="replicaPolicy"):
+        scale_out_manifest_bundle(
+            workloads=[{"name": "ingress-api", "scaleCategory": "horizontally-scalable", "replicaPolicy": "ops-define"}],
+            namespace="neurons-scale",
+            access_policy="tailscale_private",
+            image_by_workload={"ingress-api": "neurons-api:scale"},
+            container_port_by_workload={"ingress-api": 8080},
+        )
 
 
 def test_load_scale_out_workloads_rejects_unknown_category():

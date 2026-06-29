@@ -352,20 +352,30 @@ def reject_capacity_integers(resource: Any) -> None:
     """
     if isinstance(resource, Mapping):
         for key, value in resource.items():
-            if (
-                key in _CAPACITY_KEYS
-                and isinstance(value, int)
-                and not isinstance(value, bool)
-                and value >= 10
-            ):
+            if key in _CAPACITY_KEYS and _is_leaked_capacity_count(value):
                 raise ValueError(
                     f"public scale-out manifest must not embed capacity counts: "
-                    f"{key}={value} is overlay-owned"
+                    f"{key}={value!r} is overlay-owned"
                 )
             reject_capacity_integers(value)
     elif isinstance(resource, (list, tuple)):
         for item in resource:
             reject_capacity_integers(item)
+
+
+def _is_leaked_capacity_count(value: Any) -> bool:
+    """True if value is a 2+ digit capacity count in int, float, or quoted-string form.
+
+    Covers bypass shapes (``"10"``, ``10.0``) as well as plain ints. bool is excluded
+    (True/False are not counts) and non-numeric strings (e.g. a policy marker) pass.
+    """
+    if isinstance(value, bool):
+        return False
+    try:
+        as_float = float(value)
+    except (TypeError, ValueError):
+        return False
+    return as_float.is_integer() and as_float >= 10
 
 
 def scale_out_manifest_bundle(
@@ -388,6 +398,11 @@ def scale_out_manifest_bundle(
     safe_namespace = public_safe_text(str(namespace or ""), max_chars=120)
     if safe_namespace in {"default", "prod", "production"}:
         raise ValueError("production k3s migration is not part of this roadmap")
+    safe_access = public_safe_text(str(access_policy or ""), max_chars=120).strip().lower()
+    if safe_access not in _K3S_CANARY_ACCESS_POLICIES:
+        # tailnet-only NetworkPolicy is the isolation gate; an unsupported access policy must
+        # fail closed rather than emit a bundle without isolation (mirrors the canary plan).
+        raise ValueError("scale-out access_policy must be tailscale_private")
     resources: list[dict[str, Any]] = [_namespace_resource(safe_namespace)]
     for workload in workloads:
         if not isinstance(workload, Mapping):
@@ -421,6 +436,12 @@ def scale_out_manifest_bundle(
             # One effective policy drives both the Deployment shape and the HPA/PDB choice,
             # so a blank policy can't yield an ops-defined Deployment without its HPA.
             effective_policy = replica_policy or "ops-defined"
+            if effective_policy not in {"ops-defined", "single"}:
+                # A typo (e.g. "ops-define") would silently fall through to single-replica;
+                # fail closed instead so a horizontally-scalable workload can't be demoted.
+                raise ValueError(
+                    f"unknown replicaPolicy for horizontally-scalable workload {name}: {effective_policy!r}"
+                )
             deployment = _deployment_resource(
                 name=name,
                 namespace=safe_namespace,
@@ -438,7 +459,7 @@ def scale_out_manifest_bundle(
                 # single replica (e.g. mcp-http until host networking is removed):
                 # maxUnavailable:1 would permit evicting the only Pod, so guard with minAvailable.
                 resources.append(_pdb_resource(name=name, namespace=safe_namespace, mode="minAvailable"))
-    if access_policy == "tailscale_private":
+    if safe_access == "tailscale_private":
         # NOTE: the default k3s flannel backend parses but does NOT enforce NetworkPolicy.
         # Enforcement (CNI selection) is a private ops-overlay concern (cniSelection).
         resources.append(_tailscale_private_network_policy(safe_namespace))
@@ -547,8 +568,10 @@ def _statefulset_resource(*, name: str, namespace: str, image: str, container_po
                         "name": f"{name}-data",
                         "annotations": {"neurons.scale/storage": "ops-defined"},
                     },
-                    # storageClassName + request size are overlay-owned (PVC sizing).
-                    "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {}}},
+                    # storageClassName + real request size are overlay-owned (PVC sizing). A
+                    # safe-default 1Gi request keeps the PVC schema valid; overlay patches the
+                    # real size.
+                    "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": "1Gi"}}},
                 }
             ],
         },
@@ -569,8 +592,10 @@ def _headless_service_resource(*, name: str, namespace: str, container_port: int
 
 
 def _hpa_resource(*, name: str, namespace: str) -> dict[str, Any]:
-    # Skeleton only: minReplicas/maxReplicas/metric targets are overlay-owned counts and
-    # are intentionally omitted so the public template carries no capacity numbers.
+    # Skeleton only: minReplicas/metric targets are overlay-owned counts and are omitted.
+    # maxReplicas is required by the autoscaling/v2 schema, so a single-digit safe default (1)
+    # keeps the template valid (kubectl/ArgoCD) while leaking no production count; the real
+    # bound is overlay-patched.
     return {
         "apiVersion": "autoscaling/v2",
         "kind": "HorizontalPodAutoscaler",
@@ -581,6 +606,7 @@ def _hpa_resource(*, name: str, namespace: str) -> dict[str, Any]:
         },
         "spec": {
             "scaleTargetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": name},
+            "maxReplicas": 1,
         },
     }
 
