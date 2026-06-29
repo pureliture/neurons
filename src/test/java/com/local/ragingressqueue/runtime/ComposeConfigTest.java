@@ -123,7 +123,7 @@ class ComposeConfigTest {
 
         java.util.Set<String> documented = new java.util.TreeSet<>();
         var documentedMatcher =
-            java.util.regex.Pattern.compile("(?m)^([A-Z0-9_]+)=").matcher(envExample);
+            java.util.regex.Pattern.compile("(?m)^\\s*([A-Z0-9_]+)\\s*=").matcher(envExample);
         while (documentedMatcher.find()) {
             documented.add(documentedMatcher.group(1));
         }
