@@ -23,6 +23,9 @@ class LegacyLedgerBrainReadModel:
         return self._ledger.list_approved_memory_cards(project=project, limit=limit)
 
     def list_accepted_cards(self, *, project: str, limit: int) -> list[dict]:
+        # accepted lane 전체(현재+과거)를 반환한다. drift_explain 같은 history 소비자는 superseded/
+        # stale 카드도 필요하다. 현재-권위(current authority) 소비자(persona/context pack)는 자체적으로
+        # currentness=current 로 거른다(over-restrict 방지).
         if hasattr(self._ledger, "list_llm_brain_memory_cards"):
             return self._ledger.list_llm_brain_memory_cards(
                 project=project, accepted_only=True, limit=limit

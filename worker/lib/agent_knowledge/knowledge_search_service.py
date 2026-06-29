@@ -90,6 +90,7 @@ class KnowledgeSearchService:
         read_pipeline: AuthorizedMemoryReader | None = None,
         mirror_search=None,
         allow_restricted_steward: bool = False,
+        allow_steward_auto_accept: bool = False,
     ):
         self.ledger = ledger
         self.ragflow = ragflow
@@ -97,9 +98,11 @@ class KnowledgeSearchService:
         self.allow_private_results = bool(allow_private_results)
         self.native_memory_id = native_memory_id
         self.graph_adapter = graph_adapter
-        # Brain Steward restricted tools(approve/reject/auto_accept)는 기본적으로 막혀 있다.
-        # human/manual gate 또는 명시적 test-only path 에서만 True 로 연다.
+        # Brain Steward restricted tools 는 기본적으로 막혀 있다. review_commit(approve/reject/
+        # supersede_commit/stale_commit)과 가장 위험한 auto_accept 를 별도 flag 로 분리한다.
+        # human/manual gate 또는 명시적 test-only path 에서만 연다.
         self.allow_restricted_steward = bool(allow_restricted_steward)
+        self.allow_steward_auto_accept = bool(allow_steward_auto_accept)
         # M8 read cutover: a Qdrant-backed (query, brain_id) -> list[dict] callable
         # that fills brain.query's archive/evidence lanes from the Qdrant searchable
         # mirror. When set it REPLACES the RAGFlow archive search (which is off in the
@@ -125,7 +128,11 @@ class KnowledgeSearchService:
 
         from .session_memory.brain_steward import BrainStewardService
 
-        return BrainStewardService(self.ledger, allow_restricted=self.allow_restricted_steward)
+        return BrainStewardService(
+            self.ledger,
+            allow_restricted=self.allow_restricted_steward,
+            allow_auto_accept=self.allow_steward_auto_accept,
+        )
 
     def core_brain(self, *, project: str = ""):
         return build_runtime_brain_service(

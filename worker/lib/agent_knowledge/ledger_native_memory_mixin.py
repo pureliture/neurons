@@ -208,11 +208,16 @@ class NativeMemoryMixin:
         """검토 대기(pending) MemoryCard proposal 만 반환한다.
 
         accepted/rejected lane 은 제외하고, 사람이 봐야 할 candidate / suggested_accept /
-        needs_review lifecycle 만 노출한다. 읽기 전용이며 어떤 상태도 바꾸지 않는다.
+        needs_review lifecycle 만 노출한다. lifecycle 집합은 모델 계층의 단일 정의
+        REVIEW_LIFECYCLE_STATES 를 따른다. 읽기 전용이며 어떤 상태도 바꾸지 않는다.
         """
 
-        filters = ["lifecycle_state IN ('candidate', 'suggested_accept', 'needs_review')"]
-        values: list[object] = []
+        from .session_memory.memory_card import REVIEW_LIFECYCLE_STATES
+
+        review_states = sorted(REVIEW_LIFECYCLE_STATES)
+        placeholders = ", ".join("?" for _ in review_states)
+        filters = [f"lifecycle_state IN ({placeholders})"]
+        values: list[object] = list(review_states)
         if project:
             filters.append("project = ?")
             values.append(project)
