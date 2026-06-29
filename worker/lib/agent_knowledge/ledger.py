@@ -98,6 +98,27 @@ def _migrate_backend_neutral_index_schema(connection: sqlite3.Connection) -> Non
             old_column=old_column,
             new_column="index_run_id",
         )
+    _ensure_column(connection, "native_memory_mirror", "index_memory_id", "TEXT DEFAULT ''")
+    _ensure_column(connection, "native_memory_mirror", "index_disabled_at", "TEXT DEFAULT ''")
+    _copy_column_if_present(
+        connection,
+        "native_memory_mirror",
+        old_column="ragflow_memory_id",
+        new_column="index_memory_id",
+    )
+    _copy_column_if_present(
+        connection,
+        "native_memory_mirror",
+        old_column="ragflow_disabled_at",
+        new_column="index_disabled_at",
+    )
+    _ensure_column(connection, "memory_gc_audit", "index_document_id_hash", "TEXT NOT NULL DEFAULT ''")
+    _copy_column_if_present(
+        connection,
+        "memory_gc_audit",
+        old_column="ragflow_document_id_hash",
+        new_column="index_document_id_hash",
+    )
     if _table_exists(connection, "index_targets"):
         _copy_index_targets_from_legacy_table(connection, "ragflow_datasets")
         _copy_index_targets_from_legacy_table(connection, "index_datasets")
