@@ -738,7 +738,7 @@
           </div>
           <div class="card-detail">
             <div class="detail-label">문제</div>
-            <p>StatusService가 RagFlowGateway, RagFlowPressurePolicy, RAGFlow 설정에 직접 결합합니다. Core API 계층이 어댑터-프라이빗 상세정보를 유출합니다.</p>
+            <p>StatusService가 RetiredIndexBridgeGateway, RetiredIndexBridgePressurePolicy, RetiredIndexBridge 설정에 직접 결합합니다. Core API 계층이 어댑터-프라이빗 상세정보를 유출합니다.</p>
             <div class="detail-label">수정</div>
             <p><code>snapshot()</code> 메서드를 RagTargetAdapter 계약에 추가합니다. StatusService는 계약만 의존합니다. 새 어댑터 추가 시 StatusService 변경 불필요.</p>
             <div class="detail-label">파일</div>
@@ -777,7 +777,7 @@
             <div class="card-title">DeliveryResult.targetRef 불투명 핸들 구현</div>
           </div>
           <div class="card-files">
-            <code>target/RagFlowTargetAdapter.java:114</code>
+            <code>target/RetiredIndexBridgeTargetAdapter.java:114</code>
           </div>
           <div class="card-meta">
             <span class="badge badge-leverage-mid">레버리지: 중간</span>
@@ -789,7 +789,7 @@
             <div class="detail-label">수정</div>
             <p>documentId의 해시 등 실제 불투명 핸들을 반환합니다. 어댑터-프라이빗 ID를 제네릭 계층 밖에 유지합니다.</p>
             <div class="detail-label">파일</div>
-            <p class="detail-value">RagFlowTargetAdapter.java</p>
+            <p class="detail-value">RetiredIndexBridgeTargetAdapter.java</p>
           </div>
         </div>
       </div>
@@ -808,15 +808,15 @@
           <div class="expand-icon">&#9662;</div>
           <div class="card-header">
             <div class="card-number">6</div>
-            <div class="card-title">RAGFlow 패키지 분리</div>
+            <div class="card-title">RetiredIndexBridge 패키지 분리</div>
           </div>
           <div class="card-files">
-            <code>target/RagFlowTargetAdapter.java</code><br>
-            <code>target/HttpRagFlowGateway.java</code><br>
-            <code>target/RagFlowGateway.java</code><br>
-            <code>target/RagFlowDocumentRef.java</code><br>
-            <code>target/RagFlowPressurePolicy.java</code><br>
-            <code>target/RagFlowPressureSnapshot.java</code>
+            <code>target/RetiredIndexBridgeTargetAdapter.java</code><br>
+            <code>target/HttpRetiredIndexBridgeGateway.java</code><br>
+            <code>target/RetiredIndexBridgeGateway.java</code><br>
+            <code>target/RetiredIndexBridgeDocumentRef.java</code><br>
+            <code>target/RetiredIndexBridgePressurePolicy.java</code><br>
+            <code>target/RetiredIndexBridgePressureSnapshot.java</code>
           </div>
           <div class="card-meta">
             <span class="badge badge-leverage-mid">레버리지: 중간-높음</span>
@@ -824,9 +824,9 @@
           </div>
           <div class="card-detail">
             <div class="detail-label">문제</div>
-            <p>RAGFlow 관련 클래스가 제네릭 target 패키지에 섞여 있습니다. 어댑터-프라이빗과 제네릭 계약의 경계가 흐립니다.</p>
+            <p>RetiredIndexBridge 관련 클래스가 제네릭 target 패키지에 섞여 있습니다. 어댑터-프라이빗과 제네릭 계약의 경계가 흐립니다.</p>
             <div class="detail-label">수정</div>
-            <p>모든 RAGFlow 클래스를 <code>target.ragflow</code> 하위 패키지로 이동합니다. RagTargetAdapter, TargetStatusSnapshot, TargetPressure만 제네릭 target에 남깁니다.</p>
+            <p>모든 RetiredIndexBridge 클래스를 <code>target.retired_index_bridge</code> 하위 패키지로 이동합니다. RagTargetAdapter, TargetStatusSnapshot, TargetPressure만 제네릭 target에 남깁니다.</p>
             <div class="detail-label">파일</div>
             <p class="detail-value">6개 파일 이동 + import 업데이트</p>
           </div>
@@ -863,7 +863,7 @@
           </div>
           <div class="card-files">
             <code>application.yml</code><br>
-            <code>target/RagFlowTargetAdapter.java</code><br>
+            <code>target/RetiredIndexBridgeTargetAdapter.java</code><br>
             <code>queue/NatsJetStreamConfiguration.java</code>
           </div>
           <div class="card-meta">
@@ -874,7 +874,7 @@
             <div class="detail-label">문제</div>
             <p>@Value 주입이 클래스 전체에 산재되어 있습니다. 타입 안전한 설정 빈이 없습니다. @ConfigurationProperties 패턴이 없습니다.</p>
             <div class="detail-label">수정</div>
-            <p>RagFlowProperties, QueueProperties, WorkerProperties 클래스를 @ConfigurationProperties로 생성합니다. @Value를 생성자 주입 타입 빈으로 교체합니다.</p>
+            <p>RetiredIndexBridgeProperties, QueueProperties, WorkerProperties 클래스를 @ConfigurationProperties로 생성합니다. @Value를 생성자 주입 타입 빈으로 교체합니다.</p>
             <div class="detail-label">참조</div>
             <p class="detail-value">sidebeam GitLabApiProperties, RestClientProperties 패턴</p>
           </div>
@@ -993,7 +993,7 @@
             <div class="card-title">멱등-안전 호출용 RetryPolicy</div>
           </div>
           <div class="card-files">
-            <code>target/RagFlowGateway.java</code>
+            <code>target/RetiredIndexBridgeGateway.java</code>
           </div>
           <div class="card-meta">
             <span class="badge badge-leverage-mid">레버리지: 중간</span>
@@ -1001,7 +1001,7 @@
           </div>
           <div class="card-detail">
             <div class="detail-label">문제</div>
-            <p>RAGFlow 어댑터에 재시도가 없습니다. 전체 upload/update/parse 재시도는 JetStream redelivery와 충돌합니다.</p>
+            <p>RetiredIndexBridge 어댑터에 재시도가 없습니다. 전체 upload/update/parse 재시도는 JetStream redelivery와 충돌합니다.</p>
             <div class="detail-label">수정</div>
             <p>RetryPolicy 인터페이스를 추가합니다. 멱등-안전 경계에만 적용: pressure check, status read. upload/update/parse 재시도는 JetStream의 책임입니다.</p>
             <div class="detail-label">참조</div>
@@ -1119,7 +1119,7 @@
       <div class="constraint-list">
         <div class="constraint-item">
           <div class="status locked"></div>
-          <span>라이브 RAGFlow 딜리버리: delivery-enabled=false, 별도 승인 전까지 금지</span>
+          <span>라이브 RetiredIndexBridge 딜리버리: delivery-enabled=false, 별도 승인 전까지 금지</span>
         </div>
         <div class="constraint-item">
           <div class="status locked"></div>

@@ -35,7 +35,7 @@ def test_seam_invariants_catch_missing_injection_seam(monkeypatch):
     monkeypatch.setattr(
         lint,
         "REQUIRED_INJECTION_SEAMS",
-        {"session_memory/session_memory_gc.py": ("NoSuchRunner", "ragflow_client")},
+        {"session_memory/session_memory_gc.py": ("NoSuchRunner", "index_client")},
     )
     violations = lint.check_seam_invariants()
     assert any("missing injection seam" in v for v in violations)

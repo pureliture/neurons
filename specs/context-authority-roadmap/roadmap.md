@@ -20,8 +20,8 @@ Primary references:
 - `docs/specs/2026-06-24-qdrant-mirror-cutover/requirements.md`
 - GitHub issues #25 and #27 for container baseline and k3s PoC
 
-Historical migration docs may still mention retired RAGFlow lanes. This roadmap
-does not include RAGFlow as an active architecture component.
+Historical migration docs may still mention retired RetiredIndexBridge lanes. This roadmap
+does not include RetiredIndexBridge as an active architecture component.
 
 ## Product Frame
 
@@ -102,7 +102,7 @@ include a short boundary cross-check.
 - Graphiti is the semantic extraction/projection path. It is not the product
   authority layer.
 - Qdrant is a searchable document mirror. It is not canonical memory.
-- Retired RAGFlow lanes must not be reintroduced as core Context Authority.
+- Retired RetiredIndexBridge lanes must not be reintroduced as core Context Authority.
 - Dendrite captures local evidence and source locators. It does not make
   authority decisions.
 - Central does not replicate all PC files. It stores metadata, hashes, derived
@@ -591,7 +591,7 @@ Parallel infra:
 - Do not sync graph DB files between PCs.
 - Do not make Neo4j the raw source of truth.
 - Do not make Qdrant canonical memory.
-- Do not reintroduce RAGFlow as a core Context Authority dependency.
+- Do not reintroduce RetiredIndexBridge as a core Context Authority dependency.
 - Do not let Graphiti semantic extraction sit in the hot path.
 - Do not auto-delete archive candidates.
 - Do not auto-edit skills.

@@ -53,7 +53,7 @@ class NatsIngestConsumerTest {
             redacted body
             """;
         return new IngestJob(
-            Map.of("provider", "codex", "project", "workspace-ragflow-advisor"),
+            Map.of("provider", "codex", "project", "workspace-index-advisor"),
             new DocumentPayload(
                 "redacted_rag_ready_document",
                 "redaction.v2",
@@ -63,7 +63,7 @@ class NatsIngestConsumerTest {
                 Map.of("schema_version", "agent_knowledge_document.v2", "result_type", "conversation_chunk")
             ),
             ContentHashVerifier.sha256Hex(body),
-            "ragflow-transcript-memory",
+            "index-transcript-memory",
             "conversation_chunk",
             null
         );

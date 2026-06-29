@@ -5,7 +5,7 @@
   dry-run (default) 모든 mirror document를 materialize+build하되 upsert하지 않는다.
   run [--limit N]   mirror point를 upsert한다. 명시적 --collection이 필수다.
   rollback --submitted F   jsonl ``F``에 기록된 point만 정확히 삭제한다.
-  parity            Parity-soak 엔트리포인트(RAGFlow primary vs CouchDB-joined mirror).
+  parity            Parity-soak 엔트리포인트(RetiredIndexBridge primary vs CouchDB-joined mirror).
 
 사용법(argparse 순서): GLOBAL 옵션(--collection / --checkpoint / --submitted /
 --qdrant-url / --embedding-concurrency)은 서브커맨드 앞에 오고, 서브커맨드 전용
@@ -24,9 +24,9 @@ source/authority: CouchDB source plane(go-forward recall authority; ledger
 - ``run``/``rollback``은 ``ensure_collection=False``로 adapter를 만든다: 존재하지
   않는 target collection은 fail-closed이며(서버측에서 조용히 생성되지 않는다),
   ``run``은 최초 staging 셋업을 위해 ``--create-collection``을 넘길 수 있다.
-- MIRROR-ONLY: CLI는 CouchDB primary나 RAGFlow에 쓰지 않고, dual-write backend도
+- MIRROR-ONLY: CLI는 CouchDB primary나 RetiredIndexBridge에 쓰지 않고, dual-write backend도
   만들지 않는다. backfill은 CouchDB를 읽고(read-only materialize) Qdrant point만
-  upsert/delete한다. RAGFlow는 parity의 primary fetch에서만 닿고 backfill에서는 닿지 않는다.
+  upsert/delete한다. RetiredIndexBridge는 parity의 primary fetch에서만 닿고 backfill에서는 닿지 않는다.
 - 출력은 counts/statuses의 JSON이다(redaction-safe). jsonl audit / checkpoint는
   natural-key triple(content_hash + idempotency_key + target_profile)만 담고, body나
   raw id는 담지 않는다.
@@ -256,8 +256,8 @@ def _cmd_rollback(args) -> int:
 
 
 def _cmd_parity(args) -> int:
-    # parity soak는 RAGFlow baseline을 측정한 뒤 gate 시점에 설정되는 query cohort +
-    # threshold, 그리고 live RAGFlow primary fetch와 mirror authority-join용 CouchDB
+    # parity soak는 RetiredIndexBridge baseline을 측정한 뒤 gate 시점에 설정되는 query cohort +
+    # threshold, 그리고 live RetiredIndexBridge primary fetch와 mirror authority-join용 CouchDB
     # store가 필요하다. baseline을 CLI에 박아넣는 대신 wiring 엔트리포인트만 드러내고
     # 명시적 cohort 파일 없이는 verdict를 내지 않는다.
     if not args.cohort:
@@ -268,8 +268,8 @@ def _cmd_parity(args) -> int:
     raise SystemExit(
         "parity CLI는 thin 엔트리포인트다. gate runner는 "
         "qdrant_backfill_parity.run_parity_soak에 있다(pure-compute, 주입 가능한 fetcher). "
-        "primary_fetch = session-memory dataset에 대한 RAGFlow retrieve(이 CLI에서 "
-        "RAGFlow를 쓰는 유일한 곳), mirror_fetch = CouchDB projection-state resolver로 "
+        "primary_fetch = session-memory dataset에 대한 RetiredIndexBridge retrieve(이 CLI에서 "
+        "RetiredIndexBridge를 쓰는 유일한 곳), mirror_fetch = CouchDB projection-state resolver로 "
         "join한 Qdrant query."
     )
 

@@ -11,7 +11,7 @@ from agent_knowledge.session_memory.transcript_memory_gc import (
 from agent_knowledge.session_memory.transcript_model import TranscriptChunk
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 SESSION_ID_HASH = "sha256:transcript-memory-gc-target"
 TRANSCRIPT_DATASET_ID = "ds_transcript_memory"
 SESSION_DATASET_ID = "ds_session_memory"
@@ -119,7 +119,7 @@ def test_transcript_memory_gc_dry_run_lists_covered_source_after_active_replacem
             ledger_path=ledger_path,
             dataset_id=TRANSCRIPT_DATASET_ID,
             session_memory_dataset_id=SESSION_DATASET_ID,
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             min_indexed_age_seconds=0,
             execute_disable=False,
         ),
@@ -144,7 +144,7 @@ def test_transcript_memory_gc_execute_disable_is_blocked_in_worker_slice(tmp_pat
             ledger_path=ledger_path,
             dataset_id=TRANSCRIPT_DATASET_ID,
             session_memory_dataset_id=SESSION_DATASET_ID,
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             min_indexed_age_seconds=0,
             execute_disable=True,
         ),
@@ -177,7 +177,7 @@ def test_transcript_memory_gc_blocks_without_matching_coverage(tmp_path):
             ledger_path=ledger_path,
             dataset_id=TRANSCRIPT_DATASET_ID,
             session_memory_dataset_id=SESSION_DATASET_ID,
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             min_indexed_age_seconds=0,
             execute_disable=False,
         ),
@@ -199,7 +199,7 @@ def test_transcript_memory_gc_cli_dry_run_reports_json_without_network(tmp_path,
         TRANSCRIPT_DATASET_ID,
         "--session-memory-dataset-id",
         SESSION_DATASET_ID,
-        "--ragflow-url",
+        "--retired-index-bridge-url",
         "http://localhost:9380",
     ])
 
@@ -222,7 +222,7 @@ def test_transcript_memory_gc_cli_execute_disable_is_fail_closed(tmp_path, capsy
         TRANSCRIPT_DATASET_ID,
         "--session-memory-dataset-id",
         SESSION_DATASET_ID,
-        "--ragflow-url",
+        "--retired-index-bridge-url",
         "http://localhost:9380",
         "--execute-disable",
     ])
@@ -245,7 +245,7 @@ def test_transcript_memory_gc_cli_requires_search_surface_verification(tmp_path,
         TRANSCRIPT_DATASET_ID,
         "--candidate-scope",
         CANDIDATE_SCOPE_SESSION_SEARCH,
-        "--ragflow-url",
+        "--retired-index-bridge-url",
         "http://localhost:9380",
     ])
 

@@ -56,7 +56,7 @@ def main() -> int:
         by_key.setdefault((e["subject_key"], e["expected_lane"]), e)
 
     cur = by_key[("authority-model", "current")]["canonical_statement"]
-    sup = by_key[("ragflow-as-brain", "superseded_conflict")]["canonical_statement"]
+    sup = by_key[("index-as-brain", "superseded_conflict")]["canonical_statement"]
 
     with tempfile.TemporaryDirectory() as tmp:
         ledger = Ledger(Path(tmp) / "ledger.sqlite")

@@ -44,7 +44,7 @@ def test_bearer_and_secret_assignment_still_caught():
     with pytest.raises(ValueError):
         ensure_public_safe({"a": "Authorization: Bearer abc.def"}, "p")
     with pytest.raises(ValueError):
-        ensure_public_safe({"a": "RAGFLOW_API_KEY=xyz"}, "p")
+        ensure_public_safe({"a": "RETIRED_INDEX_BRIDGE_API_KEY=xyz"}, "p")
 
 
 def test_private_pattern_in_dict_key_is_caught():

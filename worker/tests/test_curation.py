@@ -9,10 +9,10 @@ from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.memory_card import build_memory_candidate, build_memory_card
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
-def _candidate(statement="Keep RAGFlow core unmodified.", candidate_type="project_decision"):
+def _candidate(statement="Keep RetiredIndexBridge core unmodified.", candidate_type="project_decision"):
     return build_memory_candidate(
         candidate_type=candidate_type,
         statement=statement,
@@ -35,8 +35,8 @@ def test_curation_approves_candidate_into_auditable_memory_card(tmp_path):
 
     assert stored_candidate["approval_state"] == "approved"
     assert stored_card["state"] == "active"
-    assert card["ragflow_dataset_id"] == "local-approved-memory-cards"
-    assert card["ragflow_document_id"] == f"memdoc_{card['memory_id']}"
+    assert card["index_target_id"] == "local-approved-memory-cards"
+    assert card["index_document_id"] == f"memdoc_{card['memory_id']}"
     assert card["ledger_status"] == "indexed"
     assert item["type"] == "memory_card"
     assert item["status"] == "indexed"

@@ -5,7 +5,7 @@ from pathlib import Path
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.mcp_server import (
     TOOL_NAME,
-    DisabledRagflowClient,
+    DisabledRetiredIndexBridgeClient,
     KnowledgeSearchService,
     handle_jsonrpc_message,
 )
@@ -22,7 +22,7 @@ def _service(tmp_path: Path) -> KnowledgeSearchService:
     ledger = _ledger(tmp_path)
     return KnowledgeSearchService(
         ledger=ledger,
-        ragflow=DisabledRagflowClient(),
+        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         allow_private_results=True,
     )

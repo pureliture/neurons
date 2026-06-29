@@ -1,6 +1,6 @@
 """TDD for the tool_evidence_summary ingress-queue sync runner.
 
-Live delivery never uploads to RAGFlow directly; it enqueues redacted part
+Live delivery never uploads to RetiredIndexBridge directly; it enqueues redacted part
 documents to the local rag-ingress-queue, which routes by target_profile. This
 runner mirrors the conversation_chunk enqueue path (IngressQueueClient,
 mark_enqueued) and must re-redact for the public queue and never leak.
@@ -16,8 +16,8 @@ from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.tool_evidence_sync import ToolEvidenceSyncRunner
 
 
-PROJECT = "workspace-ragflow-advisor"
-TARGET_PROFILE = "ragflow-transcript-memory"
+PROJECT = "workspace-index-advisor"
+TARGET_PROFILE = "index-transcript-memory"
 SECRET = "synthetic-" + "sync-token-value"
 LOCAL_PATH = "/Users/example/Projects/secret/run.py"
 

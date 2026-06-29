@@ -19,7 +19,7 @@ from agent_knowledge.mcp_server import (
     MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
     STEWARD_RESTRICTED_TOOL_NAMES,
     BrainStewardService,
-    DisabledRagflowClient,
+    DisabledRetiredIndexBridgeClient,
     KnowledgeSearchService,
     StewardPermissionError,
     dispatch_tool_call,
@@ -79,7 +79,7 @@ def _accept_card(ledger: Ledger, **span_overrides) -> dict:
 def _service(tmp_path: Path, *, allow_restricted: bool = False) -> KnowledgeSearchService:
     return KnowledgeSearchService(
         ledger=_ledger(tmp_path),
-        ragflow=DisabledRagflowClient(),
+        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         allow_restricted_steward=allow_restricted,
     )

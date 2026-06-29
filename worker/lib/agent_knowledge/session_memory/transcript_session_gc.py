@@ -1,11 +1,11 @@
-"""Session-level transcript volume GC (RAGFlow-direct, coverage-by-summary).
+"""Session-level transcript volume GC (RetiredIndexBridge-direct, coverage-by-summary).
 
 전제(실측 2026-06-13): transcript 세션의 대다수(~73%)는 이미 session_memory로 요약돼 있다.
 그러나 (a) per-chunk ``session_memory_coverage_edges``는 sparse/유실됐고, (b) 그 요약본들은
-RAGFlow session-memory 데이터셋에 있을 뿐 neuron ledger(33행)엔 없다. 그래서 ledger-edge 기반
+RetiredIndexBridge session-memory 데이터셋에 있을 뿐 neuron ledger(33행)엔 없다. 그래서 ledger-edge 기반
 ``transcript_volume_gc``는 실제 볼륨을 못 줄인다.
 
-이 GC는 **ledger를 거치지 않고 RAGFlow를 직접** 본다:
+이 GC는 **ledger를 거치지 않고 RetiredIndexBridge를 직접** 본다:
   1. session-memory 데이터셋에서 *유효(active=status enabled, run DONE)* 요약본의 session_id_hash를
      모아 "요약된 세션 집합"을 만든다.
   2. transcript 데이터셋을 훑어, 그 집합에 속한 세션의 chunk를 backup 후 hard-delete(볼륨 회수).
@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .native_memory_sync_approval import ApprovalError, validate_goal3_live_approval
-from ..ragflow_client import RagflowHttpClient
+from ..index_client import RetiredIndexBridgeHttpClient
 from .gc_backup import write_gc_backup
 from .gc_safety_auditor import hard_delete_documents
 
@@ -47,7 +47,7 @@ TRANSCRIPT_SESSION_GC_MAX_FAILURES = 10
 class TranscriptSessionGcConfig:
     transcript_dataset_id: str
     session_memory_dataset_id: str
-    ragflow_url: str
+    index_url: str
     backup_dir: str = ""
     max_items: int = 25
     min_transcript_age_seconds: int = MIN_TRANSCRIPT_AGE_FLOOR_SECONDS
@@ -91,7 +91,7 @@ def _doc_age_seconds(doc: dict, now_epoch: float | None = None) -> float | None:
 
 
 def _doc_is_active_summary(doc: dict) -> bool:
-    # RAGFlow doc status '1' = enabled(retrievable), '0' = disabled. run DONE = parsed.
+    # RetiredIndexBridge doc status '1' = enabled(retrievable), '0' = disabled. run DONE = parsed.
     if str(doc.get("status")) not in ("1", "1.0"):
         return False
     return str(doc.get("run") or "") == "DONE"
@@ -103,27 +103,27 @@ class TranscriptSessionGcRunner:
         *,
         config: TranscriptSessionGcConfig,
         token: str = "",
-        ragflow_client=None,
+        index_client=None,
         now_epoch_fn: Callable[[], float] | None = None,
     ):
         self.config = config
         self.token = token
         # S0a 주입 seam(기본 None=기존 동작, behavior-preserving). client는 read-scan용으로
         # 무조건 생성되므로 주입점을 명시해 특성화/테스트가 fake를 단다.
-        self._ragflow_client = ragflow_client
+        self._index_client = index_client
         self._now_epoch_fn = now_epoch_fn
 
     def _now_epoch(self) -> float:
         return self._now_epoch_fn() if self._now_epoch_fn is not None else _now_epoch()
 
     def run(self) -> dict:
-        ragflow = self._ragflow_client if self._ragflow_client is not None else RagflowHttpClient(
-            base_url=self.config.ragflow_url,
+        retired_index_bridge = self._index_client if self._index_client is not None else RetiredIndexBridgeHttpClient(
+            base_url=self.config.index_url,
             bearer_token=self.token,
             request_timeout_seconds=45,
         )
-        summarized = self._summarized_sessions(ragflow)
-        candidates = self._scan_candidates(ragflow, summarized)
+        summarized = self._summarized_sessions(retired_index_bridge)
+        candidates = self._scan_candidates(retired_index_bridge, summarized)
         selected = candidates[: max(int(self.config.max_items), 1)]
         deleted = backed_up = attempted = failed = 0
         failed_error_class = ""
@@ -133,7 +133,7 @@ class TranscriptSessionGcRunner:
             for cand in selected:
                 attempted += 1
                 try:
-                    body = "\n".join(ragflow.list_document_chunks(self.config.transcript_dataset_id, cand.document_id))
+                    body = "\n".join(retired_index_bridge.list_document_chunks(self.config.transcript_dataset_id, cand.document_id))
                     if not body.strip():
                         raise ValueError("empty document body; backup would be lossy, aborting delete")
                     write_gc_backup(
@@ -145,16 +145,16 @@ class TranscriptSessionGcRunner:
                         provider=cand.provider,
                         project=cand.project,
                         dataset_id=self.config.transcript_dataset_id,
-                        ragflow_document_id=cand.document_id,
+                        index_document_id=cand.document_id,
                         body=body,
                         replacement_knowledge_id="",
                         extra={"coverage": "session_level", "summarized_session": True},
                     )
                     backed_up += 1
-                    hard_delete_documents(ragflow, self.config.transcript_dataset_id, [cand.document_id])
+                    hard_delete_documents(retired_index_bridge, self.config.transcript_dataset_id, [cand.document_id])
                     deleted += 1
                 except Exception as exc:  # noqa: BLE001
-                    # 단발 transient(RAGFlow CPU-bound 부하 중 delete 실패 등)에 배치 전체가
+                    # 단발 transient(RetiredIndexBridge CPU-bound 부하 중 delete 실패 등)에 배치 전체가
                     # 멈추지 않도록 skip-and-continue. 단 실패가 누적되면(systemic) circuit
                     # breaker로 중단. backup이 됐는데 delete가 실패한 doc은 다음 run에 다시
                     # eligible → 재시도(self-heal), backup은 content_hash 키라 중복 안 쌓임.
@@ -188,12 +188,12 @@ class TranscriptSessionGcRunner:
             "hard_delete_performed": bool(self.config.execute and deleted),
         }
 
-    def _summarized_sessions(self, ragflow) -> set:
-        """유효(active) session_memory의 session_id_hash 집합. RAGFlow-direct, bounded scan."""
+    def _summarized_sessions(self, retired_index_bridge) -> set:
+        """유효(active) session_memory의 session_id_hash 집합. RetiredIndexBridge-direct, bounded scan."""
         sessions: set = set()
         for page in range(1, self.config.max_session_scan_pages + 1):
             try:
-                docs = ragflow.list_documents(self.config.session_memory_dataset_id, page=page, page_size=self.config.page_size)
+                docs = retired_index_bridge.list_documents(self.config.session_memory_dataset_id, page=page, page_size=self.config.page_size)
             except Exception:  # noqa: BLE001 - fail-closed: 못 읽으면 그만큼 덜 지운다
                 break
             if not docs:
@@ -206,14 +206,14 @@ class TranscriptSessionGcRunner:
                     sessions.add(sid)
         return sessions
 
-    def _scan_candidates(self, ragflow, summarized: set) -> list[_SessCandidate]:
+    def _scan_candidates(self, retired_index_bridge, summarized: set) -> list[_SessCandidate]:
         """transcript를 훑어, 요약된 세션 + floor 통과 chunk를 후보로 모은다(max_items까지)."""
         floor = self.config.effective_min_transcript_age_seconds()
         want = max(int(self.config.max_items), 1)
         out: list[_SessCandidate] = []
         for page in range(1, self.config.max_transcript_scan_pages + 1):
             try:
-                docs = ragflow.list_documents(self.config.transcript_dataset_id, page=page, page_size=self.config.page_size)
+                docs = retired_index_bridge.list_documents(self.config.transcript_dataset_id, page=page, page_size=self.config.page_size)
             except Exception:  # noqa: BLE001
                 break
             if not docs:
@@ -252,8 +252,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="transcript-session-gc")
     parser.add_argument("--transcript-dataset-id", required=True)
     parser.add_argument("--session-memory-dataset-id", required=True)
-    parser.add_argument("--ragflow-url", required=True)
-    parser.add_argument("--token-env", default="RAGFLOW_API_KEY")
+    parser.add_argument("--retired-index-bridge-url", required=True)
+    parser.add_argument("--retired-index-bridge-token-env", default="RETIRED_INDEX_BRIDGE_API_KEY")
     parser.add_argument("--backup-dir", dest="backup_dir", default="")
     parser.add_argument("--max-items", type=int, default=25)
     parser.add_argument("--min-transcript-age-seconds", type=int, default=MIN_TRANSCRIPT_AGE_FLOOR_SECONDS)
@@ -261,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--approval", default="")
     args = parser.parse_args(raw_argv)
 
-    token = os.environ.get(args.token_env, "")
+    token = os.environ.get(args.retired_index_bridge_token_env, "")
     if not token:
         print("token env is not set", file=sys.stderr)
         return 2
@@ -274,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.approval,
                 operation=TRANSCRIPT_SESSION_GC_OPERATION,
                 dataset_id=args.transcript_dataset_id,
-                ragflow_base_url=args.ragflow_url,
+                index_base_url=args.retired_index_bridge_url,
                 command_argv=["transcript-session-gc", *raw_argv],
                 max_wait_seconds=900,
             )
@@ -284,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
     config = TranscriptSessionGcConfig(
         transcript_dataset_id=args.transcript_dataset_id,
         session_memory_dataset_id=args.session_memory_dataset_id,
-        ragflow_url=args.ragflow_url,
+        index_url=args.retired_index_bridge_url,
         backup_dir=args.backup_dir,
         max_items=args.max_items,
         min_transcript_age_seconds=args.min_transcript_age_seconds,

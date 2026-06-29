@@ -1,6 +1,6 @@
-"""M6 dual-write shadow seam: primary IndexBackendAdapter + best-effort mirror.
+"""M6 dual-write shadow seam: primary RetiredIndexBridgeAdapter + best-effort mirror.
 
-The primary backend (RAGFlow today, CouchDB alternative) stays the authority of
+The primary backend (RetiredIndexBridge today, CouchDB alternative) stays the authority of
 record. The Qdrant mirror submit is best-effort: a mirror failure is captured as an
 outcome and NEVER breaks or alters the primary submit result. find/status delegate
 to the primary so the mirror cannot influence dedup or status.
@@ -8,7 +8,7 @@ to the primary so the mirror cannot influence dedup or status.
 This is the code-only seam for Stage 2 (M6). It is NOT wired into the live
 ``shadow_worker`` entrypoint here; activation (an env branch that constructs this
 backend) is added at deploy time once a Qdrant instance exists. With no Qdrant
-deployed and the flag off, the existing RAGFlow/CouchDB delivery is byte-identical.
+deployed and the flag off, the existing RetiredIndexBridge/CouchDB delivery is byte-identical.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from .index_backend import (
+from .retired_index_bridge import (
     BackendDocumentHandle,
     BackendStatusDetail,
     BackendSubmitResult,
@@ -43,7 +43,7 @@ class MirrorWriteOutcome:
 
 
 class MirrorDualWriteBackend:
-    """``IndexBackendAdapter`` wrapping a primary + an optional best-effort mirror."""
+    """``RetiredIndexBridgeAdapter`` wrapping a primary + an optional best-effort mirror."""
 
     def __init__(
         self,

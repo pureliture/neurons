@@ -1,4 +1,4 @@
-# RAGFlow→Qdrant Searchable-Mirror Cutover Requirements
+# RetiredIndexBridge→Qdrant Searchable-Mirror Cutover Requirements
 
 ## 승인 대상
 
@@ -12,34 +12,34 @@
 - `worker/docs/qdrant-readiness/00..04` — read/write audit, schema/metadata mapping,
   embedding ownership+lifecycle, gate ladder.
 - `docs/specs/2026-06-21-qdrant-docling-searchable-mirror/{requirements,design,milestones}.md`
-  — Qdrant+Docling mirror PoC(M0–M7, done). searchable mirror only, IndexBackendAdapter
+  — Qdrant+Docling mirror PoC(M0–M7, done). searchable mirror only, RetiredIndexBridgeAdapter
   호환, evidence packet gate, production NO-GO.
-- `specs/recall-cutover/{requirements,design}.md` — recall을 RAGFlow session-memory로
+- `specs/recall-cutover/{requirements,design}.md` — recall을 RetiredIndexBridge session-memory로
   컷오버 후 transcript-memory 은퇴(RC1–RC6 done).
 
 ## 배경 (확정된 라이브 상태)
 
 - canonical authority: CouchDB transcript source, ledger PG MemoryCard/state,
-  Neo4j/Graphiti ontology. Qdrant/RAGFlow는 mirror이며 authority 아님.
+  Neo4j/Graphiti ontology. Qdrant/RetiredIndexBridge는 mirror이며 authority 아님.
 - recall은 **ledger-first**다. `mcp_server.KnowledgeSearchService.brain_query`의 권위
-  read model은 `LegacyLedgerBrainReadModel`(ledger)이고, RAGFlow `retrieve`는
+  read model은 `LegacyLedgerBrainReadModel`(ledger)이고, RetiredIndexBridge `retrieve`는
   launch에 `--dataset-id`가 있을 때만 켜지는 archive/evidence 보조 lane이다.
-  옛 recall 토글(`--state-db-recall`/`--ragflow-direct-recall`)은 현재 no-op.
+  옛 recall 토글(`--state-db-recall`/`--retired-index-bridge-direct-recall`)은 현재 no-op.
 - embedding/rerank: repo에 이미 OpenAI-compatible embedder/reranker가 있다
   (`graphiti_adapter.GraphitiNeo4jConfig`: `LLM_BRAIN_EMBEDDING_*`,
   `OPENAI_BASE_URL`, `embedding_dim=1024`; graphiti_core OpenAI embedder +
   cross-encoder reranker).
-- `IndexBackendAdapter`에 delete 없음. 이번 readiness에서 Qdrant adapter에 delete
+- `RetiredIndexBridgeAdapter`에 delete 없음. 이번 readiness에서 Qdrant adapter에 delete
   seam 초안(`delete_document`/`delete_by_natural_key`, 라이브 미연결) 추가됨.
 
 ## 질문-답변 흐름 (자문자답)
 
 ### Q1: Qdrant가 대체하는 정확한 대상은?
 
-RAGFlow의 **vector retrieval(searchable mirror)** 역할만 대체한다. 구체적으로
+RetiredIndexBridge의 **vector retrieval(searchable mirror)** 역할만 대체한다. 구체적으로
 brain.query archive/evidence 후보 lane, knowledge.search ranking,
-supersede_detector 벡터 후보 단계, document-bridge lane이 쓰는 `ragflow.retrieve`.
-RAGFlow 제품/운영면 전체나 canonical authority는 대체하지 않는다.
+supersede_detector 벡터 후보 단계, document-bridge lane이 쓰는 `index.retrieve`.
+RetiredIndexBridge 제품/운영면 전체나 canonical authority는 대체하지 않는다.
 
 ### Q2: 미러에 무엇을 적재하는가?
 
@@ -80,14 +80,14 @@ ledger `qdrant_collections` 레지스트리(additive migration)가 authority다.
 
 Stage 1 code-only readiness → Stage 2 dual-write shadow(관찰) → Stage 3 shadow-read
 parity(recall@k+golden, soak) → Stage 4 read cutover(mirror lane만) → Stage 5 write
-cutover + no-fallback 소비자 이전 + Qdrant GC chokepoint → Stage 6 RAGFlow 벡터
-mirror disable. 각 단계는 이전 단계 evidence가 green일 때만 진입. RAGFlow는 Stage 6
+cutover + no-fallback 소비자 이전 + Qdrant GC chokepoint → Stage 6 RetiredIndexBridge 벡터
+mirror disable. 각 단계는 이전 단계 evidence가 green일 때만 진입. RetiredIndexBridge는 Stage 6
 이전까지 ON(fallback). Stage 4까지 가역, Stage 6 hard delete만 비가역(backup 선행).
 
 ### Q7: 사전승인과 라이브 파괴 단계의 경계는?
 
 사용자 휴먼 게이트 사전승인은 **설계 + 가역·code-only 실행(Stage 1)의 in-loop
-게이트**에만 적용된다. 라이브 RAGFlow disable/delete/GC execute/routing/env mutation
+게이트**에만 적용된다. 라이브 RetiredIndexBridge disable/delete/GC execute/routing/env mutation
 (Stage 4–6의 라이브 부분)은 repo 가드레일상 blanket 사전승인으로 못 덮는다 — 각 건
 current evidence, exact argv, bounded timeout, redaction, postcheck, rollback/abort
 기준을 분리한 **operator 승인 게이트**로 남긴다. agentic-execution은 그 지점에서
@@ -95,7 +95,7 @@ current evidence, exact argv, bounded timeout, redaction, postcheck, rollback/ab
 
 ### Q8: 범위 밖(YAGNI)은?
 
-RAGFlow 벡터 미러 외 RAGFlow 전체 제거, production Qdrant 배포/Docker/systemd/
+RetiredIndexBridge 벡터 미러 외 RetiredIndexBridge 전체 제거, production Qdrant 배포/Docker/systemd/
 firewall, canonical authority의 Qdrant 이전, hybrid search 튜닝(기존 reranker 재사용
 이상), recall을 ledger-first로 바꾸는 일(이미 done), raw transcript 접근.
 
@@ -121,12 +121,12 @@ firewall, canonical authority의 Qdrant 이전, hybrid search 튜닝(기존 rera
 | 항목 | 요구값 |
 | --- | --- |
 | Authority | CouchDB/ledger PG/Neo4j canonical 유지. mirror는 비권위, 항상 ledger-join. |
-| Safety | 라이브 RAGFlow disable/delete/GC/routing/env는 단계별 evidence+operator 승인 게이트. 사전승인으로 미적용. |
+| Safety | 라이브 RetiredIndexBridge disable/delete/GC/routing/env는 단계별 evidence+operator 승인 게이트. 사전승인으로 미적용. |
 | Reversibility | Stage 4까지 가역(recall 되돌리기). Stage 6 hard delete만 비가역, backup이 rollback. |
-| Recall no-regression | mirror lane recall@k가 RAGFlow 기준선 대비 목표 이상 + golden 회귀 0(soak window). |
+| Recall no-regression | mirror lane recall@k가 RetiredIndexBridge 기준선 대비 목표 이상 + golden 회귀 0(soak window). |
 | Embedding | 기존 OpenAI-compatible(LLM_BRAIN_EMBEDDING_*, dim 1024) 재사용. 새 모델/secret 없음. Gemini Flash 아님. |
 | Privacy | raw host/path/token/dataset_id/document_id/transcript body 출력 금지. leak/secret fail-closed. |
-| Compatibility | 기존 enqueue payload, targetProfile, IndexBackendAdapter contract 유지. |
+| Compatibility | 기존 enqueue payload, targetProfile, RetiredIndexBridgeAdapter contract 유지. |
 | Local-first | qdrant/docling는 optional `searchable-mirror` extra. 테스트는 fake/in-memory로 network 없이 통과. |
 | Idempotency | natural-key point_id로 upsert/dedup 결정적·재실행 안전. |
 
@@ -137,13 +137,13 @@ firewall, canonical authority의 Qdrant 이전, hybrid search 튜닝(기존 rera
 - 운영자는 Stage 2에서 Qdrant를 격리 shadow sink로 dual-write하고, Stage 3에서
   recall@k+golden parity가 무회귀임을 evidence packet으로 확인한다.
 - 운영자는 Stage 4에서 mirror lane recall을 Qdrant로 재배선(가역)하고 안정 window를
-  관측한다. RAGFlow는 fallback으로 ON.
+  관측한다. RetiredIndexBridge는 fallback으로 ON.
 - 운영자는 Stage 5에서 write를 전환하고 no-fallback 소비자를 이전한 뒤, Stage 6에서
-  backup·승인 후 RAGFlow 벡터 미러를 disable한다(hard delete는 retention 후 별도).
+  backup·승인 후 RetiredIndexBridge 벡터 미러를 disable한다(hard delete는 retention 후 별도).
 
 ## 미결정 항목
 
-- recall@k parity 정량 임계 최종값(Stage 3에서 RAGFlow 기준선 측정 후 고정).
+- recall@k parity 정량 임계 최종값(Stage 3에서 RetiredIndexBridge 기준선 측정 후 고정).
 - 단일 collection vs `privacy_class`별 분리(접근정책 입력 시 재검토; 기본 단일).
 - M9 closure-chain에 searchable-mirror gate를 cross-reference하는 정확한 schema 연결
   지점(Stage 6 착수 시 확정).

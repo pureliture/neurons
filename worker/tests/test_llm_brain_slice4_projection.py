@@ -4,10 +4,10 @@ import pytest
 
 from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
 from agent_knowledge.session_memory.memory_promotion import human_approve_memory_card_candidate
-from agent_knowledge.session_memory.ragflow_projection import (
-    RagflowMemoryCardProjectionClient,
+from agent_knowledge.session_memory.index_projection import (
+    RetiredIndexBridgeMemoryCardProjectionClient,
     build_projection_job,
-    build_ragflow_projection_payload,
+    build_index_projection_payload,
     enqueue_projection_jobs,
     execute_projection_job,
     projection_idempotency_key,
@@ -16,7 +16,7 @@ from agent_knowledge.session_memory.ragflow_projection import (
 )
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
 def _source_span(**overrides):
@@ -30,11 +30,11 @@ def _source_span(**overrides):
         "project": PROJECT,
         "provider": "codex",
         "title": "Projection policy",
-        "redacted_summary": "RAGFlow is a searchable mirror, not canonical state.",
+        "redacted_summary": "RetiredIndexBridge is a searchable mirror, not canonical state.",
         "typed_payload": {
-            "decision": "Project accepted MemoryCards to RAGFlow as a mirror.",
+            "decision": "Project accepted MemoryCards to RetiredIndexBridge as a mirror.",
             "rationale": "Local ledger remains canonical during projection lag.",
-            "alternatives": ["Make RAGFlow canonical"],
+            "alternatives": ["Make RetiredIndexBridge canonical"],
             "consequence": "Projection failures become diagnostics, not state changes.",
             "authority_ref": "session-memory-decision-4",
         },
@@ -61,7 +61,7 @@ def _accepted_card():
 def _approval_record(job, *, dataset_id=""):
     record = {
         "approved": True,
-        "operation": "ragflow_projection_write",
+        "operation": "index_projection_write",
         "idempotency_key": job["idempotency_key"],
         "dry_run_status": "dry_run",
         "approved_by": "ddalkak",
@@ -77,7 +77,7 @@ def test_projection_job_requires_accepted_memory_card():
         build_projection_job(_candidate())
 
     job = build_projection_job(_accepted_card())
-    assert job["operation"] == "ragflow_upsert"
+    assert job["operation"] == "index_upsert"
     assert job["status"] == "queued"
     assert job["canonical_state_changed"] is False
 
@@ -86,7 +86,7 @@ def test_projection_payload_is_idempotent_and_redacted_metadata_only():
     card = _accepted_card()
     first_key = projection_idempotency_key(card)
     second_key = projection_idempotency_key(card)
-    payload = build_ragflow_projection_payload(card)
+    payload = build_index_projection_payload(card)
 
     assert first_key == second_key
     assert payload["memory_id"] == card["memory_id"]
@@ -156,10 +156,10 @@ def test_projection_execute_write_requires_matching_approval_record():
     assert result["projection_state"]["reason"] == "missing_projection_approval_record"
 
 
-def test_ragflow_projection_adapter_uses_deterministic_document_without_delete_disable():
+def test_index_projection_adapter_uses_deterministic_document_without_delete_disable():
     calls = {"uploads": 0, "metadata": [], "parse": [], "delete": 0, "disable": 0}
 
-    class FakeRagflow:
+    class FakeRetiredIndexBridge:
         def __init__(self):
             self.documents = []
 
@@ -172,7 +172,7 @@ def test_ragflow_projection_adapter_uses_deterministic_document_without_delete_d
 
         def upload_document(self, dataset_id, content, *, filename):
             calls["uploads"] += 1
-            assert "RAGFlow is a searchable mirror" in content
+            assert "RetiredIndexBridge is a searchable mirror" in content
             document_id = "doc_projection"
             self.documents.append({"id": document_id, "name": filename})
             return {"document_id": document_id, "run": "UNSTART"}
@@ -190,7 +190,7 @@ def test_ragflow_projection_adapter_uses_deterministic_document_without_delete_d
             calls["disable"] += 1
 
     job = build_projection_job(_accepted_card())
-    client = RagflowMemoryCardProjectionClient(ragflow=FakeRagflow(), dataset_id="ds_llm_brain")
+    client = RetiredIndexBridgeMemoryCardProjectionClient(retired_index_bridge=FakeRetiredIndexBridge(), dataset_id="ds_llm_brain")
 
     first = client.upsert_memory_card(job["payload"], idempotency_key=job["idempotency_key"])
     second = client.upsert_memory_card(job["payload"], idempotency_key=job["idempotency_key"])

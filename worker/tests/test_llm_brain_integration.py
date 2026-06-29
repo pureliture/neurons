@@ -14,7 +14,7 @@ from agent_knowledge.session_memory.memory_promotion import build_feedback_recor
 from agent_knowledge.session_memory.memory_promotion import suggest_accept_from_evidence
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
 def _source_span(**overrides):
@@ -31,7 +31,7 @@ def _source_span(**overrides):
         "redacted_summary": "Canonical ledger writes are now wired through LLMBrainMemoryService.",
         "typed_payload": {
             "task_state": "active",
-            "next_action": "Project accepted MemoryCards to the RAGFlow mirror.",
+            "next_action": "Project accepted MemoryCards to the RetiredIndexBridge mirror.",
             "blocker": None,
             "owner_hint": "codex",
             "status": "integration_ready",
@@ -83,7 +83,7 @@ def _feedback_records(candidate, *, count=6):
 def _projection_approval(job):
     return {
         "approved": True,
-        "operation": "ragflow_projection_write",
+        "operation": "index_projection_write",
         "idempotency_key": job["idempotency_key"],
         "dry_run_status": "dry_run",
         "approved_by": "ddalkak",
@@ -152,7 +152,7 @@ def test_auto_policy_acceptance_requires_operator_ref_then_writes_canonical_card
     assert ledger.get_llm_brain_memory_card(committed["accepted_card"]["memory_id"])["approval_state"] == "auto_accepted"
 
 
-def test_projection_job_is_stored_and_fake_ragflow_write_updates_job_state(tmp_path):
+def test_projection_job_is_stored_and_fake_index_write_updates_job_state(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite")
     service = LLMBrainMemoryService(ledger)
     card = service.accept_human_approved_candidate(

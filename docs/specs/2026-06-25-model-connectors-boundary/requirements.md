@@ -5,7 +5,7 @@
 - Source of truth: `requirements.md`
 - Preview companion: `requirements.html`
 - 현재 단계: Phase 1 Requirements Discovery
-- 승인 전 제한: `design.md` 작성, 구현 코드 변경, live Graphiti/Neo4j/Qdrant/RAGFlow mutation은 하지 않는다.
+- 승인 전 제한: `design.md` 작성, 구현 코드 변경, live Graphiti/Neo4j/Qdrant/RetiredIndexBridge mutation은 하지 않는다.
 
 ## 배경
 
@@ -31,7 +31,7 @@
 - 단, Phase 1/2 중에는 live 실행하지 않는다. 구현 단계에서 current evidence,
   exact argv, bounded timeout, redaction, postcheck, rollback/abort 기준을 제시한
   operator gate를 통과해야 한다.
-- 이 선택은 Graphiti/Neo4j data-plane을 검증 대상으로 포함하지만, RAGFlow
+- 이 선택은 Graphiti/Neo4j data-plane을 검증 대상으로 포함하지만, RetiredIndexBridge
   disable/delete, Qdrant cutover, native-memory authority 이전은 여전히 범위 밖이다.
 
 ### Q2: Graphiti schema extraction canary는 어느 깊이까지 확인할까?
@@ -101,7 +101,7 @@
 
 | 항목 | 요구값 |
 | --- | --- |
-| Safety | code-only 변경을 우선하며 live Graphiti/Neo4j/Qdrant/RAGFlow mutation은 별도 승인 전 금지한다. |
+| Safety | code-only 변경을 우선하며 live Graphiti/Neo4j/Qdrant/RetiredIndexBridge mutation은 별도 승인 전 금지한다. |
 | Compatibility | 기존 public import path, env precedence, test fixture behavior, `GraphitiNeo4jConfig` facade를 유지한다. |
 | Privacy | raw host, private path, token, API key, raw transcript, dataset_id, document_id를 출력하지 않는다. |
 | Import locality | shared connector는 Graphiti/Qdrant adapter보다 낮은 layer에 있어야 하며 `llm_brain_core`와 `rag_ingress` 사이 circular import를 만들지 않는다. |
@@ -109,7 +109,7 @@
 | Testability | 기본 test는 fake/no-network로 통과하고 live endpoint wiring은 lazy path로 유지한다. |
 | Live gate | Graphiti schema extraction canary는 구현 단계의 별도 operator gate 이후에만 실행한다. |
 | Canary scope | 단일 public-safe synthetic episode만 사용하며 실제 projection slice는 범위 밖이다. |
-| YAGNI | 새 모델 선택, live cutover, RAGFlow disable/delete, native-memory authority 이전, `agent_knowledge` root package rename은 이번 요구사항 밖으로 둔다. |
+| YAGNI | 새 모델 선택, live cutover, RetiredIndexBridge disable/delete, native-memory authority 이전, `agent_knowledge` root package rename은 이번 요구사항 밖으로 둔다. |
 
 ## 사용자 시나리오
 

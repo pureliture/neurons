@@ -83,7 +83,7 @@ class GcSafetyMixin:
         schema_version: str,
         mode: str,
         knowledge_id: str,
-        ragflow_document_id: str,
+        index_document_id: str,
         dataset_id: str,
         replacement_knowledge_id: str,
         dirty_at: str = "",
@@ -93,7 +93,7 @@ class GcSafetyMixin:
         mutated: bool = True,
     ) -> dict:
         """G-3 (M-GC contract §3.4 A1/A2/A3): durable append-only audit row for
-        one successful GC mutation. The raw RAGFlow document id is NEVER stored;
+        one successful GC mutation. The raw RetiredIndexBridge document id is NEVER stored;
         only its sha256 hex digest is persisted (A3). For the irreversible
         session_memory hard delete, ``replacement_knowledge_id`` records the
         active generation that justified the delete so it stays reconstructable
@@ -102,13 +102,13 @@ class GcSafetyMixin:
         GC" reconstructable (E3)."""
         audit_id = "memory_gc_" + uuid.uuid4().hex
         created_at = datetime.now(timezone.utc).isoformat()
-        document_id_hash = hashlib.sha256(str(ragflow_document_id or "").encode("utf-8")).hexdigest()
+        document_id_hash = hashlib.sha256(str(index_document_id or "").encode("utf-8")).hexdigest()
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO memory_gc_audit (
                     audit_id, gc_kind, operation, schema_version, mode,
-                    knowledge_id, ragflow_document_id_hash, dataset_id,
+                    knowledge_id, index_document_id_hash, dataset_id,
                     replacement_knowledge_id, dirty_at, snapshot_updated_at,
                     approval_operation, age_gate_seconds, mutated, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -141,7 +141,7 @@ class GcSafetyMixin:
             rows = connection.execute(
                 """
                 SELECT audit_id, gc_kind, operation, schema_version, mode,
-                       knowledge_id, ragflow_document_id_hash, dataset_id,
+                       knowledge_id, index_document_id_hash, dataset_id,
                        replacement_knowledge_id, dirty_at, snapshot_updated_at,
                        approval_operation, age_gate_seconds, mutated, created_at
                 FROM memory_gc_audit

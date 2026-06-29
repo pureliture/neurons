@@ -81,7 +81,7 @@ def write_cpd_xml(path: Path) -> None:
                 <file path="/repo/src/main/java/com/local/ragingressqueue/status/service/StatusService.java" line="88"/>
               </duplication>
               <duplication lines="5" tokens="60">
-                <file path="/repo/src/main/java/com/local/ragingressqueue/adapter/ext/ragflow/RagFlowGateway.java" line="11"/>
+                <file path="/repo/src/main/java/com/local/ragingressqueue/adapter/ext/retired_index_bridge/RetiredIndexBridgeGateway.java" line="11"/>
                 <file path="/repo/src/main/java/com/local/ragingressqueue/status/service/StatusService.java" line="120"/>
               </duplication>
             </pmd-cpd>

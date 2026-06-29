@@ -9,15 +9,15 @@ Target project path: `<repo>`
 
 `rag-ingress-queue`는 local PC, Mac mini, future producer에서 발생하는 redacted RAG-ready document ingest 요청을 받아 downstream RAG target이 감당 가능한 속도로 전달하는 범용 ingress queue 서버다.
 
-현재 첫 target은 RAGFlow다. 그러나 core server는 RAGFlow 전용으로 만들지 않는다. RAGFlow는 `RagTargetAdapter` 구현체 중 하나로 둔다.
+현재 첫 target은 RetiredIndexBridge다. 그러나 core server는 RetiredIndexBridge 전용으로 만들지 않는다. RetiredIndexBridge는 `RagTargetAdapter` 구현체 중 하나로 둔다.
 
-현재 `workspace-ragflow-advisor`의 확정 구조에서는 RAGFlow를 장기기억 본문과 검색 대상이 모이는 `LLM wiki`로 사용한다. `rag-ingress-queue`는 그 wiki로 안전하게 쓰기 위한 delivery/write-admission 계층이며, session summary 생성, long-term memory 판단, recall routing, lifecycle/GC 판단은 하지 않는다.
+현재 `workspace-index-advisor`의 확정 구조에서는 RetiredIndexBridge를 장기기억 본문과 검색 대상이 모이는 `LLM wiki`로 사용한다. `rag-ingress-queue`는 그 wiki로 안전하게 쓰기 위한 delivery/write-admission 계층이며, session summary 생성, long-term memory 판단, recall routing, lifecycle/GC 판단은 하지 않는다.
 
 ## 2. 문제 배경
 
-현재 ingest 흐름은 Mac mini 쪽 runtime이 RAGFlow REST endpoint를 직접 호출하는 구조다. 이 구조에서는 producer가 RAGFlow parser backlog를 충분히 고려하지 못하고, 대량 migration이나 여러 session이 동시에 발생할 때 downstream RAG에 과도한 backlog가 쌓일 수 있다.
+현재 ingest 흐름은 Mac mini 쪽 runtime이 RetiredIndexBridge REST endpoint를 직접 호출하는 구조다. 이 구조에서는 producer가 RetiredIndexBridge parser backlog를 충분히 고려하지 못하고, 대량 migration이나 여러 session이 동시에 발생할 때 downstream RAG에 과도한 backlog가 쌓일 수 있다.
 
-이미 RAGFlow 내부에 backlog가 쌓이면 RAGFlow가 처리할 수는 있지만, 지속 운영에서는 write admission control, retry, redelivery, dead-letter, target-specific backpressure 정책이 producer와 분리되어야 한다.
+이미 RetiredIndexBridge 내부에 backlog가 쌓이면 RetiredIndexBridge가 처리할 수는 있지만, 지속 운영에서는 write admission control, retry, redelivery, dead-letter, target-specific backpressure 정책이 producer와 분리되어야 한다.
 
 ## 3. 범위
 
@@ -32,17 +32,17 @@ Target project path: `<repo>`
 - Mac producer-side source resolution, redaction, packing boundary
 - worker의 pull consumer 처리
 - target adapter contract
-- 첫 adapter로 RAGFlow REST adapter 정의
+- 첫 adapter로 RetiredIndexBridge REST adapter 정의
 - MCP/read plane과 ingest write path 분리
 - operator-facing status, health, redacted evidence
-- target profile별 RAGFlow dataset routing
+- target profile별 RetiredIndexBridge dataset routing
 - `session-compactor`와 `memory-regeneration-runner`가 모두 사용할 수 있는 write gateway
 
 ### Out of scope
 
-- RAGFlow Docker Compose project 수정
-- RAGFlow 내부 Redis 공유
-- RAGFlow DB/volume 직접 조작
+- RetiredIndexBridge Docker Compose project 수정
+- RetiredIndexBridge 내부 Redis 공유
+- RetiredIndexBridge DB/volume 직접 조작
 - MCP를 bulk ingest write path로 사용하는 설계
 - raw transcript body, token, raw dataset_id, raw document_id, private path 노출
 - Ubuntu-side worker가 Mac-only private locator를 직접 해석하는 설계
@@ -50,7 +50,7 @@ Target project path: `<repo>`
 - session summary, task summary, approved memory card 생성
 - memory-regeneration-runner 구현
 - recall routing, lifecycle plan, GC/delete 판단
-- RAGFlow Memory/Agent feature 생성 또는 mirror 운영
+- RetiredIndexBridge Memory/Agent feature 생성 또는 mirror 운영
 - Mac mini local `ledger.py`/document status SQLite를 queue worker가 직접 갱신하는 설계
 
 ## 4. 고정 기술 결정
@@ -62,8 +62,8 @@ Target project path: `<repo>`
 | Concurrency | Java virtual threads |
 | Queue engine | `NATS JetStream` |
 | Queue model | Work queue stream + durable pull consumer |
-| Deployment | RAGFlow와 분리된 Docker Compose project |
-| First target adapter | `RAGFlowAdapter` |
+| Deployment | RetiredIndexBridge와 분리된 Docker Compose project |
+| First target adapter | `RetiredIndexBridgeAdapter` |
 | Product name | `rag-ingress-queue` |
 
 Spring Boot 4.x는 Java 25를 target runtime으로 쓰는 요구사항에 맞는 후보로 둔다. Spring Boot 공식 system requirements는 Spring Boot 4.0.6이 Java 17 이상을 요구하고 Java 26까지 호환된다고 설명한다.
@@ -93,13 +93,13 @@ rag-ingress-queue ingress-worker
         |
         v
 RagTargetAdapter
-  RAGFlowAdapter first
+  RetiredIndexBridgeAdapter first
         |
         v
 Downstream RAG target
 ```
 
-`memory-regeneration-runner`는 queue consumer가 아니다. Ubuntu에서 RAGFlow redacted corpus를 읽어 session/task summary 또는 approved memory card 후보 문서를 만든 뒤, 그 결과물을 다시 `/enqueue`로 넣는 batch producer다.
+`memory-regeneration-runner`는 queue consumer가 아니다. Ubuntu에서 RetiredIndexBridge redacted corpus를 읽어 session/task summary 또는 approved memory card 후보 문서를 만든 뒤, 그 결과물을 다시 `/enqueue`로 넣는 batch producer다.
 
 ## 6. Compose project 요구사항
 
@@ -115,7 +115,7 @@ volumes:
   nats_data
 ```
 
-RAGFlow compose project와 network, volume, service lifecycle을 분리한다. RAGFlow와 통신할 때는 host-published endpoint 또는 명시적으로 허용된 network bridge를 사용한다. 초기안은 RAGFlow compose 파일을 수정하지 않는 것을 원칙으로 한다.
+RetiredIndexBridge compose project와 network, volume, service lifecycle을 분리한다. RetiredIndexBridge와 통신할 때는 host-published endpoint 또는 명시적으로 허용된 network bridge를 사용한다. 초기안은 RetiredIndexBridge compose 파일을 수정하지 않는 것을 원칙으로 한다.
 
 ## 7. NATS JetStream 요구사항
 
@@ -213,27 +213,27 @@ Request shape:
   "source": {
     "type": "local_pc",
     "provider": "codex",
-    "project": "workspace-ragflow-advisor"
+    "project": "workspace-index-advisor"
   },
   "payload": {
     "kind": "redacted_rag_ready_document",
     "redactionVersion": "redaction.v2",
     "document": {
-      "filename": "ak-conv-codex-workspace-ragflow-advisor-session-t0001-t0008-redacted.md",
+      "filename": "ak-conv-codex-workspace-index-advisor-session-t0001-t0008-redacted.md",
       "contentType": "text/markdown",
       "body": "---\nschema_version: agent_knowledge_document.v2\nresult_type: conversation_chunk\n---\nredacted conversation chunk",
       "metadata": {
         "schema_version": "agent_knowledge_document.v2",
         "result_type": "conversation_chunk",
         "provider": "codex",
-        "project": "workspace-ragflow-advisor",
+        "project": "workspace-index-advisor",
         "session_id_hash": "sha256:redacted",
         "content_hash": "sha256:redacted"
       }
     }
   },
   "contentHash": "sha256:redacted",
-  "targetProfile": "ragflow-transcript-memory",
+  "targetProfile": "index-transcript-memory",
   "kind": "conversation_chunk"
 }
 ```
@@ -242,19 +242,19 @@ Large payloads may later use a `payload.kind=redacted_document_ref` shape, but t
 
 Initial target profiles:
 
-| targetProfile | RAGFlow dataset role | document kind |
+| targetProfile | RetiredIndexBridge dataset role | document kind |
 |---|---|---|
-| `ragflow-transcript-memory` | `transcript-memory` | `conversation_chunk` |
-| `ragflow-session-summary` | `session-summary` | `session_summary` |
-| `ragflow-task-summary` | `task-summary` | `task_summary` |
-| `ragflow-approved-memory-card` | `approved-memory-card` | `approved_memory_card` |
+| `index-transcript-memory` | `transcript-memory` | `conversation_chunk` |
+| `index-session-summary` | `session-summary` | `session_summary` |
+| `index-task-summary` | `task-summary` | `task_summary` |
+| `index-approved-memory-card` | `approved-memory-card` | `approved_memory_card` |
 
 > 📌 위 표는 2026-05-17 draft 시점의 **초기 4개** profile이다. 현재 구현된 `TargetProfileRegistry`는
-> **7개**(추가: `ragflow-session-memory`·`ragflow-project-memory`·`ragflow-procedural-memory`)이며,
+> **7개**(추가: `index-session-memory`·`index-project-memory`·`index-procedural-memory`)이며,
 > 유효 profile의 단일 진실 공급원(SSOT)은 [docs/contracts/ingress-contract.md](contracts/ingress-contract.md) §3이다.
 > 이 요구사항 문서는 점-인-타임 기록이므로 표는 그대로 둔다.
 
-RAGFlow partitioning is dataset-first. Metadata `result_type` remains useful for trace/filter inside each dataset, but must not be the primary partitioning strategy for all memory data in a single dataset.
+RetiredIndexBridge partitioning is dataset-first. Metadata `result_type` remains useful for trace/filter inside each dataset, but must not be the primary partitioning strategy for all memory data in a single dataset.
 
 Response shape:
 
@@ -285,7 +285,7 @@ Returns redacted operator summary:
     "deadLetter": 0
   },
   "target": {
-    "name": "ragflow",
+    "name": "retired_index_bridge",
     "pressure": "open|throttled|closed"
   }
 }
@@ -293,7 +293,7 @@ Returns redacted operator summary:
 
 ## 10. `RagTargetAdapter` contract
 
-Core server must depend on this contract, not on RAGFlow-specific implementation details. `IngestJob` contains a redacted target-ready document or a redacted document reference, not a provider transcript locator.
+Core server must depend on this contract, not on RetiredIndexBridge-specific implementation details. `IngestJob` contains a redacted target-ready document or a redacted document reference, not a provider transcript locator.
 
 ```java
 public interface RagTargetAdapter {
@@ -314,31 +314,31 @@ public interface RagTargetAdapter {
 - `THROTTLED`
 - `AUTHORIZED`
 
-## 11. RAGFlow adapter 요구사항
+## 11. RetiredIndexBridge adapter 요구사항
 
-`RAGFlowAdapter`는 RAGFlow REST API와 parser status를 generic target 상태로 변환한다.
+`RetiredIndexBridgeAdapter`는 RetiredIndexBridge REST API와 parser status를 generic target 상태로 변환한다.
 
 Responsibilities:
 
-- RAGFlow health/status 확인
+- RetiredIndexBridge health/status 확인
 - target pressure 계산
 - redacted target-ready document upload/parse request
 - document status polling
-- RAGFlow `DONE`을 generic `INDEXED` 후보로 변환
+- RetiredIndexBridge `DONE`을 generic `INDEXED` 후보로 변환
 - failed/index_timeout/reconcile 후보 판별
 
-RAGFlow-specific values such as raw dataset_id and raw document_id must remain adapter-private and must not appear in generic operator output.
+RetiredIndexBridge-specific values such as raw dataset_id and raw document_id must remain adapter-private and must not appear in generic operator output.
 
 ## 12. Backpressure 요구사항
 
 Worker must check target pressure before delivery.
 
-RAGFlow first adapter pressure inputs:
+RetiredIndexBridge first adapter pressure inputs:
 
 - `UNSTART` document count
 - `RUNNING` document count
 - stale `indexing` age/count
-- RAGFlow healthz
+- RetiredIndexBridge healthz
 - recent upload/parse error rate
 
 Generic pressure states:
@@ -349,15 +349,15 @@ Generic pressure states:
 
 ## 13. External document status gate 및 authorization 요구사항
 
-- 여기서 `Ledger`는 `workspace-ragflow-advisor`의 기존 `ledger.py`/문서 상태표를 가리키는 이름이며, 별도 장기기억 저장소가 아니다.
-- RAGFlow document status table은 RAGFlow document id/hash/state/provenance/authorization을 기록하는 external local 상태표다.
+- 여기서 `Ledger`는 `workspace-index-advisor`의 기존 `ledger.py`/문서 상태표를 가리키는 이름이며, 별도 장기기억 저장소가 아니다.
+- RetiredIndexBridge document status table은 RetiredIndexBridge document id/hash/state/provenance/authorization을 기록하는 external local 상태표다.
 - `rag-ingress-queue`는 이 상태표를 직접 소유하거나 직접 갱신하지 않는다.
 - `rag-ingress-queue`는 external reconcile client가 상태표를 갱신할 수 있도록 job id, content hash, target profile, generic status, redacted target ref/status snapshot을 제공한다.
 - Queue ack와 document status table indexed는 같은 의미가 아니다.
 - Target `INDEXED`와 recall/promote authorization도 같은 의미가 아니다.
 - document status table authorization pass 전에는 indexed transcript memory를 recall/promote에 사용하지 않는다.
 - Document status output must be redacted.
-- RAGFlow live `DONE`인데 local status table이 stale이면 reconcile 대상이다.
+- RetiredIndexBridge live `DONE`인데 local status table이 stale이면 reconcile 대상이다.
 
 ## 14. MCP 및 호출 채널 분리
 
@@ -366,18 +366,18 @@ MCP는 tool/read plane으로 유지한다.
 Forbidden write paths:
 
 ```text
-Mac mini -> RAGFlow REST direct write
-MCP -> RAGFlow REST bulk ingest write
-migration script -> RAGFlow REST direct write
-memory-regeneration-runner -> RAGFlow REST direct write
+Mac mini -> RetiredIndexBridge REST direct write
+MCP -> RetiredIndexBridge REST bulk ingest write
+migration script -> RetiredIndexBridge REST direct write
+memory-regeneration-runner -> RetiredIndexBridge REST direct write
 ```
 
 Allowed write path:
 
 ```text
 Local PC producer -> rag-ingress-queue /enqueue -> NATS JetStream -> worker -> RagTargetAdapter
-Mac mini session-compactor -> rag-ingress-queue /enqueue -> NATS JetStream -> worker -> RAGFlowAdapter
-Ubuntu memory-regeneration-runner -> rag-ingress-queue /enqueue -> NATS JetStream -> worker -> RAGFlowAdapter
+Mac mini session-compactor -> rag-ingress-queue /enqueue -> NATS JetStream -> worker -> RetiredIndexBridgeAdapter
+Ubuntu memory-regeneration-runner -> rag-ingress-queue /enqueue -> NATS JetStream -> worker -> RetiredIndexBridgeAdapter
 ```
 
 MCP에 ingest tool이 필요해지는 경우에도 MCP implementation은 RAG target을 직접 write하지 않고 `rag-ingress-queue /enqueue`로 위임한다.
@@ -386,7 +386,7 @@ MCP에 ingest tool이 필요해지는 경우에도 MCP implementation은 RAG tar
 
 Must not log or expose:
 
-- `RAGFLOW_API_KEY`
+- `RETIRED_INDEX_BRIDGE_API_KEY`
 - bearer token
 - raw dataset_id
 - raw document_id
@@ -423,28 +423,28 @@ Postcheck must report:
 1. Local PC producer가 RAG target REST를 직접 호출하지 않는다.
 2. `rag-ingress-queue /enqueue`가 message를 JetStream에 publish하고 publish ack를 확인한다.
 3. Worker가 pull consumer로 message를 가져와 target pressure가 `OPEN`일 때만 delivery한다.
-4. RAGFlow-specific details는 `RAGFlowAdapter` 안에 격리된다.
+4. RetiredIndexBridge-specific details는 `RetiredIndexBridgeAdapter` 안에 격리된다.
 5. Postcheck가 queue, worker, target, document status, authorization 상태를 redacted summary로 보여준다.
-6. RAGFlow memory corpus는 dataset-first partitioning을 사용한다.
+6. RetiredIndexBridge memory corpus는 dataset-first partitioning을 사용한다.
 
 ## 18. Human review checklist
 
 - HTML 산출물에서 write path와 MCP read/tool plane이 시각적으로 분리되어야 한다.
-- Docker Compose project, network, volume, port, env ownership이 RAGFlow와 겹치지 않는다는 점이 보여야 한다.
-- `RagTargetAdapter` contract와 `RAGFlowAdapter` v1 경계가 분리되어야 한다.
+- Docker Compose project, network, volume, port, env ownership이 RetiredIndexBridge와 겹치지 않는다는 점이 보여야 한다.
+- `RagTargetAdapter` contract와 `RetiredIndexBridgeAdapter` v1 경계가 분리되어야 한다.
 - `ingested`, `indexed`, `authorized`, `recall/promote eligible`은 서로 다른 상태로 표현되어야 한다.
 - token, raw dataset_id, raw document_id, private path, transcript body는 예시와 다이어그램에 없어야 한다.
 
-## 19. `workspace-ragflow-advisor` 즉시 적용 요구사항
+## 19. `workspace-index-advisor` 즉시 적용 요구사항
 
-현재 적용 대상은 `workspace-ragflow-advisor`의 spool 기반 session RAG 경로다. 이 경로는
-provider hook을 RAGFlow 직접 write path로 쓰지 않고, Mac mini에서 provider transcript를
-parse/redaction/pack한 뒤 redacted RAGFlow-ready document만 queue로 넘긴다.
+현재 적용 대상은 `workspace-index-advisor`의 spool 기반 session RAG 경로다. 이 경로는
+provider hook을 RetiredIndexBridge 직접 write path로 쓰지 않고, Mac mini에서 provider transcript를
+parse/redaction/pack한 뒤 redacted RetiredIndexBridge-ready document만 queue로 넘긴다.
 
 현재 코드 기준으로 `session-compactor`는 새 컴포넌트가 아니라 기존
 `transcript-capture`, `transcript-worker`, `transcript-packer` 역할을 묶어 부르는
 운영 이름이다. 이미 구현된 capture/redaction/chunk/pack 경로는 유지하고, steady-state
-write sink만 RAGFlow direct upload에서 queue enqueue로 바꾼다.
+write sink만 RetiredIndexBridge direct upload에서 queue enqueue로 바꾼다.
 
 ### 현재 경로
 
@@ -458,8 +458,8 @@ Codex Stop
   -> private TranscriptCaptureSpool
   -> transcript-worker
   -> parse/redaction/pack
-  -> RAGFlow upload/metadata/parse/status poll
-  -> RAGFlow document status indexed state
+  -> RetiredIndexBridge upload/metadata/parse/status poll
+  -> RetiredIndexBridge document status indexed state
 ```
 
 현재 `Stop` hook capture는 raw transcript body를 보내지 않는다. Capture request는
@@ -475,12 +475,12 @@ Codex Stop
   -> private TranscriptCaptureSpool
   -> session-compactor enqueue sink
   -> parse/redaction/pack on Mac mini
-  -> enqueue redacted RAGFlow-ready document
+  -> enqueue redacted RetiredIndexBridge-ready document
   -> rag-ingress-queue /enqueue
   -> NATS JetStream
   -> ingress-worker
-  -> RagTargetAdapter / RAGFlowAdapter
-  -> RAGFlow document status indexed + authorization postcheck
+  -> RagTargetAdapter / RetiredIndexBridgeAdapter
+  -> RetiredIndexBridge document status indexed + authorization postcheck
 ```
 
 요구사항:
@@ -490,27 +490,27 @@ Codex Stop
 - `session-compactor enqueue sink`는 capture request를 검증하고 Mac mini에서 transcript source를 resolve한 뒤 `redaction.v2`와 conversation chunk packing을 완료한다.
 - `session-compactor enqueue sink`는 redacted RAG-ready document를 `rag.ingress.transcript` job으로 변환한다.
 - `session-compactor enqueue sink`는 JetStream publish ack 또는 `/enqueue accepted` 증거 전에는 local spool item을 `acked`로 이동하지 않는다.
-- 기존 `transcript-worker`의 RAGFlow direct upload 책임은 post-cutover steady-state에서 제거한다.
+- 기존 `transcript-worker`의 RetiredIndexBridge direct upload 책임은 post-cutover steady-state에서 제거한다.
 - Transcript parsing, `redaction.v2`, conversation chunk packing은 Mac mini producer boundary에 남긴다.
-- RAGFlow document upload, metadata update, parse request, status polling은 Ubuntu-side queue worker와 `RAGFlowAdapter` 경계 안으로 이동한다.
-- `acked` capture request는 RAGFlow indexing 완료 증거가 아니다.
+- RetiredIndexBridge document upload, metadata update, parse request, status polling은 Ubuntu-side queue worker와 `RetiredIndexBridgeAdapter` 경계 안으로 이동한다.
+- `acked` capture request는 RetiredIndexBridge indexing 완료 증거가 아니다.
 - JetStream ack는 document status authorization pass 증거가 아니다.
 - document status authorization pass 전에는 indexed transcript memory를 recall/promote에 사용하지 않는다.
-- Postcheck는 spool counts, queue counts, RAGFlow pressure, indexed count, authorization count를 모두 분리해서 보여준다.
+- Postcheck는 spool counts, queue counts, RetiredIndexBridge pressure, indexed count, authorization count를 모두 분리해서 보여준다.
 
-### `workspace-ragflow-advisor` 코드 매핑
+### `workspace-index-advisor` 코드 매핑
 
 | 현재 surface | 역할 | 적용 후 판단 |
 |---|---|---|
 | `session_memory/codex_hook_plan.py` | `UserPromptSubmit` / `Stop` hook command plan | hook shape는 유지 |
 | `session_memory/transcript_capture.py` | `locator_only` capture request normalization + `TranscriptCaptureSpool` | producer-side inbox 유지 |
-| `session_memory/transcript_ingest.py` | capture spool claim, transcript parse, RAGFlow direct upload/index poll | parse/redaction/pack은 session-compactor enqueue sink로 유지하고 direct upload 부분만 queue worker/adapter로 이동 |
-| `ledger.py` | session/turn/chunk, RAGFlow document ref, indexed state, authorization metadata | 이름은 ledger지만 역할은 RAGFlow document status table로 유지 |
+| `session_memory/transcript_ingest.py` | capture spool claim, transcript parse, RetiredIndexBridge direct upload/index poll | parse/redaction/pack은 session-compactor enqueue sink로 유지하고 direct upload 부분만 queue worker/adapter로 이동 |
+| `ledger.py` | session/turn/chunk, RetiredIndexBridge document ref, indexed state, authorization metadata | 이름은 ledger지만 역할은 RetiredIndexBridge document status table로 유지 |
 | `scheduler_runtime.py` | lifecycle ingest + transcript ingest scheduler command plan | scheduler enablement는 별도 approval gate |
 
-## 20. RAGFlow LLM Wiki dataset 및 regeneration boundary
+## 20. RetiredIndexBridge LLM Wiki dataset 및 regeneration boundary
 
-RAGFlow는 장기기억 본문과 검색 대상이 모이는 LLM wiki다. `rag-ingress-queue`는 RAGFlow에 넣는 배송 계층이고, RAGFlow dataset의 의미를 생성하거나 recall 순서를 판단하지 않는다.
+RetiredIndexBridge는 장기기억 본문과 검색 대상이 모이는 LLM wiki다. `rag-ingress-queue`는 RetiredIndexBridge에 넣는 배송 계층이고, RetiredIndexBridge dataset의 의미를 생성하거나 recall 순서를 판단하지 않는다.
 
 Dataset partitioning:
 
@@ -525,23 +525,23 @@ Batch regeneration path:
 
 ```text
 memory-regeneration-runner
-  -> read RAGFlow redacted transcript-memory corpus
+  -> read RetiredIndexBridge redacted transcript-memory corpus
   -> group by session/task fields
   -> generate summary/card candidate documents
   -> eval/dedupe/dry-run report
   -> enqueue approved redacted derived documents
   -> rag-ingress-queue
-  -> RAGFlow derived datasets
+  -> RetiredIndexBridge derived datasets
 ```
 
 Requirements:
 
 - `memory-regeneration-runner` is a producer, not a queue consumer.
-- `memory-regeneration-runner` must not write RAGFlow directly in steady-state.
-- `rag-ingress-queue` must support target profiles for all four initial RAGFlow dataset roles.
-- Dataset separation is required. A single RAGFlow dataset with metadata-only type partitioning is not acceptable for the steady-state memory corpus.
-- RAGFlow Search App may be used for operator review if available; a custom review UI is not required for MVP.
-- RAGFlow Memory/Agent feature is explicitly lower priority and not part of the ingress queue MVP.
+- `memory-regeneration-runner` must not write RetiredIndexBridge directly in steady-state.
+- `rag-ingress-queue` must support target profiles for all four initial RetiredIndexBridge dataset roles.
+- Dataset separation is required. A single RetiredIndexBridge dataset with metadata-only type partitioning is not acceptable for the steady-state memory corpus.
+- RetiredIndexBridge Search App may be used for operator review if available; a custom review UI is not required for MVP.
+- RetiredIndexBridge Memory/Agent feature is explicitly lower priority and not part of the ingress queue MVP.
 
 ## 21. 참고 공식 문서
 

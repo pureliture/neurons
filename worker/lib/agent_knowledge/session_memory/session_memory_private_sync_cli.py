@@ -1,6 +1,6 @@
 """Retired compatibility CLI for legacy session-memory private sync.
 
-The old command performed live RAGFlow writes. In neurons we only keep a
+The old command performed live RetiredIndexBridge writes. In neurons we only keep a
 read-only dry-run planner until the server-side live sync lane has an approved
 runtime contract.
 """
@@ -39,8 +39,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # structured report instead of falling through to an unknown-arg error.
     parser.add_argument("--dataset-id", default="")
     parser.add_argument("--dataset-name", default="")
-    parser.add_argument("--ragflow-url", default="")
-    parser.add_argument("--token-env", default="")
+    parser.add_argument("--retired-index-bridge-url", default="")
+    parser.add_argument("--retired-index-bridge-token-env", default="")
     parser.add_argument("--runtime-dir", default="")
     parser.add_argument("--batch-size", type=int, default=25)
     parser.add_argument("--max-processed-per-run", type=int, default=25)
@@ -48,7 +48,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retry-backoff-seconds", default="60,180")
     parser.add_argument("--poll-attempts", type=int, default=60)
     parser.add_argument("--poll-interval-seconds", type=float, default=1.0)
-    parser.add_argument("--transcript-read-source", choices=["ledger", "ragflow_read_sot"], default="ledger")
+    parser.add_argument("--transcript-read-source", choices=["ledger", "index_read_sot"], default="ledger")
     parser.add_argument("--approval", default="")
     return parser
 
@@ -66,7 +66,7 @@ def _blocked_report(*, status: str = "blocked_live_execution", reason: str) -> d
         "mode": "blocked",
         "mutation_performed": False,
         "network_used": False,
-        "ragflow_write_performed": False,
+        "index_write_performed": False,
         "raw_ids_printed": False,
         "raw_paths_printed": False,
         "replacement_commands": LIVE_SYNC_REPLACEMENT,
@@ -78,8 +78,8 @@ def _has_live_args(args: argparse.Namespace) -> bool:
         [
             args.dataset_id,
             args.dataset_name,
-            args.ragflow_url,
-            args.token_env,
+            args.retired_index_bridge_url,
+            args.retired_index_bridge_token_env,
             args.approval,
             args.transcript_read_source != "ledger",
         ]
@@ -147,7 +147,7 @@ def _run_dry_run(args: argparse.Namespace) -> int:
             "mode": "dry_run",
             "mutation_performed": False,
             "network_used": False,
-            "ragflow_write_performed": False,
+            "index_write_performed": False,
             "raw_ids_printed": False,
             "raw_paths_printed": False,
             "limit": max(int(limit), 1),

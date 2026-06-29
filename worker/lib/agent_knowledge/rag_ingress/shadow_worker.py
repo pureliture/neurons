@@ -2,7 +2,7 @@
 
 This is the Phase G1 (R2-full + C) artifact: a Python worker that reuses the
 existing agent-knowledge ingest pipeline (``document_from_ingress_payload`` +
-``RAGFlowIndexBackendAdapter``) and owns a server-volume IngestStateStore SQLite,
+``RetiredIndexBridgeRetiredIndexBridgeAdapter``) and owns a server-volume IngestStateStore SQLite,
 driven by a NATS JetStream consumer.
 
 SAFETY (critical): the live stream ``RAG_INGRESS_QUEUE`` uses ``WorkQueue``
@@ -10,7 +10,7 @@ retention, which forbids a second overlapping consumer (a parallel consumer woul
 steal/delete the live Java worker's messages). Therefore the shadow worker NEVER
 attaches to ``RAG_INGRESS_QUEUE``; it consumes an isolated shadow stream
 (``RAG_INGRESS_SHADOW`` / subject ``rag.shadow.>``) fed by synthetic events. The
-live ingress-api, ``rag_target_delivery_worker``, stream, and RAGFlow production
+live ingress-api, ``rag_target_delivery_worker``, stream, and RetiredIndexBridge production
 delivery are untouched.
 
 Modes:
@@ -29,14 +29,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .index_backend import RAGFlowIndexBackendAdapter
+from .retired_index_bridge import RetiredIndexBridgeRetiredIndexBridgeAdapter
 from .server_runtime import (
     apply_server_redaction,
     document_from_ingress_payload,
     normalize_ingest_job_payload,
     public_ingress_leak_violations,
 )
-from ..ragflow_client import RagflowHttpClient
+from ..index_client import RetiredIndexBridgeHttpClient
 
 SHADOW_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS shadow_ingest_log (
@@ -133,15 +133,15 @@ class IngestStateStore:
             conn.close()
 
 
-def build_backend(*, ragflow_base_url: str, ragflow_api_key: str,
+def build_backend(*, index_base_url: str, index_api_key: str,
                   dataset_id: str | None = None,
                   resolve_dataset_id: Callable[[str], str] | None = None,
-                  broad_scan_pages: int = 0) -> RAGFlowIndexBackendAdapter:
-    client = RagflowHttpClient(base_url=ragflow_base_url, bearer_token=ragflow_api_key)
+                  broad_scan_pages: int = 0) -> RetiredIndexBridgeRetiredIndexBridgeAdapter:
+    client = RetiredIndexBridgeHttpClient(base_url=index_base_url, bearer_token=index_api_key)
     if resolve_dataset_id is None:
         # smoke/dry-run: resolve every profile to one configured dataset.
         resolve_dataset_id = lambda _profile: dataset_id
-    return RAGFlowIndexBackendAdapter(
+    return RetiredIndexBridgeRetiredIndexBridgeAdapter(
         client=client,
         resolve_dataset_id=resolve_dataset_id,
         broad_scan_pages=broad_scan_pages,
@@ -150,8 +150,8 @@ def build_backend(*, ragflow_base_url: str, ragflow_api_key: str,
 
 def env_profile_dataset_resolver(getenv: Callable[[str], str | None]) -> Callable[[str], str]:
     """Live routing: map a target profile to its dataset via env, mirroring the
-    Java worker's per-profile datasets. ``ragflow-transcript-memory`` ->
-    ``RAGFLOW_TRANSCRIPT_MEMORY_DATASET_ID`` etc. Raises for an unconfigured
+    Java worker's per-profile datasets. ``index-transcript-memory`` ->
+    ``RETIRED_INDEX_BRIDGE_TRANSCRIPT_MEMORY_DATASET_ID`` etc. Raises for an unconfigured
     profile so a mis-routed delivery fails (and quarantines) rather than landing
     in the wrong dataset."""
     def resolve(profile: str) -> str:
@@ -170,9 +170,9 @@ def _now_iso() -> str:
 
 
 def process_payload(payload: dict, *, store: IngestStateStore,
-                    backend: RAGFlowIndexBackendAdapter | None, deliver: bool) -> ShadowResult:
+                    backend: RetiredIndexBridgeRetiredIndexBridgeAdapter | None, deliver: bool) -> ShadowResult:
     """Build the RagReadyDocument from a rag_ingress_enqueue.v1 payload, record
-    state, and (if deliver) submit to RAGFlow. No live stream is touched.
+    state, and (if deliver) submit to RetiredIndexBridge. No live stream is touched.
 
     G2 scoped: applies the server-side full public redaction to conservatively-
     redacted payloads (no-op for already-full ones), then fail-closes — if any
@@ -203,7 +203,7 @@ def process_payload(payload: dict, *, store: IngestStateStore,
         if existing is not None:
             dataset_ref, document_ref = existing
             # Persist as "delivered" (it IS delivered — the document exists in
-            # RAGFlow) so reconcile/counts treat a deduped redelivery exactly like
+            # RetiredIndexBridge) so reconcile/counts treat a deduped redelivery exactly like
             # an original delivery. The in-memory ShadowResult.status is
             # "deduplicated" only so run_consume can log/observe that this pass
             # skipped a re-upload; the durable vocab stays delivered on purpose.
@@ -251,7 +251,7 @@ def process_payload(payload: dict, *, store: IngestStateStore,
 
 
 async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
-                      store: IngestStateStore, backend: RAGFlowIndexBackendAdapter | None,
+                      store: IngestStateStore, backend: RetiredIndexBridgeRetiredIndexBridgeAdapter | None,
                       deliver: bool, max_messages: int | None, idle_timeout: float = 5.0,
                       allow_live: bool = False, max_deliver: int = 5,
                       fetch_batch: int = 1, concurrency: int = 1,
@@ -379,7 +379,7 @@ def build_synthetic_event(*, tag: str) -> dict:
         "kind": "conversation_chunk",
         "contentHash": content_hash,
         "idempotencyKey": f"{tag}",
-        "targetProfile": "ragflow-transcript-memory",
+        "targetProfile": "index-transcript-memory",
         "source": {"provider": "claude", "project": tag, "host": "shadow", "producer": "g1-smoke"},
         "payload": {
             "kind": "redacted_rag_ready_document",
@@ -399,7 +399,7 @@ def build_synthetic_event(*, tag: str) -> dict:
 
 
 async def run_smoke(*, nats_url: str, stream: str, subject: str, durable: str,
-                    store: IngestStateStore, backend: RAGFlowIndexBackendAdapter | None,
+                    store: IngestStateStore, backend: RetiredIndexBridgeRetiredIndexBridgeAdapter | None,
                     deliver: bool, tag: str, log: Callable[[str], None] = print) -> dict:
     """Isolated end-to-end NATS smoke: ensure shadow stream → publish 1 synthetic
     event → consume 1 → process. Never touches RAG_INGRESS_QUEUE."""
@@ -430,7 +430,7 @@ def main() -> int:
 
     Required env: RAG_INGRESS_NATS_URL, SHADOW_STREAM(!=RAG_INGRESS_QUEUE),
     SHADOW_SUBJECT, SHADOW_DURABLE, INGEST_STATE_DB_PATH. Delivery is OFF by default
-    (SHADOW_DELIVER=0); when on, RAGFLOW_BASE_URL/RAGFLOW_API_KEY/RAGFLOW_DATASET_ID
+    (SHADOW_DELIVER=0); when on, RETIRED_INDEX_BRIDGE_BASE_URL/RETIRED_INDEX_BRIDGE_API_KEY/RETIRED_INDEX_BRIDGE_DATASET_ID
     are required."""
     import argparse
     import asyncio
@@ -451,33 +451,33 @@ def main() -> int:
     deliver = os.environ.get("SHADOW_DELIVER", "0") == "1"
     broad_scan_pages = int(os.environ.get("NATURAL_KEY_BROAD_SCAN_PAGES", "0"))
     backend = None
-    delivery_backend = os.environ.get("INGRESS_DELIVERY_BACKEND", "ragflow").strip().lower()
+    delivery_backend = os.environ.get("INGRESS_DELIVERY_BACKEND", "retired_index_bridge").strip().lower()
     if deliver:
         if delivery_backend == "couchdb":
-            # CouchDB sink: construct CouchDBIndexBackendAdapter.
-            # ragflow_client is NOT imported for this path.
-            from .couchdb_index_backend import build_couchdb_index_backend
-            backend = build_couchdb_index_backend(
+            # CouchDB sink: construct CouchDBRetiredIndexBridgeAdapter.
+            # index_client is NOT imported for this path.
+            from .couchdb_retired_index_bridge import build_couchdb_retired_index_bridge
+            backend = build_couchdb_retired_index_bridge(
                 couchdb_url=os.environ["COUCHDB_URL"],
                 couchdb_user=os.environ["COUCHDB_USER"],
                 couchdb_password=os.environ["COUCHDB_PASSWORD"],
                 couchdb_db=os.environ["COUCHDB_DB"],
             )
         else:
-            # Default RAGFlow sink (ragflow or any unrecognised value).
-            single = os.environ.get("RAGFLOW_DATASET_ID", "")
+            # Default RetiredIndexBridge sink (retired_index_bridge or any unrecognised value).
+            single = os.environ.get("RETIRED_INDEX_BRIDGE_DATASET_ID", "")
             # live (no single dataset): route per target profile like the Java worker.
             resolver = None if single else env_profile_dataset_resolver(os.environ.get)
             backend = build_backend(
-                ragflow_base_url=os.environ["RAGFLOW_BASE_URL"],
-                ragflow_api_key=os.environ["RAGFLOW_API_KEY"],
+                index_base_url=os.environ["RETIRED_INDEX_BRIDGE_BASE_URL"],
+                index_api_key=os.environ["RETIRED_INDEX_BRIDGE_API_KEY"],
                 dataset_id=single or None,
                 resolve_dataset_id=resolver,
                 broad_scan_pages=broad_scan_pages,
             )
         # M6 dual-write shadow (OFF unless MIRROR_DUAL_WRITE=1 + QDRANT_URL set).
         # Best-effort Qdrant mirror alongside the authoritative primary; a mirror
-        # failure never breaks RAGFlow/CouchDB delivery. Default-off keeps the live
+        # failure never breaks RetiredIndexBridge/CouchDB delivery. Default-off keeps the live
         # worker byte-identical.
         from .qdrant_dual_write import maybe_wrap_dual_write
         backend = maybe_wrap_dual_write(backend, environ=os.environ)
@@ -510,9 +510,9 @@ def main() -> int:
 def build_delivery_pressure_check(status_url: str, *, delivery_backend: str) -> Callable[[], bool] | None:
     """Return the live pressure gate for backends that are governed by /status.
 
-    The /status endpoint reports the legacy RAGFlow target pressure. A CouchDB
+    The /status endpoint reports the legacy RetiredIndexBridge target pressure. A CouchDB
     sink must not pause behind that signal, or CouchDB-native ingest deadlocks
-    whenever RAGFlow is intentionally unconfigured.
+    whenever RetiredIndexBridge is intentionally unconfigured.
     """
     if str(delivery_backend or "").strip().lower() == "couchdb":
         return None

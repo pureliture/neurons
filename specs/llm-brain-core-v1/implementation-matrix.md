@@ -19,35 +19,35 @@ back to grill-to-spec instead of editing the SoT silently.
 | `neurons` owns session-memory artifact and graph projection | implemented and Ubuntu current-pass smoked | `LedgerSessionMemoryArtifactStore` stores artifacts; `GraphProjectionWorker` projects artifacts, MemoryCards, and SourceRefs to `GraphMemoryAdapter`; verification-time Ubuntu Graphiti/Neo4j smoke returned `status=available`, `details=["graphiti_neo4j"]`, `episode_count=2`, `matched=true`; current Ubuntu containerized adapter smoke built `llm-brain-verify-worker:8b9596d` from the checked-out worker and returned `status=available`, `matched=true`, `labels=["Episodic"]` | None for v1 graph projection contract |
 | Metadata-first hybrid graph transition | runtime wiring implemented | `MetadataFirstHybridGraphAdapter`는 임의의 `GraphMemoryAdapter`에 메타데이터 우선 에피소드를 저장하고, 선택적 `HybridTextMirror`에서 자유 텍스트 recall을 유지하며, `get_episodes_by_ids`를 통해 공개 안전 힌트를 조인한다; `build_graph_adapter_from_env`는 `LLM_BRAIN_GRAPH_METADATA_FIRST_HYBRID=true`로 이를 선택하고 해당 경로에서 Graphiti 엔티티 추출을 비활성화한다; 테스트는 메타데이터 전용 그래프 페이로드, 스코프 보존, 정확한 episode-id 조인, 하이브리드 검색, `ContextPack` 복원, 런타임 env 연결을 검증한다 | 운영 환경의 영구 텍스트 미러 통합은 이 항목에서 주장하지 않는다; 별도 후속 작업으로 남긴다 |
 | Extract Task/Decision/Incident/PersonaFact candidates | implemented for accepted MemoryCard ontology projection | Existing MemoryCard miner/read-model reused by `BrainReadService`; `build_ontology_episode_batch` maps Session/Task/Decision/SourceRef fixtures; default Graphiti storage persists public-safe ontology episodes deterministically | LLM-driven Graphiti entity extraction is opt-in and outside v1 acceptance |
-| Build latest-work ContextPack | implemented and Ubuntu CLI-smoked | `test_llm_brain_core_ragflow_disabled.py`, `test_llm_brain_core_runtime_integration.py`, `test_ontology_episode_batch.py`; Ubuntu `brain-context-resolve` returned `status=ok`, `schema_version=llm_brain_context_resolve.v1` | None for v1 ContextPack contract |
+| Build latest-work ContextPack | implemented and Ubuntu CLI-smoked | `test_llm_brain_core_index_disabled.py`, `test_llm_brain_core_runtime_integration.py`, `test_ontology_episode_batch.py`; Ubuntu `brain-context-resolve` returned `status=ok`, `schema_version=llm_brain_context_resolve.v1` | None for v1 ContextPack contract |
 | Incident/troubleshooting search | implemented with graph contract | `BrainReadService.brain_incident_search`; runtime incident tests pass; `GraphProjectionWorker` projects ontology episodes through the graph adapter interface; Ubuntu Graphiti/Neo4j episode search returned matched Task entities | None for v1 incident search contract |
 | Time-aware drift explanation | implemented from cards and graph contract | `BrainReadService.brain_drift_explain`; runtime drift tests pass; graph-backed ontology projection tests pass; Ubuntu Neo4j dump/load preserved `Episodic` nodes (`episodes=3`) | None for v1 drift contract |
 | PersonaFact check states | implemented | `BrainReadService.brain_persona_check`; tests cover aligned/conflict/drift/insufficient evidence | Confidence lifecycle expansion is post-v1 product work, not a v1 gap |
 | SourceRef/SpanRef redaction | implemented across neurons+dendrite branches | `test_source_ref_policy_resolution.py`; `test_contextpack_no_raw_source_refs.py`; dendrite `test_source_catalog.py`; CodeRabbit follow-up `findings: 0`; dendrite full suite returned `84 passed` | Dendrite merge is release integration, not a v1 evidence gap |
 | Per-PC local brain and optional central brain | implemented for v1 local + central shadow | Local ledger-backed service works offline; `BrainEvent` envelope, central shadow rebuild, and portable export/import exist; Ubuntu central shadow smoke returned `status=succeeded` | Production transport is outside the v1 local interface |
 | Event/episode central sync, no graph DB file sync | implemented for v1 shadow | `test_central_sync_shadow_rebuild.py` rebuilds derived graph state from BrainEvents; Ubuntu worker-container shadow smoke rebuilt from events without graph file sync | Production transport/runbook is not a v1 interface |
-| RAGFlow bridge only, not core dependency | implemented and Ubuntu live-smoked for read-only bridge | Core tests pass with disabled bridge; M9 `document_bridge.py` labels RAGFlow as external read-only evidence and does not override canonical memory; Ubuntu bridge smoke returned `dataset_count=2`, `evidence_count=3`, `status=available` | None for v1 read-only bridge contract; RAGFlow write/delete/disable remains forbidden without separate approval |
+| RetiredIndexBridge bridge only, not core dependency | implemented and Ubuntu live-smoked for read-only bridge | Core tests pass with disabled bridge; M9 `document_bridge.py` labels RetiredIndexBridge as external read-only evidence and does not override canonical memory; Ubuntu bridge smoke returned `dataset_count=2`, `evidence_count=3`, `status=available` | None for v1 read-only bridge contract; RetiredIndexBridge write/delete/disable remains forbidden without separate approval |
 | Agent-facing read API | implemented and Ubuntu stdio-smoked | `mcp-stdio` exposes `brain_context_resolve`, `brain_memory_search`, `brain_incident_search`, `brain_drift_explain`, `brain_persona_get`, `brain_persona_check`, `brain_evidence_get`; Ubuntu stdio smoke returned `missing=[]`, `tool_count=10` | HTTP adapter is not a v1 interface |
 | Portable Git/Compose/export-import | implemented and Ubuntu container-smoked | `brain-export`/`brain-import` export allowlisted LLM-Brain JSONL tables and specs, excluding raw transcript tables and graph DB files; Ubuntu archive roundtrip returned `roundtrip_ok=true`; Neo4j dump/load returned `episodes=3` | None for v1 portability contract |
 | Docs/runbooks | implemented | `docs/runbooks/LLM_BRAIN_CORE_V1_LOCAL_OPS.md` documents tests, Ubuntu container graph smoke, MCP smoke, export/import, SourceRef scan/resolve, and review gate | Keep current with future production deployment changes |
-| Autopilot safety guard | implemented | `test_autopilot_no_ragflow_client_before_m9.py`; full worker suite and CodeRabbit follow-up review are clean | Maintain gate in future M9+ changes |
+| Autopilot safety guard | implemented | `test_autopilot_no_index_client_before_m9.py`; full worker suite and CodeRabbit follow-up review are clean | Maintain gate in future M9+ changes |
 
 ## Milestone Status
 
 | Milestone | Status | Evidence | Next Action |
 | --- | --- | --- | --- |
-| M0 Design freeze and safety baseline | done | SoT files present; RAGFlow demotion documented | Keep SoT unchanged unless grill-to-spec is re-entered |
+| M0 Design freeze and safety baseline | done | SoT files present; RetiredIndexBridge demotion documented | Keep SoT unchanged unless grill-to-spec is re-entered |
 | M1 Core contracts and safety guards | done | Core models/service/null graph tests pass | Maintain backward compatibility |
-| M2 RAGFlow-free artifact and replay store | done | Artifact/replay tests pass without RAGFlow | Maintain replay compatibility |
+| M2 retired-index-bridge-free artifact and replay store | done | Artifact/replay tests pass without RetiredIndexBridge | Maintain replay compatibility |
 | M3 SourceRef resolver contract | done | SourceRef golden state tests pass; dendrite SourceRef catalog/resolve contract passes | Maintain thin-client/server boundary |
-| M4 ContextPack builder | done | RAGFlow-disabled ContextPack tests pass; graph-only task fallback is covered | Maintain graph-disabled degradation |
+| M4 ContextPack builder | done | RetiredIndexBridge-disabled ContextPack tests pass; graph-only task fallback is covered | Maintain graph-disabled degradation |
 | M5 Incident, drift, persona | done with graph contract and Ubuntu graph smoke | Incident/drift/persona tests pass; ontology projection covers graph adapter input; Ubuntu Graphiti/Neo4j smoke returned matching ontology episodes | Maintain regression coverage |
 | M6a Graph adapter interface and fake backend | done | `FakeGraphMemoryAdapter` contract tests pass | Keep fake as deterministic contract backend |
 | M6b Graphiti/Neo4j dependency approval gate | done | User gave hardgate preapproval; dependency and compose profile are code/docs-backed; destructive live ops still stop | Maintain approval gate for live graph DB mutation |
 | M6c Graphiti/Neo4j Ubuntu integration | done with current-pass live smoke | `GraphitiNeo4jGraphMemoryAdapter`, `GraphProjectionWorker`, and `llm-brain-neo4j` compose profile exist; verification-time Ubuntu Neo4j container was healthy; adapter smoke returned `status=available`; dump/load returned `episodes=3`; current Ubuntu containerized adapter smoke from checked-out worker returned `status=available`, `matched=true`; current dump/load restored `Episodic` nodes with `episodes=4` and did not sync graph DB files between PCs | Keep destructive graph DB operations out of autopilot |
 | M7 Central sync shadow | done for v1 shadow | `CentralBrainShadowRebuilder` deterministically rebuilds derived graph projection from replayed current payloads; Ubuntu worker-container smoke returned `status=succeeded` | Production transport remains outside v1 local milestone |
 | M8 Thin MCP/stdio surface | done | `uv run pytest -q tests/test_neuron_mcp_stdio.py ...` passed | Keep tools read-oriented and backend-neutral |
-| M9 RAGFlow bridge compatibility | done for read-only bridge contract and Ubuntu live smoke | `test_ragflow_bridge_compatibility.py` proves bridge hit is external evidence and bridge outage does not fail ContextPack; Ubuntu RAGFlow bridge smoke returned `dataset_count=2`, `evidence_count=3` | Keep bridge read-only and non-canonical |
+| M9 RetiredIndexBridge bridge compatibility | done for read-only bridge contract and Ubuntu live smoke | `test_index_bridge_compatibility.py` proves bridge hit is external evidence and bridge outage does not fail ContextPack; Ubuntu RetiredIndexBridge bridge smoke returned `dataset_count=2`, `evidence_count=3` | Keep bridge read-only and non-canonical |
 
 ## Current Evidence
 
@@ -172,7 +172,7 @@ Current Ubuntu read-only runtime probes:
     "container": "healthy",
     "spring_health": "UP"
   },
-  "ragflow": {
+  "retired_index_bridge": {
     "container": "running",
     "api_auth_boundary": "401 on /api/v1/datasets",
     "credential_used": false
@@ -295,12 +295,12 @@ Ubuntu `brain-context-resolve` CLI smoke:
 }
 ```
 
-Ubuntu RAGFlow read-only bridge smoke:
+Ubuntu RetiredIndexBridge read-only bridge smoke:
 
 ```json
 {
   "status": "available",
-  "details": ["ragflow_read_only_bridge"],
+  "details": ["index_read_only_bridge"],
   "dataset_count": 2,
   "evidence_count": 3
 }
@@ -388,7 +388,7 @@ tests, thin-client capture code, and SSH control-plane commands.
 - Raw private transcript or raw PC file body is required.
 - Public output would expose raw absolute paths, secrets, dataset ids, document
   ids, or backend-private ids.
-- RAGFlow write/delete/disable is required.
+- RetiredIndexBridge write/delete/disable is required.
 - Docker volume deletion, credential edit, firewall/systemd/package mutation,
   production K3s/Nomad deployment, or central server mutation is required.
 - A required change contradicts `requirements.md` or `design.md`.

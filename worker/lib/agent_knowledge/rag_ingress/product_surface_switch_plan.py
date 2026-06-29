@@ -27,7 +27,7 @@ def build_m9_product_surface_switch_plan(
     state_db_recall: str,
     dataset_ids: tuple[str, ...],
     mcp_server_name: str = "agent_memory",
-    ragflow_url: str = "",
+    index_url: str = "",
     token_env: str = "",
     policy_proxy_url: str = "",
     allow_private_results: bool = True,
@@ -54,14 +54,14 @@ def build_m9_product_surface_switch_plan(
     redaction_map = {
         "ledger_path": "<redacted:ledger-path>",
         "state_db_recall": "<redacted:state-db-recall>",
-        "ragflow_url": "<redacted:ragflow-url>",
+        "index_url": "<redacted:index-url>",
         "policy_proxy_url": "<redacted:policy-proxy-url>",
     }
     mcp_argv = _mcp_argv(
         agent_knowledge_command=agent_knowledge_command,
         ledger_path=redaction_map["ledger_path"],
         dataset_ids=redacted_dataset_ids,
-        ragflow_url=redaction_map["ragflow_url"] if ragflow_url else "",
+        index_url=redaction_map["index_url"] if index_url else "",
         token_env=token_env,
         policy_proxy_url=redaction_map["policy_proxy_url"] if policy_proxy_url else "",
         allow_private_results=allow_private_results,
@@ -72,7 +72,7 @@ def build_m9_product_surface_switch_plan(
         ledger_path=redaction_map["ledger_path"],
         dataset_ids=redacted_dataset_ids,
         project=project,
-        ragflow_url=redaction_map["ragflow_url"] if ragflow_url else "",
+        index_url=redaction_map["index_url"] if index_url else "",
         token_env=token_env,
         policy_proxy_url=redaction_map["policy_proxy_url"] if policy_proxy_url else "",
         allow_private_results=allow_private_results,
@@ -191,7 +191,7 @@ def _mcp_argv(
     agent_knowledge_command: str,
     ledger_path: str,
     dataset_ids: tuple[str, ...],
-    ragflow_url: str,
+    index_url: str,
     token_env: str,
     policy_proxy_url: str,
     allow_private_results: bool,
@@ -200,10 +200,10 @@ def _mcp_argv(
     argv = [agent_knowledge_command, "mcp-stdio", "--ledger", ledger_path]
     for dataset_id in dataset_ids:
         argv.extend(["--dataset-id", dataset_id])
-    if ragflow_url:
-        argv.extend(["--ragflow-url", ragflow_url])
+    if index_url:
+        argv.extend(["--retired-index-bridge-url", index_url])
     if token_env:
-        argv.extend(["--token-env", token_env])
+        argv.extend(["--retired-index-bridge-token-env", token_env])
     if policy_proxy_url:
         argv.extend(["--policy-proxy-url", policy_proxy_url])
     if allow_private_results:
@@ -218,7 +218,7 @@ def _codex_context_hook_argv(
     ledger_path: str,
     dataset_ids: tuple[str, ...],
     project: str,
-    ragflow_url: str,
+    index_url: str,
     token_env: str,
     policy_proxy_url: str,
     allow_private_results: bool,
@@ -228,10 +228,10 @@ def _codex_context_hook_argv(
     argv = [agent_knowledge_command, "codex-context-hook", "--ledger", ledger_path]
     for dataset_id in dataset_ids:
         argv.extend(["--dataset-id", dataset_id])
-    if ragflow_url:
-        argv.extend(["--ragflow-url", ragflow_url])
+    if index_url:
+        argv.extend(["--retired-index-bridge-url", index_url])
     if token_env:
-        argv.extend(["--token-env", token_env])
+        argv.extend(["--retired-index-bridge-token-env", token_env])
     if policy_proxy_url:
         argv.extend(["--policy-proxy-url", policy_proxy_url])
     argv.extend(["--project", project, "--stdin-json"])

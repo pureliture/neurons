@@ -19,7 +19,7 @@ from agent_knowledge.session_memory.memory_regeneration import (
 )
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 DATASET_ID = "ds_private_transcript_memory"
 DOCUMENT_ID = "doc_private_transcript_chunk"
 
@@ -93,7 +93,7 @@ def test_memory_regeneration_module_is_server_core_without_client_cli_wiring():
     assert "agent_knowledge.cli" not in source
     assert "IngressQueueClient" not in source
     assert "outbox_client" not in source
-    assert DEFAULT_SESSION_MEMORY_TARGET_PROFILE == "ragflow-session-memory"
+    assert DEFAULT_SESSION_MEMORY_TARGET_PROFILE == "index-session-memory"
     assert SESSION_MEMORY_DATASET_ROLE == "session-memory"
 
 
@@ -152,7 +152,7 @@ def test_project_memory_document_prioritizes_project_state_before_appendix():
             turn_end_index=2,
             redacted_text=(
                 "Current Runtime State: session-memory runtime gate complete. "
-                "Dataset Shape: project-memory has one workspace-ragflow-advisor.md document. "
+                "Dataset Shape: project-memory has one workspace-index-advisor.md document. "
                 "Active Routes: project-memory writes through memory-regeneration --output project-memory."
             ),
             content_hash="sha256:project-quality-1",
@@ -185,7 +185,7 @@ def test_project_memory_document_prioritizes_project_state_before_appendix():
     ]
     positions = [body.index(section) for section in expected_order]
     assert positions == sorted(positions)
-    assert "workspace-ragflow-advisor" in first_window
+    assert "workspace-index-advisor" in first_window
     assert "project_context_snapshot" in first_window
     assert "runtime_evidence" not in first_window
     assert first_window.count("sha256:") <= 2
@@ -231,8 +231,8 @@ def test_enqueue_mode_calls_queue_sink_with_project_memory_contract(tmp_path):
     assert row["status"] == "queued"
     assert row["ingress_target_profile"] == DEFAULT_PROJECT_MEMORY_TARGET_PROFILE
     assert row["ingress_job_id"] == "job_project_memory_001"
-    assert row["ragflow_dataset_id"] == ""
-    assert row["ragflow_document_id"] == ""
+    assert row["index_target_id"] == ""
+    assert row["index_document_id"] == ""
 
 
 def test_ledger_transcript_source_densifies_sparse_turn_indexes_for_session_memory(tmp_path):

@@ -19,7 +19,7 @@ APPROVAL_REQUIRED_FIELDS = [
     "redaction_required",
     "abort_criteria",
     "rollback_owner",
-    "ragflow_write_approval",
+    "index_write_approval",
 ]
 
 

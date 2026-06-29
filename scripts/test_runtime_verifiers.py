@@ -16,7 +16,7 @@ def load_script(name):
 
 
 runtime_verify = load_script("runtime-verify.py")
-live_verify = load_script("live-ragflow-verify.py")
+live_verify = load_script("live-index-verify.py")
 
 
 class RuntimeVerifyContractTest(unittest.TestCase):
@@ -42,7 +42,7 @@ class RuntimeVerifyContractTest(unittest.TestCase):
             runtime_verify.require_blocked_pressure_queue_retained(evidence, before_messages=3, before_last_seq=8)
 
 
-class LiveRagFlowVerifyContractTest(unittest.TestCase):
+class LiveRetiredIndexBridgeVerifyContractTest(unittest.TestCase):
     def test_document_name_candidates_include_queue_content_hash_suffix(self):
         candidates = live_verify.document_name_candidates(
             "rag_ingress_live_verify_example.md",
@@ -80,7 +80,7 @@ class LiveRagFlowVerifyContractTest(unittest.TestCase):
             return document_id == "doc_1" and project == "neurons"
 
         chunks, authorized_chunks, mode = live_verify.retrieve_authorized_chunks(
-            "http://ragflow",
+            "http://retired_index_bridge",
             "token",
             "dataset",
             "marker",

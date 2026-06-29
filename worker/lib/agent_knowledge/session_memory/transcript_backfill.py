@@ -2,10 +2,10 @@
 
 Historical transcript sessions can sit outside the recent worker shadow-log
 window, so they never enter the session-memory build queue. This helper scans
-RAGFlow read surfaces to find transcript sessions that do not yet have an
+RetiredIndexBridge read surfaces to find transcript sessions that do not yet have an
 active session-memory summary, then seeds the neuron-local dirty-session ledger.
 
-It does not write to RAGFlow or delete transcript documents. The only mutation
+It does not write to RetiredIndexBridge or delete transcript documents. The only mutation
 is local ledger dirty-state seeding for the existing session-memory builder.
 """
 
@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..ledger import Ledger
-from ..ragflow_client import RagflowHttpClient
+from ..index_client import RetiredIndexBridgeHttpClient
 from .transcript_session_gc import _doc_is_active_summary
 
 TRANSCRIPT_BACKFILL_SCHEMA_VERSION = "agent_knowledge_transcript_backfill.v1"
@@ -29,18 +29,18 @@ class TranscriptBackfillConfig:
     ledger_path: Path
     transcript_dataset_id: str
     session_memory_dataset_id: str
-    ragflow_url: str
+    index_url: str
     max_sessions: int = 100
     page_size: int = 100
     max_session_scan_pages: int = 500
     max_transcript_scan_pages: int = 500
 
 
-def _active_summarized_sessions(ragflow, dataset_id: str, *, page_size: int, max_pages: int) -> set[str]:
+def _active_summarized_sessions(retired_index_bridge, dataset_id: str, *, page_size: int, max_pages: int) -> set[str]:
     sessions: set[str] = set()
     for page in range(1, max_pages + 1):
         try:
-            docs = ragflow.list_documents(dataset_id, page=page, page_size=page_size)
+            docs = retired_index_bridge.list_documents(dataset_id, page=page, page_size=page_size)
         except Exception:  # noqa: BLE001 - fail closed: partial read means seed fewer sessions.
             break
         if not docs:
@@ -59,13 +59,13 @@ class TranscriptBackfillRunner:
         self.token = token
 
     def run(self) -> dict:
-        ragflow = RagflowHttpClient(
-            base_url=self.config.ragflow_url,
+        retired_index_bridge = RetiredIndexBridgeHttpClient(
+            base_url=self.config.index_url,
             bearer_token=self.token,
             request_timeout_seconds=45,
         )
         summarized = _active_summarized_sessions(
-            ragflow,
+            retired_index_bridge,
             self.config.session_memory_dataset_id,
             page_size=self.config.page_size,
             max_pages=self.config.max_session_scan_pages,
@@ -75,7 +75,7 @@ class TranscriptBackfillRunner:
         seeded: set[str] = set()
         for page in range(1, self.config.max_transcript_scan_pages + 1):
             try:
-                docs = ragflow.list_documents(
+                docs = retired_index_bridge.list_documents(
                     self.config.transcript_dataset_id,
                     page=page,
                     page_size=self.config.page_size,
@@ -110,7 +110,7 @@ class TranscriptBackfillRunner:
             "seeded_session_count": len(seeded),
             "mutation_performed": bool(seeded),
             "network_used": True,
-            "ragflow_write_performed": False,
+            "index_write_performed": False,
             "raw_ids_printed": False,
         }
 
@@ -123,12 +123,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ledger", required=True, help="neuron-local state ledger")
     parser.add_argument("--transcript-dataset-id", required=True)
     parser.add_argument("--session-memory-dataset-id", required=True)
-    parser.add_argument("--ragflow-url", required=True)
-    parser.add_argument("--token-env", default="RAGFLOW_API_KEY")
+    parser.add_argument("--retired-index-bridge-url", required=True)
+    parser.add_argument("--retired-index-bridge-token-env", default="RETIRED_INDEX_BRIDGE_API_KEY")
     parser.add_argument("--max-sessions", type=int, default=100)
     args = parser.parse_args(raw_argv)
 
-    token = os.environ.get(args.token_env, "")
+    token = os.environ.get(args.retired_index_bridge_token_env, "")
     if not token:
         print("token env is not set", file=sys.stderr)
         return 2
@@ -136,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         ledger_path=Path(args.ledger),
         transcript_dataset_id=args.transcript_dataset_id,
         session_memory_dataset_id=args.session_memory_dataset_id,
-        ragflow_url=args.ragflow_url,
+        index_url=args.retired_index_bridge_url,
         max_sessions=args.max_sessions,
     )
     report = TranscriptBackfillRunner(config=config, token=token).run()

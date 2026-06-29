@@ -9,7 +9,7 @@ from .transcript_model import TranscriptSession, canonicalize_project
 from .transcript_packer import pack_tool_evidence_summary_documents
 from .transcript_parsers import extract_tool_evidence
 
-DEFAULT_TRANSCRIPT_TARGET_PROFILE = "ragflow-transcript-memory"
+DEFAULT_TRANSCRIPT_TARGET_PROFILE = "index-transcript-memory"
 TOOL_EVIDENCE_SYNC_SCHEMA_VERSION = "agent_knowledge_tool_evidence_sync.v1"
 
 
@@ -47,7 +47,7 @@ class ToolEvidenceSyncRunner:
 
     This is the server-owned core split out of the historical mixed
     ``transcript_ingest`` module. It does not import the monolith CLI and it does
-    not perform direct RAGFlow writes; live delivery remains queue-mediated and
+    not perform direct RetiredIndexBridge writes; live delivery remains queue-mediated and
     caller/approval gated.
     """
 
@@ -164,6 +164,6 @@ class ToolEvidenceSyncRunner:
             "statuses": statuses,
             "network_used": self.enqueue_sink is not None,
             "mutation_performed": enqueued > 0,
-            "ragflow_write_performed": False,
-            "raw_ragflow_ids_printed": False,
+            "index_write_performed": False,
+            "raw_index_ids_printed": False,
         }

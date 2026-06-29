@@ -99,11 +99,11 @@ def _normalize_type(raw_type) -> str | None:
     return _TYPE_SYNONYMS.get(candidate_type)
 
 
-def build_ragflow_completion_fn(client, *, llm_id: str = ""):
-    """Adapt a RAGFlow client into a miner ``completion_fn``.
+def build_index_completion_fn(client, *, llm_id: str = ""):
+    """Adapt a RetiredIndexBridge client into a miner ``completion_fn``.
 
     The miner stays backend-neutral: it only knows ``completion_fn(messages) ->
-    str``. This adapter binds the concrete RAGFlow ``chat_completion`` (stateless
+    str``. This adapter binds the concrete RetiredIndexBridge ``chat_completion`` (stateless
     tenant-default chat model; ``llm_id`` optional override) behind that seam.
     """
 
@@ -114,7 +114,7 @@ def build_ragflow_completion_fn(client, *, llm_id: str = ""):
 
 
 class LlmMemoryMiner:
-    """Real miner: an injected ``completion_fn`` (RAGFlow chat completion) extracts
+    """Real miner: an injected ``completion_fn`` (RetiredIndexBridge chat completion) extracts
     typed candidates. The LLM only yields ``(type, statement)`` pairs; assembly
     reuses :func:`build_memory_candidate` so redaction, bounding, evidence_refs,
     sensitivity, and approval_state stay in one place. Live calls are isolated
@@ -252,7 +252,7 @@ def mine_refresh_cycle_candidates(
 
     The input records must already contain redacted summaries and opaque source
     locators from transcript-memory. This function intentionally performs no
-    ledger write, queue write, RAGFlow write, or raw transcript lookup.
+    ledger write, queue write, RetiredIndexBridge write, or raw transcript lookup.
     """
 
     candidates = []

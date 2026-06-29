@@ -18,8 +18,8 @@ from agent_knowledge.rag_ingress.ingress_journal import IngressJournal
 from agent_knowledge.rag_ingress.replay_delivery import replay_deliver_dispositions, validate_replay_payload
 from agent_knowledge.session_memory.transcript_model import TranscriptChunk
 
-PROJECT = "workspace-ragflow-advisor"
-DEFAULT_TRANSCRIPT_TARGET_PROFILE = "ragflow-transcript-memory"
+PROJECT = "workspace-index-advisor"
+DEFAULT_TRANSCRIPT_TARGET_PROFILE = "index-transcript-memory"
 
 
 def _replay_requested_chunk(ledger, *, knowledge_id, chunk_id, session_id_hash, text="replay chunk text"):

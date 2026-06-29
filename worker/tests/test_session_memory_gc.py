@@ -11,7 +11,7 @@ from agent_knowledge.session_memory.session_memory_gc import (
 )
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 SESSION_ID_HASH = "sha256:session-memory-gc-target"
 
 
@@ -44,7 +44,7 @@ def _set_valid_until(ledger: Ledger, knowledge_id: str, *, seconds_ago: int | No
         )
 
 
-class _FakeRagflowGcClient:
+class _FakeRetiredIndexBridgeGcClient:
     def __init__(self, **kwargs):
         self.deleted: list[tuple[str, tuple[str, ...]]] = []
         self.chunks_body: list[str] = ["redacted session memory body line 1", "line 2"]
@@ -120,14 +120,14 @@ def test_session_memory_gc_deletes_disabled_row_only_after_replacement_active(tm
         session_id_hash=SESSION_ID_HASH,
         summary_knowledge_id=active["knowledge_id"],
     )
-    fake = _FakeRagflowGcClient()
-    monkeypatch.setattr(gc_module, "RagflowHttpClient", lambda **kwargs: fake)
+    fake = _FakeRetiredIndexBridgeGcClient()
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", lambda **kwargs: fake)
 
     dry = SessionMemoryGcRunner(
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             execute=False,
         ),
         token="test-token",
@@ -136,7 +136,7 @@ def test_session_memory_gc_deletes_disabled_row_only_after_replacement_active(tm
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             execute=True,
         ),
         token="test-token",
@@ -145,7 +145,7 @@ def test_session_memory_gc_deletes_disabled_row_only_after_replacement_active(tm
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             execute=True,
         ),
         token="test-token",
@@ -173,14 +173,14 @@ def test_session_memory_gc_requires_promoted_dirty_and_active_replacement(tmp_pa
         project=PROJECT,
         reason="gc-test",
     )
-    fake = _FakeRagflowGcClient()
-    monkeypatch.setattr(gc_module, "RagflowHttpClient", lambda **kwargs: fake)
+    fake = _FakeRetiredIndexBridgeGcClient()
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", lambda **kwargs: fake)
 
     report = SessionMemoryGcRunner(
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             execute=True,
         ),
         token="test-token",
@@ -210,14 +210,14 @@ def test_session_memory_gc_floors_min_disabled_age_to_block_fresh_disable(tmp_pa
         session_id_hash=SESSION_ID_HASH,
         summary_knowledge_id=active["knowledge_id"],
     )
-    fake = _FakeRagflowGcClient()
-    monkeypatch.setattr(gc_module, "RagflowHttpClient", lambda **kwargs: fake)
+    fake = _FakeRetiredIndexBridgeGcClient()
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", lambda **kwargs: fake)
 
     blocked = SessionMemoryGcRunner(
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             min_disabled_age_seconds=0,  # caller attempts to bypass the floor
             execute=True,
         ),
@@ -236,7 +236,7 @@ def test_session_memory_gc_floors_min_disabled_age_to_block_fresh_disable(tmp_pa
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             min_disabled_age_seconds=0,
             execute=True,
         ),
@@ -270,15 +270,15 @@ def test_session_memory_gc_requires_authorized_replacement_not_just_active_flag(
         session_id_hash=SESSION_ID_HASH,
         summary_knowledge_id=active["knowledge_id"],
     )
-    fake = _FakeRagflowGcClient()
-    monkeypatch.setattr(gc_module, "RagflowHttpClient", lambda **kwargs: fake)
+    fake = _FakeRetiredIndexBridgeGcClient()
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", lambda **kwargs: fake)
 
     _set_valid_until(ledger, active["knowledge_id"], seconds_ago=3600)  # replacement expired
     blocked = SessionMemoryGcRunner(
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             execute=True,
         ),
         token="test-token",
@@ -292,7 +292,7 @@ def test_session_memory_gc_requires_authorized_replacement_not_just_active_flag(
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             execute=True,
         ),
         token="test-token",
@@ -336,7 +336,7 @@ def test_session_memory_gc_revalidates_each_row_before_delete(tmp_path, monkeypa
 
     active_knowledge_id = active["knowledge_id"]
 
-    class _RotatingFakeRagflowGcClient(_FakeRagflowGcClient):
+    class _RotatingFakeRetiredIndexBridgeGcClient(_FakeRetiredIndexBridgeGcClient):
         def delete_documents(self, dataset_id: str, document_ids: list[str]) -> None:
             # 첫 delete 직후 active replacement를 disable -> snapshot rotation 시뮬레이션
             first = not self.deleted
@@ -344,14 +344,14 @@ def test_session_memory_gc_revalidates_each_row_before_delete(tmp_path, monkeypa
             if first:
                 Ledger(ledger_path).mark_disabled(active_knowledge_id)
 
-    fake = _RotatingFakeRagflowGcClient()
-    monkeypatch.setattr(gc_module, "RagflowHttpClient", lambda **kwargs: fake)
+    fake = _RotatingFakeRetiredIndexBridgeGcClient()
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", lambda **kwargs: fake)
 
     report = SessionMemoryGcRunner(
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             execute=True,
         ),
         token="test-token",
@@ -399,15 +399,15 @@ def test_session_memory_gc_refuses_disallowed_retention_policy(tmp_path, monkeyp
         session_id_hash=SESSION_ID_HASH,
         summary_knowledge_id=active["knowledge_id"],
     )
-    fake = _FakeRagflowGcClient()
-    monkeypatch.setattr(gc_module, "RagflowHttpClient", lambda **kwargs: fake)
+    fake = _FakeRetiredIndexBridgeGcClient()
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", lambda **kwargs: fake)
 
     # transcript-memory의 정책을 선언 -> session GC 허용 집합 밖이므로 거부.
     blocked = SessionMemoryGcRunner(
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             declared_retention_policy="private_indefinite_until_disabled",
             execute=True,
         ),
@@ -444,14 +444,14 @@ def test_session_memory_gc_allows_declared_supersede_policy(tmp_path, monkeypatc
         session_id_hash=SESSION_ID_HASH,
         summary_knowledge_id=active["knowledge_id"],
     )
-    fake = _FakeRagflowGcClient()
-    monkeypatch.setattr(gc_module, "RagflowHttpClient", lambda **kwargs: fake)
+    fake = _FakeRetiredIndexBridgeGcClient()
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", lambda **kwargs: fake)
 
     ok = SessionMemoryGcRunner(
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             declared_dataset_role="session_memory",  # role -> supersede_or_disable
             execute=True,
         ),
@@ -485,14 +485,14 @@ def test_session_memory_gc_absent_policy_keeps_prior_behavior(tmp_path, monkeypa
         session_id_hash=SESSION_ID_HASH,
         summary_knowledge_id=active["knowledge_id"],
     )
-    fake = _FakeRagflowGcClient()
-    monkeypatch.setattr(gc_module, "RagflowHttpClient", lambda **kwargs: fake)
+    fake = _FakeRetiredIndexBridgeGcClient()
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", lambda **kwargs: fake)
 
     report = SessionMemoryGcRunner(
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             execute=True,
         ),
         token="test-token",
@@ -507,7 +507,7 @@ def test_session_memory_gc_absent_policy_keeps_prior_behavior(tmp_path, monkeypa
 
 def test_session_memory_gc_writes_durable_audit_record(tmp_path, monkeypatch):
     # G-3 (M-GC §6, A1/A2/A3): every successful hard delete writes exactly one
-    # append-only audit row. Because the RAGFlow doc is gone after a hard delete,
+    # append-only audit row. Because the RetiredIndexBridge doc is gone after a hard delete,
     # the audit must carry the replacement active_knowledge_id (A2) and the bound
     # epoch markers (E3), and must store only the sha256 hash of the doc id (A3).
     ledger_path = tmp_path / "ledger.sqlite"
@@ -527,14 +527,14 @@ def test_session_memory_gc_writes_durable_audit_record(tmp_path, monkeypatch):
         session_id_hash=SESSION_ID_HASH,
         summary_knowledge_id=active["knowledge_id"],
     )
-    fake = _FakeRagflowGcClient()
-    monkeypatch.setattr(gc_module, "RagflowHttpClient", lambda **kwargs: fake)
+    fake = _FakeRetiredIndexBridgeGcClient()
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", lambda **kwargs: fake)
 
     report = SessionMemoryGcRunner(
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             execute=True,
         ),
         token="test-token",
@@ -562,16 +562,16 @@ def test_session_memory_gc_writes_durable_audit_record(tmp_path, monkeypatch):
     assert audit["age_gate_seconds"] == MIN_DISABLED_AGE_FLOOR_SECONDS
     # A3: only the sha256 hash of the raw doc id is stored, never the raw id.
     expected_hash = hashlib.sha256(b"doc_gc_old_audit").hexdigest()
-    assert audit["ragflow_document_id_hash"] == expected_hash
-    assert len(audit["ragflow_document_id_hash"]) == 64
-    assert audit["ragflow_document_id_hash"] != "doc_gc_old_audit"
+    assert audit["index_document_id_hash"] == expected_hash
+    assert len(audit["index_document_id_hash"]) == 64
+    assert audit["index_document_id_hash"] != "doc_gc_old_audit"
     assert "doc_gc_old_audit" not in json.dumps(audit)
 
 
-class _BombRagflowGcClient:
+class _BombRetiredIndexBridgeGcClient:
     # 생성되기만 해도 실패 -> retention gate가 client 생성 *전에* 거부함을 증명한다.
     def __init__(self, **kwargs):
-        raise AssertionError("RagflowHttpClient must not be constructed when retention policy is blocked")
+        raise AssertionError("RetiredIndexBridgeHttpClient must not be constructed when retention policy is blocked")
 
 
 def test_session_memory_gc_cli_blocks_disallowed_retention_policy(tmp_path, monkeypatch, capsys):
@@ -580,7 +580,7 @@ def test_session_memory_gc_cli_blocks_disallowed_retention_policy(tmp_path, monk
     # 보고한다. BombClient로 client 미생성을 강제 증명한다.
     ledger_path = tmp_path / "ledger.sqlite"
     Ledger(ledger_path)  # ensure schema exists
-    monkeypatch.setattr(gc_module, "RagflowHttpClient", _BombRagflowGcClient)
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", _BombRetiredIndexBridgeGcClient)
 
     exit_code = gc_module.main(
         [
@@ -588,7 +588,7 @@ def test_session_memory_gc_cli_blocks_disallowed_retention_policy(tmp_path, monk
             str(ledger_path),
             "--dataset-id",
             "ds_session_memory",
-            "--ragflow-url",
+            "--retired-index-bridge-url",
             "http://localhost:9380",
             "--declared-retention-policy",
             "private_indefinite_until_disabled",  # transcript policy -> disallowed for session GC
@@ -611,7 +611,7 @@ def test_session_memory_gc_cli_allows_declared_role_dry_run(tmp_path, monkeypatc
     # 않는다(BombClient가 생성되면 실패).
     ledger_path = tmp_path / "ledger.sqlite"
     Ledger(ledger_path)
-    monkeypatch.setattr(gc_module, "RagflowHttpClient", _BombRagflowGcClient)
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", _BombRetiredIndexBridgeGcClient)
 
     exit_code = gc_module.main(
         [
@@ -619,7 +619,7 @@ def test_session_memory_gc_cli_allows_declared_role_dry_run(tmp_path, monkeypatc
             str(ledger_path),
             "--dataset-id",
             "ds_session_memory",
-            "--ragflow-url",
+            "--retired-index-bridge-url",
             "http://localhost:9380",
             "--declared-dataset-role",
             "session_memory",  # -> supersede_or_disable (allowed)
@@ -656,16 +656,16 @@ def test_session_memory_gc_backs_up_before_delete(tmp_path, monkeypatch):
     ledger_path = tmp_path / "ledger.sqlite"
     ledger = Ledger(ledger_path)
     old, active = _bk_eligible_setup(ledger, old_kid="kn_bk_old", old_doc="doc_bk_old_RAW", active_kid="kn_bk_active", active_doc="doc_bk_active")
-    fake = _FakeRagflowGcClient()
+    fake = _FakeRetiredIndexBridgeGcClient()
     fake.chunks_body = ["redacted body A", "redacted body B"]
-    monkeypatch.setattr(gc_module, "RagflowHttpClient", lambda **kwargs: fake)
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", lambda **kwargs: fake)
     bk = tmp_path / "gc-backup"
 
     report = SessionMemoryGcRunner(
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             backup_dir=str(bk),
             execute=True,
         ),
@@ -689,15 +689,15 @@ def test_session_memory_gc_backup_failure_aborts_delete(tmp_path, monkeypatch):
     ledger_path = tmp_path / "ledger.sqlite"
     ledger = Ledger(ledger_path)
     _bk_eligible_setup(ledger, old_kid="kn_bkf_old", old_doc="doc_bkf_old", active_kid="kn_bkf_active", active_doc="doc_bkf_active")
-    fake = _FakeRagflowGcClient()
+    fake = _FakeRetiredIndexBridgeGcClient()
     fake.fail_chunks = True  # backup body fetch fails
-    monkeypatch.setattr(gc_module, "RagflowHttpClient", lambda **kwargs: fake)
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", lambda **kwargs: fake)
 
     report = SessionMemoryGcRunner(
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             backup_dir=str(tmp_path / "gc-backup"),
             execute=True,
         ),
@@ -715,15 +715,15 @@ def test_session_memory_gc_empty_body_aborts_delete(tmp_path, monkeypatch):
     ledger_path = tmp_path / "ledger.sqlite"
     ledger = Ledger(ledger_path)
     _bk_eligible_setup(ledger, old_kid="kn_eb_old", old_doc="doc_eb_old", active_kid="kn_eb_active", active_doc="doc_eb_active")
-    fake = _FakeRagflowGcClient()
+    fake = _FakeRetiredIndexBridgeGcClient()
     fake.chunks_body = []  # document has no parsed chunks -> empty body
-    monkeypatch.setattr(gc_module, "RagflowHttpClient", lambda **kwargs: fake)
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", lambda **kwargs: fake)
 
     report = SessionMemoryGcRunner(
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             backup_dir=str(tmp_path / "gc-backup"),
             execute=True,
         ),
@@ -770,12 +770,12 @@ def test_session_memory_gc_characterization_trace_frozen(tmp_path):
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             backup_dir=str(tmp_path / "gc-backup"),
             execute=True,
         ),
         token="test-token",
-        ragflow_client=rec,
+        index_client=rec,
         now_fn=lambda: frozen,
     ).run()
 
@@ -817,11 +817,11 @@ def test_session_memory_gc_characterization_trace_frozen(tmp_path):
     }
     assert a["dirty_at"] and a["snapshot_updated_at"]  # bound epoch markers wired
     assert a["audit_id"] and a["created_at"]  # volatile: presence only
-    assert a["ragflow_document_id_hash"] and "doc_ch_old" not in a["ragflow_document_id_hash"]
+    assert a["index_document_id_hash"] and "doc_ch_old" not in a["index_document_id_hash"]
 
 
 def test_session_memory_gc_orphan_delete_when_audit_raises(tmp_path, monkeypatch):
-    # A2 orphan-injection 오라클: delete 성공 *후* audit가 raise하면 RAGFlow doc은 이미
+    # A2 orphan-injection 오라클: delete 성공 *후* audit가 raise하면 RetiredIndexBridge doc은 이미
     # 삭제됐는데(비가역) audit row가 없는 orphan 상태가 된다. 이 partial-failure 동작을
     # 특성화로 고정한다(seam 라우팅이 순서/실패경로를 바꾸면 이 테스트가 깨진다).
     frozen = datetime(2026, 6, 16, 0, 0, 0, tzinfo=timezone.utc)
@@ -841,12 +841,12 @@ def test_session_memory_gc_orphan_delete_when_audit_raises(tmp_path, monkeypatch
         config=SessionMemoryGcConfig(
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
-            ragflow_url="http://localhost:9380",
+            index_url="http://localhost:9380",
             backup_dir=str(tmp_path / "gc-backup"),
             execute=True,
         ),
         token="test-token",
-        ragflow_client=rec,
+        index_client=rec,
         now_fn=lambda: frozen,
     ).run()
 

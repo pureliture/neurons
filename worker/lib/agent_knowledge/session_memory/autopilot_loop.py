@@ -6,7 +6,7 @@ that runs at cold start), demote any card a supersede detector flags as replaced
 route blocked candidates to needs_review (out of the canonical accepted set).
 
 Mining (step 1) is deliberately upstream and injected as ``candidates`` so this core
-is fixture-testable without a live RAGFlow/transcript-memory seam. The detector
+is fixture-testable without a live RetiredIndexBridge/transcript-memory seam. The detector
 (supersede detection, step 2) is injected so its algorithm can evolve independently.
 """
 
@@ -64,7 +64,7 @@ def run_autopilot_cycle(
             accepted.append(committed["new_card"])
             superseded.append(committed["superseded_card"])
             # Project the new current card AND re-project the demoted card (currentness=superseded)
-            # so the RAGFlow mirror demotes too (design step 4).
+            # so the RetiredIndexBridge mirror demotes too (design step 4).
             projected_count += _project_cards(
                 service, projection_client, [committed["new_card"], committed["superseded_card"]]
             )
@@ -91,10 +91,10 @@ def run_autopilot_cycle(
 def _autopilot_projection_approval(job: Mapping[str, Any]) -> dict:
     # Self-minted projection approval under standing pre-approval. dry_run_status='dry_run'
     # is required by execute_projection_job even on a live write (means "a dry-run preceded
-    # this", not "no-op") — see ragflow_projection. Forbidden ops are unaffected.
+    # this", not "no-op") — see index_projection. Forbidden ops are unaffected.
     return {
         "approved": True,
-        "operation": "ragflow_projection_write",
+        "operation": "index_projection_write",
         "idempotency_key": job["idempotency_key"],
         "dry_run_status": "dry_run",
         "approved_by": "autopilot",

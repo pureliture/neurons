@@ -2,9 +2,9 @@
 
 Models the staged cutover (design "Live Cutover") as a small state machine:
 
-    SHADOW       -> CouchDB write + RAGFlow transcript-memory write kept as a
+    SHADOW       -> CouchDB write + RetiredIndexBridge transcript-memory write kept as a
                     short-lived comparison-only path.
-    COUCHDB_ONLY -> CouchDB write only; no new RAGFlow transcript-memory write.
+    COUCHDB_ONLY -> CouchDB write only; no new RetiredIndexBridge transcript-memory write.
 
 The transition SHADOW -> COUCHDB_ONLY is gated on a stability verdict: every live
 provider must have proven CouchDB coverage across a mixed provider/project
@@ -13,8 +13,8 @@ Antigravity's CLI and is captured as provider ``antigravity``, so it is covered 
 the antigravity lane (not a separate live provider).
 
 This module contains orchestration logic only. The actual live event stream and
-the real RAGFlow transcript-memory comparison write are injected seams; running
-them against live providers / live RAGFlow is a human-gated operation.
+the real RetiredIndexBridge transcript-memory comparison write are injected seams; running
+them against live providers / live RetiredIndexBridge is a human-gated operation.
 """
 
 from __future__ import annotations
@@ -41,9 +41,9 @@ class CutoverNotReady(RuntimeError):
 
 @runtime_checkable
 class ComparisonSink(Protocol):
-    """Represents the short-lived RAGFlow transcript-memory comparison write.
+    """Represents the short-lived RetiredIndexBridge transcript-memory comparison write.
 
-    A real implementation would perform the comparison-only RAGFlow
+    A real implementation would perform the comparison-only RetiredIndexBridge
     transcript-memory write during the shadow window (human-gated). The default
     recording impl below performs no external write.
     """
@@ -84,14 +84,14 @@ class ShadowCoordinator:
             capture_metadata_project=locator.capture_metadata_project,
             cwd=locator.cwd,
             workspace_marker=locator.workspace_marker,
-            ragflow_project_hint=locator.ragflow_project_hint,
+            index_project_hint=locator.index_project_hint,
             scope="live",
         )
         result = import_historical_source(locator=live_locator, store=self.store)
         couch_written = result.status == ImportStatus.IMPORTED
 
         comparison_recorded = False
-        # The comparison RAGFlow transcript-memory write exists ONLY during the
+        # The comparison RetiredIndexBridge transcript-memory write exists ONLY during the
         # shadow window. In COUCHDB_ONLY there is no new transcript-memory write.
         if self.phase == CutoverPhase.SHADOW and couch_written and self.comparison_sink is not None:
             self.comparison_sink.record_transcript_memory_comparison(

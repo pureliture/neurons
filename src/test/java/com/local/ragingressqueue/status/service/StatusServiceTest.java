@@ -24,7 +24,7 @@ class StatusServiceTest {
 
         assertThat(status).containsEntry("externalStatus", "not_configured");
         assertThat(status.get("target")).isEqualTo(Map.of(
-            "name", "ragflow",
+            "name", "retired_index_bridge",
             "pressure", "CLOSED",
             "running", 0,
             "unstart", 0,
@@ -46,7 +46,7 @@ class StatusServiceTest {
 
         assertThat(status).containsEntry("externalStatus", "configured");
         assertThat(status.get("target")).isEqualTo(Map.of(
-            "name", "ragflow",
+            "name", "retired_index_bridge",
             "pressure", "OPEN",
             "running", 0,
             "unstart", 0,
@@ -61,15 +61,15 @@ class StatusServiceTest {
             new TargetPressureSnapshot(TargetPressure.OPEN, 0, 0, 100, null)
         );
         TargetProfileRegistry registry = new TargetProfileRegistry(Map.of(
-            "custom-ragflow-profile",
-            new TargetProfile("custom-ragflow-profile", BackendKind.RAGFLOW, "custom-role")
+            "custom-index-profile",
+            new TargetProfile("custom-index-profile", BackendKind.RETIRED_INDEX_BRIDGE, "custom-role")
         ));
 
         Map<String, Object> status = new StatusService(adapter, null, registry).currentStatus();
 
-        assertThat(adapter.lastTargetProfile).isEqualTo("custom-ragflow-profile");
+        assertThat(adapter.lastTargetProfile).isEqualTo("custom-index-profile");
         assertThat(status.get("target")).isEqualTo(Map.of(
-            "name", "ragflow",
+            "name", "retired_index_bridge",
             "pressure", "OPEN",
             "running", 0,
             "unstart", 0,
@@ -94,8 +94,8 @@ class StatusServiceTest {
             new TargetPressureSnapshot(TargetPressure.OPEN, 0, 0, 100, null)
         );
         TargetProfileRegistry registry = new TargetProfileRegistry(Map.of(
-            "custom-ragflow-profile",
-            new TargetProfile("custom-ragflow-profile", null, "custom-role")
+            "custom-index-profile",
+            new TargetProfile("custom-index-profile", null, "custom-role")
         ));
 
         assertThatThrownBy(() -> new StatusService(adapter, null, registry))
@@ -104,7 +104,7 @@ class StatusServiceTest {
     }
 
     @Test
-    void configuredLiveStatusReportsThrottledWhenRagFlowBacklogIsHigh() {
+    void configuredLiveStatusReportsThrottledWhenRetiredIndexBridgeBacklogIsHigh() {
         FakeRagTargetAdapter adapter = new FakeRagTargetAdapter(
             new TargetPressureSnapshot(TargetPressure.THROTTLED, 20, 2, 100, null)
         );
@@ -112,7 +112,7 @@ class StatusServiceTest {
         Map<String, Object> status = new StatusService(adapter, null).currentStatus();
 
         assertThat(status.get("target")).isEqualTo(Map.of(
-            "name", "ragflow",
+            "name", "retired_index_bridge",
             "pressure", "THROTTLED",
             "running", 20,
             "unstart", 2,
@@ -129,7 +129,7 @@ class StatusServiceTest {
         Map<String, Object> status = new StatusService(adapter, null).currentStatus();
 
         assertThat(status.get("target")).isEqualTo(Map.of(
-            "name", "ragflow",
+            "name", "retired_index_bridge",
             "pressure", "CLOSED",
             "running", 0,
             "unstart", 0,

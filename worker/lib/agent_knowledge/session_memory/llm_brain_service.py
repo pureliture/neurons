@@ -4,7 +4,7 @@ from typing import Any, Mapping
 
 from .memory_evaluation import apply_auto_acceptance_plan, classify_candidate_block_reason
 from .memory_promotion import commit_supersession, human_approve_memory_card_candidate
-from .ragflow_projection import build_projection_job, execute_projection_job
+from .index_projection import build_projection_job, execute_projection_job
 
 
 class LLMBrainMemoryService:

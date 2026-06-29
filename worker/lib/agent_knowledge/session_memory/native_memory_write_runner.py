@@ -152,7 +152,7 @@ class NativeMemoryMirrorWriteRunner:
 def run_native_memory_sync(
     *,
     ledger: Ledger,
-    ragflow,
+    retired_index_bridge,
     memory_id: str,
     agent_id: str = "native-memory-sync",
     user_id: str = "",
@@ -167,7 +167,7 @@ def run_native_memory_sync(
     """
     store = NativeMemoryMirrorStore(ledger)
     writer = NativeMemoryMirrorWriter(
-        ragflow=ragflow, store=store, memory_id=memory_id, agent_id=agent_id, user_id=user_id
+        retired_index_bridge=retired_index_bridge, store=store, memory_id=memory_id, agent_id=agent_id, user_id=user_id
     )
     write_report = NativeMemoryMirrorWriteRunner(
         ledger=ledger, store=store, writer=writer,
@@ -178,7 +178,7 @@ def run_native_memory_sync(
         reconcile_report = {"status": "skipped_dry_run"}
     else:
         reconcile_report = NativeMemoryReconcileRunner(
-            ragflow=ragflow, store=store,
+            retired_index_bridge=retired_index_bridge, store=store,
             config=NativeMemoryReconcileConfig(memory_id=memory_id, reconcile_top_n=reconcile_top_n),
         ).run()
 
@@ -219,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
 
     report = run_native_memory_sync(
         ledger=Ledger(Path(args.ledger)),
-        ragflow=None,
+        retired_index_bridge=None,
         memory_id=args.native_memory_id,
         agent_id=args.agent_id,
         batch_limit=args.batch_limit,

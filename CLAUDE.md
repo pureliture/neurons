@@ -9,14 +9,13 @@
 - 코드 식별자, CLI 이름, 파일명, endpoint 이름은 영어 원문을 유지한다.
 - `neurons`를 server/brain repo로 다룬다. Mac thin-client 책임은 `dendrite`로
   보낸다.
-- RAGFlow app health, queue/NATS state, worker delivery, ledger/state authority,
+- Qdrant/graph health, queue/NATS state, worker delivery, ledger/state authority,
   recall/product surface를 서로 다른 plane으로 분리해서 판단한다.
 
 ## Claude Guardrails
 
-- `RAGFLOW_API_KEY` 하나만 사용한다. `RAGFLOW_WRITE_TOKEN` /
-  `RAGFLOW_READ_TOKEN`을 새로 만들지 않는다.
-- Live RAGFlow write/delete/disable, live GC, Docker/systemd/firewall/package
+- Retired external index bridge credentials are not part of active runtime configuration.
+- Retired external index bridge write/delete/disable, live GC, Docker/systemd/firewall/package
   mutation은 current evidence, explicit user intent, exact argv, timeout,
   redaction, postcheck, rollback/abort criteria 없이 실행하지 않는다.
 - Healthy runtime에서는 repair/restart를 실행하지 않는다.

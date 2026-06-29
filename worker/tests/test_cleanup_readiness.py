@@ -4,7 +4,7 @@ from agent_knowledge.session_memory.cleanup_readiness import (
 )
 
 
-class FakeRagflow:
+class FakeRetiredIndexBridge:
     def __init__(self, docs_by_dataset_keyword):
         self.docs_by_dataset_keyword = docs_by_dataset_keyword
 
@@ -28,7 +28,7 @@ def _doc(*, run="DONE", project="neurons", agent_id="codex-transcript-capture", 
 
 
 def _config():
-    return CleanupReadinessConfig(ragflow_url="http://ragflow", projects=("neurons", "dendrite"))
+    return CleanupReadinessConfig(index_url="http://retired_index_bridge", projects=("neurons", "dendrite"))
 
 
 def test_cleanup_readiness_blocks_until_corrected_coverage_is_done():
@@ -49,18 +49,18 @@ def test_cleanup_readiness_blocks_until_corrected_coverage_is_done():
                 provider="antigravity",
             )
         ],
-        ("ds_transcript-memory", "workspace-ragflow-advisor"): [
-            _doc(project="workspace-ragflow-advisor", agent_id="ragflow-advisor")
+        ("ds_transcript-memory", "workspace-index-advisor"): [
+            _doc(project="workspace-index-advisor", agent_id="index-advisor")
         ],
         ("ds_session-memory", "neurons"): [
-            _doc(project="neurons", agent_id="ragflow-advisor", provider="antigravity")
+            _doc(project="neurons", agent_id="index-advisor", provider="antigravity")
         ],
-        ("ds_session-memory", "workspace-ragflow-advisor"): [
-            _doc(project="workspace-ragflow-advisor", agent_id="ragflow-advisor")
+        ("ds_session-memory", "workspace-index-advisor"): [
+            _doc(project="workspace-index-advisor", agent_id="index-advisor")
         ],
     }
 
-    report = CleanupReadinessRunner(config=_config(), ragflow=FakeRagflow(docs)).run()
+    report = CleanupReadinessRunner(config=_config(), retired_index_bridge=FakeRetiredIndexBridge(docs)).run()
 
     assert report["status"] == "blocked"
     assert report["mutation_performed"] is False
@@ -83,8 +83,8 @@ def test_cleanup_readiness_ready_requires_pollution_and_corrected_docs():
                 provider="antigravity",
             )
         ],
-        ("ds_transcript-memory", "workspace-ragflow-advisor"): [
-            _doc(project="workspace-ragflow-advisor", agent_id="ragflow-advisor")
+        ("ds_transcript-memory", "workspace-index-advisor"): [
+            _doc(project="workspace-index-advisor", agent_id="index-advisor")
         ],
         ("ds_session-memory", "neurons"): [
             _doc(project="neurons", agent_id="codex-memory-regeneration")
@@ -96,12 +96,12 @@ def test_cleanup_readiness_ready_requires_pollution_and_corrected_docs():
                 provider="antigravity",
             )
         ],
-        ("ds_session-memory", "workspace-ragflow-advisor"): [
-            _doc(project="workspace-ragflow-advisor", agent_id="ragflow-advisor")
+        ("ds_session-memory", "workspace-index-advisor"): [
+            _doc(project="workspace-index-advisor", agent_id="index-advisor")
         ],
     }
 
-    report = CleanupReadinessRunner(config=_config(), ragflow=FakeRagflow(docs)).run()
+    report = CleanupReadinessRunner(config=_config(), retired_index_bridge=FakeRetiredIndexBridge(docs)).run()
 
     assert report["status"] == "ready_for_disable_candidate_refresh"
     assert report["gates"]["ready"] is True
@@ -113,7 +113,7 @@ def test_cleanup_readiness_detects_legacy_agent_inside_correct_project():
     docs = {
         ("ds_transcript-memory", "neurons"): [
             _doc(project="neurons", agent_id="codex-transcript-capture"),
-            _doc(project="neurons", agent_id="ragflow-advisor", provider="codex"),
+            _doc(project="neurons", agent_id="index-advisor", provider="codex"),
         ],
         ("ds_transcript-memory", "dendrite"): [
             _doc(
@@ -134,7 +134,7 @@ def test_cleanup_readiness_detects_legacy_agent_inside_correct_project():
         ],
     }
 
-    report = CleanupReadinessRunner(config=_config(), ragflow=FakeRagflow(docs)).run()
+    report = CleanupReadinessRunner(config=_config(), retired_index_bridge=FakeRetiredIndexBridge(docs)).run()
 
     assert report["status"] == "ready_for_disable_candidate_refresh"
     assert report["gates"]["legacy_pollution_present"] is True

@@ -11,7 +11,7 @@ from agent_knowledge.session_memory.transcript_volume_gc import (
     TranscriptVolumeGcRunner,
 )
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 SESSION = "sha256:vol-sess"
 SM_DS = "ds_session_memory"
 TX_DS = "ds_transcript_memory"
@@ -32,7 +32,7 @@ class _FakeVolClient:
         self.last_keywords = None
 
     def list_documents(self, dataset_id, *, keywords="", page=1, page_size=100):
-        # RAGFlow keyword 검색은 meta가 아니라 이름/내용 매치 → resolver는 session fragment로
+        # RetiredIndexBridge keyword 검색은 meta가 아니라 이름/내용 매치 → resolver는 session fragment로
         # 좁히고 Python에서 meta.content_hash로 거른다. fake은 세션 후보를 모두 돌려주고
         # (keyword 기록만) resolver의 content_hash 매칭을 검증한다.
         self.last_keywords = keywords
@@ -86,7 +86,7 @@ def _cfg(tmp_path, ledger_path, *, execute=False, backup=True):
     return TranscriptVolumeGcConfig(
         ledger_path=ledger_path,
         transcript_dataset_id=TX_DS,
-        ragflow_url="http://localhost:9380",
+        index_url="http://localhost:9380",
         backup_dir=str(tmp_path / "gc-backup") if backup else "",
         execute=execute,
     )
@@ -97,7 +97,7 @@ def test_dryrun_lists_covered_source_hash(tmp_path, monkeypatch):
     ledger_path = tmp_path / "l.sqlite"
     ledger = Ledger(ledger_path)
     _active_sm_covering(ledger, kid="kn_sm5", doc="doc_sm5", source_hash=src, aged=True)
-    monkeypatch.setattr(vol, "RagflowHttpClient", lambda **k: _FakeVolClient())
+    monkeypatch.setattr(vol, "RetiredIndexBridgeHttpClient", lambda **k: _FakeVolClient())
     report = TranscriptVolumeGcRunner(config=_cfg(tmp_path, ledger_path, execute=False), token="t").run()
     assert report["eligible_count"] == 1
     assert report["mode"] == "dry_run"
@@ -111,7 +111,7 @@ def test_execute_backs_up_then_hard_deletes_covered_transcript(tmp_path, monkeyp
     ledger = Ledger(ledger_path)
     active = _active_sm_covering(ledger, kid="kn_sm5", doc="doc_sm5", source_hash=src, aged=True)
     fake = _FakeVolClient(docs_by_hash={src: "doc_tx_RAW_1"})
-    monkeypatch.setattr(vol, "RagflowHttpClient", lambda **k: fake)
+    monkeypatch.setattr(vol, "RetiredIndexBridgeHttpClient", lambda **k: fake)
     report = TranscriptVolumeGcRunner(config=_cfg(tmp_path, ledger_path, execute=True), token="t").run()
     assert report["deleted_count"] == 1
     assert report["backed_up_count"] == 1
@@ -124,9 +124,9 @@ def test_execute_backs_up_then_hard_deletes_covered_transcript(tmp_path, monkeyp
     assert rec["content_hash"] == src
     assert rec["replacement_knowledge_id"] == active["knowledge_id"]
     assert "raw transcript body line 1" in rec["body"]
-    assert "ragflow_document_id" not in rec  # only the hash is persisted, never the raw id
-    assert len(rec["ragflow_document_id_hash"]) == 64
-    # resolver는 content_hash가 아니라 session fragment로 좁힌다(RAGFlow keyword=이름/내용 매치).
+    assert "index_document_id" not in rec  # only the hash is persisted, never the raw id
+    assert len(rec["index_document_id_hash"]) == 64
+    # resolver는 content_hash가 아니라 session fragment로 좁힌다(RetiredIndexBridge keyword=이름/내용 매치).
     assert fake.last_keywords == "vol-sess"
 
 
@@ -136,7 +136,7 @@ def test_resolver_narrows_by_session_fragment_not_content_hash(tmp_path, monkeyp
     ledger = Ledger(ledger_path)
     _active_sm_covering(ledger, kid="kn_sm5", doc="doc_sm5", source_hash=src, aged=True)
     fake = _FakeVolClient(docs_by_hash={src: "doc_tx_1"})
-    monkeypatch.setattr(vol, "RagflowHttpClient", lambda **k: fake)
+    monkeypatch.setattr(vol, "RetiredIndexBridgeHttpClient", lambda **k: fake)
     report = TranscriptVolumeGcRunner(config=_cfg(tmp_path, ledger_path, execute=True), token="t").run()
     assert report["deleted_count"] == 1
     assert fake.last_keywords == "vol-sess"  # SESSION="sha256:vol-sess" -> fragment "vol-sess"
@@ -150,9 +150,9 @@ def test_execute_without_backup_dir_is_blocked(tmp_path, monkeypatch):
     _active_sm_covering(ledger, kid="kn_sm5", doc="doc_sm5", source_hash=src, aged=True)
 
     def _bomb(**k):
-        raise AssertionError("RagflowHttpClient must not be constructed when backup_dir missing")
+        raise AssertionError("RetiredIndexBridgeHttpClient must not be constructed when backup_dir missing")
 
-    monkeypatch.setattr(vol, "RagflowHttpClient", _bomb)
+    monkeypatch.setattr(vol, "RetiredIndexBridgeHttpClient", _bomb)
     report = TranscriptVolumeGcRunner(config=_cfg(tmp_path, ledger_path, execute=True, backup=False), token="t").run()
     assert report["deleted_count"] == 0
     assert report["failed_error_class"] == "backup_dir_required"
@@ -164,8 +164,8 @@ def test_resolve_failsafe_skips_when_no_exact_content_hash_match(tmp_path, monke
     ledger_path = tmp_path / "l.sqlite"
     ledger = Ledger(ledger_path)
     _active_sm_covering(ledger, kid="kn_sm5", doc="doc_sm5", source_hash=src, aged=True)
-    fake = _FakeVolClient(docs_by_hash={})  # no RAGFlow doc carries this content_hash
-    monkeypatch.setattr(vol, "RagflowHttpClient", lambda **k: fake)
+    fake = _FakeVolClient(docs_by_hash={})  # no RetiredIndexBridge doc carries this content_hash
+    monkeypatch.setattr(vol, "RetiredIndexBridgeHttpClient", lambda **k: fake)
     report = TranscriptVolumeGcRunner(config=_cfg(tmp_path, ledger_path, execute=True), token="t").run()
     assert report["eligible_count"] == 1
     assert report["deleted_count"] == 0
@@ -185,7 +185,7 @@ def test_empty_body_aborts_delete(tmp_path, monkeypatch):
             return []
 
     fake = _EmptyBodyClient(docs_by_hash={src: "doc_tx_1"})
-    monkeypatch.setattr(vol, "RagflowHttpClient", lambda **k: fake)
+    monkeypatch.setattr(vol, "RetiredIndexBridgeHttpClient", lambda **k: fake)
     report = TranscriptVolumeGcRunner(config=_cfg(tmp_path, ledger_path, execute=True), token="t").run()
     assert fake.deleted == []
     assert report["deleted_count"] == 0
@@ -197,7 +197,7 @@ def test_fresh_active_below_floor_not_eligible(tmp_path, monkeypatch):
     ledger_path = tmp_path / "l.sqlite"
     ledger = Ledger(ledger_path)
     _active_sm_covering(ledger, kid="kn_sm5", doc="doc_sm5", source_hash=src, aged=False)  # snapshot just now
-    monkeypatch.setattr(vol, "RagflowHttpClient", lambda **k: _FakeVolClient())
+    monkeypatch.setattr(vol, "RetiredIndexBridgeHttpClient", lambda **k: _FakeVolClient())
     report = TranscriptVolumeGcRunner(config=_cfg(tmp_path, ledger_path, execute=True), token="t").run()
     assert report["eligible_count"] == 0
     assert report["deleted_count"] == 0
@@ -233,7 +233,7 @@ def test_transcript_volume_gc_characterization_order_and_no_audit(tmp_path):
     rec = _RecordingVolClient(docs_by_hash={src: "doc_tx_RAW_1"})
 
     report = TranscriptVolumeGcRunner(
-        config=_cfg(tmp_path, ledger_path, execute=True), token="t", ragflow_client=rec
+        config=_cfg(tmp_path, ledger_path, execute=True), token="t", index_client=rec
     ).run()
 
     assert report["deleted_count"] == 1

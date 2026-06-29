@@ -64,7 +64,7 @@ def validate_goal3_live_approval(
     *,
     operation: str,
     dataset_id: str,
-    ragflow_base_url: str,
+    index_base_url: str,
     command_argv: list[str],
     project: str | None = None,
     max_wait_seconds: float | None = None,
@@ -106,8 +106,8 @@ def validate_goal3_live_approval(
     target = payload.get("target") or {}
     if target.get("dataset_id") != dataset_id:
         raise ApprovalError("approval dataset_id mismatch")
-    if str(target.get("ragflow_base_url") or "").rstrip("/") != ragflow_base_url.rstrip("/"):
-        raise ApprovalError("approval ragflow_base_url mismatch")
+    if str(target.get("index_base_url") or "").rstrip("/") != index_base_url.rstrip("/"):
+        raise ApprovalError("approval index_base_url mismatch")
     if project is not None and target.get("project") and target.get("project") != project:
         raise ApprovalError("approval project mismatch")
     if max_wait_seconds is not None and float(max_wait_seconds) > timeout_seconds:

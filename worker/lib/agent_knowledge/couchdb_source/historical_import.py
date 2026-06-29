@@ -78,7 +78,7 @@ class SourceLocator:
     capture_metadata_project: str = ""
     cwd: str = ""
     workspace_marker: str = ""
-    ragflow_project_hint: str = ""
+    index_project_hint: str = ""
     scope: str = "historical"  # historical | live
 
 
@@ -90,7 +90,7 @@ class ImportResult:
     project: str = ""
     project_source: str = ""
     project_ambiguous: bool = False
-    ragflow_project_mismatch: bool = False
+    index_project_mismatch: bool = False
     eligible_for_retirement: bool = False
     conversation_chunk_count: int = 0
     notes: tuple[str, ...] = field(default_factory=tuple)
@@ -123,7 +123,7 @@ def import_historical_source(
             provider_source_path=locator.source_path,
             cwd=locator.cwd,
             workspace_marker=locator.workspace_marker,
-            ragflow_project_hint=locator.ragflow_project_hint,
+            index_project_hint=locator.index_project_hint,
         ),
         server_inference=server_inference,
     )
@@ -143,7 +143,7 @@ def import_historical_source(
             project=resolution.project,
             project_source=resolution.source,
             project_ambiguous=resolution.ambiguous,
-            ragflow_project_mismatch=resolution.ragflow_mismatch,
+            index_project_mismatch=resolution.index_mismatch,
             notes=(_error_class(exc), "excluded_from_retirement"),
         )
 
@@ -162,7 +162,7 @@ def import_historical_source(
             project=resolution.project,
             project_source=resolution.source,
             project_ambiguous=resolution.ambiguous,
-            ragflow_project_mismatch=resolution.ragflow_mismatch,
+            index_project_mismatch=resolution.index_mismatch,
             notes=(str(exc), "no_projection"),
         )
 
@@ -195,7 +195,7 @@ def import_historical_source(
         project=resolution.project,
         project_source=resolution.source,
         project_ambiguous=resolution.ambiguous,
-        ragflow_project_mismatch=resolution.ragflow_mismatch,
+        index_project_mismatch=resolution.index_mismatch,
         eligible_for_retirement=resolution.eligible_for_retirement,
         conversation_chunk_count=len(chunks),
         notes=resolution.notes,
@@ -211,7 +211,7 @@ def import_historical_sources(
     """Import a batch of locators and return an aggregate report.
 
     The report includes a project-mismatch list (resolved project vs the polluted
-    RAGFlow project hint) -- the M2 "project mismatch reporting" deliverable.
+    RetiredIndexBridge project hint) -- the M2 "project mismatch reporting" deliverable.
     """
 
     results = [
@@ -231,7 +231,7 @@ def import_historical_sources(
                 "project_source": r.project_source,
             }
             for r in results
-            if r.ragflow_project_mismatch
+            if r.index_project_mismatch
         ],
         "ambiguous_sessions": [
             {"provider": r.provider, "session_id_hash": r.session_id_hash}

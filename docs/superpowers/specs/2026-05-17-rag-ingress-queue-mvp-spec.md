@@ -7,9 +7,9 @@ Project path: `<repo>`
 
 ## Goal
 
-`rag-ingress-queue`의 첫 구현 단위는 RAGFlow 앞단에 위치하는 범용 write gateway다. Local PC, Mac mini `session-compactor`, Ubuntu `memory-regeneration-runner`가 redacted RAG-ready document ingest 요청을 `POST /v1/ingest/enqueue`로 넣으면, server는 NATS JetStream에 publish하고 worker는 target pressure가 허용될 때만 `RagTargetAdapter`를 통해 downstream RAG target으로 전달한다.
+`rag-ingress-queue`의 첫 구현 단위는 RetiredIndexBridge 앞단에 위치하는 범용 write gateway다. Local PC, Mac mini `session-compactor`, Ubuntu `memory-regeneration-runner`가 redacted RAG-ready document ingest 요청을 `POST /v1/ingest/enqueue`로 넣으면, server는 NATS JetStream에 publish하고 worker는 target pressure가 허용될 때만 `RagTargetAdapter`를 통해 downstream RAG target으로 전달한다.
 
-MVP는 RAGFlow를 첫 target adapter로 포함하되 core server가 RAGFlow-specific field, raw ID, parser status, dataset credential에 결합되지 않도록 한다.
+MVP는 RetiredIndexBridge를 첫 target adapter로 포함하되 core server가 RetiredIndexBridge-specific field, raw ID, parser status, dataset credential에 결합되지 않도록 한다.
 
 ## Source Documents
 
@@ -30,15 +30,15 @@ Documentation lookup note:
 
 ## Non-Goals
 
-- RAGFlow Docker Compose project 수정
-- RAGFlow 내부 Redis, DB, volume 직접 조작
+- RetiredIndexBridge Docker Compose project 수정
+- RetiredIndexBridge 내부 Redis, DB, volume 직접 조작
 - raw transcript body, raw private path, token, raw dataset_id, raw document_id 노출
 - MCP를 bulk ingest write path로 사용
 - Mac-only private locator를 Ubuntu worker가 직접 해석
 - queue worker가 Mac mini `ledger.py`/SQLite를 직접 갱신
 - session summary, task summary, memory card 생성
 - recall/promote authorization 판단
-- RAGFlow Memory/Agent feature 또는 mirror 운영
+- RetiredIndexBridge Memory/Agent feature 또는 mirror 운영
 
 ## Architecture Decisions
 
@@ -47,8 +47,8 @@ Documentation lookup note:
 | Java 25 + Spring Boot 4.x | Spring Boot 4.0.6 공식 요구사항상 Java 25는 지원 범위 안에 있다. | Context7 first, official docs fallback, `architecture` |
 | Virtual threads | `spring.threads.virtual.enabled=true`를 기본 설정으로 두고 worker process에는 `spring.main.keep-alive=true`를 포함한다. | Context7 first, official docs fallback |
 | Queue engine | NATS JetStream `WorkQueuePolicy`, durable pull consumer, explicit ack를 사용한다. | Context7 first, `system-design` |
-| Adapter boundary | Core는 `RagTargetAdapter` contract만 의존하고 `RAGFlowAdapter`를 첫 구현체로 둔다. | `architecture`, `tech-debt` |
-| Dataset routing | `targetProfile`은 configured target profile ID다. 초기 profile은 RAGFlow dataset role에 매핑되지만 raw dataset ID와 adapter-private mapping은 public API에 나오지 않는다. Metadata-only single dataset partitioning은 금지한다. | `system-design` |
+| Adapter boundary | Core는 `RagTargetAdapter` contract만 의존하고 `RetiredIndexBridgeAdapter`를 첫 구현체로 둔다. | `architecture`, `tech-debt` |
+| Dataset routing | `targetProfile`은 configured target profile ID다. 초기 profile은 RetiredIndexBridge dataset role에 매핑되지만 raw dataset ID와 adapter-private mapping은 public API에 나오지 않는다. Metadata-only single dataset partitioning은 금지한다. | `system-design` |
 | Status semantics | `queued`, `delivered`, `indexed`, `authorized`, `recall/promote eligible`을 별도 상태로 유지한다. | `testing-strategy`, `deploy-checklist` |
 
 ## Component Scope
@@ -163,27 +163,27 @@ Accepted request:
   "source": {
     "type": "local_pc",
     "provider": "codex",
-    "project": "workspace-ragflow-advisor"
+    "project": "workspace-index-advisor"
   },
   "payload": {
     "kind": "redacted_rag_ready_document",
     "redactionVersion": "redaction.v2",
     "document": {
-      "filename": "ak-conv-codex-workspace-ragflow-advisor-session-t0001-t0008-redacted.md",
+      "filename": "ak-conv-codex-workspace-index-advisor-session-t0001-t0008-redacted.md",
       "contentType": "text/markdown",
       "body": "---\nschema_version: agent_knowledge_document.v2\nresult_type: conversation_chunk\n---\nredacted conversation chunk",
       "metadata": {
         "schema_version": "agent_knowledge_document.v2",
         "result_type": "conversation_chunk",
         "provider": "codex",
-        "project": "workspace-ragflow-advisor",
+        "project": "workspace-index-advisor",
         "session_id_hash": "sha256:redacted",
         "content_hash": "sha256:redacted"
       }
     }
   },
   "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "targetProfile": "ragflow-transcript-memory",
+  "targetProfile": "index-transcript-memory",
   "kind": "conversation_chunk"
 }
 ```
@@ -204,7 +204,7 @@ Payload contract:
 - Core domain model must preserve a future `redacted_document_ref` extension point.
 - Any future ref must point only to worker-readable, already redacted, target-ready blob storage.
 - Mac-only `private_locator` is not a valid steady-state queue payload.
-- Public API and queue DTO payload kinds must not use `ragflow_*` names.
+- Public API and queue DTO payload kinds must not use `index_*` names.
 
 Validation requirements:
 
@@ -241,7 +241,7 @@ MVP response:
     "deadLetter": 0
   },
   "target": {
-    "name": "ragflow",
+    "name": "retired_index_bridge",
     "pressure": "OPEN"
   }
 }
@@ -251,22 +251,22 @@ MVP response:
 
 ## Target Profiles
 
-| targetProfile | RAGFlow dataset role | document kind |
+| targetProfile | RetiredIndexBridge dataset role | document kind |
 |---|---|---|
-| `ragflow-transcript-memory` | `transcript-memory` | `conversation_chunk` |
-| `ragflow-session-summary` | `session-summary` | `session_summary` |
-| `ragflow-task-summary` | `task-summary` | `task_summary` |
-| `ragflow-approved-memory-card` | `approved-memory-card` | `approved_memory_card` |
+| `index-transcript-memory` | `transcript-memory` | `conversation_chunk` |
+| `index-session-summary` | `session-summary` | `session_summary` |
+| `index-task-summary` | `task-summary` | `task_summary` |
+| `index-approved-memory-card` | `approved-memory-card` | `approved_memory_card` |
 
 Raw dataset IDs are adapter-private and must not appear in generic API output, logs, docs examples, or postcheck summaries.
 
-MCP remains a read/tool plane. If a future MCP ingest tool is added, it must delegate to `rag-ingress-queue /enqueue` and must not call RAGFlow REST directly.
+MCP remains a read/tool plane. If a future MCP ingest tool is added, it must delegate to `rag-ingress-queue /enqueue` and must not call RetiredIndexBridge REST directly.
 
 ## Backpressure Behavior
 
-RAGFlow adapter pressure inputs:
+RetiredIndexBridge adapter pressure inputs:
 
-- RAGFlow health
+- RetiredIndexBridge health
 - `UNSTART` document count
 - `RUNNING` document count
 - stale indexing age/count
@@ -284,9 +284,9 @@ MVP default is fail-closed. New delivery occurs only when pressure is `OPEN`. Fu
 
 ## Status and Authorization Boundaries
 
-- JetStream publish ack means queue accepted the job, not RAGFlow indexed it.
+- JetStream publish ack means queue accepted the job, not RetiredIndexBridge indexed it.
 - JetStream consumer ack means worker finished the queue delivery unit, not recall authorization.
-- RAGFlow `DONE` can map to generic `INDEXED` candidate, not authorization.
+- RetiredIndexBridge `DONE` can map to generic `INDEXED` candidate, not authorization.
 - External document status table authorization pass is required before indexed transcript memory can be used for recall/promote.
 - `Ledger` in this project context means the existing external document status table, not a separate memory store.
 - Queue worker may expose a redacted target status snapshot for an external reconcile client, but must not directly mutate external document status or authorization state.
@@ -302,7 +302,7 @@ Use TDD for every behavior-bearing implementation task.
 | Idempotency/job ID | Unit tests | stable ID from canonical `contentHash`/profile/kind, explicit idempotency key accepted |
 | JetStream publish | Fake publisher contract first, Testcontainers NATS integration next | publish subject mapping, publish ack required, publish failure maps to 503/queued false, durable pull consumer, explicit ack, nak/retry, max_deliver/quarantine candidate |
 | Worker pressure gate | Unit tests | `OPEN` delivers, `THROTTLED` does not create new delivery, `CLOSED` does not deliver |
-| Adapter boundary | Unit tests | core depends on `RagTargetAdapter`, RAGFlow-specific IDs stay private |
+| Adapter boundary | Unit tests | core depends on `RagTargetAdapter`, RetiredIndexBridge-specific IDs stay private |
 | Status/authorization split | Unit tests | `INDEXED` target status never becomes `AUTHORIZED`; external authorization state is separate |
 | Status endpoint | Unit/Web tests | queue counts included, target pressure included, secrets absent |
 | Compose/postcheck | Smoke tests | NATS JetStream starts, API health responds, stream/consumer visible, redacted output scan passes |
@@ -311,9 +311,9 @@ Coverage target for MVP:
 
 - Domain validation and redaction guard: high confidence with focused unit tests
 - API layer: representative Web MVC tests
-- NATS/RAGFlow: fake adapters first, live/Testcontainers smoke after core behavior is green
-- Live RAGFlow smoke is approval-gated and must not run without a separate explicit approval.
-- Live RAGFlow smoke, when approved, proves sanitized upload/status polling/redacted output only; it does not prove external authorization readiness.
+- NATS/RetiredIndexBridge: fake adapters first, live/Testcontainers smoke after core behavior is green
+- Live RetiredIndexBridge smoke is approval-gated and must not run without a separate explicit approval.
+- Live RetiredIndexBridge smoke, when approved, proves sanitized upload/status polling/redacted output only; it does not prove external authorization readiness.
 
 TDD evidence required per implementation task:
 
@@ -334,7 +334,7 @@ Pre-deploy:
 - [ ] No raw token, raw dataset_id, raw document_id, private path, or transcript body appears in examples, logs, API responses, or postcheck output.
 - [ ] NATS stream and durable pull consumer definitions are documented and reproducible.
 - [ ] JetStream limits, local bind/auth posture, and terminal quarantine policy are documented.
-- [ ] RAGFlow compose project is not modified.
+- [ ] RetiredIndexBridge compose project is not modified.
 - [ ] Dependency pins and docs consulted date are recorded in implementation/runbook docs.
 
 Deploy:
@@ -358,11 +358,11 @@ Post-deploy:
 Rollback triggers:
 
 - API starts returning unredacted sensitive fields.
-- Worker writes RAGFlow directly outside `RagTargetAdapter`.
+- Worker writes RetiredIndexBridge directly outside `RagTargetAdapter`.
 - `CLOSED` target pressure still produces delivery attempts.
 - `THROTTLED` target pressure still produces new upload/parse requests.
 - NATS redelivery/dead-letter count rises without bounded retry behavior or quarantine explanation.
-- RAGFlow compose project or volumes are changed by this project.
+- RetiredIndexBridge compose project or volumes are changed by this project.
 
 Rollback owner/procedure:
 
@@ -370,18 +370,18 @@ Rollback owner/procedure:
 - Stop worker first to halt downstream delivery.
 - Keep NATS data intact until queue state is inspected.
 - Restore previous API/worker image or config.
-- Verify RAGFlow compose project, volumes, and direct write paths were not modified.
+- Verify RetiredIndexBridge compose project, volumes, and direct write paths were not modified.
 
 ## Tech Debt Guardrails
 
 | Debt Type | Guardrail |
 |---|---|
-| Architecture debt | Keep core interfaces target-neutral; all RAGFlow-specific mapping stays in adapter package. |
+| Architecture debt | Keep core interfaces target-neutral; all RetiredIndexBridge-specific mapping stays in adapter package. |
 | Code debt | Keep validation, redaction, queue publish, worker delivery, and target adapter responsibilities in separate classes. |
 | Test debt | Require RED/GREEN evidence for validation, pressure, adapter privacy, and status endpoint behavior. |
 | Dependency debt | Use Spring Boot managed dependency versions where possible; document unmanaged NATS client version, docs consulted date, and upgrade/compatibility smoke command. |
 | Documentation debt | Update README/runbook/plan when commands, ports, status fields, or compose service names change. |
-| Infrastructure debt | Compose project must remain separate from RAGFlow; postcheck must prove service, stream, consumer, and pressure status. |
+| Infrastructure debt | Compose project must remain separate from RetiredIndexBridge; postcheck must prove service, stream, consumer, and pressure status. |
 
 ## Phase and Skill Matrix
 
@@ -398,13 +398,13 @@ Rollback owner/procedure:
 ## Acceptance Criteria
 
 1. `POST /v1/ingest/enqueue` accepts valid redacted RAG-ready documents and publishes to JetStream only after validation.
-2. Invalid, `ragflow_*` payload kind, raw target ID, raw token, raw transcript, or private-locator payloads are rejected without leaking sensitive data.
+2. Invalid, `index_*` payload kind, raw target ID, raw token, raw transcript, or private-locator payloads are rejected without leaking sensitive data.
 3. Worker uses a durable pull consumer and checks target pressure before delivery.
 4. `RagTargetAdapter` is the only target delivery boundary visible to core worker code.
-5. RAGFlow-specific raw values are adapter-private.
+5. RetiredIndexBridge-specific raw values are adapter-private.
 6. `/healthz` and `/status` return redacted operator-facing data.
 7. `queued`, `delivered`, `indexed`, external `authorized`, and `recall/promote eligible` are not collapsed into one state.
-8. Separate Docker Compose project can start NATS JetStream, API, and worker without modifying RAGFlow compose.
+8. Separate Docker Compose project can start NATS JetStream, API, and worker without modifying RetiredIndexBridge compose.
 9. Tests cover validation, redaction, idempotency, pressure, adapter privacy, and status output.
 10. README and operator runbook document quick start, config, smoke test, postcheck, rollback triggers, and known non-goals.
 11. MVP fail-closed behavior is proven: only `OPEN` target pressure creates new delivery.

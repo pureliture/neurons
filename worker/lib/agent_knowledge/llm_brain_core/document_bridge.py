@@ -35,15 +35,15 @@ class DisabledDocumentBridge:
         return DocumentBridgeResult(status="disabled", details=("not_part_of_core_read_path",))
 
 
-class RagFlowDocumentBridge:
-    """Read-only RAGFlow document/citation bridge.
+class RetiredIndexBridgeDocumentBridge:
+    """Read-only RetiredIndexBridge document/citation bridge.
 
     The bridge is deliberately search-only. It returns external document
     evidence with no canonical-memory authority and no write/delete methods.
     """
 
-    def __init__(self, *, ragflow: Any, dataset_ids: list[str] | tuple[str, ...]) -> None:
-        self._ragflow = ragflow
+    def __init__(self, *, retired_index_bridge: Any, dataset_ids: list[str] | tuple[str, ...]) -> None:
+        self._retired_index_bridge = retired_index_bridge
         self._dataset_ids = list(dataset_ids)
 
     def search_documents(self, *, query: str, project: str, limit: int = 5) -> DocumentBridgeResult:
@@ -51,7 +51,7 @@ class RagFlowDocumentBridge:
             return DocumentBridgeResult(status="disabled", details=("no_bridge_datasets",))
         bounded = max(1, min(int(limit), 20))
         try:
-            chunks = self._ragflow.retrieve(
+            chunks = self._retired_index_bridge.retrieve(
                 query,
                 self._dataset_ids,
                 filters={"project": project} if project else None,
@@ -63,7 +63,7 @@ class RagFlowDocumentBridge:
         return DocumentBridgeResult(
             status="available" if evidence else "available_empty",
             evidence=evidence,
-            details=("ragflow_read_only_bridge",),
+            details=("index_read_only_bridge",),
         )
 
 
@@ -77,5 +77,5 @@ def _chunk_to_evidence(chunk: dict[str, Any]) -> dict[str, Any]:
         "score": chunk.get("score"),
         "source_ref_id": public_safe_text(str(chunk.get("source_ref_id") or metadata.get("source_ref_id") or ""), max_chars=160),
     }
-    ensure_public_safe(evidence, "RagFlowDocumentBridge.evidence")
+    ensure_public_safe(evidence, "RetiredIndexBridgeDocumentBridge.evidence")
     return evidence
