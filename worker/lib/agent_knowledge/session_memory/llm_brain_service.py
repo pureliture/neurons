@@ -34,8 +34,10 @@ class LLMBrainMemoryService:
             user_reason=user_reason,
             timestamp=timestamp,
         )
-        accepted_card = self.ledger.upsert_llm_brain_memory_card(promotion["accepted_card"])
-        feedback_record = self.ledger.upsert_llm_brain_feedback_record(promotion["feedback_record"])
+        # card + audit 를 한 트랜잭션으로 묶어 부분 커밋을 막는다(#49).
+        with self.ledger._transaction() as tx:
+            accepted_card = tx.upsert_llm_brain_memory_card(promotion["accepted_card"])
+            feedback_record = tx.upsert_llm_brain_feedback_record(promotion["feedback_record"])
         return {
             "schema_version": "llm_brain_human_acceptance_commit.v1",
             "promotion_path": "human_approval",
@@ -93,14 +95,16 @@ class LLMBrainMemoryService:
             decision_id=decision_id,
             timestamp=timestamp,
         )
-        new_card = self.ledger.upsert_llm_brain_memory_card(promotion["accepted_card"])
-        feedback_record = self.ledger.upsert_llm_brain_feedback_record(promotion["feedback_record"])
-        demoted = commit_supersession(
-            old_card,
-            superseded_by=new_card["memory_id"],
-            timestamp=timestamp,
-        )
-        superseded_card = self.ledger.upsert_llm_brain_memory_card(demoted)
+        # new accept + audit + old demote 를 한 트랜잭션으로 묶는다. 중간 실패 시 전부 rollback(#49).
+        with self.ledger._transaction() as tx:
+            new_card = tx.upsert_llm_brain_memory_card(promotion["accepted_card"])
+            feedback_record = tx.upsert_llm_brain_feedback_record(promotion["feedback_record"])
+            demoted = commit_supersession(
+                old_card,
+                superseded_by=new_card["memory_id"],
+                timestamp=timestamp,
+            )
+            superseded_card = tx.upsert_llm_brain_memory_card(demoted)
         return {
             "schema_version": "llm_brain_supersession_commit.v1",
             "canonical_write_performed": True,
