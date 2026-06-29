@@ -12,6 +12,7 @@ from .transcript_model import (
     TranscriptSession,
     TranscriptToolEvent,
     TranscriptTurn,
+    canonicalize_provider,
 )
 
 PARSER_VERSION = "provider-transcript-parser.v1"
@@ -38,7 +39,10 @@ def parse_transcript_source(
     project: str,
     source_locator_hash: str,
 ) -> ParsedTranscript:
-    if provider not in {"claude", "gemini", "codex", "antigravity"}:
+    provider = canonicalize_provider(provider)
+    # hermes has no native transcript format yet; it ingests via the generic
+    # provider_transcript_fixture.v1 path below, like any non-native provider.
+    if provider not in {"claude", "gemini", "codex", "antigravity", "hermes"}:
         raise ValueError(f"unsupported provider: {provider}")
     path = Path(source_path)
     if provider == "claude" and path.suffix.lower() == ".jsonl":
@@ -50,7 +54,7 @@ def parse_transcript_source(
     if provider == "antigravity" and path.suffix.lower() == ".jsonl":
         return _parse_antigravity_native_jsonl(path, project=project, source_locator_hash=source_locator_hash)
     payload = _load_json_source(path)
-    if payload.get("provider") != provider:
+    if canonicalize_provider(payload.get("provider")) != provider:
         raise ValueError("source_parse_failed: provider mismatch")
     if payload.get("schema_version") != "provider_transcript_fixture.v1":
         raise ValueError("source_parse_failed: unsupported fixture schema")

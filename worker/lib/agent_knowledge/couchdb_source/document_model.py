@@ -31,6 +31,7 @@ from ..session_memory.transcript_model import (
     TranscriptChunk,
     TranscriptSession,
     canonicalize_project,
+    canonicalize_provider,
 )
 
 COUCHDB_SOURCE_SCHEMA_VERSION = "couchdb_transcript_source.v1"
@@ -132,10 +133,11 @@ def build_session_id_hash(provider: str, raw_session_id: str) -> str:
     """Canonical session identity hash: ``sha256(f"{provider}:{raw_session_id}")``.
 
     The raw session id is consumed here and never stored; only the hash leaves
-    this function.
+    this function. Provider is normalized so casing drift ("Hermes" vs "hermes")
+    cannot fork session identity between the live and historical ingest paths.
     """
 
-    return sha256_hash(f"{provider}:{raw_session_id}")
+    return sha256_hash(f"{canonicalize_provider(provider)}:{raw_session_id}")
 
 
 def build_source_locator_hash(raw_locator: str) -> str:

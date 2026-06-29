@@ -681,10 +681,10 @@ def test_projection_field_sets_are_stable(tmp_path):
         if i["proposal_kind"] == "candidate"
     )
     assert set(review_item) == {
-        "memory_id", "proposal_kind", "target_memory_id", "card_type", "scope", "project",
-        "provider", "title", "summary", "lifecycle_state", "judgment_state", "approval_state",
-        "currentness", "freshness", "governance_tier", "confidence", "reason", "supersedes",
-        "source_ref_count", "evidence_hash_count",
+        "memory_id", "proposal_kind", "proposed_by", "target_memory_id", "card_type", "scope",
+        "project", "provider", "title", "summary", "lifecycle_state", "judgment_state",
+        "approval_state", "currentness", "freshness", "governance_tier", "confidence", "reason",
+        "supersedes", "source_ref_count", "evidence_hash_count",
     }
 
 

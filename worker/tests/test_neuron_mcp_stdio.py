@@ -653,6 +653,52 @@ def test_mcp_brain_memory_search_normalizes_git_repository_project(tmp_path: Pat
     assert result["results"][0]["summary"] == "한국어로 응답한다"
 
 
+def test_brain_read_paths_do_not_leak_steward_proposals_to_hermes(tmp_path: Path):
+    # Hermes 가 남긴 steward proposal(candidate)은 authoritative read 경로로 새지 않는다.
+    from agent_knowledge.session_memory.brain_steward import BrainStewardService
+
+    service = _service(tmp_path)
+    BrainStewardService(service.ledger).candidate_create(
+        source_span=_source_span(content_hash="sha256:steward-leak-probe"),
+        proposer="hermes",
+    )
+
+    search = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 91,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_MEMORY_SEARCH_TOOL_NAME,
+                "arguments": {"repository": FIXTURE_REPOSITORY, "query": "한국어 응답"},
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    # accepted card 1개만 보이고 proposal 은 결과/직렬화에 등장하지 않는다.
+    assert search["memory_status"]["count"] == 1
+    assert "mem_steward_" not in json.dumps(search, ensure_ascii=False)
+
+    context = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 92,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": "main",
+                    "current_request": "한국어 응답 규칙",
+                    "consumer": "hermes",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    assert "mem_steward_" not in json.dumps(context, ensure_ascii=False)
+
+
 def test_mcp_knowledge_search_caps_limit_at_tool_layer(tmp_path: Path):
     pipeline = _RecordingReadPipeline()
     service = KnowledgeSearchService(
