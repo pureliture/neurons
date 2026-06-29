@@ -33,9 +33,9 @@ def _write(tmp_path, **over):
         content_hash="sha256:abc",
         session_id_hash="sha256:sess",
         provider="codex",
-        project="workspace-ragflow-advisor",
+        project="workspace-index-advisor",
         dataset_id="ds_session_memory",
-        ragflow_document_id="ragflow-doc-RAW-12345",
+        index_document_id="index-doc-RAW-12345",
         body="# session memory rev4\n\nredacted body.",
         replacement_knowledge_id="kn_sm_rev5",
     )
@@ -56,12 +56,12 @@ def test_write_then_read_roundtrip_preserves_body_and_meta(tmp_path):
 
 def test_raw_document_id_never_stored_only_hash(tmp_path):
     path = _write(tmp_path)
-    raw = "ragflow-doc-RAW-12345"
+    raw = "index-doc-RAW-12345"
     on_disk = path.read_text(encoding="utf-8")
     assert raw not in on_disk  # raw id must not be persisted
     rec = read_gc_backup(path)
-    assert "ragflow_document_id" not in rec
-    assert rec["ragflow_document_id_hash"] != raw and len(rec["ragflow_document_id_hash"]) == 64
+    assert "index_document_id" not in rec
+    assert rec["index_document_id_hash"] != raw and len(rec["index_document_id_hash"]) == 64
 
 
 def test_backup_dir_is_private_0700(tmp_path):

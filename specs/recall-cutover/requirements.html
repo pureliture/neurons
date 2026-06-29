@@ -13,13 +13,13 @@ tr:first-child td{background:#f6f0fa;font-weight:600}li{margin:.2em 0}</style><h
 <br>
 <h2>배경 (라이브 증거)</h2>
 <br>
-<li>실행 중 recall은 `neuron-knowledge mcp-stdio --ragflow-direct-recall</li>
+<li>실행 중 recall은 `neuron-knowledge mcp-stdio --retired-index-bridge-direct-recall</li>
 <p>  --dataset-id &lt;transcript-memory&gt;` 로 **transcript-memory(cca3d0)를 직접** 읽는다.</p>
-<li>session-memory(f6c55b, 6668 docs)는 RAGFlow retrieval에서 대표 쿼리 4개 모두</li>
+<li>session-memory(f6c55b, 6668 docs)는 RetiredIndexBridge retrieval에서 대표 쿼리 4개 모두</li>
 <p>  **0 hits** (현재 recall surface로 동작 안 함).</p>
-<li>CouchDB transcript-source에는 3567 세션(clean 3326 + ragflow_fallback 241)이</li>
+<li>CouchDB transcript-source에는 3567 세션(clean 3326 + index_fallback 241)이</li>
 <p>  적재·검증 완료. 14 세션은 leak-blocked로 저장 불가(백업 전용).</p>
-<li>transcript-memory write(delivery)는 `RAGFLOW_DELIVERY_ENABLED=true`로 활성.</li>
+<li>transcript-memory write(delivery)는 `RETIRED_INDEX_BRIDGE_DELIVERY_ENABLED=true`로 활성.</li>
 <li>결론: transcript-memory를 안전하게 삭제(은퇴)하려면, recall을 **동작하는</li>
 <p>  session-memory surface로 컷오버**하는 것이 선결이다.</p>
 <br>
@@ -27,13 +27,13 @@ tr:first-child td{background:#f6f0fa;font-weight:600}li{margin:.2em 0}</style><h
 <br>
 <h3>Q1: 컷오버 후 normal recall의 권위 surface는 무엇인가?</h3>
 <br>
-<p>RAGFlow `session-memory`(f6c55b)다.</p>
+<p>RetiredIndexBridge `session-memory`(f6c55b)다.</p>
 <br>
-<li>design.md 계약: RAGFlow `session-memory`가 brain-facing recall surface이고</li>
+<li>design.md 계약: RetiredIndexBridge `session-memory`가 brain-facing recall surface이고</li>
 <p>  CouchDB는 source/evidence 전용이다. normal recall은 CouchDB evidence fetch에</p>
 <p>  의존하지 않아야 한다.</p>
 <li>따라서 CouchDB-direct recall이나 transcript-memory 유지가 아니라, CouchDB</li>
-<p>  source에서 **derived session-memory**를 RAGFlow에 구축해 recall을 받는다.</p>
+<p>  source에서 **derived session-memory**를 RetiredIndexBridge에 구축해 recall을 받는다.</p>
 <br>
 <h3>Q2: session-memory가 지금 0 hits인 원인 가설과, 컷오버가 보장해야 하는 상태는?</h3>
 <br>
@@ -42,7 +42,7 @@ tr:first-child td{background:#f6f0fa;font-weight:600}li{margin:.2em 0}</style><h
 <p>source 미반영 + retrieval 미동작).</p>
 <br>
 <li>컷오버 done 상태: session-memory가 CouchDB source(conversation + tool evidence</li>
-<p>  요약)에서 재생성되어 **RAGFlow retrieval로 hit가 나오는** 상태여야 한다.</p>
+<p>  요약)에서 재생성되어 **RetiredIndexBridge retrieval로 hit가 나오는** 상태여야 한다.</p>
 <li>단일 docs 수가 아니라 recall smoke 통과가 기준이다.</li>
 <br>
 <h3>Q3: recall 품질 성공 기준(no-regression)은 어떻게 정의하나?</h3>
@@ -71,7 +71,7 @@ tr:first-child td{background:#f6f0fa;font-weight:600}li{margin:.2em 0}</style><h
 <p>신규 transcript는 transcript-memory에 더 이상 write하지 않고 CouchDB source +</p>
 <p>session-memory projection 경로로만 흐른다.</p>
 <br>
-<li>`RAGFLOW_DELIVERY`의 transcript-memory 타깃을 비활성/제거한다.</li>
+<li>`RETIRED_INDEX_BRIDGE_DELIVERY`의 transcript-memory 타깃을 비활성/제거한다.</li>
 <li>신규 세션이 CouchDB로 들어가고 session-memory가 갱신되는지 확인한다(M4 shadow</li>
 <p>  로직 재사용 가능).</p>
 <li>최종 상태에서 transcript-memory 신규 write가 0이어야 한다.</li>
@@ -106,7 +106,7 @@ tr:first-child td{background:#f6f0fa;font-weight:600}li{margin:.2em 0}</style><h
 <br>
 <h2>기능 요구사항</h2>
 <br>
-<li>CouchDB source(3567 세션)에서 RAGFlow `session-memory`를 재생성하고 retrieval</li>
+<li>CouchDB source(3567 세션)에서 RetiredIndexBridge `session-memory`를 재생성하고 retrieval</li>
 <p>  가능 상태(parse 완료)로 만든다.</p>
 <li>recall smoke(대표 쿼리 ≥8)로 session-memory recall이 transcript-memory 대비</li>
 <p>  무회귀임을 검증한다.</p>

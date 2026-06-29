@@ -2,7 +2,7 @@
 
 No projection (gate reads ledger). Uses vertex extraction + vertex embedding join so the
 score reflects semantic coverage of the golden by what is actually mineable from the corpus.
-Run: RAGFLOW_API_KEY=... uv run python eval/gate_measure.py
+Run: RETIRED_INDEX_BRIDGE_API_KEY=... uv run python eval/gate_measure.py
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import os
 import sys
 
 from agent_knowledge.ledger import Ledger
-from agent_knowledge.mcp_server import build_ragflow_client
+from agent_knowledge.mcp_server import build_index_client
 from agent_knowledge.session_memory.autopilot_cli import mine_live_candidates
 from agent_knowledge.session_memory.autopilot_loop import run_autopilot_cycle
 from agent_knowledge.session_memory.brain_query import run_brain_query_v2
@@ -28,12 +28,12 @@ THRESHOLD = float(os.environ.get("GATE_THRESHOLD", "0.78"))
 
 
 def main() -> int:
-    rf = build_ragflow_client(
-        ragflow_url="http://127.0.0.1:19380", token=os.environ["RAGFLOW_API_KEY"], policy_proxy_url=""
+    rf = build_index_client(
+        index_url="http://127.0.0.1:19380", token=os.environ["RETIRED_INDEX_BRIDGE_API_KEY"], policy_proxy_url=""
     )
     ledger = Ledger(os.path.expanduser("~/.autopilot-canary/gate.sqlite"))
 
-    candidates = mine_live_candidates(ragflow=rf, project=PROJECT, limit=LIMIT, max_candidates=2)
+    candidates = mine_live_candidates(retired_index_bridge=rf, project=PROJECT, limit=LIMIT, max_candidates=2)
     run_autopilot_cycle(candidates=candidates, ledger=ledger, refresh_watermark="gate-measure")
     recall = run_brain_query_v2(
         read_model=LegacyLedgerBrainReadModel(ledger),

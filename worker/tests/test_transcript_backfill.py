@@ -7,7 +7,7 @@ from agent_knowledge.session_memory.transcript_backfill import (
 
 SM = "ds_sm"
 TX = "ds_tx"
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
 def _sm(sid, *, status="1", run="DONE"):
@@ -39,13 +39,13 @@ def _cfg(tmp_path, *, max_sessions=100):
         ledger_path=tmp_path / "l.sqlite",
         transcript_dataset_id=TX,
         session_memory_dataset_id=SM,
-        ragflow_url="http://localhost:9380",
+        index_url="http://localhost:9380",
         max_sessions=max_sessions,
     )
 
 
 def _patch(monkeypatch, fake):
-    monkeypatch.setattr(bf, "RagflowHttpClient", lambda **k: fake)
+    monkeypatch.setattr(bf, "RetiredIndexBridgeHttpClient", lambda **k: fake)
 
 
 def test_seeds_only_unsummarized_sessions(tmp_path, monkeypatch):
@@ -57,7 +57,7 @@ def test_seeds_only_unsummarized_sessions(tmp_path, monkeypatch):
     assert rep["seeded_session_count"] == 2
     assert rep["mutation_performed"] is True
     assert rep["network_used"] is True
-    assert rep["ragflow_write_performed"] is False
+    assert rep["index_write_performed"] is False
     assert _dirty_sessions(cfg.ledger_path) == {"S2", "S3"}
 
 

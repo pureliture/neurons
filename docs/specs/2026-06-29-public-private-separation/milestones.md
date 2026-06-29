@@ -6,7 +6,7 @@
 
 ## M2 sanitize current tree (+ .env.example / .gitignore / pyc)
 - status: done
-- evidence: tree leak-scan 0 hits; 12 kept files scrubbed (host alias/home/user paths); 8 invert-path files git rm'd from HEAD; 3 pyc untracked; .env.example RAGFLOW_*/PG/embedding stubs; worker 1253 passed; gradle test green.
+- evidence: tree leak-scan 0 hits; 12 kept files scrubbed (host alias/home/user paths); 8 invert-path files git rm'd from HEAD; 3 pyc untracked; .env.example RETIRED_INDEX_BRIDGE_*/PG/embedding stubs; worker 1253 passed; gradle test green.
 
 ## M3 leak-scanner tool + CI gate
 - status: done

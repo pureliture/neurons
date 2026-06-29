@@ -162,7 +162,7 @@ def test_execute_child_general_exception_is_reported_not_crashed(tmp_path):
 
     def _session(argv):  # type: ignore[no-untyped-def]
         _ = argv
-        raise ConnectionError("ragflow unreachable")
+        raise ConnectionError("retired_index_bridge unreachable")
 
     def _graph(argv):  # type: ignore[no-untyped-def]
         _ = argv

@@ -1,11 +1,11 @@
 """Recoverable-delete backup store for GC hard deletes.
 
-GC가 RAGFlow 문서를 hard delete(session_memory superseded 세대, 또는 covered
+GC가 RetiredIndexBridge 문서를 hard delete(session_memory superseded 세대, 또는 covered
 transcript chunk)하기 *전에* 그 문서의 본문(redacted MD)과 복구에 필요한 메타를
 private(0700) JSON으로 보관한다. 삭제는 이로써 복구 가능해진다: 백업에서 본문을
-RAGFlow에 재업로드 + 재임베딩(parse) + ledger row 복원.
+RetiredIndexBridge에 재업로드 + 재임베딩(parse) + ledger row 복원.
 
-redaction: raw RAGFlow document id는 저장하지 않고 sha256 hex만 남긴다(다른 GC
+redaction: raw RetiredIndexBridge document id는 저장하지 않고 sha256 hex만 남긴다(다른 GC
 redaction 산출물과 정합, `raw_ids_printed: False` 불변과 같은 정책). body는 이미
 redacted된 문서 본문이므로 live 문서와 동일 privacy 등급이며, 보관소는 0700으로 둔다.
 """
@@ -41,7 +41,7 @@ def write_gc_backup(
     provider: str,
     project: str,
     dataset_id: str,
-    ragflow_document_id: str,
+    index_document_id: str,
     body: str,
     replacement_knowledge_id: str = "",
     coverage: list | None = None,
@@ -68,7 +68,7 @@ def write_gc_backup(
         "provider": provider,
         "project": project,
         "dataset_id": dataset_id,
-        "ragflow_document_id_hash": _sha256_hex(ragflow_document_id),
+        "index_document_id_hash": _sha256_hex(index_document_id),
         "body": body,
         "replacement_knowledge_id": replacement_knowledge_id,
         "coverage": coverage or [],
@@ -101,10 +101,10 @@ def list_gc_backups(backup_dir: Path | str, *, kind: str | None = None) -> list[
     return out
 
 
-def restore_gc_backup(ragflow, record: dict, *, dataset_id: str | None = None, parse: bool = True) -> dict:
-    """복구: 백업 본문을 RAGFlow에 재업로드 + 재임베딩(``request_parse``)한다.
+def restore_gc_backup(retired_index_bridge, record: dict, *, dataset_id: str | None = None, parse: bool = True) -> dict:
+    """복구: 백업 본문을 RetiredIndexBridge에 재업로드 + 재임베딩(``request_parse``)한다.
 
-    GC된 콘텐츠를 다시 retrievable 상태로 되돌린다. RAGFlow document id는 재업로드 시
+    GC된 콘텐츠를 다시 retrievable 상태로 되돌린다. RetiredIndexBridge document id는 재업로드 시
     새로 발급되므로(원래 id 부활 아님) 새 id를 돌려준다. ledger linkage 재구성은 별도
     단계(또는 정상 파이프라인 재적재)로 둔다 — 여기서는 "본문+임베딩 복원"까지 책임진다.
     """
@@ -114,11 +114,11 @@ def restore_gc_backup(ragflow, record: dict, *, dataset_id: str | None = None, p
     if not ds:
         raise ValueError("dataset_id is required for restore")
     filename = "gc-restore-" + _safe_name(record.get("knowledge_id") or record.get("content_hash")) + ".md"
-    uploaded = ragflow.upload_document(ds, str(record.get("body") or ""), filename=filename)
+    uploaded = retired_index_bridge.upload_document(ds, str(record.get("body") or ""), filename=filename)
     new_document_id = uploaded.get("document_id") if isinstance(uploaded, dict) else None
     did_parse = False
     if parse and new_document_id:
-        ragflow.request_parse(ds, [new_document_id])
+        retired_index_bridge.request_parse(ds, [new_document_id])
         did_parse = True
     return {
         "restored": bool(new_document_id),
@@ -130,7 +130,7 @@ def restore_gc_backup(ragflow, record: dict, *, dataset_id: str | None = None, p
 
 
 def main(argv: list[str] | None = None) -> int:
-    """복구 CLI: 백업 1건을 RAGFlow에 재적재 + 재임베딩한다(additive, 삭제 아님)."""
+    """복구 CLI: 백업 1건을 RetiredIndexBridge에 재적재 + 재임베딩한다(additive, 삭제 아님)."""
     import argparse
     import json as _json
     import os
@@ -139,20 +139,20 @@ def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     parser = argparse.ArgumentParser(prog="gc-restore")
     parser.add_argument("--backup", required=True, help="path to a gc backup json record")
-    parser.add_argument("--ragflow-url", required=True)
+    parser.add_argument("--retired-index-bridge-url", required=True)
     parser.add_argument("--dataset-id", default="", help="override target dataset id (default: record's)")
-    parser.add_argument("--token-env", default="RAGFLOW_API_KEY")
+    parser.add_argument("--retired-index-bridge-token-env", default="RETIRED_INDEX_BRIDGE_API_KEY")
     parser.add_argument("--no-parse", action="store_true", help="skip re-embedding (request_parse)")
     ns = parser.parse_args(args)
     token = os.environ.get(ns.token_env, "")
     if not token:
         print("token env is not set", file=sys.stderr)
         return 2
-    from ..ragflow_client import RagflowHttpClient
+    from ..index_client import RetiredIndexBridgeHttpClient
 
     record = read_gc_backup(ns.backup)
-    ragflow = RagflowHttpClient(base_url=ns.ragflow_url, bearer_token=token, request_timeout_seconds=45)
-    report = restore_gc_backup(ragflow, record, dataset_id=ns.dataset_id or None, parse=not ns.no_parse)
+    retired_index_bridge = RetiredIndexBridgeHttpClient(base_url=ns.index_url, bearer_token=token, request_timeout_seconds=45)
+    report = restore_gc_backup(retired_index_bridge, record, dataset_id=ns.dataset_id or None, parse=not ns.no_parse)
     report["raw_ids_printed"] = False
     safe = {k: v for k, v in report.items() if k != "new_document_id"}
     safe["new_document_id_present"] = bool(report.get("new_document_id"))

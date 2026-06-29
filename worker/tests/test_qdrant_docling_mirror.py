@@ -5,7 +5,7 @@ import math
 
 import pytest
 
-from agent_knowledge.rag_ingress.index_backend import BackendDocumentHandle, IndexStatus
+from agent_knowledge.rag_ingress.retired_index_bridge import BackendDocumentHandle, IndexStatus
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
     EVIDENCE_PACKET_SCHEMA,
     HashEmbeddingProvider,
@@ -110,7 +110,7 @@ def test_qdrant_docling_adapter_upserts_normalized_markdown_and_reports_status()
     assert result.status == IndexStatus.INDEXED
     stored = client.collections["mirror_test"][result.document_ref]
     assert stored["payload"]["authority"] == MIRROR_AUTHORITY
-    assert stored["payload"]["target_profile"] == "ragflow-session-memory"
+    assert stored["payload"]["target_profile"] == "index-session-memory"
     assert stored["payload"]["content_hash"] == document.content_hash
     assert stored["payload"]["idempotency_key"] == document.idempotency_key
     assert stored["payload"]["text"] == "# Normalized\nLedger stays canonical."
@@ -164,14 +164,14 @@ def test_qdrant_docling_adapter_query_returns_mirror_labeled_hits():
         embedding_provider=HashEmbeddingProvider(size=8),
     )
     adapter.submit_document(_document(body="Qdrant mirror remains non authoritative."))
-    adapter.submit_document(_document(target_profile="ragflow-project-memory", body="Other project mirror."))
+    adapter.submit_document(_document(target_profile="index-project-memory", body="Other project mirror."))
 
-    hits = adapter.query_documents("authoritative mirror", target_profile="ragflow-session-memory")
+    hits = adapter.query_documents("authoritative mirror", target_profile="index-session-memory")
 
     assert len(hits) == 1
     assert hits[0]["authority"] == MIRROR_AUTHORITY
     assert hits[0]["result_type"] == "searchable_mirror"
-    assert hits[0]["target_profile"] == "ragflow-session-memory"
+    assert hits[0]["target_profile"] == "index-session-memory"
     assert hits[0]["canonical_resolution_required"] is True
     assert hits[0]["authority_join_status"] == "not_checked"
     assert "score" in hits[0]
@@ -185,13 +185,13 @@ def test_qdrant_docling_adapter_filters_target_profile_before_limit():
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=HashEmbeddingProvider(size=8),
     )
-    adapter.submit_document(_document(target_profile="ragflow-project-memory", body="alpha beta gamma"))
-    adapter.submit_document(_document(target_profile="ragflow-session-memory", body="alpha beta gamma"))
+    adapter.submit_document(_document(target_profile="index-project-memory", body="alpha beta gamma"))
+    adapter.submit_document(_document(target_profile="index-session-memory", body="alpha beta gamma"))
 
-    hits = adapter.query_mirror_candidates("alpha beta gamma", target_profile="ragflow-session-memory", limit=1)
+    hits = adapter.query_mirror_candidates("alpha beta gamma", target_profile="index-session-memory", limit=1)
 
     assert len(hits) == 1
-    assert hits[0]["target_profile"] == "ragflow-session-memory"
+    assert hits[0]["target_profile"] == "index-session-memory"
 
 
 def test_qdrant_docling_adapter_accepts_list_query_response():
@@ -204,10 +204,10 @@ def test_qdrant_docling_adapter_accepts_list_query_response():
     )
     adapter.submit_document(_document(body="list response shape"))
 
-    hits = adapter.query_mirror_candidates("list response shape", target_profile="ragflow-session-memory")
+    hits = adapter.query_mirror_candidates("list response shape", target_profile="index-session-memory")
 
     assert len(hits) == 1
-    assert hits[0]["target_profile"] == "ragflow-session-memory"
+    assert hits[0]["target_profile"] == "index-session-memory"
 
 
 def test_qdrant_docling_adapter_query_checks_embedding_size():
@@ -316,7 +316,7 @@ def test_searchable_mirror_gate_blocks_failover_without_evidence_packet():
 
     assert report["production_authority_status"] == "NO-GO"
     assert report["comparison_gate_status"] == "blocked_until_valid_evidence_packet"
-    assert report["ragflow_failover_status"] == "blocked_no_live_failover_from_searchable_mirror_gate"
+    assert report["index_failover_status"] == "blocked_no_live_failover_from_searchable_mirror_gate"
     assert "evidence_packet_required" in report["blockers"]
     assert report["canonical_authority"]["ledger_pg_memory_cards"] == "preserved"
 
@@ -348,7 +348,7 @@ def test_searchable_mirror_gate_accepts_valid_packet_without_live_failover():
     assert report["evidence_packet_digest"].startswith("sha256:")
     assert report["comparison_gate_status"] == "ready_for_operator_cutover_packet"
     assert report["production_authority_status"] == "NO-GO"
-    assert report["ragflow_failover_status"] == "blocked_no_live_failover_from_searchable_mirror_gate"
+    assert report["index_failover_status"] == "blocked_no_live_failover_from_searchable_mirror_gate"
 
 
 def test_searchable_mirror_gate_rejects_compare_mismatch():
@@ -415,7 +415,7 @@ def test_searchable_mirror_gate_cli_is_dry_run_redacted_and_no_go(tmp_path, caps
     assert report["raw_paths_printed"] is False
     assert report["production_authority_status"] == "NO-GO"
     assert report["comparison_gate_status"] == "ready_for_operator_cutover_packet"
-    assert report["ragflow_failover_status"] == "blocked_no_live_failover_from_searchable_mirror_gate"
+    assert report["index_failover_status"] == "blocked_no_live_failover_from_searchable_mirror_gate"
 
 
 def test_searchable_mirror_gate_cli_rejects_live_mode(capsys):
@@ -427,7 +427,7 @@ def test_searchable_mirror_gate_cli_rejects_live_mode(capsys):
 
 def _document(
     *,
-    target_profile="ragflow-session-memory",
+    target_profile="index-session-memory",
     body="Qdrant Docling mirror PoC.",
     metadata=None,
 ):
@@ -476,7 +476,7 @@ def _valid_evidence_packet() -> dict:
         "collected_at": "2026-06-21T00:00:00Z",
         "dual_write": {
             "evidence_digest": _digest("dual-write"),
-            "target_profiles": ["ragflow-session-memory"],
+            "target_profiles": ["index-session-memory"],
             "total_count": 2,
         },
         "read_compare": {

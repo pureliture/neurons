@@ -23,7 +23,7 @@ from agent_knowledge.mcp_server import (
     MEMORY_STALE_COMMIT_TOOL_NAME,
     MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
     STEWARD_RESTRICTED_TOOL_NAMES,
-    DisabledRagflowClient,
+    DisabledRetiredIndexBridgeClient,
     KnowledgeSearchService,
     dispatch_tool_call,
 )
@@ -35,7 +35,7 @@ PROJECT = "workspace-steward"
 def _service(tmp_path: Path, *, allow_restricted: bool = False) -> KnowledgeSearchService:
     return KnowledgeSearchService(
         ledger=_ledger(tmp_path),
-        ragflow=DisabledRagflowClient(),
+        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         allow_restricted_steward=allow_restricted,
     )

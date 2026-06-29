@@ -6,19 +6,19 @@ import os
 import sys
 from dataclasses import dataclass
 
-from ..ragflow_client import RagflowHttpClient
+from ..index_client import RetiredIndexBridgeHttpClient
 
 
 CLEANUP_READINESS_SCHEMA_VERSION = "agent_knowledge_cleanup_readiness.v1"
 DEFAULT_PROJECTS = ("neurons", "dendrite")
-LEGACY_PROJECT = "workspace-ragflow-advisor"
-LEGACY_AGENT_ID = "ragflow-advisor"
+LEGACY_PROJECT = "workspace-index-advisor"
+LEGACY_AGENT_ID = "index-advisor"
 
 
 @dataclass(frozen=True)
 class CleanupReadinessConfig:
-    ragflow_url: str
-    token_env: str = "RAGFLOW_API_KEY"
+    index_url: str
+    token_env: str = "RETIRED_INDEX_BRIDGE_API_KEY"
     transcript_dataset_name: str = "transcript-memory"
     session_dataset_name: str = "session-memory"
     projects: tuple[str, ...] = DEFAULT_PROJECTS
@@ -26,9 +26,9 @@ class CleanupReadinessConfig:
 
 
 class CleanupReadinessRunner:
-    def __init__(self, *, config: CleanupReadinessConfig, ragflow: RagflowHttpClient):
+    def __init__(self, *, config: CleanupReadinessConfig, retired_index_bridge: RetiredIndexBridgeHttpClient):
         self.config = config
-        self.ragflow = ragflow
+        self.retired_index_bridge = retired_index_bridge
 
     def run(self) -> dict:
         transcript = self._dataset_report(
@@ -74,10 +74,10 @@ class CleanupReadinessRunner:
         }
 
     def _dataset_report(self, dataset_name: str, keywords: list[str]) -> dict:
-        dataset_id = _resolve_dataset_id(self.ragflow, dataset_name)
+        dataset_id = _resolve_dataset_id(self.retired_index_bridge, dataset_name)
         probes = {}
         for keyword in keywords:
-            docs = self.ragflow.list_documents(
+            docs = self.retired_index_bridge.list_documents(
                 dataset_id,
                 page=1,
                 page_size=max(int(self.config.page_size), 1),
@@ -92,8 +92,8 @@ class CleanupReadinessRunner:
         }
 
 
-def _resolve_dataset_id(ragflow: RagflowHttpClient, dataset_name: str) -> str:
-    for dataset in ragflow.list_datasets(name=dataset_name):
+def _resolve_dataset_id(retired_index_bridge: RetiredIndexBridgeHttpClient, dataset_name: str) -> str:
+    for dataset in retired_index_bridge.list_datasets(name=dataset_name):
         if dataset.get("name") == dataset_name and dataset.get("id"):
             return str(dataset["id"])
     raise RuntimeError(f"dataset not found: {dataset_name}")
@@ -205,7 +205,7 @@ def _next_actions(gates: dict) -> list[str]:
             "prepare private backup path and operator-bound approval argv",
             "run recall regression before any live disable/delete",
         ]
-    actions = ["wait for queue/RAGFlow indexing to settle, then rerun cleanup-readiness"]
+    actions = ["wait for queue/RetiredIndexBridge indexing to settle, then rerun cleanup-readiness"]
     blockers = set(gates.get("blockers") or [])
     if "corrected_session_memory_done_coverage_missing" in blockers:
         actions.append(
@@ -242,33 +242,33 @@ def _parse_projects(value: str) -> tuple[str, ...]:
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="cleanup-readiness")
-    parser.add_argument("--ragflow-url", required=True)
-    parser.add_argument("--token-env", default="RAGFLOW_API_KEY")
+    parser.add_argument("--retired-index-bridge-url", required=True)
+    parser.add_argument("--retired-index-bridge-token-env", default="RETIRED_INDEX_BRIDGE_API_KEY")
     parser.add_argument("--transcript-dataset-name", default="transcript-memory")
     parser.add_argument("--session-dataset-name", default="session-memory")
     parser.add_argument("--projects", default=",".join(DEFAULT_PROJECTS))
     parser.add_argument("--page-size", type=int, default=20)
     args = parser.parse_args(raw_argv)
 
-    token = os.environ.get(args.token_env, "")
+    token = os.environ.get(args.retired_index_bridge_token_env, "")
     if not token:
         print("token env is not set", file=sys.stderr)
         return 2
-    client = RagflowHttpClient(
-        base_url=args.ragflow_url,
+    client = RetiredIndexBridgeHttpClient(
+        base_url=args.retired_index_bridge_url,
         bearer_token=token,
         request_timeout_seconds=25,
     )
     report = CleanupReadinessRunner(
         config=CleanupReadinessConfig(
-            ragflow_url=args.ragflow_url,
-            token_env=args.token_env,
+            index_url=args.retired_index_bridge_url,
+            token_env=args.retired_index_bridge_token_env,
             transcript_dataset_name=args.transcript_dataset_name,
             session_dataset_name=args.session_dataset_name,
             projects=_parse_projects(args.projects),
             page_size=args.page_size,
         ),
-        ragflow=client,
+        retired_index_bridge=client,
     ).run()
     print(json.dumps(report, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
     return 0 if report.get("status") == "ready_for_disable_candidate_refresh" else 1

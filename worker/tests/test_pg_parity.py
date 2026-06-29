@@ -76,7 +76,7 @@ def _run_sequence(ledger) -> dict:
         schema_version="v1",
         mode="execute",
         knowledge_id="kn_old",
-        ragflow_document_id="doc_old",
+        index_document_id="doc_old",
         dataset_id="ds",
         replacement_knowledge_id="kn_active",
         age_gate_seconds=86400,
@@ -95,7 +95,7 @@ def _run_sequence(ledger) -> dict:
         "audit_replacement": audits[0]["replacement_knowledge_id"],
         "audit_age_gate": audits[0]["age_gate_seconds"],
         "audit_mutated": int(audits[0]["mutated"]),
-        "audit_doc_hash": audits[0]["ragflow_document_id_hash"],
+        "audit_doc_hash": audits[0]["index_document_id_hash"],
     }
 
 
@@ -198,7 +198,7 @@ def test_env_switch_routes_ledger_to_postgres(monkeypatch):
     assert isinstance(ledger._db_adapter, PostgresLedgerDbAdapter)
     ledger.record_memory_gc_audit(
         gc_kind="session_memory", operation="env_op", schema_version="v1", mode="execute",
-        knowledge_id="k", ragflow_document_id="d", dataset_id="ds",
+        knowledge_id="k", index_document_id="d", dataset_id="ds",
         replacement_knowledge_id="r", age_gate_seconds=1, mutated=True,
     )
     audits = ledger.list_memory_gc_audit()

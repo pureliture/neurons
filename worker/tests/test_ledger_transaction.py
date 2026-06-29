@@ -6,10 +6,10 @@ from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.memory_card import build_memory_candidate, build_memory_card
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
-def _candidate(statement="Keep RAGFlow core unmodified.", candidate_type="project_decision"):
+def _candidate(statement="Keep RetiredIndexBridge core unmodified.", candidate_type="project_decision"):
     return build_memory_candidate(
         candidate_type=candidate_type,
         statement=statement,

@@ -1,6 +1,6 @@
-"""Materialize RAGFlow session-memory from the CouchDB source plane.
+"""Materialize RetiredIndexBridge session-memory from the CouchDB source plane.
 
-The derived ``session-memory`` document must let normal recall work from RAGFlow
+The derived ``session-memory`` document must let normal recall work from RetiredIndexBridge
 *alone* (requirement: normal recall does not fetch CouchDB evidence refs). So the
 materializer embeds the conversation chunk bodies and the *full* tool evidence
 summaries from the bounded bundles into one public-safe session-memory body.
@@ -22,9 +22,9 @@ from ..session_memory.chunk_overlap import ChunkView, canonicalize_chunk_views
 from .document_model import (
     OwnershipViolation,
     ProjectionStatus,
-    RAGFLOW_RECALL_PROFILE,
+    RETIRED_INDEX_BRIDGE_RECALL_PROFILE,
     SourceDocType,
-    assert_ragflow_target_allowed,
+    assert_index_target_allowed,
     build_coverage_hash,
     build_coverage_manifest_document,
     build_projection_state_document,
@@ -95,7 +95,7 @@ class RecordingSessionMemoryProjector:
         self.calls: list[dict] = []
 
     def project(self, *, target_profile: str, document: dict) -> str:
-        assert_ragflow_target_allowed(target_profile)  # transcript-memory rejected
+        assert_index_target_allowed(target_profile)  # transcript-memory rejected
         ref = "session-memory-ref-" + str(document.get("content_hash", "")).split(":")[-1][:12]
         self.calls.append({"target_profile": target_profile, "content_hash": document.get("content_hash")})
         return ref
@@ -218,7 +218,7 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
         session_id_hash=session_id_hash,
         provider=provider,
         project=project,
-        target_profile=RAGFLOW_RECALL_PROFILE,
+        target_profile=RETIRED_INDEX_BRIDGE_RECALL_PROFILE,
         body=body,
         content_hash=sha256_hash(body),
         conversation_chunk_count=len(chunks),
@@ -235,7 +235,7 @@ def project_session_memory(
     projector: SessionMemoryProjector,
     mirror_sink: "QdrantMirrorSink | None" = None,
 ) -> dict:
-    """Project a materialized session-memory to RAGFlow, recording projection_state.
+    """Project a materialized session-memory to RetiredIndexBridge, recording projection_state.
 
     Fail-closed: a not-fully-materialized session is never projected. A projector
     error leaves the CouchDB source intact and records a failed projection_state.

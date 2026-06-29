@@ -86,8 +86,8 @@ _FULL_COLUMNS = {
     "status",
     "superseded_by",
     "original_content_hash",
-    "ragflow_memory_id",
-    "ragflow_disabled_at",
+    "index_memory_id",
+    "index_disabled_at",
     "created_at",
     "superseded_at",
 }
@@ -105,7 +105,7 @@ def test_upsert_inserts_active_row(tmp_path):
     assert row["session_tag"] == "mem:1001"
     assert row["created_at"] == FIXED.isoformat()
     assert row["superseded_by"] == ""
-    assert row["ragflow_disabled_at"] == ""
+    assert row["index_disabled_at"] == ""
 
 
 def test_upsert_return_is_full_row_not_written_flag(tmp_path):
@@ -247,14 +247,14 @@ def test_list_pending_reconcile_only_superseded_not_disabled(tmp_path):
         statement_id="1002", brain_id="/a", original_content_hash="h2", now=FIXED
     )
     store.mark_superseded("1002", superseded_by="1003", now=LATER)
-    # superseded + ragflow_disabled_at filled (직접 SQL — 후속 reconcile 소관)
+    # superseded + index_disabled_at filled (직접 SQL — 후속 reconcile 소관)
     store.upsert_statement(
         statement_id="1003", brain_id="/a", original_content_hash="h3", now=FIXED
     )
     store.mark_superseded("1003", superseded_by="1004", now=LATER)
     with store._connect() as connection:
         connection.execute(
-            "UPDATE native_memory_mirror SET ragflow_disabled_at=? WHERE statement_id=?",
+            "UPDATE native_memory_mirror SET index_disabled_at=? WHERE statement_id=?",
             (FIXED.isoformat(), "1003"),
         )
     pending = store.list_pending_reconcile()
@@ -307,44 +307,44 @@ def test_reupsert_updates_search_text_and_card_type(tmp_path):
     assert row["created_at"] == FIXED.isoformat()
 
 
-# --- U1(completion): mark_ragflow_disabled ---
+# --- U1(completion): mark_index_disabled ---
 
 
-def test_mark_ragflow_disabled_records_and_drops_from_pending(tmp_path):
+def test_mark_index_disabled_records_and_drops_from_pending(tmp_path):
     store = _store(tmp_path)
     store.upsert_statement(statement_id="1001", brain_id="/a", original_content_hash="h1", now=FIXED)
     store.mark_superseded("1001", superseded_by="1002", now=LATER)
-    assert store.mark_ragflow_disabled("1001", ragflow_disabled_at=LATER.isoformat(), ragflow_memory_id="m1") is True
+    assert store.mark_index_disabled("1001", index_disabled_at=LATER.isoformat(), index_memory_id="m1") is True
     row = store.get_by_session_tags(["mem:1001"])["mem:1001"]
-    assert row["ragflow_disabled_at"] == LATER.isoformat()
-    assert row["ragflow_memory_id"] == "m1"
+    assert row["index_disabled_at"] == LATER.isoformat()
+    assert row["index_memory_id"] == "m1"
     assert store.list_pending_reconcile() == []
 
 
-def test_mark_ragflow_disabled_active_row_returns_false(tmp_path):
+def test_mark_index_disabled_active_row_returns_false(tmp_path):
     store = _store(tmp_path)
     store.upsert_statement(statement_id="1001", brain_id="/a", original_content_hash="h1", now=FIXED)
-    assert store.mark_ragflow_disabled("1001", ragflow_disabled_at=LATER.isoformat()) is False
+    assert store.mark_index_disabled("1001", index_disabled_at=LATER.isoformat()) is False
 
 
-def test_mark_ragflow_disabled_idempotent(tmp_path):
+def test_mark_index_disabled_idempotent(tmp_path):
     store = _store(tmp_path)
     store.upsert_statement(statement_id="1001", brain_id="/a", original_content_hash="h1", now=FIXED)
     store.mark_superseded("1001", superseded_by="1002", now=LATER)
-    assert store.mark_ragflow_disabled("1001", ragflow_disabled_at=LATER.isoformat()) is True
-    assert store.mark_ragflow_disabled("1001", ragflow_disabled_at=FIXED.isoformat()) is False
+    assert store.mark_index_disabled("1001", index_disabled_at=LATER.isoformat()) is True
+    assert store.mark_index_disabled("1001", index_disabled_at=FIXED.isoformat()) is False
 
 
-def test_mark_ragflow_disabled_does_not_overwrite_existing_memory_id(tmp_path):
+def test_mark_index_disabled_does_not_overwrite_existing_memory_id(tmp_path):
     store = _store(tmp_path)
     store.upsert_statement(
         statement_id="1001", brain_id="/a", original_content_hash="h1",
-        ragflow_memory_id="existing", now=FIXED,
+        index_memory_id="existing", now=FIXED,
     )
     store.mark_superseded("1001", superseded_by="1002", now=LATER)
-    store.mark_ragflow_disabled("1001", ragflow_disabled_at=LATER.isoformat(), ragflow_memory_id="new")
+    store.mark_index_disabled("1001", index_disabled_at=LATER.isoformat(), index_memory_id="new")
     row = store.get_by_session_tags(["mem:1001"])["mem:1001"]
-    assert row["ragflow_memory_id"] == "existing"
+    assert row["index_memory_id"] == "existing"
 
 
 # --- Phase 1: list_active_statements (supersede-sync 입력) ---

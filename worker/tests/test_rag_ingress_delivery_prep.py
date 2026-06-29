@@ -3,8 +3,8 @@
 Covers:
 - Slice A: delivery_payloads persistence (record/get/conflict/fill-gap) and the
   fail-closed triple-hash recovery gate.
-- Slice B: RagflowDeliveryBackend submit/uncertain/retryable/payload-unavailable
-  mapping over a fake IndexBackendAdapter (no network anywhere).
+- Slice B: RetiredIndexBridgeDeliveryBackend submit/uncertain/retryable/payload-unavailable
+  mapping over a fake RetiredIndexBridgeAdapter (no network anywhere).
 - Slice C: drain_pending_deliveries dry-run-first contract + live counters via a
   fake DeliveryBackend.
 """
@@ -20,7 +20,7 @@ from agent_knowledge.rag_ingress.delivery_backend import (
     PAYLOAD_HASH_MISMATCH,
     PAYLOAD_MISSING,
     PAYLOAD_OK,
-    RagflowDeliveryBackend,
+    RetiredIndexBridgeDeliveryBackend,
     resolve_delivery_payload,
 )
 from agent_knowledge.rag_ingress.delivery_drain import drain_pending_deliveries
@@ -29,7 +29,7 @@ from agent_knowledge.rag_ingress.delivery_executor import (
     DeliveryExecutor,
     DeliveryOutcomeUncertain,
 )
-from agent_knowledge.rag_ingress.index_backend import (
+from agent_knowledge.rag_ingress.retired_index_bridge import (
     BackendDocumentHandle,
     BackendStatusDetail,
     BackendSubmitResult,
@@ -54,7 +54,7 @@ def _payload(*, key="k1", body="hello delivery body"):
             },
         },
         "contentHash": "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest(),
-        "targetProfile": "ragflow-transcript-memory",
+        "targetProfile": "index-transcript-memory",
         "kind": "conversation_chunk",
         "idempotencyKey": key,
     }
@@ -152,7 +152,7 @@ def test_resolve_delivery_payload_detects_tampered_body(tmp_path):
     assert gate == PAYLOAD_HASH_MISMATCH
 
 
-# ---- Slice B: RagflowDeliveryBackend ----
+# ---- Slice B: RetiredIndexBridgeDeliveryBackend ----
 
 class _FakeIndexAdapter:
     def __init__(self, *, result=None, error=None, detail=None, natural_key_handle=None):
@@ -194,7 +194,7 @@ def test_backend_submit_success_returns_succeeded_evidence(tmp_path):
     adapter = _FakeIndexAdapter(
         result=BackendSubmitResult(dataset_ref="ds_1", document_ref="doc_1", status=IndexStatus.PENDING)
     )
-    backend = RagflowDeliveryBackend(state_db=state_db, index_backend=adapter)
+    backend = RetiredIndexBridgeDeliveryBackend(state_db=state_db, retired_index_bridge=adapter)
 
     evidence = backend.submit(_job_view(state_db, "kf"))
 
@@ -216,7 +216,7 @@ def test_backend_submit_reuses_existing_natural_key_without_upload(tmp_path):
         natural_key_handle=BackendDocumentHandle(dataset_ref="ds_existing", document_ref="doc_existing"),
         detail=BackendStatusDetail(status=IndexStatus.INDEXED, progress=1.0, backend_raw_status="DONE"),
     )
-    backend = RagflowDeliveryBackend(state_db=state_db, index_backend=adapter)
+    backend = RetiredIndexBridgeDeliveryBackend(state_db=state_db, retired_index_bridge=adapter)
 
     evidence = backend.submit(_job_view(state_db, "k_existing"))
 
@@ -226,7 +226,7 @@ def test_backend_submit_reuses_existing_natural_key_without_upload(tmp_path):
     assert evidence.run == "DONE"
     assert adapter.submitted == []
     assert adapter.natural_key_calls == [
-        ("ragflow-transcript-memory", "k_existing", payload["contentHash"])
+        ("index-transcript-memory", "k_existing", payload["contentHash"])
     ]
 
 
@@ -234,7 +234,7 @@ def test_backend_submit_exception_raises_uncertain(tmp_path):
     state_db = _state_db(tmp_path)
     _seed(state_db, _payload(key="kg", body="body g"))
     adapter = _FakeIndexAdapter(error=TimeoutError("mid-flight"))
-    backend = RagflowDeliveryBackend(state_db=state_db, index_backend=adapter)
+    backend = RetiredIndexBridgeDeliveryBackend(state_db=state_db, retired_index_bridge=adapter)
 
     with pytest.raises(DeliveryOutcomeUncertain):
         backend.submit(_job_view(state_db, "kg"))
@@ -246,7 +246,7 @@ def test_backend_explicit_failed_maps_to_retryable(tmp_path):
     adapter = _FakeIndexAdapter(
         result=BackendSubmitResult(dataset_ref="ds", document_ref="doc", status=IndexStatus.FAILED)
     )
-    backend = RagflowDeliveryBackend(state_db=state_db, index_backend=adapter)
+    backend = RetiredIndexBridgeDeliveryBackend(state_db=state_db, retired_index_bridge=adapter)
 
     evidence = backend.submit(_job_view(state_db, "kh"))
     assert evidence.status == "failed_retryable"
@@ -260,7 +260,7 @@ def test_backend_missing_payload_is_distinct_status_and_no_submit(tmp_path):
     adapter = _FakeIndexAdapter(
         result=BackendSubmitResult(dataset_ref="ds", document_ref="doc", status=IndexStatus.PENDING)
     )
-    backend = RagflowDeliveryBackend(state_db=state_db, index_backend=adapter)
+    backend = RetiredIndexBridgeDeliveryBackend(state_db=state_db, retired_index_bridge=adapter)
 
     evidence = backend.submit(_job_view(state_db, "ki"))
 
@@ -272,8 +272,8 @@ def test_backend_with_executor_quarantines_after_uncertain_cap(tmp_path):
     state_db = _state_db(tmp_path)
     payload = _payload(key="kj", body="body j")
     _seed(state_db, payload)
-    backend = RagflowDeliveryBackend(
-        state_db=state_db, index_backend=_FakeIndexAdapter(error=TimeoutError("boom"))
+    backend = RetiredIndexBridgeDeliveryBackend(
+        state_db=state_db, retired_index_bridge=_FakeIndexAdapter(error=TimeoutError("boom"))
     )
     executor = DeliveryExecutor(state_db=state_db, backend=backend, lease_owner="t")
 
@@ -292,7 +292,7 @@ def test_backend_find_by_natural_key_returns_status_evidence(tmp_path):
         natural_key_handle=BackendDocumentHandle(dataset_ref="ds_lookup", document_ref="doc_lookup"),
         detail=BackendStatusDetail(status=IndexStatus.INDEXING, progress=0.2, backend_raw_status="RUNNING"),
     )
-    backend = RagflowDeliveryBackend(state_db=state_db, index_backend=adapter)
+    backend = RetiredIndexBridgeDeliveryBackend(state_db=state_db, retired_index_bridge=adapter)
 
     evidence = backend.find_by_natural_key("kk", payload["contentHash"])
 
@@ -302,15 +302,15 @@ def test_backend_find_by_natural_key_returns_status_evidence(tmp_path):
     assert evidence.document_ref == "doc_lookup"
     assert evidence.run == "RUNNING"
     assert adapter.natural_key_calls == [
-        ("ragflow-transcript-memory", "kk", payload["contentHash"])
+        ("index-transcript-memory", "kk", payload["contentHash"])
     ]
 
 
 def test_backend_find_by_natural_key_is_none_for_unknown_or_mismatched_job(tmp_path):
     state_db = _state_db(tmp_path)
-    backend = RagflowDeliveryBackend(
+    backend = RetiredIndexBridgeDeliveryBackend(
         state_db=state_db,
-        index_backend=_FakeIndexAdapter(
+        retired_index_bridge=_FakeIndexAdapter(
             natural_key_handle=BackendDocumentHandle(dataset_ref="ds", document_ref="doc"),
             detail=BackendStatusDetail(status=IndexStatus.INDEXED, progress=1.0, backend_raw_status="DONE"),
         ),
@@ -320,9 +320,9 @@ def test_backend_find_by_natural_key_is_none_for_unknown_or_mismatched_job(tmp_p
 
 def test_backend_status_maps_detail(tmp_path):
     state_db = _state_db(tmp_path)
-    backend = RagflowDeliveryBackend(
+    backend = RetiredIndexBridgeDeliveryBackend(
         state_db=state_db,
-        index_backend=_FakeIndexAdapter(
+        retired_index_bridge=_FakeIndexAdapter(
             detail=BackendStatusDetail(status=IndexStatus.INDEXED, progress=1.0, backend_raw_status="DONE")
         ),
     )

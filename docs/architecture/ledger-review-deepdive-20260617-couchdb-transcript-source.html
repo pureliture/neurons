@@ -31,11 +31,11 @@
       <div class="wrap">
         <p class="eyebrow">Ledger deepdive update</p>
         <h1>CouchDB Transcript Source Migration</h1>
-        <p class="lead">원본 ledger deepdive HTML은 보존하고, RAGFlow transcript-memory 완전 은퇴와 CouchDB source/evidence store 전환 기준을 별도 갱신본으로 정리한다.</p>
+        <p class="lead">원본 ledger deepdive HTML은 보존하고, RetiredIndexBridge transcript-memory 완전 은퇴와 CouchDB source/evidence store 전환 기준을 별도 갱신본으로 정리한다.</p>
         <div class="chips">
           <span class="chip">Original preserved: docs/architecture/ledger-review-deepdive-20260614.html</span>
           <span class="chip">Generated: 2026-06-17</span>
-          <span class="chip">RAGFlow target: session-memory only</span>
+          <span class="chip">RetiredIndexBridge target: session-memory only</span>
           <span class="chip">CouchDB: transcript/tool evidence source</span>
         </div>
       </div>
@@ -45,7 +45,7 @@
       <div class="warning"><strong>Preservation rule:</strong> this file does not overwrite the original 2026-06-14 ledger deepdive. It is the CouchDB transcript-source migration update.</div>
       <h1>CouchDB Transcript Source Migration Design Spec</h1>
 <h2>Overview</h2>
-<p><code>transcript-memory</code>를 RAGFlow dataset에서 CouchDB-backed source/evidence store로 이전한다. RAGFlow는 normal brain path에서 <code>session-memory</code>만 제공하며, CouchDB는 transcript/tool evidence의 rebuild, audit, rollback source로 남는다.</p>
+<p><code>transcript-memory</code>를 RetiredIndexBridge dataset에서 CouchDB-backed source/evidence store로 이전한다. RetiredIndexBridge는 normal brain path에서 <code>session-memory</code>만 제공하며, CouchDB는 transcript/tool evidence의 rebuild, audit, rollback source로 남는다.</p>
 <h2>Requirements Reference</h2>
 <ul>
 <li>Phase 1 source: <code>requirements.md</code></li>
@@ -54,20 +54,20 @@
 <li>Updated architecture artifact: <code>docs/architecture/ledger-review-deepdive-20260617-couchdb-transcript-source.html</code></li>
 <li>핵심 요구사항:</li>
 </ul>
-<p>  - RAGFlow <code>transcript-memory</code> 신규 write/read 의존을 완전히 제거한다.</p>
-<p>  - Provider 원본 transcript를 기준 source로 삼고 RAGFlow/ledger는 coverage 검증에 쓴다.</p>
-<p>  - RAGFlow에는 <code>session-memory</code>만 남긴다.</p>
+<p>  - RetiredIndexBridge <code>transcript-memory</code> 신규 write/read 의존을 완전히 제거한다.</p>
+<p>  - Provider 원본 transcript를 기준 source로 삼고 RetiredIndexBridge/ledger는 coverage 검증에 쓴다.</p>
+<p>  - RetiredIndexBridge에는 <code>session-memory</code>만 남긴다.</p>
 <p>  - <code>tool_evidence_summary</code>는 bounded bundle로 CouchDB에 보존하고, <code>session-memory</code>에는 충분히 materialize한다.</p>
 <p>  - Codex, Claude Code, Gemini CLI, agy, Antigravity를 migration 대상으로 한다.</p>
 <p>  - Gemini CLI는 historical import only이고, Codex/Claude Code/agy/Antigravity는 live pipeline cutover까지 완료 기준에 포함한다.</p>
 <h2>Approach Proposal</h2>
-<h3>Recommended: CouchDB Source Store + RAGFlow Session Ontology</h3>
-<p>Provider 원본 transcript를 다시 parse/redact/rebuild해 CouchDB에 source/evidence document로 저장한다. <code>session-memory</code> builder는 CouchDB source를 읽어 tool evidence를 충분히 materialize한 session-memory document를 만들고, RAGFlow에는 이 derived <code>session-memory</code>만 project한다.</p>
-<p>장점은 RAGFlow가 Palantir Ontology처럼 brain-facing recall surface로 유지되고, CouchDB가 noisy source/evidence lifecycle을 전담한다는 점이다. 단점은 migration 동안 CouchDB source model, coverage verifier, RAGFlow projection gate를 함께 도입해야 한다는 점이다.</p>
-<h3>Alternative: RAGFlow Metadata Repair First</h3>
-<p>기존 RAGFlow <code>transcript-memory</code>의 project metadata를 보정한 뒤 CouchDB로 옮긴다. 초기 구현은 줄지만, 이미 오염된 RAGFlow metadata를 migration source로 재사용하는 위험이 크다.</p>
+<h3>Recommended: CouchDB Source Store + RetiredIndexBridge Session Ontology</h3>
+<p>Provider 원본 transcript를 다시 parse/redact/rebuild해 CouchDB에 source/evidence document로 저장한다. <code>session-memory</code> builder는 CouchDB source를 읽어 tool evidence를 충분히 materialize한 session-memory document를 만들고, RetiredIndexBridge에는 이 derived <code>session-memory</code>만 project한다.</p>
+<p>장점은 RetiredIndexBridge가 Palantir Ontology처럼 brain-facing recall surface로 유지되고, CouchDB가 noisy source/evidence lifecycle을 전담한다는 점이다. 단점은 migration 동안 CouchDB source model, coverage verifier, RetiredIndexBridge projection gate를 함께 도입해야 한다는 점이다.</p>
+<h3>Alternative: RetiredIndexBridge Metadata Repair First</h3>
+<p>기존 RetiredIndexBridge <code>transcript-memory</code>의 project metadata를 보정한 뒤 CouchDB로 옮긴다. 초기 구현은 줄지만, 이미 오염된 RetiredIndexBridge metadata를 migration source로 재사용하는 위험이 크다.</p>
 <h3>Alternative: Long-Term Dual Store</h3>
-<p>CouchDB와 RAGFlow <code>transcript-memory</code>를 계속 병행한다. rollback은 쉽지만, RAGFlow <code>session-memory</code> only 목표와 맞지 않고 운영/검색 의미가 계속 겹친다.</p>
+<p>CouchDB와 RetiredIndexBridge <code>transcript-memory</code>를 계속 병행한다. rollback은 쉽지만, RetiredIndexBridge <code>session-memory</code> only 목표와 맞지 않고 운영/검색 의미가 계속 겹친다.</p>
 <h2>Architecture</h2>
 <pre><code>Provider transcript sources on PC
   - Codex
@@ -94,28 +94,28 @@ Cold Full Redacted Archive   Session-Memory Materializer
                               full tool evidence summary materialization
                                       |
                                       v
-                              RAGFlow session-memory
+                              RetiredIndexBridge session-memory
                               brain-facing recall surface</code></pre>
-<p>RAGFlow <code>transcript-memory</code> remains only as a temporary comparison input during migration. It is not a source of truth and is not part of the final runtime path.</p>
+<p>RetiredIndexBridge <code>transcript-memory</code> remains only as a temporary comparison input during migration. It is not a source of truth and is not part of the final runtime path.</p>
 <h2>Data Flow</h2>
 <h3>Historical Import</h3>
 <p>1. Enumerate source transcript files for the 5 provider/tool lanes.</p>
 <p>2. Parse and redact provider transcript sources server-side.</p>
 <p>3. Resolve <code>project</code> through hierarchy authority: capture metadata, provider source path/workspace marker, then server inference.</p>
 <p>4. Write conversation chunks and tool evidence bundles into CouchDB.</p>
-<p>5. Compare CouchDB coverage with RAGFlow and ledger/ingress state without trusting RAGFlow project metadata.</p>
+<p>5. Compare CouchDB coverage with RetiredIndexBridge and ledger/ingress state without trusting RetiredIndexBridge project metadata.</p>
 <p>6. Build <code>session-memory</code> from CouchDB source.</p>
-<p>7. Project only <code>session-memory</code> to RAGFlow.</p>
+<p>7. Project only <code>session-memory</code> to RetiredIndexBridge.</p>
 <p>8. Run coverage, rebuild, and representative recall smoke before retirement.</p>
 <h3>Live Cutover</h3>
 <p>1. Start CouchDB shadow write for Codex, Claude Code, agy, and Antigravity live lanes.</p>
-<p>2. Keep existing RAGFlow <code>transcript-memory</code> write only as a short-lived comparison path.</p>
+<p>2. Keep existing RetiredIndexBridge <code>transcript-memory</code> write only as a short-lived comparison path.</p>
 <p>3. Observe a short stability window with mixed provider/project traffic.</p>
 <p>4. Switch live writes to CouchDB-only.</p>
-<p>5. Remove RAGFlow <code>transcript-memory</code> write and read dependencies.</p>
+<p>5. Remove RetiredIndexBridge <code>transcript-memory</code> write and read dependencies.</p>
 <h3>Normal Recall</h3>
-<p>1. LLM or brain query reads RAGFlow <code>session-memory</code>.</p>
-<p>2. RAGFlow <code>session-memory</code> contains sufficient tool evidence summary materialization.</p>
+<p>1. LLM or brain query reads RetiredIndexBridge <code>session-memory</code>.</p>
+<p>2. RetiredIndexBridge <code>session-memory</code> contains sufficient tool evidence summary materialization.</p>
 <p>3. Normal recall does not fetch CouchDB evidence refs.</p>
 <p>4. CouchDB refs remain for provenance, audit, rollback, and debug.</p>
 <h2>Component Details</h2>
@@ -137,14 +137,14 @@ Cold Full Redacted Archive   Session-Memory Materializer
 <ul>
 <li>Input: capture metadata, provider source path, cwd/workspace marker, session context.</li>
 <li>Output: canonical project plus ambiguity state.</li>
-<li>Dependencies: no RAGFlow project metadata as single authority.</li>
+<li>Dependencies: no RetiredIndexBridge project metadata as single authority.</li>
 <li>Failure mode: ambiguous project requires explicit ambiguity marker and is excluded from irreversible retirement proof.</li>
 </ul>
 <h3>CouchDB Transcript Source Store</h3>
 <ul>
 <li>Input: conversation chunks, tool evidence bundles, coverage manifests, projection state.</li>
 <li>Output: document revisions and queryable coverage state.</li>
-<li>Dependencies: CouchDB container owned by neurons, not RAGFlow internal DB/Redis/MinIO/Elasticsearch.</li>
+<li>Dependencies: CouchDB container owned by neurons, not RetiredIndexBridge internal DB/Redis/MinIO/Elasticsearch.</li>
 <li>Expected document families:</li>
 </ul>
 <p>  - <code>transcript_session</code></p>
@@ -165,18 +165,18 @@ Cold Full Redacted Archive   Session-Memory Materializer
 <li>Input: CouchDB conversation chunks and tool evidence bundles.</li>
 <li>Output: derived <code>session-memory</code> documents.</li>
 <li>Dependencies: existing session-memory builder behavior.</li>
-<li>Constraint: materialize enough tool evidence summary for RAGFlow-only normal recall.</li>
+<li>Constraint: materialize enough tool evidence summary for RetiredIndexBridge-only normal recall.</li>
 </ul>
-<h3>RAGFlow Session Projection</h3>
+<h3>RetiredIndexBridge Session Projection</h3>
 <ul>
 <li>Input: derived <code>session-memory</code> documents.</li>
-<li>Output: RAGFlow <code>session-memory</code> documents.</li>
-<li>Dependencies: RAGFlow adapter and dataset resolution.</li>
+<li>Output: RetiredIndexBridge <code>session-memory</code> documents.</li>
+<li>Dependencies: RetiredIndexBridge adapter and dataset resolution.</li>
 <li>Constraint: no <code>transcript-memory</code> projection after cutover.</li>
 </ul>
 <h3>Coverage And Retirement Verifier</h3>
 <ul>
-<li>Input: CouchDB coverage manifests, ledger/ingress state, RAGFlow comparison data, session-memory rebuild outputs, recall smoke outputs.</li>
+<li>Input: CouchDB coverage manifests, ledger/ingress state, RetiredIndexBridge comparison data, session-memory rebuild outputs, recall smoke outputs.</li>
 <li>Output: retirement readiness report.</li>
 <li>Gate:</li>
 </ul>
@@ -191,14 +191,14 @@ Cold Full Redacted Archive   Session-Memory Materializer
 </ul>
 <h2>Error Handling</h2>
 <ul>
-<li>RAGFlow project metadata mismatch: ignore as authority, record as comparison mismatch, and resolve via hierarchy authority.</li>
+<li>RetiredIndexBridge project metadata mismatch: ignore as authority, record as comparison mismatch, and resolve via hierarchy authority.</li>
 <li>Provider source missing on PC: mark source unavailable and block irreversible retirement for affected coverage.</li>
-<li>Raw leak detection: reject write, record redacted failure metadata only, and do not project to RAGFlow.</li>
+<li>Raw leak detection: reject write, record redacted failure metadata only, and do not project to RetiredIndexBridge.</li>
 <li>CouchDB revision conflict: retry idempotent upsert using deterministic document id and content hash.</li>
 <li>Tool evidence bundle overflow: split deterministically and preserve evidence index ranges.</li>
 <li>Session-memory materialization loss: fail retirement gate if any source chunk or tool evidence bundle is dropped.</li>
-<li>RAGFlow projection failure: keep CouchDB source intact and mark projection state failed.</li>
-<li>Recall smoke failure: block RAGFlow <code>transcript-memory</code> retirement until rebuild or materialization is corrected.</li>
+<li>RetiredIndexBridge projection failure: keep CouchDB source intact and mark projection state failed.</li>
+<li>Recall smoke failure: block RetiredIndexBridge <code>transcript-memory</code> retirement until rebuild or materialization is corrected.</li>
 <li>Gemini CLI live event detected: treat as scope violation unless separately approved.</li>
 </ul>
 <h2>Testing Strategy</h2>
@@ -215,26 +215,26 @@ Cold Full Redacted Archive   Session-Memory Materializer
 <p>  - historical import from provider source fixtures</p>
 <p>  - CouchDB write/read coverage queries</p>
 <p>  - session-memory materialization from CouchDB source</p>
-<p>  - RAGFlow session-memory projection using fake/recording adapter</p>
+<p>  - RetiredIndexBridge session-memory projection using fake/recording adapter</p>
 <ul>
 <li>Migration verification:</li>
 </ul>
-<p>  - coverage comparison against ledger/ingress and RAGFlow candidate set</p>
+<p>  - coverage comparison against ledger/ingress and RetiredIndexBridge candidate set</p>
 <p>  - rebuild no-loss checks for conversation chunks and tool evidence bundles</p>
-<p>  - representative recall smoke on RAGFlow <code>session-memory</code></p>
+<p>  - representative recall smoke on RetiredIndexBridge <code>session-memory</code></p>
 <ul>
 <li>Live cutover checks:</li>
 </ul>
 <p>  - short shadow window across Codex, Claude Code, agy, and Antigravity</p>
 <p>  - Gemini CLI historical import only check</p>
-<p>  - no new RAGFlow <code>transcript-memory</code> writes after CouchDB-only switch</p>
+<p>  - no new RetiredIndexBridge <code>transcript-memory</code> writes after CouchDB-only switch</p>
 <h2>Milestones</h2>
 <ul>
 <li>M1: Source model and CouchDB ownership contract - document families, deterministic ids, redaction boundaries, and ownership rules are testable.</li>
 <li>M2: Historical import and project authority - provider source rebuild covers Codex, Claude Code, Gemini CLI, agy, and Antigravity historical data with project mismatch reporting.</li>
-<li>M3: Tool evidence and session-memory materialization - bounded bundles are stored in CouchDB and fully materialized into RAGFlow <code>session-memory</code> for normal recall.</li>
+<li>M3: Tool evidence and session-memory materialization - bounded bundles are stored in CouchDB and fully materialized into RetiredIndexBridge <code>session-memory</code> for normal recall.</li>
 <li>M4: Shadow live cutover - Codex, Claude Code, agy, and Antigravity shadow writes prove CouchDB coverage during a short stability window.</li>
-<li>M5: RAGFlow transcript-memory retirement - coverage, rebuild, and recall smoke gates pass; new writes and reads no longer depend on RAGFlow <code>transcript-memory</code>.</li>
+<li>M5: RetiredIndexBridge transcript-memory retirement - coverage, rebuild, and recall smoke gates pass; new writes and reads no longer depend on RetiredIndexBridge <code>transcript-memory</code>.</li>
 <li>M6: Retention and archive - hot CouchDB source compacts old data to manifests while cold full redacted archive remains available for audit/rollback.</li>
 </ul>
 <h2>Updated Architecture Artifact</h2>

@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-session-memory", action="store_true")
     parser.add_argument("--skip-graph", action="store_true")
     parser.add_argument("--dataset-name", default="session-memory")
-    parser.add_argument("--ragflow-url", default="")
+    parser.add_argument("--retired-index-bridge-url", default="")
     parser.add_argument("--enable-graph", action="store_true", default=True)
     parser.add_argument("--graph-required", action="store_true")
     parser.add_argument("--reextract-entities", action="store_true")
@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
             skip_session_memory=bool(args.skip_session_memory),
             skip_graph=bool(args.skip_graph),
             dataset_name=str(args.dataset_name or "session-memory"),
-            ragflow_url=str(args.ragflow_url or ""),
+            index_url=str(args.retired_index_bridge_url or ""),
             enable_graph=bool(args.enable_graph),
             graph_required=bool(args.graph_required),
             reextract_entities=bool(args.reextract_entities),
@@ -109,7 +109,7 @@ def run_migration_flow(
     skip_session_memory: bool = False,
     skip_graph: bool = False,
     dataset_name: str = "session-memory",
-    ragflow_url: str = "",
+    index_url: str = "",
     enable_graph: bool = True,
     graph_required: bool = False,
     reextract_entities: bool = False,
@@ -130,7 +130,7 @@ def run_migration_flow(
         execute=execute,
         approval=session_memory_approval,
         dataset_name=dataset_name,
-        ragflow_url=ragflow_url,
+        index_url=index_url,
         project=project,
         provider=provider,
     )
@@ -199,7 +199,7 @@ def _session_memory_argv(
     execute: bool,
     approval: Path | None,
     dataset_name: str,
-    ragflow_url: str,
+    index_url: str,
     project: str = "",
     provider: str = "",
 ) -> list[str]:
@@ -210,8 +210,8 @@ def _session_memory_argv(
         argv.extend(["--approval", str(approval or "")])
     if dataset_name:
         argv.extend(["--dataset-name", dataset_name])
-    if ragflow_url:
-        argv.extend(["--ragflow-url", ragflow_url])
+    if index_url:
+        argv.extend(["--retired-index-bridge-url", index_url])
     # 흐름이 project/provider로 scope되면 session-memory 단계도 동일 scope로 제한해
     # 범위 밖 세션을 materialize하지 않게 한다.
     if project:

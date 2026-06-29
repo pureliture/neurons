@@ -44,7 +44,7 @@
         </div>
         <h3 class="text-xl font-bold text-slate-800 mb-3">GC Safety Lane & Auditing Container 분리</h3>
         <p class="text-slate-700 mb-6 leading-relaxed">
-          가비지 컬렉션(GC) 작업은 비가역적인 데이터 하드 삭제와 RAGFlow 외부 API 연동이 밀접하게 결합되어 있어, 오작동 시 전체 원장(Monolithic Ledger) 데이터베이스에 미치는 블래스트 래디우스(Blast Radius)가 가장 큽니다. 따라서 GC 감사 로깅(<code class="font-mono">memory_gc_audit</code>) 및 백업 프로세스를 독립된 <strong>GC Safety Lane & Auditing Container</strong>로 격리하는 것을 최우선으로 권장합니다.
+          가비지 컬렉션(GC) 작업은 비가역적인 데이터 하드 삭제와 RetiredIndexBridge 외부 API 연동이 밀접하게 결합되어 있어, 오작동 시 전체 원장(Monolithic Ledger) 데이터베이스에 미치는 블래스트 래디우스(Blast Radius)가 가장 큽니다. 따라서 GC 감사 로깅(<code class="font-mono">memory_gc_audit</code>) 및 백업 프로세스를 독립된 <strong>GC Safety Lane & Auditing Container</strong>로 격리하는 것을 최우선으로 권장합니다.
         </p>
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
           <div class="bg-white p-4 rounded-xl border border-emerald-100 shadow-sm">
@@ -53,7 +53,7 @@
           </div>
           <div class="bg-white p-4 rounded-xl border border-emerald-100 shadow-sm">
             <span class="font-bold text-slate-900 block mb-1">분리 난이도 & 비용</span>
-            <span class="text-orange-600 font-semibold text-xs">Medium</span> <span class="text-slate-500 text-xs">(RAGFlow API 및 백업 경로 결합)</span>
+            <span class="text-orange-600 font-semibold text-xs">Medium</span> <span class="text-slate-500 text-xs">(RetiredIndexBridge API 및 백업 경로 결합)</span>
           </div>
           <div class="bg-white p-4 rounded-xl border border-emerald-100 shadow-sm">
             <span class="font-bold text-slate-900 block mb-1">기대 효과</span>
@@ -133,7 +133,7 @@
               <div>
                 <span class="text-[10px] font-bold text-slate-400 block uppercase">External Resource Dependencies</span>
                 <div class="text-[11px] text-slate-600 mt-1">
-                  SQLite 영속 파일, RAGFlow HTTP API (GC 실행 시 문서를 물리적으로 제거하기 위해 간접 연동)
+                  SQLite 영속 파일, RetiredIndexBridge HTTP API (GC 실행 시 문서를 물리적으로 제거하기 위해 간접 연동)
                 </div>
               </div>
               <div class="bg-orange-50/50 border border-orange-100 p-2.5 rounded-lg text-xs">
@@ -188,7 +188,7 @@
                 <h3 class="text-lg font-bold text-slate-900">Native Memory & Memory Cards Synchronization</h3>
               </div>
               <p class="text-slate-600 text-xs leading-relaxed mb-4">
-                LLM Brain에서 사용 승인한 메모리 카드의 동기화 제어 및 검색/조회용 문서 인가 처리(<code class="font-mono text-[10px]">authorize_document</code>)를 수행하며, RAGFlow 백엔드의 네이티브 메모리와의 동기화 상태(<code class="font-mono text-[10px]">native_memory_mirror</code>)를 관리합니다.
+                LLM Brain에서 사용 승인한 메모리 카드의 동기화 제어 및 검색/조회용 문서 인가 처리(<code class="font-mono text-[10px]">authorize_document</code>)를 수행하며, RetiredIndexBridge 백엔드의 네이티브 메모리와의 동기화 상태(<code class="font-mono text-[10px]">native_memory_mirror</code>)를 관리합니다.
               </p>
             </div>
             <div class="border-t border-slate-100 pt-4 space-y-3">
@@ -205,13 +205,13 @@
               <div>
                 <span class="text-[10px] font-bold text-slate-400 block uppercase">External Resource Dependencies</span>
                 <div class="text-[11px] text-slate-600 mt-1">
-                  SQLite 영속 파일, RAGFlow HTTP API, <code class="font-mono text-[10px]">RAGFLOW_API_KEY</code> 환경 변수
+                  SQLite 영속 파일, RetiredIndexBridge HTTP API, <code class="font-mono text-[10px]">RETIRED_INDEX_BRIDGE_API_KEY</code> 환경 변수
                 </div>
               </div>
               <div class="bg-orange-50/50 border border-orange-100 p-2.5 rounded-lg text-xs">
                 <span class="font-semibold text-orange-800 block">Deletion Test 평가: 호출자에게 복잡도 전가 (Push to callers)</span>
                 <p class="text-slate-600 text-[11px] mt-1">
-                  이 기능을 삭제하면 MCP 서버 등의 검색 레이어가 retrieval 요청을 처리할 때마다 만료 시간 검사, 데이터셋 활성화 여부 검사, 스냅샷 승인 여부 검사 등 복잡한 인가 로직을 매번 RAGFlow 쿼리 전후로 수동 수행해야 합니다.
+                  이 기능을 삭제하면 MCP 서버 등의 검색 레이어가 retrieval 요청을 처리할 때마다 만료 시간 검사, 데이터셋 활성화 여부 검사, 스냅샷 승인 여부 검사 등 복잡한 인가 로직을 매번 RetiredIndexBridge 쿼리 전후로 수동 수행해야 합니다.
                 </p>
               </div>
             </div>
@@ -251,9 +251,9 @@
                 </tr>
                 <tr class="hover:bg-slate-50/80">
                   <td class="p-3 text-center">3</td>
-                  <td class="p-3 font-mono font-semibold text-slate-900">ragflow_datasets</td>
+                  <td class="p-3 font-mono font-semibold text-slate-900">index_targets</td>
                   <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
-                  <td class="p-3">RAGFlow 데이터셋 ID 및 상태 정보</td>
+                  <td class="p-3">RetiredIndexBridge 데이터셋 ID 및 상태 정보</td>
                 </tr>
                 <tr class="hover:bg-slate-50/80">
                   <td class="p-3 text-center">4</td>
@@ -427,7 +427,7 @@
                   <td class="p-3 text-center">32</td>
                   <td class="p-3 font-mono font-semibold text-slate-900">native_memory_mirror</td>
                   <td class="p-3"><span class="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full text-[10px] font-semibold">Area D</span></td>
-                  <td class="p-3">RAGFlow 원격 데이터와 로컬 메모리 미러 동기화 상태</td>
+                  <td class="p-3">RetiredIndexBridge 원격 데이터와 로컬 메모리 미러 동기화 상태</td>
                 </tr>
                 <tr class="hover:bg-slate-50/80">
                   <td class="p-3 text-center">33</td>
@@ -482,7 +482,7 @@
               </div>
               <div class="bg-slate-50 p-4 rounded-xl border border-slate-100">
                 <span class="font-bold text-slate-900 block mb-1">제안 방향 (Proposed Deepening)</span>
-                GC 가비지 컬렉터의 실행 상태, 감사 로그 로깅, RAGFlow 백업 및 삭제 트리거 역할을 하는 독자적인 감사 컨테이너 프로세스로 분리합니다.
+                GC 가비지 컬렉터의 실행 상태, 감사 로그 로깅, RetiredIndexBridge 백업 및 삭제 트리거 역할을 하는 독자적인 감사 컨테이너 프로세스로 분리합니다.
               </div>
             </div>
 
@@ -498,7 +498,7 @@
                       classDef leak fill:#fee2e2,stroke:#ef4444,stroke-width:2px;
                       Callers[GC Scripts / CLI] -->|Direct Call| Ledger[Monolithic Ledger]
                       Ledger -->|Direct Access| DB[(SQLite DB)]
-                      Ledger -->|Direct Delete| RAG[RAGFlow API]
+                      Ledger -->|Direct Delete| RAG[RetiredIndexBridge API]
                       class Ledger leak;
                   </div>
                 </div>
@@ -510,7 +510,7 @@
                       classDef safe fill:#e6f8f9,stroke:#0d9488,stroke-width:2px;
                       Callers[GC Scripts / CLI] -->|Invoke| GCC[GC Safety Container]
                       GCC -->|REST/gRPC| API[Ledger Core API]
-                      GCC -->|API Delete & Backup| RAG[RAGFlow API & Backup Store]
+                      GCC -->|API Delete & Backup| RAG[RetiredIndexBridge API & Backup Store]
                       API -->|Exclusive Access| DB[(SQLite DB)]
                       class GCC,API safe;
                   </div>
@@ -524,7 +524,7 @@
                 <h4 class="font-bold text-emerald-800 mb-2">아키텍처 개선 효과 (Wins)</h4>
                 <ul class="list-disc pl-4 space-y-1 text-slate-700 text-xs">
                   <li><strong>Locality</strong>: GC 스케줄러 실행 및 감사 로그, 삭제 전 백업 로직이 독립적인 모듈에 격리되어 모놀리식 원장의 blast radius가 제한됩니다.</li>
-                  <li><strong>Leverage</strong>: RAGFlow 삭제 API의 일시 장애 대처 능력 및 재시도 메커니즘을 원장 트랜잭션과 독립적으로 구축하여 결함 감내가 향상됩니다.</li>
+                  <li><strong>Leverage</strong>: RetiredIndexBridge 삭제 API의 일시 장애 대처 능력 및 재시도 메커니즘을 원장 트랜잭션과 독립적으로 구축하여 결함 감내가 향상됩니다.</li>
                   <li><strong>Interface/Seam</strong>: SQLite 직접 쿼리 대신 REST/gRPC API Seam을 두어 결합도를 낮추고 결함 전파를 차단합니다.</li>
                   <li><strong>Tests</strong>: 원장의 실제 DB 잠금 경합을 방지하고 GC 삭제 과정의 dry-run 및 validation을 독립적인 테스트 스위트로 집중 커버 가능합니다.</li>
                 </ul>
@@ -535,7 +535,7 @@
                   <span class="px-2 py-0.5 rounded bg-orange-100 text-orange-800 font-bold text-xs">Medium</span>
                 </div>
                 <p class="text-slate-700 text-xs leading-relaxed">
-                  RAGFlow API 및 로컬/원격 백업 디렉토리 경로에 대한 결합이 있고, 원장의 마킹 처리를 위해 Ledger Core API와의 네트워크 통신 흐름이 신설되어야 하기 때문입니다.
+                  RetiredIndexBridge API 및 로컬/원격 백업 디렉토리 경로에 대한 결합이 있고, 원장의 마킹 처리를 위해 Ledger Core API와의 네트워크 통신 흐름이 신설되어야 하기 때문입니다.
                 </p>
               </div>
               <div class="bg-rose-50/20 p-4 rounded-xl border border-rose-100/50">
@@ -817,7 +817,7 @@
                 <h4 class="font-bold text-emerald-800 mb-2">아키텍처 개선 효과 (Wins)</h4>
                 <ul class="list-disc pl-4 space-y-1 text-slate-700 text-xs">
                   <li><strong>Locality</strong>: 신규 메모리 재생성 로직과 영속화 승격 승인 상태 기계의 흐름이 중앙 빌더 엔진 프로세스 내로 응집됩니다.</li>
-                  <li><strong>Leverage</strong>: RAGFlow로의 업로드 및 상태 업데이트 경쟁을 원격 API 레벨에서 중재하여 빌드 충돌과 중복 승격을 원천 차단합니다.</li>
+                  <li><strong>Leverage</strong>: RetiredIndexBridge로의 업로드 및 상태 업데이트 경쟁을 원격 API 레벨에서 중재하여 빌드 충돌과 중복 승격을 원천 차단합니다.</li>
                   <li><strong>Interface/Seam</strong>: 복잡한 조인 쿼리를 동반한 데이터 정합성 검사(edge complete 등)를 API Seam 내부 비즈니스 로직으로 감춥니다.</li>
                   <li><strong>Tests</strong>: 빌드 결과물 업로드 실패 및 검증 미통과 edge case에 대한 승격 보류 상태 전이를 격리된 가상 환경에서 명확히 검증 가능합니다.</li>
                 </ul>
@@ -828,7 +828,7 @@
                   <span class="px-2 py-0.5 rounded bg-orange-100 text-orange-800 font-bold text-xs">Medium</span>
                 </div>
                 <p class="text-slate-700 text-xs leading-relaxed">
-                  빌드가 완료된 메모리를 RAGFlow API에 등록하고 원장 DB에 반영하는 양방향 외부 API 의존성이 존재하기 때문입니다.
+                  빌드가 완료된 메모리를 RetiredIndexBridge API에 등록하고 원장 DB에 반영하는 양방향 외부 API 의존성이 존재하기 때문입니다.
                 </p>
               </div>
               <div class="bg-rose-50/20 p-4 rounded-xl border border-rose-100/50">

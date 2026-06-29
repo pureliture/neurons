@@ -44,11 +44,11 @@ class SecretLikeMetadataError(ValueError):
 
 
 class DocumentIndexTargetProfile:
-    """Logical backend profiles. Backend-neutral by contract (no ``ragflow``).
+    """Logical backend profiles. Backend-neutral by contract (no ``retired_index_bridge``).
 
     A logical profile names *what kind of knowledge* a document belongs to. The
     mapping from a logical profile to a physical backend dataset id is owned by
-    the backend adapter (e.g. the RAGFlow ``ragflow_datasets`` lookup), never by
+    the backend adapter (e.g. the RetiredIndexBridge ``index_targets`` lookup), never by
     this generic layer.
     """
 

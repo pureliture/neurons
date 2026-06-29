@@ -1777,7 +1777,7 @@ def _inspect_state_db_product_coverage(
     succeeded_delivery_count = 0
     payload_missing_count = 0
     payload_hash_mismatch_count = 0
-    missing_ragflow_ref_count = 0
+    missing_index_ref_count = 0
 
     if not exists:
         return {
@@ -1791,7 +1791,7 @@ def _inspect_state_db_product_coverage(
             "matched_payload_type_counts": {},
             "payload_missing_count": 0,
             "payload_hash_mismatch_count": 0,
-            "missing_ragflow_ref_count": 0,
+            "missing_index_ref_count": 0,
             "expected_product_result_classes": list(expected_product_result_classes),
         }
 
@@ -1818,8 +1818,8 @@ def _inspect_state_db_product_coverage(
                     succeeded_document_kind_counts[document_kind] = (
                         succeeded_document_kind_counts.get(document_kind, 0) + 1
                     )
-                    if not job.get("ragflow_dataset_id") or not job.get("ragflow_document_id"):
-                        missing_ragflow_ref_count += 1
+                    if not job.get("index_target_id") or not job.get("index_document_id"):
+                        missing_index_ref_count += 1
                     payload = _payload_for_job(connection, job) if delivery_payloads_table_exists else None
                     if payload is None:
                         payload_missing_count += 1
@@ -1840,8 +1840,8 @@ def _inspect_state_db_product_coverage(
         _block(blockers, "state_db_payload_missing_for_succeeded_delivery")
     if payload_hash_mismatch_count:
         _block(blockers, "state_db_payload_integrity_mismatch")
-    if missing_ragflow_ref_count:
-        _block(blockers, "state_db_succeeded_delivery_missing_ragflow_refs")
+    if missing_index_ref_count:
+        _block(blockers, "state_db_succeeded_delivery_missing_index_refs")
 
     return {
         "state_db_exists": exists,
@@ -1854,7 +1854,7 @@ def _inspect_state_db_product_coverage(
         "matched_payload_type_counts": dict(sorted(matched_payload_type_counts.items())),
         "payload_missing_count": payload_missing_count,
         "payload_hash_mismatch_count": payload_hash_mismatch_count,
-        "missing_ragflow_ref_count": missing_ragflow_ref_count,
+        "missing_index_ref_count": missing_index_ref_count,
         "expected_product_result_classes": list(expected_product_result_classes),
     }
 

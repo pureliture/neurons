@@ -29,7 +29,7 @@ def _item(session_id, message_id, message_type="semantic"):
     return {"session_id": session_id, "message_id": message_id, "message_type": message_type, "status": True}
 
 
-class _FakeRagflow:
+class _FakeRetiredIndexBridge:
     def __init__(self, *, search_result, disable_results=None):
         self.search_result = search_result
         # message_id(str) → envelope. 기본 모두 성공.
@@ -51,22 +51,22 @@ def _superseded_row(store, statement_id="1001", *, search_text="prefers tabs"):
     store.mark_superseded(statement_id, superseded_by="2002")
 
 
-def _runner(ragflow, store, *, memory_id="mem_main", **cfg):
+def _runner(retired_index_bridge, store, *, memory_id="mem_main", **cfg):
     config = NativeMemoryReconcileConfig(memory_id=memory_id, **cfg)
-    return NativeMemoryReconcileRunner(ragflow=ragflow, store=store, config=config, now_func=lambda: "2026-06-09T00:00:00+00:00")
+    return NativeMemoryReconcileRunner(retired_index_bridge=retired_index_bridge, store=store, config=config, now_func=lambda: "2026-06-09T00:00:00+00:00")
 
 
 def test_reconcile_disables_all_session_tag_items_and_marks(tmp_path):
     store = _store(tmp_path)
     _superseded_row(store)
     # session_tag 공유 raw 1 + 추출 2 = 3 item(게이트 사실: 전부 disable).
-    ragflow = _FakeRagflow(search_result=_search_envelope([
+    retired_index_bridge = _FakeRetiredIndexBridge(search_result=_search_envelope([
         _item("mem:1001", 41, "raw"),
         _item("mem:1001", 42, "semantic"),
         _item("mem:1001", 43, "procedural"),
     ]))
-    report = _runner(ragflow, store).run()
-    assert [c["message_id"] for c in ragflow.disable_calls] == ["41", "42", "43"]
+    report = _runner(retired_index_bridge, store).run()
+    assert [c["message_id"] for c in retired_index_bridge.disable_calls] == ["41", "42", "43"]
     assert report["disabled_total"] == 3
     assert report["rows_fully_disabled"] == 1
     assert report["mutation_performed"] is True
@@ -77,20 +77,20 @@ def test_reconcile_disables_all_session_tag_items_and_marks(tmp_path):
 def test_reconcile_filters_foreign_session_tags(tmp_path):
     store = _store(tmp_path)
     _superseded_row(store)
-    ragflow = _FakeRagflow(search_result=_search_envelope([
+    retired_index_bridge = _FakeRetiredIndexBridge(search_result=_search_envelope([
         _item("mem:1001", 42),
         _item("mem:9999", 99),  # 다른 session_tag — 절대 disable 안 함(거짓양성 0).
     ]))
-    _runner(ragflow, store).run()
-    assert [c["message_id"] for c in ragflow.disable_calls] == ["42"]
+    _runner(retired_index_bridge, store).run()
+    assert [c["message_id"] for c in retired_index_bridge.disable_calls] == ["42"]
 
 
 def test_reconcile_no_match_leaves_row_pending(tmp_path):
     store = _store(tmp_path)
     _superseded_row(store)
-    ragflow = _FakeRagflow(search_result=_search_envelope([_item("mem:9999", 99)]))
-    report = _runner(ragflow, store).run()
-    assert ragflow.disable_calls == []
+    retired_index_bridge = _FakeRetiredIndexBridge(search_result=_search_envelope([_item("mem:9999", 99)]))
+    report = _runner(retired_index_bridge, store).run()
+    assert retired_index_bridge.disable_calls == []
     assert report["rows_no_match"] == 1
     assert [r["statement_id"] for r in store.list_pending_reconcile()] == ["1001"]
 
@@ -98,9 +98,9 @@ def test_reconcile_no_match_leaves_row_pending(tmp_path):
 def test_reconcile_search_failed_leaves_row_pending(tmp_path):
     store = _store(tmp_path)
     _superseded_row(store)
-    ragflow = _FakeRagflow(search_result=_fail())
-    report = _runner(ragflow, store).run()
-    assert ragflow.disable_calls == []
+    retired_index_bridge = _FakeRetiredIndexBridge(search_result=_fail())
+    report = _runner(retired_index_bridge, store).run()
+    assert retired_index_bridge.disable_calls == []
     assert report["rows_search_failed"] == 1
     assert [r["statement_id"] for r in store.list_pending_reconcile()] == ["1001"]
 
@@ -108,28 +108,28 @@ def test_reconcile_search_failed_leaves_row_pending(tmp_path):
 def test_reconcile_partial_disable_does_not_mark(tmp_path):
     store = _store(tmp_path)
     _superseded_row(store)
-    ragflow = _FakeRagflow(
+    retired_index_bridge = _FakeRetiredIndexBridge(
         search_result=_search_envelope([_item("mem:1001", 42), _item("mem:1001", 43)]),
         disable_results={"43": _fail()},  # 둘 중 하나 disable 실패 → partial.
     )
-    report = _runner(ragflow, store).run()
+    report = _runner(retired_index_bridge, store).run()
     assert report["rows_partial"] == 1
     assert report["rows_fully_disabled"] == 0
-    # ragflow_disabled_at 미기록 → row 잔존(다음 run 재시도).
+    # index_disabled_at 미기록 → row 잔존(다음 run 재시도).
     assert [r["statement_id"] for r in store.list_pending_reconcile()] == ["1001"]
 
 
 def test_reconcile_idempotent_second_run_no_pending(tmp_path):
     store = _store(tmp_path)
     _superseded_row(store)
-    ragflow = _FakeRagflow(search_result=_search_envelope([_item("mem:1001", 42)]))
-    _runner(ragflow, store).run()
+    retired_index_bridge = _FakeRetiredIndexBridge(search_result=_search_envelope([_item("mem:1001", 42)]))
+    _runner(retired_index_bridge, store).run()
     assert store.list_pending_reconcile() == []
     # 두 번째 run: pending 0 → 처리 0(재disable 없음).
-    ragflow2 = _FakeRagflow(search_result=_search_envelope([_item("mem:1001", 42)]))
-    report2 = _runner(ragflow2, store).run()
+    retired_index_bridge2 = _FakeRetiredIndexBridge(search_result=_search_envelope([_item("mem:1001", 42)]))
+    report2 = _runner(retired_index_bridge2, store).run()
     assert report2["processed"] == 0
-    assert ragflow2.disable_calls == []
+    assert retired_index_bridge2.disable_calls == []
 
 
 def test_reconcile_bounded_max_rows_per_run(tmp_path):
@@ -137,10 +137,10 @@ def test_reconcile_bounded_max_rows_per_run(tmp_path):
     for sid in ("1001", "1002", "1003"):
         _superseded_row(store, sid)
     # 각 row 의 session_tag 에 맞는 단일 hit 를 모두 담아 반환하되, max_rows_per_run=2 로 제한.
-    ragflow = _FakeRagflow(search_result=_search_envelope([
+    retired_index_bridge = _FakeRetiredIndexBridge(search_result=_search_envelope([
         _item("mem:1001", 11), _item("mem:1002", 12), _item("mem:1003", 13),
     ]))
-    report = _runner(ragflow, store, max_rows_per_run=2).run()
+    report = _runner(retired_index_bridge, store, max_rows_per_run=2).run()
     assert report["processed"] == 2
     # 1 row 는 다음 run 으로 잔류.
     assert len(store.list_pending_reconcile()) == 1
@@ -149,8 +149,8 @@ def test_reconcile_bounded_max_rows_per_run(tmp_path):
 def test_reconcile_one_returns_outcome_shape(tmp_path):
     store = _store(tmp_path)
     _superseded_row(store)
-    ragflow = _FakeRagflow(search_result=_search_envelope([_item("mem:1001", 42)]))
-    runner = _runner(ragflow, store)
+    retired_index_bridge = _FakeRetiredIndexBridge(search_result=_search_envelope([_item("mem:1001", 42)]))
+    runner = _runner(retired_index_bridge, store)
     pending = store.list_pending_reconcile()
     outcome = runner.reconcile_one(pending[0])
     assert outcome["ok"] is True

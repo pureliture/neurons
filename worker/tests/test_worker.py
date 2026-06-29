@@ -4,7 +4,7 @@ Focus: the boundary this co-locate is responsible for —
   - the vendored package imports the live delivery path WITHOUT pulling in the
     client/Ledger/outbox wiring;
   - the redelivery dedup (under-dedup gap fix) works via both layers;
-  - submit_document persists the natural key so the RAGFlow-side probe can match.
+  - submit_document persists the natural key so the RetiredIndexBridge-side probe can match.
 """
 import importlib
 
@@ -16,10 +16,10 @@ from agent_knowledge.rag_ingress.shadow_worker import (
     build_synthetic_event,
     process_payload,
 )
-from agent_knowledge.rag_ingress.index_backend import (
+from agent_knowledge.rag_ingress.retired_index_bridge import (
     BackendDocumentHandle,
     BackendSubmitResult,
-    RAGFlowIndexBackendAdapter,
+    RetiredIndexBridgeRetiredIndexBridgeAdapter,
 )
 from agent_knowledge.rag_ingress.rag_ready_document import build_rag_ready_document
 
@@ -113,7 +113,7 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.session_memory.native_memory_sync_approval",
         "agent_knowledge.session_memory.native_memory_writer",
         "agent_knowledge.session_memory.native_memory_write_runner",
-        "agent_knowledge.session_memory.ragflow_projection",
+        "agent_knowledge.session_memory.index_projection",
         "agent_knowledge.session_memory.session_memory_gc",
         "agent_knowledge.session_memory.terminal_skipped_quarantine",
         "agent_knowledge.session_memory.transcript_quality",
@@ -125,7 +125,7 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
 
     gc_backup = importlib.import_module("agent_knowledge.session_memory.gc_backup")
     # restore_gc_backup is vendored with the GC executors so a mistaken hard delete
-    # is recoverable (re-upload + re-embed) where GC runs; it takes the ragflow
+    # is recoverable (re-upload + re-embed) where GC runs; it takes the retired_index_bridge
     # client as an argument, so the slice still has no wired client.
     assert hasattr(gc_backup, "restore_gc_backup")
 
@@ -169,17 +169,17 @@ def test_redelivery_dedups_via_local_log(tmp_path):
     assert r2.status == "deduplicated"
     assert r2.delivered is True
     assert backend.submit_calls == 1          # NOT re-uploaded
-    assert r2.document_ref == r1.document_ref  # same RAGFlow document
+    assert r2.document_ref == r1.document_ref  # same RetiredIndexBridge document
 
 
 def test_redelivery_dedups_via_natural_key_when_local_log_lost(tmp_path):
-    # Fresh local volume (no prior row) but the document already exists in RAGFlow
+    # Fresh local volume (no prior row) but the document already exists in RetiredIndexBridge
     # from a first attempt that uploaded then crashed before recording.
     store = IngestStateStore(tmp_path / "s.sqlite")
     backend = FakeBackend(natural_key_hit=BackendDocumentHandle(dataset_ref="ds-9", document_ref="pre-existing"))
     res = process_payload(build_synthetic_event(tag="nk-dedup"), store=store, backend=backend, deliver=True)
     assert res.status == "deduplicated"
-    assert backend.submit_calls == 0          # found in RAGFlow, no upload
+    assert backend.submit_calls == 0          # found in RetiredIndexBridge, no upload
     assert res.document_ref == "pre-existing"
     assert backend.nk_calls == 1
 
@@ -201,9 +201,9 @@ def test_local_dedup_survives_restart(tmp_path):
 
 def test_submit_document_persists_natural_key_metadata():
     client = FakeClient()
-    adapter = RAGFlowIndexBackendAdapter(client=client, resolve_dataset_id=lambda _profile: "ds-1")
+    adapter = RetiredIndexBridgeRetiredIndexBridgeAdapter(client=client, resolve_dataset_id=lambda _profile: "ds-1")
     document = build_rag_ready_document(
-        target_profile="ragflow-transcript-memory",
+        target_profile="index-transcript-memory",
         document_kind="conversation_chunk",
         source_namespace="claude",
         source_alias="x.md",
@@ -221,28 +221,28 @@ def test_submit_document_persists_natural_key_metadata():
 # --- transport closure -----------------------------------------------------
 
 def test_default_transport_closure_resolves():
-    # The default RagflowHttpClient transport (_urllib_transport) lazily imports
+    # The default RetiredIndexBridgeHttpClient transport (_urllib_transport) lazily imports
     # transport_contract.ProxyResponse at call time; it must be vendored or live
     # delivery fails at runtime with ModuleNotFoundError.
-    import agent_knowledge.ragflow_client as rc
+    import agent_knowledge.index_client as rc
     from agent_knowledge.transport_contract import ProxyResponse  # noqa: F401
 
-    client = rc.RagflowHttpClient(base_url="http://example", bearer_token="t")
+    client = rc.RetiredIndexBridgeHttpClient(base_url="http://example", bearer_token="t")
     assert client.transport is rc._urllib_transport
 
 
 # --- backend pressure gate -------------------------------------------------
 
-def test_couchdb_delivery_backend_disables_legacy_ragflow_pressure_gate():
+def test_couchdb_delivery_backend_disables_legacy_index_pressure_gate():
     assert build_delivery_pressure_check("http://ingress/status", delivery_backend="couchdb") is None
     assert build_delivery_pressure_check("", delivery_backend="couchdb") is None
-    assert build_delivery_pressure_check("http://ingress/status", delivery_backend="ragflow") is not None
+    assert build_delivery_pressure_check("http://ingress/status", delivery_backend="retired_index_bridge") is not None
 
 
 # --- natural-key match fail-safe -------------------------------------------
 
 def test_natural_key_match_requires_idempotency_key():
-    from agent_knowledge.rag_ingress.index_backend import _document_matches_natural_key
+    from agent_knowledge.rag_ingress.retired_index_bridge import _document_matches_natural_key
 
     ph = "sha256:abc"
     ik = "claude:conversation_chunk:" + ph
@@ -266,19 +266,19 @@ def test_natural_key_match_requires_idempotency_key():
 
 
 def test_find_by_natural_key_empty_inputs_fail_closed():
-    from agent_knowledge.rag_ingress.index_backend import RAGFlowIndexBackendAdapter
+    from agent_knowledge.rag_ingress.retired_index_bridge import RetiredIndexBridgeRetiredIndexBridgeAdapter
 
     class BoomClient:
         def list_documents(self, *a, **k):
             raise AssertionError("must not scan when the natural key is empty")
 
-    adapter = RAGFlowIndexBackendAdapter(client=BoomClient(), resolve_dataset_id=lambda _p: "ds")
+    adapter = RetiredIndexBridgeRetiredIndexBridgeAdapter(client=BoomClient(), resolve_dataset_id=lambda _p: "ds")
     assert adapter.find_by_natural_key(target_profile="p", idempotency_key="", payload_hash="sha256:x") is None
     assert adapter.find_by_natural_key(target_profile="p", idempotency_key="k", payload_hash="") is None
 
 
 def test_find_by_natural_key_does_not_broad_scan_by_default():
-    from agent_knowledge.rag_ingress.index_backend import RAGFlowIndexBackendAdapter
+    from agent_knowledge.rag_ingress.retired_index_bridge import RetiredIndexBridgeRetiredIndexBridgeAdapter
 
     payload_hash = "sha256:" + "abcdef123456" + ("0" * 52)
 
@@ -291,7 +291,7 @@ def test_find_by_natural_key_does_not_broad_scan_by_default():
             return []
 
     client = RecordingClient()
-    adapter = RAGFlowIndexBackendAdapter(client=client, resolve_dataset_id=lambda _p: "ds")
+    adapter = RetiredIndexBridgeRetiredIndexBridgeAdapter(client=client, resolve_dataset_id=lambda _p: "ds")
 
     assert adapter.find_by_natural_key(
         target_profile="p", idempotency_key="ik", payload_hash=payload_hash
@@ -300,7 +300,7 @@ def test_find_by_natural_key_does_not_broad_scan_by_default():
 
 
 def test_find_by_natural_key_checks_content_hash_fragment_keyword():
-    from agent_knowledge.rag_ingress.index_backend import RAGFlowIndexBackendAdapter
+    from agent_knowledge.rag_ingress.retired_index_bridge import RetiredIndexBridgeRetiredIndexBridgeAdapter
 
     payload_hash = "sha256:" + "abcdef123456" + ("0" * 52)
     idempotency_key = "ik"
@@ -324,7 +324,7 @@ def test_find_by_natural_key_checks_content_hash_fragment_keyword():
             return []
 
     client = FragmentClient()
-    adapter = RAGFlowIndexBackendAdapter(client=client, resolve_dataset_id=lambda _p: "ds")
+    adapter = RetiredIndexBridgeRetiredIndexBridgeAdapter(client=client, resolve_dataset_id=lambda _p: "ds")
 
     handle = adapter.find_by_natural_key(
         target_profile="p", idempotency_key=idempotency_key, payload_hash=payload_hash

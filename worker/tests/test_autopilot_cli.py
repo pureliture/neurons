@@ -11,7 +11,7 @@ from agent_knowledge.session_memory.autopilot_cli import (
 )
 
 
-class _FakeRagflow:
+class _FakeRetiredIndexBridge:
     def __init__(self, chunks, completion):
         self._chunks = chunks
         self._completion = completion
@@ -82,13 +82,13 @@ _ENVELOPE_COMPLETION = (
 
 
 def test_mine_live_candidates_then_run_command_end_to_end(tmp_path):
-    ragflow = _FakeRagflow(
+    retired_index_bridge = _FakeRetiredIndexBridge(
         chunks=[{"redacted_text": "auth switched to OAuth", "knowledge_id": "k1", "content_hash": "sha256:c1", "provider": "codex"}],
         completion=_ENVELOPE_COMPLETION,
     )
 
     candidates = mine_live_candidates(
-        ragflow=ragflow, project=PROJECT, completion_fn=lambda messages: _ENVELOPE_COMPLETION
+        retired_index_bridge=retired_index_bridge, project=PROJECT, completion_fn=lambda messages: _ENVELOPE_COMPLETION
     )
     assert len(candidates) == 1
     assert candidates[0]["card_type"] == "decision"

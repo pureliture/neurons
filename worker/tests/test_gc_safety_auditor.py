@@ -19,7 +19,7 @@ def test_record_gc_audit_persists_full_payload_and_hashes_doc_id(tmp_path):
         schema_version="v1",
         mode="execute",
         knowledge_id="kn_audit",
-        ragflow_document_id="doc_RAW_secret",
+        index_document_id="doc_RAW_secret",
         dataset_id="ds_test",
         replacement_knowledge_id="kn_replacement",
         dirty_at="2026-01-01T00:00:00+00:00",
@@ -44,8 +44,8 @@ def test_record_gc_audit_persists_full_payload_and_hashes_doc_id(tmp_path):
     assert a["age_gate_seconds"] == 86400
     assert a["mutated"] == 1
     # raw doc id는 저장 안 됨(hash만)
-    assert "doc_RAW_secret" not in a["ragflow_document_id_hash"]
-    assert a["ragflow_document_id_hash"]
+    assert "doc_RAW_secret" not in a["index_document_id_hash"]
+    assert a["index_document_id_hash"]
 
 
 def test_mark_session_memory_deleted_missing_row_is_noop(tmp_path):

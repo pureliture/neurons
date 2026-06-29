@@ -342,8 +342,8 @@ class IngressStatusMixin:
             if existing is not None and existing["content_hash"] != content_hash:
                 if (
                     existing["status"] != "prepared"
-                    or existing["ragflow_dataset_id"]
-                    or existing["ragflow_document_id"]
+                    or existing["index_target_id"]
+                    or existing["index_document_id"]
                     or existing["ingress_job_id"]
                     or existing["queued_at"]
                     or existing["indexed_at"]
@@ -381,13 +381,13 @@ class IngressStatusMixin:
                         source_chunk_count=?,
                         metadata_json=?,
                         status='prepared',
-                        ragflow_dataset_id='',
-                        ragflow_document_id='',
+                        index_target_id='',
+                        index_document_id='',
                         ingress_target_profile='',
                         ingress_job_id='',
                         queued_at='',
-                        ragflow_run='',
-                        ragflow_progress=0,
+                        index_run_id='',
+                        index_progress=0,
                         indexed_at='',
                         disabled_at='',
                         authorization_status='active'
@@ -453,13 +453,13 @@ class IngressStatusMixin:
                         ELSE excluded.metadata_json
                     END,
                     status='prepared',
-                    ragflow_dataset_id='',
-                    ragflow_document_id='',
+                    index_target_id='',
+                    index_document_id='',
                     ingress_target_profile='',
                     ingress_job_id='',
                     queued_at='',
-                    ragflow_run='',
-                    ragflow_progress=0,
+                    index_run_id='',
+                    index_progress=0,
                     indexed_at='',
                     disabled_at='',
                     authorization_status='active'
@@ -510,17 +510,17 @@ class IngressStatusMixin:
                 os.chmod(side_file, 0o600)
     def list_index_timeouts(self, *, dataset_id: str | None = None, limit: int = 50) -> list[dict]:
         query = """
-            SELECT knowledge_id, ragflow_dataset_id, ragflow_document_id, ragflow_run, ragflow_progress
+            SELECT knowledge_id, index_target_id, index_document_id, index_run_id, index_progress
             FROM knowledge_items
             WHERE status = 'index_timeout'
-              AND ragflow_dataset_id IS NOT NULL
-              AND ragflow_dataset_id != ''
-              AND ragflow_document_id IS NOT NULL
-              AND ragflow_document_id != ''
+              AND index_target_id IS NOT NULL
+              AND index_target_id != ''
+              AND index_document_id IS NOT NULL
+              AND index_document_id != ''
         """
         params: list[object] = []
         if dataset_id:
-            query += " AND ragflow_dataset_id = ?"
+            query += " AND index_target_id = ?"
             params.append(dataset_id)
         query += " ORDER BY updated_at ASC LIMIT ?"
         params.append(max(limit, 1))
@@ -605,7 +605,7 @@ class IngressStatusMixin:
                 UPDATE knowledge_items
                 SET status = 'quarantined',
                     metadata_json = ?,
-                    ragflow_run = ?,
+                    index_run_id = ?,
                     indexed_at = '',
                     updated_at = ?
                 WHERE knowledge_id = ?
@@ -616,7 +616,7 @@ class IngressStatusMixin:
                 """,
                 (
                     json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                    run_bucket or str(item.get("ragflow_run") or ""),
+                    run_bucket or str(item.get("index_run_id") or ""),
                     now,
                     knowledge_id,
                     expected_target_profile,
@@ -640,11 +640,11 @@ class IngressStatusMixin:
     ) -> bool:
         """CAS record an idempotent local replay-request and re-arm a queued row.
 
-        The row stays ``queued`` and keeps its ingress target/job; ragflow
+        The row stays ``queued`` and keeps its ingress target/job; retired_index_bridge
         run/progress/document_id are reset and queued_at is refreshed, and an
         explicit ``m5_disposition_status=replay_requested`` marker plus attempt
         counter are stamped on the local legacy ledger only. This NEVER writes,
-        disables, deletes, or directly replays a RAGFlow document.
+        disables, deletes, or directly replays a RetiredIndexBridge document.
 
         Important scope limit: this is a local re-arm + audit marker. It does not by
         itself re-enqueue a queue job or create a delivery record, so it does not on
@@ -665,9 +665,9 @@ class IngressStatusMixin:
                 """
                 UPDATE knowledge_items
                 SET metadata_json = ?,
-                    ragflow_run = 'QUEUED',
-                    ragflow_progress = 0,
-                    ragflow_document_id = '',
+                    index_run_id = 'QUEUED',
+                    index_progress = 0,
+                    index_document_id = '',
                     indexed_at = '',
                     queued_at = ?,
                     updated_at = ?
@@ -718,7 +718,7 @@ class IngressStatusMixin:
         ``m5_disposition_status=replay_delivered`` so the row drops out of the
         replay-requested selection on the next run (natural idempotency). The row
         stays ``queued`` because the existing delivery worker still has to drive the
-        new job to RAGFlow. No RAGFlow document is written/disabled/deleted here.
+        new job to RetiredIndexBridge. No RetiredIndexBridge document is written/disabled/deleted here.
         """
         item = self.get_by_knowledge_id(knowledge_id) or {}
         metadata = _load_metadata_json(str(item.get("metadata_json") or "{}"))
@@ -733,9 +733,9 @@ class IngressStatusMixin:
                 UPDATE knowledge_items
                 SET metadata_json = ?,
                     ingress_job_id = ?,
-                    ragflow_run = 'QUEUED',
-                    ragflow_progress = 0,
-                    ragflow_document_id = '',
+                    index_run_id = 'QUEUED',
+                    index_progress = 0,
+                    index_document_id = '',
                     indexed_at = '',
                     queued_at = ?,
                     updated_at = ?
@@ -778,7 +778,7 @@ class IngressStatusMixin:
         The row had more than one exact-match DONE backend document. The caller
         selects a deterministic canonical document id; this method reflects that
         single canonical into the ledger row. It does not delete, disable, or
-        otherwise mutate any RAGFlow document; backend duplicate cleanup remains a
+        otherwise mutate any RetiredIndexBridge document; backend duplicate cleanup remains a
         separate operator-gated concern.
         """
         item = self.get_by_knowledge_id(knowledge_id) or {}
@@ -796,10 +796,10 @@ class IngressStatusMixin:
                 UPDATE knowledge_items
                 SET status = 'indexed',
                     metadata_json = ?,
-                    ragflow_dataset_id = ?,
-                    ragflow_document_id = ?,
-                    ragflow_run = 'DONE',
-                    ragflow_progress = 1.0,
+                    index_target_id = ?,
+                    index_document_id = ?,
+                    index_run_id = 'DONE',
+                    index_progress = 1.0,
                     ingress_target_profile = '',
                     ingress_job_id = '',
                     queued_at = '',
@@ -1282,13 +1282,13 @@ class IngressStatusMixin:
                     privacy_level = 'private',
                     redaction_version = ?,
                     status = 'prepared',
-                    ragflow_dataset_id = '',
-                    ragflow_document_id = '',
+                    index_target_id = '',
+                    index_document_id = '',
                     ingress_target_profile = '',
                     ingress_job_id = '',
                     queued_at = '',
-                    ragflow_run = '',
-                    ragflow_progress = 0,
+                    index_run_id = '',
+                    index_progress = 0,
                     indexed_at = '',
                     disabled_at = '',
                     authorization_status = 'active'
@@ -1315,7 +1315,7 @@ class IngressStatusMixin:
         """
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM knowledge_items WHERE ragflow_document_id = ?",
+                "SELECT * FROM knowledge_items WHERE index_document_id = ?",
                 (document_id,),
             ).fetchone()
         if row is None:
@@ -1357,7 +1357,7 @@ class IngressStatusMixin:
             return None
         if _is_expired(item.get("valid_until", "")):
             return None
-        if not self._dataset_is_enabled(item.get("ragflow_dataset_id", "")):
+        if not self._dataset_is_enabled(item.get("index_target_id", "")):
             return None
         if item.get("type") == "session_summary":
             return None
@@ -1414,7 +1414,7 @@ class IngressStatusMixin:
                 SELECT tc.*
                 FROM transcript_chunks tc
                 JOIN knowledge_items ki ON ki.knowledge_id = tc.knowledge_id
-                WHERE ki.ragflow_document_id = ?
+                WHERE ki.index_document_id = ?
                 """,
                 (document_id,),
             ).fetchone()

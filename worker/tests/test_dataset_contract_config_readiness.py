@@ -4,10 +4,10 @@ import json
 import pytest
 
 from agent_knowledge.dataset_contract import (
-    CANONICAL_RAGFLOW_DATASET_NAMES,
+    CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES,
     CURRENT_RUNTIME_DATASET_NAMES,
     DATASET_CONTRACT_VERSION,
-    DEPRECATED_RAGFLOW_DATASET_PREFIXES,
+    DEPRECATED_RETIRED_INDEX_BRIDGE_DATASET_PREFIXES,
     build_default_dataset_contract_config,
     clear_dataset_contract_config_cache,
     dataset_contract_config_schema,
@@ -27,8 +27,8 @@ def test_m3_default_config_fixture_matches_current_python_constants(tmp_path):
     assert config["schema_version"] == "agent_knowledge_dataset_contract_config.v1"
     assert config["contract_version"] == DATASET_CONTRACT_VERSION
     assert config["current_runtime_dataset_names"] == dict(CURRENT_RUNTIME_DATASET_NAMES)
-    assert config["canonical_ragflow_dataset_names"] == dict(CANONICAL_RAGFLOW_DATASET_NAMES)
-    assert config["deprecated_ragflow_dataset_prefixes"] == list(DEPRECATED_RAGFLOW_DATASET_PREFIXES)
+    assert config["canonical_index_dataset_names"] == dict(CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES)
+    assert config["deprecated_index_dataset_prefixes"] == list(DEPRECATED_RETIRED_INDEX_BRIDGE_DATASET_PREFIXES)
     assert config["load_policy"] == {
         "mode": "process_start_once",
         "hot_reload": False,
@@ -58,7 +58,7 @@ def test_m3_dataset_contract_config_is_loaded_once_without_hot_reload(tmp_path):
     first = load_dataset_contract_config_once(fixture)
 
     changed = copy.deepcopy(config)
-    changed["deprecated_ragflow_dataset_prefixes"].append("changed-after-startup-")
+    changed["deprecated_index_dataset_prefixes"].append("changed-after-startup-")
     fixture.write_text(json.dumps(changed, sort_keys=True), encoding="utf-8")
 
     assert load_dataset_contract_config_once(fixture) == first

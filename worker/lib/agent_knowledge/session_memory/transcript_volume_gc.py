@@ -1,6 +1,6 @@
-"""Transcript-memory volume reclaim GC (coverage-driven, RAGFlow-direct).
+"""Transcript-memory volume reclaim GC (coverage-driven, RetiredIndexBridge-direct).
 
-기존 ``transcript_memory_gc``(disable-first)는 recall 노이즈만 줄이고 RAGFlow 인덱스
+기존 ``transcript_memory_gc``(disable-first)는 recall 노이즈만 줄이고 RetiredIndexBridge 인덱스
 스토리지는 비우지 못한다. transcript-memory가 무한정 쌓이는 큰 데이터셋이므로, 볼륨을
 실제로 회수하려면 **hard delete**가 필요하다. 안전하게 하려면:
 
@@ -13,7 +13,7 @@
 
 이 경로는 conversation_chunk ledger row에 의존하지 않는다(M9 은퇴 후 그 row가 없음).
 대신 active session_memory의 ``session_memory_coverage_edges.source_content_hash``로
-대상을 고르고, RAGFlow transcript 문서의 ``meta_fields.content_hash`` 정확 매칭으로
+대상을 고르고, RetiredIndexBridge transcript 문서의 ``meta_fields.content_hash`` 정확 매칭으로
 실문서를 찾는다(fuzzy 금지 — 매칭 안 되면 skip, 절대 추측 삭제 안 함).
 """
 
@@ -29,7 +29,7 @@ from pathlib import Path
 
 from ..ledger import Ledger, SESSION_MEMORY_REGENERATION_EVIDENCE_STATUS
 from .native_memory_sync_approval import ApprovalError, validate_goal3_live_approval
-from ..ragflow_client import RagflowHttpClient
+from ..index_client import RetiredIndexBridgeHttpClient
 from .gc_backup import write_gc_backup
 from .gc_safety_auditor import hard_delete_documents
 
@@ -44,7 +44,7 @@ MIN_ACTIVE_AGE_FLOOR_SECONDS = 86400
 class TranscriptVolumeGcConfig:
     ledger_path: Path
     transcript_dataset_id: str
-    ragflow_url: str
+    index_url: str
     backup_dir: str = ""
     max_items: int = 25
     min_active_age_seconds: int = MIN_ACTIVE_AGE_FLOOR_SECONDS
@@ -69,13 +69,13 @@ class TranscriptVolumeGcRunner:
         *,
         config: TranscriptVolumeGcConfig,
         token: str = "",
-        ragflow_client=None,
+        index_client=None,
         now_fn: Callable[[], datetime] | None = None,
     ):
         self.config = config
         self.token = token
         # S0a 주입 seam(기본 None=기존 동작, behavior-preserving).
-        self._ragflow_client = ragflow_client
+        self._index_client = index_client
         self._now_fn = now_fn
 
     def _now(self) -> datetime:
@@ -95,19 +95,19 @@ class TranscriptVolumeGcRunner:
             # G-8: 볼륨 회수 hard delete는 백업 없이 실행하지 않는다.
             return self._report(candidates, selected, 0, 0, 0, 0, 1, "backup_dir_required")
         if self.config.execute and selected:
-            ragflow = self._ragflow_client if self._ragflow_client is not None else RagflowHttpClient(
-                base_url=self.config.ragflow_url,
+            retired_index_bridge = self._index_client if self._index_client is not None else RetiredIndexBridgeHttpClient(
+                base_url=self.config.index_url,
                 bearer_token=self.token,
                 request_timeout_seconds=45,
             )
             for cand in selected:
-                doc_id = self._resolve_transcript_doc_id(ragflow, cand.source_content_hash, cand.session_id_hash)
+                doc_id = self._resolve_transcript_doc_id(retired_index_bridge, cand.source_content_hash, cand.session_id_hash)
                 if not doc_id:
                     unresolved_count += 1
                     continue
                 attempted_count += 1
                 try:
-                    body = "\n".join(ragflow.list_document_chunks(self.config.transcript_dataset_id, doc_id))
+                    body = "\n".join(retired_index_bridge.list_document_chunks(self.config.transcript_dataset_id, doc_id))
                     if not body.strip():
                         # 빈 본문 백업은 lossy(복구 불가) → 삭제 중단.
                         raise ValueError("empty document body; backup would be lossy, aborting delete")
@@ -120,12 +120,12 @@ class TranscriptVolumeGcRunner:
                         provider=cand.provider,
                         project=cand.project,
                         dataset_id=self.config.transcript_dataset_id,
-                        ragflow_document_id=doc_id,
+                        index_document_id=doc_id,
                         body=body,
                         replacement_knowledge_id=cand.active_knowledge_id,
                     )
                     backed_up_count += 1
-                    hard_delete_documents(ragflow, self.config.transcript_dataset_id, [doc_id])
+                    hard_delete_documents(retired_index_bridge, self.config.transcript_dataset_id, [doc_id])
                     deleted_count += 1
                 except Exception as exc:  # noqa: BLE001
                     failed_error_class = exc.__class__.__name__
@@ -168,7 +168,7 @@ class TranscriptVolumeGcRunner:
                     active.session_id_hash AS session_id_hash,
                     active.provider AS provider,
                     active.project AS project,
-                    active.ragflow_document_id AS active_document_id
+                    active.index_document_id AS active_document_id
                 FROM session_memory_coverage_edges edge
                 JOIN knowledge_items active
                   ON active.knowledge_id = edge.active_knowledge_id
@@ -182,7 +182,7 @@ class TranscriptVolumeGcRunner:
                   AND active.coverage_status = 'complete'
                   AND active.coverage_gap_count = 0
                   AND active.coverage_duplicate_count = 0
-                  AND active.ragflow_document_id != ''
+                  AND active.index_document_id != ''
                   AND coalesce(nullif(snap.updated_at, ''), nullif(snap.activated_at, '')) != ''
                   AND coalesce(nullif(snap.updated_at, ''), nullif(snap.activated_at, '')) <= ?
                   AND edge.source_content_hash != ''
@@ -222,10 +222,10 @@ class TranscriptVolumeGcRunner:
             cache[active_knowledge_id] = bool(authorized and authorized.get("type") == "session_memory")
         return cache[active_knowledge_id]
 
-    def _resolve_transcript_doc_id(self, ragflow, content_hash: str, session_id_hash: str) -> str:
-        """RAGFlow transcript 문서를 찾는다.
+    def _resolve_transcript_doc_id(self, retired_index_bridge, content_hash: str, session_id_hash: str) -> str:
+        """RetiredIndexBridge transcript 문서를 찾는다.
 
-        RAGFlow keyword 검색은 meta가 아니라 문서 이름/내용을 매치하므로 content_hash(sha256)로는
+        RetiredIndexBridge keyword 검색은 meta가 아니라 문서 이름/내용을 매치하므로 content_hash(sha256)로는
         문서를 못 찾는다(G3 read model이 확인: "metadata-filtered retrieve는 단일 세션을 못 고른다,
         keyword listing이 authoritative"). 대신 session_id_hash fragment로 그 세션 문서를 좁힌 뒤
         (이름/내용에 fragment 포함) Python에서 ``meta_fields.content_hash`` 정확 매칭으로 단일 문서를
@@ -235,7 +235,7 @@ class TranscriptVolumeGcRunner:
         if not fragment:
             return ""
         try:
-            docs = ragflow.list_documents(self.config.transcript_dataset_id, keywords=fragment, page_size=200)
+            docs = retired_index_bridge.list_documents(self.config.transcript_dataset_id, keywords=fragment, page_size=200)
         except Exception:  # noqa: BLE001
             return ""
         matches = []
@@ -256,8 +256,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="transcript-volume-gc")
     parser.add_argument("--ledger", required=True)
     parser.add_argument("--transcript-dataset-id", required=True)
-    parser.add_argument("--ragflow-url", required=True)
-    parser.add_argument("--token-env", default="RAGFLOW_API_KEY")
+    parser.add_argument("--retired-index-bridge-url", required=True)
+    parser.add_argument("--retired-index-bridge-token-env", default="RETIRED_INDEX_BRIDGE_API_KEY")
     parser.add_argument("--backup-dir", dest="backup_dir", default="")
     parser.add_argument("--max-items", type=int, default=25)
     parser.add_argument("--min-active-age-seconds", type=int, default=MIN_ACTIVE_AGE_FLOOR_SECONDS)
@@ -265,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--approval", default="")
     args = parser.parse_args(raw_argv)
 
-    token = os.environ.get(args.token_env, "")
+    token = os.environ.get(args.retired_index_bridge_token_env, "")
     if args.execute:
         if not token:
             print("token env is not set", file=sys.stderr)
@@ -278,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.approval,
                 operation=TRANSCRIPT_VOLUME_GC_OPERATION,
                 dataset_id=args.transcript_dataset_id,
-                ragflow_base_url=args.ragflow_url,
+                index_base_url=args.retired_index_bridge_url,
                 command_argv=["transcript-volume-gc", *raw_argv],
                 max_wait_seconds=900,
             )
@@ -288,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     config = TranscriptVolumeGcConfig(
         ledger_path=Path(args.ledger),
         transcript_dataset_id=args.transcript_dataset_id,
-        ragflow_url=args.ragflow_url,
+        index_url=args.retired_index_bridge_url,
         backup_dir=args.backup_dir,
         max_items=args.max_items,
         min_active_age_seconds=args.min_active_age_seconds,

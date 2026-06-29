@@ -151,7 +151,7 @@ M1 safety target에 필요한 최소 method subset부터 시작한다. `ledger.t
 - nested transaction은 M1에서 지원하지 않는다. 감지 시 fail closed 한다.
 - read-only Ledger에서 write transaction 요청은 기존 read-only write failure 성격을
   유지하거나 더 이른 명시적 error로 실패한다.
-- live RAGFlow, Docker/systemd, credential, raw transcript/source mutation은 M1 error
+- live RetiredIndexBridge, Docker/systemd, credential, raw transcript/source mutation은 M1 error
   handling 범위 밖이다.
 
 ## Testing Strategy
@@ -208,7 +208,7 @@ M1은 red -> green -> refactor 흐름을 따른다.
     fixture, orchestration-driven rollout/abort criteria가 구현 직전 수준으로 구체화된다.
   - Expected evidence: generated config fixture matching current Python constants, validation
     test plan, no hot reload requirement, no secret/raw dataset id exposure.
-  - Abort criteria: runtime hot reload, credential access, live RAGFlow mutation, or semantics
+  - Abort criteria: runtime hot reload, credential access, live RetiredIndexBridge mutation, or semantics
     drift가 필요해지면 별도 requirements/design으로 회귀한다.
 
 ## Open Questions

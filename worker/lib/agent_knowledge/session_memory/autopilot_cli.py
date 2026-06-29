@@ -3,7 +3,7 @@
 This un-stubs the ``memory`` server command. The testable core ``run_autopilot_command``
 runs a cycle over already-mined candidates and returns a recall snapshot taken through
 the real product read-path (run_brain_query_v2). ``main`` either loads candidates from a
-JSON file or blind-mines them live from transcript-memory via RAGFlow.
+JSON file or blind-mines them live from transcript-memory via RetiredIndexBridge.
 
 AUTOPILOT MODE — GOAL AND STANDING AUTHORIZATION
 ================================================
@@ -14,12 +14,12 @@ GOAL (working goal_state, user-set 2026-06-14):
 
 STANDING PRE-APPROVAL (user, 2026-06-14):
   All autopilot approval gates are pre-approved and run unattended — candidate auto-accept
-  (human_approval path with approved_by='autopilot') and RAGFlow projection writes (the loop
+  (human_approval path with approved_by='autopilot') and RetiredIndexBridge projection writes (the loop
   self-mints the projection approval_record). No per-cycle human confirmation is required.
 
 BOUNDARY (unchanged by the pre-approval — these are NOT covered by it):
   The forbidden operations stay HARD-BLOCKED regardless of authorization: memory delete,
-  live GC execute, RAGFlow dataset delete/disable, raw transcript/secret exposure, runtime
+  live GC execute, RetiredIndexBridge dataset delete/disable, raw transcript/secret exposure, runtime
   mutation (see FORBIDDEN_AUTO_POLICY_OPERATIONS + CLAUDE.md). Pre-approval removes the
   "ask first" gate, not the safety mechanics: live writes still run bounded with exact argv,
   timeout, redaction, postcheck, and rollback, and the readiness/conflict tripwire still
@@ -40,13 +40,13 @@ from .extraction_llm import build_vertex_wrapper_completion_fn
 from .llm_brain_miner import LlmBrainEnvelopeMiner
 
 # Standing pre-approval flag for the autopilot operating mode (user-set 2026-06-14).
-# Scope = candidate accept + RAGFlow projection write only. Forbidden ops remain blocked.
+# Scope = candidate accept + RetiredIndexBridge projection write only. Forbidden ops remain blocked.
 AUTOPILOT_PREAPPROVED = True
 
 
 def mine_live_candidates(
     *,
-    ragflow: Any,
+    retired_index_bridge: Any,
     project: str,
     refresh_watermark: str = "live",
     completion_fn: Any | None = None,
@@ -58,17 +58,17 @@ def mine_live_candidates(
     """Blind mine cycle-ready MemoryCard candidates from the durable SoT (Option B).
 
     Default source is session-memory — the durable, lossless aggregate of conversations
-    (transcript-memory is transient raw chunks GC'd after conversion). Reads docs via RAGFlow,
+    (transcript-memory is transient raw chunks GC'd after conversion). Reads docs via RetiredIndexBridge,
     then runs the envelope miner with an instruction-following completion_fn (default: keyless
-    vertex-wrapper; the RAGFlow chat assistant is conversational and won't emit strict JSON).
+    vertex-wrapper; the RetiredIndexBridge chat assistant is conversational and won't emit strict JSON).
     The miner never sees the golden; output is directly consumable by run_autopilot_cycle.
     """
     if completion_fn is None:
         completion_fn = build_vertex_wrapper_completion_fn()
     if source == "transcript-memory":
-        chunks = ragflow.list_transcript_memory_chunks(project=project, limit=limit)
+        chunks = retired_index_bridge.list_transcript_memory_chunks(project=project, limit=limit)
     else:
-        chunks = ragflow.list_session_memory_chunks(project=project, provider=provider, limit=limit)
+        chunks = retired_index_bridge.list_session_memory_chunks(project=project, provider=provider, limit=limit)
     miner = LlmBrainEnvelopeMiner(completion_fn=completion_fn, max_candidates=max_candidates)
     candidates: list[dict] = []
     for chunk in chunks:
@@ -128,12 +128,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--candidates-json",
         default="",
-        help="path to a JSON array of pre-mined candidates; omit to mine live from RAGFlow",
+        help="path to a JSON array of pre-mined candidates; omit to mine live from RetiredIndexBridge",
     )
     # Live-mining options (used when --candidates-json is omitted). This is the Ubuntu
     # brain-server entry a systemd timer/cron invokes.
-    parser.add_argument("--ragflow-url", default="")
-    parser.add_argument("--token-env", default="")
+    parser.add_argument("--retired-index-bridge-url", default="")
+    parser.add_argument("--retired-index-bridge-token-env", default="")
     parser.add_argument("--policy-proxy-url", default="")
     parser.add_argument("--derived-dataset-id", default="", help="dataset id for supersede candidate recall")
     parser.add_argument("--llm-id", default="")
@@ -152,31 +152,31 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(candidates, list):
             raise ValueError("--candidates-json must contain a JSON array of candidates")
     else:
-        from ..mcp_server import build_ragflow_client
-        from .supersede_detector import build_ragflow_judge_fn, build_supersede_detector
+        from ..mcp_server import build_index_client
+        from .supersede_detector import build_index_judge_fn, build_supersede_detector
 
-        token = os.environ.get(args.token_env, "") if args.token_env else ""
-        ragflow = build_ragflow_client(
-            ragflow_url=args.ragflow_url, token=token, policy_proxy_url=args.policy_proxy_url
+        token = os.environ.get(args.retired_index_bridge_token_env, "") if args.retired_index_bridge_token_env else ""
+        retired_index_bridge = build_index_client(
+            index_url=args.retired_index_bridge_url, token=token, policy_proxy_url=args.policy_proxy_url
         )
         candidates = mine_live_candidates(
-            ragflow=ragflow,
+            retired_index_bridge=retired_index_bridge,
             project=args.project,
             refresh_watermark=args.refresh_watermark,
             limit=args.limit,
             max_candidates=args.max_candidates,
         )
         if args.derived_dataset_id:
-            from .ragflow_projection import RagflowMemoryCardProjectionClient
+            from .index_projection import RetiredIndexBridgeMemoryCardProjectionClient
 
             supersede_detector = build_supersede_detector(
-                ragflow=ragflow,
-                judge_fn=build_ragflow_judge_fn(ragflow, llm_id=args.llm_id),
+                retired_index_bridge=retired_index_bridge,
+                judge_fn=build_index_judge_fn(retired_index_bridge, llm_id=args.llm_id),
                 dataset_id=args.derived_dataset_id,
                 project=args.project,
             )
-            projection_client = RagflowMemoryCardProjectionClient(
-                ragflow=ragflow, dataset_id=args.derived_dataset_id
+            projection_client = RetiredIndexBridgeMemoryCardProjectionClient(
+                retired_index_bridge=retired_index_bridge, dataset_id=args.derived_dataset_id
             )
 
     result = run_autopilot_command(

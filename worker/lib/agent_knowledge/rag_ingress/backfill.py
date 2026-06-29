@@ -1,7 +1,7 @@
 """M4 dry-run backfill and migration readiness helpers.
 
 The functions here are deliberately pure over source queue payloads. They do
-not mutate legacy queues, the legacy ledger, the new state DB, or RAGFlow.
+not mutate legacy queues, the legacy ledger, the new state DB, or RetiredIndexBridge.
 """
 
 from __future__ import annotations

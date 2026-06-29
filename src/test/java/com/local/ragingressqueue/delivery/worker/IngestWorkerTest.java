@@ -29,7 +29,7 @@ class IngestWorkerTest {
         assertThat(decision.status()).isEqualTo(DeliveryDecision.Status.DELIVERED);
         assertThat(consumer.fetchCount).isEqualTo(1);
         assertThat(adapter.deliverCount).isEqualTo(1);
-        assertThat(adapter.deliveredTargetProfiles).containsExactly("ragflow-transcript-memory");
+        assertThat(adapter.deliveredTargetProfiles).containsExactly("index-transcript-memory");
         assertThat(consumer.ackCount).isEqualTo(1);
     }
 
@@ -114,8 +114,8 @@ class IngestWorkerTest {
         DeliveryDecision decision = worker.runOnce();
 
         assertThat(decision.status()).isEqualTo(DeliveryDecision.Status.DELIVERED);
-        assertThat(adapter.pressureTargetProfiles).containsExactly("ragflow-session-memory");
-        assertThat(adapter.deliveredTargetProfiles).containsExactly("ragflow-session-memory");
+        assertThat(adapter.pressureTargetProfiles).containsExactly("index-session-memory");
+        assertThat(adapter.deliveredTargetProfiles).containsExactly("index-session-memory");
         assertThat(consumer.ackCount).isEqualTo(1);
     }
 
@@ -128,7 +128,7 @@ class IngestWorkerTest {
             redacted body
             """;
         return new IngestJob(
-            Map.of("provider", "codex", "project", "workspace-ragflow-advisor"),
+            Map.of("provider", "codex", "project", "workspace-index-advisor"),
             new DocumentPayload(
                 "redacted_rag_ready_document",
                 "redaction.v2",
@@ -138,7 +138,7 @@ class IngestWorkerTest {
                 Map.of("schema_version", "agent_knowledge_document.v2", "result_type", "conversation_chunk")
             ),
             ContentHashVerifier.sha256Hex(body),
-            "ragflow-transcript-memory",
+            "index-transcript-memory",
             "conversation_chunk",
             null
         );
@@ -153,7 +153,7 @@ class IngestWorkerTest {
             redacted body Bearer abc.def.ghi
             """;
         return new IngestJob(
-            Map.of("provider", "codex", "project", "workspace-ragflow-advisor"),
+            Map.of("provider", "codex", "project", "workspace-index-advisor"),
             new DocumentPayload(
                 "redacted_rag_ready_document",
                 "redaction.v2",
@@ -163,7 +163,7 @@ class IngestWorkerTest {
                 Map.of("schema_version", "agent_knowledge_document.v2", "result_type", "conversation_chunk")
             ),
             ContentHashVerifier.sha256Hex(body),
-            "ragflow-transcript-memory",
+            "index-transcript-memory",
             "conversation_chunk",
             null
         );
@@ -178,7 +178,7 @@ class IngestWorkerTest {
             redacted session summary
             """;
         return new IngestJob(
-            Map.of("provider", "codex", "project", "workspace-ragflow-advisor"),
+            Map.of("provider", "codex", "project", "workspace-index-advisor"),
             new DocumentPayload(
                 "redacted_rag_ready_document",
                 "redaction.v2",
@@ -188,7 +188,7 @@ class IngestWorkerTest {
                 Map.of("schema_version", "agent_knowledge_document.v2", "result_type", "session_summary")
             ),
             ContentHashVerifier.sha256Hex(body),
-            "ragflow-session-memory",
+            "index-session-memory",
             "session_summary",
             null
         );

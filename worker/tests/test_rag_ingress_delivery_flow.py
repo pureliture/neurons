@@ -110,7 +110,7 @@ def test_timeout_after_success_replay_reconciles_to_single_delivery_job(tmp_path
 
     job = db.get_delivery_job("job_timeout")
     assert job["status"] == "succeeded"
-    assert job["ragflow_document_id"] == "doc_job_timeout"
+    assert job["index_document_id"] == "doc_job_timeout"
     assert backend.submit_calls == 1
     assert [row["job_id"] for row in db.list_rows("delivery_jobs")] == ["job_timeout"]
 
@@ -126,7 +126,7 @@ def test_async_parse_fail_maps_to_failed_retryable_then_quarantine(tmp_path):
     reconciler = DeliveryReconciler(state_db=db, backend=backend)
     assert reconciler.reconcile_once("job_async_fail", now=NOW, max_attempts=4) == "failed_retryable"
     assert db.get_delivery_job("job_async_fail")["status"] == "failed_retryable"
-    assert db.get_delivery_job("job_async_fail")["ragflow_run"] == "FAIL"
+    assert db.get_delivery_job("job_async_fail")["index_run_id"] == "FAIL"
 
     assert reconciler.reconcile_once("job_async_fail", now=NOW, max_attempts=2) == "quarantined"
     job = db.get_delivery_job("job_async_fail")
@@ -197,7 +197,7 @@ def test_executor_completion_cannot_backdate_expired_lease_with_backend_observed
     assert executor.execute_once("job_backdate", now=NOW + timedelta(seconds=2), max_attempts=3) == "stale_owner_rejected"
     job = db.get_delivery_job("job_backdate")
     assert job["status"] == "claimed"
-    assert job["ragflow_document_id"] == ""
+    assert job["index_document_id"] == ""
     assert job["last_error_class"] == "stale_owner_rejected"
 
 

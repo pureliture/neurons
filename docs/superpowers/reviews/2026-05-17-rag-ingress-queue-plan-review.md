@@ -37,5 +37,5 @@ None.
 ## Remaining Execution Notes
 
 - Corretto 25 + Gradle JVM verification is available; Docker daemon/Compose runtime must still be checked separately and marked `blocked` if unavailable.
-- Live RAGFlow smoke remains separate and requires an explicit approval packet.
+- Live RetiredIndexBridge smoke remains separate and requires an explicit approval packet.
 - The current plan is suitable as an execution scaffold, but implementation subagents must still keep each patch small and stop on any RED/GREEN mismatch.

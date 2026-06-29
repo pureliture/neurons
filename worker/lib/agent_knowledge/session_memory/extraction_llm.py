@@ -1,6 +1,6 @@
 """Instruction-following extraction LLM for the autopilot miner.
 
-The RAGFlow chat assistant is a conversational/RAG surface (it answers prose, not strict
+The RetiredIndexBridge chat assistant is a conversational/RAG surface (it answers prose, not strict
 JSON) so it is unsuitable for structured extraction. This module provides an OpenAI-compatible
 completion_fn — by default the keyless local vertex-wrapper (per ~/.graphify/providers.json,
 the project's headless extraction backend) — used as the envelope miner's completion_fn.

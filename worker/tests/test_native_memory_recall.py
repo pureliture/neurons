@@ -112,12 +112,12 @@ def test_recall_passes_brain_id_filter(tmp_path):
     store.upsert_statement(statement_id="a1", brain_id="/project/A", original_content_hash="h1", now=FIXED)
     store.upsert_statement(statement_id="b1", brain_id="/project/B", original_content_hash="h2", now=FIXED)
 
-    class _FakeRagflow:
+    class _FakeRetiredIndexBridge:
         def search_messages(self, **kwargs):
             return {"status_code": 200, "json": {"code": 0, "data": [_hit("mem:a1"), _hit("mem:b1")]}}
 
     kept = recall_active_native_memory(
-        ragflow=_FakeRagflow(), store=store, memory_id="m", query="q", brain_id="/project/A",
+        retired_index_bridge=_FakeRetiredIndexBridge(), store=store, memory_id="m", query="q", brain_id="/project/A",
     )
 
     assert [k["session_tag"] for k in kept] == ["mem:a1"]
@@ -197,10 +197,10 @@ def _envelope(chunks):
     return {"status_code": 200, "json": {"code": 0, "data": {"chunks": list(chunks)}}}
 
 
-class _FakeSearchRagflow:
+class _FakeSearchRetiredIndexBridge:
     """search_messages 덕타입. top_n 별 응답 주입 + 호출 기록.
 
-    duck-type for RagflowHttpClient.search_messages(*, query, memory_id, top_n) —
+    duck-type for RetiredIndexBridgeHttpClient.search_messages(*, query, memory_id, top_n) —
     실 client 시그니처(query/memory_id/top_n keyword-only)와 일치시킨다. client
     시그니처가 바뀌면 이 fake 도 함께 갱신할 것.
     """
@@ -228,9 +228,9 @@ def test_recall_filters_to_active(tmp_path):
     store.mark_superseded("1001", superseded_by="1002", now=LATER)
     # active 가 1개(<threshold)라 over-fetch 가 한 번 더 돌므로 50-응답도 동일하게 준다.
     both = [_hit("mem:1001"), _hit("mem:1002")]
-    ragflow = _FakeSearchRagflow({10: both, 50: both})
+    retired_index_bridge = _FakeSearchRetiredIndexBridge({10: both, 50: both})
     out = recall_active_native_memory(
-        ragflow=ragflow, store=store, memory_id="mem_main", query="preference"
+        retired_index_bridge=retired_index_bridge, store=store, memory_id="mem_main", query="preference"
     )
     assert [h["session_tag"] for h in out] == ["mem:1002"]
 
@@ -238,54 +238,54 @@ def test_recall_filters_to_active(tmp_path):
 def test_recall_overfetch_refetches_once_when_below_threshold(tmp_path):
     store = _store(tmp_path)
     _seed_active(store, "1001", "1002")
-    ragflow = _FakeSearchRagflow(
+    retired_index_bridge = _FakeSearchRetiredIndexBridge(
         {
             10: [_hit("mem:1001")],
             50: [_hit("mem:1001"), _hit("mem:1002")],
         }
     )
     out = recall_active_native_memory(
-        ragflow=ragflow, store=store, memory_id="mem_main", query="q"
+        retired_index_bridge=retired_index_bridge, store=store, memory_id="mem_main", query="q"
     )
     assert len(out) >= NATIVE_MEMORY_OVERFETCH_THRESHOLD
-    assert len(ragflow.search_calls) == 2
-    assert ragflow.search_calls[1]["top_n"] == 50
+    assert len(retired_index_bridge.search_calls) == 2
+    assert retired_index_bridge.search_calls[1]["top_n"] == 50
 
 
 def test_recall_no_overfetch_when_threshold_met(tmp_path):
     store = _store(tmp_path)
     _seed_active(store, "1001", "1002")
-    ragflow = _FakeSearchRagflow(
+    retired_index_bridge = _FakeSearchRetiredIndexBridge(
         {10: [_hit("mem:1001"), _hit("mem:1002")]}
     )
     out = recall_active_native_memory(
-        ragflow=ragflow, store=store, memory_id="mem_main", query="q"
+        retired_index_bridge=retired_index_bridge, store=store, memory_id="mem_main", query="q"
     )
     assert len(out) == 2
-    assert len(ragflow.search_calls) == 1
+    assert len(retired_index_bridge.search_calls) == 1
 
 
 def test_recall_overfetch_bounded_to_one_even_if_still_short(tmp_path):
     store = _store(tmp_path)
     _seed_active(store, "1001")
-    ragflow = _FakeSearchRagflow(
+    retired_index_bridge = _FakeSearchRetiredIndexBridge(
         {
             10: [_hit("mem:1001")],
             50: [_hit("mem:1001")],
         }
     )
     out = recall_active_native_memory(
-        ragflow=ragflow, store=store, memory_id="mem_main", query="q"
+        retired_index_bridge=retired_index_bridge, store=store, memory_id="mem_main", query="q"
     )
     assert len(out) == 1
-    assert len(ragflow.search_calls) == 2
+    assert len(retired_index_bridge.search_calls) == 2
 
 
 def test_recall_empty_hits_returns_empty(tmp_path):
     store = _store(tmp_path)
-    ragflow = _FakeSearchRagflow({10: []})
+    retired_index_bridge = _FakeSearchRetiredIndexBridge({10: []})
     out = recall_active_native_memory(
-        ragflow=ragflow, store=store, memory_id="mem_main", query="q"
+        retired_index_bridge=retired_index_bridge, store=store, memory_id="mem_main", query="q"
     )
     assert out == []
 
@@ -293,16 +293,16 @@ def test_recall_empty_hits_returns_empty(tmp_path):
 def test_recall_extracts_hits_from_envelope_data_chunks(tmp_path):
     store = _store(tmp_path)
     _seed_active(store, "1001", "1002")
-    ragflow = _FakeSearchRagflow(
+    retired_index_bridge = _FakeSearchRetiredIndexBridge(
         {10: [_hit("mem:1001"), _hit("mem:1002")]}
     )
     out = recall_active_native_memory(
-        ragflow=ragflow, store=store, memory_id="mem_main", query="q"
+        retired_index_bridge=retired_index_bridge, store=store, memory_id="mem_main", query="q"
     )
     assert {h["session_tag"] for h in out} == {"mem:1001", "mem:1002"}
 
 
-class _MalformedRagflow:
+class _MalformedRetiredIndexBridge:
     """search_messages 가 비정상 envelope 를 반환하는 fake. _extract_hits fail-closed 검증."""
 
     def __init__(self, result):
@@ -325,9 +325,9 @@ class _MalformedRagflow:
 def test_recall_malformed_envelope_returns_empty(tmp_path, result):
     store = _store(tmp_path)
     _seed_active(store, "1001")
-    ragflow = _MalformedRagflow(result)
+    retired_index_bridge = _MalformedRetiredIndexBridge(result)
     out = recall_active_native_memory(
-        ragflow=ragflow, store=store, memory_id="mem_main", query="q"
+        retired_index_bridge=retired_index_bridge, store=store, memory_id="mem_main", query="q"
     )
     assert out == []
 
@@ -338,10 +338,10 @@ class _ExplodingStoreSearch:
 
 
 def test_recall_propagates_store_exception(tmp_path):
-    ragflow = _FakeSearchRagflow({10: [_hit("mem:1001")]})
+    retired_index_bridge = _FakeSearchRetiredIndexBridge({10: [_hit("mem:1001")]})
     with pytest.raises(RuntimeError, match="store unavailable"):
         recall_active_native_memory(
-            ragflow=ragflow,
+            retired_index_bridge=retired_index_bridge,
             store=_ExplodingStoreSearch(),
             memory_id="mem_main",
             query="q",

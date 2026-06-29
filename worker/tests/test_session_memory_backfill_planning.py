@@ -11,7 +11,7 @@ from agent_knowledge.session_memory.backfill import (
 )
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
 class ProviderContract:

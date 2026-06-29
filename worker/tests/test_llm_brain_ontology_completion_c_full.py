@@ -170,7 +170,7 @@ def test_memory_card_episode_extraction_body_is_meaning_prose_not_json():
         {
             "decision": "Adopt CouchDB as the transcript source of truth.",
             "rationale": "Idempotent deterministic upserts simplify replay.",
-            "consequence": "RAGFlow keeps only the derived recall surface.",
+            "consequence": "RetiredIndexBridge keeps only the derived recall surface.",
         },
         summary="Choose CouchDB transcript SoT",
     )

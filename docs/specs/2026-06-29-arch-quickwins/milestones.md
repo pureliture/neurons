@@ -12,4 +12,4 @@
 
 ## M3 .env.example 정합 + coverage 가드 (#7)
 - status: done
-- evidence: ComposeConfigTest.envExampleCoversAllRequiredComposeVars assertion red(누락 MCP_HTTP_HOST,LLM_BRAIN_ENV_FILE)->green; 필수 2 + parity RAGFLOW_TASK_SUMMARY_DATASET_ID + MCP_HTTP_PORT + optional 주석 섹션 추가. gradle 전수 green.
+- evidence: ComposeConfigTest.envExampleCoversAllRequiredComposeVars assertion red(누락 MCP_HTTP_HOST,LLM_BRAIN_ENV_FILE)->green; 필수 2 + parity RETIRED_INDEX_BRIDGE_TASK_SUMMARY_DATASET_ID + MCP_HTTP_PORT + optional 주석 섹션 추가. gradle 전수 green.

@@ -37,7 +37,7 @@ authority graph를 검토한다.
     storage adapters hidden behind authority stores.
   - Dendrite captures local evidence and source locators; it does not decide
     document/workflow/preference authority.
-  - RAGFlow is not an active Context Authority component.
+  - RetiredIndexBridge is not an active Context Authority component.
   - Hermes is read-only consumer in this roadmap; self-improvement/proposal loop
     is out of scope. (Cross-ref: the proposal-only Brain Steward surface in
     `specs/brain-steward-hardening/` is a sanctioned extension — agents only
@@ -145,7 +145,7 @@ flowchart LR
 - HTML outputs are inventory items with explicit status such as generated
   companion or human preview.
 - Archive/delete recommendations remain proposals.
-- RAGFlow is not reintroduced as a Context Authority dependency.
+- RetiredIndexBridge is not reintroduced as a Context Authority dependency.
 
 ## Data Flow
 
@@ -439,7 +439,7 @@ must be clearly named and separate.
 ### Boundary Regression Tests
 
 - Agent-facing API does not require direct Neo4j/Qdrant/Graphiti calls.
-- RAGFlow is not introduced as a core Context Authority dependency.
+- RetiredIndexBridge is not introduced as a core Context Authority dependency.
 - Dendrite capture does not assign authority statuses.
 - Raw PC file bodies and graph DB files are not synced for federation.
 - Hermes는 authoritative write 권한을 얻지 않는다. proposal 전용 Brain Steward 표면

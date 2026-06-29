@@ -150,19 +150,19 @@ def test_state_shadow_readiness_blocks_undispositioned_legacy_mismatch(tmp_path:
 def test_product_surface_switch_plan_is_redacted_and_approval_gated():
     raw_ledger = "/private/example-agent-knowledge/ledger.sqlite"
     raw_state = "/private/example-agent-knowledge/rag-ingress-state.sqlite"
-    raw_ragflow = "http://127.0.0.1:19380"
+    raw_retired_index_bridge = "http://127.0.0.1:19380"
 
     plan = build_m9_product_surface_switch_plan(
         dry_run=True,
         redact_paths=True,
         reason="unit switch plan",
         agent_knowledge_command="agent-knowledge",
-        project="workspace-ragflow-advisor",
+        project="workspace-index-advisor",
         ledger_path=raw_ledger,
         state_db_recall=raw_state,
         dataset_ids=("ds_transcript_memory",),
-        ragflow_url=raw_ragflow,
-        token_env="RAGFLOW_API_KEY",
+        index_url=raw_retired_index_bridge,
+        token_env="RETIRED_INDEX_BRIDGE_API_KEY",
     )
 
     encoded = json.dumps(plan, sort_keys=True)
@@ -173,7 +173,7 @@ def test_product_surface_switch_plan_is_redacted_and_approval_gated():
     assert plan["approval_required_before_live_mutation"] is True
     assert raw_ledger not in encoded
     assert raw_state not in encoded
-    assert raw_ragflow not in encoded
+    assert raw_retired_index_bridge not in encoded
     assert "ds_transcript_memory" not in encoded
 
 
@@ -184,7 +184,7 @@ def test_product_surface_switch_plan_rejects_non_dry_run():
             redact_paths=True,
             reason="unit switch plan",
             agent_knowledge_command="agent-knowledge",
-            project="workspace-ragflow-advisor",
+            project="workspace-index-advisor",
             ledger_path="/private/example/ledger.sqlite",
             state_db_recall="/private/example/state.sqlite",
             dataset_ids=("ds_transcript_memory",),

@@ -42,7 +42,7 @@
     <g font-size="10.3" fill="#9fb3d1">
       <text x="464" y="184">POST /v1/ingest/enqueue</text>
       <text x="464" y="203">schemaVersion rag_ingress_enqueue.v1</text>
-      <text x="464" y="222">targetProfile = ragflow-*</text>
+      <text x="464" y="222">targetProfile = index-*</text>
       <text x="464" y="241">idempotencyKey (옵션)</text>
     </g>
   </g>
@@ -139,7 +139,7 @@
     <text x="866" y="358" fill="#34d399" font-size="13" font-weight="700">⑧ submit · ack / nak</text>
     <g font-size="10.3" fill="#9fd6bd">
       <text x="866" y="382">backend.submit_document(document)</text>
-      <text x="866" y="401">RAGFlow / CouchDB sink · out-of-repo</text>
+      <text x="866" y="401">RetiredIndexBridge / CouchDB sink · out-of-repo</text>
     </g>
     <g font-size="10.2">
       <circle cx="873" cy="421" r="5" fill="#34d399"/><text x="885" y="425" fill="#86efc4">성공 → msg.ack() · delivered</text>
@@ -200,5 +200,5 @@
   </g>
 
   <!-- footer note -->
-  <text x="56" y="726" fill="#475569" font-size="10.5">◆ 동기 경로(Producer)와 비동기 경로(Worker)는 JetStream publish ack로만 연결된다 — ack는 큐 수용을 뜻하며 RAGFlow indexed를 보장하지 않는다.</text>
+  <text x="56" y="726" fill="#475569" font-size="10.5">◆ 동기 경로(Producer)와 비동기 경로(Worker)는 JetStream publish ack로만 연결된다 — ack는 큐 수용을 뜻하며 RetiredIndexBridge indexed를 보장하지 않는다.</text>
 </svg>

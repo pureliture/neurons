@@ -26,7 +26,7 @@ class ConversationChunkDetails:
 @dataclass(frozen=True)
 class MemoryProvenance:
     dataset: str
-    ragflow_document_id: str
+    index_document_id: str
 
 
 @dataclass(frozen=True)
@@ -67,18 +67,18 @@ class MemoryReadPipeline:
         self,
         *,
         ledger: Ledger,
-        ragflow,
+        retired_index_bridge,
         dataset_ids: list[str],
         allow_private_results: bool = False,
     ):
         self.ledger = ledger
-        self.ragflow = ragflow
+        self.retired_index_bridge = retired_index_bridge
         self.dataset_ids = dataset_ids
         self.allow_private_results = bool(allow_private_results)
 
     def read(self, query: MemorySearchQuery) -> MemorySearchResponse:
         bounded_limit = max(1, int(query.limit))
-        chunks = self.ragflow.retrieve(
+        chunks = self.retired_index_bridge.retrieve(
             query.query,
             self.dataset_ids,
             filters=query.filters,
@@ -98,8 +98,8 @@ class MemoryReadPipeline:
             if item is None:
                 continue
             provenance = MemoryProvenance(
-                dataset=str(chunk.get("kb_id") or chunk.get("dataset_id") or item["ragflow_dataset_id"]),
-                ragflow_document_id=item["ragflow_document_id"],
+                dataset=str(chunk.get("kb_id") or chunk.get("dataset_id") or item["index_target_id"]),
+                index_document_id=item["index_document_id"],
             )
             conversation_chunk_details = None
             if item["type"] == "conversation_chunk":

@@ -17,10 +17,10 @@ DATASET_SPLIT_CRITERIA = (
     "retrieval_behavior",
 )
 
-REDACTED_RAGFLOW_AGENT_ID = "<redacted:ragflow-agent-id>"
-REDACTED_RAGFLOW_MEMORY_ID = "<redacted:ragflow-memory-id>"
+REDACTED_RETIRED_INDEX_BRIDGE_AGENT_ID = "<redacted:index-agent-id>"
+REDACTED_RETIRED_INDEX_BRIDGE_MEMORY_ID = "<redacted:index-memory-id>"
 _TASK_SUMMARY_DATASET_NAME = "tas" + "k-summary"
-_TASK_SUMMARY_TARGET_PROFILE = "ragflow-tas" + "k-summary"
+_TASK_SUMMARY_TARGET_PROFILE = "index-tas" + "k-summary"
 
 CURRENT_RUNTIME_DATASET_NAMES = {
     "disposable_smoke": "transcript-memory-smoke",
@@ -34,7 +34,7 @@ CURRENT_RUNTIME_DATASET_NAMES = {
     "derived_memory_items": "derived-memory-items",
 }
 
-CANONICAL_RAGFLOW_DATASET_NAMES = {
+CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES = {
     "smoke": "transcript-memory-smoke",
     "operational_evidence": "runtime-evidence",
     "episodic_conversation": "transcript-memory",
@@ -52,7 +52,7 @@ CANONICAL_RAGFLOW_DATASET_NAMES = {
     "eval_observability": "eval-observability",
 }
 
-DEPRECATED_RAGFLOW_DATASET_PREFIXES = (
+DEPRECATED_RETIRED_INDEX_BRIDGE_DATASET_PREFIXES = (
     "openclaw-",
     "agent-knowledge",
     "openclaw-ks",
@@ -87,7 +87,7 @@ _PRIVATE_EMBEDDING_POOL = "private-memory-embedding-pool"
 _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
     LogicalDatasetRole(
         role="smoke",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["smoke"],
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["smoke"],
         purpose="temporary live smoke and disposable verification documents",
         privacy_level="private",
         permission="me",
@@ -98,12 +98,12 @@ _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
         retention_policy="short_retention",
         default_physical_policy="separate_disposable_dataset",
         aliases=(),
-        target_profile="ragflow-transcript-memory-smoke",
+        target_profile="index-transcript-memory-smoke",
         document_kind="runtime_smoke",
     ),
     LogicalDatasetRole(
         role="operational_evidence",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["operational_evidence"],
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["operational_evidence"],
         purpose="minimized lifecycle hook, doctor, and runtime evidence",
         privacy_level="private",
         permission="me",
@@ -114,12 +114,12 @@ _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
         retention_policy="operational_history",
         default_physical_policy="separate_operational_dataset",
         aliases=(),
-        target_profile="ragflow-runtime-evidence",
+        target_profile="index-runtime-evidence",
         document_kind="runtime_evidence",
     ),
     LogicalDatasetRole(
         role="episodic_conversation",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["episodic_conversation"],
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["episodic_conversation"],
         purpose="redacted AI CLI conversation chunks with provenance",
         privacy_level="private",
         permission="me",
@@ -130,12 +130,12 @@ _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
         retention_policy="private_indefinite_until_disabled",
         default_physical_policy="separate_private_transcript_dataset",
         aliases=(),
-        target_profile="ragflow-transcript-memory",
+        target_profile="index-transcript-memory",
         document_kind="conversation_chunk",
     ),
     LogicalDatasetRole(
         role="tool_evidence_summary",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["tool_evidence_summary"],
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["tool_evidence_summary"],
         purpose="redacted high-signal tool/function evidence summaries linked to conversation_chunk sessions",
         privacy_level="private",
         permission="me",
@@ -146,12 +146,12 @@ _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
         retention_policy="private_indefinite_until_disabled",
         default_physical_policy="separate_private_transcript_dataset",
         aliases=(),
-        target_profile="ragflow-transcript-memory",
+        target_profile="index-transcript-memory",
         document_kind="tool_evidence_summary",
     ),
     LogicalDatasetRole(
         role="session_memory",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["session_memory"],
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["session_memory"],
         purpose="canonical full redacted session memory documents regenerated from transcript-memory sessions",
         privacy_level="private",
         permission="me",
@@ -162,12 +162,12 @@ _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
         retention_policy="supersede_or_disable",
         default_physical_policy="separate_session_memory_dataset",
         aliases=(),
-        target_profile="ragflow-session-memory",
+        target_profile="index-session-memory",
         document_kind="session_memory",
     ),
     LogicalDatasetRole(
         role="session_recap",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["session_recap"],
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["session_recap"],
         purpose="durable human-readable session recaps regenerated from transcript-memory sessions",
         privacy_level="private",
         permission="me",
@@ -178,12 +178,12 @@ _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
         retention_policy="supersede_or_disable",
         default_physical_policy="reuse_session_memory_dataset_until_backfill_approved",
         aliases=("session-recap",),
-        target_profile="ragflow-session-memory",
+        target_profile="index-session-memory",
         document_kind="session_recap",
     ),
     LogicalDatasetRole(
         role="project_memory",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["project_memory"],
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["project_memory"],
         purpose="deferred cache or materialized view candidate; MVP project recap is generated by filtering session-memory rows by project",
         privacy_level="private",
         permission="me",
@@ -194,12 +194,12 @@ _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
         retention_policy="supersede_or_disable",
         default_physical_policy="deferred_materialized_view_candidate",
         aliases=("project_summary", "project-summary"),
-        target_profile="ragflow-project-memory",
+        target_profile="index-project-memory",
         document_kind="project_context_snapshot",
     ),
     LogicalDatasetRole(
         role="task_summary",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["task_summary"],
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["task_summary"],
         purpose="task or goal level summaries regenerated from transcript-memory sessions",
         privacy_level="private",
         permission="me",
@@ -214,7 +214,7 @@ _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
     ),
     LogicalDatasetRole(
         role="approved_memory_card",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["approved_memory_card"],
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["approved_memory_card"],
         purpose="approved canonical long-term memory cards promoted from summaries and evidence",
         privacy_level="private",
         permission="me",
@@ -224,12 +224,12 @@ _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
         retrieval_behavior="approved_memory_card_recall",
         retention_policy="supersede_or_disable",
         default_physical_policy="separate_approved_memory_card_dataset",
-        target_profile="ragflow-approved-memory-card",
+        target_profile="index-approved-memory-card",
         document_kind="approved_memory_card",
     ),
     LogicalDatasetRole(
         role="procedural_memory",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["procedural_memory"],
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["procedural_memory"],
         purpose="repo-scoped approved vibe coding usage patterns and workflow habits",
         privacy_level="private",
         permission="me",
@@ -239,13 +239,13 @@ _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
         retrieval_behavior="ledger_resolved_procedural_pattern_recall",
         retention_policy="supersede_or_disable",
         default_physical_policy="separate_procedural_memory_dataset",
-        target_profile="ragflow-procedural-memory",
+        target_profile="index-procedural-memory",
         document_kind="repo_usage_pattern",
     ),
     LogicalDatasetRole(
         role="derived_memory_items",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["derived_memory_items"],
-        purpose="searchable Dataset mirror of approved active memory cards and RAGFlow Memory module accepted items",
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["derived_memory_items"],
+        purpose="searchable Dataset mirror of approved active memory cards and RetiredIndexBridge Memory module accepted items",
         privacy_level="private",
         permission="me",
         embedding_model_pool=_PRIVATE_EMBEDDING_POOL,
@@ -254,12 +254,12 @@ _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
         retrieval_behavior="metadata_filtered_derived_memory_item_recall",
         retention_policy="supersede_or_disable",
         default_physical_policy="separate_derived_memory_items_dataset",
-        target_profile="ragflow-derived-memory-items",
+        target_profile="index-derived-memory-items",
         document_kind="derived_memory_item",
     ),
     LogicalDatasetRole(
         role="profile_memory",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["profile_memory"],
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["profile_memory"],
         purpose="approved user and project profile facts",
         privacy_level="private",
         permission="me",
@@ -272,7 +272,7 @@ _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
     ),
     LogicalDatasetRole(
         role="project_knowledge",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["project_knowledge"],
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["project_knowledge"],
         purpose="project docs, ADRs, specs, plans, and runbooks",
         privacy_level="private_or_team",
         permission="me_or_team",
@@ -285,7 +285,7 @@ _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
     ),
     LogicalDatasetRole(
         role="tool_skill_registry",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["tool_skill_registry"],
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["tool_skill_registry"],
         purpose="tool and skill selection knowledge with failure modes and examples",
         privacy_level="private_or_team",
         permission="me_or_team",
@@ -298,7 +298,7 @@ _LOGICAL_ROLES: tuple[LogicalDatasetRole, ...] = (
     ),
     LogicalDatasetRole(
         role="eval_observability",
-        recommended_name=CANONICAL_RAGFLOW_DATASET_NAMES["eval_observability"],
+        recommended_name=CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["eval_observability"],
         purpose="retrieval eval queries, failed recall, doctor, and observability records",
         privacy_level="private",
         permission="me",
@@ -336,8 +336,8 @@ _DATASET_CONTRACT_CONFIG_REQUIRED_FIELDS = (
     "contract_version",
     "split_criteria",
     "current_runtime_dataset_names",
-    "canonical_ragflow_dataset_names",
-    "deprecated_ragflow_dataset_prefixes",
+    "canonical_index_dataset_names",
+    "deprecated_index_dataset_prefixes",
     "logical_roles",
     "load_policy",
     "orchestration_rollout",
@@ -385,15 +385,15 @@ def build_default_dataset_contract_config() -> dict:
         "contract_version": DATASET_CONTRACT_VERSION,
         "split_criteria": list(DATASET_SPLIT_CRITERIA),
         "current_runtime_dataset_names": dict(CURRENT_RUNTIME_DATASET_NAMES),
-        "canonical_ragflow_dataset_names": dict(CANONICAL_RAGFLOW_DATASET_NAMES),
-        "deprecated_ragflow_dataset_prefixes": list(DEPRECATED_RAGFLOW_DATASET_PREFIXES),
+        "canonical_index_dataset_names": dict(CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES),
+        "deprecated_index_dataset_prefixes": list(DEPRECATED_RETIRED_INDEX_BRIDGE_DATASET_PREFIXES),
         "logical_roles": [role.to_plan_record() for role in _LOGICAL_ROLES],
         "load_policy": dict(_DATASET_CONTRACT_LOAD_POLICY),
         "orchestration_rollout": dict(_DATASET_CONTRACT_ROLLOUT_POLICY),
         "abort_criteria": [
             "runtime hot reload would be required",
             "credential or raw dataset id access would be required",
-            "live RAGFlow mutation would be required",
+            "live RetiredIndexBridge mutation would be required",
             "dataset contract semantics would drift from code-defined fallback",
         ],
     }
@@ -404,7 +404,7 @@ def validate_dataset_contract_config(config: dict) -> dict:
 
     Validation is intentionally startup-oriented: the accepted shape is complete,
     contains no secret/raw-id shaped fields, and maps runtime names to logical
-    roles without requiring live RAGFlow or orchestration mutation.
+    roles without requiring live RetiredIndexBridge or orchestration mutation.
     """
 
     if not isinstance(config, dict):
@@ -573,11 +573,11 @@ def build_resources_plan() -> dict:
         "live_mutation_allowed": False,
         "mutation_performed": False,
         "network_used": False,
-        "ragflow_core_modification_allowed": False,
-        "ragflow_core_policy": "excluded",
+        "index_core_modification_allowed": False,
+        "index_core_policy": "excluded",
         "split_criteria": list(DATASET_SPLIT_CRITERIA),
         "logical_roles": [role.to_plan_record() for role in _LOGICAL_ROLES],
-        "ragflow_memory_agent_integration": _ragflow_memory_agent_integration_plan(),
+        "index_memory_agent_integration": _index_memory_agent_integration_plan(),
     }
 
 
@@ -595,11 +595,11 @@ def verify_resources_contract() -> dict:
         "network_used": False,
         "live_mutation_allowed": False,
         "mutation_performed": False,
-        "ragflow_core_modification_allowed": False,
+        "index_core_modification_allowed": False,
         "roles_checked": len(_LOGICAL_ROLES),
         "split_criteria_checked": len(DATASET_SPLIT_CRITERIA),
         "missing_required_runtime_names": missing_runtime_names,
-        "ragflow_memory_agent_integration": {
+        "index_memory_agent_integration": {
             "status": "disabled_plan_only",
             "memory_targets_checked": len(_memory_targets()),
             "agent_workflows_checked": len(_agent_targets()),
@@ -608,7 +608,7 @@ def verify_resources_contract() -> dict:
             "mutation_performed": False,
             "ledger_canonical": True,
             "knowledge_mcp_canonical": True,
-            "ragflow_generic_mcp_auxiliary": True,
+            "index_generic_mcp_auxiliary": True,
             "memory_targets": _memory_targets(),
             "agent_targets": _agent_targets(),
         },
@@ -618,13 +618,13 @@ def verify_resources_contract() -> dict:
 def build_dataset_cleanup_approval_packet(*, observed_datasets: list[dict], operator: str) -> dict:
     dataset_records = [_cleanup_record(dataset) for dataset in observed_datasets]
     return {
-        "schema_version": "agent_knowledge_ragflow_dataset_cleanup_approval_packet.v1",
+        "schema_version": "agent_knowledge_index_dataset_cleanup_approval_packet.v1",
         "status": "draft_requires_operator_approval",
-        "operation": "ragflow_dataset_naming_cleanup",
+        "operation": "index_dataset_naming_cleanup",
         "mode": "approval_packet_only",
         "operator": operator,
         "canonical_dataset": {
-            "name": CANONICAL_RAGFLOW_DATASET_NAMES["episodic_conversation"],
+            "name": CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["episodic_conversation"],
             "role": "episodic_conversation",
             "action": "create_or_reuse_by_name",
             "create_requires_approval": True,
@@ -639,7 +639,7 @@ def build_dataset_cleanup_approval_packet(*, observed_datasets: list[dict], oper
             "disable_or_delete_deprecated_test_datasets_only_after_approval",
         ],
         "approval": {
-            "token_env": "RAGFLOW_API_KEY",
+            "token_env": "RETIRED_INDEX_BRIDGE_API_KEY",
             "exact_argv_required": True,
             "timeout_seconds": 120,
             "retry_limit": 0,
@@ -665,23 +665,23 @@ def build_dataset_cleanup_approval_packet(*, observed_datasets: list[dict], oper
         "delete_all_allowed": False,
         "network_used": False,
         "mutation_performed": False,
-        "ragflow_write_performed": False,
+        "index_write_performed": False,
     }
 
 
 def build_dataset_naming_audit(*, observed_datasets: list[dict]) -> dict:
     dataset_records = [_cleanup_record(dataset) for dataset in observed_datasets]
-    canonical_names = sorted(set(CANONICAL_RAGFLOW_DATASET_NAMES.values()))
+    canonical_names = sorted(set(CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES.values()))
     observed_names = {record["name"] for record in dataset_records}
     missing = [name for name in canonical_names if name not in observed_names]
     decisions = [record["decision"] for record in dataset_records]
     return {
-        "schema_version": "agent_knowledge_ragflow_dataset_naming_audit.v1",
+        "schema_version": "agent_knowledge_index_dataset_naming_audit.v1",
         "status": "review_required" if any(decision != "keep_canonical" for decision in decisions) else "ok",
         "mode": "read_only_inventory",
         "network_used": False,
         "mutation_performed": False,
-        "ragflow_write_performed": False,
+        "index_write_performed": False,
         "canonical_dataset_names": canonical_names,
         "missing_canonical_dataset_names": missing,
         "summary": {
@@ -700,7 +700,7 @@ def _cleanup_record(dataset: dict) -> dict:
     dataset_id = str(dataset.get("dataset_id") or dataset.get("id") or "")
     document_count = int(dataset.get("document_count") or 0)
     deprecated_prefix = _has_deprecated_prefix(name)
-    canonical = name in CANONICAL_RAGFLOW_DATASET_NAMES.values()
+    canonical = name in CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES.values()
     if canonical:
         decision = "keep_canonical"
     elif deprecated_prefix:
@@ -719,7 +719,7 @@ def _cleanup_record(dataset: dict) -> dict:
 
 
 def _has_deprecated_prefix(name: str) -> bool:
-    return any(name.startswith(prefix) for prefix in DEPRECATED_RAGFLOW_DATASET_PREFIXES)
+    return any(name.startswith(prefix) for prefix in DEPRECATED_RETIRED_INDEX_BRIDGE_DATASET_PREFIXES)
 
 
 def _sha256_short(value: str) -> str:
@@ -728,13 +728,13 @@ def _sha256_short(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
-def _ragflow_memory_agent_integration_plan() -> dict:
+def _index_memory_agent_integration_plan() -> dict:
     return {
         "enabled": False,
         "mode": "plan_only",
         "ledger_canonical": True,
         "knowledge_mcp_canonical": True,
-        "ragflow_generic_mcp_auxiliary": True,
+        "index_generic_mcp_auxiliary": True,
         "network_used": False,
         "live_mutation_allowed": False,
         "mutation_performed": False,
@@ -753,8 +753,8 @@ def _memory_targets() -> list[dict]:
             "target": "session_episode_memory",
             "memory_type": "episodic",
             "target_dataset_role": "derived_memory_items",
-            "target_dataset_name": CANONICAL_RAGFLOW_DATASET_NAMES["derived_memory_items"],
-            "memory_id_redacted": REDACTED_RAGFLOW_MEMORY_ID,
+            "target_dataset_name": CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["derived_memory_items"],
+            "memory_id_redacted": REDACTED_RETIRED_INDEX_BRIDGE_MEMORY_ID,
             "source": "approved_memory_cards",
             "raw_transcript_written": False,
             "raw_private_source_written": False,
@@ -763,8 +763,8 @@ def _memory_targets() -> list[dict]:
             "target": "project_semantic_memory",
             "memory_type": "semantic",
             "target_dataset_role": "derived_memory_items",
-            "target_dataset_name": CANONICAL_RAGFLOW_DATASET_NAMES["derived_memory_items"],
-            "memory_id_redacted": REDACTED_RAGFLOW_MEMORY_ID,
+            "target_dataset_name": CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["derived_memory_items"],
+            "memory_id_redacted": REDACTED_RETIRED_INDEX_BRIDGE_MEMORY_ID,
             "source": "approved_memory_cards",
             "raw_transcript_written": False,
             "raw_private_source_written": False,
@@ -773,8 +773,8 @@ def _memory_targets() -> list[dict]:
             "target": "user_procedural_preference_memory",
             "memory_type": "semantic_or_procedural",
             "target_dataset_role": "derived_memory_items",
-            "target_dataset_name": CANONICAL_RAGFLOW_DATASET_NAMES["derived_memory_items"],
-            "memory_id_redacted": REDACTED_RAGFLOW_MEMORY_ID,
+            "target_dataset_name": CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES["derived_memory_items"],
+            "memory_id_redacted": REDACTED_RETIRED_INDEX_BRIDGE_MEMORY_ID,
             "source": "approved_memory_cards",
             "raw_transcript_written": False,
             "raw_private_source_written": False,
@@ -786,10 +786,10 @@ def _agent_targets() -> list[dict]:
     return [
         {
             "workflow": workflow,
-            "agent_id_redacted": REDACTED_RAGFLOW_AGENT_ID,
+            "agent_id_redacted": REDACTED_RETIRED_INDEX_BRIDGE_AGENT_ID,
             "dsl_status": "planned_not_created",
             "knowledge_mcp_canonical": True,
-            "ragflow_generic_mcp_auxiliary": True,
+            "index_generic_mcp_auxiliary": True,
             "approval_required_before_live_create": True,
         }
         for workflow in (

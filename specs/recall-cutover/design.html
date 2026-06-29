@@ -6,8 +6,8 @@ tr:first-child td{background:#f6f0fa;font-weight:600}li{margin:.2em 0}</style><h
 <br>
 <h2>Overview</h2>
 <br>
-<p>RAGFlow `transcript-memory`를 은퇴(삭제)하기 위해, 라이브 recall을 CouchDB</p>
-<p>source에서 재생성한 RAGFlow `session-memory` surface로 무회귀 컷오버한다. 데이터</p>
+<p>RetiredIndexBridge `transcript-memory`를 은퇴(삭제)하기 위해, 라이브 recall을 CouchDB</p>
+<p>source에서 재생성한 RetiredIndexBridge `session-memory` surface로 무회귀 컷오버한다. 데이터</p>
 <p>이관/검증은 이미 완료(3567 세션); 본 spec은 recall surface 전환과 파괴적 삭제의</p>
 <p>안전 순서를 다룬다.</p>
 <br>
@@ -22,7 +22,7 @@ tr:first-child td{background:#f6f0fa;font-weight:600}li{margin:.2em 0}</style><h
 <br>
 <h3>Recommended: Rebuild session-memory + staged recall cutover</h3>
 <br>
-<p>CouchDB source에서 M3 materializer로 session-memory 문서를 생성해 RAGFlow</p>
+<p>CouchDB source에서 M3 materializer로 session-memory 문서를 생성해 RetiredIndexBridge</p>
 <p>`session-memory` dataset에 live projection + parse하고, recall을 거기로 재배선한</p>
 <p>뒤, 백업하고 transcript-memory를 삭제한다. 이미 구현된 M3(materializer/projection</p>
 <p>seam)를 재사용한다.</p>
@@ -42,7 +42,7 @@ tr:first-child td{background:#f6f0fa;font-weight:600}li{margin:.2em 0}</style><h
 CouchDB transcript-source (3567 sessions)
         | M3 materialize_session_memory (embed tool evidence)
         v
-SessionMemoryRebuilder ── live projector ──► RAGFlow session-memory (f6c55b)
+SessionMemoryRebuilder ── live projector ──► RetiredIndexBridge session-memory (f6c55b)
         |                                          | parse/index
         v                                          v
 RecallSmoke (session-memory vs transcript-memory) ─ verdict(no-regression)
@@ -61,7 +61,7 @@ TranscriptMemoryRetirer (delete dataset) ── 비가역, 마지막
 <br>
 <li>진단: session-memory 0-hits 근인 확인(parse status / 내용 부재 / recall 경로).</li>
 <li>재생성: 각 CouchDB 세션 → materialize_session_memory → session-memory doc →</li>
-<p>   RAGFlow session-memory upload + parse. 결정적 id로 idempotent.</p>
+<p>   RetiredIndexBridge session-memory upload + parse. 결정적 id로 idempotent.</p>
 <li>recall smoke: 대표 쿼리 ≥8을 session-memory와 transcript-memory에 retrieval,</li>
 <p>   hits/유사도 비교 → 무회귀 verdict.</p>
 <li>재배선: recall 진입점 dataset → session-memory. 실행 중 recall이 session-memory</li>
@@ -74,14 +74,14 @@ TranscriptMemoryRetirer (delete dataset) ── 비가역, 마지막
 <h2>Component Details</h2>
 <br>
 <li>**SessionMemoryRebuilder**: 입력 CouchDB source(conversation chunk + tool</li>
-<p>  evidence bundle); 출력 RAGFlow session-memory docs(parsed). 의존 M3</p>
-<p>  materializer + RAGFlow upload/parse. 실패 시 부분 진행 + 재실행 안전.</p>
+<p>  evidence bundle); 출력 RetiredIndexBridge session-memory docs(parsed). 의존 M3</p>
+<p>  materializer + RetiredIndexBridge upload/parse. 실패 시 부분 진행 + 재실행 안전.</p>
 <li>**RecallSmoke**: 입력 대표 쿼리 + 두 dataset; 출력 per-query hits/유사도 +</li>
-<p>  무회귀 verdict. 의존 RAGFlow retrieval API.</p>
+<p>  무회귀 verdict. 의존 RetiredIndexBridge retrieval API.</p>
 <li>**RecallRepointer**: 입력 recall 설정; 출력 session-memory를 읽는 recall. 의존</li>
 <p>  mcp-stdio 런치/서버 설정. 가역(되돌리기).</p>
 <li>**WriteCutover**: 입력 delivery 설정; 출력 transcript-memory write 0. 의존</li>
-<p>  RAGFLOW_DELIVERY/dataset 설정.</p>
+<p>  RETIRED_INDEX_BRIDGE_DELIVERY/dataset 설정.</p>
 <li>**TranscriptMemoryBackup**: 입력 dataset; 출력 durable 백업(14 포함). rollback</li>
 <p>  source.</p>
 <li>**TranscriptMemoryRetirer**: 입력 dataset id + 게이트 verdict; 출력 dataset</li>
@@ -101,13 +101,13 @@ TranscriptMemoryRetirer (delete dataset) ── 비가역, 마지막
 <br>
 <li>단위: RecallSmoke verdict 로직, SessionMemoryRebuilder doc 생성(fake projector),</li>
 <p>  WriteCutover 설정 전이 — fake/in-memory로.</p>
-<li>통합: 소량 세션 재생성 → RAGFlow parse → retrieval hit 확인(라이브 소규모).</li>
+<li>통합: 소량 세션 재생성 → RetiredIndexBridge parse → retrieval hit 확인(라이브 소규모).</li>
 <li>라이브 게이트: recall smoke 무회귀, 재배선 후 recall 출처 확인, 백업 무결성,</li>
 <p>  삭제 후 recall 지속.</p>
 <br>
 <h2>Milestones</h2>
 <br>
-<li>RC1: session-memory 0-hits 진단 + CouchDB에서 session-memory 재생성 → RAGFlow</li>
+<li>RC1: session-memory 0-hits 진단 + CouchDB에서 session-memory 재생성 → RetiredIndexBridge</li>
 <p>  parse 완료, retrieval에서 hit 발생. (done: 대표 쿼리에서 session-memory hits&gt;0)</p>
 <li>RC2: recall smoke 무회귀 — 대표 쿼리 ≥8에서 session-memory가 transcript-memory</li>
 <p>  대비 동등. (done: smoke verdict pass)</p>

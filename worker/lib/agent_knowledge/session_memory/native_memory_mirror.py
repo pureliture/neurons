@@ -9,7 +9,7 @@ DEFAULT_BRAIN_ID_PREFIX = "/project/"
 
 
 def session_tag_for(statement_id: str) -> str:
-    """statement_id -> RAGFlow join key. 단일 정의처(writer/recall 공유)."""
+    """statement_id -> RetiredIndexBridge join key. 단일 정의처(writer/recall 공유)."""
     return f"mem:{statement_id}"
 
 
@@ -36,7 +36,7 @@ class NativeMemoryMirrorStore:
         original_content_hash: str,
         search_text: str = "",
         card_type: str = "",
-        ragflow_memory_id: str = "",
+        index_memory_id: str = "",
         now: datetime | None = None,
     ) -> dict:
         session_tag = session_tag_for(statement_id)
@@ -46,8 +46,8 @@ class NativeMemoryMirrorStore:
                 """
                 INSERT INTO native_memory_mirror (
                     statement_id, brain_id, session_tag, status, superseded_by,
-                    original_content_hash, search_text, card_type, ragflow_memory_id,
-                    ragflow_disabled_at, created_at, superseded_at
+                    original_content_hash, search_text, card_type, index_memory_id,
+                    index_disabled_at, created_at, superseded_at
                 ) VALUES (?, ?, ?, 'active', '', ?, ?, ?, ?, '', ?, '')
                 ON CONFLICT(statement_id) DO UPDATE SET
                     -- session_tag 은 INSERT 시 고정(=mem:<statement_id> 불변), SET 에서 의도적 제외.
@@ -57,7 +57,7 @@ class NativeMemoryMirrorStore:
                     original_content_hash=excluded.original_content_hash,
                     search_text=excluded.search_text,
                     card_type=excluded.card_type,
-                    ragflow_memory_id=excluded.ragflow_memory_id,
+                    index_memory_id=excluded.index_memory_id,
                     status='active',
                     superseded_by='',
                     superseded_at=''
@@ -69,7 +69,7 @@ class NativeMemoryMirrorStore:
                     original_content_hash,
                     search_text,
                     card_type,
-                    ragflow_memory_id,
+                    index_memory_id,
                     timestamp,
                 ),
             )
@@ -105,16 +105,16 @@ class NativeMemoryMirrorStore:
             )
             return cursor.rowcount > 0
 
-    def mark_ragflow_disabled(
+    def mark_index_disabled(
         self,
         statement_id: str,
         *,
-        ragflow_disabled_at: str,
-        ragflow_memory_id: str = "",
+        index_disabled_at: str,
+        index_memory_id: str = "",
     ) -> bool:
-        """superseded row 에 ragflow_disabled_at 기록 + (비어있던 경우) ragflow_memory_id backfill.
+        """superseded row 에 index_disabled_at 기록 + (비어있던 경우) index_memory_id backfill.
 
-        멱등 가드: WHERE status='superseded' AND ragflow_disabled_at='' → 이미 기록됐거나
+        멱등 가드: WHERE status='superseded' AND index_disabled_at='' → 이미 기록됐거나
         active 인 row 는 rowcount=0 → False. reconcile_one 이 그 session_tag 의 모든 message
         disable 확인 후에만 호출한다(부분실패 시 미호출 → row 가 list_pending_reconcile 에 잔존).
         """
@@ -122,12 +122,12 @@ class NativeMemoryMirrorStore:
             cursor = connection.execute(
                 """
                 UPDATE native_memory_mirror
-                SET ragflow_disabled_at=?,
-                    ragflow_memory_id = CASE
-                        WHEN ragflow_memory_id='' THEN ? ELSE ragflow_memory_id END
-                WHERE statement_id=? AND status='superseded' AND ragflow_disabled_at=''
+                SET index_disabled_at=?,
+                    index_memory_id = CASE
+                        WHEN index_memory_id='' THEN ? ELSE index_memory_id END
+                WHERE statement_id=? AND status='superseded' AND index_disabled_at=''
                 """,
-                (ragflow_disabled_at, ragflow_memory_id, statement_id),
+                (index_disabled_at, index_memory_id, statement_id),
             )
             return cursor.rowcount > 0
 
@@ -168,7 +168,7 @@ class NativeMemoryMirrorStore:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM native_memory_mirror "
-                "WHERE status = 'superseded' AND ragflow_disabled_at = '' "
+                "WHERE status = 'superseded' AND index_disabled_at = '' "
                 "LIMIT ?",
                 (limit,),
             ).fetchall()

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_knowledge.rag_ingress.index_backend import BackendDocumentHandle, IndexStatus
+from agent_knowledge.rag_ingress.retired_index_bridge import BackendDocumentHandle, IndexStatus
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
     DEFAULT_COLLECTION_NAME,
     HashEmbeddingProvider,

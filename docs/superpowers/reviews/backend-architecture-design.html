@@ -557,7 +557,7 @@
       </p>
       <p>
         <code>RagTargetAdapter</code> (Port, 인터페이스) ← 우리 도메인이 "타겟에 전달한다"고 정의<br>
-        <code>RagFlowTargetAdapter</code> (Adapter, 구현체) ← RAGFlow REST API로 실제로 전달
+        <code>RetiredIndexBridgeTargetAdapter</code> (Adapter, 구현체) ← RetiredIndexBridge REST API로 실제로 전달
       </p>
 
       <div class="pa-grid">
@@ -573,7 +573,7 @@
           <h4>외부 서비스 어댑터</h4>
           <p>
             외부 비즈니스 서비스를 우리 도메인에 맞게 감쌉니다.<br><br>
-            예: RAGFlow (RAG 타겟), GitLab (소스 저장소), 외부 인증 서버<br><br>
+            예: RetiredIndexBridge (RAG 타겟), GitLab (소스 저장소), 외부 인증 서버<br><br>
             → "외부 서비스를 우리 도메인 방식으로 사용한다"
           </p>
         </div>
@@ -601,7 +601,7 @@
           </div>
           <div class="block block-api">
             <div class="block-name">StatusService</div>
-            <div class="block-package">api/ ← RAGFlow 직접 의존</div>
+            <div class="block-package">api/ ← RetiredIndexBridge 직접 의존</div>
           </div>
         </div>
       </div>
@@ -650,11 +650,11 @@
             <div class="block-package">queue/ ← 인프라 어댑터</div>
           </div>
           <div class="block block-adapter-ext">
-            <div class="block-name">RagFlowTargetAdapter</div>
+            <div class="block-name">RetiredIndexBridgeTargetAdapter</div>
             <div class="block-package">target/ ← 외부 어댑터 (제네릭에 섞임)</div>
           </div>
           <div class="block block-adapter-ext">
-            <div class="block-name">HttpRagFlowGateway</div>
+            <div class="block-name">HttpRetiredIndexBridgeGateway</div>
             <div class="block-package">target/ ← 외부 어댑터 (제네릭에 섞임)</div>
           </div>
         </div>
@@ -665,7 +665,7 @@
       <span class="tree-line tree-pkg">com.local.ragingressqueue</span>
       <span class="tree-line tree-indent tree-pkg">├── api/ ← enqueue, status, healthz 모두 여기</span>
       <span class="tree-line tree-indent2 tree-file">│   ├── IngressController.java</span>
-      <span class="tree-line tree-indent2 tree-file">│   ├── StatusService.java ← RAGFlow 직접 의존 (문제)</span>
+      <span class="tree-line tree-indent2 tree-file">│   ├── StatusService.java ← RetiredIndexBridge 직접 의존 (문제)</span>
       <span class="tree-line tree-indent2 tree-file">│   └── IdempotencyStore.java</span>
       <span class="tree-line tree-indent tree-pkg">├── core/ ← 도메인 + 검증 혼합</span>
       <span class="tree-line tree-indent2 tree-file">│   ├── IngestJob.java</span>
@@ -681,9 +681,9 @@
       <span class="tree-line tree-indent2 tree-file">│   └── WorkerConfiguration.java</span>
       <span class="tree-line tree-indent tree-pkg">└── target/ ← 포트 + 외부 어댑터 혼합 (문제)</span>
       <span class="tree-line tree-indent2 tree-file">    ├── RagTargetAdapter.java ← Port (제네릭 계약)</span>
-      <span class="tree-line tree-indent2 tree-file">    ├── RagFlowTargetAdapter.java ← 외부 Adapter</span>
-      <span class="tree-line tree-indent2 tree-file">    ├── HttpRagFlowGateway.java ← 외부 Adapter</span>
-      <span class="tree-line tree-indent2 tree-file">    └── RagFlowPressurePolicy.java ← 외부 Adapter</span>
+      <span class="tree-line tree-indent2 tree-file">    ├── RetiredIndexBridgeTargetAdapter.java ← 외부 Adapter</span>
+      <span class="tree-line tree-indent2 tree-file">    ├── HttpRetiredIndexBridgeGateway.java ← 외부 Adapter</span>
+      <span class="tree-line tree-indent2 tree-file">    └── RetiredIndexBridgePressurePolicy.java ← 외부 Adapter</span>
     </div>
   </section>
 
@@ -812,12 +812,12 @@
             <div class="block-package">adapter/infra/nats/ ← 인프라 어댑터</div>
           </div>
           <div class="block block-adapter-ext">
-            <div class="block-name">RagFlowTargetAdapter</div>
-            <div class="block-package">adapter/ext/ragflow/ ← 외부 어댑터</div>
+            <div class="block-name">RetiredIndexBridgeTargetAdapter</div>
+            <div class="block-package">adapter/ext/retired_index_bridge/ ← 외부 어댑터</div>
           </div>
           <div class="block block-adapter-ext">
-            <div class="block-name">HttpRagFlowGateway</div>
-            <div class="block-package">adapter/ext/ragflow/ ← 외부 어댑터</div>
+            <div class="block-name">HttpRetiredIndexBridgeGateway</div>
+            <div class="block-package">adapter/ext/retired_index_bridge/ ← 외부 어댑터</div>
           </div>
         </div>
       </div>
@@ -846,7 +846,7 @@
       <span class="tree-line tree-indent3 tree-file">│   │   └── nats/         NatsIngestPublisher.java, NatsIngestConsumer.java</span>
       <span class="tree-line tree-indent3 tree-file">│   │       NatsJetStreamProvisioner.java</span>
       <span class="tree-line tree-indent2 tree-file">│   └── ext/              ← 외부 서비스 어댑터</span>
-      <span class="tree-line tree-indent3 tree-file">│       └── ragflow/      RagFlowTargetAdapter.java, HttpRagFlowGateway.java</span>
+      <span class="tree-line tree-indent3 tree-file">│       └── retired_index_bridge/      RetiredIndexBridgeTargetAdapter.java, HttpRetiredIndexBridgeGateway.java</span>
       <span class="tree-line tree-indent tree-pkg">└── common/ ← 공통 인프라</span>
       <span class="tree-line tree-indent2 tree-file">    ├── config/           NatsJetStreamConfiguration.java</span>
       <span class="tree-line tree-indent2 tree-file">    ├── exception/        ApplicationException, BusinessException, ErrorCode</span>
@@ -947,7 +947,7 @@
           </tr>
           <tr>
             <td>백프레셔/압력 게이트</td>
-            <td><span class="status-badge status-ok">TargetPressure + RagFlowPressurePolicy</span></td>
+            <td><span class="status-badge status-ok">TargetPressure + RetiredIndexBridgePressurePolicy</span></td>
             <td><span class="status-badge status-na">해당 없음</span></td>
             <td><span class="status-badge status-ok">유지</span></td>
           </tr>
@@ -1022,7 +1022,7 @@
           <li>GET /status 응답 생성</li>
           <li>Queue 상태 (pending, inFlight, deadLetter)</li>
           <li>Target 상태 (pressure, adapter snapshot)</li>
-          <li>RAGFlow 설정에 직접 의존하지 않음</li>
+          <li>RetiredIndexBridge 설정에 직접 의존하지 않음</li>
           <li>api → service → target.port 의존</li>
         </ul>
       </div>
@@ -1049,9 +1049,9 @@
         <ul>
           <li>RagTargetAdapter — 타겟 전달 인터페이스</li>
           <li>checkPressure(), deliver(), snapshot()</li>
-          <li>도메인이 RAGFlow를 몰라도 됨</li>
+          <li>도메인이 RetiredIndexBridge를 몰라도 됨</li>
           <li>Qdrant, Weaviate 등 교체 가능</li>
-          <li>구현체는 adapter/ext/ragflow/</li>
+          <li>구현체는 adapter/ext/retired_index_bridge/</li>
         </ul>
       </div>
 
@@ -1075,9 +1075,9 @@
           <div class="card-title" style="color: var(--layer-adapter-ext)">adapter/ext</div>
         </div>
         <ul>
-          <li>RagFlowTargetAdapter — Port 구현 (RAG 타겟)</li>
-          <li>HttpRagFlowGateway — HTTP 클라이언트</li>
-          <li>RagFlowPressurePolicy — 압력 계산</li>
+          <li>RetiredIndexBridgeTargetAdapter — Port 구현 (RAG 타겟)</li>
+          <li>HttpRetiredIndexBridgeGateway — HTTP 클라이언트</li>
+          <li>RetiredIndexBridgePressurePolicy — 압력 계산</li>
           <li>외부 서비스를 도메인 방식으로 감쌈</li>
           <li>→ "외부 서비스를 우리가 사용한다"</li>
         </ul>

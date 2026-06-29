@@ -27,11 +27,11 @@ brief 가정 위에 서 있었다. 이관 착수 전 **live read-only 재검증*
   의존한다: `RAG_INGRESS_QUEUE`(WorkQueue retention) + Explicit ack + ackWait 30s +
   maxDeliver(라이브 override 100000≈무제한) + fail-open pressure gate.
 - 실제 문제는 brief가 우려한 "이중 dedup"이 아니라 정반대 **under-dedup**이었다:
-  `index_backend.submit_document`이 dedup 조회 없이 무조건 upload→metadata→parse를
+  `retired_index_bridge.submit_document`이 dedup 조회 없이 무조건 upload→metadata→parse를
   수행하고, `process_payload`도 submit 전에 delivered 여부를 확인하지 않는다. 따라서
-  JetStream 재배달 시 동일 문서가 RAGFlow에 **중복 생성**될 수 있다. 은퇴한 Java
-  worker(`RagFlowTargetAdapter`)는 오히려 `RecentDeliveryCache`(in-memory 3단계) +
-  `findByContentHash`(RAGFlow 폴백) 2계층 dedup을 갖고 있었다 — Python 라이브가 더 약했다.
+  JetStream 재배달 시 동일 문서가 RetiredIndexBridge에 **중복 생성**될 수 있다. 은퇴한 Java
+  worker(`RetiredIndexBridgeTargetAdapter`)는 오히려 `RecentDeliveryCache`(in-memory 3단계) +
+  `findByContentHash`(RetiredIndexBridge 폴백) 2계층 dedup을 갖고 있었다 — Python 라이브가 더 약했다.
 
 ## Decision
 
@@ -48,7 +48,7 @@ co-located worker는 durable `delivery_jobs`/lease 기계를 가져오지 않는
 3. **idempotency = 2계층 natural-key dedup**(은퇴한 Java worker 설계 복원):
    - 로컬: worker의 durable `shadow_ingest_log`(idempotency_key→delivered+document_ref)를
      submit 전에 조회. delivered면 재업로드하지 않고 기존 ref 재사용. 재시작 안전.
-   - 폴백: 로컬 row가 없으면 `find_by_natural_key`로 RAGFlow에서 동일
+   - 폴백: 로컬 row가 없으면 `find_by_natural_key`로 RetiredIndexBridge에서 동일
      content_hash/idempotency_key 문서를 찾아 재사용(첫 시도가 업로드 후 기록 전 사망,
      또는 로컬 볼륨 소실 케이스 커버).
    - 폴백이 매칭되도록 `submit_document`가 content_hash+idempotency_key를 업로드
@@ -63,7 +63,7 @@ co-located worker는 durable `delivery_jobs`/lease 기계를 가져오지 않는
 | 우려(brief §6.2) | at-least-once + natural-key에서의 처리 |
 |---|---|
 | JetStream redelivery ↔ lease 이중 dedup | lease가 없으므로 dedup 권원이 하나(natural-key). 충돌 불성립. |
-| 재시작 중복 upload | 로컬 durable log + RAGFlow natural-key 폴백이 막음(restart-safe). |
+| 재시작 중복 upload | 로컬 durable log + RetiredIndexBridge natural-key 폴백이 막음(restart-safe). |
 | poison/head-of-line | maxDeliver→quarantine(ack-drop)로 NATS가 단독 처리. |
 | in-flight 소유권 | WorkQueue + 단일 durable 컨슈머가 보장. 분산 lock 불필요. |
 
@@ -74,8 +74,8 @@ co-located worker는 durable `delivery_jobs`/lease 기계를 가져오지 않는
 - **한계(명시)**:
   - dedup이 "정확히 한 번"은 아니다. content_hash로 자연키 동등성을 보장하는 *효과적*
     at-least-once+idempotent-submit이다(중복문서 미생성이 목표, 메시지 1회 처리 보장 아님).
-  - `find_by_natural_key`는 RAGFlow `list_documents` keyword/페이지 폴백에 의존하므로
-    대용량 dataset에서 비용이 있다. 로컬 log 히트가 우선이라 평시 경로는 RAGFlow 조회 0.
+  - `find_by_natural_key`는 RetiredIndexBridge `list_documents` keyword/페이지 폴백에 의존하므로
+    대용량 dataset에서 비용이 있다. 로컬 log 히트가 우선이라 평시 경로는 RetiredIndexBridge 조회 0.
   - 메타데이터에 content_hash/idempotency_key가 추가된다(additive, recall 무해).
 
 ## Revisit conditions (이 결정을 다시 열어야 할 때)

@@ -27,7 +27,7 @@ Private repo 또는 private storage에만 둘 것은 실제 운영 권위와 증
 - private user preference and private source refs
 - live deployment evidence and private runbook execution logs
 - production k3s values, overlays, and host topology
-- real queue state, DB backup, Qdrant payload, and RAGFlow mappings
+- real queue state, DB backup, Qdrant payload, and RetiredIndexBridge mappings
 - secret, token, cookie, bearer string, API key, raw `dataset_id`, and raw `document_id`
 
 ## Repo Roles
@@ -43,7 +43,7 @@ GC approval records, and private authority ledger evidence.
 
 `dendrite` public remains the host-native thin client. It owns provider capture
 hooks, local spool/outbox, redaction before ship, and POST to an approved
-ingress endpoint. It does not own server runtime, RAGFlow direct write,
+ingress endpoint. It does not own server runtime, RetiredIndexBridge direct write,
 session-memory promotion, or GC.
 
 ## Compose And Configuration

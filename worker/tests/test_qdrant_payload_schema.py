@@ -1,6 +1,6 @@
 """M2: top-level filter payload fields + payload index declaration.
 
-RAGFlow-parity filter keys (result_type, project, provider, session_id_hash) are
+RetiredIndexBridge-parity filter keys (result_type, project, provider, session_id_hash) are
 promoted from the nested metadata dict to top-level payload, payload indexes are
 declared at collection-create time, and multi-field filtering (notably
 privacy_class) works through query_mirror_candidates.

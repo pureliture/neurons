@@ -13,7 +13,7 @@ from agent_knowledge.session_memory.memory_promotion import (
 )
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
 def _source_span(**overrides):

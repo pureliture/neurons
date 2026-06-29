@@ -1,6 +1,6 @@
-# session-memory / ledger worker — RAGFlow와 분리된 별도 compose project
-# (requirements.md §6). ledger-pg compose와도 분리. RAGFlow/PG와는 host-published
-# endpoint(host.docker.internal)로 통신 — RAGFlow compose 파일 미수정 원칙 준수.
+# session-memory / ledger worker — RetiredIndexBridge와 분리된 별도 compose project
+# (requirements.md §6). ledger-pg compose와도 분리. RetiredIndexBridge/PG와는 host-published
+# endpoint(host.docker.internal)로 통신 — RetiredIndexBridge compose 파일 미수정 원칙 준수.
 name: session-memory-worker
 
 services:
@@ -11,14 +11,14 @@ services:
     image: session-memory-worker:local
     container_name: session-memory-worker
     restart: unless-stopped
-    # host networking: 컨테이너가 호스트 loopback 공유 → RAGFlow(127.0.0.1:9380)·
+    # host networking: 컨테이너가 호스트 loopback 공유 → RetiredIndexBridge(127.0.0.1:9380)·
     # ledger-pg(127.0.0.1:5432) 모두 호스트와 동일 endpoint로 도달. approval argv도
     # 호스트와 동일(127.0.0.1)하게 유지돼 contract 일치. 호스트-cron과 동일 동작.
     network_mode: host
     environment:
       RUN_MODE: ${RUN_MODE:-cron}
-      RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:-}
-      RAGFLOW_BASE_URL: ${RAGFLOW_BASE_URL:-http://127.0.0.1:9380}
+      RETIRED_INDEX_BRIDGE_API_KEY: ${RETIRED_INDEX_BRIDGE_API_KEY:-}
+      RETIRED_INDEX_BRIDGE_BASE_URL: ${RETIRED_INDEX_BRIDGE_BASE_URL:-http://127.0.0.1:9380}
       NEURON_LEDGER_PG_DSN: ${NEURON_LEDGER_PG_DSN:-}
     security_opt:
       - no-new-privileges:true

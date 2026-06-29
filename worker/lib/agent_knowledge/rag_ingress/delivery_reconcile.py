@@ -18,8 +18,8 @@ class DeliveryReconciler:
         if row is None:
             raise KeyError(job_id)
         evidence = None
-        dataset_ref = str(row.get("ragflow_dataset_id") or "")
-        document_ref = str(row.get("ragflow_document_id") or "")
+        dataset_ref = str(row.get("index_target_id") or "")
+        document_ref = str(row.get("index_document_id") or "")
         if dataset_ref and document_ref:
             evidence = self._backend.status(dataset_ref, document_ref)
         if evidence is None:

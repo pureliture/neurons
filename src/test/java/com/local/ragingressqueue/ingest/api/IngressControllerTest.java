@@ -196,7 +196,7 @@ class IngressControllerTest {
             {
               "schemaVersion": "rag_ingress_enqueue.v1",
               %s
-              "source": {"type":"local_pc","provider":"codex","project":"workspace-ragflow-advisor"},
+              "source": {"type":"local_pc","provider":"codex","project":"workspace-index-advisor"},
               "payload": {
                 "kind": "redacted_rag_ready_document",
                 "redactionVersion": "redaction.v2",
@@ -208,7 +208,7 @@ class IngressControllerTest {
                 }
               },
               "contentHash": "%s",
-              "targetProfile": "ragflow-transcript-memory",
+              "targetProfile": "index-transcript-memory",
               "kind": "conversation_chunk"
             }
             """.formatted(optionalField == null ? "" : optionalField, jsonString(body), contentHash(body));
@@ -230,7 +230,7 @@ class IngressControllerTest {
                 }
               },
               "contentHash": "%s",
-              "targetProfile": "ragflow-transcript-memory",
+              "targetProfile": "index-transcript-memory",
               "kind": "conversation_chunk"
             }
             """.formatted(jsonString(body), contentHash(body));
@@ -247,7 +247,7 @@ class IngressControllerTest {
         return """
             {
               "schemaVersion": "rag_ingress_enqueue.v1",
-              "source": {"type":"local_pc","provider":"codex","project":"workspace-ragflow-advisor"},
+              "source": {"type":"local_pc","provider":"codex","project":"workspace-index-advisor"},
               "payload": {
                 "kind": "redacted_rag_ready_document",
                 "redactionVersion": "redaction.v2",
@@ -259,7 +259,7 @@ class IngressControllerTest {
                 }
               },
               "contentHash": "%s",
-              "targetProfile": "ragflow-session-memory",
+              "targetProfile": "index-session-memory",
               "kind": "session_summary"
             }
             """.formatted(jsonString(body), contentHash(body));

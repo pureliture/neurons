@@ -1,6 +1,6 @@
 """Concrete CouchDB HTTP adapter implementing :class:`CouchDBSourceStore`.
 
-Mirrors the ``RagflowHttpClient`` transport-injection pattern (a ``transport``
+Mirrors the ``RetiredIndexBridgeHttpClient`` transport-injection pattern (a ``transport``
 callable returning :class:`ProxyResponse`) so it is fully unit-testable without a
 running CouchDB. The default transport uses ``urllib``.
 
@@ -8,7 +8,7 @@ Idempotency parity with the in-memory store: the caller never supplies ``_rev``.
 ``put`` reads the current doc, dedups on the shared ``payload_hash`` (identical
 content -> ``duplicate`` no-op), and otherwise writes with the current ``_rev``
 (retrying once on a 409 conflict). Auth is an injected header value (CouchDB has
-its own credentials; this is NOT the RAGFlow token).
+its own credentials; this is NOT the RetiredIndexBridge token).
 """
 
 from __future__ import annotations

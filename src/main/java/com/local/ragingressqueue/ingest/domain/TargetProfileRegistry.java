@@ -12,11 +12,9 @@ import java.util.Set;
  * Single source of truth mapping logical {@code targetProfile} ids to a {@link BackendKind} and a
  * logical dataset role. Authoritative for which profiles the public enqueue contract accepts.
  *
- * <p>Physical backend resource ids (RAGFlow dataset ids, tokens) are intentionally absent — they
- * stay in the backend adapter/config. The {@link #DEFAULT} registry mirrors
- * {@code rag-ingress.target-profiles} in {@code application.yml}; a parity test keeps the two
- * consistent. Full {@code @ConfigurationProperties} binding + startup fail-fast is a tracked
- * follow-up, deliberately out of scope for this contract/groundwork slice.</p>
+ * <p>Physical backend resource ids and credentials are intentionally absent. The retired
+ * external index bridge adapter is not loaded by the default Spring profiles; these logical
+ * profiles preserve the public enqueue contract while active delivery is owned elsewhere.</p>
  */
 public final class TargetProfileRegistry {
     public static final TargetProfileRegistry DEFAULT = new TargetProfileRegistry(defaultProfiles());
@@ -68,17 +66,17 @@ public final class TargetProfileRegistry {
 
     private static Map<String, TargetProfile> defaultProfiles() {
         Map<String, TargetProfile> profiles = new LinkedHashMap<>();
-        register(profiles, "ragflow-transcript-memory", "transcript-memory");
-        register(profiles, "ragflow-session-memory", "session-memory");
-        register(profiles, "ragflow-session-summary", "session-summary");
-        register(profiles, "ragflow-project-memory", "project-memory");
-        register(profiles, "ragflow-task-summary", "task-summary");
-        register(profiles, "ragflow-approved-memory-card", "approved-memory-card");
-        register(profiles, "ragflow-procedural-memory", "procedural-memory");
+        register(profiles, "index-transcript-memory", "transcript-memory");
+        register(profiles, "index-session-memory", "session-memory");
+        register(profiles, "index-session-summary", "session-summary");
+        register(profiles, "index-project-memory", "project-memory");
+        register(profiles, "index-task-summary", "task-summary");
+        register(profiles, "index-approved-memory-card", "approved-memory-card");
+        register(profiles, "index-procedural-memory", "procedural-memory");
         return profiles;
     }
 
     private static void register(Map<String, TargetProfile> profiles, String id, String datasetRole) {
-        profiles.put(id, new TargetProfile(id, BackendKind.RAGFLOW, datasetRole));
+        profiles.put(id, new TargetProfile(id, BackendKind.RETIRED_INDEX_BRIDGE, datasetRole));
     }
 }

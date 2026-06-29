@@ -3,7 +3,7 @@
 A Qdrant hit is never authoritative on its own -- ``SearchableMirrorHit`` carries
 ``canonical_resolution_required=True`` / ``authority_join_status="not_checked"``.
 Before any product use, each candidate must be resolved against the canonical
-authority, exactly as the RAGFlow retrieval path resolves every chunk through
+authority, exactly as the RetiredIndexBridge retrieval path resolves every chunk through
 ``ledger.authorize_document``.
 
 Critically, resolution routes through the SAME canonical predicate the ledger uses

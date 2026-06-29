@@ -19,7 +19,7 @@ canary로 닫는다.
 - `llm_brain_core`와 `rag_ingress`는 서로 import하지 않는다.
 - `GraphitiNeo4jConfig`는 장기 compatibility facade로 유지한다.
 - live canary는 public-safe synthetic episode 하나만 사용한다.
-- 새 모델 선택, live cutover, RAGFlow disable/delete, native-memory authority 이전은
+- 새 모델 선택, live cutover, RetiredIndexBridge disable/delete, native-memory authority 이전은
   범위 밖이다.
 
 ## Approach
@@ -151,7 +151,7 @@ build_openai_embedding_provider / build_openai_reranker
 - Required graph probe failure: fail fast when graph is required; best-effort graph remains
   degraded/unavailable instead of false healthy.
 - Live canary failure: abort implementation verification, report redacted failure class,
-  do not mutate RAGFlow/Qdrant/native-memory.
+  do not mutate RetiredIndexBridge/Qdrant/native-memory.
 
 ## Testing Strategy
 

@@ -21,7 +21,7 @@ sanctioned proposal-only extension이며, SoT는 `specs/brain-steward-hardening/
 
 ## Authority model
 
-- `neurons` ledger가 authority다. Qdrant/graph/RAGFlow는 canonical authority가 아니다.
+- `neurons` ledger가 authority다. Qdrant/graph/RetiredIndexBridge는 canonical authority가 아니다.
 - **accepted + current** MemoryCard만 authoritative memory다.
 - candidate/proposal은 recall에서 정답처럼 쓰이지 않는다. authority pack에 포함되지 않는다.
 - stale/superseded memory는 authority pack에서 빠지고, review queue에서 downgraded

@@ -1,6 +1,6 @@
 """Supersede detector — embedding-cosine candidate recall + LLM judge (decided #2).
 
-Two stages: (1) lenient RAGFlow vector recall over the derived-memory-items mirror pulls
+Two stages: (1) lenient RetiredIndexBridge vector recall over the derived-memory-items mirror pulls
 candidate prior cards (recall-oriented; the LLM filters precision), (2) an injected LLM
 judge decides supersede/distinct/conflict per (new candidate, prior card). Fail-closed:
 only an explicit "supersede" verdict against a still-current ledger card returns a demote
@@ -26,8 +26,8 @@ _JUDGE_PROMPT = (
 )
 
 
-def build_ragflow_judge_fn(ragflow: Any, *, llm_id: str = "") -> Callable[[Mapping[str, Any], Mapping[str, Any]], str]:
-    """LLM judge over the RAGFlow chat model: (new, old) -> supersede|conflict|distinct (fail-closed to distinct)."""
+def build_index_judge_fn(retired_index_bridge: Any, *, llm_id: str = "") -> Callable[[Mapping[str, Any], Mapping[str, Any]], str]:
+    """LLM judge over the RetiredIndexBridge chat model: (new, old) -> supersede|conflict|distinct (fail-closed to distinct)."""
 
     def judge(candidate: Mapping[str, Any], old_card: Mapping[str, Any]) -> str:
         messages = [
@@ -35,7 +35,7 @@ def build_ragflow_judge_fn(ragflow: Any, *, llm_id: str = "") -> Callable[[Mappi
             {"role": "user", "content": f"OLD: {old_card.get('summary') or ''}\nNEW: {candidate.get('summary') or ''}"},
         ]
         try:
-            verdict = str(ragflow.chat_completion(messages, llm_id=llm_id) or "").strip().lower()
+            verdict = str(retired_index_bridge.chat_completion(messages, llm_id=llm_id) or "").strip().lower()
         except Exception:
             return "distinct"
         if "supersede" in verdict:
@@ -49,7 +49,7 @@ def build_ragflow_judge_fn(ragflow: Any, *, llm_id: str = "") -> Callable[[Mappi
 
 def build_supersede_detector(
     *,
-    ragflow: Any,
+    retired_index_bridge: Any,
     judge_fn: Callable[[Mapping[str, Any], Mapping[str, Any]], str],
     dataset_id: str,
     project: str,
@@ -61,7 +61,7 @@ def build_supersede_detector(
         if not query:
             return None
         try:
-            hits = ragflow.retrieve(
+            hits = retired_index_bridge.retrieve(
                 query,
                 [dataset_id],
                 filters={"project": project} if project else None,

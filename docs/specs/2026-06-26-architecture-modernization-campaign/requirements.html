@@ -121,7 +121,7 @@
     <p>후속 workstream은 거의 design 수준까지 준비한다. 승인될 <code>design.md</code>는 M2/M3 구현자가 바로 들어갈 수 있을 만큼 구체화해야 한다.</p>
 
     <h3>Q: runtime/deployment evidence는 어디까지 요구할 것인가?</h3>
-    <p>runtime/deployment evidence는 로컬 worker test와 read-only Ubuntu runtime check로 제한한다. live mutation, Docker/systemd 변경, credential 접근, RAGFlow write/delete/disable, 운영 DB 변경은 포함하지 않는다.</p>
+    <p>runtime/deployment evidence는 로컬 worker test와 read-only Ubuntu runtime check로 제한한다. live mutation, Docker/systemd 변경, credential 접근, RetiredIndexBridge write/delete/disable, 운영 DB 변경은 포함하지 않는다.</p>
 
     <h2>기능 요구사항</h2>
     <ul>
@@ -140,7 +140,7 @@
       <tbody>
         <tr><td>Scope control</td><td>campaign은 실행을 포함하되, 각 milestone은 검증 가능한 단위로 작게 유지한다.</td></tr>
         <tr><td>Compatibility</td><td>기존 public CLI/API, 기존 DB behavior, 기존 dataset contract semantics를 암묵적으로 깨지 않는다.</td></tr>
-        <tr><td>Safety</td><td>live RAGFlow, Docker/systemd, credential, raw transcript/source mutation은 직접 실행하지 않는다.</td></tr>
+        <tr><td>Safety</td><td>live RetiredIndexBridge, Docker/systemd, credential, raw transcript/source mutation은 직접 실행하지 않는다.</td></tr>
         <tr><td>TDD-first</td><td>code-changing milestone은 red -> green -> refactor 또는 동등한 TDD-first 흐름을 기본값으로 둔다.</td></tr>
         <tr><td>Runtime evidence</td><td>M1은 로컬 worker test를 중심으로 검증하고, Ubuntu runtime은 read-only 상태 확인만 수행한다.</td></tr>
       </tbody>

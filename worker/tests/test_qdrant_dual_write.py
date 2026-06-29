@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_knowledge.rag_ingress.index_backend import (
+from agent_knowledge.rag_ingress.retired_index_bridge import (
     BackendDocumentHandle,
     BackendStatusDetail,
     BackendSubmitResult,

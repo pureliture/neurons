@@ -19,10 +19,10 @@ from agent_knowledge.session_memory.native_memory_write_runner import (
 )
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
-class _FakeRagflow:
+class _FakeRetiredIndexBridge:
     def __init__(self):
         self.add_calls: list[dict] = []
         self.disable_calls: list[dict] = []
@@ -44,11 +44,11 @@ class _FakeRagflow:
 def _setup(tmp_path, config=None):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     store = NativeMemoryMirrorStore(ledger)
-    ragflow = _FakeRagflow()
-    writer = NativeMemoryMirrorWriter(ragflow=ragflow, store=store, memory_id="mem_main", agent_id="a")
+    retired_index_bridge = _FakeRetiredIndexBridge()
+    writer = NativeMemoryMirrorWriter(retired_index_bridge=retired_index_bridge, store=store, memory_id="mem_main", agent_id="a")
     runner = NativeMemoryMirrorWriteRunner(ledger=ledger, store=store, writer=writer, config=config)
     service = CurationService(ledger)
-    return ledger, store, ragflow, runner, service
+    return ledger, store, retired_index_bridge, runner, service
 
 
 def _approve(service, statement, ctype="procedural_rule"):
@@ -106,7 +106,7 @@ def test_is_pending_logic():
 
 
 def test_forward_writes_unmirrored_card(tmp_path):
-    ledger, store, ragflow, runner, service = _setup(tmp_path)
+    ledger, store, retired_index_bridge, runner, service = _setup(tmp_path)
     card = _approve(service, "run lint before deploy")
 
     report = runner.run()
@@ -114,42 +114,42 @@ def test_forward_writes_unmirrored_card(tmp_path):
     assert report["scanned"] == 1
     assert report["pending"] == 1
     assert report["written"] == 1
-    assert len(ragflow.add_calls) == 1
+    assert len(retired_index_bridge.add_calls) == 1
     tag = session_tag_for(card["memory_id"])
     assert store.get_by_session_tags([tag])[tag]["status"] == "active"
 
 
 def test_forward_skips_already_mirrored_same_hash(tmp_path):
-    ledger, store, ragflow, runner, service = _setup(tmp_path)
+    ledger, store, retired_index_bridge, runner, service = _setup(tmp_path)
     _approve(service, "run lint before deploy")
     runner.run()
 
     report = runner.run()  # 2회차: 이미 mirror active + 동일 hash
 
-    assert len(ragflow.add_calls) == 1  # writer.write 재호출 안 함
+    assert len(retired_index_bridge.add_calls) == 1  # writer.write 재호출 안 함
     assert report["pending"] == 0
     assert report["written"] == 0
 
 
 def test_forward_skips_superseded_mirror_row(tmp_path):
     # ledger active 인데 mirror 가 superseded 면 forward 가 재활성화하지 않는다.
-    ledger, store, ragflow, runner, service = _setup(tmp_path)
+    ledger, store, retired_index_bridge, runner, service = _setup(tmp_path)
     card = _approve(service, "run lint before deploy")
     runner.run()
     store.mark_superseded(card["memory_id"], superseded_by="x")
-    calls_before = len(ragflow.add_calls)
+    calls_before = len(retired_index_bridge.add_calls)
 
     report = runner.run()
 
     assert report["pending"] == 0
-    assert len(ragflow.add_calls) == calls_before
+    assert len(retired_index_bridge.add_calls) == calls_before
 
 
 # --- supersede-sync (reverse) ---
 
 
 def test_supersede_sync_marks_ledger_disabled_orphan(tmp_path):
-    ledger, store, ragflow, runner, service = _setup(tmp_path)
+    ledger, store, retired_index_bridge, runner, service = _setup(tmp_path)
     card = _approve(service, "run lint before deploy")
     runner.run()  # mirror active
 
@@ -162,7 +162,7 @@ def test_supersede_sync_marks_ledger_disabled_orphan(tmp_path):
 
 
 def test_supersede_sync_ignores_still_active(tmp_path):
-    ledger, store, ragflow, runner, service = _setup(tmp_path)
+    ledger, store, retired_index_bridge, runner, service = _setup(tmp_path)
     _approve(service, "run lint before deploy")
     runner.run()
 
@@ -173,7 +173,7 @@ def test_supersede_sync_ignores_still_active(tmp_path):
 
 def test_supersede_sync_marks_deleted_card_orphan(tmp_path):
     # ledger card 행 자체가 삭제되면 get_memory_card_state→None → orphan 으로 superseded.
-    ledger, store, ragflow, runner, service = _setup(tmp_path)
+    ledger, store, retired_index_bridge, runner, service = _setup(tmp_path)
     card = _approve(service, "run lint before deploy")
     runner.run()  # mirror active
     with ledger._connect() as conn:
@@ -187,9 +187,9 @@ def test_supersede_sync_marks_deleted_card_orphan(tmp_path):
 
 
 def test_forward_counts_add_message_rejected(tmp_path):
-    ledger, store, ragflow, runner, service = _setup(tmp_path)
+    ledger, store, retired_index_bridge, runner, service = _setup(tmp_path)
     _approve(service, "run lint before deploy")
-    ragflow.add_envelope = {"code": 102, "message": "boom"}  # envelope 실패
+    retired_index_bridge.add_envelope = {"code": 102, "message": "boom"}  # envelope 실패
 
     report = runner.run()
 
@@ -201,7 +201,7 @@ def test_forward_counts_add_message_rejected(tmp_path):
 
 
 def test_empty_drain(tmp_path):
-    ledger, store, ragflow, runner, service = _setup(tmp_path)
+    ledger, store, retired_index_bridge, runner, service = _setup(tmp_path)
     report = runner.run()
     assert report == {
         "superseded_synced": 0,
@@ -216,7 +216,7 @@ def test_empty_drain(tmp_path):
 
 
 def test_batch_limit_hit(tmp_path):
-    ledger, store, ragflow, runner, service = _setup(tmp_path, config=NativeMemoryWriteConfig(batch_limit=1))
+    ledger, store, retired_index_bridge, runner, service = _setup(tmp_path, config=NativeMemoryWriteConfig(batch_limit=1))
     _approve(service, "fact one")
     _approve(service, "fact two")
 
@@ -230,18 +230,18 @@ def test_batch_limit_hit(tmp_path):
 
 
 def test_run_dry_run_skips_forward_mutation(tmp_path):
-    ledger, store, ragflow, runner, service = _setup(tmp_path)
+    ledger, store, retired_index_bridge, runner, service = _setup(tmp_path)
     _approve(service, "run lint before deploy")
 
     report = runner.run(dry_run=True)
 
     assert report["pending"] == 1  # would-write
     assert report["written"] == 0
-    assert len(ragflow.add_calls) == 0
+    assert len(retired_index_bridge.add_calls) == 0
 
 
 def test_run_dry_run_counts_supersede_without_marking(tmp_path):
-    ledger, store, ragflow, runner, service = _setup(tmp_path)
+    ledger, store, retired_index_bridge, runner, service = _setup(tmp_path)
     card = _approve(service, "run lint before deploy")
     runner.run()  # mirror active
     service.disable(card["memory_id"], reviewed_by="d", reason="r")
@@ -257,10 +257,10 @@ def test_run_dry_run_counts_supersede_without_marking(tmp_path):
 
 
 def test_run_native_memory_sync_writes_then_reconciles(tmp_path):
-    ledger, store, ragflow, runner, service = _setup(tmp_path)
+    ledger, store, retired_index_bridge, runner, service = _setup(tmp_path)
     _approve(service, "run lint before deploy")
 
-    report = run_native_memory_sync(ledger=ledger, ragflow=ragflow, memory_id="mem_main")
+    report = run_native_memory_sync(ledger=ledger, retired_index_bridge=retired_index_bridge, memory_id="mem_main")
 
     assert report["status"] == "ok"
     assert report["dry_run"] is False
@@ -269,15 +269,15 @@ def test_run_native_memory_sync_writes_then_reconciles(tmp_path):
 
 
 def test_run_native_memory_sync_dry_run_skips_reconcile_and_mutation(tmp_path):
-    ledger, store, ragflow, runner, service = _setup(tmp_path)
+    ledger, store, retired_index_bridge, runner, service = _setup(tmp_path)
     _approve(service, "run lint before deploy")
 
-    report = run_native_memory_sync(ledger=ledger, ragflow=ragflow, memory_id="mem_main", dry_run=True)
+    report = run_native_memory_sync(ledger=ledger, retired_index_bridge=retired_index_bridge, memory_id="mem_main", dry_run=True)
 
     assert report["dry_run"] is True
     assert report["write"]["pending"] == 1
     assert report["write"]["written"] == 0
-    assert len(ragflow.add_calls) == 0
+    assert len(retired_index_bridge.add_calls) == 0
     assert report["reconcile"]["status"] == "skipped_dry_run"
 
 
@@ -289,7 +289,7 @@ def test_native_memory_sync_cli_no_memory_binding_is_noop(tmp_path, capsys):
 
 
 def test_native_memory_sync_cli_dry_run_runs_without_network(tmp_path, capsys):
-    ledger, store, ragflow, runner, service = _setup(tmp_path)
+    ledger, store, retired_index_bridge, runner, service = _setup(tmp_path)
     _approve(service, "run lint before deploy")
 
     rc = main([
@@ -309,7 +309,7 @@ def test_native_memory_sync_cli_dry_run_runs_without_network(tmp_path, capsys):
     assert report["reconcile"]["status"] == "skipped_dry_run"
     assert report["mutation_performed"] is False
     assert report["network_used"] is False
-    assert len(ragflow.add_calls) == 0
+    assert len(retired_index_bridge.add_calls) == 0
 
 
 def test_native_memory_sync_cli_live_run_is_fail_closed(tmp_path, capsys):

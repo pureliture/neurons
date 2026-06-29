@@ -72,7 +72,7 @@ class RedactionGuardTest {
                 Map.of("auth", "Bearer ghp_ABCdef0123456789xyzQQ", "safe", "value")
             ),
             ContentHashVerifier.sha256Hex(redactedBody()),
-            "ragflow-transcript-memory",
+            "index-transcript-memory",
             "conversation_chunk",
             "codex:conversation_chunk:sha256deadbeef"
         );

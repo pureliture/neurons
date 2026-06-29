@@ -19,8 +19,8 @@ class ComposeConfigTest {
         assertThat(compose).contains("ingress-api:");
         assertThat(compose).contains("ingress-worker:");
         assertThat(compose).contains("RAG_INGRESS_NATS_URL: nats://nats-jetstream:4222");
-        assertThat(compose).contains("RAGFLOW_PRESSURE_RUNNING_THROTTLE_THRESHOLD");
-        assertThat(compose).contains("RAGFLOW_PRESSURE_RUNNING_CLOSED_THRESHOLD");
+        assertThat(compose).contains("RETIRED_INDEX_BRIDGE_PRESSURE_RUNNING_THROTTLE_THRESHOLD");
+        assertThat(compose).contains("RETIRED_INDEX_BRIDGE_PRESSURE_RUNNING_CLOSED_THRESHOLD");
         assertThat(compose).contains("host.docker.internal:host-gateway");
         assertThat(compose).contains("127.0.0.1:4222:4222");
         assertThat(compose).contains("127.0.0.1:18080:8080");
@@ -75,9 +75,9 @@ class ComposeConfigTest {
             .filter(line -> line.strip().equals("network_mode: host"))
             .count();
         assertThat(hostNetworkDirectives).isEqualTo(1);
-        assertThat(compose).doesNotContain("ragflow-server");
-        assertThat(compose).doesNotContain("ragflow-redis");
-        assertThat(compose).doesNotContain("ragflow-mysql");
+        assertThat(compose).doesNotContain("index-server");
+        assertThat(compose).doesNotContain("index-redis");
+        assertThat(compose).doesNotContain("index-mysql");
     }
 
     @Test

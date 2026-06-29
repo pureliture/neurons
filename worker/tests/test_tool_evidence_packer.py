@@ -2,7 +2,7 @@
 
 A tool_evidence_summary document is a new append-only source-document kind in
 the transcript-memory dataset. It mirrors the conversation_chunk packer: bounded
-markdown body, flat string-only metadata for RAGFlow filters, deterministic
+markdown body, flat string-only metadata for RetiredIndexBridge filters, deterministic
 order, and the same session_id_hash linkage.
 """
 
@@ -21,7 +21,7 @@ from agent_knowledge.session_memory.transcript_packer import (
 
 SESSION_HASH = "sha256:" + "3" * 64
 SOURCE_LOCATOR_HASH = "sha256:" + "a" * 64
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 SECRET_VALUE = "synthetic-" + "packer-token-value"
 LOCAL_RUNTIME_PATH = "/Users/example/Projects/secret-app/run.py"
 
@@ -84,7 +84,7 @@ def test_pack_tool_evidence_summary_body_contains_evidence_sections():
     assert "12 passed in 1.23s" in packed.body
 
 
-def test_pack_tool_evidence_summary_metadata_is_flat_for_ragflow_filters():
+def test_pack_tool_evidence_summary_metadata_is_flat_for_index_filters():
     packed = pack_tool_evidence_summary_document(session=_session(), records=_records())
     for key, value in packed.metadata.items():
         assert not isinstance(value, (dict, list, tuple, set)), f"metadata {key} must be a flat scalar"

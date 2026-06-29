@@ -1,6 +1,6 @@
 """M3: ledger qdrant_collections registry (additive, no network).
 
-Parallel to ragflow_datasets. Authority for logical_name -> Qdrant collection
+Parallel to index_targets. Authority for logical_name -> Qdrant collection
 mapping, vector params, and enable state. Does not touch any live Qdrant.
 """
 

@@ -37,11 +37,11 @@ from ..session_memory.transcript_model import (
 COUCHDB_SOURCE_SCHEMA_VERSION = "couchdb_transcript_source.v1"
 COUCHDB_SOURCE_OWNER = "couchdb-transcript-source"
 
-# RAGFlow keeps only the derived recall surface after cutover. ``transcript-memory``
+# RetiredIndexBridge keeps only the derived recall surface after cutover. ``transcript-memory``
 # is retired: never a CouchDB-source doc type, never a post-cutover projection
 # target. These two constants encode the migration's final-state invariant.
-RAGFLOW_RECALL_PROFILE = "session-memory"
-RETIRED_RAGFLOW_PROFILE = "transcript-memory"
+RETIRED_INDEX_BRIDGE_RECALL_PROFILE = "session-memory"
+RETIRED_RETIRED_INDEX_BRIDGE_PROFILE = "transcript-memory"
 
 
 class SourceDocType:
@@ -202,20 +202,20 @@ def assert_couchdb_owned(doc_type: str) -> None:
         )
 
 
-def assert_ragflow_target_allowed(target_profile: str) -> None:
-    """The only RAGFlow projection target after cutover is ``session-memory``.
+def assert_index_target_allowed(target_profile: str) -> None:
+    """The only RetiredIndexBridge projection target after cutover is ``session-memory``.
 
     ``transcript-memory`` is explicitly rejected so a projection_state document
     can never record the retired profile as its destination.
     """
 
-    if target_profile == RETIRED_RAGFLOW_PROFILE:
+    if target_profile == RETIRED_RETIRED_INDEX_BRIDGE_PROFILE:
         raise OwnershipViolation(
-            "transcript-memory is retired and is not a valid RAGFlow projection target"
+            "transcript-memory is retired and is not a valid RetiredIndexBridge projection target"
         )
-    if target_profile != RAGFLOW_RECALL_PROFILE:
+    if target_profile != RETIRED_INDEX_BRIDGE_RECALL_PROFILE:
         raise OwnershipViolation(
-            f"RAGFlow projection target must be {RAGFLOW_RECALL_PROFILE!r}, got {target_profile!r}"
+            f"RetiredIndexBridge projection target must be {RETIRED_INDEX_BRIDGE_RECALL_PROFILE!r}, got {target_profile!r}"
         )
 
 
@@ -223,7 +223,7 @@ def assert_source_text_clean(text: str) -> None:
     """Fail-closed redaction boundary: reject any body that still leaks.
 
     Mirrors the ingress ``public_ingress_leak_violations`` gate so a CouchDB
-    write enforces the same contract as a RAGFlow delivery.
+    write enforces the same contract as a RetiredIndexBridge delivery.
     """
 
     violations = public_ingress_leak_violations(text)
@@ -422,9 +422,9 @@ def build_coverage_manifest_document(
 
     Holds the counts and coverage hashes for conversation chunks and tool
     evidence bundles, an optional comparison block against ledger/ingress and the
-    RAGFlow candidate set (comparison only -- RAGFlow project metadata is never
+    RetiredIndexBridge candidate set (comparison only -- RetiredIndexBridge project metadata is never
     trusted as authority), and the project-authority resolution (source tier,
-    ambiguity, RAGFlow project mismatch) so the retirement gate can exclude
+    ambiguity, RetiredIndexBridge project mismatch) so the retirement gate can exclude
     ambiguous sessions from irreversible retirement proof.
     """
 
@@ -458,13 +458,13 @@ def build_projection_state_document(
     provider: str,
     project: str,
     projection_status: str,
-    target_profile: str = RAGFLOW_RECALL_PROFILE,
+    target_profile: str = RETIRED_INDEX_BRIDGE_RECALL_PROFILE,
     session_memory_knowledge_id: str = "",
     active_content_hash: str = "",
     failure_reason: str = "",
     source_locator_hash: str = "",
 ) -> dict:
-    """Tracks projection of the derived session-memory to RAGFlow.
+    """Tracks projection of the derived session-memory to RetiredIndexBridge.
 
     ``target_profile`` is checked against the ownership rule so the retired
     ``transcript-memory`` profile can never be recorded as a projection target.
@@ -476,7 +476,7 @@ def build_projection_state_document(
     hash. Populated on the SUCCESS (PROJECTED) path; left "" on failure paths.
     """
 
-    assert_ragflow_target_allowed(target_profile)
+    assert_index_target_allowed(target_profile)
     if projection_status not in ProjectionStatus.known():
         raise ValueError(f"unknown projection_status: {projection_status}")
     # A PROJECTED state without an active_content_hash would leave the authority
@@ -546,8 +546,8 @@ __all__ = [
     "COUCHDB_SOURCE_SCHEMA_VERSION",
     "COUCHDB_SOURCE_OWNER",
     "COUCHDB_OWNED_DOC_TYPES",
-    "RAGFLOW_RECALL_PROFILE",
-    "RETIRED_RAGFLOW_PROFILE",
+    "RETIRED_INDEX_BRIDGE_RECALL_PROFILE",
+    "RETIRED_RETIRED_INDEX_BRIDGE_PROFILE",
     "SourceDocType",
     "ProjectionStatus",
     "RetentionTier",
@@ -556,7 +556,7 @@ __all__ = [
     "SecretLikeMetadataError",
     "assert_no_secret_like_metadata",
     "assert_couchdb_owned",
-    "assert_ragflow_target_allowed",
+    "assert_index_target_allowed",
     "assert_source_text_clean",
     "assert_hash_like",
     "sha256_hash",
