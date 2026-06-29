@@ -442,11 +442,11 @@ must be clearly named and separate.
 - RAGFlow is not introduced as a core Context Authority dependency.
 - Dendrite capture does not assign authority statuses.
 - Raw PC file bodies and graph DB files are not synced for federation.
-- Hermes gains no authoritative write. The proposal-only Brain Steward surface
-  (`specs/brain-steward-hardening/`, `specs/hermes-brain-steward/`) is a sanctioned
-  separate lane where agents only propose (candidate / stale / supersede);
-  the self-improvement / authoritative-commit loop is not added, and
-  approve / reject / auto_accept / commit stay restricted to a human/manual gate.
+- Hermes는 authoritative write 권한을 얻지 않는다. proposal 전용 Brain Steward 표면
+  (`specs/brain-steward-hardening/`, `specs/hermes-brain-steward/`)은 에이전트가 제안
+  (candidate / stale / supersede)만 남기는 sanctioned 별도 lane이며, self-improvement /
+  authoritative-commit loop은 추가하지 않는다. approve / reject / auto_accept / commit은
+  human/manual gate로 제한된다.
 
 ### Runtime Evidence Tests
 

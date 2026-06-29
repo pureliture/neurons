@@ -88,7 +88,7 @@ top of it.
 | Dendrite | Local capture, tool/file/git event sensing, same-device source resolve | Sensor, not brain |
 | neurons-local | Per-PC local index, file/session graph, offline recall, sync artifact | Local authority for that device's observed facts |
 | neurons-central | Cross-device federation, dedupe, authority synthesis, context pack | Product authority layer |
-| Hermes | Read-only Context Authority consumer in this roadmap | Same consumer level as Codex/Claude Code for the read path; the proposal-only Brain Steward surface is a sanctioned separate lane (agents only propose, no authoritative write); self-improvement / authoritative-commit loop out of scope |
+| Hermes | Read-only Context Authority consumer in this roadmap | 읽기 경로에서는 Codex/Claude Code와 동일한 consumer 수준이다. proposal 전용 Brain Steward 표면은 sanctioned 별도 lane이며(에이전트는 제안만, authoritative write 불가), self-improvement / authoritative-commit loop은 out of scope다 |
 
 ## Boundary Guardrails
 
@@ -111,9 +111,9 @@ include a short boundary cross-check.
 - HTML outputs are first-class inventory objects, but usually generated
   companions or human previews, not source of truth.
 - Archive/delete recommendations are proposals only. No automatic delete.
-- Hermes self-improvement, authoritative-commit, skill updates, and cleanup loops
-  are outside this roadmap. Proposal generation now ships as a proposal-only Brain
-  Steward surface in a separate sanctioned spec lane; it adds no authoritative write.
+- Hermes self-improvement, authoritative-commit, skill update, cleanup loop은 이
+  로드맵 범위 밖이다. proposal 생성은 이제 별도 sanctioned spec lane의 proposal 전용
+  Brain Steward 표면으로 제공되며, authoritative write를 추가하지 않는다.
 
 ## Neo4j Workbench Strategy
 
@@ -211,8 +211,8 @@ Context Pack for one repo, starting with `neurons`.
 Primary user:
 
 - Codex/Claude Code coding agent first.
-- Hermes is a read-only consumer at the same level as coding agents for this
-  roadmap's read path; its separate Brain Steward surface is proposal-only.
+- Hermes는 이 로드맵의 읽기 경로에서 코딩 에이전트와 동일 수준의 read-only consumer이며,
+  별도 Brain Steward 표면은 proposal 전용이다.
 
 Delivery:
 
@@ -595,9 +595,9 @@ Parallel infra:
 - Do not let Graphiti semantic extraction sit in the hot path.
 - Do not auto-delete archive candidates.
 - Do not auto-edit skills.
-- Do not include Hermes self-improvement or authoritative-commit loop in this
-  roadmap. The proposal-only Brain Steward surface is a separate sanctioned spec
-  lane and performs no authoritative write.
+- 이 로드맵에 Hermes self-improvement나 authoritative-commit loop을 포함하지 않는다.
+  proposal 전용 Brain Steward 표면은 별도 sanctioned spec lane이며 authoritative write를
+  수행하지 않는다.
 - Do not start production k3s migration before product authority APIs are
   useful and workload boundaries are stable.
 
