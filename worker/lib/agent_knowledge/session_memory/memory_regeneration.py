@@ -13,6 +13,12 @@ from .transcript_model import MAX_PACKED_TRANSCRIPT_BODY_CHARS, REDACTION_VERSIO
 from .transcript_packer import PackedTranscriptDocument
 from .transcript_ingest import build_transcript_chunks
 from .transcript_parsers import extract_tool_evidence, parse_transcript_source
+from .chunk_overlap import (
+    ChunkView,
+    canonicalize_chunk_views,
+    sanitize_session_memory_chunk_text as _sanitize_session_memory_chunk_text,
+)
+
 SESSION_MEMORY_KIND = "session_memory"
 SESSION_RECAP_KIND = "session_recap"
 TASK_SUMMARY_KIND = "task_summary"
@@ -40,36 +46,8 @@ PROJECT_SOURCE_CHUNK_PROVENANCE_SAMPLE_LIMIT = 10
 SOURCE_SESSION_PROVENANCE_SAMPLE_LIMIT = 20
 SESSION_MEMORY_SOURCE_MANIFEST_ALGORITHM = "source_content_hash|source_window_hash.sorted.v1"
 SESSION_MEMORY_SOT_SOURCE_MANIFEST_ALGORITHM = SESSION_MEMORY_SOURCE_MANIFEST_ALGORITHM  # deprecated compatibility alias
-_SESSION_MEMORY_CHUNK_HEADER_LABELS = (
-    "session_id_hash",
-    "source_locator_hash",
-    "turn_start_index",
-    "turn_end_index",
-    "turn_part_index",
-    "turn_part_count",
-    "part_index",
-    "part_count",
-    "char_start",
-    "char_end",
-    "content_hash",
-    "knowledge_id",
-    "chunk_id",
-    "dataset_id",
-    "dataset_ref",
-    "datasetId",
-    "dataset_ids",
-    "document_id",
-    "document_ref",
-    "documentId",
-    "document_ids",
-    "token",
-    "access_token",
-    "api_key",
-)
-_SESSION_MEMORY_HEADER_LINE_RE = re.compile(
-    rf"^\s*(?:{'|'.join(re.escape(label) for label in _SESSION_MEMORY_CHUNK_HEADER_LABELS)})\s*[:=]\s*.*$",
-    flags=re.IGNORECASE,
-)
+# Chunk-overlap canonicalization policy (sanitize, strict-window-contains) lives in
+# .chunk_overlap as the single source of truth, shared with the M3 materializer.
 
 
 @dataclass(frozen=True)
@@ -1723,76 +1701,38 @@ def _canonical_session_group_for_memory(group: SessionChunkGroup) -> tuple[Sessi
     )
 
 
+def _record_to_chunk_view(record: TranscriptMemoryChunkRecord) -> ChunkView:
+    return ChunkView(
+        content_hash=record.content_hash,
+        turn_start_index=record.turn_start_index,
+        turn_end_index=record.turn_end_index,
+        part_index=int(record.part_index or 1),
+        part_count=int(record.part_count or 1),
+        char_start=int(record.char_start or 0),
+        char_end=int(record.char_end or 0),
+        redaction_version=record.redaction_version,
+        text=record.redacted_text,
+    )
+
+
 def _canonicalize_session_chunks_for_memory(
     chunks: tuple[TranscriptMemoryChunkRecord, ...] | Iterable[TranscriptMemoryChunkRecord],
 ) -> tuple[tuple[TranscriptMemoryChunkRecord, ...], dict]:
+    # Delegates the overlap policy (exact-dup + subsumption) to the shared
+    # chunk_overlap module so M3 materialization and regeneration stay identical.
     normalized = _normalize_session_chunks_for_memory(chunks)
-    deduped: list[TranscriptMemoryChunkRecord] = []
-    seen_exact_sources: set[tuple[object, ...]] = set()
-    exact_duplicate_count = 0
-    for chunk in normalized:
-        source_key = (
-            chunk.content_hash,
-            chunk.turn_start_index,
-            chunk.turn_end_index,
-            int(chunk.part_index or 1),
-            int(chunk.part_count or 1),
-            int(chunk.char_start or 0),
-            int(chunk.char_end or 0),
-            chunk.redaction_version,
-        )
-        if source_key in seen_exact_sources:
-            exact_duplicate_count += 1
-            continue
-        seen_exact_sources.add(source_key)
-        deduped.append(chunk)
-
-    sanitized_text_by_index = {
-        index: _sanitize_session_memory_chunk_text(chunk.redacted_text).strip()
-        for index, chunk in enumerate(deduped)
-    }
-    subsumed_indexes: set[int] = set()
-    for container_index, container in enumerate(deduped):
-        container_text = sanitized_text_by_index[container_index]
-        if not container_text:
-            continue
-        for candidate_index, candidate in enumerate(deduped):
-            if container_index == candidate_index or candidate_index in subsumed_indexes:
-                continue
-            if not _chunk_turn_window_strictly_contains(container, candidate):
-                continue
-            candidate_text = sanitized_text_by_index[candidate_index]
-            if candidate_text and candidate_text in container_text:
-                subsumed_indexes.add(candidate_index)
-
-    canonical = tuple(
-        chunk
-        for index, chunk in enumerate(deduped)
-        if index not in subsumed_indexes
-    )
-    dropped_source_chunk_count = len(normalized) - len(canonical)
+    views = [_record_to_chunk_view(record) for record in normalized]
+    _kept_views, report = canonicalize_chunk_views(views)
+    # Map survivors back to source records by index (report["kept_indexes"]), not by
+    # object identity — survives a future view-copy refactor inside the shared module.
+    canonical = tuple(normalized[index] for index in report["kept_indexes"])
     return canonical, {
-        "input_source_chunk_count": len(normalized),
-        "canonical_source_chunk_count": len(canonical),
-        "exact_duplicate_count": exact_duplicate_count,
-        "subsumed_overlap_count": len(subsumed_indexes),
-        "dropped_source_chunk_count": dropped_source_chunk_count,
+        "input_source_chunk_count": report["input_count"],
+        "canonical_source_chunk_count": report["kept_count"],
+        "exact_duplicate_count": report["exact_duplicate_count"],
+        "subsumed_overlap_count": report["subsumed_overlap_count"],
+        "dropped_source_chunk_count": report["dropped_count"],
     }
-
-
-def _chunk_turn_window_strictly_contains(
-    container: TranscriptMemoryChunkRecord,
-    candidate: TranscriptMemoryChunkRecord,
-) -> bool:
-    container_start = int(container.turn_start_index)
-    container_end = int(container.turn_end_index)
-    candidate_start = int(candidate.turn_start_index)
-    candidate_end = int(candidate.turn_end_index)
-    return (
-        (container_start, container_end) != (candidate_start, candidate_end)
-        and container_start <= candidate_start
-        and container_end >= candidate_end
-    )
 
 
 def _existing_derived_memory_blocks_enqueue(existing: dict | None, *, kind: str, enqueue: bool) -> bool:
@@ -2071,24 +2011,6 @@ def _render_retrieval_first_document(
     if max_chars is None:
         return document
     return bound_text(document, max_chars)
-
-
-def _sanitize_session_memory_chunk_text(raw_text: str) -> str:
-    text = str(raw_text)
-    text = "\n".join(line for line in text.splitlines() if not _SESSION_MEMORY_HEADER_LINE_RE.match(line))
-    text = re.sub(
-        r"\b(?:session_id_hash|source_locator_hash|turn_start_index|turn_end_index|turn_part_index|turn_part_count|part_index|part_count|char_start|char_end|content_hash|knowledge_id|chunk_id|dataset_id|dataset_ref|datasetId|dataset_ids|document_id|document_ref|documentId|document_ids|token|access_token|api_key)"
-        r"\s*[:=]\s*[^\s,;\]\)\n]+",
-        "<redacted:private-field>",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(
-        r"\b(?:ds_[A-Za-z0-9_-]+|doc_[A-Za-z0-9_-]+|kn_[A-Za-z0-9_-]+|chunk_[A-Za-z0-9_-]+)\b",
-        "<redacted:private-field>",
-        text,
-    )
-    return redact_public_ingress_text(text)
 
 
 def _assert_session_memory_not_truncated(body: str) -> None:
