@@ -88,7 +88,7 @@ top of it.
 | Dendrite | Local capture, tool/file/git event sensing, same-device source resolve | Sensor, not brain |
 | neurons-local | Per-PC local index, file/session graph, offline recall, sync artifact | Local authority for that device's observed facts |
 | neurons-central | Cross-device federation, dedupe, authority synthesis, context pack | Product authority layer |
-| Hermes | Read-only Context Authority consumer in this roadmap | Same consumer level as Codex/Claude Code; self-improvement/proposal loop out of scope |
+| Hermes | Read-only Context Authority consumer in this roadmap | Same consumer level as Codex/Claude Code for the read path; the proposal-only Brain Steward surface is a sanctioned separate lane (agents only propose, no authoritative write); self-improvement / authoritative-commit loop out of scope |
 
 ## Boundary Guardrails
 
@@ -111,8 +111,9 @@ include a short boundary cross-check.
 - HTML outputs are first-class inventory objects, but usually generated
   companions or human previews, not source of truth.
 - Archive/delete recommendations are proposals only. No automatic delete.
-- Hermes self-improvement, proposal generation, skill updates, and cleanup loops
-  are outside this roadmap.
+- Hermes self-improvement, authoritative-commit, skill updates, and cleanup loops
+  are outside this roadmap. Proposal generation now ships as a proposal-only Brain
+  Steward surface in a separate sanctioned spec lane; it adds no authoritative write.
 
 ## Neo4j Workbench Strategy
 
@@ -210,7 +211,8 @@ Context Pack for one repo, starting with `neurons`.
 Primary user:
 
 - Codex/Claude Code coding agent first.
-- Hermes is only a read-only consumer at the same level as coding agents.
+- Hermes is a read-only consumer at the same level as coding agents for this
+  roadmap's read path; its separate Brain Steward surface is proposal-only.
 
 Delivery:
 
@@ -593,7 +595,9 @@ Parallel infra:
 - Do not let Graphiti semantic extraction sit in the hot path.
 - Do not auto-delete archive candidates.
 - Do not auto-edit skills.
-- Do not include Hermes self-improvement or proposal loop in this roadmap.
+- Do not include Hermes self-improvement or authoritative-commit loop in this
+  roadmap. The proposal-only Brain Steward surface is a separate sanctioned spec
+  lane and performs no authoritative write.
 - Do not start production k3s migration before product authority APIs are
   useful and workload boundaries are stable.
 
