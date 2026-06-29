@@ -1268,16 +1268,25 @@ def _copy_column_if_present(
 
 def _migrate_backend_neutral_delivery_schema(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "delivery_jobs", "index_target_id", "TEXT DEFAULT ''")
+    _ensure_column(connection, "delivery_jobs", "index_document_id", "TEXT DEFAULT ''")
     _ensure_column(connection, "delivery_jobs", "index_run_id", "TEXT DEFAULT ''")
+    for old_column in ("ragflow_dataset_id", "index_dataset_id"):
+        _copy_column_if_present(
+            connection,
+            "delivery_jobs",
+            old_column=old_column,
+            new_column="index_target_id",
+        )
     _copy_column_if_present(
         connection,
         "delivery_jobs",
-        old_column="index_dataset_id",
-        new_column="index_target_id",
+        old_column="ragflow_document_id",
+        new_column="index_document_id",
     )
-    _copy_column_if_present(
-        connection,
-        "delivery_jobs",
-        old_column="index_run",
-        new_column="index_run_id",
-    )
+    for old_column in ("ragflow_run", "index_run"):
+        _copy_column_if_present(
+            connection,
+            "delivery_jobs",
+            old_column=old_column,
+            new_column="index_run_id",
+        )

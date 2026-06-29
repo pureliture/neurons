@@ -76,31 +76,62 @@ def _copy_column_if_present(
 
 def _migrate_backend_neutral_index_schema(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "knowledge_items", "index_target_id", "TEXT DEFAULT ''")
+    _ensure_column(connection, "knowledge_items", "index_document_id", "TEXT DEFAULT ''")
     _ensure_column(connection, "knowledge_items", "index_run_id", "TEXT DEFAULT ''")
-    _copy_column_if_present(
-        connection,
-        "knowledge_items",
-        old_column="index_dataset_id",
-        new_column="index_target_id",
-    )
-    _copy_column_if_present(
-        connection,
-        "knowledge_items",
-        old_column="index_run",
-        new_column="index_run_id",
-    )
-    if _table_exists(connection, "index_datasets") and _table_exists(connection, "index_targets"):
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO index_targets (
-                logical_name, dataset_id, embedding_model, chunk_method,
-                metadata_policy_version, contract_version, created_at, enabled, disabled_at
-            )
-            SELECT logical_name, dataset_id, embedding_model, chunk_method,
-                   metadata_policy_version, contract_version, created_at, enabled, disabled_at
-            FROM index_datasets
-            """
+    for old_column in ("ragflow_dataset_id", "index_dataset_id"):
+        _copy_column_if_present(
+            connection,
+            "knowledge_items",
+            old_column=old_column,
+            new_column="index_target_id",
         )
+    _copy_column_if_present(
+        connection,
+        "knowledge_items",
+        old_column="ragflow_document_id",
+        new_column="index_document_id",
+    )
+    for old_column in ("ragflow_run", "index_run"):
+        _copy_column_if_present(
+            connection,
+            "knowledge_items",
+            old_column=old_column,
+            new_column="index_run_id",
+        )
+    if _table_exists(connection, "index_targets"):
+        _copy_index_targets_from_legacy_table(connection, "ragflow_datasets")
+        _copy_index_targets_from_legacy_table(connection, "index_datasets")
+
+
+def _copy_index_targets_from_legacy_table(connection: sqlite3.Connection, legacy_table: str) -> None:
+    _assert_safe_sql_identifier(legacy_table)
+    if not _table_exists(connection, legacy_table):
+        return
+    legacy_columns = _column_names(connection, legacy_table)
+    required_columns = {
+        "logical_name",
+        "dataset_id",
+        "embedding_model",
+        "chunk_method",
+        "metadata_policy_version",
+        "contract_version",
+        "created_at",
+        "enabled",
+        "disabled_at",
+    }
+    if not required_columns.issubset(legacy_columns):
+        return
+    connection.execute(
+        f"""
+        INSERT OR IGNORE INTO index_targets (
+            logical_name, dataset_id, embedding_model, chunk_method,
+            metadata_policy_version, contract_version, created_at, enabled, disabled_at
+        )
+        SELECT logical_name, dataset_id, embedding_model, chunk_method,
+               metadata_policy_version, contract_version, created_at, enabled, disabled_at
+        FROM {legacy_table}
+        """
+    )
 
 
 def _assert_safe_sql_identifier(value: str) -> None:

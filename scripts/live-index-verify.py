@@ -362,13 +362,13 @@ def main():
 
     document = wait_until(
         deadline,
-        lambda: find_document(args.index_url, args.index_api_key, args.dataset_id, document_names),
+        lambda: find_document(args.retired_index_bridge_url, args.index_api_key, args.dataset_id, document_names),
         "RetiredIndexBridge document appearance",
     )
     document_id = document["id"]
 
     def indexed_document():
-        current = find_document(args.index_url, args.index_api_key, args.dataset_id, document_names)
+        current = find_document(args.retired_index_bridge_url, args.index_api_key, args.dataset_id, document_names)
         if not current:
             return None
         run = current.get("run", "")
@@ -384,10 +384,10 @@ def main():
     except RuntimeError:
         if not args.allow_same_document_chunk_fallback:
             raise
-        indexed = find_document(args.index_url, args.index_api_key, args.dataset_id, document_names)
+        indexed = find_document(args.retired_index_bridge_url, args.index_api_key, args.dataset_id, document_names)
         if indexed is None:
             raise RuntimeError("RetiredIndexBridge document disappeared before fallback")
-        add_searchable_chunk(args.index_url, args.index_api_key, args.dataset_id, document_id, marker)
+        add_searchable_chunk(args.retired_index_bridge_url, args.index_api_key, args.dataset_id, document_id, marker)
         searchable_chunk_source = "index_chunk_api_same_live_document"
     pre_authorized = is_authorized(ledger_path, document_id, project=args.project)
     if pre_authorized and not (args.existing_filename and args.allow_preauthorized_existing_document):
@@ -403,7 +403,7 @@ def main():
 
     def authorized_retrieval():
         result = retrieve_authorized_chunks(
-            args.index_url,
+            args.retired_index_bridge_url,
             args.index_api_key,
             args.dataset_id,
             marker,
