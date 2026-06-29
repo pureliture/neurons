@@ -28,6 +28,86 @@ _READ_ONLY_SQL_ALLOWED_KEYWORDS = {"EXPLAIN", "PRAGMA", "SELECT"}
 _READ_ONLY_SQL_CTE_FINAL_KEYWORDS = {"SELECT"}
 
 
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _column_names(connection: sqlite3.Connection, table: str) -> set[str]:
+    if not _table_exists(connection, table):
+        return set()
+    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    _assert_safe_sql_identifier(table)
+    _assert_safe_sql_identifier(column)
+    if column in _column_names(connection, table):
+        return
+    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _copy_column_if_present(
+    connection: sqlite3.Connection,
+    table: str,
+    *,
+    old_column: str,
+    new_column: str,
+) -> None:
+    _assert_safe_sql_identifier(table)
+    _assert_safe_sql_identifier(old_column)
+    _assert_safe_sql_identifier(new_column)
+    columns = _column_names(connection, table)
+    if old_column not in columns or new_column not in columns:
+        return
+    connection.execute(
+        f"""
+        UPDATE {table}
+        SET {new_column} = {old_column}
+        WHERE ({new_column} IS NULL OR {new_column} = '')
+          AND {old_column} IS NOT NULL
+          AND {old_column} != ''
+        """
+    )
+
+
+def _migrate_backend_neutral_index_schema(connection: sqlite3.Connection) -> None:
+    _ensure_column(connection, "knowledge_items", "index_target_id", "TEXT DEFAULT ''")
+    _ensure_column(connection, "knowledge_items", "index_run_id", "TEXT DEFAULT ''")
+    _copy_column_if_present(
+        connection,
+        "knowledge_items",
+        old_column="index_dataset_id",
+        new_column="index_target_id",
+    )
+    _copy_column_if_present(
+        connection,
+        "knowledge_items",
+        old_column="index_run",
+        new_column="index_run_id",
+    )
+    if _table_exists(connection, "index_datasets") and _table_exists(connection, "index_targets"):
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO index_targets (
+                logical_name, dataset_id, embedding_model, chunk_method,
+                metadata_policy_version, contract_version, created_at, enabled, disabled_at
+            )
+            SELECT logical_name, dataset_id, embedding_model, chunk_method,
+                   metadata_policy_version, contract_version, created_at, enabled, disabled_at
+            FROM index_datasets
+            """
+        )
+
+
+def _assert_safe_sql_identifier(value: str) -> None:
+    if not value.replace("_", "").isalnum():
+        raise ValueError("unsafe SQL identifier")
+
+
 def _read_only_sql_allowed(sql: str) -> bool:
     match = _READ_ONLY_SQL_KEYWORD_RE.match(sql)
     if match is None:
@@ -270,8 +350,8 @@ class _LedgerTransaction:
         )
         self._mark_uploaded(
             card["memory_id"],
-            dataset_id=card.get("ragflow_dataset_id") or "local-approved-memory-cards",
-            document_id=card.get("ragflow_document_id") or f"memdoc_{card['memory_id']}",
+            dataset_id=card.get("index_target_id") or "local-approved-memory-cards",
+            document_id=card.get("index_document_id") or f"memdoc_{card['memory_id']}",
             run="LOCAL",
         )
         self._mark_indexed(card["memory_id"], run="LOCAL")
@@ -338,7 +418,7 @@ class _LedgerTransaction:
     def get_memory_card(self, memory_id: str) -> dict | None:
         row = self._connection.execute(
             """
-            SELECT mc.*, ki.ragflow_dataset_id, ki.ragflow_document_id, ki.status AS ledger_status
+            SELECT mc.*, ki.index_target_id, ki.index_document_id, ki.status AS ledger_status
             FROM memory_cards mc
             LEFT JOIN knowledge_items ki ON ki.knowledge_id = mc.memory_id
             WHERE mc.memory_id = ?
@@ -370,8 +450,8 @@ class _LedgerTransaction:
             if existing["content_hash"] != content_hash:
                 if (
                     existing["status"] != "prepared"
-                    or existing["ragflow_dataset_id"]
-                    or existing["ragflow_document_id"]
+                    or existing["index_target_id"]
+                    or existing["index_document_id"]
                     or existing["ingress_job_id"]
                     or existing["queued_at"]
                     or existing["indexed_at"]
@@ -395,13 +475,13 @@ class _LedgerTransaction:
                         summary=?,
                         privacy_level=?,
                         status='prepared',
-                        ragflow_dataset_id='',
-                        ragflow_document_id='',
+                        index_target_id='',
+                        index_document_id='',
                         ingress_target_profile='',
                         ingress_job_id='',
                         queued_at='',
-                        ragflow_run='',
-                        ragflow_progress=0,
+                        index_run_id='',
+                        index_progress=0,
                         indexed_at='',
                         disabled_at='',
                         authorization_status='active'
@@ -431,13 +511,13 @@ class _LedgerTransaction:
                     summary=?,
                     privacy_level=?,
                     status='prepared',
-                    ragflow_dataset_id='',
-                    ragflow_document_id='',
+                    index_target_id='',
+                    index_document_id='',
                     ingress_target_profile='',
                     ingress_job_id='',
                     queued_at='',
-                    ragflow_run='',
-                    ragflow_progress=0,
+                    index_run_id='',
+                    index_progress=0,
                     indexed_at='',
                     disabled_at='',
                     authorization_status='active'
@@ -487,12 +567,12 @@ class _LedgerTransaction:
         self._update_status(
             knowledge_id,
             "uploaded_unparsed",
-            ragflow_dataset_id=dataset_id,
-            ragflow_document_id=document_id,
+            index_target_id=dataset_id,
+            index_document_id=document_id,
             ingress_target_profile="",
             ingress_job_id="",
             queued_at="",
-            ragflow_run=run,
+            index_run_id=run,
             indexed_at="",
         )
 
@@ -500,8 +580,8 @@ class _LedgerTransaction:
         self._update_status(
             knowledge_id,
             "indexed",
-            ragflow_run=run,
-            ragflow_progress=1.0,
+            index_run_id=run,
+            index_progress=1.0,
             indexed_at=datetime.now(timezone.utc).isoformat(),
         )
         self._indexed_knowledge_ids.append(knowledge_id)
@@ -658,8 +738,8 @@ class Ledger(
                     ingested_at TEXT DEFAULT '',
                     updated_at TEXT DEFAULT '',
                     privacy_level TEXT NOT NULL DEFAULT 'normal',
-                    ragflow_dataset_id TEXT DEFAULT '',
-                    ragflow_document_id TEXT DEFAULT '',
+                    index_target_id TEXT DEFAULT '',
+                    index_document_id TEXT DEFAULT '',
                     ingress_target_profile TEXT DEFAULT '',
                     ingress_job_id TEXT DEFAULT '',
                     queued_at TEXT DEFAULT '',
@@ -676,8 +756,8 @@ class Ledger(
                     coverage_duplicate_count INTEGER DEFAULT 0,
                     source_manifest_hash TEXT DEFAULT '',
                     source_chunk_count INTEGER DEFAULT 0,
-                    ragflow_run TEXT DEFAULT '',
-                    ragflow_progress REAL DEFAULT 0,
+                    index_run_id TEXT DEFAULT '',
+                    index_progress REAL DEFAULT 0,
                     indexed_at TEXT DEFAULT '',
                     disabled_at TEXT DEFAULT '',
                     authorization_status TEXT DEFAULT 'active',
@@ -691,7 +771,7 @@ class Ledger(
                     created_at TEXT NOT NULL,
                     completed_at TEXT DEFAULT ''
                 );
-                CREATE TABLE IF NOT EXISTS ragflow_datasets (
+                CREATE TABLE IF NOT EXISTS index_targets (
                     logical_name TEXT PRIMARY KEY,
                     dataset_id TEXT NOT NULL,
                     embedding_model TEXT DEFAULT '',
@@ -1124,8 +1204,8 @@ class Ledger(
                     original_content_hash TEXT NOT NULL,
                     search_text TEXT NOT NULL DEFAULT '',
                     card_type TEXT NOT NULL DEFAULT '',
-                    ragflow_memory_id TEXT DEFAULT '',
-                    ragflow_disabled_at TEXT DEFAULT '',
+                    index_memory_id TEXT DEFAULT '',
+                    index_disabled_at TEXT DEFAULT '',
                     created_at TEXT NOT NULL,
                     superseded_at TEXT DEFAULT ''
                 );
@@ -1138,7 +1218,7 @@ class Ledger(
                     schema_version TEXT NOT NULL,
                     mode TEXT NOT NULL,
                     knowledge_id TEXT NOT NULL,
-                    ragflow_document_id_hash TEXT NOT NULL,
+                    index_document_id_hash TEXT NOT NULL,
                     dataset_id TEXT NOT NULL,
                     replacement_knowledge_id TEXT NOT NULL,
                     dirty_at TEXT NOT NULL DEFAULT '',
@@ -1200,6 +1280,7 @@ class Ledger(
                 # extraction_level column exists before this script's level index.
                 + _GRAPH_PROJECTION_STATE_SCHEMA
             )
+            _migrate_backend_neutral_index_schema(connection)
             _ensure_column(connection, "knowledge_items", "session_id_hash", "TEXT DEFAULT ''")
             _ensure_column(connection, "knowledge_items", "evidence_status", "TEXT DEFAULT 'historical'")
             _ensure_column(connection, "knowledge_items", "coverage_status", "TEXT DEFAULT ''")
@@ -1300,7 +1381,7 @@ class Ledger(
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT mc.*, ki.ragflow_dataset_id, ki.ragflow_document_id, ki.status AS ledger_status
+                SELECT mc.*, ki.index_target_id, ki.index_document_id, ki.status AS ledger_status
                 FROM memory_cards mc
                 LEFT JOIN knowledge_items ki ON ki.knowledge_id = mc.memory_id
                 WHERE mc.memory_id = ?
@@ -1453,12 +1534,12 @@ class Ledger(
         self._update_status(
             knowledge_id,
             "uploaded_unparsed",
-            ragflow_dataset_id=dataset_id,
-            ragflow_document_id=document_id,
+            index_target_id=dataset_id,
+            index_document_id=document_id,
             ingress_target_profile="",
             ingress_job_id="",
             queued_at="",
-            ragflow_run=run,
+            index_run_id=run,
             indexed_at="",
         )
 
@@ -1466,13 +1547,13 @@ class Ledger(
         self._update_status(
             knowledge_id,
             "queued",
-            ragflow_dataset_id="",
-            ragflow_document_id="",
+            index_target_id="",
+            index_document_id="",
             ingress_target_profile=target_profile,
             ingress_job_id=job_id,
             queued_at=datetime.now(timezone.utc).isoformat(),
-            ragflow_run=run,
-            ragflow_progress=0,
+            index_run_id=run,
+            index_progress=0,
             indexed_at="",
         )
 
@@ -1483,27 +1564,27 @@ class Ledger(
         self._update_status(knowledge_id, "parse_requested")
 
     def mark_indexing(self, knowledge_id: str, *, run: str, progress: float) -> None:
-        self._update_status(knowledge_id, "indexing", ragflow_run=run, ragflow_progress=progress, indexed_at="")
+        self._update_status(knowledge_id, "indexing", index_run_id=run, index_progress=progress, indexed_at="")
 
     def mark_indexed(self, knowledge_id: str, *, run: str) -> None:
         self._update_status(
             knowledge_id,
             "indexed",
-            ragflow_run=run,
-            ragflow_progress=1.0,
+            index_run_id=run,
+            index_progress=1.0,
             indexed_at=datetime.now(timezone.utc).isoformat(),
         )
         self._maybe_mark_session_memory_dirty_for_indexed_item(knowledge_id)
         self._maybe_mark_project_memory_dirty_for_indexed_item(knowledge_id)
 
     def mark_index_timeout(self, knowledge_id: str, *, run: str = "TIMEOUT", progress: float = 0) -> None:
-        self._update_status(knowledge_id, "index_timeout", ragflow_run=run, ragflow_progress=progress, indexed_at="")
+        self._update_status(knowledge_id, "index_timeout", index_run_id=run, index_progress=progress, indexed_at="")
 
 
 
 
     def mark_parse_failed(self, knowledge_id: str, *, run: str = "FAIL") -> None:
-        self._update_status(knowledge_id, "parse_failed", ragflow_run=run, indexed_at="")
+        self._update_status(knowledge_id, "parse_failed", index_run_id=run, indexed_at="")
 
     def mark_quarantined(
         self,
@@ -1748,11 +1829,11 @@ class Ledger(
             raise ValueError("session memory coverage must be complete before promotion")
         if not self._session_memory_coverage_edges_are_complete(item):
             raise ValueError("session memory coverage edges must match source manifest before promotion")
-        if not item.get("ragflow_dataset_id"):
-            raise ValueError("session memory requires ragflow_dataset_id before promotion")
-        if not item.get("ragflow_document_id"):
-            raise ValueError("session memory requires ragflow_document_id before promotion")
-        if not self._dataset_is_enabled(item.get("ragflow_dataset_id", "")):
+        if not item.get("index_target_id"):
+            raise ValueError("session memory requires index_target_id before promotion")
+        if not item.get("index_document_id"):
+            raise ValueError("session memory requires index_document_id before promotion")
+        if not self._dataset_is_enabled(item.get("index_target_id", "")):
             raise ValueError("session memory dataset must be enabled before promotion")
         session_id_hash = item.get("session_id_hash") or ""
         if not session_id_hash:
@@ -1938,11 +2019,11 @@ class Ledger(
                   AND ki.evidence_status = ?
                   AND ki.supersedes = ''
                   AND (ki.valid_until = '' OR ki.valid_until > ?)
-                  AND ki.ragflow_dataset_id != ''
-                  AND ki.ragflow_document_id != ''
+                  AND ki.index_target_id != ''
+                  AND ki.index_document_id != ''
                   AND NOT EXISTS (
-                    SELECT 1 FROM ragflow_datasets rd
-                    WHERE rd.dataset_id = ki.ragflow_dataset_id
+                    SELECT 1 FROM index_targets rd
+                    WHERE rd.dataset_id = ki.index_target_id
                       AND (rd.enabled = 0 OR rd.disabled_at != '')
                   )
                 ORDER BY ki.indexed_at ASC, ki.updated_at ASC
@@ -1977,11 +2058,11 @@ class Ledger(
             raise ValueError("expired project memory snapshot cannot be promoted")
         if item.get("evidence_status") != SESSION_MEMORY_REGENERATION_EVIDENCE_STATUS:
             raise ValueError("project memory snapshot requires regenerated transcript provenance before promotion")
-        if not item.get("ragflow_dataset_id"):
-            raise ValueError("project memory snapshot requires ragflow_dataset_id before promotion")
-        if not item.get("ragflow_document_id"):
-            raise ValueError("project memory snapshot requires ragflow_document_id before promotion")
-        if not self._dataset_is_enabled(item.get("ragflow_dataset_id", "")):
+        if not item.get("index_target_id"):
+            raise ValueError("project memory snapshot requires index_target_id before promotion")
+        if not item.get("index_document_id"):
+            raise ValueError("project memory snapshot requires index_document_id before promotion")
+        if not self._dataset_is_enabled(item.get("index_target_id", "")):
             raise ValueError("project memory snapshot dataset must be enabled before promotion")
         provider = item.get("provider") or ""
         project = item.get("project") or ""

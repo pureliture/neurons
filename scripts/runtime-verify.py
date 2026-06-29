@@ -100,7 +100,7 @@ def valid_enqueue_payload(body, *, project):
             },
         },
         "contentHash": "sha256:" + hashlib.sha256(body.encode()).hexdigest(),
-        "targetProfile": "ragflow-transcript-memory",
+        "targetProfile": "index-transcript-memory",
         "kind": "conversation_chunk",
         "idempotencyKey": marker,
     }

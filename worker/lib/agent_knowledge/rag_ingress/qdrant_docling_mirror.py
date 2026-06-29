@@ -27,7 +27,7 @@ from agent_knowledge.public_safe_util import (
 )
 from agent_knowledge.redaction import redact_public_ingress_text
 
-from .index_backend import (
+from .retired_index_bridge import (
     BackendDocumentHandle,
     BackendStatusDetail,
     BackendSubmitResult,
@@ -142,10 +142,10 @@ class MirrorDeletionResult:
 
 
 class MirrorDeletionCapable(Protocol):
-    """Optional deletion capability layered on top of ``IndexBackendAdapter``.
+    """Optional deletion capability layered on top of ``RetiredIndexBridgeAdapter``.
 
-    The backend-neutral ``IndexBackendAdapter`` protocol covers submit / find /
-    status only; it has no delete. RAGFlow document deletion currently bypasses
+    The backend-neutral ``RetiredIndexBridgeAdapter`` protocol covers submit / find /
+    status only; it has no delete. RetiredIndexBridge document deletion currently bypasses
     the adapter and goes through the GC ``hard_delete_documents`` chokepoint, so
     there is no neutral delete seam yet. This optional protocol is the draft seam
     a GC/retirement path would target for a Qdrant mirror. It is intentionally
@@ -219,7 +219,7 @@ class HashEmbeddingProvider:
 
 
 class QdrantDoclingMirrorAdapter:
-    """``IndexBackendAdapter`` implementation over Qdrant.
+    """``RetiredIndexBridgeAdapter`` implementation over Qdrant.
 
     ``client`` is a qdrant-client-shaped object. Tests inject a fake client so no
     network or optional dependency is required for the contract checks.
@@ -442,7 +442,7 @@ class QdrantDoclingMirrorAdapter:
         """Delete one mirror point by handle (draft GC/retirement seam).
 
         Idempotent: deleting an absent point is a safe no-op when ``missing_ok``.
-        This never touches RAGFlow; it only removes a Qdrant point, and it is not
+        This never touches RetiredIndexBridge; it only removes a Qdrant point, and it is not
         wired into any live GC route -- it exists so a future GC chokepoint can
         target the same neutral seam for the mirror.
         """
@@ -693,7 +693,7 @@ def build_searchable_mirror_gate_report(
             if packet_valid
             else "blocked_until_valid_evidence_packet"
         ),
-        "ragflow_failover_status": "blocked_no_live_failover_from_searchable_mirror_gate",
+        "index_failover_status": "blocked_no_live_failover_from_searchable_mirror_gate",
         "blockers": blockers,
         "approval_required_before_live_mutation": True,
     }
@@ -735,7 +735,7 @@ def _payload_for_document(document: RagReadyDocument, markdown: str) -> dict[str
         "summary": public_safe_text(markdown, max_chars=512),
         "metadata": metadata,
     }
-    # Promote RAGFlow-parity filter keys to top-level payload so they can be
+    # Promote RetiredIndexBridge-parity filter keys to top-level payload so they can be
     # indexed and filtered like target_profile (they otherwise live only inside
     # the nested ``metadata`` dict). None of these overwrite an existing top-level
     # key.
@@ -745,7 +745,7 @@ def _payload_for_document(document: RagReadyDocument, markdown: str) -> dict[str
 
 
 def _promoted_filter_fields(metadata: dict[str, Any], document: RagReadyDocument) -> dict[str, Any]:
-    # Canonical filter field name is ``result_type`` (RAGFlow uses result_type/type
+    # Canonical filter field name is ``result_type`` (RetiredIndexBridge uses result_type/type
     # interchangeably); fall back to the document_kind so the field is always set.
     result_type = str(metadata.get("result_type") or metadata.get("type") or document.document_kind or "")
     promoted: dict[str, Any] = {"result_type": public_safe_text(result_type, max_chars=120)}

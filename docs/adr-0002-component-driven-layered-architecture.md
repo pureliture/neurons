@@ -16,7 +16,7 @@ api/          → Controller, Service
 core/         → Domain, Validation
 queue/        → NATS JetStream publish/consume/provision
 worker/       → Worker loop, orchestration
-target/       → RagTargetAdapter + RAGFlow 구현체 (혼합)
+target/       → RagTargetAdapter + RetiredIndexBridge 구현체 (혼합)
 ```
 
 이 구조는 기능(도메인) 단위가 아니라 기술 계층을 기준으로 분리되어 있어 다음과 같은 문제를 초래한다.
@@ -28,12 +28,12 @@ target/       → RagTargetAdapter + RAGFlow 구현체 (혼합)
    - `IngestWorker`(delivery 기능)는 `worker/`에 따로 있지만 enqueue와의 연결 관계가 패키지로 표현되지 않음
 
 2. **Port와 Adapter가 한 패키지에 섞임**
-   - `RagTargetAdapter`(Port, 제네릭 계약)와 `RagFlowTargetAdapter`(Adapter, 구현체)가 둘 다 `target/`에 있음
+   - `RagTargetAdapter`(Port, 제네릭 계약)와 `RetiredIndexBridgeTargetAdapter`(Adapter, 구현체)가 둘 다 `target/`에 있음
    - `IngestPublisher`(Port)와 `NatsIngestPublisher`(Adapter)가 둘 다 `queue/`에 있음
    - 새 RAG 타겟이나 큐 엔진을 추가할 때 Port가 Adapter 구현에 묶임
 
 3. **외부 시스템의 종류가 구분되지 않음**
-   - NATS(기술 인프라)와 RAGFlow(비즈니스 서비스)가 같은 `queue/`와 `target/`에 있음
+   - NATS(기술 인프라)와 RetiredIndexBridge(비즈니스 서비스)가 같은 `queue/`와 `target/`에 있음
    - 인프라 교체와 외부 서비스 교체가 서로 다른 리스크지만 구조상 구분되지 않음
 
 4. **공통 인프라가 기능 패키지에 산재됨**
@@ -107,11 +107,11 @@ com.local.ragingressqueue
 │   │       ├── NatsJetStreamProvisioner.java
 │   │       └── NatsQueueStatusProvider.java
 │   └── ext/                     ← 외부 서비스 어댑터 (비즈니스)
-│       └── ragflow/
-│           ├── RagFlowTargetAdapter.java
-│           ├── HttpRagFlowGateway.java
-│           ├── RagFlowPressurePolicy.java
-│           └── RagFlowDocumentRef.java
+│       └── retired_index_bridge/
+│           ├── RetiredIndexBridgeTargetAdapter.java
+│           ├── HttpRetiredIndexBridgeGateway.java
+│           ├── RetiredIndexBridgePressurePolicy.java
+│           └── RetiredIndexBridgeDocumentRef.java
 └── common/                      ← 공통 인프라
     ├── config/
     │   ├── NatsJetStreamConfiguration.java
@@ -165,7 +165,7 @@ api (표현) → service (응용) → domain (도메인) → port (포트) ← a
 | 구분 | 설명 | 예시 |
 |------|------|------|
 | 인프라 어댑터 (adapter/infra/) | 기술 인프라를 도메인 방식으로 감쌈 | NATS, Redis, DB 클라이언트 |
-| 외부 서비스 어댑터 (adapter/ext/) | 외부 비즈니스 서비스를 도메인 방식으로 감쌈 | RAGFlow, GitLab, 외부 인증 서버 |
+| 외부 서비스 어댑터 (adapter/ext/) | 외부 비즈니스 서비스를 도메인 방식으로 감쌈 | RetiredIndexBridge, GitLab, 외부 인증 서버 |
 
 핵심 차이:
 - **인프라 어댑터**: 우리가 기술을 도메인 방식으로 사용한다
@@ -319,7 +319,7 @@ Cons:
 ### 일치하는 골격
 
 기능 단위 패키징(`ingest/`·`delivery/`·`status/`), Port 분리(`queue/port/`·`target/port/`),
-어댑터 분류(`adapter/infra/nats/`·`adapter/ext/ragflow/`), 공통 계층(`common/config/`·`common/logging/`).
+어댑터 분류(`adapter/infra/nats/`·`adapter/ext/retired_index_bridge/`), 공통 계층(`common/config/`·`common/logging/`).
 component-driven + Port/Adapter 방향성은 코드에 반영돼 있고 이제 ArchUnit으로 강제된다.
 
 ## References

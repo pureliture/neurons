@@ -21,54 +21,27 @@ rag-ingress:
     fetch-wait-ms: 1000
     provision-on-startup: true
   worker:
-    target-profile: ${RAG_INGRESS_WORKER_TARGET_PROFILE:ragflow-transcript-memory}
+    target-profile: ${RAG_INGRESS_WORKER_TARGET_PROFILE:index-transcript-memory}
     poll-interval-ms: 1000
-  target:
-    ragflow:
-      delivery-enabled: ${RAGFLOW_DELIVERY_ENABLED:false}
-      base-url: ${RAGFLOW_BASE_URL:}
-      api-key: ${RAGFLOW_API_KEY:}
-      pressure:
-        running-throttle-threshold: ${RAGFLOW_PRESSURE_RUNNING_THROTTLE_THRESHOLD:20}
-        unstart-throttle-threshold: ${RAGFLOW_PRESSURE_UNSTART_THROTTLE_THRESHOLD:5}
-        running-closed-threshold: ${RAGFLOW_PRESSURE_RUNNING_CLOSED_THRESHOLD:100}
-        unstart-closed-threshold: ${RAGFLOW_PRESSURE_UNSTART_CLOSED_THRESHOLD:25}
-      dedup-cache:
-        ttl-seconds: ${RAGFLOW_DEDUP_CACHE_TTL_SECONDS:600}
-        max-size: ${RAGFLOW_DEDUP_CACHE_MAX_SIZE:10000}
-      supersede:
-        # When enabled, a new content version of a logical document (identified by the
-        # logical-id-field below) retires the document's prior versions in the dataset. Inert unless
-        # the producer supplies a per-logical-document-unique value for that field, so append-only
-        # kinds (e.g. conversation_chunk) without it are never affected.
-        enabled: ${RAGFLOW_SUPERSEDE_ENABLED:false}
-        logical-id-field: ${RAGFLOW_SUPERSEDE_LOGICAL_ID_FIELD:logical_document_id}
   target-profiles:
-    ragflow-transcript-memory:
-      adapter: ragflow
+    index-transcript-memory:
+      adapter: retired_index_bridge
       dataset-role: transcript-memory
-      dataset-id: ${RAGFLOW_TRANSCRIPT_MEMORY_DATASET_ID:}
-    ragflow-session-memory:
-      adapter: ragflow
+    index-session-memory:
+      adapter: retired_index_bridge
       dataset-role: session-memory
-      dataset-id: ${RAGFLOW_SESSION_MEMORY_DATASET_ID:${RAGFLOW_SESSION_SUMMARY_DATASET_ID:}}
-    ragflow-session-summary:
-      adapter: ragflow
+    index-session-summary:
+      adapter: retired_index_bridge
       dataset-role: session-summary
-      dataset-id: ${RAGFLOW_SESSION_SUMMARY_DATASET_ID:}
-    ragflow-project-memory:
-      adapter: ragflow
+    index-project-memory:
+      adapter: retired_index_bridge
       dataset-role: project-memory
-      dataset-id: ${RAGFLOW_PROJECT_MEMORY_DATASET_ID:}
-    ragflow-task-summary:
-      adapter: ragflow
+    index-task-summary:
+      adapter: retired_index_bridge
       dataset-role: task-summary
-      dataset-id: ${RAGFLOW_TASK_SUMMARY_DATASET_ID:}
-    ragflow-approved-memory-card:
-      adapter: ragflow
+    index-approved-memory-card:
+      adapter: retired_index_bridge
       dataset-role: approved-memory-card
-      dataset-id: ${RAGFLOW_APPROVED_MEMORY_CARD_DATASET_ID:}
-    ragflow-procedural-memory:
-      adapter: ragflow
+    index-procedural-memory:
+      adapter: retired_index_bridge
       dataset-role: procedural-memory
-      dataset-id: ${RAGFLOW_PROCEDURAL_MEMORY_DATASET_ID:}

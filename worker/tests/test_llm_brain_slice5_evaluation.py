@@ -12,7 +12,7 @@ from agent_knowledge.session_memory.memory_evaluation import (
 from agent_knowledge.session_memory.memory_promotion import build_feedback_record, suggest_accept_from_evidence
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 
 
 def _source_span(**overrides):
@@ -229,8 +229,8 @@ def test_auto_policy_forbidden_operations_are_rejected():
     for operation in (
         "memory_delete",
         "live_gc_execute",
-        "ragflow_dataset_delete",
-        "ragflow_dataset_disable",
+        "index_dataset_delete",
+        "index_dataset_disable",
         "private_transcript_raw_exposure",
         "secret_source_return",
         "runtime_mutation_execute",

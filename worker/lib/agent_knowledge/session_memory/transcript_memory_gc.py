@@ -36,8 +36,8 @@ BASE_CANDIDATE_SELECT_SQL = """
                     source.provider,
                     source.project,
                     tc.session_id_hash,
-                    source.ragflow_dataset_id,
-                    source.ragflow_document_id,
+                    source.index_target_id,
+                    source.index_document_id,
                     source.indexed_at,
                     source.updated_at,
                     source.metadata_json,
@@ -46,7 +46,7 @@ BASE_CANDIDATE_SELECT_SQL = """
                     tc.turn_end_index,
                     tc.redaction_version,
                     active.knowledge_id AS active_knowledge_id,
-                    active.ragflow_document_id AS active_document_id,
+                    active.index_document_id AS active_document_id,
                     {covered_source_window_hash}
                 FROM knowledge_items source
                 JOIN transcript_chunks tc
@@ -66,8 +66,8 @@ BASE_CANDIDATE_SELECT_SQL = """
                   AND source.status = 'indexed'
                   AND source.authorization_status = 'active'
                   AND source.disabled_at = ''
-                  AND source.ragflow_dataset_id = ?
-                  AND source.ragflow_document_id != ''
+                  AND source.index_target_id = ?
+                  AND source.index_document_id != ''
                   AND coalesce(nullif(source.indexed_at, ''), nullif(source.updated_at, '')) != ''
                   AND coalesce(nullif(source.indexed_at, ''), nullif(source.updated_at, '')) <= ?
                   AND dirty.status = 'promoted'
@@ -88,7 +88,7 @@ BASE_CANDIDATE_SELECT_SQL = """
                   AND active.coverage_status = 'complete'
                   AND active.coverage_gap_count = 0
                   AND active.coverage_duplicate_count = 0
-                  AND active.ragflow_document_id != ''
+                  AND active.index_document_id != ''
                 ORDER BY source.indexed_at ASC, source.updated_at ASC, source.knowledge_id ASC
                 """
 
@@ -103,7 +103,7 @@ EXACT_COVERAGE_JOIN_SQL = """
 class TranscriptMemoryGcConfig:
     ledger_path: Path
     dataset_id: str
-    ragflow_url: str
+    index_url: str
     session_memory_dataset_id: str = ""
     candidate_scope: str = CANDIDATE_SCOPE_EXACT_COVERAGE
     max_items: int = 25
@@ -273,7 +273,7 @@ def _empty_search_surface_report(*, enabled: bool) -> dict:
         "network_used": False,
         "raw_query_printed": False,
         "raw_chunk_content_printed": False,
-        "raw_ragflow_ids_printed": False,
+        "raw_index_ids_printed": False,
     }
 
 
@@ -297,12 +297,12 @@ def _source_window_hash(row: dict) -> str:
 
 def _active_replacement_is_authorized(ledger: Ledger, knowledge_id: str, cache: dict[str, bool]) -> bool:
     item = ledger.get_by_knowledge_id(knowledge_id)
-    if not item or not item.get("ragflow_document_id"):
+    if not item or not item.get("index_document_id"):
         return False
     if not ledger._session_memory_coverage_edges_are_complete(item):
         return False
     if knowledge_id not in cache:
-        cache[knowledge_id] = ledger.authorize_document(str(item.get("ragflow_document_id") or "")) is not None
+        cache[knowledge_id] = ledger.authorize_document(str(item.get("index_document_id") or "")) is not None
     return cache[knowledge_id]
 
 
@@ -400,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--candidate-scope", choices=CANDIDATE_SCOPES, default=CANDIDATE_SCOPE_EXACT_COVERAGE)
     parser.add_argument("--declared-dataset-role", "--dataset-role", dest="declared_dataset_role", default="")
     parser.add_argument("--declared-retention-policy", "--retention-policy", dest="declared_retention_policy", default="")
-    parser.add_argument("--ragflow-url", required=True)
+    parser.add_argument("--retired-index-bridge-url", required=True)
     parser.add_argument("--max-items", type=int, default=25)
     parser.add_argument("--min-indexed-age-seconds", type=int, default=86400)
     parser.add_argument("--verify-search-surface", action="store_true")
@@ -419,7 +419,7 @@ def main(argv: list[str] | None = None) -> int:
             dataset_id=args.dataset_id,
             session_memory_dataset_id=args.session_memory_dataset_id,
             candidate_scope=args.candidate_scope,
-            ragflow_url=args.ragflow_url,
+            index_url=args.retired_index_bridge_url,
             max_items=args.max_items,
             min_indexed_age_seconds=args.min_indexed_age_seconds,
             execute_disable=bool(args.execute_disable),

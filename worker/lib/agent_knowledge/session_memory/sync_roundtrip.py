@@ -13,31 +13,31 @@ from .memory_regeneration import (
 from .session_memory_roundtrip import verify_session_memory_retrieval_no_loss
 
 
-def rollback_session_memory_document(ledger, ragflow, dataset_id: str, session_id_hash: str) -> dict:
+def rollback_session_memory_document(ledger, retired_index_bridge, dataset_id: str, session_id_hash: str) -> dict:
     getter = getattr(ledger, "get_session_memory_by_session_id_hash", None)
     row = getter(session_id_hash) if callable(getter) else None
     if not row:
         return {"rolled_back": False, "disable_status": "no_document_id"}
     return rollback_session_memory_document_by_knowledge_id(
         ledger,
-        ragflow,
+        retired_index_bridge,
         dataset_id,
         str(row.get("knowledge_id") or ""),
     )
 
 
-def rollback_session_memory_document_by_knowledge_id(ledger, ragflow, dataset_id: str, knowledge_id: str) -> dict:
+def rollback_session_memory_document_by_knowledge_id(ledger, retired_index_bridge, dataset_id: str, knowledge_id: str) -> dict:
     if not knowledge_id:
         return {"rolled_back": False, "disable_status": "no_document_id"}
     row = ledger.get_by_knowledge_id(knowledge_id)
     if not row:
         return {"rolled_back": False, "disable_status": "no_document_id"}
-    document_id = str(row.get("ragflow_document_id") or "")
+    document_id = str(row.get("index_document_id") or "")
     if not document_id:
         ledger.mark_disabled(knowledge_id)
         return {"rolled_back": False, "disable_status": "ledger_disabled_no_document"}
     try:
-        ragflow.disable_document(dataset_id, document_id)
+        retired_index_bridge.disable_document(dataset_id, document_id)
         ledger.mark_disabled(knowledge_id)
         return {"rolled_back": True, "disable_status": "disabled"}
     except Exception:
@@ -47,7 +47,7 @@ def rollback_session_memory_document_by_knowledge_id(ledger, ragflow, dataset_id
 def verify_session_memory_sync_roundtrip(
     *,
     ledger,
-    ragflow,
+    retired_index_bridge,
     dataset_id: str,
     session_id_hash: str,
     source,
@@ -97,9 +97,9 @@ def verify_session_memory_sync_roundtrip(
             "disable_status": "no_document_id",
         }
     knowledge_id = str(row.get("knowledge_id") or knowledge_id)
-    document_id = str(row.get("ragflow_document_id") or "")
+    document_id = str(row.get("index_document_id") or "")
     if not document_id:
-        rollback = rollback_session_memory_document_by_knowledge_id(ledger, ragflow, dataset_id, knowledge_id)
+        rollback = rollback_session_memory_document_by_knowledge_id(ledger, retired_index_bridge, dataset_id, knowledge_id)
         return {
             "schema_version": "agent_knowledge_session_memory_roundtrip.v1",
             "retrieved": False,
@@ -118,7 +118,7 @@ def verify_session_memory_sync_roundtrip(
     ]
     try:
         verdict = verify_session_memory_retrieval_no_loss(
-            ragflow=ragflow,
+            retired_index_bridge=retired_index_bridge,
             dataset_id=dataset_id,
             document_id=document_id,
             expected_source_texts=expected_source_texts,
@@ -140,7 +140,7 @@ def verify_session_memory_sync_roundtrip(
     tool_evidence_retrieved = not evidence_texts
     if evidence_texts:
         try:
-            evidence_chunks = ragflow.retrieve(
+            evidence_chunks = retired_index_bridge.retrieve(
                 "session memory tool evidence",
                 [dataset_id],
                 document_ids=[document_id],
@@ -161,7 +161,7 @@ def verify_session_memory_sync_roundtrip(
     verdict["tool_evidence_no_loss"] = tool_evidence_no_loss
     verdict["retrieval_no_loss"] = bool(verdict.get("retrieval_no_loss")) and tool_evidence_no_loss
     if not (verdict["coverage_no_loss"] and verdict["retrieval_no_loss"]):
-        verdict.update(rollback_session_memory_document_by_knowledge_id(ledger, ragflow, dataset_id, knowledge_id))
+        verdict.update(rollback_session_memory_document_by_knowledge_id(ledger, retired_index_bridge, dataset_id, knowledge_id))
     return verdict
 
 

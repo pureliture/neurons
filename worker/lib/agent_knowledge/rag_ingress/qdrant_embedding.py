@@ -1,6 +1,6 @@
 """Qdrant searchable mirror용 OpenAI-compatible ``EmbeddingProvider``.
 
-Mirror는 worker가 만든 vector가 필요하고, RAGFlow는 server-side embedding을
+Mirror는 worker가 만든 vector가 필요하고, RetiredIndexBridge는 server-side embedding을
 쓴다. 새 model을 고르지 않고 Graphiti adapter와 같은
 ``LLM_BRAIN_EMBEDDING_*`` env, ``OPENAI_*`` fallback, 기본 dim 1024를
 재사용한다. 새 secret은 만들지 않는다.

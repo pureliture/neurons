@@ -45,7 +45,7 @@ campaign 성공 기준은 M1을 실제 구현하고, 후속 workstream을 바로
 
 ### Q: runtime/deployment evidence는 어디까지 요구할 것인가?
 
-runtime/deployment evidence는 로컬 worker test와 read-only Ubuntu runtime check로 제한한다. M1은 persistence safety harness와 seam 도입이므로 live mutation, Docker/systemd 변경, credential 접근, RAGFlow write/delete/disable, 운영 DB 변경은 포함하지 않는다. 다만 `neurons`의 실제 runtime truth는 Ubuntu surface이므로, 구현 완료 전후에 read-only 상태 확인을 통해 배포 표면과 충돌하지 않는지 확인한다.
+runtime/deployment evidence는 로컬 worker test와 read-only Ubuntu runtime check로 제한한다. M1은 persistence safety harness와 seam 도입이므로 live mutation, Docker/systemd 변경, credential 접근, RetiredIndexBridge write/delete/disable, 운영 DB 변경은 포함하지 않는다. 다만 `neurons`의 실제 runtime truth는 Ubuntu surface이므로, 구현 완료 전후에 read-only 상태 확인을 통해 배포 표면과 충돌하지 않는지 확인한다.
 
 ## 기능 요구사항
 
@@ -67,7 +67,7 @@ runtime/deployment evidence는 로컬 worker test와 read-only Ubuntu runtime ch
 | --- | --- |
 | Scope control | campaign은 실행을 포함하되, 각 milestone은 검증 가능한 단위로 작게 유지한다. |
 | Compatibility | 기존 public CLI/API, 기존 DB behavior, 기존 dataset contract semantics를 암묵적으로 깨지 않는다. |
-| Safety | live RAGFlow, Docker/systemd, credential, raw transcript/source mutation은 이 campaign 구현 범위에서 직접 실행하지 않는다. |
+| Safety | live RetiredIndexBridge, Docker/systemd, credential, raw transcript/source mutation은 이 campaign 구현 범위에서 직접 실행하지 않는다. |
 | Evidence | 각 workstream은 완료 판단에 필요한 test/runtime/document evidence를 명시해야 한다. |
 | Ownership | `neurons`가 소유한 server/brain-side authority와 `dendrite` thin-client 책임을 섞지 않는다. |
 | TDD-first | code-changing milestone은 red -> green -> refactor 또는 동등한 TDD-first 흐름을 기본값으로 둔다. |

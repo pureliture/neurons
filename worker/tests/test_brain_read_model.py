@@ -61,14 +61,14 @@ def test_build_semantic_recall_binds_recall_pipeline(tmp_path, monkeypatch):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     captured = {}
 
-    def fake_recall(*, ragflow, store, memory_id, query, brain_id=""):
+    def fake_recall(*, retired_index_bridge, store, memory_id, query, brain_id=""):
         captured.update(memory_id=memory_id, query=query, brain_id=brain_id)
         return [{"session_tag": "mem:x"}]
 
     import agent_knowledge.session_memory.brain_read_model as mod
 
     monkeypatch.setattr(mod, "recall_active_native_memory", fake_recall)
-    semantic = build_semantic_recall(ledger=ledger, ragflow=object(), memory_id="mem_main")
+    semantic = build_semantic_recall(ledger=ledger, retired_index_bridge=object(), memory_id="mem_main")
     hits = semantic("질문", "/project/p")
     assert hits == [{"session_tag": "mem:x"}]
     assert captured == {"memory_id": "mem_main", "query": "질문", "brain_id": "/project/p"}

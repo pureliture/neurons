@@ -28,6 +28,6 @@
 - status: done
 - evidence: `test_searchable_mirror_gate_cli_is_dry_run_redacted_and_no_go` exercises `rag-ingress-state searchable-mirror-gate --dry-run --redact-paths --evidence-packet ...` with no network/mutation.
 
-## M7 RAGFlow Failover Remains Blocked
+## M7 RetiredIndexBridge Failover Remains Blocked
 - status: done
-- evidence: gate report keeps `production_authority_status=NO-GO`; valid evidence can make only `comparison_gate_status=ready_for_operator_cutover_packet`; `ragflow_failover_status` remains blocked.
+- evidence: gate report keeps `production_authority_status=NO-GO`; valid evidence can make only `comparison_gate_status=ready_for_operator_cutover_packet`; `index_failover_status` remains blocked.

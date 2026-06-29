@@ -10,7 +10,7 @@ import pytest
 from agent_knowledge.ledger import Ledger, SESSION_MEMORY_REGENERATION_EVIDENCE_STATUS
 
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 SOURCE_MANIFEST_HASH = "sha256:" + ("a" * 64)
 
 
@@ -90,10 +90,10 @@ def test_ledger_core_lifecycle_and_queue_selectors(tmp_path: Path):
     )
     assert item["status"] == "prepared"
 
-    ledger.mark_enqueued("kn_1", target_profile="ragflow-transcript-memory", job_id="job_1")
+    ledger.mark_enqueued("kn_1", target_profile="index-transcript-memory", job_id="job_1")
     queued = ledger.list_queued_documents(
         document_type="conversation_chunk",
-        target_profile="ragflow-transcript-memory",
+        target_profile="index-transcript-memory",
     )
 
     assert [row["knowledge_id"] for row in queued] == ["kn_1"]
@@ -103,7 +103,7 @@ def test_ledger_core_lifecycle_and_queue_selectors(tmp_path: Path):
     ledger.mark_indexed("kn_1", run="DONE")
     assert ledger.list_queued_documents(
         document_type="conversation_chunk",
-        target_profile="ragflow-transcript-memory",
+        target_profile="index-transcript-memory",
     ) == []
     assert ledger.lifecycle_counts()["indexed"] == 1
 

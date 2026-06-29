@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from ..ragflow_client import envelope_code, envelope_failed
+from ..index_client import envelope_code, envelope_failed
 from .memory_card import MAX_MEMORY_STATEMENT_CHARS
 from .native_memory_governance import governance_tier, mirror_prerequisite_block_reason
 from .native_memory_mirror import NativeMemoryMirrorStore, session_tag_for
@@ -26,15 +26,15 @@ class NativeMemoryMirrorWriter:
     def __init__(
         self,
         *,
-        ragflow,                       # RagflowHttpClient (또는 add_message 덕타입). 테스트=fake.
+        retired_index_bridge,                       # RetiredIndexBridgeHttpClient (또는 add_message 덕타입). 테스트=fake.
         store: NativeMemoryMirrorStore,
         memory_id: str,                # 단일 str. write() 내부에서 [self.memory_id] 로 감싸 호출.
         agent_id: str,
         user_id: str = "",
     ):
-        # ragflow_client.add_message 시그니처는 memory_id: list[str] 이지만 self.memory_id 는
+        # index_client.add_message 시그니처는 memory_id: list[str] 이지만 self.memory_id 는
         # 단일 str 로 보관하고, add_message 호출 시점에만 [self.memory_id] 로 감싼다(이중 wrapping 방지).
-        self.ragflow = ragflow
+        self.retired_index_bridge = retired_index_bridge
         self.store = store
         self.memory_id = memory_id
         self.agent_id = agent_id
@@ -54,7 +54,7 @@ class NativeMemoryMirrorWriter:
 
         # governance 게이트(dedup 직후·add_message 직전): Memory API mirror 는
         # approved memory card + provenance/eval pass 의 bounded mirror 로만 허용한다.
-        # RAGFlow Memory 가 canonical authority 가 되는 경로를 원천 차단한다.
+        # RetiredIndexBridge Memory 가 canonical authority 가 되는 경로를 원천 차단한다.
         block_reason = mirror_prerequisite_block_reason(
             approved=statement.approved,
             provenance_status=statement.provenance_status,
@@ -70,7 +70,7 @@ class NativeMemoryMirrorWriter:
                 "eval_status": statement.eval_status,
             }
 
-        result = self.ragflow.add_message(
+        result = self.retired_index_bridge.add_message(
             memory_id=[self.memory_id],
             agent_id=self.agent_id,
             session_id=tag,
@@ -93,7 +93,7 @@ class NativeMemoryMirrorWriter:
             original_content_hash=statement.original_content_hash,
             search_text=search_text,
             card_type=statement.card_type,
-            ragflow_memory_id="",
+            index_memory_id="",
             now=now,
         )
         return {"written": True, "session_tag": tag, "tier": tier}

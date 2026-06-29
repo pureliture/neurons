@@ -61,7 +61,7 @@ AREA_TABLES: dict[str, frozenset[str]] = {
         "project_memory_active_snapshots",
     }),
     AREA_D: frozenset({
-        "ragflow_datasets",
+        "index_targets",
         "qdrant_collections",
         "memory_cards",
         "memory_card_evidence",

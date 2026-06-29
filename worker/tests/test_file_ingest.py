@@ -4,7 +4,7 @@ import pytest
 
 
 class FakeClient:
-    """Records calls; mimics the RagflowHttpClient surface file_ingest needs."""
+    """Records calls; mimics the RetiredIndexBridgeHttpClient surface file_ingest needs."""
 
     def __init__(self):
         self.calls = []
@@ -36,7 +36,7 @@ def test_submit_file_uploads_raw_bytes_unchanged_and_triggers_parse():
     res = submit_file(client=fc, dataset_id="ds1", file_bytes=pdf, filename="report.pdf")
 
     assert res == {"dataset_id": "ds1", "document_id": "doc_x"}
-    # raw file bytes are forwarded to RAGFlow unchanged — no extraction, no redaction
+    # raw file bytes are forwarded to RetiredIndexBridge unchanged — no extraction, no redaction
     assert ("upload", "ds1", pdf, "report.pdf", "application/pdf") in fc.calls
     # native parse is triggered for the uploaded document
     assert ("parse", "ds1", ("doc_x",)) in fc.calls

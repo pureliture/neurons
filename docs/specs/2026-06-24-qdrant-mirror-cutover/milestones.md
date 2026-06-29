@@ -13,7 +13,7 @@ Stage 1만 이 루프에서 실행한다(M1–M5, 가역·test-evidence). M6–M
 
 ## M3 ledger qdrant_collections registry (additive migration)
 - status: done
-- evidence: tests/test_ledger_qdrant_collections.py 5 passed (upsert/get/list/enable fail-closed/reopen, additive 옆 ragflow_datasets)
+- evidence: tests/test_ledger_qdrant_collections.py 5 passed (upsert/get/list/enable fail-closed/reopen, additive 옆 index_targets)
 
 ## M4 Qdrant hit ledger-join (authority gate)
 - status: done
@@ -63,7 +63,7 @@ Stage 1만 이 루프에서 실행한다(M1–M5, 가역·test-evidence). M6–M
 
 ## M6/M7 code-only seam (branch codex/qdrant-mirror-m6-dualwrite-shadow; main 머지 후 분기)
 - Stage 1이 main에 머지(PR #22, merge 200a2c0). 이 브랜치는 갱신된 main 기준.
-- MirrorDualWriteBackend(`qdrant_dual_write.py`): primary(RAGFlow/CouchDB) authority +
+- MirrorDualWriteBackend(`qdrant_dual_write.py`): primary(RetiredIndexBridge/CouchDB) authority +
   best-effort Qdrant mirror. mirror 실패는 primary를 안 깸, find/status는 primary 전용.
   shadow_worker 미배선(활성화 env 분기는 Qdrant 배포 시 추가).
 - read-compare harness(`qdrant_read_compare.py`): primary vs mirror top-k content_hash
@@ -80,7 +80,7 @@ Stage 1만 이 루프에서 실행한다(M1–M5, 가역·test-evidence). M6–M
   볼륨, `${QDRANT_IMAGE:-qdrant/qdrant:latest}`) + ingress-worker-py dual-write env
   (전부 default-off) + 임베딩 env passthrough. 바 `compose up` 무변.
 - worker/Dockerfile: lean deps(qdrant-client + openai; docling 제외 — Passthrough).
-- 문서 05: RAGFlow 벡터 미러 은퇴(M9/M10) 전제조건 — "안 쓴다/불필요"가 아직 거짓인
+- 문서 05: RetiredIndexBridge 벡터 미러 은퇴(M9/M10) 전제조건 — "안 쓴다/불필요"가 아직 거짓인
   audit 근거(라이브 writer + no-fallback reader 잔존), 삭제 전 blocker 체크리스트,
   비가역 per-action 증거 게이트, 가역/비가역 경계.
 - 전체 worker suite 915 passed. 라이브 mutation 0(플래그 off·Qdrant 미배포·delete 미실행).

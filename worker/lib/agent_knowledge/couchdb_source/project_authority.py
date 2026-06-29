@@ -1,6 +1,6 @@
 """Hierarchy project-authority resolver for the CouchDB transcript migration.
 
-RAGFlow's existing ``project`` metadata is known to be polluted, so it is never a
+RetiredIndexBridge's existing ``project`` metadata is known to be polluted, so it is never a
 single authority. The resolver derives a canonical project label from a priority
 hierarchy (design "Project Authority Resolver"):
 
@@ -48,9 +48,9 @@ class ProjectAuthorityInput:
     provider_source_path: str = ""
     cwd: str = ""
     workspace_marker: str = ""
-    # RAGFlow's recorded project, kept for mismatch reporting only -- never an
+    # RetiredIndexBridge's recorded project, kept for mismatch reporting only -- never an
     # authority.
-    ragflow_project_hint: str = ""
+    index_project_hint: str = ""
 
 
 @dataclass(frozen=True)
@@ -59,7 +59,7 @@ class ProjectResolution:
     source: str
     ambiguous: bool
     candidates: tuple[str, ...] = ()
-    ragflow_mismatch: bool = False
+    index_mismatch: bool = False
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -74,7 +74,7 @@ class ProjectResolution:
             "source": self.source,
             "ambiguous": self.ambiguous,
             "candidates": list(self.candidates),
-            "ragflow_mismatch": self.ragflow_mismatch,
+            "index_mismatch": self.index_mismatch,
             "eligible_for_retirement": self.eligible_for_retirement,
             "notes": list(self.notes),
         }
@@ -103,7 +103,7 @@ def resolve_project(
         if canonical:
             tiers.append((source, canonical))
 
-    ragflow_project = canonicalize_project(payload.ragflow_project_hint)
+    index_project = canonicalize_project(payload.index_project_hint)
 
     if not tiers:
         inferred = canonicalize_project(server_inference() if server_inference else "")
@@ -113,7 +113,7 @@ def resolve_project(
                 source=ProjectAuthoritySource.SERVER_INFERENCE,
                 ambiguous=False,
                 candidates=(inferred,),
-                ragflow_project=ragflow_project,
+                index_project=index_project,
                 notes=("server_inference_only",),
             )
         return _finalize_resolution(
@@ -121,7 +121,7 @@ def resolve_project(
             source=ProjectAuthoritySource.UNRESOLVED,
             ambiguous=True,
             candidates=(),
-            ragflow_project=ragflow_project,
+            index_project=index_project,
             notes=("no_project_signal",),
         )
 
@@ -143,7 +143,7 @@ def resolve_project(
         source=winner_source,
         ambiguous=ambiguous,
         candidates=distinct,
-        ragflow_project=ragflow_project,
+        index_project=index_project,
         notes=tuple(notes),
     )
 
@@ -154,19 +154,19 @@ def _finalize_resolution(
     source: str,
     ambiguous: bool,
     candidates: tuple[str, ...],
-    ragflow_project: str,
+    index_project: str,
     notes: tuple[str, ...],
 ) -> ProjectResolution:
-    mismatch = bool(ragflow_project) and bool(project) and ragflow_project != project
+    mismatch = bool(index_project) and bool(project) and index_project != project
     note_list = list(notes)
     if mismatch:
-        note_list.append("ragflow_project_mismatch")
+        note_list.append("index_project_mismatch")
     return ProjectResolution(
         project=project,
         source=source,
         ambiguous=ambiguous,
         candidates=candidates,
-        ragflow_mismatch=mismatch,
+        index_mismatch=mismatch,
         notes=tuple(note_list),
     )
 

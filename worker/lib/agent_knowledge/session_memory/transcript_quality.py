@@ -188,11 +188,11 @@ def audit_transcript_source(provider: str, source: str | Path, *, project: str) 
         "gate_f_plus_representative_contract": _gate_f_plus_representative_contract(
             coverage_manifest,
             network_used=False,
-            ragflow_write_performed=False,
+            index_write_performed=False,
         ),
         "retrieval_quality_boundary": {
             "status": "not_evaluated_no_network",
-            "ragflow_write_performed": False,
+            "index_write_performed": False,
             "live_read_only_retrieval_performed": False,
             "content_recall_reverified": False,
             "authorization_smoke_reused": False,
@@ -200,7 +200,7 @@ def audit_transcript_source(provider: str, source: str | Path, *, project: str) 
         "decision": _quality_decision(has_loss, coverage_manifest),
         "network_used": False,
         "mutation_performed": False,
-        "ragflow_write_performed": False,
+        "index_write_performed": False,
         "raw_source_path_printed": False,
         "raw_transcript_text_printed": False,
     }
@@ -430,7 +430,7 @@ def _gate_f_plus_representative_contract(
     coverage_manifest: dict,
     *,
     network_used: bool,
-    ragflow_write_performed: bool,
+    index_write_performed: bool,
 ) -> dict:
     turn_count = int(coverage_manifest["parsed_turn_count"])
     tool_event_count = int(coverage_manifest["parsed_tool_event_count"])
@@ -462,7 +462,7 @@ def _gate_f_plus_representative_contract(
             "observed_attachment_count": attachment_count,
         },
         "network_used": network_used,
-        "ragflow_write_performed": ragflow_write_performed,
+        "index_write_performed": index_write_performed,
     }
 
 
@@ -470,7 +470,7 @@ def _quality_decision(has_loss: bool, coverage_manifest: dict) -> str:
     contract = _gate_f_plus_representative_contract(
         coverage_manifest,
         network_used=False,
-        ragflow_write_performed=False,
+        index_write_performed=False,
     )
     if has_loss:
         return "revise_packing_before_small_backfill"

@@ -48,7 +48,7 @@ class BrainReadModel(Protocol):
 
 
 SemanticRecall = Callable[[str, str], list[dict]]  # (query, brain_id) -> hits
-RagflowMirrorSearch = Callable[[str, str], list[dict]]
+RetiredIndexBridgeMirrorSearch = Callable[[str, str], list[dict]]
 
 
 def project_from_brain_id(brain_id: str) -> str | None:
@@ -113,7 +113,7 @@ def run_brain_query_v2(
     brain_id: str,
     query: str,
     query_intent: str = "session_context",
-    ragflow_search: RagflowMirrorSearch | None = None,
+    index_search: RetiredIndexBridgeMirrorSearch | None = None,
     promotion_candidates: list[dict] | None = None,
     evidence_candidates: list[dict] | None = None,
     limit: int = DEFAULT_LIMIT,
@@ -121,7 +121,7 @@ def run_brain_query_v2(
     """LLM-brain query envelope with local-ledger precedence.
 
     This v2 helper is deliberately read-only. It does not write ledger state and
-    it treats RAGFlow as a mirror whose results can only fill archive/evidence
+    it treats RetiredIndexBridge as a mirror whose results can only fill archive/evidence
     lanes unless matching local ledger truth already exists.
     """
 
@@ -137,19 +137,19 @@ def run_brain_query_v2(
         return _query_v2_error(brain_id=brain_id, code="invalid_query", message="query must be non-empty")
     bounded_limit = max(1, min(MAX_LIMIT, int(limit)))
     ledger_cards = list_ledger_accepted_cards(read_model, project=project, limit=bounded_limit)
-    ragflow_results = None
-    if ragflow_search is not None:
+    index_results = None
+    if index_search is not None:
         try:
-            ragflow_results = ragflow_search(normalized, brain_id)
-            if not isinstance(ragflow_results, list):
-                ragflow_results = []
+            index_results = index_search(normalized, brain_id)
+            if not isinstance(index_results, list):
+                index_results = []
         except Exception:
-            ragflow_results = None
+            index_results = None
     response = build_brain_query_response_v2(
         brain_id=brain_id,
         query_intent=query_intent,
         ledger_cards=ledger_cards,
-        ragflow_results=ragflow_results,
+        index_results=index_results,
         promotion_candidates=promotion_candidates,
         evidence_candidates=evidence_candidates,
     )
@@ -157,7 +157,7 @@ def run_brain_query_v2(
     response["audit"] = {
         "query_hash": hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16],
         "path": "ledger_precedence_v2",
-        "ragflow_bound": ragflow_search is not None,
+        "index_bound": index_search is not None,
     }
     return response
 
@@ -167,11 +167,11 @@ def build_brain_query_response_v2(
     brain_id: str,
     query_intent: str,
     ledger_cards: list[dict] | None,
-    ragflow_results: list[dict] | None = None,
+    index_results: list[dict] | None = None,
     promotion_candidates: list[dict] | None = None,
     evidence_candidates: list[dict] | None = None,
 ) -> dict:
-    """Merge local ledger and RAGFlow mirror results into explicit query lanes."""
+    """Merge local ledger and RetiredIndexBridge mirror results into explicit query lanes."""
 
     response = {
         "brain_id": brain_id,
@@ -185,7 +185,7 @@ def build_brain_query_response_v2(
         "projection_state": {"status": "unavailable", "details": []},
         "sources": [
             {"source": "local_ledger", "authority": "canonical"},
-            {"source": "ragflow", "authority": "searchable_runtime_mirror"},
+            {"source": "retired_index_bridge", "authority": "searchable_runtime_mirror"},
         ],
     }
     ledger_by_memory_id: dict[str, dict] = {}
@@ -201,7 +201,7 @@ def build_brain_query_response_v2(
         if normalized.get("currentness") not in ("superseded", "conflicted", "stale"):
             response["accepted"].append(normalized)
 
-    for mirror_item in ragflow_results or []:
+    for mirror_item in index_results or []:
         memory_id = _mirror_memory_id(mirror_item)
         if memory_id and memory_id in ledger_by_memory_id:
             conflict = _projection_conflict(ledger_by_memory_id[memory_id], mirror_item)
@@ -214,7 +214,7 @@ def build_brain_query_response_v2(
         response[target_lane].append(_sanitize_mirror_item(mirror_item))
 
     response["projection_state"] = _projection_state(
-        conflicts=response["conflicts"], ragflow_results=ragflow_results
+        conflicts=response["conflicts"], index_results=index_results
     )
     return response
 
@@ -406,16 +406,16 @@ def _is_evidence_like_mirror_item(item: Mapping[str, Any]) -> bool:
 
 def _sanitize_mirror_item(item: Mapping[str, Any]) -> dict:
     if not isinstance(item, Mapping):
-        return {"result_type": "ragflow_mirror", "summary": ""}
+        return {"result_type": "index_mirror", "summary": ""}
     sanitized = {
-        "result_type": str(item.get("result_type") or "ragflow_mirror"),
+        "result_type": str(item.get("result_type") or "index_mirror"),
         "memory_id": str(item.get("memory_id") or ""),
         "card_type": str(item.get("card_type") or ""),
         "summary": redact_and_bound_evidence_text(
             str(item.get("summary") or ""), MAX_TRANSCRIPT_SNIPPET_CHARS
         ),
         "currentness": str(item.get("currentness") or "unknown"),
-        "authority": "ragflow_mirror",
+        "authority": "index_mirror",
     }
     if item.get("score") is not None:
         sanitized["score"] = item.get("score")
@@ -440,10 +440,10 @@ def _safe_public_text(value: Any) -> str:
     return redact_and_bound_evidence_text(str(value or ""), MAX_TRANSCRIPT_SNIPPET_CHARS)
 
 
-def _projection_state(*, conflicts: list[dict], ragflow_results: list[dict] | None) -> dict:
+def _projection_state(*, conflicts: list[dict], index_results: list[dict] | None) -> dict:
     if conflicts:
         return {"status": "projection_stale", "details": conflicts}
-    if ragflow_results is None:
+    if index_results is None:
         return {"status": "unavailable", "details": []}
     return {"status": "fresh", "details": []}
 

@@ -19,8 +19,8 @@ DEFAULT_POLICY = {
 FORBIDDEN_AUTO_POLICY_OPERATIONS = (
     "memory_delete",
     "live_gc_execute",
-    "ragflow_dataset_delete",
-    "ragflow_dataset_disable",
+    "index_dataset_delete",
+    "index_dataset_disable",
     "private_transcript_raw_exposure",
     "secret_source_return",
     "runtime_mutation_execute",

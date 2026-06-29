@@ -23,7 +23,7 @@ Design (CouchDB-native):
   (idempotent across both paths).
 
 MIRROR-ONLY: this module reads CouchDB (read-only materialize) and upserts Qdrant.
-It NEVER writes the CouchDB primary, NEVER writes RAGFlow, and NEVER constructs a
+It NEVER writes the CouchDB primary, NEVER writes RetiredIndexBridge, and NEVER constructs a
 dual-write backend. All emitted/recorded data is redaction-safe: counts, statuses,
 and mirror natural-key triples only -- never bodies, raw ids, or secrets.
 """
@@ -43,7 +43,7 @@ from .rag_ready_document import (
 from .qdrant_docling_mirror import MirrorDeletionResult
 
 from ..couchdb_source.document_model import (
-    RAGFLOW_RECALL_PROFILE,
+    RETIRED_INDEX_BRIDGE_RECALL_PROFILE,
     ProjectionStatus,
     SourceDocType,
 )
@@ -86,9 +86,9 @@ class BackfillReport:
             # 진실되게: live(non-dry-run) run은 Qdrant upsert로 네트워크를 사용한다.
             # dry-run은 어떤 write도 하지 않으므로 False.
             "network_used": (not self.dry_run),
-            # mirror-only: primary/RAGFlow는 항상 쓰지 않는다(항상 False).
+            # mirror-only: primary/RetiredIndexBridge는 항상 쓰지 않는다(항상 False).
             "primary_written": False,
-            "ragflow_written": False,
+            "index_written": False,
             "raw_ids_printed": False,
             "raw_content_printed": False,
         }
@@ -176,7 +176,7 @@ def public_safe_mask_body(body: str) -> str:
 def derive_mirror_memory_id(content_hash: str) -> str:
     """Derive the SAFE mirror payload ``memory_id`` from the content_hash.
 
-    Legacy ``projection_state.session_memory_knowledge_id`` can be a raw RAGFlow
+    Legacy ``projection_state.session_memory_knowledge_id`` can be a raw RetiredIndexBridge
     document_id; carrying it as the mirror payload would risk a raw-document-id
     leak. Instead derive a public-safe, content-addressed id that is IDENTICAL in
     both the backfill and the forward projector, so the two paths stay idempotent.
@@ -204,7 +204,7 @@ def build_session_memory_mirror_document(
       idempotent across backfill + forward).
     - ``privacy_class`` is the uniform ``"private"`` (CouchDB-source has no privacy
       field; the corpus is private transcripts).
-    - ``memory_id`` is a SAFE content-derived value (never a raw RAGFlow
+    - ``memory_id`` is a SAFE content-derived value (never a raw RetiredIndexBridge
       document_id), IDENTICAL across backfill + forward; ``project``/``provider``/
       ``session_id_hash`` are promoted to indexed payload fields too.
     """
@@ -217,7 +217,7 @@ def build_session_memory_mirror_document(
         raise ValueError("session_id_hash is required")
 
     metadata: dict[str, Any] = {
-        # Safe, content-derived id (no raw RAGFlow document_id leak); identical in
+        # Safe, content-derived id (no raw RetiredIndexBridge document_id leak); identical in
         # both backfill and forward so the payload stays consistent + idempotent.
         "memory_id": derive_mirror_memory_id(content_hash),
         "project": str(project or ""),
@@ -234,7 +234,7 @@ def build_session_memory_mirror_document(
     )
     # Direct frozen-dataclass construction so content_hash is preserved verbatim.
     return RagReadyDocument(
-        target_profile=RAGFLOW_RECALL_PROFILE,
+        target_profile=RETIRED_INDEX_BRIDGE_RECALL_PROFILE,
         document_kind=SESSION_MEMORY_DOCUMENT_KIND,
         artifact_kind=SESSION_MEMORY_ARTIFACT_KIND,
         source_namespace=provider,
@@ -300,13 +300,13 @@ class QdrantSessionMemoryMirrorSink:
 
 class QdrantSessionMemoryProjector:
     """``SessionMemoryProjector`` that writes to the Qdrant mirror as the CANONICAL
-    target (RAGFlow-free write path).
+    target (retired-index-bridge-free write path).
 
     Unlike :class:`QdrantSessionMemoryMirrorSink` used as a best-effort forward hook,
     here Qdrant is the ONLY projection target: a submit failure PROPAGATES so the
     builder records a FAILED projection_state (retried next run) rather than a false
     PROJECTED. Returns a stable ``qdrant_sm:<hash16>`` ref stored as the projection's
-    ``session_memory_knowledge_id`` (no RAGFlow document id exists in this path); the
+    ``session_memory_knowledge_id`` (no RetiredIndexBridge document id exists in this path); the
     point itself is keyed by the content-derived point_id, so a later backfill of the
     same session is idempotent regardless of the ref.
     """
@@ -373,7 +373,7 @@ def iter_projected_session_memories(store: Any) -> Iterator[dict[str, Any]]:
     materializes them per session so this stays a cheap, redaction-safe scan.
     """
 
-    # NOTE: session_memory_knowledge_id (legacy raw RAGFlow document_id) is
+    # NOTE: session_memory_knowledge_id (legacy raw RetiredIndexBridge document_id) is
     # intentionally NOT read here -- the mirror payload memory_id is derived from
     # content_hash inside the build helper, so carrying the raw ref would only risk
     # a raw-document-id leak.
@@ -423,7 +423,7 @@ def backfill_session_memory(
     without it (deterministic point_id).
 
     MIRROR-ONLY: reads CouchDB (read-only materialize) + upserts Qdrant only. Never
-    writes the CouchDB primary or RAGFlow.
+    writes the CouchDB primary or RetiredIndexBridge.
     """
 
     already_submitted = already_submitted or set()
@@ -592,7 +592,7 @@ __all__ = [
     "BACKFILL_SCHEMA",
     "SESSION_MEMORY_DOCUMENT_KIND",
     "SESSION_MEMORY_PRIVACY_CLASS",
-    "RAGFLOW_RECALL_PROFILE",
+    "RETIRED_INDEX_BRIDGE_RECALL_PROFILE",
     "BackfillReport",
     "RollbackReport",
     "EmbeddingDimMismatch",

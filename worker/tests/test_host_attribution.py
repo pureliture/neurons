@@ -11,11 +11,11 @@ from agent_knowledge.rag_ingress.server_runtime import document_from_ingress_pay
 def _payload(*, host="", content_hash="sha256:abc", idem="idem-1"):
     payload = {
         "schemaVersion": "rag_ingress_enqueue.v1",
-        "targetProfile": "ragflow-transcript-memory",
+        "targetProfile": "index-transcript-memory",
         "kind": "conversation_chunk",
         "contentHash": content_hash,
         "idempotencyKey": idem,
-        "source": {"provider": "claude", "project": "workspace-ragflow-advisor"},
+        "source": {"provider": "claude", "project": "workspace-index-advisor"},
         "payload": {
             "kind": "redacted_rag_ready_document",
             "redactionVersion": "redaction.v2",

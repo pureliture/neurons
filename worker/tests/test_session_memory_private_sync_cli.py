@@ -7,7 +7,7 @@ from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.session_memory_private_sync_cli import main
 from agent_knowledge.session_memory.transcript_model import TranscriptChunk, TranscriptSession, TranscriptTurn
 
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 PROVIDER = "codex"
 
 
@@ -93,10 +93,10 @@ def test_session_memory_private_sync_legacy_live_invocation_is_blocked(capsys):
     rc = main([
         "--ledger",
         "/tmp/ledger.sqlite3",
-        "--ragflow-url",
+        "--retired-index-bridge-url",
         "http://127.0.0.1:19380",
-        "--token-env",
-        "RAGFLOW_API_KEY",
+        "--retired-index-bridge-token-env",
+        "RETIRED_INDEX_BRIDGE_API_KEY",
         "--approval",
         "/tmp/approval.json",
     ])
@@ -106,7 +106,7 @@ def test_session_memory_private_sync_legacy_live_invocation_is_blocked(capsys):
     assert report["status"] == "blocked_retired_legacy_entrypoint"
     assert report["mutation_performed"] is False
     assert report["network_used"] is False
-    assert report["ragflow_write_performed"] is False
+    assert report["index_write_performed"] is False
 
 
 def test_session_memory_private_sync_dry_run_rejects_live_arguments(tmp_path, capsys):
@@ -116,7 +116,7 @@ def test_session_memory_private_sync_dry_run_rejects_live_arguments(tmp_path, ca
         "--dry-run",
         "--ledger",
         str(ledger.path),
-        "--ragflow-url",
+        "--retired-index-bridge-url",
         "http://127.0.0.1:19380",
     ])
 
@@ -130,7 +130,7 @@ def test_session_memory_private_sync_dry_run_rejects_live_arguments(tmp_path, ca
 def test_session_memory_private_sync_cli_has_no_live_client_imports():
     source = Path("lib/agent_knowledge/session_memory/session_memory_private_sync_cli.py").read_text(encoding="utf-8")
     for forbidden in (
-        "RagflowHttpClient",
+        "RetiredIndexBridgeHttpClient",
         "os.environ",
         "upload_document",
         "request_parse",

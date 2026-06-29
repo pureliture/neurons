@@ -1,8 +1,8 @@
 # Milestones — couchdb-transcript-migration
 
 Working state for `/agentic-execution` of `design.md`. Live operations against
-real private transcripts / live RAGFlow / live archive are human-gated
-(AGENTS.md raw-transcript rule; CLAUDE.md live RAGFlow write/delete/GC rule) and
+real private transcripts / live RetiredIndexBridge / live archive are human-gated
+(AGENTS.md raw-transcript rule; CLAUDE.md live RetiredIndexBridge write/delete/GC rule) and
 are NOT performed inside this loop. Code + tests are built with fixtures/fakes.
 
 ## M1 CouchDB source model + ownership contract
@@ -12,7 +12,7 @@ are NOT performed inside this loop. Code + tests are built with fixtures/fakes.
   suite 549 passed / 2 skipped (baseline was 525/2). Six document families,
   deterministic ids/hashes (parity-locked to `transcript_model._sha256`),
   fail-closed redaction boundary (`public_ingress_leak_violations`), ownership
-  rules (`transcript-memory` retired; only `session-memory` is a valid RAGFlow
+  rules (`transcript-memory` retired; only `session-memory` is a valid RetiredIndexBridge
   target), idempotent in-memory store seam.
 
 ## M2 Historical import + project authority resolver
@@ -20,7 +20,7 @@ are NOT performed inside this loop. Code + tests are built with fixtures/fakes.
 - evidence: `couchdb_source/{project_authority,historical_import}.py` +
   `tests/test_couchdb_{project_authority,historical_import}.py`. Hierarchy
   resolver (capture metadata > path/cwd/marker > server inference) with ambiguity
-  + RAGFlow-mismatch reporting; import orchestrator parses via existing
+  + RetiredIndexBridge-mismatch reporting; import orchestrator parses via existing
   `parse_transcript_source`, applies the stricter public-ingress redaction at the
   store boundary, writes transcript_session + conversation_chunk +
   coverage_manifest, fail-closed on unreadable source / leak / unsupported lane.
@@ -46,12 +46,12 @@ are NOT performed inside this loop. Code + tests are built with fixtures/fakes.
   suite 573/2. Bounded bundles via existing `chunk_tool_evidence_records` ->
   tool_evidence_bundle docs (index range + coverage hash); coverage manifest
   updated with tool evidence counts; session-memory materializer embeds full
-  tool evidence summary for RAGFlow-only recall; projection goes to
+  tool evidence summary for RetiredIndexBridge-only recall; projection goes to
   session-memory only (transcript-memory rejected), fail-closed on
   materialization loss / projector error (source kept, projection_state=failed).
 
 ## M4 Shadow live cutover logic (code+tests; live run gated)
-- status: done (logic); live event stream + real RAGFlow comparison human-gated
+- status: done (logic); live event stream + real RetiredIndexBridge comparison human-gated
 - evidence: `couchdb_source/shadow_cutover.py` +
   `tests/test_couchdb_shadow_cutover.py`. 6 new tests; full suite 579/2.
   SHADOW->COUCHDB_ONLY state machine; shadow writes CouchDB + records
@@ -60,10 +60,10 @@ are NOT performed inside this loop. Code + tests are built with fixtures/fakes.
   parser_unavailable; gated stability verdict (per-provider coverage + mixed
   projects). Default required set incl. agy blocks full cutover until agy parser
   exists; `required_providers` lets an operator cut over ready lanes.
-- note: actual live provider event stream and real RAGFlow transcript-memory
+- note: actual live provider event stream and real RetiredIndexBridge transcript-memory
   comparison write are injected seams; running them live is human-gated.
 
-## M5 RAGFlow transcript-memory retirement verifier (code+tests; live retire gated)
+## M5 RetiredIndexBridge transcript-memory retirement verifier (code+tests; live retire gated)
 - status: done (verifier); live retire + runtime callsite removal human-gated
 - evidence: `couchdb_source/retirement_verifier.py` +
   `tests/test_couchdb_retirement_verifier.py`. 7 new tests; full suite 593/2.
@@ -71,10 +71,10 @@ are NOT performed inside this loop. Code + tests are built with fixtures/fakes.
   never sufficient; ambiguous sessions excluded; aggregate ready requires every
   eligible session to pass all three. Report carries an explicit
   `live_action_required` note.
-- human gate: removing the ~87 RAGFlow transcript-memory write/read callsites is
+- human gate: removing the ~87 RetiredIndexBridge transcript-memory write/read callsites is
   an explicit API-breaking change (AGENTS.md "keep public CLI/API compat unless
   user approves a break"; existing tests like
-  test_ragflow_transcript_memory_read_sot.py depend on it), and the live RAGFlow
+  test_index_transcript_memory_read_sot.py depend on it), and the live RetiredIndexBridge
   transcript-memory disable/delete is a hard-to-reverse live GC op. Both are NOT
   done autonomously; they run after the verifier passes + user approval.
 
@@ -99,12 +99,12 @@ are NOT performed inside this loop. Code + tests are built with fixtures/fakes.
 - worktree isolation: branch `codex/couchdb-transcript-migration-spec`; `main` clean.
 
 ## Human-gated live operations (NOT performed autonomously)
-These need real private-transcript / live-RAGFlow access and explicit per-op
-approval (AGENTS.md raw-transcript + live RAGFlow/GC rules). Required sequence:
+These need real private-transcript / live-RetiredIndexBridge access and explicit per-op
+approval (AGENTS.md raw-transcript + live RetiredIndexBridge/GC rules). Required sequence:
 1. Live historical import of real provider transcripts -> populate CouchDB source.
 2. Retirement verifier passes on real coverage (coverage + rebuild + recall smoke).
-3. Runtime cutover: remove ~87 RAGFlow transcript-memory write/read callsites
+3. Runtime cutover: remove ~87 RetiredIndexBridge transcript-memory write/read callsites
    (API-breaking) -> CouchDB-only new writes.
-4. Live RAGFlow transcript-memory disable/delete.
+4. Live RetiredIndexBridge transcript-memory disable/delete.
 5. Live retention compaction + cold archive write.
 Steps 3-5 must follow step 2; doing them before verified coverage risks loss.

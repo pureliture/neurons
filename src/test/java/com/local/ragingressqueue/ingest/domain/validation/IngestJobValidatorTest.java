@@ -31,7 +31,7 @@ class IngestJobValidatorTest {
     void acceptsSessionRecapForSessionMemoryTarget() {
         IngestJob job = validJob(
             "session_recap",
-            "ragflow-session-memory",
+            "index-session-memory",
             "session-recap.md",
             "session_recap"
         );
@@ -43,7 +43,7 @@ class IngestJobValidatorTest {
     void acceptsToolEvidenceSummaryForTranscriptMemoryTarget() {
         IngestJob job = validJob(
             "tool_evidence_summary",
-            "ragflow-transcript-memory",
+            "index-transcript-memory",
             "tool-evidence-summary.md",
             "tool_evidence_summary"
         );
@@ -52,8 +52,8 @@ class IngestJobValidatorTest {
     }
 
     @Test
-    void rejectsRagflowNamedPayloadKindInPublicDto() {
-        IngestJob job = validJob().withPayload(validJob().payload().withKind("ragflow_ready_document"));
+    void rejectsRetiredIndexBridgeNamedPayloadKindInPublicDto() {
+        IngestJob job = validJob().withPayload(validJob().payload().withKind("index_ready_document"));
 
         assertThat(validator.validate(job)).anyMatch(violation -> violation.contains("payload.kind"));
     }
@@ -109,7 +109,7 @@ class IngestJobValidatorTest {
     }
 
     private IngestJob validJob() {
-        return validJob("conversation_chunk", "ragflow-transcript-memory", "chunk.md", "conversation_chunk");
+        return validJob("conversation_chunk", "index-transcript-memory", "chunk.md", "conversation_chunk");
     }
 
     private IngestJob validJob(String resultType, String targetProfile, String filename, String kind) {
@@ -121,7 +121,7 @@ class IngestJobValidatorTest {
             redacted body
             """.formatted(resultType);
         return new IngestJob(
-            Map.of("type", "local_pc", "provider", "codex", "project", "workspace-ragflow-advisor"),
+            Map.of("type", "local_pc", "provider", "codex", "project", "workspace-index-advisor"),
             new DocumentPayload(
                 "redacted_rag_ready_document",
                 "redaction.v2",

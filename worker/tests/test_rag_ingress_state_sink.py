@@ -27,15 +27,15 @@ def _payload(*, body: str = "# chunk\n\nhello", key: str | None = None) -> dict:
         target_profile="transcript-memory",
         document_kind="conversation_chunk",
         source_namespace="codex",
-        source_alias="workspace-ragflow-advisor/session",
+        source_alias="workspace-index-advisor/session",
         privacy_class="private",
         body=body,
         filename="conversation.md",
-        metadata={"privacy_class": "private", "project": "workspace-ragflow-advisor"},
+        metadata={"privacy_class": "private", "project": "workspace-index-advisor"},
     )
     payload = build_ingress_enqueue_payload(
         document,
-        source={"provider": "codex", "source_alias": "workspace-ragflow-advisor/session"},
+        source={"provider": "codex", "source_alias": "workspace-index-advisor/session"},
     )
     if key is not None:
         payload["idempotencyKey"] = key

@@ -1,7 +1,7 @@
 """CouchDB source store seam + an in-memory fake for tests.
 
 :class:`CouchDBSourceStore` is the backend-neutral boundary (mirroring the
-ingress :class:`IndexBackendAdapter` Protocol). The concrete CouchDB HTTP
+ingress :class:`RetiredIndexBridgeAdapter` Protocol). The concrete CouchDB HTTP
 adapter is introduced in a later milestone; M1 ships the contract and an
 in-memory fake that the rest of the migration tests against.
 

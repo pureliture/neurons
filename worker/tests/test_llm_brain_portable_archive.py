@@ -61,7 +61,7 @@ def test_llm_brain_portable_archive_has_manifest_and_no_raw_tables(tmp_path: Pat
     assert "data/llm_brain_session_memory_artifacts.jsonl" in names
     assert "data/llm_brain_source_refs.jsonl" in names
     assert "transcript_chunks.jsonl" not in names
-    assert "ragflow_documents.jsonl" not in names
+    assert "index_documents.jsonl" not in names
     assert manifest["raw_tables_included"] is False
     assert manifest["graph_db_files_included"] is False
 

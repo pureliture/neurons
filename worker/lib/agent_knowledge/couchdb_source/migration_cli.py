@@ -3,7 +3,7 @@
 Runs on the Mac (where the provider transcripts live; the Ubuntu server does not
 read provider paths). For each provider it enumerates the on-disk session store,
 extracts the session's own working directory (the authoritative ``project``
-signal -- NOT RAGFlow's polluted metadata), and imports each session through the
+signal -- NOT RetiredIndexBridge's polluted metadata), and imports each session through the
 ``couchdb_source`` historical-import pipeline into a CouchDB store.
 
 Provider roots (overridable):
@@ -216,7 +216,7 @@ def run_migration(
                     prov["imported"] += 1
                     if result.project_ambiguous:
                         prov["ambiguous"] += 1
-                    if result.ragflow_project_mismatch:
+                    if result.index_project_mismatch:
                         prov["mismatch"] += 1
                 else:
                     prov["errors"] += 1

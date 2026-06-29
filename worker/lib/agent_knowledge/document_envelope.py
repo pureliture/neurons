@@ -85,7 +85,7 @@ def build_agent_id(*, provider: str, producer: str) -> str:
     return f"{_slug(provider)}-{_slug(producer)}"
 
 
-def build_ragflow_meta_fields(metadata: dict) -> dict:
+def build_index_meta_fields(metadata: dict) -> dict:
     provenance = metadata.get("provenance") or {}
     retention = metadata.get("retention") or {}
     meta_fields = {

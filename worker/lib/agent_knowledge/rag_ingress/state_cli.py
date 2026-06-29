@@ -5,9 +5,9 @@ Backend selection (live drain only)
 Set ``INGRESS_DELIVERY_BACKEND`` in the environment to choose the live delivery
 backend.  Accepted values:
 
-``ragflow`` (default)
-    Uses :class:`RagflowDeliveryBackend` against the RAGFlow dataset specified
-    by ``--ragflow-url`` / ``--dataset-id``.
+``retired_index_bridge`` (default)
+    Uses :class:`RetiredIndexBridgeDeliveryBackend` against the RetiredIndexBridge dataset specified
+    by ``--retired-index-bridge-url`` / ``--dataset-id``.
 
 ``couchdb``
     Uses :class:`CouchDBDeliveryBackend`.  Requires the following env vars:
@@ -31,11 +31,11 @@ from .ingress_journal import IngressJournal
 from .replay_delivery import replay_deliver_dispositions
 from .state_db import RAGIngressStateDB
 
-DEFAULT_TRANSCRIPT_TARGET_PROFILE = "ragflow-transcript-memory"
+DEFAULT_TRANSCRIPT_TARGET_PROFILE = "index-transcript-memory"
 
 # Env var that selects the live delivery backend.
 _BACKEND_ENV_VAR = "INGRESS_DELIVERY_BACKEND"
-_BACKEND_RAGFLOW = "ragflow"
+_BACKEND_RETIRED_INDEX_BRIDGE = "retired_index_bridge"
 _BACKEND_COUCHDB = "couchdb"
 
 
@@ -83,8 +83,8 @@ def _build_parser() -> argparse.ArgumentParser:
     drain.add_argument("--redact-paths", action="store_true")
     drain.add_argument("--dry-run", action="store_true")
     drain.add_argument("--approval")
-    # RAGFlow backend args (default backend)
-    drain.add_argument("--ragflow-url")
+    # RetiredIndexBridge backend args (default backend)
+    drain.add_argument("--retired-index-bridge-url")
     drain.add_argument("--dataset-id")
     # CouchDB backend args (INGRESS_DELIVERY_BACKEND=couchdb)
     drain.add_argument("--couchdb-url", default=os.environ.get("COUCHDB_URL", ""))
@@ -101,7 +101,7 @@ def _build_parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--redact-paths", action="store_true")
     reconcile.add_argument("--dry-run", action="store_true")
     reconcile.add_argument("--approval")
-    reconcile.add_argument("--ragflow-url")
+    reconcile.add_argument("--retired-index-bridge-url")
     reconcile.add_argument("--dataset-id")
     reconcile.add_argument("--max-runtime-seconds", type=float, default=300.0)
 
@@ -187,10 +187,10 @@ def _build_live_backend(args: argparse.Namespace, state_db: RAGIngressStateDB):
     """Construct the live DeliveryBackend selected by INGRESS_DELIVERY_BACKEND.
 
     Returns None (and prints an error) if the selection is unknown or the
-    required env vars are missing for the chosen backend.  Keeping RAGFlow
+    required env vars are missing for the chosen backend.  Keeping RetiredIndexBridge
     imports here avoids touching the couchdb path's import surface.
     """
-    backend_name = os.environ.get(_BACKEND_ENV_VAR, _BACKEND_RAGFLOW).strip().lower()
+    backend_name = os.environ.get(_BACKEND_ENV_VAR, _BACKEND_RETIRED_INDEX_BRIDGE).strip().lower()
 
     if backend_name == _BACKEND_COUCHDB:
         couchdb_url = getattr(args, "couchdb_url", "") or os.environ.get("COUCHDB_URL", "")
@@ -214,13 +214,13 @@ def _build_live_backend(args: argparse.Namespace, state_db: RAGIngressStateDB):
             couchdb_db=couchdb_db,
         )
 
-    if backend_name == _BACKEND_RAGFLOW:
-        # RAGFlow backend -- existing live path (remains blocked in CLI until vendored).
+    if backend_name == _BACKEND_RETIRED_INDEX_BRIDGE:
+        # RetiredIndexBridge backend -- existing live path (remains blocked in CLI until vendored).
         return None  # caller will fall through to _print_live_blocked
 
     print(
         f"drain-deliveries: unknown INGRESS_DELIVERY_BACKEND={backend_name!r}; "
-        f"accepted values: ragflow, couchdb",
+        f"accepted values: retired_index_bridge, couchdb",
         file=sys.stderr,
     )
     return None
@@ -231,9 +231,9 @@ def _run_drain_deliveries(args: argparse.Namespace) -> int:
         return 2
     if not args.dry_run:
         # Live path: select backend via INGRESS_DELIVERY_BACKEND env var.
-        backend_name = os.environ.get(_BACKEND_ENV_VAR, _BACKEND_RAGFLOW).strip().lower()
+        backend_name = os.environ.get(_BACKEND_ENV_VAR, _BACKEND_RETIRED_INDEX_BRIDGE).strip().lower()
         if backend_name != _BACKEND_COUCHDB:
-            # RAGFlow and unknown names keep the existing live-blocked gate.
+            # RetiredIndexBridge and unknown names keep the existing live-blocked gate.
             return _print_live_blocked("drain-deliveries")
         try:
             state_db = RAGIngressStateDB(args.state_db)

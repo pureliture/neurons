@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Implementation in progress; JVM build/offline postcheck verified, Ubuntu compose runtime verification 100%, live RAGFlow gate pending
+**Status:** Implementation in progress; JVM build/offline postcheck verified, Ubuntu compose runtime verification 100%, live RetiredIndexBridge gate pending
 
 **Goal:** Java 25 + Spring Boot 4.x 기반 `rag-ingress-queue` MVP를 만들어 redacted RAG-ready document enqueue, NATS JetStream publish, worker pressure gate, target adapter boundary, redacted status/postcheck를 검증 가능하게 구현한다.
 
-**Architecture:** `ingress-api`는 validation과 JetStream publish만 담당하고, `ingress-worker`는 durable pull consumer와 `RagTargetAdapter` 호출만 담당한다. RAGFlow-specific dataset/document ID, parser status, credential은 `RAGFlowAdapter` 내부와 adapter-private opaque handle로 격리한다.
+**Architecture:** `ingress-api`는 validation과 JetStream publish만 담당하고, `ingress-worker`는 durable pull consumer와 `RagTargetAdapter` 호출만 담당한다. RetiredIndexBridge-specific dataset/document ID, parser status, credential은 `RetiredIndexBridgeAdapter` 내부와 adapter-private opaque handle로 격리한다.
 
 **Tech Stack:** Corretto 25, Spring Boot 4.x, Gradle, NATS JetStream, JUnit 5, Spring Boot Test, fake-port unit tests, Docker Compose runtime smoke, structured JSON logging. Testcontainers-backed NATS integration remains deferred until Docker runtime is available.
 
@@ -25,7 +25,7 @@
 
 This means local build/test verification can run with Corretto 25 and Gradle. Runtime compose verification remains blocked until Docker daemon and Docker Compose are available.
 
-Implementation note from 2026-05-17: the initial Gradle/Spring Boot skeleton, validation/API/worker tests, JetStream publish ack publisher, durable pull consumer wiring, fail-closed RAGFlow adapter skeleton, compose file, and offline postcheck are implemented locally. Ubuntu runtime verification on `ops-host` produced `runtime.verified=true` for scope `ubuntu-compose-api-nats-closed-pressure-worker-gate`: Docker/Compose startup, API health, postcheck, redaction rejection, JetStream stream/consumer creation, enqueue publish ack `RAG_INGRESS_QUEUE:1`, and CLOSED-pressure worker no-fetch evidence. Live RAGFlow delivery remains a separate approval gate.
+Implementation note from 2026-05-17: the initial Gradle/Spring Boot skeleton, validation/API/worker tests, JetStream publish ack publisher, durable pull consumer wiring, fail-closed RetiredIndexBridge adapter skeleton, compose file, and offline postcheck are implemented locally. Ubuntu runtime verification on `ops-host` produced `runtime.verified=true` for scope `ubuntu-compose-api-nats-closed-pressure-worker-gate`: Docker/Compose startup, API health, postcheck, redaction rejection, JetStream stream/consumer creation, enqueue publish ack `RAG_INGRESS_QUEUE:1`, and CLOSED-pressure worker no-fetch evidence. Live RetiredIndexBridge delivery remains a separate approval gate.
 
 ## Progress Visibility Rules
 
@@ -66,7 +66,7 @@ Milestones:
 | 4. Dependency/API docs lookup | Spring Boot/NATS syntax and compatibility checks | Context7 first; if quota exhausted, official docs fallback |
 | 5. Code review | spec compliance first, code quality second | `superpowers:requesting-code-review`, code-simplifier-style review |
 | 6. Deploy gate | compose smoke, postcheck, rollback criteria | `deploy-checklist` |
-| 7. Tech debt pass | keep boundaries small and avoid RAGFlow lock-in | `tech-debt` |
+| 7. Tech debt pass | keep boundaries small and avoid RetiredIndexBridge lock-in | `tech-debt` |
 | 8. Completion gate | evidence before completion claim | `superpowers:verification-before-completion` |
 
 ## Subagent Handoff Packet
@@ -170,7 +170,7 @@ Create:
 - `src/main/java/com/local/ragingressqueue/queue/NatsJetStreamProvisioner.java`: idempotent stream/consumer creation and drift check.
 - `src/main/java/com/local/ragingressqueue/worker/*.java`: worker loop, pressure gate, delivery orchestration.
 - `src/main/java/com/local/ragingressqueue/target/*.java`: `RagTargetAdapter` contract and target status model.
-- `src/main/java/com/local/ragingressqueue/target/ragflow/*.java`: first RAGFlow adapter skeleton with adapter-private opaque references.
+- `src/main/java/com/local/ragingressqueue/target/retired_index_bridge/*.java`: first RetiredIndexBridge adapter skeleton with adapter-private opaque references.
 - `src/main/resources/application.yml`: virtual threads, actuator, queue/profile config.
 - `src/test/java/com/local/ragingressqueue/**`: unit, Web MVC, fake adapter/fake gateway, compose contract tests; Testcontainers integration is deferred until Docker is available.
 - `compose.yaml`: separate `rag-ingress-queue` services.
@@ -369,17 +369,17 @@ rag-ingress:
     consumer: rag_target_delivery_worker
     provision-on-startup: true
   target-profiles:
-    ragflow-transcript-memory:
-      adapter: ragflow
+    index-transcript-memory:
+      adapter: retired_index_bridge
       dataset-role: transcript-memory
-    ragflow-session-summary:
-      adapter: ragflow
+    index-session-summary:
+      adapter: retired_index_bridge
       dataset-role: session-summary
-    ragflow-task-summary:
-      adapter: ragflow
+    index-task-summary:
+      adapter: retired_index_bridge
       dataset-role: task-summary
-    ragflow-approved-memory-card:
-      adapter: ragflow
+    index-approved-memory-card:
+      adapter: retired_index_bridge
       dataset-role: approved-memory-card
 ```
 
@@ -431,8 +431,8 @@ class IngestJobValidatorTest {
     }
 
     @Test
-    void rejectsRagflowNamedPayloadKindInPublicDto() {
-        IngestJob job = validJob().withPayload(validJob().payload().withKind("ragflow_ready_document"));
+    void rejectsRetiredIndexBridgeNamedPayloadKindInPublicDto() {
+        IngestJob job = validJob().withPayload(validJob().payload().withKind("index_ready_document"));
         assertThat(validator.validate(job)).anyMatch(v -> v.contains("payload.kind"));
     }
 
@@ -475,7 +475,7 @@ class IngestJobValidatorTest {
 
     private IngestJob validJob() {
         return new IngestJob(
-            Map.of("type", "local_pc", "provider", "codex", "project", "workspace-ragflow-advisor"),
+            Map.of("type", "local_pc", "provider", "codex", "project", "workspace-index-advisor"),
             new DocumentPayload(
                 "redacted_rag_ready_document",
                 "redaction.v2",
@@ -485,7 +485,7 @@ class IngestJobValidatorTest {
                 Map.of("schema_version", "agent_knowledge_document.v2", "result_type", "conversation_chunk")
             ),
             ContentHashVerifier.sha256Hex("---\nschema_version: agent_knowledge_document.v2\nresult_type: conversation_chunk\n---\nredacted body"),
-            "ragflow-transcript-memory",
+            "index-transcript-memory",
             "conversation_chunk",
             null
         );
@@ -514,7 +514,7 @@ ACCEPTED, DELIVERED, INDEXING, INDEXED, FAILED, THROTTLED
 `IngestJobValidator.validate(IngestJob job)` must return `List<String>` and reject:
 
 - `payload.kind` not equal to `redacted_rag_ready_document`
-- any `payload.kind` starting with `ragflow_`
+- any `payload.kind` starting with `index_`
 - `private_locator`
 - non-hex `contentHash`
 - canonical body digest mismatch
@@ -639,7 +639,7 @@ Implementation rules:
 
 - Convert `EnqueueRequest` to `IngestJob`.
 - Require `schemaVersion=rag_ingress_enqueue.v1`.
-- Model payload as a variant envelope, not as a RAGFlow-specific DTO.
+- Model payload as a variant envelope, not as a RetiredIndexBridge-specific DTO.
 - Run `IngestJobValidator` and `RedactionGuard`.
 - Use `IngestPublisher.publish(IngestJob job)`.
 - Return HTTP 202 for accepted publish.
@@ -795,20 +795,20 @@ rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests Inge
 
 Expected: PASS.
 
-## Task 7: RAGFlow Adapter Skeleton and Adapter-Private References
+## Task 7: RetiredIndexBridge Adapter Skeleton and Adapter-Private References
 
 **Files:**
-- Create: `src/main/java/com/local/ragingressqueue/target/ragflow/RagFlowAdapter.java`
-- Create: `src/main/java/com/local/ragingressqueue/target/ragflow/RagFlowTargetRef.java`
-- Create: `src/main/java/com/local/ragingressqueue/target/ragflow/RagFlowStatusSnapshotMapper.java`
-- Test: `src/test/java/com/local/ragingressqueue/target/ragflow/RagFlowAdapterTest.java`
+- Create: `src/main/java/com/local/ragingressqueue/target/retired_index_bridge/RetiredIndexBridgeAdapter.java`
+- Create: `src/main/java/com/local/ragingressqueue/target/retired_index_bridge/RetiredIndexBridgeTargetRef.java`
+- Create: `src/main/java/com/local/ragingressqueue/target/retired_index_bridge/RetiredIndexBridgeStatusSnapshotMapper.java`
+- Test: `src/test/java/com/local/ragingressqueue/target/retired_index_bridge/RetiredIndexBridgeAdapterTest.java`
 
 - [ ] **Step 1: Write RED adapter tests**
 
 Test cases:
 
-- RAGFlow `DONE` maps to `INDEXED`
-- RAGFlow raw document ID is converted to opaque handle/hash in public snapshot
+- RetiredIndexBridge `DONE` maps to `INDEXED`
+- RetiredIndexBridge raw document ID is converted to opaque handle/hash in public snapshot
 - snapshot contains `jobId`, `contentHash`, `targetProfile`, generic status, and redacted target ref for external reconcile client
 - pressure `UNSTART`/`RUNNING` counts above threshold maps to `THROTTLED` or `CLOSED`
 - adapter never returns `AUTHORIZED`
@@ -819,21 +819,21 @@ Test cases:
 Run:
 
 ```bash
-rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests RagFlowAdapterTest'
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests RetiredIndexBridgeAdapterTest'
 ```
 
 Expected: FAIL because adapter classes do not exist.
 
 - [ ] **Step 3: Implement skeleton with fake HTTP client port**
 
-Do not call live RAGFlow in unit tests. Introduce a client port that can be backed by fake responses.
+Do not call live RetiredIndexBridge in unit tests. Introduce a client port that can be backed by fake responses.
 
 - [ ] **Step 4: Run GREEN**
 
 Run:
 
 ```bash
-rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests RagFlowAdapterTest'
+rtk sh -lc 'JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test --tests RetiredIndexBridgeAdapterTest'
 ```
 
 Expected: PASS.
@@ -909,7 +909,7 @@ Expected: tests PASS and offline postcheck returns exit 0.
 Assert:
 
 - compose project contains `nats-jetstream`, `ingress-api`, `ingress-worker`
-- compose file does not reference RAGFlow service names, volumes, or compose project
+- compose file does not reference RetiredIndexBridge service names, volumes, or compose project
 - NATS enables JetStream with file storage
 - API/worker receive `RAG_INGRESS_NATS_URL=nats://nats-jetstream:4222`
 - API and worker use same image with different command/env
@@ -1007,7 +1007,7 @@ Runbook sections:
 - test commands
 - compose smoke commands
 - postcheck command
-- live RAGFlow approval gate
+- live RetiredIndexBridge approval gate
 - rollback owner and procedure
 - evidence artifact path
 - local MVP persistence limits: single NATS server, named volume, not HA
@@ -1047,7 +1047,7 @@ Update `docs/requirements.md` so the public example uses:
 "kind": "redacted_rag_ready_document"
 ```
 
-Do not reintroduce `ragflow_ready_document` as a public payload kind.
+Do not reintroduce `index_ready_document` as a public payload kind.
 
 ## Task 11: Final Review and Completion Gate
 
@@ -1108,9 +1108,9 @@ Co-Authored-By: Codex GPT-5 <noreply@openai.com>
 
 If the active model name differs, replace `GPT-5` with the current session model name.
 
-## Live RAGFlow Gate
+## Live RetiredIndexBridge Gate
 
-Do not run live RAGFlow calls without a separate explicit approval packet containing:
+Do not run live RetiredIndexBridge calls without a separate explicit approval packet containing:
 
 - argv/request
 - timeout
@@ -1124,7 +1124,7 @@ Approved live smoke proves only:
 
 - sanitized upload/status path can run
 - raw IDs stay out of generic outputs
-- RAGFlow `DONE` maps to `INDEXED` candidate
+- RetiredIndexBridge `DONE` maps to `INDEXED` candidate
 
 Approved live smoke does not prove:
 

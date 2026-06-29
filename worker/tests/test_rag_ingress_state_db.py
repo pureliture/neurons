@@ -32,15 +32,15 @@ def _payload(*, body: str = "# Canary\n\nbounded ingress document", key: str | N
         target_profile="transcript-memory",
         document_kind="conversation_chunk",
         source_namespace="codex",
-        source_alias="workspace-ragflow-advisor/session",
+        source_alias="workspace-index-advisor/session",
         privacy_class="private",
         body=body,
         filename="canary.md",
-        metadata={"project": "workspace-ragflow-advisor", "privacy_class": "private"},
+        metadata={"project": "workspace-index-advisor", "privacy_class": "private"},
     )
     payload = build_ingress_enqueue_payload(
         document,
-        source={"provider": "codex", "source_alias": "workspace-ragflow-advisor/session"},
+        source={"provider": "codex", "source_alias": "workspace-index-advisor/session"},
     )
     if key is not None:
         payload["idempotencyKey"] = key

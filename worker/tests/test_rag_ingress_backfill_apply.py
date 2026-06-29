@@ -10,7 +10,7 @@ from agent_knowledge.rag_ingress.backfill_apply import (
 from agent_knowledge.rag_ingress.state_db import RAGIngressStateDB
 
 
-def _payload(*, key, body="hello chunk body", target_profile="ragflow-transcript-memory", kind="conversation_chunk"):
+def _payload(*, key, body="hello chunk body", target_profile="index-transcript-memory", kind="conversation_chunk"):
     return {
         "schemaVersion": "rag_ingress_enqueue.v1",
         "source": {"host": "mac_mini", "producer": "test", "provider": "codex", "project": "p"},

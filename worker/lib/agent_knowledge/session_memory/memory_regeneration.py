@@ -27,8 +27,8 @@ PROJECT_CONTEXT_SNAPSHOT_KIND = "project_context_snapshot"
 SESSION_MEMORY_SOT_KIND = SESSION_MEMORY_KIND  # deprecated compatibility alias
 SESSION_MEMORY_DATASET_ROLE = "session-memory"
 PROJECT_MEMORY_DATASET_ROLE = "project-memory"
-DEFAULT_SESSION_MEMORY_TARGET_PROFILE = "ragflow-session-memory"
-DEFAULT_PROJECT_MEMORY_TARGET_PROFILE = "ragflow-project-memory"
+DEFAULT_SESSION_MEMORY_TARGET_PROFILE = "index-session-memory"
+DEFAULT_PROJECT_MEMORY_TARGET_PROFILE = "index-project-memory"
 MEMORY_REGENERATION_REPORT_SCHEMA_VERSION = "agent_knowledge_memory_regeneration_report.v1"
 MEMORY_REGENERATION_SESSION_MEMORY_VERSION = "session-memory.v1"
 MEMORY_REGENERATION_SOT_VERSION = MEMORY_REGENERATION_SESSION_MEMORY_VERSION  # deprecated compatibility alias
@@ -119,11 +119,11 @@ class FixtureTranscriptMemorySource:
         ]
 
 
-class RagflowTranscriptMemorySource:
-    """Read redacted transcript-memory records from a read-only RAGFlow adapter."""
+class RetiredIndexBridgeTranscriptMemorySource:
+    """Read redacted transcript-memory records from a read-only RetiredIndexBridge adapter."""
 
-    def __init__(self, ragflow):
-        self.ragflow = ragflow
+    def __init__(self, retired_index_bridge):
+        self.retired_index_bridge = retired_index_bridge
 
     def list_conversation_chunks(
         self,
@@ -132,30 +132,30 @@ class RagflowTranscriptMemorySource:
         provider: str | None = None,
         session_id_hash: str | None = None,
     ) -> list[TranscriptMemoryChunkRecord]:
-        if not hasattr(self.ragflow, "list_transcript_memory_chunks"):
-            raise ValueError("ragflow transcript-memory read adapter is required")
-        records = self.ragflow.list_transcript_memory_chunks(
+        if not hasattr(self.retired_index_bridge, "list_transcript_memory_chunks"):
+            raise ValueError("retired_index_bridge transcript-memory read adapter is required")
+        records = self.retired_index_bridge.list_transcript_memory_chunks(
             project=project,
             provider=provider,
             session_id_hash=session_id_hash,
         )
-        return [_chunk_record_from_ragflow(record) for record in records]
+        return [_chunk_record_from_retired_index_bridge(record) for record in records]
 
 
-class RagflowRetrievalTranscriptMemorySource:
-    """Read RAGFlow retrieval hits and resolve every candidate through the local ledger."""
+class RetiredIndexBridgeRetrievalTranscriptMemorySource:
+    """Read RetiredIndexBridge retrieval hits and resolve every candidate through the local ledger."""
 
     def __init__(
         self,
         *,
         ledger: Ledger,
-        ragflow,
+        retired_index_bridge,
         dataset_ids: list[str],
         query: str,
         limit: int = 10,
     ):
         self.ledger = ledger
-        self.ragflow = ragflow
+        self.retired_index_bridge = retired_index_bridge
         self.dataset_ids = list(dataset_ids)
         self.query = query
         self.limit = limit
@@ -175,7 +175,7 @@ class RagflowRetrievalTranscriptMemorySource:
             "type": "conversation_chunk",
         }
         filters = {key: value for key, value in filters.items() if value}
-        chunks = self.ragflow.retrieve(self.query, self.dataset_ids, filters=filters, limit=self.limit)
+        chunks = self.retired_index_bridge.retrieve(self.query, self.dataset_ids, filters=filters, limit=self.limit)
         records: list[TranscriptMemoryChunkRecord] = []
         unauthorized_candidate_count = 0
         dataset_mismatch_count = 0
@@ -189,7 +189,7 @@ class RagflowRetrievalTranscriptMemorySource:
                 unauthorized_candidate_count += 1
                 continue
             candidate_dataset = chunk.get("kb_id") or chunk.get("dataset_id")
-            if candidate_dataset and item.get("ragflow_dataset_id") and candidate_dataset != item["ragflow_dataset_id"]:
+            if candidate_dataset and item.get("index_target_id") and candidate_dataset != item["index_target_id"]:
                 dataset_mismatch_count += 1
                 continue
             conversation_chunk = self.ledger.get_conversation_chunk_by_document(str(document_id))
@@ -201,7 +201,7 @@ class RagflowRetrievalTranscriptMemorySource:
                 continue
             records.append(_chunk_record_from_ledger(conversation_chunk, str(chunk.get("content") or "")))
         self.last_read_report = {
-            "source": "ragflow_retrieval",
+            "source": "index_retrieval",
             "query_hash": _sha256_content(self.query),
             "dataset_ids_hash": _sha256_content("|".join(self.dataset_ids)),
             "candidate_count": len(chunks or []),
@@ -210,14 +210,14 @@ class RagflowRetrievalTranscriptMemorySource:
             "dataset_mismatch_count": dataset_mismatch_count,
             "network_used": True,
             "mutation_performed": False,
-            "ragflow_write_performed": False,
+            "index_write_performed": False,
             "raw_query_printed": False,
             "raw_chunk_content_printed": False,
-            "raw_ragflow_ids_printed": False,
+            "raw_index_ids_printed": False,
         }
         return records
 class LedgerTranscriptMemorySource:
-    """Read the local status mirror for already indexed RAGFlow transcript chunks."""
+    """Read the local status mirror for already indexed RetiredIndexBridge transcript chunks."""
 
     def __init__(self, ledger: Ledger, *, densify_indexed_windows: bool = True):
         self.ledger = ledger
@@ -405,7 +405,7 @@ class SessionFileTranscriptMemorySource:
             "tool_evidence_count": len(evidence),
             "network_used": False,
             "mutation_performed": False,
-            "ragflow_write_performed": False,
+            "index_write_performed": False,
             "raw_source_paths_printed": False,
             "raw_chunk_content_printed": False,
         }
@@ -525,7 +525,7 @@ class SessionMemoryRegenerationRunner:
         target_profile: str = DEFAULT_SESSION_MEMORY_TARGET_PROFILE,
         ledger: Ledger | None = None,
         sync: bool = False,
-        ragflow=None,
+        retired_index_bridge=None,
         dataset_id: str = "",
         runtime_dir: str | Path = "",
         max_poll_attempts: int = 60,
@@ -538,7 +538,7 @@ class SessionMemoryRegenerationRunner:
         self.target_profile = target_profile
         self.ledger = ledger
         self.sync = sync
-        self.ragflow = ragflow
+        self.retired_index_bridge = retired_index_bridge
         self.dataset_id = dataset_id
         self.runtime_dir = runtime_dir
         self.max_poll_attempts = max_poll_attempts
@@ -634,15 +634,15 @@ class SessionMemoryRegenerationRunner:
                 would_write_session_memory.append(planned)
                 continue
 
-            if not self.ledger or not self.ragflow or not self.dataset_id:
-                raise ValueError("session-memory sync requires ledger, ragflow, and dataset_id")
+            if not self.ledger or not self.retired_index_bridge or not self.dataset_id:
+                raise ValueError("session-memory sync requires ledger, retired_index_bridge, and dataset_id")
 
             knowledge_id = packed.metadata["knowledge_id"]
             existing = self.ledger.get_by_knowledge_id(knowledge_id)
             if existing is None:
                 existing = self.ledger.get_by_content_hash(content_hash)
             existing_status = str((existing or {}).get("status") or "")
-            existing_document_id = str((existing or {}).get("ragflow_document_id") or "")
+            existing_document_id = str((existing or {}).get("index_document_id") or "")
             existing_same_content = bool(existing and existing.get("content_hash") == content_hash)
             if existing_same_content:
                 knowledge_id = str(existing.get("knowledge_id") or knowledge_id)
@@ -706,32 +706,32 @@ class SessionMemoryRegenerationRunner:
             if resume_existing_document:
                 document_id = existing_document_id
                 if existing_status == "uploaded_unparsed":
-                    self.ragflow.update_metadata(self.dataset_id, document_id, packed.metadata)
-                    self.ragflow.request_parse(self.dataset_id, [document_id])
+                    self.retired_index_bridge.update_metadata(self.dataset_id, document_id, packed.metadata)
+                    self.retired_index_bridge.request_parse(self.dataset_id, [document_id])
                     self.ledger.mark_parse_requested(knowledge_id)
                 elif existing_status == "metadata_applied":
-                    self.ragflow.request_parse(self.dataset_id, [document_id])
+                    self.retired_index_bridge.request_parse(self.dataset_id, [document_id])
                     self.ledger.mark_parse_requested(knowledge_id)
             else:
                 from ..temp_upload import secure_upload_payload
 
                 with secure_upload_payload(self.runtime_dir, packed.body) as upload_path:
-                    upload = self.ragflow.upload_document(
+                    upload = self.retired_index_bridge.upload_document(
                         self.dataset_id,
                         upload_path.read_text(encoding="utf-8"),
                         filename=packed.filename,
                     )
                 document_id = upload["document_id"]
                 self.ledger.mark_uploaded(knowledge_id, dataset_id=self.dataset_id, document_id=document_id, run=upload["run"])
-                self.ragflow.update_metadata(self.dataset_id, document_id, packed.metadata)
-                self.ragflow.request_parse(self.dataset_id, [document_id])
+                self.retired_index_bridge.update_metadata(self.dataset_id, document_id, packed.metadata)
+                self.retired_index_bridge.request_parse(self.dataset_id, [document_id])
                 self.ledger.mark_parse_requested(knowledge_id)
 
             last_run = "TIMEOUT"
             last_progress = 0
             indexed = False
             for attempt in range(self.max_poll_attempts):
-                status = self.ragflow.get_document_status(self.dataset_id, document_id)
+                status = self.retired_index_bridge.get_document_status(self.dataset_id, document_id)
                 run = status["run"]
                 if run == "DONE":
                     self.ledger.mark_indexed(knowledge_id, run=run)
@@ -756,7 +756,7 @@ class SessionMemoryRegenerationRunner:
             "mode": "sync" if self.sync else "dry_run",
             "network_used": bool(source_report.get("network_used")) or self.sync,
             "mutation_performed": mutated,
-            "ragflow_write_performed": mutated,
+            "index_write_performed": mutated,
             "datasetRole": SESSION_MEMORY_DATASET_ROLE,
             "targetProfile": self.target_profile,
             "kind": SESSION_MEMORY_KIND,
@@ -859,7 +859,7 @@ class SessionMemoryBulkDryRunRunner:
             "mode": "bulk_dry_run",
             "network_used": bool(source_report.get("network_used")),
             "mutation_performed": False,
-            "ragflow_write_performed": False,
+            "index_write_performed": False,
             "datasetRole": SESSION_MEMORY_DATASET_ROLE,
             "targetProfile": self.target_profile,
             "kind": SESSION_MEMORY_KIND,
@@ -1020,11 +1020,11 @@ class SessionRecapRegenerationRunner:
         }
 
     @classmethod
-    def mark_ragflow_done_session_recaps(
+    def mark_index_done_session_recaps(
         cls,
         *,
         ledger: Ledger,
-        ragflow,
+        retired_index_bridge,
         dataset_id: str,
         limit: int = 50,
         max_pages: int = 20,
@@ -1035,7 +1035,7 @@ class SessionRecapRegenerationRunner:
         done_docs_by_hash: dict[str, dict] = {}
         pages_scanned = 0
         for page in range(1, max(int(max_pages), 1) + 1):
-            docs = ragflow.list_documents(dataset_id, page=page, page_size=page_size)
+            docs = retired_index_bridge.list_documents(dataset_id, page=page, page_size=page_size)
             pages_scanned += 1
             if not docs:
                 break
@@ -1061,14 +1061,14 @@ class SessionRecapRegenerationRunner:
             ledger.mark_indexed(row["knowledge_id"], run="DONE")
             indexed_count += 1
         return {
-            "schema_version": "agent_knowledge_session_recap_ragflow_done_reconciler.v1",
+            "schema_version": "agent_knowledge_session_recap_index_done_reconciler.v1",
             "checked_queued_count": len(queued),
-            "ragflow_indexed_count": indexed_count,
-            "ragflow_missing_count": len(queued) - indexed_count,
-            "ragflow_pages_scanned": pages_scanned,
+            "index_indexed_count": indexed_count,
+            "index_missing_count": len(queued) - indexed_count,
+            "index_pages_scanned": pages_scanned,
             "network_used": True,
             "mutation_performed": bool(indexed_count),
-            "raw_ragflow_ids_printed": False,
+            "raw_index_ids_printed": False,
         }
 
 
@@ -1307,11 +1307,11 @@ class ProjectMemoryRegenerationRunner:
         }
 
     @classmethod
-    def mark_ragflow_done_project_snapshots(
+    def mark_index_done_project_snapshots(
         cls,
         *,
         ledger: Ledger,
-        ragflow,
+        retired_index_bridge,
         dataset_id: str,
         limit: int = 50,
         max_pages: int = 20,
@@ -1322,7 +1322,7 @@ class ProjectMemoryRegenerationRunner:
         done_docs_by_hash: dict[str, dict] = {}
         pages_scanned = 0
         for page in range(1, max(int(max_pages), 1) + 1):
-            docs = ragflow.list_documents(dataset_id, page=page, page_size=page_size)
+            docs = retired_index_bridge.list_documents(dataset_id, page=page, page_size=page_size)
             pages_scanned += 1
             if not docs:
                 break
@@ -1343,14 +1343,14 @@ class ProjectMemoryRegenerationRunner:
             ledger.mark_indexed(row["knowledge_id"], run="DONE")
             indexed_count += 1
         return {
-            "schema_version": "agent_knowledge_project_memory_ragflow_done_reconciler.v1",
+            "schema_version": "agent_knowledge_project_memory_index_done_reconciler.v1",
             "checked_queued_count": len(queued),
-            "ragflow_indexed_count": indexed_count,
-            "ragflow_missing_count": len(queued) - indexed_count,
-            "ragflow_pages_scanned": pages_scanned,
+            "index_indexed_count": indexed_count,
+            "index_missing_count": len(queued) - indexed_count,
+            "index_pages_scanned": pages_scanned,
             "network_used": True,
             "mutation_performed": bool(indexed_count),
-            "raw_ragflow_ids_printed": False,
+            "raw_index_ids_printed": False,
         }
 def pack_session_memory_document(
     group: SessionChunkGroup,
@@ -1585,8 +1585,8 @@ def _indexed_session_recaps(ledger: Ledger, *, limit: int) -> list[dict]:
             FROM knowledge_items
             WHERE type = 'session_recap'
               AND status = 'indexed'
-              AND ragflow_dataset_id != ''
-              AND ragflow_document_id != ''
+              AND index_target_id != ''
+              AND index_document_id != ''
             ORDER BY indexed_at DESC, updated_at DESC
             LIMIT ?
             """,
@@ -1613,10 +1613,10 @@ def _queued_project_memory_snapshots(ledger: Ledger, *, limit: int) -> list[dict
     return [dict(row) for row in rows]
 
 
-def _chunk_record_from_ragflow(record: dict) -> TranscriptMemoryChunkRecord:
+def _chunk_record_from_retired_index_bridge(record: dict) -> TranscriptMemoryChunkRecord:
     metadata = dict(record.get("metadata") or {})
     if metadata.get("result_type") != "conversation_chunk" and metadata.get("type") != "conversation_chunk":
-        raise ValueError("ragflow transcript-memory record must be a conversation_chunk")
+        raise ValueError("retired_index_bridge transcript-memory record must be a conversation_chunk")
     redacted_text = str(record.get("body") or record.get("content") or "")
     return TranscriptMemoryChunkRecord(
         knowledge_id=str(metadata["knowledge_id"]),
@@ -1655,7 +1655,7 @@ def _chunk_record_from_ledger(record: dict, retrieval_content: str = "") -> Tran
         source_status=str(record.get("source_status") or "indexed_transcript_memory"),
         redaction_version=str(record.get("redaction_version") or REDACTION_VERSION),
     )
-def _ragflow_document_sort_key(doc: dict) -> tuple[str, str]:
+def _index_document_sort_key(doc: dict) -> tuple[str, str]:
     return (str(doc.get("update_time") or doc.get("update_date") or doc.get("create_time") or ""), str(doc.get("name") or ""))
 
 
@@ -1767,7 +1767,7 @@ def _session_memory_metadata(
         "project": group.project,
         "agent_id": build_agent_id(provider=group.provider, producer="memory-regeneration"),
         "session_id_hash": group.session_id_hash,
-        "source_locator_hash": "derived-from-ragflow-transcript-memory",
+        "source_locator_hash": "derived-from-index-transcript-memory",
         "chunk_id": f"session_memory_{_hash_fragment(group.session_id_hash, 16)}",
         "turn_start_index": turn_start_index,
         "turn_end_index": turn_end_index,
@@ -1790,7 +1790,7 @@ def _session_memory_metadata(
         "provenance_producer": "memory-regeneration-runner",
         "provenance_status": SESSION_MEMORY_REGENERATION_EVIDENCE_STATUS,
         "provenance_ledger_contract": "agent_knowledge_ledger.v3",
-        "provenance_source_target_profile": "ragflow-transcript-memory",
+        "provenance_source_target_profile": "index-transcript-memory",
         "provenance_source_kind": provenance_source_kind,
         "retrieval_tags": ",".join([group.provider, group.project, SESSION_MEMORY_DATASET_ROLE, SESSION_MEMORY_KIND]),
         "retention_policy": "private_indefinite_until_superseded_or_disabled",
@@ -1808,7 +1808,7 @@ def _session_recap_metadata(group: SessionChunkGroup, knowledge_id: str) -> dict
         "project": group.project,
         "agent_id": build_agent_id(provider=group.provider, producer="session-recap"),
         "session_id_hash": group.session_id_hash,
-        "source_locator_hash": "derived-from-ragflow-transcript-memory",
+        "source_locator_hash": "derived-from-index-transcript-memory",
         "chunk_id": f"recap_{_hash_fragment(group.session_id_hash, 16)}",
         "turn_start_index": group.turn_start_index,
         "turn_end_index": group.turn_end_index,
@@ -1825,7 +1825,7 @@ def _session_recap_metadata(group: SessionChunkGroup, knowledge_id: str) -> dict
             "producer": "memory-regeneration-runner",
             "status": SESSION_MEMORY_REGENERATION_EVIDENCE_STATUS,
             "ledger_contract": "agent_knowledge_ledger.v3",
-            "source_target_profile": "ragflow-transcript-memory",
+            "source_target_profile": "index-transcript-memory",
             "source_kind": "conversation_chunk",
             **_source_chunk_provenance(group.chunks),
         },
@@ -1870,7 +1870,7 @@ def _project_memory_metadata(group: ProjectChunkGroup, knowledge_id: str) -> dic
         "provenance": {
             "producer": "memory-regeneration-runner",
             "ledger_contract": "agent_knowledge_ledger.v3",
-            "source_target_profile": "ragflow-transcript-memory",
+            "source_target_profile": "index-transcript-memory",
             "source_kind": "conversation_chunk",
             **_source_session_provenance(group.session_id_hashes),
             **_source_chunk_provenance(

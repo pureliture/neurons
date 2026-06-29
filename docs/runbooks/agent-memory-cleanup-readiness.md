@@ -1,6 +1,6 @@
 # Agent Memory Cleanup Readiness
 
-이 runbook은 잘못 매핑된 `transcript-memory` / `session-memory` RAGFlow
+이 runbook은 잘못 매핑된 `transcript-memory` / `session-memory` RetiredIndexBridge
 문서를 정리하기 전 준비 절차다. 여기서는 live disable/delete를 실행하지 않는다.
 
 ## Gate Order
@@ -36,29 +36,29 @@
 Read-only readiness:
 
 ```bash
-RAGFLOW_API_KEY=... uv run neuron-knowledge cleanup-readiness \
-  --ragflow-url http://127.0.0.1:19380 \
-  --token-env RAGFLOW_API_KEY \
+RETIRED_INDEX_BRIDGE_API_KEY=... uv run neuron-knowledge cleanup-readiness \
+  --retired-index-bridge-url http://127.0.0.1:19380 \
+  --retired-index-bridge-token-env RETIRED_INDEX_BRIDGE_API_KEY \
   --projects neurons,dendrite
 ```
 
 Session-memory canary dry-run:
 
 ```bash
-RAGFLOW_API_KEY=... uv run neuron-knowledge neuron-session-memory-build \
+RETIRED_INDEX_BRIDGE_API_KEY=... uv run neuron-knowledge neuron-session-memory-build \
   --dry-run \
   --probe-meta \
   --shadow-db <private-shadow-snapshot-db> \
   --watermark-file <private-watermark-file> \
-  --ragflow-url http://127.0.0.1:19380 \
-  --token-env RAGFLOW_API_KEY \
+  --retired-index-bridge-url http://127.0.0.1:19380 \
+  --retired-index-bridge-token-env RETIRED_INDEX_BRIDGE_API_KEY \
   --limit 50
 ```
 
 If the meta probe finds corrected `neurons`/`dendrite` conversation chunks but
 `memory-regeneration build-session-memory --all-sessions` reports
 `sessions_available=0`, the blocker is source-lane mismatch: the delivered
-transcript source is present in shadow/RAGFlow read-SoT, but the ledger
+transcript source is present in shadow/RetiredIndexBridge read-SoT, but the ledger
 `transcript_chunks` source used by the legacy dry-run builder is empty.
 
 ```bash
@@ -76,7 +76,7 @@ uv run neuron-knowledge transcript-memory-gc \
   --ledger <private-ledger> \
   --dataset-id <private-transcript-memory-dataset-id> \
   --session-memory-dataset-id <private-session-memory-dataset-id> \
-  --ragflow-url http://127.0.0.1:19380 \
+  --retired-index-bridge-url http://127.0.0.1:19380 \
   --declared-retention-policy private_indefinite_until_disabled \
   --candidate-scope exact-coverage \
   --max-items 25
@@ -85,11 +85,11 @@ uv run neuron-knowledge transcript-memory-gc \
 Session-memory hard-delete dry-run:
 
 ```bash
-RAGFLOW_API_KEY=... uv run neuron-knowledge session-memory-gc \
+RETIRED_INDEX_BRIDGE_API_KEY=... uv run neuron-knowledge session-memory-gc \
   --ledger <private-ledger> \
   --dataset-id <private-session-memory-dataset-id> \
-  --ragflow-url http://127.0.0.1:19380 \
-  --token-env RAGFLOW_API_KEY \
+  --retired-index-bridge-url http://127.0.0.1:19380 \
+  --retired-index-bridge-token-env RETIRED_INDEX_BRIDGE_API_KEY \
   --declared-retention-policy supersede_or_disable \
   --backup-dir <private-backup-dir> \
   --max-items 25
@@ -108,7 +108,7 @@ RAGFLOW_API_KEY=... uv run neuron-knowledge session-memory-gc \
 - `corrected_session_memory_done_coverage_missing`
 - `corrected_transcript_memory_has_non_done_runs`
 - `memory-regeneration build-session-memory --all-sessions` can return
-  `sessions_available=0` while shadow/RAGFlow read-SoT still has corrected
+  `sessions_available=0` while shadow/RetiredIndexBridge read-SoT still has corrected
   `neurons`/`dendrite` conversation chunks.
 
 이 blocker가 남아 있으면 disable/delete 실행은 금지한다.

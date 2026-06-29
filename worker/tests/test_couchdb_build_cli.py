@@ -89,7 +89,7 @@ def _mark_projected(store: InMemoryCouchDBSourceStore, sid: str, provider: str, 
         provider=provider,
         project=project,
         projection_status=dm.ProjectionStatus.PROJECTED,
-        session_memory_knowledge_id="ragflow-ref-fake",
+        session_memory_knowledge_id="index-ref-fake",
         active_content_hash="sha256:" + "a" * 64,
     )
     store.put(state)
@@ -127,8 +127,8 @@ def _run_main(
         "COUCHDB_USER": "admin",
         "COUCHDB_PASSWORD": "secret",
         "COUCHDB_DB": "transcript_source",
-        "RAGFLOW_URL": "http://localhost:9380",
-        "RAGFLOW_API_KEY": "test-token",
+        "RETIRED_INDEX_BRIDGE_URL": "http://localhost:9380",
+        "RETIRED_INDEX_BRIDGE_API_KEY": "test-token",
     }
     if extra_env:
         env.update(extra_env)
@@ -146,7 +146,7 @@ def _run_main(
     ]
     if projector is not None:
         patches.append(
-            patch("agent_knowledge.couchdb_source.build_cli.RagflowSessionMemoryProjector", lambda **kw: projector)
+            patch("agent_knowledge.couchdb_source.build_cli.RetiredIndexBridgeSessionMemoryProjector", lambda **kw: projector)
         )
 
     with __builtins_context(*patches):
@@ -191,8 +191,8 @@ def _run(argv: list[str], store: InMemoryCouchDBSourceStore, *, projector=None, 
         "COUCHDB_USER": "admin",
         "COUCHDB_PASSWORD": "secret",
         "COUCHDB_DB": "transcript_source",
-        "RAGFLOW_URL": "http://localhost:9380",
-        "RAGFLOW_API_KEY": "test-token",
+        "RETIRED_INDEX_BRIDGE_URL": "http://localhost:9380",
+        "RETIRED_INDEX_BRIDGE_API_KEY": "test-token",
     }
     if extra_env:
         env.update(extra_env)
@@ -227,10 +227,10 @@ def _run(argv: list[str], store: InMemoryCouchDBSourceStore, *, projector=None, 
         stack.enter_context(patch.dict(os.environ, env))
         stack.enter_context(patch("sys.stdout", buf))
         if projector is not None:
-            # Patch at the source module (ragflow_projector), not in build_cli which imports it
+            # Patch at the source module (index_projector), not in build_cli which imports it
             stack.enter_context(
                 patch(
-                    "agent_knowledge.couchdb_source.ragflow_projector.RagflowSessionMemoryProjector",
+                    "agent_knowledge.couchdb_source.index_projector.RetiredIndexBridgeSessionMemoryProjector",
                     lambda **kw: projector,
                 )
             )
@@ -560,7 +560,7 @@ class TestLiveRun:
         projector = RecordingSessionMemoryProjector()
         _run(argv, store, projector=projector)
 
-        assert projector.calls[0]["target_profile"] == dm.RAGFLOW_RECALL_PROFILE
+        assert projector.calls[0]["target_profile"] == dm.RETIRED_INDEX_BRIDGE_RECALL_PROFILE
 
 
 class TestProjectorCleanup:

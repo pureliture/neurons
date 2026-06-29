@@ -1,7 +1,7 @@
 """Retrieval no-loss verification for session-memory production proof.
 
 Read-only. No promotion, no GC. Returns a redacted count-only verdict
-(no raw ids / no raw body). RAGFlow retrieve returns semantic chunks, so
+(no raw ids / no raw body). RetiredIndexBridge retrieve returns semantic chunks, so
 no-loss is proven by source-text coverage of the retrieved chunk union,
 NOT by document body hash equality.
 
@@ -13,7 +13,7 @@ Limitations (presence-based substring matching):
   can yield a false PASS. The proof relies on redacted source chunk texts
   being substantial and distinct; flag in the gate report if a session has
   trivially short turns.
-- RAGFlow may transform indexed text (stemming, tokenization). If retrieval
+- RetiredIndexBridge may transform indexed text (stemming, tokenization). If retrieval
   fails despite a correct upload, review retrieval settings before treating
   it as a real loss.
 """
@@ -26,7 +26,7 @@ def _normalize(text: str) -> str:
 
 def verify_session_memory_retrieval_no_loss(
     *,
-    ragflow,
+    retired_index_bridge,
     dataset_id: str,
     document_id: str,
     expected_source_texts: list[str],
@@ -39,7 +39,7 @@ def verify_session_memory_retrieval_no_loss(
     missing_edge_count = max(0, source_chunk_count - covered_edge_count)
     coverage_no_loss = source_chunk_count > 0 and missing_edge_count == 0
 
-    chunks = ragflow.retrieve(
+    chunks = retired_index_bridge.retrieve(
         retrieval_question,
         [dataset_id],
         document_ids=[document_id],
@@ -57,7 +57,7 @@ def verify_session_memory_retrieval_no_loss(
     # `retrieval_no_loss` therefore reflects retrievability (something came back),
     # NOT GC-grade full-source coverage. The strict every-source-text check is
     # `full_text_retrieval_no_loss`, a non-blocking warning that the SEPARATE
-    # coverage-gated GC acceptance consumes. A long body whose tail RAGFlow does
+    # coverage-gated GC acceptance consumes. A long body whose tail RetiredIndexBridge does
     # not return in a single retrieve is still recall-acceptable; GC stays blocked
     # until full_text coverage holds. (Mixing the two would reject recall-usable
     # documents during sync, which the contract forbids.)

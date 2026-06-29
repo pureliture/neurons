@@ -1,6 +1,6 @@
 """CouchDB-backed transcript/tool-evidence source store.
 
-This package owns the migration of ``transcript-memory`` from a RAGFlow dataset
+This package owns the migration of ``transcript-memory`` from a RetiredIndexBridge dataset
 to a CouchDB-backed source/evidence plane (design:
 ``specs/couchdb-transcript-migration/design.md``).
 
@@ -9,8 +9,8 @@ Plane ownership contract (M1):
 - CouchDB owns the *source/evidence* plane: ``transcript_session``,
   ``conversation_chunk``, ``tool_evidence_bundle``, ``coverage_manifest``,
   ``projection_state``, ``retention_manifest`` documents.
-- RAGFlow owns *only* the derived ``session-memory`` recall surface after
-  cutover. ``transcript-memory`` is a retired RAGFlow profile and is never a
+- RetiredIndexBridge owns *only* the derived ``session-memory`` recall surface after
+  cutover. ``transcript-memory`` is a retired RetiredIndexBridge profile and is never a
   CouchDB-source doc type nor a valid post-cutover projection target.
 - No raw path, raw id, secret, or un-redacted transcript body crosses into a
   CouchDB-source document. Hashes only.
@@ -20,8 +20,8 @@ from .document_model import (  # noqa: F401
     COUCHDB_SOURCE_OWNER,
     COUCHDB_SOURCE_SCHEMA_VERSION,
     COUCHDB_OWNED_DOC_TYPES,
-    RAGFLOW_RECALL_PROFILE,
-    RETIRED_RAGFLOW_PROFILE,
+    RETIRED_INDEX_BRIDGE_RECALL_PROFILE,
+    RETIRED_RETIRED_INDEX_BRIDGE_PROFILE,
     OwnershipViolation,
     ProjectionStatus,
     RetentionTier,
@@ -29,7 +29,7 @@ from .document_model import (  # noqa: F401
     SourceRedactionLeak,
     assert_couchdb_owned,
     assert_no_secret_like_metadata,
-    assert_ragflow_target_allowed,
+    assert_index_target_allowed,
     assert_source_text_clean,
     build_conversation_chunk_document,
     build_coverage_hash,

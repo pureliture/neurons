@@ -15,16 +15,16 @@ repo-local provider overlay다. 공통 운영 계약은 `AGENTS.md`를 우선한
 
 - Mac provider hook, locator-only spool/outbox, thin shipper, Antigravity
   capture ergonomics는 `dendrite` 책임이다.
-- Server worker, `ledger.py`, `TranscriptIngestWorker`, RAGFlow adapter,
+- Server worker, `ledger.py`, `TranscriptIngestWorker`, Qdrant/graph recall,
   brain.query, MemoryCard, native memory, GC planners는 `neurons` 책임이다.
 - Historical component 이름으로 판단하지 말고 동작으로 판단한다.
 
 ## Safety
 
-- `RAGFLOW_API_KEY`만 사용한다.
+- Retired external index bridge credentials are not part of active runtime configuration.
 - Raw transcript body, private locator/path, token, raw dataset_id,
   raw document_id를 출력하지 않는다.
-- RAGFlow write/delete/disable, live GC, Docker/systemd/firewall/package
+- Retired external index bridge write/delete/disable, live GC, Docker/systemd/firewall/package
   mutation은 explicit user intent와 postcheck/rollback plan 없이 실행하지 않는다.
 
 ## Checks

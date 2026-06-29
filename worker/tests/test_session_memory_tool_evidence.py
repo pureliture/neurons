@@ -16,7 +16,7 @@ from agent_knowledge.session_memory.memory_regeneration import (
 
 
 SESSION_HASH = "sha256:" + "3" * 64
-PROJECT = "workspace-ragflow-advisor"
+PROJECT = "workspace-index-advisor"
 SECRET_VALUE = "synthetic-" + "smem-token-value"
 LOCAL_PATH = "/Users/example/Projects/app/run.py"
 

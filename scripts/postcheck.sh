@@ -34,7 +34,7 @@ if [[ "$MODE" == "offline" ]]; then
   "mode": "offline",
   "health": {"status": "skipped"},
   "queue": {"pending": 0, "inFlight": 0, "redelivered": 0, "deadLetter": 0},
-  "target": {"name": "ragflow", "pressure": "CLOSED"},
+  "target": {"name": "retired_index_bridge", "pressure": "CLOSED"},
   "documentStatus": {"indexedCandidateCount": 0},
   "authorization": {"authorizedCount": 0},
   "externalStatus": "not_configured",

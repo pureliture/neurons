@@ -190,8 +190,8 @@ class NativeMemoryMixin:
         )
         self.mark_uploaded(
             card["memory_id"],
-            dataset_id=card.get("ragflow_dataset_id") or "local-approved-memory-cards",
-            document_id=card.get("ragflow_document_id") or f"memdoc_{card['memory_id']}",
+            dataset_id=card.get("index_target_id") or "local-approved-memory-cards",
+            document_id=card.get("index_document_id") or f"memdoc_{card['memory_id']}",
             run="LOCAL",
         )
         self.mark_indexed(card["memory_id"], run="LOCAL")
@@ -556,13 +556,13 @@ class NativeMemoryMixin:
                 (pack_id,),
             ).fetchall()
         return [dict(row) for row in rows]
-    def upsert_ragflow_dataset_plan(self, plan) -> dict:
+    def upsert_index_dataset_plan(self, plan) -> dict:
         now = datetime.now(timezone.utc).isoformat()
         dataset_id = plan.required_resource_ids["dataset_id"]
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO ragflow_datasets (
+                INSERT INTO index_targets (
                     logical_name, dataset_id, metadata_policy_version,
                     contract_version, created_at, enabled, disabled_at
                 ) VALUES (?, ?, ?, ?, ?, 1, '')
@@ -582,14 +582,14 @@ class NativeMemoryMixin:
                 ),
             )
             row = connection.execute(
-                "SELECT * FROM ragflow_datasets WHERE logical_name = ?",
+                "SELECT * FROM index_targets WHERE logical_name = ?",
                 (plan.logical_name,),
             ).fetchone()
         return dict(row)
-    def get_ragflow_dataset(self, logical_name: str) -> dict | None:
+    def get_index_dataset(self, logical_name: str) -> dict | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM ragflow_datasets WHERE logical_name = ?",
+                "SELECT * FROM index_targets WHERE logical_name = ?",
                 (logical_name,),
             ).fetchone()
         return dict(row) if row else None
@@ -606,7 +606,7 @@ class NativeMemoryMixin:
     ) -> dict:
         """Register/refresh a logical_name -> Qdrant collection mapping.
 
-        Parallel to ``upsert_ragflow_dataset_plan`` for the searchable mirror. This
+        Parallel to ``upsert_index_dataset_plan`` for the searchable mirror. This
         records the INTENDED collection mapping + vector params; it performs no
         network call and touches no live Qdrant collection. A refresh updates only
         metadata and never re-enables a disabled row (use
@@ -685,7 +685,7 @@ class NativeMemoryMixin:
 
     def _qdrant_collection_is_enabled(self, collection: str) -> bool:
         # Fail-closed: a collection absent from the registry is NOT treated as
-        # enabled (unlike ragflow_datasets which fails open). The mirror must be
+        # enabled (unlike index_targets which fails open). The mirror must be
         # explicitly registered before any live use.
         if not collection:
             return False
@@ -733,7 +733,7 @@ class NativeMemoryMixin:
             return False
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT enabled, disabled_at FROM ragflow_datasets WHERE dataset_id = ?",
+                "SELECT enabled, disabled_at FROM index_targets WHERE dataset_id = ?",
                 (dataset_id,),
             ).fetchone()
         if row is None:

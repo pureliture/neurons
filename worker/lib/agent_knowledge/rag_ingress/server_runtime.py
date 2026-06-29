@@ -12,7 +12,7 @@ from typing import Callable
 
 from ..events import EventValidationError
 from ..spool import Spool
-from .index_backend import IndexBackendAdapter
+from .retired_index_bridge import RetiredIndexBridgeAdapter
 from .rag_ready_document import DEFAULT_INGRESS_PAYLOAD_KIND, RagReadyDocument, assert_no_secret_like_metadata
 
 
@@ -296,7 +296,7 @@ def normalize_ingest_job_payload(message: dict) -> dict:
     }
 
 
-def drain_one_ingress_job(queue: IngressJobQueue, backend: IndexBackendAdapter) -> dict:
+def drain_one_ingress_job(queue: IngressJobQueue, backend: RetiredIndexBridgeAdapter) -> dict:
     claimed = queue.claim_next()
     try:
         payload = json.loads(claimed.read_text(encoding="utf-8"))

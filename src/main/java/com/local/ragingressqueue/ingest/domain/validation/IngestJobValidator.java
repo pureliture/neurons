@@ -78,7 +78,7 @@ public class IngestJobValidator {
         if ("private_locator".equals(payloadKind)) {
             violations.add("private_locator is not a valid queue payload");
         }
-        if (payloadKind != null && payloadKind.startsWith("ragflow_")) {
+        if (payloadKind != null && payloadKind.startsWith("index_")) {
             violations.add("payload.kind must be target-neutral");
         }
         if (!INLINE_PAYLOAD_KIND.equals(payloadKind)) {

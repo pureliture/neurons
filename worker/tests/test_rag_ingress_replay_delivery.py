@@ -11,8 +11,8 @@ from agent_knowledge.rag_ingress.replay_delivery import (
 )
 from agent_knowledge.session_memory.transcript_model import TranscriptChunk
 
-PROJECT = "workspace-ragflow-advisor"
-DEFAULT_TRANSCRIPT_TARGET_PROFILE = "ragflow-transcript-memory"
+PROJECT = "workspace-index-advisor"
+DEFAULT_TRANSCRIPT_TARGET_PROFILE = "index-transcript-memory"
 
 
 def _replay_requested_chunk(
@@ -407,13 +407,13 @@ def test_replay_deliver_blocks_on_incomplete_key_and_missing_text():
         "knowledge_id": "",
         "metadata": {"m5_disposition_status": "replay_requested", "chunk_id": ""},
         "session_id_hash": "",
-        "target_profile": "ragflow-transcript-memory",
+        "target_profile": "index-transcript-memory",
         "ingress_job_id": "j",
         "updated_at": "t",
     }
     ledger = _StubLedger([row], {})
     result = replay_deliver_dispositions(
-        ledger=ledger, ingress_client=_FakeIngress(), target_profile="ragflow-transcript-memory",
+        ledger=ledger, ingress_client=_FakeIngress(), target_profile="index-transcript-memory",
         reason="m6_replay_delivery_packet", dry_run=True,
     )
     assert "replay_source_text_missing" in result["blockers"]

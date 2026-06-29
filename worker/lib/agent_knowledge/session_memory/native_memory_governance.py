@@ -1,9 +1,9 @@
 """native-memory mirror governance policy.
 
-card_type 별 위험 등급은 audit/context 우선순위에만 쓴다. RAGFlow Memory mirror
+card_type 별 위험 등급은 audit/context 우선순위에만 쓴다. RetiredIndexBridge Memory mirror
 write는 모든 card_type에서 명시 승인, provenance pass, eval pass가 필요하다.
 어휘는 miner 의 memory_card.CANDIDATE_TYPES 를 SoT 로 재사용한다(새 어휘 발명 금지).
-RAGFlow search hit 의 message_type(raw/semantic/...)은 별개 어휘이며 tier 계산에 쓰지 않는다.
+RetiredIndexBridge search hit 의 message_type(raw/semantic/...)은 별개 어휘이며 tier 계산에 쓰지 않는다.
 """
 from __future__ import annotations
 

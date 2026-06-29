@@ -358,7 +358,7 @@ def test_semantic_error_falls_back_to_ledger():
     read_model = _CardReadModel([_card(memory_id="mem_a")])
 
     def broken(query, brain_id):
-        raise RuntimeError("ragflow down")
+        raise RuntimeError("retired_index_bridge down")
 
     result = run_brain_query(
         read_model=read_model, semantic_recall=broken, brain_id="/project/p", query="q"
@@ -413,7 +413,7 @@ def test_limit_cutoff_keeps_top_score_regardless_of_input_order():
 
 class _CountReadModel(_EmptyReadModel):
     def list_project_card_counts(self):
-        return [("workspace-ragflow-advisor", 3), ("workspace-stocks", 1), ("", 2)]
+        return [("workspace-index-advisor", 3), ("workspace-stocks", 1), ("", 2)]
 
 
 def test_resolve_lists_project_brain_ids_with_counts():
@@ -421,7 +421,7 @@ def test_resolve_lists_project_brain_ids_with_counts():
 
     result = resolve_brain_ids(read_model=_CountReadModel())
     assert result["candidates"] == [
-        {"brain_id": "/project/workspace-ragflow-advisor", "kind": "project", "card_count": 3, "hint": ""},
+        {"brain_id": "/project/workspace-index-advisor", "kind": "project", "card_count": 3, "hint": ""},
         {"brain_id": "/project/workspace-stocks", "kind": "project", "card_count": 1, "hint": ""},
     ]  # 빈 project는 제외
 

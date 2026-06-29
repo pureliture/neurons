@@ -54,7 +54,7 @@ def _populate(ledger):
     ledger.mark_dirty_session_memory_promoted(session_id_hash=SID, summary_knowledge_id=active["knowledge_id"])
     ledger.record_memory_gc_audit(
         gc_kind="session_memory", operation="op", schema_version="v1", mode="execute",
-        knowledge_id="kn_old", ragflow_document_id="doc_old", dataset_id="ds",
+        knowledge_id="kn_old", index_document_id="doc_old", dataset_id="ds",
         replacement_knowledge_id="kn_active", age_gate_seconds=86400, mutated=True,
     )
 

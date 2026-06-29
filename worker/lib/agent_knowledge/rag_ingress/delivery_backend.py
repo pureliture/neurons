@@ -1,4 +1,4 @@
-"""M8.1 real DeliveryBackend prep: state-DB payload -> IndexBackendAdapter submit.
+"""M8.1 real DeliveryBackend prep: state-DB payload -> RetiredIndexBridgeAdapter submit.
 
 This module turns a committed ``delivery_jobs`` row into an actual backend
 submission, WITHOUT being wired to any production route:
@@ -8,7 +8,7 @@ submission, WITHOUT being wired to any production route:
   CLI live path (which itself requires an explicit approval record).
 - It submits committed ``delivery_jobs`` only: the executor (``DeliveryExecutor``)
   claims the job and calls ``submit`` OUTSIDE the command transaction, so no
-  RAGFlow/queue call ever happens inside a state-DB transaction.
+  RetiredIndexBridge/queue call ever happens inside a state-DB transaction.
 - Payload availability gate (M8.1 Slice A): ``delivery_jobs`` is hash-only, so the
   payload is recovered from the ``delivery_payloads`` table and triple-checked
   (job.payload_hash == stored payload_hash == sha256(document body)). A missing or
@@ -31,7 +31,7 @@ from .delivery_executor import (
     DeliveryJobView,
     DeliveryOutcomeUncertain,
 )
-from .index_backend import BackendDocumentHandle, IndexBackendAdapter, IndexStatus
+from .retired_index_bridge import BackendDocumentHandle, RetiredIndexBridgeAdapter, IndexStatus
 from .server_runtime import document_from_ingress_payload
 from .state_db import RAGIngressStateDB
 
@@ -74,12 +74,12 @@ def resolve_delivery_payload(
     return payload, PAYLOAD_OK
 
 
-class RagflowDeliveryBackend:
-    """``DeliveryBackend`` protocol implementation over ``IndexBackendAdapter``."""
+class RetiredIndexBridgeDeliveryBackend:
+    """``DeliveryBackend`` protocol implementation over ``RetiredIndexBridgeAdapter``."""
 
-    def __init__(self, *, state_db: RAGIngressStateDB, index_backend: IndexBackendAdapter):
+    def __init__(self, *, state_db: RAGIngressStateDB, retired_index_bridge: RetiredIndexBridgeAdapter):
         self._state_db = state_db
-        self._index_backend = index_backend
+        self._retired_index_bridge = retired_index_bridge
 
     def submit(self, job: DeliveryJobView) -> DeliveryBackendEvidence:
         payload, gate = resolve_delivery_payload(
@@ -105,7 +105,7 @@ class RagflowDeliveryBackend:
             metadata={**document.metadata, "content_hash": document.content_hash},
         )
         try:
-            result = self._index_backend.submit_document(document)
+            result = self._retired_index_bridge.submit_document(document)
         except Exception as exc:
             # the request may have reached the backend before failing; never
             # report a mid-flight error as a clean retryable failure
@@ -123,7 +123,7 @@ class RagflowDeliveryBackend:
         row = self._state_db.get_row("delivery_jobs", "idempotency_key", idempotency_key)
         if row is None or str(row.get("payload_hash") or "") != payload_hash:
             return None
-        lookup = getattr(self._index_backend, "find_by_natural_key", None)
+        lookup = getattr(self._retired_index_bridge, "find_by_natural_key", None)
         if not callable(lookup):
             return None
         handle = lookup(
@@ -133,7 +133,7 @@ class RagflowDeliveryBackend:
         )
         if handle is None:
             return None
-        detail = self._index_backend.document_status_detail(handle)
+        detail = self._retired_index_bridge.document_status_detail(handle)
         return DeliveryBackendEvidence(
             idempotency_key=idempotency_key,
             payload_hash=payload_hash,
@@ -144,7 +144,7 @@ class RagflowDeliveryBackend:
         )
 
     def status(self, dataset_ref: str, document_ref: str) -> DeliveryBackendEvidence:
-        detail = self._index_backend.document_status_detail(
+        detail = self._retired_index_bridge.document_status_detail(
             BackendDocumentHandle(dataset_ref=dataset_ref, document_ref=document_ref)
         )
         return DeliveryBackendEvidence(

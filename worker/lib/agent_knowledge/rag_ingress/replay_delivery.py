@@ -4,7 +4,7 @@ Unlike the M5 replay disposition (``mark_replay_requested_if_queued``, which onl
 re-armed the ledger row and recorded a ``replay_requested`` marker without causing
 any re-delivery), this seam reconstructs an ingress enqueue payload from the local
 ledger and re-POSTs it to the rag-ingress-queue, creating a NEW queue job so the
-existing delivery worker re-delivers the document to RAGFlow. This is the resolution
+existing delivery worker re-delivers the document to RetiredIndexBridge. This is the resolution
 of the M5 system-manager BLOCKING-1 follow-up.
 
 Reconstruction fidelity (honest scope):
@@ -408,5 +408,5 @@ def replay_deliver_dispositions(
         "network_used": bool(not dry_run),
         "mutation_performed": bool(delivered_count or remote_enqueue_count),
         "raw_backend_ids_printed": False,
-        "raw_ragflow_ids_printed": False,
+        "raw_index_ids_printed": False,
     }

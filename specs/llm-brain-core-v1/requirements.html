@@ -32,23 +32,23 @@
   <main>
     <section class="note">
       <strong>핵심 범위</strong>
-      <p><code>neurons</code> 안에 LLM-Brain Core v1을 설계한다. 기존 <code>dendrite</code>/<code>neurons</code> pipeline은 유지하고, RAGFlow는 core가 아니라 external document bridge로 격하한다.</p>
+      <p><code>neurons</code> 안에 LLM-Brain Core v1을 설계한다. 기존 <code>dendrite</code>/<code>neurons</code> pipeline은 유지하고, RetiredIndexBridge는 core가 아니라 external document bridge로 격하한다.</p>
     </section>
     <h2>자문자답 결론</h2>
     <div class="grid">
       <div class="card"><strong>무엇을 만드는가</strong>문서 검색기가 아니라 작업 기억 시스템.</div>
       <div class="card"><strong>어디에 구현하는가</strong>v1은 새 repo가 아니라 <code>neurons</code>.</div>
-      <div class="card"><strong>RAGFlow 위치</strong>기존 것은 보존. core dependency 아님.</div>
+      <div class="card"><strong>RetiredIndexBridge 위치</strong>기존 것은 보존. core dependency 아님.</div>
       <div class="card"><strong>session-memory</strong>raw SoT, event SoT, artifact, graph index를 분리.</div>
       <div class="card"><strong>파일 참조</strong><code>SourceRef</code>/<code>SpanRef</code>/hash/permission/sync policy.</div>
       <div class="card"><strong>autopilot</strong>승인된 design milestones만 소비. SoT 변경은 상류 회귀.</div>
     </div>
     <h2>Acceptance Gates</h2>
     <ul>
-      <li>RAGFlow disabled 상태에서 latest work ContextPack test 통과.</li>
-      <li>RAGFlow disabled 상태에서 Decision drift timeline test 통과.</li>
-      <li>RAGFlow disabled 상태에서 Incident search/replay test 통과.</li>
-      <li>RAGFlow disabled 상태에서 PersonaFact candidate/check test 통과.</li>
+      <li>RetiredIndexBridge disabled 상태에서 latest work ContextPack test 통과.</li>
+      <li>RetiredIndexBridge disabled 상태에서 Decision drift timeline test 통과.</li>
+      <li>RetiredIndexBridge disabled 상태에서 Incident search/replay test 통과.</li>
+      <li>RetiredIndexBridge disabled 상태에서 PersonaFact candidate/check test 통과.</li>
       <li><code>SourceRef</code> raw private path/body redaction test 통과.</li>
       <li>기존 <code>dendrite</code> client boundary와 <code>neurons</code> server authority guard 유지.</li>
     </ul>

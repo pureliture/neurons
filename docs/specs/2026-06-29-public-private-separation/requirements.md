@@ -26,7 +26,7 @@
     private ops 저장소 URL.
   - 운영 런북류의 사적 SSH alias, 사적 홈 경로, 라이브 서비스 포트.
   - 아키텍처/스펙 문서의 라이브 ledger 스냅샷 지문(부분 해시)·row counts,
-    k3s canary/dry-run live evidence, 라이브 RAGFlow 문서 파일명·해시.
+    k3s canary/dry-run live evidence, 라이브 RetiredIndexBridge 문서 파일명·해시.
   - 소스 일부의 라이브 컬렉션명, dogfood 프로젝트 alias, 옛 사용자 절대경로.
 
 ## 목표
@@ -86,7 +86,7 @@ rename 하나**(저장소 밖, 사용자 수행 권고). 나머지(alias/경로/
   `sanitize-then-public`)을 부여한 **separation manifest**를 만든다.
 - FR2: `sanitize-then-public` 파일을 in-place로 정리한다(사적 호스트/경로/포트/
   볼륨명/alias/옛 사용자경로 → placeholder, env 주입화). reversible 커밋.
-- FR3: `.env.example`에 부재한 표준 env(`RAGFLOW_API_KEY` 등) placeholder 스텁 보강
+- FR3: `.env.example`에 부재한 표준 env(`RETIRED_INDEX_BRIDGE_API_KEY` 등) placeholder 스텁 보강
   (단, 해당 compose 범위에서 실제 소비되는지 검증 후).
 - FR4: `.gitignore` 보강(추적 중인 `__pycache__/*.pyc`, `.agents/` 등 제거+무시).
 - FR5: `private-neurons-ops` 항목을 neurons-ops용으로 **로컬 스테이징**(이동 패치/

@@ -2,7 +2,7 @@
 
 ## Overview
 
-LLM-Brain Core v1은 `neurons` 안에서 AI session, MemoryCard, source evidence, temporal ontology relation을 결합해 현재 작업 ContextPack과 장기 작업 기억을 제공한다. RAGFlow는 기존 문서/citation bridge로 보존하지만, canonical memory, ontology store, core acceptance path에서는 제외한다.
+LLM-Brain Core v1은 `neurons` 안에서 AI session, MemoryCard, source evidence, temporal ontology relation을 결합해 현재 작업 ContextPack과 장기 작업 기억을 제공한다. RetiredIndexBridge는 기존 문서/citation bridge로 보존하지만, canonical memory, ontology store, core acceptance path에서는 제외한다.
 
 ## Requirements Reference
 
@@ -12,9 +12,9 @@ LLM-Brain Core v1은 `neurons` 안에서 AI session, MemoryCard, source evidence
 - 핵심 기능 요구사항:
   - `neurons`에 구현한다.
   - 기존 `dendrite`/`neurons` 수집 파이프라인과 안전한 `MemoryCard`/ledger/read-model 자산을 재사용한다.
-  - RAGFlow disabled 상태에서 ContextPack, Decision drift, Incident search, PersonaFact check가 통과해야 한다.
+  - RetiredIndexBridge disabled 상태에서 ContextPack, Decision drift, Incident search, PersonaFact check가 통과해야 한다.
   - graph DB는 derived index이며 raw/session/event SoT가 아니다.
-  - RAGFlow는 external document bridge로만 남긴다.
+  - RetiredIndexBridge는 external document bridge로만 남긴다.
 
 ## Approach Proposal
 
@@ -32,7 +32,7 @@ LLM-Brain Core v1은 `neurons` 안에서 AI session, MemoryCard, source evidence
 Pros:
 - 기존 `neurons` server authority와 일치한다.
 - 새 repo 이관 비용이 없다.
-- RAGFlow dependency를 M0 invariant로 core에서 제거한다.
+- RetiredIndexBridge dependency를 M0 invariant로 core에서 제거한다.
 - autopilot은 검증 가능한 작은 milestone으로 자를 수 있다.
 
 Cons:
@@ -45,7 +45,7 @@ Cons:
 
 Decision: v1 이후 extraction candidate로만 둔다.
 
-### Alternative B: RAGFlow Core Extension
+### Alternative B: RetiredIndexBridge Core Extension
 
 기존 corpus 활용은 빠르지만, portable local brain, SourceRef, ontology drift, persona evidence, event replay 요구와 맞지 않는다.
 
@@ -57,10 +57,10 @@ Decision: core에서 제외한다.
 | --- | --- | --- | --- |
 | CouchDB raw session | AI session raw SoT | Yes for raw session body | Raw body is not copied into graph or public output. |
 | NATS/event ledger | replay/order/idempotency SoT | Yes for event replay | Defines `source_event_id`, idempotency, tombstone, retry state. |
-| SessionMemoryArtifactStore | materialized session-memory SoT | Yes for session-memory artifact | RAGFlow-free acceptance gate. |
+| SessionMemoryArtifactStore | materialized session-memory SoT | Yes for session-memory artifact | retired-index-bridge-free acceptance gate. |
 | MemoryCard ledger | accepted/superseded memory fact SoT | Yes for durable extracted memory | Existing `MemoryCard` lifecycle/currentness invariants preserved. |
 | GraphMemoryAdapter | derived relation/search index | No | Can be stale/unavailable without changing canonical truth. |
-| RAGFlow bridge | external document/citation fallback | No | Never wins over artifact or MemoryCard ledger. |
+| RetiredIndexBridge bridge | external document/citation fallback | No | Never wins over artifact or MemoryCard ledger. |
 
 Any response that contains graph or bridge evidence must include status fields that distinguish canonical memory from derived index freshness and external bridge availability.
 
@@ -89,7 +89,7 @@ Agent/Codex/Claude Code/OpenClaw ── thin MCP/stdio/HTTP ──► Brain read
 
                          optional bridge
 
-Brain read API ──► RAGFlow bridge ──► existing Ubuntu RAGFlow corpus
+Brain read API ──► RetiredIndexBridge bridge ──► existing Ubuntu RetiredIndexBridge corpus
                  (complex docs/citation only)
 ```
 
@@ -97,9 +97,9 @@ Brain read API ──► RAGFlow bridge ──► existing Ubuntu RAGFlow corpus
 
 - `dendrite` owns local provider hook, locator-only capture, local source catalog, same-device source resolution, thin shipper.
 - `neurons` owns ingest, raw-session materialization, session-memory artifact, MemoryCard, ontology episode mapping, graph adapter, brain query, sync state, GC safety.
-- `workspace-ragflow-advisor` owns Ubuntu RAGFlow operations and live RAGFlow management, not LLM-Brain product core.
-- Agent-facing tools call Brain API only; they do not call Graphiti, Neo4j, CouchDB, or RAGFlow directly.
-- M1-M5 must not instantiate a RAGFlow client, require network credentials, mutate Docker, or add new runtime dependencies.
+- `workspace-index-advisor` owns Ubuntu RetiredIndexBridge operations and live RetiredIndexBridge management, not LLM-Brain product core.
+- Agent-facing tools call Brain API only; they do not call Graphiti, Neo4j, CouchDB, or RetiredIndexBridge directly.
+- M1-M5 must not instantiate a RetiredIndexBridge client, require network credentials, mutate Docker, or add new runtime dependencies.
 
 ## Data Flow
 
@@ -184,7 +184,7 @@ V1 designs the envelope and shadow replay gate. A production transport product i
 Proposed package: `worker/lib/agent_knowledge/llm_brain_core/`.
 
 Purpose:
-- isolate new core interfaces from legacy RAGFlow-centric module paths;
+- isolate new core interfaces from legacy RetiredIndexBridge-centric module paths;
 - expose stable interfaces consumed by CLI/MCP/autopilot;
 - allow later extraction to a standalone repo without moving all `neurons` internals.
 
@@ -198,13 +198,13 @@ Do not reuse without isolation before M9:
 - `autopilot_cli.main`;
 - `mine_live_candidates`;
 - `autopilot_loop._autopilot_projection_approval`;
-- `ragflow_projection.py` write path;
-- `Ledger.promote_session_memory` path that requires RAGFlow dataset/document identifiers.
+- `index_projection.py` write path;
+- `Ledger.promote_session_memory` path that requires RetiredIndexBridge dataset/document identifiers.
 
 Safe reuse candidates:
 - `LLMBrainMemoryService` canonical MemoryCard write methods, excluding projection execution;
 - `memory_card.py`;
-- `memory_miner.py` and `llm_brain_miner.py` with injected non-RAGFlow source spans;
+- `memory_miner.py` and `llm_brain_miner.py` with injected non-RetiredIndexBridge source spans;
 - `memory_evaluation.py`;
 - `memory_promotion.py`;
 - `brain_query.run_brain_query_v2` read-model ideas, not response shape wholesale.
@@ -215,7 +215,7 @@ Purpose:
 - durable materialized session memory from CouchDB/session chunks/tool evidence;
 - canonical input for current-work recall and candidate mining;
 - no raw transcript duplication beyond existing CouchDB source;
-- no RAGFlow dataset/document id requirement.
+- no RetiredIndexBridge dataset/document id requirement.
 
 Core fields:
 
@@ -239,7 +239,7 @@ Core fields:
 Initial implementation:
 - use existing ledger/SQLite-compatible pattern if present;
 - keep PostgreSQL/SQLite storage behind an interface;
-- do not require Graphiti, Neo4j, or RAGFlow for artifact writes.
+- do not require Graphiti, Neo4j, or RetiredIndexBridge for artifact writes.
 
 ### OntologyEpisode and GraphMemoryResult
 
@@ -431,19 +431,19 @@ brain_evidence_get
 
 M1 fixes the internal `BrainReadService` contract. M8 adds thin MCP/stdio wrappers. MCP is not a separate gateway product.
 
-### RAGFlow Bridge
+### RetiredIndexBridge Bridge
 
 Purpose:
-- search existing Ubuntu RAGFlow corpus for complex document/citation use cases;
+- search existing Ubuntu RetiredIndexBridge corpus for complex document/citation use cases;
 - migrate needed evidence into SourceRef/episode form;
-- preserve existing RAGFlow while core matures.
+- preserve existing RetiredIndexBridge while core matures.
 
 Rules:
 - M0 invariant: not core, not canonical, not default dependency.
-- no RAGFlow client instantiation before M9;
-- no RAGFlow delete/disable in ordinary autopilot;
-- RAGFlow result never wins over canonical artifact or MemoryCard state;
-- RAGFlow failures produce bridge unavailable diagnostics, not core failure.
+- no RetiredIndexBridge client instantiation before M9;
+- no RetiredIndexBridge delete/disable in ordinary autopilot;
+- RetiredIndexBridge result never wins over canonical artifact or MemoryCard state;
+- RetiredIndexBridge failures produce bridge unavailable diagnostics, not core failure.
 
 ### BrainEvent Envelope
 
@@ -492,7 +492,7 @@ terminal_failed
 | Permission revoked SourceRef | `terminal_failed` for content fetch | keep metadata; return `permission_revoked`. |
 | Poison event / schema mismatch | `quarantined` | no graph projection until migration/review. |
 | Ontology migration missing | `quarantined` | require explicit migration handler. |
-| RAGFlow bridge down | bridge unavailable | core query succeeds with bridge gap. |
+| RetiredIndexBridge bridge down | bridge unavailable | core query succeeds with bridge gap. |
 
 ## Testing Strategy
 
@@ -502,11 +502,11 @@ terminal_failed
 - `GraphMemoryAdapter` contract with `NullGraphMemoryAdapter` and fake adapter.
 - `SourceRef` policy golden outputs for `metadata_only`, `derived_only`, `local_only`, `full_sync`, revoked, deleted, stale hash.
 - `BrainEvent` replay: duplicate, out-of-order, tombstone, conflict quarantine.
-- no RAGFlow client instantiation before M9.
+- no RetiredIndexBridge client instantiation before M9.
 
 ### Unit Tests
 
-- `SessionMemoryArtifactStore` writes/read/idempotency without RAGFlow.
+- `SessionMemoryArtifactStore` writes/read/idempotency without RetiredIndexBridge.
 - MemoryCard to `OntologyEpisode` mapping.
 - ContextPack builder ranking and redaction.
 - Incident search ranking and "do not apply" classification.
@@ -515,16 +515,16 @@ terminal_failed
 ### Integration Tests
 
 - CouchDB fixture session -> artifact -> MemoryCard candidate -> ontology episode -> ContextPack.
-- RAGFlow disabled mode: all core acceptance gates pass.
+- RetiredIndexBridge disabled mode: all core acceptance gates pass.
 - graph-disabled degradation: ContextPack returns canonical memory with `graph_status=unavailable`.
-- RAGFlow bridge fake client: bridge result is included as document evidence but does not override canonical memory.
+- RetiredIndexBridge bridge fake client: bridge result is included as document evidence but does not override canonical memory.
 - MCP/stdio roundtrip for `brain_context_resolve` and `brain_incident_search` after M8.
 
 ### Required Negative Tests
 
 ```text
-test_llm_brain_core_ragflow_disabled.py
-test_autopilot_no_ragflow_client_before_m9.py
+test_llm_brain_core_index_disabled.py
+test_autopilot_no_index_client_before_m9.py
 test_contextpack_no_raw_source_refs.py
 test_brain_event_replay_idempotency.py
 test_source_ref_policy_resolution.py
@@ -532,7 +532,7 @@ test_source_ref_policy_resolution.py
 
 ### Regression Tests
 
-- Existing `worker` llm-brain/autopilot tests remain green where they are not RAGFlow-live paths.
+- Existing `worker` llm-brain/autopilot tests remain green where they are not RetiredIndexBridge-live paths.
 - Existing `dendrite`/`neurons` boundary tests remain green.
 - No raw transcript/private path/dataset id/document id in public outputs.
 
@@ -559,11 +559,11 @@ uv run pytest -q
 
 | Phase | Item | Done |
 | --- | --- | --- |
-| Quick win | Document RAGFlow as bridge, not core | README/spec wording no longer implies RAGFlow is canonical brain. |
+| Quick win | Document RetiredIndexBridge as bridge, not core | README/spec wording no longer implies RetiredIndexBridge is canonical brain. |
 | Quick win | Split query correctness from projection freshness | ContextPack response has separate `memory_status`, `graph_status`, `bridge_status`. |
 | Quick win | Isolate unsafe autopilot reuse | `autopilot_cli.main`, live mining, self-minted projection approval blocked before M9. |
 | Investment | Add graph adapter seam | `GraphMemoryAdapter` + null/fake tests exist. |
-| Investment | Add ContextPack builder | RAGFlow-disabled latest-work acceptance test passes. |
+| Investment | Add ContextPack builder | RetiredIndexBridge-disabled latest-work acceptance test passes. |
 | Investment | Add SourceRef contract | metadata-only evidence path and redaction tests pass. |
 | Watch | LinkML/TerminusDB schema governance | Activate only if ontology migrations become a governance bottleneck. |
 
@@ -573,8 +573,8 @@ uv run pytest -q
 
 Done:
 - `requirements.md` and `design.md` approved.
-- RAGFlow demotion is documented as invariant, not a late milestone.
-- Existing targeted tests pass or legacy RAGFlow-live tests are explicitly classified as bridge/compat.
+- RetiredIndexBridge demotion is documented as invariant, not a late milestone.
+- Existing targeted tests pass or legacy RetiredIndexBridge-live tests are explicitly classified as bridge/compat.
 - No live mutation.
 
 ### M1: Core Contracts and Safety Guards
@@ -583,22 +583,22 @@ Scope:
 - add `agent_knowledge.llm_brain_core` package skeleton;
 - define `BrainReadService`, `ContextPack`, `SourceRef`, `BrainEvent`, `OntologyEpisode`, `GraphMemoryAdapter`;
 - implement `NullGraphMemoryAdapter`;
-- add guard test that M1-M5 code path does not instantiate RAGFlow clients.
+- add guard test that M1-M5 code path does not instantiate RetiredIndexBridge clients.
 
 Done:
-- RAGFlow-disabled ContextPack fixture returns structured gaps rather than failure.
-- `test_autopilot_no_ragflow_client_before_m9.py` exists.
+- RetiredIndexBridge-disabled ContextPack fixture returns structured gaps rather than failure.
+- `test_autopilot_no_index_client_before_m9.py` exists.
 - No existing public CLI break.
 
-### M2: RAGFlow-free Artifact and Replay Store
+### M2: retired-index-bridge-free Artifact and Replay Store
 
 Scope:
 - implement `SessionMemoryArtifactStore` behind interface;
-- map CouchDB/session fixture to artifact without `ragflow_dataset_id` or `ragflow_document_id`;
+- map CouchDB/session fixture to artifact without `index_target_id` or `index_document_id`;
 - add `BrainEvent` idempotent replay model.
 
 Done:
-- artifact write/read/idempotency tests pass without RAGFlow.
+- artifact write/read/idempotency tests pass without RetiredIndexBridge.
 - duplicate/out-of-order/tombstone replay tests pass.
 
 ### M3: SourceRef Resolver Contract
@@ -620,7 +620,7 @@ Scope:
 
 Done:
 - latest task, stop point, unfinished items, current decisions, persona constraints return in one ContextPack.
-- RAGFlow disabled test passes.
+- RetiredIndexBridge disabled test passes.
 
 ### M5: Incident, Drift, Persona
 
@@ -682,16 +682,16 @@ Done:
 - MCP/stdio roundtrip tests pass.
 - tools do not expose raw backend identifiers or private paths.
 
-### M9: RAGFlow Bridge Compatibility
+### M9: RetiredIndexBridge Bridge Compatibility
 
 Scope:
-- existing RAGFlow projection/search remains as optional bridge;
-- response status separates `core_memory`, `derived_graph`, and `ragflow_bridge`.
+- existing RetiredIndexBridge projection/search remains as optional bridge;
+- response status separates `core_memory`, `derived_graph`, and `index_bridge`.
 
 Done:
-- RAGFlow unavailable does not fail core ContextPack.
+- RetiredIndexBridge unavailable does not fail core ContextPack.
 - bridge hit is labeled as external document evidence.
-- no RAGFlow write/delete/disable is added without separate approval.
+- no RetiredIndexBridge write/delete/disable is added without separate approval.
 
 ## Autopilot Execution Contract
 
@@ -712,8 +712,8 @@ first milestone: M1 only
 ```
 
 Stop conditions:
-- acceptance test requires live RAGFlow mutation;
-- any M1-M5 code path needs RAGFlow client instantiation, network, credential, dataset id, or document id;
+- acceptance test requires live RetiredIndexBridge mutation;
+- any M1-M5 code path needs RetiredIndexBridge client instantiation, network, credential, dataset id, or document id;
 - raw private transcript/file body is needed;
 - raw backend ids or private paths appear in public output;
 - design SoT must change;
@@ -730,17 +730,17 @@ Stop conditions:
 ## Review Fixes Applied
 
 - Added authority precedence table so graph is derived index, not canonical winner.
-- Moved RAGFlow demotion to M0 invariant and renamed final milestone to bridge compatibility.
+- Moved RetiredIndexBridge demotion to M0 invariant and renamed final milestone to bridge compatibility.
 - Replaced direct Graphiti leakage with backend-neutral `OntologyEpisode` and `GraphMemoryResult`.
 - Made SourceRef opaque and delegated same-device content fetch to `dendrite`.
 - Added `BrainEvent` envelope, ordering, tombstone, duplicate, and conflict rules.
 - Split graph integration milestone into interface, dependency approval, and Ubuntu integration stages.
-- Added negative tests and stop conditions for RAGFlow-coupling regression.
+- Added negative tests and stop conditions for RetiredIndexBridge-coupling regression.
 
 ## Self-Review
 
 - No implementation code is included.
-- RAGFlow is not required for core acceptance.
+- RetiredIndexBridge is not required for core acceptance.
 - Raw SoT, artifact store, MemoryCard ledger, graph index, and bridge roles are separated.
 - Milestones are independently testable and autopilot-friendly.
 - V1 non-goals are explicit boundaries, not hidden acceptance gaps.
