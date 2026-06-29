@@ -20,11 +20,15 @@ MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME = "memory_supersede_propose"
 MEMORY_CANDIDATE_APPROVE_TOOL_NAME = "memory_candidate_approve"
 MEMORY_CANDIDATE_REJECT_TOOL_NAME = "memory_candidate_reject"
 MEMORY_CANDIDATE_AUTO_ACCEPT_TOOL_NAME = "memory_candidate_auto_accept"
+MEMORY_SUPERSEDE_COMMIT_TOOL_NAME = "memory_supersede_commit"
+MEMORY_STALE_COMMIT_TOOL_NAME = "memory_stale_commit"
 
 STEWARD_RESTRICTED_TOOL_NAMES = (
     MEMORY_CANDIDATE_APPROVE_TOOL_NAME,
     MEMORY_CANDIDATE_REJECT_TOOL_NAME,
     MEMORY_CANDIDATE_AUTO_ACCEPT_TOOL_NAME,
+    MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
+    MEMORY_STALE_COMMIT_TOOL_NAME,
 )
 
 # candidate / supersede proposal 이 공유하는 redacted source_span 입력 스키마.
@@ -314,6 +318,34 @@ def list_tools() -> list[dict]:
                     "evaluation": {"type": "object"},
                 },
                 "required": ["candidate_memory_id", "operator_approval_ref", "evaluation"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
+            "description": "[steward/restricted] supersede proposal을 확정해 교체 후보를 accept하고 기존 card를 superseded로 demote한다. 기본 권한에서는 막혀 있다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "proposal_memory_id": {"type": "string"},
+                    "approved_by": {"type": "string"},
+                    "decision_id": {"type": "string"},
+                },
+                "required": ["proposal_memory_id", "approved_by", "decision_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": MEMORY_STALE_COMMIT_TOOL_NAME,
+            "description": "[steward/restricted] stale proposal을 확정해 대상 accepted card를 currentness=stale로 demote한다. 기본 권한에서는 막혀 있다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "proposal_memory_id": {"type": "string"},
+                    "approved_by": {"type": "string"},
+                    "decision_id": {"type": "string"},
+                },
+                "required": ["proposal_memory_id", "approved_by", "decision_id"],
                 "additionalProperties": False,
             },
         },

@@ -196,7 +196,9 @@ def build_brain_query_response_v2(
             ledger_by_memory_id[memory_id] = normalized
         if normalized.get("currentness") == "current":
             response["current"].append(normalized)
-        if normalized.get("currentness") not in ("superseded", "conflicted"):
+        # stale 도 accepted/compat recall lane 에서 제외한다 — stale_commit 으로 내려간 카드가
+        # 다시 답변 근거(local_ledger_accepted)로 쓰이면 안 된다.
+        if normalized.get("currentness") not in ("superseded", "conflicted", "stale"):
             response["accepted"].append(normalized)
 
     for mirror_item in ragflow_results or []:

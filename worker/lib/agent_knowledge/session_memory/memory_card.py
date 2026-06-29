@@ -51,6 +51,9 @@ APPROVAL_STATES = ("suggested", "approved", "rejected", "auto_accepted", "needs_
 GOVERNANCE_TIERS = ("low", "medium", "high")
 FRESHNESS_VALUES = ("current", "recent", "historical", "unknown")
 CURRENTNESS_VALUES = ("current", "stale", "superseded", "conflicted", "unknown")
+# 검토 대기(pending review) lifecycle. Brain Steward review queue 조회(ledger)와
+# approve/reject 적격성(service)이 공유하는 단일 정의. accepted/rejected lane 제외.
+REVIEW_LIFECYCLE_STATES = frozenset({"candidate", "suggested_accept", "needs_review"})
 
 _COMMON_MEMORY_CARD_FIELDS = (
     "memory_id",

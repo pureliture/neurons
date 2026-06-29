@@ -8,6 +8,7 @@ from ._util import ensure_public_safe, public_safe_text
 from .artifact_store import InMemorySessionMemoryArtifactStore, SessionMemoryArtifactStore
 from .context_builder import (
     ContextPackBuilder,
+    NON_CURRENT_AUTHORITY,
     decision_view as _decision_view,
     incident_records as _incident_records,
     persona_view as _persona_view,
@@ -355,6 +356,8 @@ class BrainReadService:
             cards = [card for card in cards if str(card.get("project") or "") in ("", project)]
         if scope:
             cards = [card for card in cards if str(card.get("scope") or "") in ("", scope, "global")]
+        # 현재-권위가 아닌(stale/superseded/archive_candidate) 카드는 persona fact 에서 제외한다.
+        cards = [card for card in cards if str(card.get("currentness") or "") not in NON_CURRENT_AUTHORITY]
         facts = [_persona_view(card) for card in cards]
         result = {"facts": facts, "memory_status": {"status": "available", "authority": "canonical_card"}}
         ensure_public_safe(result, "brain_persona_get")
@@ -378,12 +381,14 @@ class BrainReadService:
             status = "persona_drift"
         else:
             status = "aligned"
-        conflicts = [_persona_view(card) for card in cards if _persona_conflicts(card, plan)]
+        # 현재-권위가 아닌 카드는 current fact/conflict 로 보지 않는다(drift 판정은 위에서 전체 카드 기준).
+        current_cards = [card for card in cards if str(card.get("currentness") or "") not in NON_CURRENT_AUTHORITY]
+        conflicts = [_persona_view(card) for card in current_cards if _persona_conflicts(card, plan)]
         if conflicts:
             status = "possible_conflict"
         result = {
             "status": status,
-            "facts": [_persona_view(card) for card in cards],
+            "facts": [_persona_view(card) for card in current_cards],
             "conflicts": conflicts,
             "memory_status": {"status": "available", "authority": "canonical_card"},
         }

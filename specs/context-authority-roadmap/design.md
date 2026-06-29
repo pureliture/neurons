@@ -39,7 +39,10 @@ authority graph를 검토한다.
     document/workflow/preference authority.
   - RAGFlow is not an active Context Authority component.
   - Hermes is read-only consumer in this roadmap; self-improvement/proposal loop
-    is out of scope.
+    is out of scope. (Cross-ref: the proposal-only Brain Steward surface in
+    `specs/brain-steward-hardening/` is a sanctioned extension — agents only
+    propose; authoritative truth still changes solely through restricted
+    human/manual commit, so "agents do not decide authority" still holds.)
   - Custom UI is deferred until Neo4j workbench leaves a concrete screen gap.
 
 ## Approach Proposal

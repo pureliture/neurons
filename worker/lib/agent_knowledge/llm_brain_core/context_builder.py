@@ -12,6 +12,10 @@ from .workflow_authority import workflow_contract_cards_from_memory_cards
 
 # Task statuses that mean a task is no longer open work. Kept here with the
 # ranking/merge logic so the "is this still unfinished" rule lives in one place.
+# 더 이상 현재-권위(current authority)가 아닌 currentness. persona/context-pack 의 현재
+# 사실(fact) 소비자는 이 상태의 카드를 제외한다. (drift_explain 같은 history 소비자는 별도.)
+NON_CURRENT_AUTHORITY = frozenset({"stale", "superseded", "archive_candidate"})
+
 TERMINAL_TASK_STATUSES = {"done", "resolved", "closed", "cancelled"}
 CONTEXT_AUTHORITY_CONSUMERS = {"unspecified", "codex", "claude-code", "hermes"}
 SEARCH_MIRROR_STATUSES = {"unverified", "configured_unverified", "available", "degraded", "unavailable"}
@@ -66,7 +70,12 @@ class ContextPackBuilder:
             last_stopped_at = graph_task_stop(graph_result)
 
         decisions = tuple(decision_view(card) for card in cards if card.get("card_type") == "decision")
-        persona = tuple(persona_view(card) for card in cards if card.get("card_type") == "preference")
+        persona = tuple(
+            persona_view(card)
+            for card in cards
+            if card.get("card_type") == "preference"
+            and str(card.get("currentness") or "") not in NON_CURRENT_AUTHORITY
+        )
         unfinished = tuple(unfinished_items(cards, graph_result))
         source_refs = tuple(merged_source_refs(cards, graph_result))
 
