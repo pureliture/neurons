@@ -211,6 +211,17 @@ class _LedgerTransaction:
         self._connection = connection
         self._indexed_knowledge_ids: list[str] = []
 
+    def upsert_llm_brain_memory_card(self, card: dict) -> dict:
+        # 공유 connection 으로 실행 — restricted commit 의 다중 write 를 한 트랜잭션으로 묶는다.
+        from .ledger_native_memory_mixin import upsert_llm_brain_memory_card_on
+
+        return upsert_llm_brain_memory_card_on(self._connection, card)
+
+    def upsert_llm_brain_feedback_record(self, record: dict) -> dict:
+        from .ledger_native_memory_mixin import upsert_llm_brain_feedback_record_on
+
+        return upsert_llm_brain_feedback_record_on(self._connection, record)
+
     def upsert_memory_card(self, card: dict) -> dict:
         self._connection.execute(
             """

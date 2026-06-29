@@ -663,6 +663,52 @@ def test_commit_rejects_mismatched_proposal_kind(tmp_path):
         steward.supersede_commit(proposal_memory_id=cand_id, approved_by="op", decision_id="d")
 
 
+def test_stale_commit_is_atomic_rolls_back_on_mid_failure(tmp_path, monkeypatch):
+    from agent_knowledge.ledger import _LedgerTransaction
+
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger, allow_restricted=True)
+    target_id = _accept_card(ledger)["memory_id"]
+    prop = steward.stale_mark(memory_id=target_id, reason="stale 사유")["proposal"]["memory_id"]
+
+    # fault injection: 트랜잭션 중간(audit write)에서 실패시킨다.
+    def boom(self, record):
+        raise RuntimeError("injected audit failure")
+
+    # _accept_card 가 이미 자체 acceptance feedback 1건을 남겼으므로 baseline 을 잡는다.
+    feedback_before = len(ledger.list_llm_brain_feedback_records(limit=100))
+    monkeypatch.setattr(_LedgerTransaction, "upsert_llm_brain_feedback_record", boom)
+    with pytest.raises(RuntimeError):
+        steward.stale_commit(proposal_memory_id=prop, approved_by="op", decision_id="d")
+
+    # 전부 rollback: target 미demote, proposal 그대로 pending, 새 audit 0 — 부분 커밋 없음.
+    assert ledger.get_llm_brain_memory_card(target_id)["currentness"] == "current"
+    assert prop in [i["memory_id"] for i in steward.review_queue_list(project=PROJECT)["items"]]
+    assert len(ledger.list_llm_brain_feedback_records(limit=100)) == feedback_before
+
+
+def test_supersede_commit_is_atomic_rolls_back_on_mid_failure(tmp_path, monkeypatch):
+    from agent_knowledge.ledger import _LedgerTransaction
+
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger, allow_restricted=True)
+    old_id = _accept_card(ledger)["memory_id"]
+    prop = steward.supersede_propose(old_memory_id=old_id, source_span=_supersede_span())["proposal"]["memory_id"]
+
+    def boom(self, record):
+        raise RuntimeError("injected audit failure")
+
+    monkeypatch.setattr(_LedgerTransaction, "upsert_llm_brain_feedback_record", boom)
+    with pytest.raises(RuntimeError):
+        steward.supersede_commit(proposal_memory_id=prop, approved_by="op", decision_id="d")
+
+    # 전부 rollback: old 는 그대로 current, 교체 후보는 accept되지 않고 pending — 두 카드 동시 current 없음.
+    assert ledger.get_llm_brain_memory_card(old_id)["currentness"] == "current"
+    assert prop in [i["memory_id"] for i in steward.review_queue_list(project=PROJECT)["items"]]
+    pack_ids = [i["memory_id"] for i in steward.authority_pack_read(project=PROJECT)["items"]]
+    assert prop not in pack_ids
+
+
 def test_projection_field_sets_are_stable(tmp_path):
     ledger = _ledger(tmp_path)
     steward = BrainStewardService(ledger)
