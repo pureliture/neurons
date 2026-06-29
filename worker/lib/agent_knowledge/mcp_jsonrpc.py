@@ -24,13 +24,26 @@ from .mcp_tools import (
     MEMORY_CANDIDATE_CREATE_TOOL_NAME,
     MEMORY_CANDIDATE_REJECT_TOOL_NAME,
     MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
+    MEMORY_STALE_COMMIT_TOOL_NAME,
     MEMORY_STALE_MARK_TOOL_NAME,
+    MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
     MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
     STEWARD_RESTRICTED_TOOL_NAMES,
     TOOL_NAME,
     list_tools,
 )
 from .session_memory.brain_steward import StewardPermissionError
+
+_STEWARD_TOOL_NAMES = frozenset(
+    {
+        MEMORY_AUTHORITY_PACK_READ_TOOL_NAME,
+        MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
+        MEMORY_CANDIDATE_CREATE_TOOL_NAME,
+        MEMORY_STALE_MARK_TOOL_NAME,
+        MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
+        *STEWARD_RESTRICTED_TOOL_NAMES,
+    }
+)
 
 
 def handle_jsonrpc_message(message: dict, service: KnowledgeSearchService) -> dict | None:
@@ -206,38 +219,6 @@ def _call_tool(params: dict, service: KnowledgeSearchService) -> dict:
     return dispatch_tool_call(params, service)
 
 
-_STEWARD_SOURCE_SPAN_KEYS = (
-    "card_type",
-    "project",
-    "provider",
-    "scope",
-    "title",
-    "redacted_summary",
-    "summary",
-    "typed_payload",
-    "content_hash",
-    "source_ref",
-    "span_ref",
-    "confidence",
-    "confidence_basis",
-    "governance_tier",
-)
-_STEWARD_TOOL_NAMES = frozenset(
-    {
-        MEMORY_AUTHORITY_PACK_READ_TOOL_NAME,
-        MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
-        MEMORY_CANDIDATE_CREATE_TOOL_NAME,
-        MEMORY_STALE_MARK_TOOL_NAME,
-        MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
-        *STEWARD_RESTRICTED_TOOL_NAMES,
-    }
-)
-
-
-def _steward_source_span(arguments: dict) -> dict:
-    return {key: arguments[key] for key in _STEWARD_SOURCE_SPAN_KEYS if key in arguments}
-
-
 def _steward_proposer(arguments: dict) -> str:
     """제안 actor 라벨(예: hermes). card subject provider 와 다른 식별 축이며 advisory 다."""
     return normalize_context_consumer(str(arguments.get("proposer") or "unspecified"))
@@ -260,7 +241,7 @@ def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSe
         return _tool_result(result)
     if tool_name == MEMORY_CANDIDATE_CREATE_TOOL_NAME:
         result = steward.candidate_create(
-            source_span=_steward_source_span(arguments),
+            source_span=steward.select_source_span(arguments),
             mark_needs_review=bool(arguments.get("mark_needs_review", False)),
             review_reason=str(arguments.get("review_reason") or ""),
             proposer=_steward_proposer(arguments),
@@ -276,7 +257,7 @@ def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSe
     if tool_name == MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME:
         result = steward.supersede_propose(
             old_memory_id=_require_non_empty_string(arguments, "old_memory_id", tool_name=tool_name),
-            source_span=_steward_source_span(arguments),
+            source_span=steward.select_source_span(arguments),
             proposer=_steward_proposer(arguments),
         )
         return _tool_result(result)
@@ -304,20 +285,27 @@ def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSe
                 evaluation=evaluation,
                 operator_approval_ref=_require_non_empty_string(arguments, "operator_approval_ref", tool_name=tool_name),
             )
+        elif tool_name == MEMORY_SUPERSEDE_COMMIT_TOOL_NAME:
+            result = steward.supersede_commit(
+                proposal_memory_id=_require_non_empty_string(arguments, "proposal_memory_id", tool_name=tool_name),
+                approved_by=_require_non_empty_string(arguments, "approved_by", tool_name=tool_name),
+                decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
+            )
+        elif tool_name == MEMORY_STALE_COMMIT_TOOL_NAME:
+            result = steward.stale_commit(
+                proposal_memory_id=_require_non_empty_string(arguments, "proposal_memory_id", tool_name=tool_name),
+                approved_by=_require_non_empty_string(arguments, "approved_by", tool_name=tool_name),
+                decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
+            )
         else:
             # 새 restricted tool 이 분기 없이 auto_accept 로직으로 흘러드는 것을 막는다.
             raise ValueError(f"unhandled steward tool: {tool_name}")
     except StewardPermissionError:
-        return _tool_result(
-            {
-                "schema_version": "brain_steward_restricted_denied.v1",
-                "tool": tool_name,
-                "permission": "denied",
-                "reason": "restricted_tool_requires_human_gate",
-                "write_performed": False,
-                "authoritative_memory_changed": False,
-            }
-        )
+        # denied 계약은 service 가 소유한다(M5). dispatch 는 그대로 전달만 한다.
+        return _tool_result(steward.restricted_denied_payload(tool_name))
+    # restricted commit 은 accepted/current authority 를 바꾼다. 같은 세션 card 캐시를
+    # 무효화해 이후 core_brain() 읽기가 demote 전 snapshot 을 반환하지 않게 한다(read-after-write).
+    service.invalidate_brain_card_cache()
     return _tool_result(result)
 
 

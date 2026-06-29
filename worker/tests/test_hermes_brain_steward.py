@@ -20,6 +20,8 @@ from agent_knowledge.mcp_server import (
     MEMORY_CANDIDATE_CREATE_TOOL_NAME,
     MEMORY_CANDIDATE_REJECT_TOOL_NAME,
     MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
+    MEMORY_STALE_COMMIT_TOOL_NAME,
+    MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
     STEWARD_RESTRICTED_TOOL_NAMES,
     DisabledRagflowClient,
     KnowledgeSearchService,
@@ -165,7 +167,8 @@ def test_proposed_by_does_not_leak_raw_or_private(tmp_path):
 
 def test_hermes_default_role_denies_all_restricted_tools(tmp_path):
     # Hermes 가 연결하는 기본 transport(allow_restricted_steward=False)에서 restricted
-    # 3종은 모두 거부되고 어떤 write 도 일어나지 않는다.
+    # 도구(approve/reject/auto_accept/supersede_commit/stale_commit)는 모두 거부되고
+    # 어떤 write 도 일어나지 않는다.
     service = _service(tmp_path)  # default: allow_restricted=False (Hermes role)
     created = _text(
         dispatch_tool_call(
@@ -191,6 +194,16 @@ def test_hermes_default_role_denies_all_restricted_tools(tmp_path):
             "candidate_memory_id": candidate_id,
             "operator_approval_ref": "op",
             "evaluation": {"ok": True},
+        },
+        MEMORY_SUPERSEDE_COMMIT_TOOL_NAME: {
+            "proposal_memory_id": candidate_id,
+            "approved_by": "hermes",
+            "decision_id": "d1",
+        },
+        MEMORY_STALE_COMMIT_TOOL_NAME: {
+            "proposal_memory_id": candidate_id,
+            "approved_by": "hermes",
+            "decision_id": "d1",
         },
     }
     for name in STEWARD_RESTRICTED_TOOL_NAMES:
