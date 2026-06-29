@@ -16,6 +16,126 @@ from .db_adapter import ClosingSqliteConnection, SqliteLedgerDbAdapter
 from .ledger_base import *  # noqa: F401,F403
 
 
+def upsert_llm_brain_memory_card_on(connection, card: dict) -> dict:
+    """주입된 connection 으로 llm_brain MemoryCard 를 upsert 한다(commit/connect 하지 않음).
+
+    public Ledger.upsert_llm_brain_memory_card 와 _LedgerTransaction 이 같은 로직을 공유해
+    여러 write 를 단일 트랜잭션으로 묶을 수 있게 한다. read-back 도 같은 connection 에서 한다
+    (트랜잭션 미커밋 상태의 값을 일관되게 반환)."""
+
+    from .session_memory.memory_card import validate_memory_card_envelope
+
+    validated = validate_memory_card_envelope(card)
+    now = datetime.now(timezone.utc).isoformat()
+    accepted_at = (
+        str(validated.get("approved_at") or now)
+        if validated["lifecycle_state"] in {"accepted", "human_accepted", "auto_accepted"}
+        else ""
+    )
+    hash_source = dict(validated)
+    hash_source.pop("content_hash", None)
+    hash_source.pop("card_hash", None)
+    content_hash = _sha256_text(
+        json.dumps(hash_source, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    )
+    validated["content_hash"] = content_hash
+    validated["card_hash"] = content_hash
+    envelope_json = json.dumps(validated, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    connection.execute(
+        """
+        INSERT INTO llm_brain_memory_cards (
+            memory_id, brain_id, card_type, project, provider,
+            lifecycle_state, judgment_state, approval_state, currentness,
+            status, content_hash, envelope_json, accepted_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(memory_id) DO UPDATE SET
+            brain_id=excluded.brain_id,
+            card_type=excluded.card_type,
+            project=excluded.project,
+            provider=excluded.provider,
+            lifecycle_state=excluded.lifecycle_state,
+            judgment_state=excluded.judgment_state,
+            approval_state=excluded.approval_state,
+            currentness=excluded.currentness,
+            status=excluded.status,
+            content_hash=excluded.content_hash,
+            envelope_json=excluded.envelope_json,
+            accepted_at=excluded.accepted_at,
+            updated_at=excluded.updated_at
+        """,
+        (
+            validated["memory_id"],
+            validated["brain_id"],
+            validated["card_type"],
+            validated["project"],
+            validated["provider"],
+            validated["lifecycle_state"],
+            validated["judgment_state"],
+            validated["approval_state"],
+            validated["currentness"],
+            validated["status"],
+            content_hash,
+            envelope_json,
+            accepted_at,
+            now,
+        ),
+    )
+    row = connection.execute(
+        "SELECT envelope_json FROM llm_brain_memory_cards WHERE memory_id = ?",
+        (validated["memory_id"],),
+    ).fetchone()
+    if row is None:
+        # 방금 upsert 한 행이라 정상 경로에선 발생하지 않는다. 이상 상태는 opaque TypeError 대신
+        # 명확한 에러로 fail-closed 한다.
+        raise ValueError("llm_brain memory card not found after upsert")
+    return json.loads(row["envelope_json"])
+
+
+def upsert_llm_brain_feedback_record_on(connection, record: dict) -> dict:
+    """주입된 connection 으로 llm_brain feedback record 를 upsert 한다(commit/connect 하지 않음)."""
+
+    from .session_memory.memory_card import validate_feedback_record
+
+    validated = validate_feedback_record(record)
+    created_at = str(validated.get("timestamp") or datetime.now(timezone.utc).isoformat())
+    record_json = json.dumps(validated, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    connection.execute(
+        """
+        INSERT INTO llm_brain_feedback_records (
+            feedback_id, memory_id, decision_id, repo_id, final_status,
+            user_action, conflict_state, record_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(feedback_id) DO UPDATE SET
+            memory_id=excluded.memory_id,
+            decision_id=excluded.decision_id,
+            repo_id=excluded.repo_id,
+            final_status=excluded.final_status,
+            user_action=excluded.user_action,
+            conflict_state=excluded.conflict_state,
+            record_json=excluded.record_json,
+            created_at=excluded.created_at
+        """,
+        (
+            validated["feedback_id"],
+            validated["memory_id"],
+            validated["decision_id"],
+            validated["repo_id"],
+            validated["final_status"],
+            validated["user_action"],
+            validated["conflict_state"],
+            record_json,
+            created_at,
+        ),
+    )
+    row = connection.execute(
+        "SELECT record_json FROM llm_brain_feedback_records WHERE feedback_id = ?",
+        (validated["feedback_id"],),
+    ).fetchone()
+    if row is None:
+        raise ValueError("llm_brain feedback record not found after upsert")
+    return json.loads(row["record_json"])
+
+
 class NativeMemoryMixin:
     """Native Memory & Memory Cards Synchronization — ledger.py god-class에서 분할(behavior-preserving).
 
@@ -100,65 +220,8 @@ class NativeMemoryMixin:
             ).fetchall()
         return [dict(row) for row in rows]
     def upsert_llm_brain_memory_card(self, card: dict) -> dict:
-        from .session_memory.memory_card import validate_memory_card_envelope
-
-        validated = validate_memory_card_envelope(card)
-        now = datetime.now(timezone.utc).isoformat()
-        accepted_at = (
-            str(validated.get("approved_at") or now)
-            if validated["lifecycle_state"] in {"accepted", "human_accepted", "auto_accepted"}
-            else ""
-        )
-        hash_source = dict(validated)
-        hash_source.pop("content_hash", None)
-        hash_source.pop("card_hash", None)
-        content_hash = _sha256_text(
-            json.dumps(hash_source, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-        )
-        validated["content_hash"] = content_hash
-        validated["card_hash"] = content_hash
-        envelope_json = json.dumps(validated, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO llm_brain_memory_cards (
-                    memory_id, brain_id, card_type, project, provider,
-                    lifecycle_state, judgment_state, approval_state, currentness,
-                    status, content_hash, envelope_json, accepted_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(memory_id) DO UPDATE SET
-                    brain_id=excluded.brain_id,
-                    card_type=excluded.card_type,
-                    project=excluded.project,
-                    provider=excluded.provider,
-                    lifecycle_state=excluded.lifecycle_state,
-                    judgment_state=excluded.judgment_state,
-                    approval_state=excluded.approval_state,
-                    currentness=excluded.currentness,
-                    status=excluded.status,
-                    content_hash=excluded.content_hash,
-                    envelope_json=excluded.envelope_json,
-                    accepted_at=excluded.accepted_at,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    validated["memory_id"],
-                    validated["brain_id"],
-                    validated["card_type"],
-                    validated["project"],
-                    validated["provider"],
-                    validated["lifecycle_state"],
-                    validated["judgment_state"],
-                    validated["approval_state"],
-                    validated["currentness"],
-                    validated["status"],
-                    content_hash,
-                    envelope_json,
-                    accepted_at,
-                    now,
-                ),
-            )
-        return self.get_llm_brain_memory_card(validated["memory_id"])
+            return upsert_llm_brain_memory_card_on(connection, card)
     def get_llm_brain_memory_card(self, memory_id: str) -> dict | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -235,41 +298,8 @@ class NativeMemoryMixin:
             ).fetchall()
         return [json.loads(row["envelope_json"]) for row in rows]
     def upsert_llm_brain_feedback_record(self, record: dict) -> dict:
-        from .session_memory.memory_card import validate_feedback_record
-
-        validated = validate_feedback_record(record)
-        created_at = str(validated.get("timestamp") or datetime.now(timezone.utc).isoformat())
-        record_json = json.dumps(validated, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO llm_brain_feedback_records (
-                    feedback_id, memory_id, decision_id, repo_id, final_status,
-                    user_action, conflict_state, record_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(feedback_id) DO UPDATE SET
-                    memory_id=excluded.memory_id,
-                    decision_id=excluded.decision_id,
-                    repo_id=excluded.repo_id,
-                    final_status=excluded.final_status,
-                    user_action=excluded.user_action,
-                    conflict_state=excluded.conflict_state,
-                    record_json=excluded.record_json,
-                    created_at=excluded.created_at
-                """,
-                (
-                    validated["feedback_id"],
-                    validated["memory_id"],
-                    validated["decision_id"],
-                    validated["repo_id"],
-                    validated["final_status"],
-                    validated["user_action"],
-                    validated["conflict_state"],
-                    record_json,
-                    created_at,
-                ),
-            )
-        return self.get_llm_brain_feedback_record(validated["feedback_id"])
+            return upsert_llm_brain_feedback_record_on(connection, record)
     def get_llm_brain_feedback_record(self, feedback_id: str) -> dict | None:
         with self._connect() as connection:
             row = connection.execute(

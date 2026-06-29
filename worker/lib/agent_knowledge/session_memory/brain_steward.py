@@ -349,9 +349,11 @@ class BrainStewardService:
         rejection = human_reject_memory_card_candidate(
             candidate, rejected_by=rejected_by, decision_id=decision_id, reason=reason
         )
-        stored = self.ledger.upsert_llm_brain_memory_card(rejection["rejected_card"])
-        # audit: authority 를 바꾸는 restricted 결정에 feedback record 를 남긴다(M4).
-        self.ledger.upsert_llm_brain_feedback_record(rejection["feedback_record"])
+        # card + audit 를 한 트랜잭션으로 묶어 부분 커밋을 막는다(#49).
+        with self.ledger._transaction() as tx:
+            stored = tx.upsert_llm_brain_memory_card(rejection["rejected_card"])
+            # audit: authority 를 바꾸는 restricted 결정에 feedback record 를 남긴다(M4).
+            tx.upsert_llm_brain_feedback_record(rejection["feedback_record"])
         return self._safe_restricted_result(
             {
                 "schema_version": "brain_steward_candidate_rejection.v1",
@@ -404,7 +406,6 @@ class BrainStewardService:
         target_id = str(proposal.get("steward_target_memory_id") or "")
         target = self._load_current_target(target_id, what="stale")
         committed_at = datetime.now(timezone.utc).isoformat()
-        demoted = self.ledger.upsert_llm_brain_memory_card(commit_stale(target, timestamp=committed_at))
         # proposal 을 검토 큐에서 제거하기 위해 종료(committed) 상태로 전이한다. currentness=stale 은
         # 유지되어 authority/recall lane 에는 들어가지 않는다. 다른 accepted card 와 일관되게
         # approver/시각도 기록하고, audit feedback 과 같은 timestamp 를 쓴다.
@@ -420,21 +421,24 @@ class BrainStewardService:
                 "steward_commit_state": "committed",
             }
         )
-        stored_proposal = self.ledger.upsert_llm_brain_memory_card(committed)
-        # audit: stale 확정에 feedback record 를 남긴다(M4).
-        self.ledger.upsert_llm_brain_feedback_record(
-            build_feedback_record(
-                candidate=committed,
-                decision_id=decision_id,
-                proposed_status="needs_review",
-                final_status="accepted",
-                user_action="approve",
-                model_reason="stale proposal committed; target demoted to stale",
-                confidence=float(committed.get("confidence") or 0),
-                conflict_state="none",
-                timestamp=committed_at,
+        # target demote + proposal 종료 + audit 를 한 트랜잭션으로 묶는다. 중간 실패 시 전부 rollback(#49).
+        with self.ledger._transaction() as tx:
+            demoted = tx.upsert_llm_brain_memory_card(commit_stale(target, timestamp=committed_at))
+            stored_proposal = tx.upsert_llm_brain_memory_card(committed)
+            # audit: stale 확정에 feedback record 를 남긴다(M4).
+            tx.upsert_llm_brain_feedback_record(
+                build_feedback_record(
+                    candidate=committed,
+                    decision_id=decision_id,
+                    proposed_status="needs_review",
+                    final_status="accepted",
+                    user_action="approve",
+                    model_reason="stale proposal committed; target demoted to stale",
+                    confidence=float(committed.get("confidence") or 0),
+                    conflict_state="none",
+                    timestamp=committed_at,
+                )
             )
-        )
         return {
             "schema_version": "brain_steward_stale_commit.v1",
             "canonical_write_performed": True,
