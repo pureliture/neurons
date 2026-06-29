@@ -568,10 +568,10 @@ def _statefulset_resource(*, name: str, namespace: str, image: str, container_po
                         "name": f"{name}-data",
                         "annotations": {"neurons.scale/storage": "ops-defined"},
                     },
-                    # storageClassName + real request size are overlay-owned (PVC sizing). A
-                    # safe-default 1Gi request keeps the PVC schema valid; overlay patches the
-                    # real size.
-                    "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": "1Gi"}}},
+                    # storageClassName + request size are overlay-owned (PVC sizing). The size is
+                    # left out on purpose: a public count is never embedded, and a bare base apply
+                    # fails closed until the overlay patches storage in.
+                    "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {}}},
                 }
             ],
         },

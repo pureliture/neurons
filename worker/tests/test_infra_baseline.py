@@ -560,8 +560,9 @@ def test_scale_out_manifest_bundle_classifies_workloads_without_leaking_counts()
     assert sts is not None
     assert _resource(bundle, "Deployment", "ledger-postgres") is None
     assert _resource(bundle, "Service", "ledger-postgres-headless")["spec"]["clusterIP"] == "None"
-    # PVC carries a safe-default storage request so the schema validates; real sizing is overlay-patched.
-    assert sts["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"] == "1Gi"
+    # PVC carries NO storage size: size is overlay-owned. Leaving requests empty makes a
+    # bare base apply fail closed (overlay must patch the size in) rather than leaking a count.
+    assert "storage" not in sts["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]
 
     # tailscale_private still attaches the namespace-scoped NetworkPolicy.
     assert _resource(bundle, "NetworkPolicy", "tailscale-private-only") is not None
