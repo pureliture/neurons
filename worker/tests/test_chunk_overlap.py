@@ -5,6 +5,8 @@ one (turn-window containment + text containment), and collapse exact duplicates"
 reused by both the canonical M3 materializer and the regeneration path.
 """
 
+import hashlib
+
 from agent_knowledge.session_memory.chunk_overlap import (
     ChunkView,
     canonicalize_chunk_views,
@@ -13,7 +15,7 @@ from agent_knowledge.session_memory.chunk_overlap import (
 
 def _view(text, *, turn_start, turn_end, content_hash=None, part_index=1, part_count=1, char_start=0, char_end=0, redaction_version="redaction.v2"):
     return ChunkView(
-        content_hash=content_hash if content_hash is not None else f"sha256:{abs(hash(text)):064x}"[:71],
+        content_hash=content_hash if content_hash is not None else "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest(),
         turn_start_index=turn_start,
         turn_end_index=turn_end,
         part_index=part_index,

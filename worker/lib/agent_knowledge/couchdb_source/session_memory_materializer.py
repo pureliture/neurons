@@ -147,16 +147,18 @@ def update_coverage_with_tool_evidence(*, session_id_hash: str, store: CouchDBSo
 
 
 def _chunk_to_view(chunk: dict) -> ChunkView:
+    # `... or <default>` (not get's default) so a present-but-None field coerces to the
+    # default rather than the string "None"/an int error.
     return ChunkView(
-        content_hash=str(chunk.get("content_hash", "")),
-        turn_start_index=int(chunk.get("turn_start_index", 0) or 0),
-        turn_end_index=int(chunk.get("turn_end_index", 0) or 0),
-        part_index=int(chunk.get("part_index", 1) or 1),
-        part_count=int(chunk.get("part_count", 1) or 1),
-        char_start=int(chunk.get("char_start", 0) or 0),
-        char_end=int(chunk.get("char_end", 0) or 0),
-        redaction_version=str(chunk.get("redaction_version", "")),
-        text=str(chunk.get("body", "")),
+        content_hash=str(chunk.get("content_hash") or ""),
+        turn_start_index=int(chunk.get("turn_start_index") or 0),
+        turn_end_index=int(chunk.get("turn_end_index") or 0),
+        part_index=int(chunk.get("part_index") or 1),
+        part_count=int(chunk.get("part_count") or 1),
+        char_start=int(chunk.get("char_start") or 0),
+        char_end=int(chunk.get("char_end") or 0),
+        redaction_version=str(chunk.get("redaction_version") or ""),
+        text=str(chunk.get("body") or ""),
     )
 
 

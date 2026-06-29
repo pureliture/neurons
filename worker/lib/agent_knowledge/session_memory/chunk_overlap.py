@@ -13,6 +13,7 @@ is identical on every path. The functions are pure (no IO, no mutation of inputs
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from ..redaction import redact_public_ingress_text
@@ -105,7 +106,7 @@ def chunk_turn_window_strictly_contains(container, candidate) -> bool:
     )
 
 
-def canonicalize_chunk_views(views) -> tuple[list[ChunkView], dict]:
+def canonicalize_chunk_views(views: Iterable[ChunkView]) -> tuple[list[ChunkView], dict]:
     """Drop exact duplicates and subsumed (shorter, contained) chunks.
 
     Returns (kept_views_in_input_order, report). Input order of survivors is
