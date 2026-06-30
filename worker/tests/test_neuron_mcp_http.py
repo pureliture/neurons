@@ -20,6 +20,7 @@ from agent_knowledge.mcp_server import list_tools  # noqa: E402
 @pytest.fixture(autouse=True)
 def _default_kubernetes_pod_cidr(monkeypatch):
     monkeypatch.delenv("KUBERNETES_POD_CIDR", raising=False)
+    monkeypatch.delenv("MCP_HTTP_ALLOWED_HOSTS", raising=False)
 
 
 # --- 테스트용 stub service (transport 경로만 검증; 실 ledger/graph 불필요) ---
@@ -55,10 +56,10 @@ class _StubService:
 # --- _to_sdk_tools: 스키마 무변형 매핑 ---
 
 
-def test_to_sdk_tools_maps_ten_without_mutation():
+def test_to_sdk_tools_maps_all_tools_without_mutation():
     sdk_tools = mh._to_sdk_tools()
     source = list_tools()
-    assert len(sdk_tools) == 10
+    assert len(sdk_tools) == len(source)
     assert {t.name for t in sdk_tools} == {t["name"] for t in source}
     by_name = {t["name"]: t for t in source}
     for tool in sdk_tools:
@@ -200,6 +201,130 @@ def test_transport_security_settings_cover_tailnet_without_loopback_aliases():
         "http://[fd7a:115c:a1e0::1]",
         "http://[fd7a:115c:a1e0::1]:8765",
     ]
+
+
+def test_transport_security_settings_adds_configured_allowed_hosts_and_https_origins():
+    settings = mh._transport_security_settings(
+        "10.42.0.31",
+        8765,
+        additional_allowed_hosts=[
+            "mcp.example.test",
+            "mcp.example.test:5443",
+            "mcp.example.test",
+        ],
+    )
+
+    assert settings.enable_dns_rebinding_protection is True
+    assert settings.allowed_hosts == [
+        "10.42.0.31",
+        "10.42.0.31:8765",
+        "mcp.example.test",
+        "mcp.example.test:5443",
+    ]
+    assert "https://mcp.example.test" in settings.allowed_origins
+    assert "https://mcp.example.test:5443" in settings.allowed_origins
+    assert "http://mcp.example.test" not in settings.allowed_origins
+
+
+def test_configured_allowed_hosts_reads_env_csv():
+    hosts = mh._configured_allowed_hosts(
+        {
+            "MCP_HTTP_ALLOWED_HOSTS": (
+                " MCP.Example.Test, mcp.example.test:5443, ,mcp.example.test "
+            )
+        }
+    )
+
+    assert hosts == ("mcp.example.test", "mcp.example.test:5443")
+
+
+def test_normalize_allowed_host_lowercases_dns_and_ipv6_literals():
+    assert mh._normalize_allowed_host("MCP.Example.Test:5443") == "mcp.example.test:5443"
+    assert mh._normalize_allowed_host("[FD7A:115C:A1E0::1]:5443") == (
+        "[fd7a:115c:a1e0::1]:5443"
+    )
+
+
+def test_transport_security_settings_reads_env_allowed_hosts(monkeypatch):
+    monkeypatch.setenv("MCP_HTTP_ALLOWED_HOSTS", "MCP.Example.Test,mcp.example.test:5443")
+
+    settings = mh._transport_security_settings("10.42.0.31", 8765)
+
+    assert "mcp.example.test" in settings.allowed_hosts
+    assert "mcp.example.test:5443" in settings.allowed_hosts
+    assert "https://mcp.example.test" in settings.allowed_origins
+    assert "https://mcp.example.test:5443" in settings.allowed_origins
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "https://mcp.example.test",
+        "mcp.example.test/mcp",
+        "mcp.example.test?debug=true",
+        "user@mcp.example.test",
+        "*.example.test",
+        "mcp.example.test:+5443",
+        "mcp.example.test:1_000",
+        "mcp.example.test:bad",
+        "fd7a:115c:a1e0::1",
+        "fd7a:115c:a1e0::1:5443",
+    ],
+)
+def test_normalize_allowed_host_rejects_invalid_authorities(raw):
+    with pytest.raises(ValueError, match="MCP_HTTP_ALLOWED_HOSTS"):
+        mh._normalize_allowed_host(raw)
+
+
+def test_mcp_http_cli_passes_allowed_hosts(monkeypatch):
+    from agent_knowledge import cli as cli_mod
+
+    captured = {}
+
+    def _fake_serve(service, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli_mod, "_build_recall_service", lambda _args: _StubService())
+    monkeypatch.setattr(mh, "serve", _fake_serve)
+
+    rc = cli_mod._mcp_http_main(
+        [
+            "--ledger",
+            "/tmp/placeholder.sqlite",
+            "--allowed-host",
+            "mcp.example.test",
+            "--allowed-host",
+            "mcp.example.test:5443",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["allowed_hosts"] == ("mcp.example.test", "mcp.example.test:5443")
+
+
+def test_mcp_http_cli_validates_allowed_hosts_before_service_wiring(monkeypatch, capsys):
+    from agent_knowledge import cli as cli_mod
+
+    service_wired = {"called": False}
+
+    def _build_service(_args):
+        service_wired["called"] = True
+        return _StubService()
+
+    monkeypatch.setattr(cli_mod, "_build_recall_service", _build_service)
+
+    rc = cli_mod._mcp_http_main(
+        [
+            "--ledger",
+            "/tmp/placeholder.sqlite",
+            "--allowed-host",
+            "mcp.example.test:+5443",
+        ]
+    )
+
+    assert rc == 2
+    assert service_wired["called"] is False
+    assert "MCP_HTTP_ALLOWED_HOSTS" in capsys.readouterr().err
 
 
 def test_build_app_loopback_has_routes():
@@ -366,10 +491,66 @@ def test_initialize_list_and_call_over_http(http_base):
                 return tools, called
 
     tools, called = asyncio.run(_roundtrip())
-    assert len(tools.tools) == 10
+    assert len(tools.tools) == len(list_tools())
     assert "knowledge.search" in {t.name for t in tools.tools}
     assert called.isError is False
     assert called.structuredContent == {"results": [{"knowledge_id": "kx"}]}
+
+
+def _post_mcp_initialize(base: str, *, host: str, origin: str | None = None) -> httpx.Response:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "probe", "version": "0"},
+        },
+    }
+    headers = {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "host": host,
+    }
+    if origin is not None:
+        headers["origin"] = origin
+    return httpx.post(f"{base}/mcp", headers=headers, json=payload, timeout=2)
+
+
+def test_mcp_route_enforces_configured_host_and_origin_allowlist():
+    port = _free_port()
+    app = mh.build_app(_StubService(), port=port, allowed_hosts=["mcp.example.test"])
+
+    with _ServerThread(app, port) as base:
+        allowed = _post_mcp_initialize(
+            base, host="mcp.example.test", origin="https://mcp.example.test"
+        )
+        bad_host = _post_mcp_initialize(
+            base, host="evil.example.test", origin="https://mcp.example.test"
+        )
+        bad_origin = _post_mcp_initialize(
+            base, host="mcp.example.test", origin="https://evil.example.test"
+        )
+
+    assert allowed.status_code == 200
+    assert bad_host.status_code == 421
+    assert bad_origin.status_code == 403
+
+
+def test_healthz_liveness_remains_static_while_mcp_fails_closed_on_bad_host():
+    port = _free_port()
+    app = mh.build_app(_StubService(), port=port, allowed_hosts=["mcp.example.test"])
+
+    with _ServerThread(app, port) as base:
+        healthz = httpx.get(f"{base}/healthz", headers={"host": "evil.example.test"}, timeout=2)
+        mcp = _post_mcp_initialize(
+            base, host="evil.example.test", origin="https://mcp.example.test"
+        )
+
+    assert healthz.status_code == 200
+    assert healthz.json() == {"status": "ok"}
+    assert mcp.status_code == 421
 
 
 def test_http_call_refreshes_brain_card_cache_per_request():
@@ -409,4 +590,6 @@ def test_stateless_two_independent_sessions(http_base):
         return first, second
 
     first, second = asyncio.run(_both())
-    assert len(first) == 10 and len(second) == 10
+    expected_tool_count = len(list_tools())
+    assert len(first) == expected_tool_count
+    assert len(second) == expected_tool_count
