@@ -59,3 +59,21 @@ jobs:
         # --group dev: pytest는 dev dependency group으로 선언돼 있어 명시적으로 설치해야
         # clean 러너(전역 pytest 없음)에서 `Failed to spawn: pytest`가 나지 않는다.
         run: uv run --group dev pytest -q
+
+  worker-mcp-http-pytest:
+    name: worker mcp-http pytest (uv)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run MCP HTTP pytest
+        working-directory: worker
+        # mcp-http는 optional extra라 base worker job에서는 skip된다.
+        # 이 job은 transport 보안/Host-Origin 회귀를 PR status로 고정한다.
+        run: uv run --group dev --extra mcp-http pytest tests/test_neuron_mcp_http.py -q

@@ -393,19 +393,19 @@ services:
     restart: unless-stopped
     network_mode: host
     command:
-      - neuron-knowledge
-      - mcp-http
-      - --ledger
-      - /app/state/ledger.sqlite
-      - --host
-      - ${MCP_HTTP_HOST:?set MCP_HTTP_HOST to the tailnet IP (never 0.0.0.0)}
-      - --port
-      - ${MCP_HTTP_PORT:-8765}
-      - --allow-non-loopback
-      - --enable-graph
-      # graph-required: Neo4j/wrapper 미가용 시 기동 거부(advisor recall은 graph 중심).
-      # degrade 기동을 원하면 이 플래그를 제거한다.
-      - --graph-required
+      - /bin/sh
+      - -c
+      - |
+        if [ -n "$${MCP_HTTP_ALLOWED_HOSTS_FROM_COMPOSE:-}" ]; then
+          export MCP_HTTP_ALLOWED_HOSTS="$${MCP_HTTP_ALLOWED_HOSTS_FROM_COMPOSE}"
+        fi
+        exec neuron-knowledge mcp-http \
+          --ledger /app/state/ledger.sqlite \
+          --host "$${MCP_HTTP_HOST}" \
+          --port "$${MCP_HTTP_PORT:-8765}" \
+          --allow-non-loopback \
+          --enable-graph \
+          --graph-required
     env_file:
       # graph LLM/embedding 키(LLM_BRAIN_EMBEDDING_*·LLM_BRAIN_LLM_*·
       # LLM_BRAIN_GRAPH_LLM_PROVIDER·LLM_BRAIN_GRAPH_EXTRACT_ENTITIES·API key 등)는
@@ -419,6 +419,12 @@ services:
       LLM_BRAIN_NEO4J_URI: ${LLM_BRAIN_NEO4J_URI:-bolt://127.0.0.1:17687}
       LLM_BRAIN_NEO4J_USER: ${LLM_BRAIN_NEO4J_USER:-neo4j}
       LLM_BRAIN_NEO4J_PASSWORD: ${LLM_BRAIN_NEO4J_PASSWORD:?set LLM_BRAIN_NEO4J_PASSWORD}
+      MCP_HTTP_HOST: ${MCP_HTTP_HOST:?set MCP_HTTP_HOST to the tailnet IP (never 0.0.0.0)}
+      MCP_HTTP_PORT: ${MCP_HTTP_PORT:-8765}
+      # Do not set MCP_HTTP_ALLOWED_HOSTS directly here: environment overrides env_file.
+      # The wrapper promotes compose-project .env only when non-empty, while brain env
+      # file MCP_HTTP_ALLOWED_HOSTS remains the canonical in-container fallback.
+      MCP_HTTP_ALLOWED_HOSTS_FROM_COMPOSE: ${MCP_HTTP_ALLOWED_HOSTS:-}
       # 실 ledger는 PG. open_read_only의 --ledger 파일은 placeholder. network_mode host면 DSN host=127.0.0.1.
       NEURON_LEDGER_PG_DSN: ${NEURON_LEDGER_PG_DSN:?set NEURON_LEDGER_PG_DSN (PG ledger)}
     healthcheck:

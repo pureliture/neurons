@@ -81,6 +81,18 @@ class ComposeConfigTest {
     }
 
     @Test
+    void mcpHttpServicePreservesEnvFileAllowedHostsFallback() throws IOException {
+        String mcpService = serviceBlock(
+            Files.readString(Path.of("compose.yaml")),
+            "neuron-knowledge-mcp"
+        );
+
+        assertThat(mcpService).contains("MCP_HTTP_ALLOWED_HOSTS_FROM_COMPOSE: ${MCP_HTTP_ALLOWED_HOSTS:-}");
+        assertThat(mcpService).contains("export MCP_HTTP_ALLOWED_HOSTS=");
+        assertThat(mcpService).doesNotContain("MCP_HTTP_ALLOWED_HOSTS: ${MCP_HTTP_ALLOWED_HOSTS:-}");
+    }
+
+    @Test
     void envExampleKeepsLlmBrainSecretsAsPlaceholders() throws IOException {
         String envExample = Files.readString(Path.of(".env.example"));
 
@@ -133,5 +145,22 @@ class ComposeConfigTest {
         assertThat(missing)
             .as("required ${VAR:?} compose vars missing from .env.example")
             .isEmpty();
+    }
+
+    private static String serviceBlock(String compose, String serviceName) {
+        String header = "  " + serviceName + ":\n";
+        int start = compose.indexOf(header);
+        assertThat(start).as("service exists: " + serviceName).isGreaterThanOrEqualTo(0);
+
+        var nextService = java.util.regex.Pattern.compile("(?m)^  [A-Za-z0-9_-]+:\\s*$")
+            .matcher(compose);
+        int end = compose.length();
+        while (nextService.find()) {
+            if (nextService.start() > start) {
+                end = nextService.start();
+                break;
+            }
+        }
+        return compose.substring(start, end);
     }
 }

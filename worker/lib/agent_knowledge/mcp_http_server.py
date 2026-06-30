@@ -22,6 +22,7 @@ import ipaddress
 import logging
 import os
 import traceback
+from collections.abc import Sequence
 from typing import Any
 
 from mcp import types as mcp_types
@@ -51,6 +52,7 @@ _TAILNET_NETWORKS = (
 )
 _KUBERNETES_POD_CIDR_ENV = "KUBERNETES_POD_CIDR"
 _DEFAULT_KUBERNETES_POD_CIDRS = "10.42.0.0/16"
+_MCP_HTTP_ALLOWED_HOSTS_ENV = "MCP_HTTP_ALLOWED_HOSTS"
 
 
 def _is_tailnet_address(host: str) -> bool:
@@ -99,7 +101,102 @@ def _is_loopback_address(host: str) -> bool:
         return host == "localhost"
 
 
-def _transport_security_settings(host: str, port: int) -> TransportSecuritySettings:
+def _dedupe(values: list[str]) -> list[str]:
+    deduped = []
+    seen = set()
+    for value in values:
+        if value not in seen:
+            deduped.append(value)
+            seen.add(value)
+    return deduped
+
+
+def _invalid_allowed_host() -> ValueError:
+    return ValueError(f"invalid {_MCP_HTTP_ALLOWED_HOSTS_ENV} authority")
+
+
+def _validate_port(port: str) -> None:
+    if not port.isascii() or not port.isdecimal():
+        raise _invalid_allowed_host()
+    try:
+        parsed = int(port)
+    except ValueError as exc:
+        raise _invalid_allowed_host() from exc
+    if parsed < 1 or parsed > 65535:
+        raise _invalid_allowed_host()
+
+
+def _normalize_allowed_host(raw_host: str) -> str:
+    host = raw_host.strip()
+    if (
+        not host
+        or any(char.isspace() for char in host)
+        or "://" in host
+        or "/" in host
+        or "?" in host
+        or "#" in host
+        or "@" in host
+        or "*" in host
+    ):
+        raise _invalid_allowed_host()
+
+    if host.startswith("["):
+        end = host.find("]")
+        if end == -1:
+            raise _invalid_allowed_host()
+        literal = host[1:end]
+        try:
+            addr = ipaddress.ip_address(literal)
+        except ValueError as exc:
+            raise _invalid_allowed_host() from exc
+        if addr.version != 6:
+            raise _invalid_allowed_host()
+        remainder = host[end + 1 :]
+        if remainder:
+            if not remainder.startswith(":") or not remainder[1:]:
+                raise _invalid_allowed_host()
+            _validate_port(remainder[1:])
+        return f"[{addr}]{remainder}"
+
+    if host.count(":") > 1:
+        raise _invalid_allowed_host()
+
+    if ":" in host:
+        name, raw_port = host.rsplit(":", 1)
+        if not name or not raw_port:
+            raise _invalid_allowed_host()
+        _validate_port(raw_port)
+        return f"{name.lower()}:{raw_port}"
+    return host.lower()
+
+
+def _configured_allowed_hosts(environ: dict[str, str] | None = None) -> tuple[str, ...]:
+    raw = (environ if environ is not None else os.environ).get(_MCP_HTTP_ALLOWED_HOSTS_ENV, "")
+    hosts = [_normalize_allowed_host(part) for part in raw.split(",") if part.strip()]
+    return tuple(_dedupe(hosts))
+
+
+def resolve_allowed_hosts(
+    additional_allowed_hosts: Sequence[str] = (),
+    *,
+    environ: dict[str, str] | None = None,
+) -> tuple[str, ...]:
+    return tuple(
+        _dedupe(
+            [
+                *_configured_allowed_hosts(environ),
+                *(_normalize_allowed_host(allowed_host) for allowed_host in additional_allowed_hosts),
+            ]
+        )
+    )
+
+
+def _transport_security_settings(
+    host: str,
+    port: int,
+    *,
+    additional_allowed_hosts: Sequence[str] | None = None,
+) -> TransportSecuritySettings:
     authority = f"{_bracket(host)}:{port}"
     allowed_hosts = [_bracket(host), authority]
     allowed_origins = [f"http://{_bracket(host)}", f"http://{authority}"]
@@ -116,6 +213,15 @@ def _transport_security_settings(host: str, port: int) -> TransportSecuritySetti
         allowed_origins.extend(
             f"http://{alias}" for alias in loopback_hosts if f"http://{alias}" not in allowed_origins
         )
+    normalized_extra_hosts = list(
+        resolve_allowed_hosts()
+        if additional_allowed_hosts is None
+        else resolve_allowed_hosts(additional_allowed_hosts, environ={})
+    )
+    allowed_hosts = _dedupe([*allowed_hosts, *normalized_extra_hosts])
+    allowed_origins = _dedupe(
+        [*allowed_origins, *(f"https://{host}" for host in normalized_extra_hosts)]
+    )
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=allowed_hosts,
@@ -207,6 +313,7 @@ def build_app(
     allow_non_loopback: bool = False,
     allow_kubernetes_pod_ip: bool = False,
     stateless_http: bool = True,
+    allowed_hosts: Sequence[str] | None = None,
 ) -> Starlette:
     # bind 가드: 0.0.0.0은 무조건 거부(전 인터페이스 노출 차단). 비-loopback은
     # --allow-non-loopback + tailnet 대역일 때만 허용한다. k3s canary는 추가 플래그로
@@ -240,7 +347,9 @@ def build_app(
         return await _dispatch_call_tool(service, name, arguments)
 
     # DNS rebinding 보호는 loopback/tailnet 모두 활성화한다.
-    security_settings = _transport_security_settings(host, port)
+    security_settings = _transport_security_settings(
+        host, port, additional_allowed_hosts=allowed_hosts
+    )
 
     session_manager = StreamableHTTPSessionManager(
         app=server,
@@ -266,6 +375,7 @@ def serve(
     port: int = DEFAULT_PORT,
     allow_non_loopback: bool = False,
     allow_kubernetes_pod_ip: bool = False,
+    allowed_hosts: Sequence[str] | None = None,
 ) -> None:
     import uvicorn
 
@@ -276,5 +386,6 @@ def serve(
         allow_non_loopback=allow_non_loopback,
         allow_kubernetes_pod_ip=allow_kubernetes_pod_ip,
         stateless_http=True,
+        allowed_hosts=allowed_hosts,
     )
     uvicorn.run(app, host=host, port=int(port), log_level="warning")
