@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Ingress API Profile Startup Requirements</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.55; margin: 40px; max-width: 980px; color: #1f2937; }
+    h1, h2, h3 { color: #111827; }
+    code { background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #d1d5db; padding: 0.5rem; text-align: left; }
+    th { background: #f9fafb; }
+  </style>
+</head>
+<body>
+  <h1>Ingress API Profile Startup Requirements</h1>
+  <h2>승인 대상</h2>
+  <ul>
+    <li>Source of truth: <code>requirements.md</code></li>
+    <li>Preview companion: <code>requirements.html</code></li>
+  </ul>
+  <h2>요약</h2>
+  <p><code>ingress-api</code>는 <code>SPRING_PROFILES_ACTIVE=api</code> 단독으로 떠야 한다. target adapter가 없으면 앱을 죽이지 않고 <code>/status</code>에서 <code>not_configured</code> degraded 상태를 표현한다.</p>
+  <h2>핵심 결정</h2>
+  <p><code>api &amp; !worker &amp; !retired-index-bridge</code> profile 전용 fallback <code>RagTargetAdapter</code> bean을 둔다. 실제 adapter profile 또는 worker profile이 켜지면 fallback은 비활성화된다.</p>
+  <h2>검증</h2>
+  <ul>
+    <li>api profile status context smoke</li>
+    <li><code>/healthz</code>와 <code>/status</code> contract test</li>
+    <li>기존 retired-index-bridge와 worker 관련 test 유지</li>
+    <li>Java test와 boot jar build</li>
+  </ul>
+</body>
+</html>

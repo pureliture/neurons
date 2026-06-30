@@ -174,8 +174,10 @@ class IngressControllerTest {
     void statusReturnsRedactedQueueAndTargetSummary() throws Exception {
         String response = mockMvc.perform(get("/status"))
             .andExpect(status().isOk())
+            .andExpect(jsonPath("$.externalStatus").value("not_configured"))
             .andExpect(jsonPath("$.queue.pending").value(0))
             .andExpect(jsonPath("$.target.pressure").value("CLOSED"))
+            .andExpect(jsonPath("$.target.reason").value("not_configured"))
             .andReturn()
             .getResponse()
             .getContentAsString();
