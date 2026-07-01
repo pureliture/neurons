@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MCP HTTP Allowed Hosts Requirements</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; max-width: 920px; margin: 40px auto; padding: 0 20px; color: #1f2937; }
+    h1, h2, h3 { line-height: 1.25; color: #111827; }
+    code { background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #d1d5db; padding: 0.5rem; text-align: left; vertical-align: top; }
+    th { background: #f9fafb; }
+  </style>
+</head>
+<body>
+  <h1>MCP HTTP Allowed Hosts Requirements</h1>
+  <p><strong>Source of truth:</strong> <code>requirements.md</code></p>
+  <p><strong>Preview companion:</strong> <code>requirements.html</code></p>
+  <p><strong>승인 상태:</strong> 사용자가 <code>requirements.md</code>와 후속 <code>design.md</code>를 사전 승인함.</p>
+
+  <h2>핵심 요구</h2>
+  <ul>
+    <li><code>neuron-knowledge mcp-http</code>는 반복 가능한 <code>--allowed-host</code>를 지원한다.</li>
+    <li><code>MCP_HTTP_ALLOWED_HOSTS</code>는 comma-separated 추가 Host/authority 목록을 지원한다.</li>
+    <li>Compose MCP service는 brain env file fallback을 보존하고, project env 값이 있을 때만 canonical env로 승격한다.</li>
+    <li>추가 Host는 <code>TransportSecuritySettings.allowed_hosts</code>에 들어간다.</li>
+    <li>추가 Host마다 <code>https://&lt;authority&gt;</code> origin도 함께 허용한다.</li>
+    <li>DNS rebinding 보호, loopback/tailnet/Pod IP bind guard, optional extra 구조는 유지한다.</li>
+    <li>실제 운영 hostname과 private 값은 public repo 산출물에 기록하지 않는다.</li>
+  </ul>
+
+  <h2>범위</h2>
+  <p>수정 주 레포는 <code>neurons</code>이며, <code>neurons-ops</code> 배포값 변경은 이번 PR 범위 밖이다.</p>
+</body>
+</html>
