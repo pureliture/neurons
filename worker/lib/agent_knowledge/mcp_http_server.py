@@ -22,7 +22,7 @@ import ipaddress
 import logging
 import os
 import traceback
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from mcp import types as mcp_types
@@ -112,7 +112,9 @@ def _dedupe(values: list[str]) -> list[str]:
 
 
 def _invalid_allowed_host() -> ValueError:
-    return ValueError(f"invalid {_MCP_HTTP_ALLOWED_HOSTS_ENV} authority")
+    return ValueError(
+        f"invalid allowed host authority ({_MCP_HTTP_ALLOWED_HOSTS_ENV} or --allowed-host)"
+    )
 
 
 def _validate_port(port: str) -> None:
@@ -170,8 +172,8 @@ def _normalize_allowed_host(raw_host: str) -> str:
     return host.lower()
 
 
-def _configured_allowed_hosts(environ: dict[str, str] | None = None) -> tuple[str, ...]:
-    raw = (environ if environ is not None else os.environ).get(_MCP_HTTP_ALLOWED_HOSTS_ENV, "")
+def _configured_allowed_hosts(environ: Mapping[str, str | None] | None = None) -> tuple[str, ...]:
+    raw = (environ if environ is not None else os.environ).get(_MCP_HTTP_ALLOWED_HOSTS_ENV) or ""
     hosts = [_normalize_allowed_host(part) for part in raw.split(",") if part.strip()]
     return tuple(_dedupe(hosts))
 
@@ -220,7 +222,7 @@ def _transport_security_settings(
     )
     allowed_hosts = _dedupe([*allowed_hosts, *normalized_extra_hosts])
     allowed_origins = _dedupe(
-        [*allowed_origins, *(f"https://{host}" for host in normalized_extra_hosts)]
+        [*allowed_origins, *(f"https://{extra_host}" for extra_host in normalized_extra_hosts)]
     )
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,

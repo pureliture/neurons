@@ -238,6 +238,12 @@ def test_configured_allowed_hosts_reads_env_csv():
     assert hosts == ("mcp.example.test", "mcp.example.test:5443")
 
 
+def test_configured_allowed_hosts_treats_none_env_value_as_empty():
+    hosts = mh._configured_allowed_hosts({"MCP_HTTP_ALLOWED_HOSTS": None})
+
+    assert hosts == ()
+
+
 def test_normalize_allowed_host_lowercases_dns_and_ipv6_literals():
     assert mh._normalize_allowed_host("MCP.Example.Test:5443") == "mcp.example.test:5443"
     assert mh._normalize_allowed_host("[FD7A:115C:A1E0::1]:5443") == (
