@@ -10,7 +10,11 @@ import io.nats.client.JetStreamManagement;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.bean.override.convention.TestBean;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -23,13 +27,13 @@ import static org.assertj.core.api.Assertions.assertThat;
     }
 )
 class ApiProfileStartupSmokeTest {
-    @MockitoBean
+    @TestBean(name = "natsConnection", methodName = "fakeConnection", enforceOverride = true)
     Connection connection;
 
-    @MockitoBean
+    @TestBean(name = "jetStreamManagement", methodName = "fakeJetStreamManagement", enforceOverride = true)
     JetStreamManagement jetStreamManagement;
 
-    @MockitoBean
+    @TestBean(name = "jetStream", methodName = "fakeJetStream", enforceOverride = true)
     JetStream jetStream;
 
     @Autowired
@@ -42,5 +46,37 @@ class ApiProfileStartupSmokeTest {
     void apiProfileStartsWithUnavailableTargetAdapterAndHealthzStaysIndependent() {
         assertThat(targetAdapter).isInstanceOf(UnavailableTargetAdapter.class);
         assertThat(controller.healthz()).containsEntry("status", "ok");
+    }
+
+    static Connection fakeConnection() {
+        return noCallProxy(Connection.class);
+    }
+
+    static JetStreamManagement fakeJetStreamManagement() {
+        return noCallProxy(JetStreamManagement.class);
+    }
+
+    static JetStream fakeJetStream() {
+        return noCallProxy(JetStream.class);
+    }
+
+    private static <T> T noCallProxy(Class<T> type) {
+        InvocationHandler handler = (proxy, method, args) -> {
+            if (method.getDeclaringClass() == Object.class) {
+                return objectMethodValue(proxy, method, args, type);
+            }
+            throw new AssertionError("Unexpected NATS call in api profile startup smoke test: " + method);
+        };
+        Object proxy = Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] {type}, handler);
+        return type.cast(proxy);
+    }
+
+    private static Object objectMethodValue(Object proxy, Method method, Object[] args, Class<?> type) {
+        return switch (method.getName()) {
+            case "equals" -> proxy == args[0];
+            case "hashCode" -> System.identityHashCode(proxy);
+            case "toString" -> "fake-" + type.getSimpleName();
+            default -> throw new AssertionError("Unexpected Object method: " + method);
+        };
     }
 }
