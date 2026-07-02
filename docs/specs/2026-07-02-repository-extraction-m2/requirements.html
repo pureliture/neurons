@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Repository Extraction M2 Requirements</title>
+  <style>
+    body{margin:0;background:#f6f8fb;color:#172033;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.65}
+    main{max-width:980px;margin:0 auto;padding:36px 22px}
+    h1{font-size:38px;line-height:1.05;margin:0 0 12px}
+    h2{margin-top:34px;border-top:1px solid #d8dee9;padding-top:20px}
+    h3{margin-top:24px;color:#2457c5}
+    code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#eef2f7;padding:1px 5px;border-radius:4px}
+    table{width:100%;border-collapse:collapse;background:white}
+    th,td{border:1px solid #d8dee9;padding:10px;text-align:left;vertical-align:top}
+    th{background:#edf2f8}
+    .hero{background:white;border:1px solid #d8dee9;border-radius:8px;padding:22px;box-shadow:0 16px 36px rgba(22,33,52,.08)}
+    .badge{display:inline-block;border-radius:999px;background:#e4f4ec;color:#107255;padding:5px 10px;font-weight:700;font-size:13px}
+    li{margin:6px 0}
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <span class="badge">pre-approved source</span>
+    <h1>Repository Extraction M2 Requirements</h1>
+    <p><code>CurationService.approve</code>를 첫 실제 repository extraction 대상으로 고정한다. production 검증은 read-only evidence로 제한한다.</p>
+  </section>
+  <h2>확정 결정</h2>
+  <ul>
+    <li>기존 승인 트랙 M2 Repository extraction을 구현한다.</li>
+	    <li>첫 caller migration은 <code>CurationService.approve</code>다.</li>
+	    <li><code>MemoryCurationRepository</code> port는 <code>approve_candidate</code> use-case만 소유한다.</li>
+	    <li><code>supersede</code>는 다음 multi-write 후보로 남기며 이번 milestone에서 transaction-safe 완료로 주장하지 않는다.</li>
+	    <li>이번 port는 active use-case seam이며 stable public import contract가 아니다.</li>
+	    <li><code>ILedgerCoreDbAdapter</code>, public <code>UnitOfWork</code>, REST/gRPC Ledger Core API는 범위 밖이다.</li>
+	    <li>production 검증은 read-only evidence만 수행한다.</li>
+	  </ul>
+  <h2>기능 요구사항</h2>
+  <ul>
+    <li><code>CurationService.approve</code>는 repository port를 통해 write flow를 수행한다.</li>
+    <li>기존 <code>CurationService(ledger)</code> construction은 유지한다.</li>
+	    <li>memory card, evidence, candidate approval, profile fact write는 같은 transaction 안에서 실행한다.</li>
+	    <li><code>Ledger._transaction()</code>이 없으면 default repository는 fail-closed 한다.</li>
+	    <li>repository metadata는 첫 실제 caller migration 상태와 public contract 미완료 상태를 함께 보여준다.</li>
+	  </ul>
+  <h2>비기능 요구사항</h2>
+  <table>
+    <tr><th>항목</th><th>요구값</th></tr>
+    <tr><td>Safety</td><td>production mutation, deployment, GC execute, credential edit, RAGFlow/RetiredIndexBridge live call 금지</td></tr>
+    <tr><td>TDD</td><td>code-changing milestone은 red -> green -> refactor</td></tr>
+    <tr><td>Review</td><td>code_simplifier, codebase_architecture_manager, system_architecture_manager로 품질 보정</td></tr>
+  </table>
+</main>
+</body>
+</html>

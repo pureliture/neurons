@@ -5,32 +5,62 @@ from typing import Any, Protocol
 
 
 class MemoryCurationRepository(Protocol):
-    """M2 first repository candidate for curation-owned memory writes."""
+    """Use-case port for curation-owned approval writes."""
 
-    def upsert_memory_candidate(self, candidate: dict) -> Mapping[str, Any]: ...
-
-    def update_memory_candidate_state(
+    def approve_candidate(
         self,
-        candidate_id: str,
-        state: str,
+        candidate: Mapping[str, Any],
+        card: Mapping[str, Any],
         *,
-        reviewed_by: str = "",
-        reason: str = "",
+        approved_by: str,
     ) -> Mapping[str, Any]: ...
 
-    def upsert_memory_card(self, card: dict) -> Mapping[str, Any]: ...
 
-    def add_memory_card_evidence(self, memory_id: str, evidence_refs: list[dict]) -> None: ...
+class LedgerMemoryCurationRepository:
+    """Ledger-backed repository for the first M2 curation caller migration."""
 
-    def upsert_profile_fact(
+    def __init__(self, ledger):
+        self._ledger = ledger
+
+    def approve_candidate(
         self,
+        candidate: Mapping[str, Any],
+        card: Mapping[str, Any],
         *,
-        memory_id: str,
-        project: str,
-        fact_type: str,
-        content_hash: str,
-        state: str,
-    ) -> None: ...
+        approved_by: str,
+    ) -> Mapping[str, Any]:
+        transaction_factory = getattr(self._ledger, "_transaction", None)
+        if transaction_factory is None:
+            raise RuntimeError("LedgerMemoryCurationRepository requires Ledger._transaction")
+        with transaction_factory() as transaction:
+            return self._approve_on(transaction, candidate, card, approved_by=approved_by)
+
+    @staticmethod
+    def _approve_on(
+        transaction,
+        candidate: Mapping[str, Any],
+        card: Mapping[str, Any],
+        *,
+        approved_by: str,
+    ) -> Mapping[str, Any]:
+        card_payload = dict(card)
+        stored = transaction.upsert_memory_card(card_payload)
+        memory_id = str(card_payload["memory_id"])
+        transaction.add_memory_card_evidence(memory_id, list(candidate["evidence_refs"]))
+        transaction.update_memory_candidate_state(
+            str(candidate["candidate_id"]),
+            "approved",
+            reviewed_by=approved_by,
+        )
+        if candidate["candidate_type"] == "user_preference":
+            transaction.upsert_profile_fact(
+                memory_id=memory_id,
+                project=str(card_payload["project"]),
+                fact_type=str(card_payload["card_type"]),
+                content_hash=str(card_payload["content_hash"]),
+                state=str(card_payload.get("state", "active")),
+            )
+        return stored
 
 
 class _MemoryCardRepositoryCandidate(Protocol):
@@ -129,16 +159,17 @@ def repository_candidate_method_matrix() -> list[dict[str, Any]]:
 
 
 def build_repository_extraction_plan() -> dict[str, Any]:
-    """Build the M2 readiness plan without activating a public migration."""
+    """Build the M2 extraction plan for the first migrated curation caller."""
 
     return {
         "schema_version": "agent_knowledge_repository_extraction_plan.v1",
         "milestone": "M2",
-        "mode": "readiness_only",
+        "mode": "first_caller_migration",
         "first_candidate": {
             "name": "memory_curation",
             "port": "MemoryCurationRepository",
-            "activation_state": "readiness_only",
+            "adapter": "LedgerMemoryCurationRepository",
+            "activation_state": "active_for_curation_approve",
             "public_import_contract": False,
             "protocol_definition_stable": False,
             "tables": [
@@ -148,6 +179,17 @@ def build_repository_extraction_plan() -> dict[str, Any]:
                 "profile_facts",
             ],
             "method_matrix": repository_candidate_method_matrix(),
+        },
+        "first_migrated_caller": {
+            "caller": "CurationService.approve",
+            "repository": "LedgerMemoryCurationRepository",
+            "rollback_guard": "Ledger._transaction",
+        },
+        "next_multi_write_candidate": {
+            "caller": "CurationService.supersede",
+            "reason": "old_card_demote_plus_new_card_approval_multi_write",
+            "status": "not_migrated_in_m2_first_caller",
+            "transaction_safe_claimed": False,
         },
         "caller_migration_order": [
             {
