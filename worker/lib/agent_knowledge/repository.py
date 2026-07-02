@@ -4,33 +4,87 @@ from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
 
+def _required_text(record: Mapping[str, Any], field: str) -> str:
+    value = record.get(field)
+    if value is None or value == "":
+        raise ValueError(f"missing required memory curation field: {field}")
+    return str(value)
+
+
+def _required_list(record: Mapping[str, Any], field: str) -> list[Any]:
+    value = record.get(field)
+    if value is None:
+        raise ValueError(f"missing required memory curation field: {field}")
+    return list(value)
+
+
 class MemoryCurationRepository(Protocol):
-    """M2 first repository candidate for curation-owned memory writes."""
+    """Use-case port for curation-owned approval writes."""
 
-    def upsert_memory_candidate(self, candidate: dict) -> Mapping[str, Any]: ...
-
-    def update_memory_candidate_state(
+    def approve_candidate(
         self,
-        candidate_id: str,
-        state: str,
+        candidate: Mapping[str, Any],
+        card: Mapping[str, Any],
         *,
-        reviewed_by: str = "",
-        reason: str = "",
+        approved_by: str,
     ) -> Mapping[str, Any]: ...
 
-    def upsert_memory_card(self, card: dict) -> Mapping[str, Any]: ...
 
-    def add_memory_card_evidence(self, memory_id: str, evidence_refs: list[dict]) -> None: ...
+class LedgerMemoryCurationRepository:
+    """Ledger-backed repository for the first M2 curation caller migration."""
 
-    def upsert_profile_fact(
+    def __init__(self, ledger):
+        self._ledger = ledger
+
+    def approve_candidate(
         self,
+        candidate: Mapping[str, Any],
+        card: Mapping[str, Any],
         *,
-        memory_id: str,
-        project: str,
-        fact_type: str,
-        content_hash: str,
-        state: str,
-    ) -> None: ...
+        approved_by: str,
+    ) -> Mapping[str, Any]:
+        transaction_factory = getattr(self._ledger, "_transaction", None)
+        if transaction_factory is None:
+            raise RuntimeError("LedgerMemoryCurationRepository requires Ledger._transaction")
+        with transaction_factory() as transaction:
+            return self._approve_on(transaction, candidate, card, approved_by=approved_by)
+
+    @staticmethod
+    def _approve_on(
+        transaction,
+        candidate: Mapping[str, Any],
+        card: Mapping[str, Any],
+        *,
+        approved_by: str,
+    ) -> Mapping[str, Any]:
+        card_payload = dict(card)
+        memory_id = _required_text(card_payload, "memory_id")
+        evidence_refs = _required_list(candidate, "evidence_refs")
+        candidate_id = _required_text(candidate, "candidate_id")
+        candidate_type = _required_text(candidate, "candidate_type")
+        profile_fact = None
+        if candidate_type == "user_preference":
+            profile_fact = {
+                "project": _required_text(card_payload, "project"),
+                "fact_type": _required_text(card_payload, "card_type"),
+                "content_hash": _required_text(card_payload, "content_hash"),
+                "state": str(card_payload.get("state") if card_payload.get("state") is not None else "active"),
+            }
+        stored = transaction.upsert_memory_card(card_payload)
+        if stored is None:
+            raise ValueError(f"failed to read back memory card after upsert: {memory_id}")
+        transaction.add_memory_card_evidence(memory_id, evidence_refs)
+        transaction.update_memory_candidate_state(
+            candidate_id,
+            "approved",
+            reviewed_by=approved_by,
+        )
+        if profile_fact is not None:
+            transaction.upsert_profile_fact(
+                memory_id=memory_id,
+                **profile_fact,
+            )
+        return stored
 
 
 class _MemoryCardRepositoryCandidate(Protocol):
@@ -129,16 +183,17 @@ def repository_candidate_method_matrix() -> list[dict[str, Any]]:
 
 
 def build_repository_extraction_plan() -> dict[str, Any]:
-    """Build the M2 readiness plan without activating a public migration."""
+    """Build the M2 extraction plan for the first migrated curation caller."""
 
     return {
         "schema_version": "agent_knowledge_repository_extraction_plan.v1",
         "milestone": "M2",
-        "mode": "readiness_only",
+        "mode": "first_caller_migration",
         "first_candidate": {
             "name": "memory_curation",
             "port": "MemoryCurationRepository",
-            "activation_state": "readiness_only",
+            "adapter": "LedgerMemoryCurationRepository",
+            "activation_state": "active_for_curation_approve",
             "public_import_contract": False,
             "protocol_definition_stable": False,
             "tables": [
@@ -148,6 +203,17 @@ def build_repository_extraction_plan() -> dict[str, Any]:
                 "profile_facts",
             ],
             "method_matrix": repository_candidate_method_matrix(),
+        },
+        "first_migrated_caller": {
+            "caller": "CurationService.approve",
+            "repository": "LedgerMemoryCurationRepository",
+            "rollback_guard": "Ledger._transaction",
+        },
+        "next_multi_write_candidate": {
+            "caller": "CurationService.supersede",
+            "reason": "old_card_demote_plus_new_card_approval_multi_write",
+            "status": "not_migrated_in_m2_first_caller",
+            "transaction_safe_claimed": False,
         },
         "caller_migration_order": [
             {
