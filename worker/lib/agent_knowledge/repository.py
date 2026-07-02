@@ -4,6 +4,20 @@ from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
 
+def _required_text(record: Mapping[str, Any], field: str) -> str:
+    value = record.get(field)
+    if value is None or value == "":
+        raise ValueError(f"missing required memory curation field: {field}")
+    return str(value)
+
+
+def _required_list(record: Mapping[str, Any], field: str) -> list[Any]:
+    value = record.get(field)
+    if value is None:
+        raise ValueError(f"missing required memory curation field: {field}")
+    return list(value)
+
+
 class MemoryCurationRepository(Protocol):
     """Use-case port for curation-owned approval writes."""
 
@@ -44,21 +58,31 @@ class LedgerMemoryCurationRepository:
         approved_by: str,
     ) -> Mapping[str, Any]:
         card_payload = dict(card)
+        memory_id = _required_text(card_payload, "memory_id")
+        evidence_refs = _required_list(candidate, "evidence_refs")
+        candidate_id = _required_text(candidate, "candidate_id")
+        candidate_type = _required_text(candidate, "candidate_type")
+        profile_fact = None
+        if candidate_type == "user_preference":
+            profile_fact = {
+                "project": _required_text(card_payload, "project"),
+                "fact_type": _required_text(card_payload, "card_type"),
+                "content_hash": _required_text(card_payload, "content_hash"),
+                "state": str(card_payload.get("state") if card_payload.get("state") is not None else "active"),
+            }
         stored = transaction.upsert_memory_card(card_payload)
-        memory_id = str(card_payload["memory_id"])
-        transaction.add_memory_card_evidence(memory_id, list(candidate["evidence_refs"]))
+        if stored is None:
+            raise ValueError(f"failed to read back memory card after upsert: {memory_id}")
+        transaction.add_memory_card_evidence(memory_id, evidence_refs)
         transaction.update_memory_candidate_state(
-            str(candidate["candidate_id"]),
+            candidate_id,
             "approved",
             reviewed_by=approved_by,
         )
-        if candidate["candidate_type"] == "user_preference":
+        if profile_fact is not None:
             transaction.upsert_profile_fact(
                 memory_id=memory_id,
-                project=str(card_payload["project"]),
-                fact_type=str(card_payload["card_type"]),
-                content_hash=str(card_payload["content_hash"]),
-                state=str(card_payload.get("state", "active")),
+                **profile_fact,
             )
         return stored
 
