@@ -100,8 +100,63 @@ def test_curation_service_approve_uses_injected_repository(tmp_path):
 def test_ledger_memory_curation_repository_requires_transaction_seam():
     repository = LedgerMemoryCurationRepository(object())
 
-    with pytest.raises(RuntimeError, match="requires Ledger._transaction"):
+    with pytest.raises(RuntimeError, match=r"requires Ledger\._transaction"):
         repository.approve_candidate(_candidate(), {"memory_id": "mem_x"}, approved_by="ddalkak")
+
+
+def test_ledger_memory_curation_repository_fails_closed_when_card_readback_is_missing():
+    calls = []
+
+    class Transaction:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+        def upsert_memory_card(self, card):
+            calls.append(("upsert_memory_card", card["memory_id"]))
+            return None
+
+        def add_memory_card_evidence(self, memory_id, evidence_refs):
+            calls.append(("add_memory_card_evidence", memory_id, evidence_refs))
+
+    class LedgerDouble:
+        def _transaction(self):
+            return Transaction()
+
+    repository = LedgerMemoryCurationRepository(LedgerDouble())
+    candidate = _candidate()
+    card = build_memory_card(candidate, approved_by="ddalkak")
+
+    with pytest.raises(ValueError, match="failed to read back memory card after upsert"):
+        repository.approve_candidate(candidate, card, approved_by="ddalkak")
+
+    assert calls == [("upsert_memory_card", card["memory_id"])]
+
+
+def test_ledger_memory_curation_repository_requires_candidate_identity_before_write():
+    class Transaction:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+        def upsert_memory_card(self, card):
+            raise AssertionError("write should not start when required fields are missing")
+
+    class LedgerDouble:
+        def _transaction(self):
+            return Transaction()
+
+    repository = LedgerMemoryCurationRepository(LedgerDouble())
+    candidate = dict(_candidate())
+    candidate["candidate_id"] = None
+    card = build_memory_card(_candidate(), approved_by="ddalkak")
+
+    with pytest.raises(ValueError, match="missing required memory curation field: candidate_id"):
+        repository.approve_candidate(candidate, card, approved_by="ddalkak")
 
 
 def test_repository_extraction_plan_reports_first_caller_migration():
