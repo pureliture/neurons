@@ -4,6 +4,7 @@ import asyncio
 import socket
 import threading
 import time
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -306,6 +307,107 @@ def test_mcp_http_cli_passes_allowed_hosts(monkeypatch):
 
     assert rc == 0
     assert captured["allowed_hosts"] == ("mcp.example.test", "mcp.example.test:5443")
+
+
+def test_mcp_http_cli_accepts_proposal_only_steward_write_flag(monkeypatch):
+    from agent_knowledge import cli as cli_mod
+
+    captured = {}
+
+    def _build_service(args):
+        captured["allow_steward_proposals"] = args.allow_steward_proposals
+        return _StubService()
+
+    def _fake_serve(service, **kwargs):
+        captured["served"] = True
+
+    monkeypatch.setattr(cli_mod, "_build_recall_service", _build_service)
+    monkeypatch.setattr(mh, "serve", _fake_serve)
+
+    rc = cli_mod._mcp_http_main(
+        [
+            "--ledger",
+            "/tmp/placeholder.sqlite",
+            "--allow-steward-proposals",
+        ]
+    )
+
+    assert rc == 0
+    assert captured == {"allow_steward_proposals": True, "served": True}
+
+
+def test_build_recall_service_defaults_to_read_only_ledger(monkeypatch, tmp_path):
+    from agent_knowledge import cli as cli_mod
+
+    calls = []
+
+    class FakeLedger:
+        def __init__(self, path, *, read_only=False):
+            self.path = path
+            self.read_only = bool(read_only)
+            calls.append(("init", str(path), self.read_only))
+
+        @classmethod
+        def open_read_only(cls, path):
+            calls.append(("open_read_only", str(path), True))
+            return cls(path, read_only=True)
+
+    monkeypatch.setattr(cli_mod, "Ledger", FakeLedger)
+    monkeypatch.setattr(cli_mod, "build_graph_adapter_from_env", lambda **_: None)
+
+    service = cli_mod._build_recall_service(
+        SimpleNamespace(
+            ledger=tmp_path / "ledger.sqlite",
+            dataset_id=[],
+            allow_private_results=False,
+            native_memory_id="",
+            enable_graph=False,
+            graph_required=False,
+            allow_steward_proposals=False,
+        )
+    )
+
+    assert service.ledger.read_only is True
+    assert calls[0][0] == "open_read_only"
+    assert service.allow_restricted_steward is False
+    assert service.allow_steward_auto_accept is False
+
+
+def test_build_recall_service_enables_proposal_only_writable_ledger(monkeypatch, tmp_path):
+    from agent_knowledge import cli as cli_mod
+
+    calls = []
+
+    class FakeLedger:
+        def __init__(self, path, *, read_only=False):
+            self.path = path
+            self.read_only = bool(read_only)
+            calls.append(("init", str(path), self.read_only))
+
+        @classmethod
+        def open_read_only(cls, path):
+            calls.append(("open_read_only", str(path), True))
+            return cls(path, read_only=True)
+
+    monkeypatch.setattr(cli_mod, "Ledger", FakeLedger)
+    monkeypatch.setattr(cli_mod, "build_graph_adapter_from_env", lambda **_: None)
+
+    service = cli_mod._build_recall_service(
+        SimpleNamespace(
+            ledger=tmp_path / "ledger.sqlite",
+            dataset_id=[],
+            allow_private_results=False,
+            native_memory_id="",
+            enable_graph=False,
+            graph_required=False,
+            allow_steward_proposals=True,
+        )
+    )
+
+    assert service.ledger.read_only is False
+    assert calls == [("init", str(tmp_path / "ledger.sqlite"), False)]
+    assert service.allow_restricted_steward is False
+    assert service.allow_steward_auto_accept is False
 
 
 def test_mcp_http_cli_validates_allowed_hosts_before_service_wiring(monkeypatch, capsys):

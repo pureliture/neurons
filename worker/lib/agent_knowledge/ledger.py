@@ -688,8 +688,7 @@ class Ledger(
         if not self.read_only:
             if file_backed:
                 self._prepare_parent_directory()
-            self._initialize()
-            if file_backed:
+                self._initialize()
                 for p in self.path.parent.glob(f"{self.path.name}*"):
                     try:
                         os.chmod(p, 0o600)

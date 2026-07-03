@@ -133,7 +133,10 @@ def _build_recall_service(args) -> KnowledgeSearchService:
     오류 메시지는 raw 예외를 에코하지 않고 type name만 노출한다(private path 비노출).
     """
     try:
-        ledger = Ledger.open_read_only(args.ledger)
+        if bool(getattr(args, "allow_steward_proposals", False)):
+            ledger = Ledger(args.ledger)
+        else:
+            ledger = Ledger.open_read_only(args.ledger)
     except ValueError as exc:
         raise _ServiceWiringError(2, f"ledger open failed: {type(exc).__name__}") from exc
     retired_index_bridge = build_index_client()
@@ -210,6 +213,11 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-non-loopback", action="store_true")
     parser.add_argument("--allow-kubernetes-pod-ip", action="store_true")
     parser.add_argument("--allowed-host", action="append", default=[])
+    parser.add_argument(
+        "--allow-steward-proposals",
+        action="store_true",
+        help="enable proposal-only Brain Steward writes; restricted approve/reject/auto-accept remain disabled",
+    )
     args = parser.parse_args(argv)
     _ = args.state_db_recall
     try:
