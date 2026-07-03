@@ -167,6 +167,21 @@ def test_server_backed_read_only_ledger_does_not_snapshot_path(tmp_path: Path):
     assert ledger.path == path
 
 
+def test_server_backed_write_ledger_does_not_run_sqlite_initialization(tmp_path: Path):
+    class ServerBackedAdapter:
+        is_file_backed = False
+
+        def connect(self, *, configure_journal: bool = False):
+            raise AssertionError("server-backed proposal ledger must not run SQLite initialization")
+
+    path = tmp_path / "missing" / "ledger.sqlite"
+
+    ledger = Ledger(path, read_only=False, db_adapter=ServerBackedAdapter())
+
+    assert ledger.path == path
+    assert ledger.read_only is False
+
+
 def test_server_backed_read_only_ledger_blocks_direct_write_sql(tmp_path: Path):
     class FakeResult:
         def fetchone(self):
