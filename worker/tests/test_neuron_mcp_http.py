@@ -379,10 +379,11 @@ def test_build_recall_service_enables_proposal_only_writable_ledger(monkeypatch,
     calls = []
 
     class FakeLedger:
-        def __init__(self, path, *, read_only=False):
+        def __init__(self, path, *, read_only=False, initialize_schema=True):
             self.path = path
             self.read_only = bool(read_only)
-            calls.append(("init", str(path), self.read_only))
+            self.initialize_schema = bool(initialize_schema)
+            calls.append(("init", str(path), self.read_only, self.initialize_schema))
 
         @classmethod
         def open_read_only(cls, path):
@@ -405,7 +406,7 @@ def test_build_recall_service_enables_proposal_only_writable_ledger(monkeypatch,
     )
 
     assert service.ledger.read_only is False
-    assert calls == [("init", str(tmp_path / "ledger.sqlite"), False)]
+    assert calls == [("init", str(tmp_path / "ledger.sqlite"), False, False)]
     assert service.allow_restricted_steward is False
     assert service.allow_steward_auto_accept is False
 

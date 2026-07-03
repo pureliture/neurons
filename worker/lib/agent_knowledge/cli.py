@@ -134,7 +134,11 @@ def _build_recall_service(args) -> KnowledgeSearchService:
     """
     try:
         if bool(getattr(args, "allow_steward_proposals", False)):
-            ledger = Ledger(args.ledger)
+            # Proposal-only MCP runtime attaches to an existing production ledger.
+            # Keep default Ledger(...) schema bootstrap for migration/parity tools,
+            # but avoid running bootstrap during HTTP startup where SQLite-only
+            # compatibility migrations can break server-backed stores.
+            ledger = Ledger(args.ledger, initialize_schema=False)
         else:
             ledger = Ledger.open_read_only(args.ledger)
     except ValueError as exc:
