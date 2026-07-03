@@ -942,6 +942,33 @@ def test_mcp_stdio_cli_serves_tools_list_without_index_token(tmp_path: Path, mon
     assert BRAIN_CONTEXT_RESOLVE_TOOL_NAME in names
 
 
+def test_mcp_stdio_cli_accepts_proposal_only_steward_write_flag(monkeypatch):
+    from agent_knowledge import cli as cli_mod
+
+    captured = {}
+
+    def _build_service(args):
+        captured["allow_steward_proposals"] = args.allow_steward_proposals
+        return object()
+
+    def _run_stdio_server(_service):
+        captured["served"] = True
+
+    monkeypatch.setattr(cli_mod, "_build_recall_service", _build_service)
+    monkeypatch.setattr(cli_mod, "run_stdio_server", _run_stdio_server)
+
+    rc = cli_mod._mcp_stdio_main(
+        [
+            "--ledger",
+            "/tmp/placeholder.sqlite",
+            "--allow-steward-proposals",
+        ]
+    )
+
+    assert rc == 0
+    assert captured == {"allow_steward_proposals": True, "served": True}
+
+
 def test_mcp_stdio_graph_initialization_error_does_not_print_raw_details(tmp_path: Path, monkeypatch, capsys):
     ledger = _ledger(tmp_path)
     monkeypatch.setattr(

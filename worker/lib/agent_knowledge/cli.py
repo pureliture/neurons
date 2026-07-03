@@ -168,10 +168,7 @@ def _build_recall_service(args) -> KnowledgeSearchService:
     )
 
 
-def _mcp_stdio_main(argv: list[str] | None = None) -> int:
-    import argparse
-
-    parser = argparse.ArgumentParser(prog="neuron-knowledge mcp-stdio")
+def _add_recall_service_arguments(parser) -> None:
     parser.add_argument("--ledger", required=True)
     parser.add_argument("--dataset-id", action="append", default=[])
     parser.add_argument("--policy-proxy-url", default="")
@@ -180,6 +177,18 @@ def _mcp_stdio_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state-db-recall", default="")
     parser.add_argument("--enable-graph", action="store_true")
     parser.add_argument("--graph-required", action="store_true")
+    parser.add_argument(
+        "--allow-steward-proposals",
+        action="store_true",
+        help="enable proposal-only Brain Steward writes; restricted approve/reject/auto-accept remain disabled",
+    )
+
+
+def _mcp_stdio_main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="neuron-knowledge mcp-stdio")
+    _add_recall_service_arguments(parser)
     args = parser.parse_args(argv)
     _ = args.state_db_recall
     try:
@@ -203,25 +212,13 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(prog="neuron-knowledge mcp-http")
     # 공통 인자: _mcp_stdio_main과 1:1 동일(service 구성 동일).
-    parser.add_argument("--ledger", required=True)
-    parser.add_argument("--dataset-id", action="append", default=[])
-    parser.add_argument("--policy-proxy-url", default="")
-    parser.add_argument("--allow-private-results", action="store_true")
-    parser.add_argument("--native-memory-id", default="")
-    parser.add_argument("--state-db-recall", default="")
-    parser.add_argument("--enable-graph", action="store_true")
-    parser.add_argument("--graph-required", action="store_true")
+    _add_recall_service_arguments(parser)
     # HTTP transport 전용.
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=mcp_http_server.DEFAULT_PORT)
     parser.add_argument("--allow-non-loopback", action="store_true")
     parser.add_argument("--allow-kubernetes-pod-ip", action="store_true")
     parser.add_argument("--allowed-host", action="append", default=[])
-    parser.add_argument(
-        "--allow-steward-proposals",
-        action="store_true",
-        help="enable proposal-only Brain Steward writes; restricted approve/reject/auto-accept remain disabled",
-    )
     args = parser.parse_args(argv)
     _ = args.state_db_recall
     try:
