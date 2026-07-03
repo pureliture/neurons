@@ -666,7 +666,20 @@ class _LedgerTransaction:
 class Ledger(
     IngressStatusMixin, GcSafetyMixin, MemoryPromotionMixin, NativeMemoryMixin,
 ):
-    def __init__(self, path: Path | str, *, read_only: bool = False, db_adapter=None):
+    _REQUIRED_EXISTING_SCHEMA_TABLES = (
+        "knowledge_items",
+        "memory_candidates",
+        "schema_migrations",
+    )
+
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        read_only: bool = False,
+        db_adapter=None,
+        initialize_schema: bool = True,
+    ):
         self.path = Path(path)
         self.read_only = bool(read_only)
         self._temp_dir: Path | None = None
@@ -687,8 +700,12 @@ class Ledger(
         )
         if not self.read_only:
             if file_backed:
-                self._prepare_parent_directory()
-            self._initialize()
+                if initialize_schema:
+                    self._prepare_parent_directory()
+                else:
+                    self._validate_existing_file_backed_schema()
+            if initialize_schema:
+                self._initialize()
             if file_backed:
                 for p in self.path.parent.glob(f"{self.path.name}*"):
                     try:
@@ -711,6 +728,28 @@ class Ledger(
                 shutil.rmtree(self._temp_dir)
             except OSError:
                 pass
+
+    def _validate_existing_file_backed_schema(self) -> None:
+        parent = self.path.parent
+        if parent.is_symlink():
+            raise ValueError("ledger parent must not be a symlink")
+        if not self.path.exists():
+            raise ValueError(f"ledger path does not exist: {self.path}")
+        mode = parent.stat().st_mode & 0o777
+        if mode & 0o077:
+            raise ValueError("ledger parent must be private")
+        adapter = SqliteLedgerDbAdapter(self.path, read_only=True)
+        try:
+            with adapter.connect() as connection:
+                missing = [
+                    table
+                    for table in self._REQUIRED_EXISTING_SCHEMA_TABLES
+                    if not _table_exists(connection, table)
+                ]
+        except sqlite3.DatabaseError as exc:
+            raise ValueError("ledger schema is not initialized") from exc
+        if missing:
+            raise ValueError("ledger schema is not initialized")
 
     def _snapshot_read_only_copy(self, source_path: Path) -> Path:
         if not source_path.exists():

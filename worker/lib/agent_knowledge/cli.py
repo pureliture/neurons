@@ -133,7 +133,14 @@ def _build_recall_service(args) -> KnowledgeSearchService:
     오류 메시지는 raw 예외를 에코하지 않고 type name만 노출한다(private path 비노출).
     """
     try:
-        ledger = Ledger.open_read_only(args.ledger)
+        if bool(getattr(args, "allow_steward_proposals", False)):
+            # Proposal-only MCP runtime attaches to an existing production ledger.
+            # Keep default Ledger(...) schema bootstrap for migration/parity tools,
+            # but avoid running bootstrap during HTTP startup where SQLite-only
+            # compatibility migrations can break server-backed stores.
+            ledger = Ledger(args.ledger, initialize_schema=False)
+        else:
+            ledger = Ledger.open_read_only(args.ledger)
     except ValueError as exc:
         raise _ServiceWiringError(2, f"ledger open failed: {type(exc).__name__}") from exc
     retired_index_bridge = build_index_client()
@@ -161,10 +168,7 @@ def _build_recall_service(args) -> KnowledgeSearchService:
     )
 
 
-def _mcp_stdio_main(argv: list[str] | None = None) -> int:
-    import argparse
-
-    parser = argparse.ArgumentParser(prog="neuron-knowledge mcp-stdio")
+def _add_recall_service_arguments(parser) -> None:
     parser.add_argument("--ledger", required=True)
     parser.add_argument("--dataset-id", action="append", default=[])
     parser.add_argument("--policy-proxy-url", default="")
@@ -173,6 +177,18 @@ def _mcp_stdio_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state-db-recall", default="")
     parser.add_argument("--enable-graph", action="store_true")
     parser.add_argument("--graph-required", action="store_true")
+    parser.add_argument(
+        "--allow-steward-proposals",
+        action="store_true",
+        help="enable proposal-only Brain Steward writes; restricted approve/reject/auto-accept remain disabled",
+    )
+
+
+def _mcp_stdio_main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="neuron-knowledge mcp-stdio")
+    _add_recall_service_arguments(parser)
     args = parser.parse_args(argv)
     _ = args.state_db_recall
     try:
@@ -196,14 +212,7 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(prog="neuron-knowledge mcp-http")
     # 공통 인자: _mcp_stdio_main과 1:1 동일(service 구성 동일).
-    parser.add_argument("--ledger", required=True)
-    parser.add_argument("--dataset-id", action="append", default=[])
-    parser.add_argument("--policy-proxy-url", default="")
-    parser.add_argument("--allow-private-results", action="store_true")
-    parser.add_argument("--native-memory-id", default="")
-    parser.add_argument("--state-db-recall", default="")
-    parser.add_argument("--enable-graph", action="store_true")
-    parser.add_argument("--graph-required", action="store_true")
+    _add_recall_service_arguments(parser)
     # HTTP transport 전용.
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=mcp_http_server.DEFAULT_PORT)

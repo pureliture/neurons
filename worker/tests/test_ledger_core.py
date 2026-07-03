@@ -167,6 +167,92 @@ def test_server_backed_read_only_ledger_does_not_snapshot_path(tmp_path: Path):
     assert ledger.path == path
 
 
+def test_server_backed_write_ledger_initializes_schema_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    class ServerBackedAdapter:
+        is_file_backed = False
+
+    calls: list[Path] = []
+
+    def fake_initialize(self):
+        calls.append(self.path)
+
+    monkeypatch.setattr(Ledger, "_initialize", fake_initialize)
+    path = tmp_path / "missing" / "ledger.sqlite"
+
+    ledger = Ledger(path, read_only=False, db_adapter=ServerBackedAdapter())
+
+    assert ledger.path == path
+    assert ledger.read_only is False
+    assert calls == [path]
+
+
+def test_server_backed_write_ledger_can_skip_schema_initialization_for_existing_runtime(
+    tmp_path: Path,
+):
+    class ServerBackedAdapter:
+        is_file_backed = False
+
+        def connect(self, *, configure_journal: bool = False):
+            raise AssertionError("existing server-backed runtime attach must not run schema initialization")
+
+    path = tmp_path / "missing" / "ledger.sqlite"
+
+    ledger = Ledger(
+        path,
+        read_only=False,
+        db_adapter=ServerBackedAdapter(),
+        initialize_schema=False,
+    )
+
+    assert ledger.path == path
+    assert ledger.read_only is False
+
+
+def test_file_backed_write_ledger_skip_schema_requires_existing_path(tmp_path: Path):
+    path = tmp_path / "missing" / "ledger.sqlite"
+
+    with pytest.raises(ValueError, match="ledger path does not exist"):
+        Ledger(path, initialize_schema=False)
+
+    assert not path.parent.exists()
+
+
+def test_file_backed_write_ledger_skip_schema_requires_existing_schema(tmp_path: Path):
+    path = tmp_path / "ledger.sqlite"
+    path.touch()
+
+    with pytest.raises(ValueError, match="ledger schema is not initialized"):
+        Ledger(path, initialize_schema=False)
+
+
+def test_file_backed_write_ledger_skip_schema_rejects_invalid_sqlite_file(tmp_path: Path):
+    path = tmp_path / "ledger.sqlite"
+    path.write_text("not sqlite", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="ledger schema is not initialized"):
+        Ledger(path, initialize_schema=False)
+
+
+def test_file_backed_write_ledger_can_skip_schema_initialization_for_existing_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    path = tmp_path / "ledger.sqlite"
+    Ledger(path)
+
+    def fail_initialize(self):
+        raise AssertionError("existing ledger attach must not run schema initialization")
+
+    monkeypatch.setattr(Ledger, "_initialize", fail_initialize)
+
+    ledger = Ledger(path, initialize_schema=False)
+
+    assert ledger.path == path
+    assert ledger.read_only is False
+
+
 def test_server_backed_read_only_ledger_blocks_direct_write_sql(tmp_path: Path):
     class FakeResult:
         def fetchone(self):
