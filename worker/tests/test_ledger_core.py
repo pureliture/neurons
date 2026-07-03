@@ -167,16 +167,44 @@ def test_server_backed_read_only_ledger_does_not_snapshot_path(tmp_path: Path):
     assert ledger.path == path
 
 
-def test_server_backed_write_ledger_does_not_run_sqlite_initialization(tmp_path: Path):
+def test_server_backed_write_ledger_initializes_schema_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    class ServerBackedAdapter:
+        is_file_backed = False
+
+    calls: list[Path] = []
+
+    def fake_initialize(self):
+        calls.append(self.path)
+
+    monkeypatch.setattr(Ledger, "_initialize", fake_initialize)
+    path = tmp_path / "missing" / "ledger.sqlite"
+
+    ledger = Ledger(path, read_only=False, db_adapter=ServerBackedAdapter())
+
+    assert ledger.path == path
+    assert ledger.read_only is False
+    assert calls == [path]
+
+
+def test_server_backed_write_ledger_can_skip_schema_initialization_for_existing_runtime(
+    tmp_path: Path,
+):
     class ServerBackedAdapter:
         is_file_backed = False
 
         def connect(self, *, configure_journal: bool = False):
-            raise AssertionError("server-backed proposal ledger must not run SQLite initialization")
+            raise AssertionError("existing server-backed runtime attach must not run schema initialization")
 
     path = tmp_path / "missing" / "ledger.sqlite"
 
-    ledger = Ledger(path, read_only=False, db_adapter=ServerBackedAdapter())
+    ledger = Ledger(
+        path,
+        read_only=False,
+        db_adapter=ServerBackedAdapter(),
+        initialize_schema=False,
+    )
 
     assert ledger.path == path
     assert ledger.read_only is False

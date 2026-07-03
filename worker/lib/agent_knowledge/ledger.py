@@ -666,7 +666,14 @@ class _LedgerTransaction:
 class Ledger(
     IngressStatusMixin, GcSafetyMixin, MemoryPromotionMixin, NativeMemoryMixin,
 ):
-    def __init__(self, path: Path | str, *, read_only: bool = False, db_adapter=None):
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        read_only: bool = False,
+        db_adapter=None,
+        initialize_schema: bool = True,
+    ):
         self.path = Path(path)
         self.read_only = bool(read_only)
         self._temp_dir: Path | None = None
@@ -688,7 +695,9 @@ class Ledger(
         if not self.read_only:
             if file_backed:
                 self._prepare_parent_directory()
+            if initialize_schema:
                 self._initialize()
+            if file_backed:
                 for p in self.path.parent.glob(f"{self.path.name}*"):
                     try:
                         os.chmod(p, 0o600)
