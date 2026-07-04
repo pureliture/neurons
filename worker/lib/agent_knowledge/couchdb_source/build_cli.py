@@ -41,12 +41,21 @@ def _select_sessions_needing_projection(
     scoped migration flow does not materialize out-of-scope sessions in the
     session-memory step.
     """
-    from .document_model import ProjectionStatus, SourceDocType, projection_state_doc_id
+    from .document_model import ProjectionStatus, SourceDocType
 
     sessions = store.find_by_type(
         SourceDocType.TRANSCRIPT_SESSION,
         fields=["_id", "session_id_hash", "provider", "project"],
     )
+    states = store.find_by_type(
+        SourceDocType.PROJECTION_STATE,
+        fields=["session_id_hash", "projection_status"],
+    )
+    projected_session_ids = {
+        str(state.get("session_id_hash") or "")
+        for state in states
+        if str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
+    }
     selected: list[dict] = []
     for session in sessions:
         if limit > 0 and len(selected) >= limit:
@@ -58,8 +67,7 @@ def _select_sessions_needing_projection(
             continue
         if provider and str(session.get("provider") or "") != provider:
             continue
-        state_doc = store.get(projection_state_doc_id(session_id_hash))
-        if state_doc is None or str(state_doc.get("projection_status") or "") != ProjectionStatus.PROJECTED:
+        if session_id_hash not in projected_session_ids:
             selected.append(session)
     return selected
 

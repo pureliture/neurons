@@ -33,3 +33,14 @@ def test_session_memory_image_installs_qdrant_projection_dependencies() -> None:
 
     assert "qdrant-client>=1.10" in dockerfile
     assert "openai>=1.0" in dockerfile
+
+
+def test_entrypoint_build_interval_is_env_configurable() -> None:
+    script = Path("deploy/session-memory/entrypoint.sh").read_text(encoding="utf-8")
+
+    assert "SESSION_MEMORY_BUILD_INTERVAL_SECONDS" in script
+    assert "SESSION_MEMORY_SCHEDULER_SLEEP_SECONDS" in script
+    assert "positive_int_or_default" in script
+    assert '"${SESSION_MEMORY_BUILD_INTERVAL_SECONDS:-}" 180' in script
+    assert '"${SESSION_MEMORY_SCHEDULER_SLEEP_SECONDS:-}" 60' in script
+    assert "10#$m % 3" not in script
