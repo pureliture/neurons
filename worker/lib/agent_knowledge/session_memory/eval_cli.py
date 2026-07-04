@@ -9,6 +9,7 @@ import json
 from agent_knowledge.ledger import Ledger
 
 from .eval_loop import run_enabled_eval_queries
+from .semantic_ranker import build_embedding_semantic_ranker
 
 
 def _sha256_text(value: str) -> str:
@@ -48,6 +49,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="append eval_runs and retrieval_audit rows; omit for dry-run",
     )
+    parser.add_argument(
+        "--semantic-rank",
+        action="store_true",
+        help="use the configured embedding endpoint to vector-rank accepted MemoryCards before eval scoring",
+    )
     args = parser.parse_args(argv)
 
     if args.execute:
@@ -55,15 +61,22 @@ def main(argv: list[str] | None = None) -> int:
         ledger = Ledger(args.ledger, initialize_schema=False)
     else:
         ledger = Ledger.open_read_only(args.ledger)
-    result = run_enabled_eval_queries(
-        ledger=ledger,
-        project=args.project or None,
-        provider=args.provider or None,
-        limit=args.limit or None,
-        execute=bool(args.execute),
-        run_id=args.run_id or None,
-        retain_runs=args.retain_runs,
-    )
+    semantic_ranker = build_embedding_semantic_ranker() if args.semantic_rank else None
+    try:
+        result = run_enabled_eval_queries(
+            ledger=ledger,
+            project=args.project or None,
+            provider=args.provider or None,
+            limit=args.limit or None,
+            execute=bool(args.execute),
+            run_id=args.run_id or None,
+            retain_runs=args.retain_runs,
+            semantic_ranker=semantic_ranker,
+        )
+    finally:
+        close = getattr(semantic_ranker, "close", None)
+        if callable(close):
+            close()
     print(json.dumps(_safe_stdout_payload(result), ensure_ascii=False, sort_keys=True))
     # Evaluation quality failure is persisted as eval_runs.status=fail; process
     # failure should mean the loop could not run/store its bounded evidence.

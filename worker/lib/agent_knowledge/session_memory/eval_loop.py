@@ -2,7 +2,8 @@
 
 The loop deliberately evaluates the existing read-side brain.query behavior and writes
 only append-style eval_runs/retrieval_audit/context-pack audit rows when execute=True.
-It does not call LLMs, mutate MemoryCards, or touch graph/vector backends.
+By default it does not call models, mutate MemoryCards, or touch graph/vector backends;
+callers may inject an embedding-backed semantic_ranker for an explicit model lane.
 """
 
 from __future__ import annotations
@@ -278,6 +279,7 @@ def run_enabled_eval_queries(
     execute: bool = False,
     run_id: str | None = None,
     retain_runs: int = 0,
+    semantic_ranker: Callable[..., list[dict]] | None = None,
     query_runner: QueryRunner = run_brain_query_v2,
 ) -> dict:
     """Run enabled eval_queries and optionally persist eval_runs/retrieval_audit.
@@ -322,8 +324,10 @@ def run_enabled_eval_queries(
                 read_model=read_model,
                 brain_id=f"/project/{query['project']}",
                 query=query_text,
+                query_terms=list(query.get("query_terms") or []),
                 query_intent="eval",
                 limit=k,
+                semantic_ranker=semantic_ranker,
             )
             retrieved_ids = _result_memory_ids(response)
             score = _score_query(
@@ -382,7 +386,7 @@ def run_enabled_eval_queries(
                 "query_count": metrics["query_count"],
                 "metrics": metrics,
                 "failures": failures,
-                "network_used": False,
+                "network_used": semantic_ranker is not None,
                 "mutation_performed": True,
             }
         )
@@ -402,7 +406,7 @@ def run_enabled_eval_queries(
         "run_id": effective_run_id,
         "execute": bool(execute),
         "mutation_performed": bool(execute),
-        "network_used": False,
+        "network_used": semantic_ranker is not None,
         "project": project or "",
         "provider": provider or "",
         "metrics": metrics,

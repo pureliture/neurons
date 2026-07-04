@@ -119,6 +119,85 @@ def test_enabled_eval_queries_write_eval_run_and_retrieval_audit(tmp_path):
     assert items[0]["summary"] == "[approved-memory-summary-not-persisted]"
 
 
+def test_eval_loop_passes_structured_query_terms_to_query_runner(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    card = LLMBrainMemoryService(ledger).accept_human_approved_candidate(
+        _candidate(), approved_by="ddalkak", decision_id="eval-decision"
+    )["accepted_card"]
+    ledger.upsert_eval_query(
+        {
+            "query_id": "eval_phrase_terms",
+            "query_hash": "sha256:eval-phrase-terms",
+            "query_terms": ["neurons", "live mutation", "approval gate", "dry-run"],
+            "project": PROJECT,
+            "provider": PROVIDER,
+            "expected_memory_ids": [card["memory_id"]],
+            "k": 5,
+            "min_recall": 1.0,
+            "min_precision": 1.0,
+            "enabled": True,
+        }
+    )
+    calls = []
+
+    def query_runner(**kwargs):
+        calls.append(kwargs)
+        return {"results": [{"memory_id": card["memory_id"], "result_type": "memory_card"}]}
+
+    result = run_enabled_eval_queries(
+        ledger=ledger,
+        project=PROJECT,
+        provider=PROVIDER,
+        execute=False,
+        query_runner=query_runner,
+    )
+
+    assert result["status"] == "dry_run"
+    assert calls[0]["query_terms"] == ["neurons", "live mutation", "approval gate", "dry-run"]
+
+
+def test_eval_loop_passes_semantic_ranker_and_marks_network_used(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    card = LLMBrainMemoryService(ledger).accept_human_approved_candidate(
+        _candidate(), approved_by="ddalkak", decision_id="eval-decision"
+    )["accepted_card"]
+    ledger.upsert_eval_query(
+        {
+            "query_id": "eval_semantic_rank",
+            "query_hash": "sha256:eval-semantic-rank",
+            "query_terms": ["eval", "semantic", "rank"],
+            "project": PROJECT,
+            "provider": PROVIDER,
+            "expected_memory_ids": [card["memory_id"]],
+            "k": 5,
+            "min_recall": 1.0,
+            "min_precision": 1.0,
+            "enabled": True,
+        }
+    )
+    semantic_ranker = object()
+    calls = []
+
+    def query_runner(**kwargs):
+        calls.append(kwargs)
+        return {"results": [{"memory_id": card["memory_id"], "result_type": "memory_card"}]}
+
+    result = run_enabled_eval_queries(
+        ledger=ledger,
+        project=PROJECT,
+        provider=PROVIDER,
+        execute=True,
+        run_id="eval_run_semantic",
+        semantic_ranker=semantic_ranker,
+        query_runner=query_runner,
+    )
+
+    assert result["status"] == "pass"
+    assert result["network_used"] is True
+    assert calls[0]["semantic_ranker"] is semantic_ranker
+    assert _eval_run_rows(ledger)[0]["network_used"] == 1
+
+
 def test_eval_cli_returns_success_when_eval_fails_but_storage_succeeds(tmp_path, capsys):
     ledger_path = tmp_path / "ledger.sqlite"
     ledger = Ledger(ledger_path)
@@ -174,6 +253,62 @@ def test_eval_cli_returns_success_when_eval_fails_but_storage_succeeds(tmp_path,
     assert "per_query" not in payload["metrics"]
     assert _count_table(ledger, "eval_runs") == 1
     assert _count_table(ledger, "retrieval_audit") == 1
+
+
+def test_eval_cli_semantic_rank_flag_builds_ranker_and_keeps_safe_stdout(tmp_path, capsys, monkeypatch):
+    ledger_path = tmp_path / "ledger.sqlite"
+    ledger = Ledger(ledger_path)
+    card = LLMBrainMemoryService(ledger).accept_human_approved_candidate(
+        _candidate(), approved_by="ddalkak", decision_id="eval-decision"
+    )["accepted_card"]
+    ledger.upsert_eval_query(
+        {
+            "query_id": "eval_semantic_cli",
+            "query_hash": "sha256:eval-semantic-cli",
+            "query_terms": ["eval", "loop", "implementation"],
+            "project": PROJECT,
+            "provider": PROVIDER,
+            "expected_memory_ids": [card["memory_id"]],
+            "k": 5,
+            "min_recall": 1.0,
+            "min_precision": 1.0,
+            "enabled": True,
+        }
+    )
+    closed = []
+
+    class _Ranker:
+        def __call__(self, **kwargs):
+            return kwargs["cards"]
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(eval_cli, "build_embedding_semantic_ranker", lambda: _Ranker())
+
+    rc = eval_cli.main(
+        [
+            "--ledger",
+            str(ledger_path),
+            "--project",
+            PROJECT,
+            "--provider",
+            PROVIDER,
+            "--execute",
+            "--semantic-rank",
+            "--run-id",
+            "eval_run_cli_semantic",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["status"] == "pass"
+    assert payload["network_used"] is True
+    assert closed == [True]
+    assert "run_id" not in payload
+    assert "per_query" not in payload["metrics"]
+    assert _eval_run_rows(ledger)[0]["network_used"] == 1
 
 
 def test_eval_loop_retains_only_latest_runs_and_prunes_owned_audit_rows(tmp_path):

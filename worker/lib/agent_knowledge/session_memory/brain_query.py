@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Callable, Protocol, runtime_checkable
 
 from .memory_card import CANDIDATE_TYPES
@@ -50,6 +50,7 @@ class BrainReadModel(Protocol):
 
 SemanticRecall = Callable[[str, str], list[dict]]  # (query, brain_id) -> hits
 RetiredIndexBridgeMirrorSearch = Callable[[str, str], list[dict]]
+SemanticRanker = Callable[..., list[dict]]
 
 
 def project_from_brain_id(brain_id: str) -> str | None:
@@ -76,6 +77,35 @@ def _query_tokens(text: str) -> set[str]:
     }
 
 
+def _normalize_search_text(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^A-Za-z0-9가-힣_-]+", " ", str(text or "").lower())).strip()
+
+
+def _query_phrase_terms(query_terms: Sequence[str] | None) -> list[str]:
+    phrases: list[str] = []
+    for term in query_terms or []:
+        normalized = _normalize_search_text(str(term))
+        if not normalized:
+            continue
+        tokens = _query_tokens(normalized)
+        if len(tokens) > 1 or "-" in normalized:
+            phrases.append(normalized)
+    return phrases
+
+
+def _phrase_match_count(*, phrases: Sequence[str], card_text: str) -> int:
+    if not phrases:
+        return 0
+    normalized_card = _normalize_search_text(card_text)
+    normalized_card_alt = normalized_card.replace("-", " ")
+    matched = 0
+    for phrase in phrases:
+        phrase_alt = phrase.replace("-", " ")
+        if phrase in normalized_card or phrase_alt in normalized_card_alt:
+            matched += 1
+    return matched
+
+
 def _card_search_text(card: Mapping[str, Any]) -> str:
     payload = card.get("typed_payload")
     payload_values = payload.values() if isinstance(payload, Mapping) else []
@@ -91,14 +121,21 @@ def _card_search_text(card: Mapping[str, Any]) -> str:
     )
 
 
-def _rank_ledger_cards_for_query(*, cards: list[dict], query: str, limit: int, strict: bool) -> list[dict]:
+def _rank_ledger_cards_for_query(
+    *,
+    cards: list[dict],
+    query: str,
+    query_terms: Sequence[str] | None,
+    limit: int,
+    strict: bool,
+) -> list[dict]:
     """Return query-relevant accepted cards without padding weak matches.
 
     v2 is a retrieval surface, not a "latest cards" listing. Use a bounded
-    accepted-card candidate window, rank by lexical overlap, and only return
-    cards that clear a conservative query-term coverage threshold. This keeps
-    targeted eval queries from failing precision because the response was padded
-    with weakly-related recent cards.
+    accepted-card candidate window, rank by lexical/phrase/vector overlap, and
+    only return cards that clear a conservative query-term coverage threshold.
+    This keeps targeted eval queries from failing precision because the response
+    was padded with weakly-related recent cards.
     """
 
     if not strict:
@@ -106,14 +143,31 @@ def _rank_ledger_cards_for_query(*, cards: list[dict], query: str, limit: int, s
     tokens = _query_tokens(query)
     if not tokens:
         return []
+    phrases = _query_phrase_terms(query_terms)
     threshold = max(1, (len(tokens) + 1) // 2)
-    scored: list[tuple[int, int, dict]] = []
+    scored: list[tuple[int, int, int, float, dict]] = []
     for index, card in enumerate(cards):
-        overlap = len(tokens.intersection(_query_tokens(_card_search_text(card))))
+        card_text = _card_search_text(card)
+        overlap = len(tokens.intersection(_query_tokens(card_text)))
+        phrase_matches = _phrase_match_count(phrases=phrases, card_text=card_text)
+        semantic_score = _semantic_score(card)
         if overlap >= threshold:
-            scored.append((index, overlap, card))
-    scored.sort(key=lambda item: (-item[1], item[0]))
-    return [card for _, _, card in scored[:limit]]
+            scored.append((index, phrase_matches, overlap, semantic_score, card))
+    if phrases:
+        max_phrase_matches = max((item[1] for item in scored), default=0)
+        if max_phrase_matches >= 2:
+            phrase_scored = [item for item in scored if item[1] == max_phrase_matches]
+            if phrase_scored:
+                scored = phrase_scored
+    scored.sort(key=lambda item: (-item[1], -item[3], -item[2], item[0]))
+    return [card for _, _, _, _, card in scored[:limit]]
+
+
+def _semantic_score(card: Mapping[str, Any]) -> float:
+    value = card.get("_semantic_score")
+    if not isinstance(value, (int, float)):
+        return 0.0
+    return float(value)
 
 
 def _hit_rank(hit: dict) -> tuple:
@@ -166,6 +220,8 @@ def run_brain_query_v2(
     promotion_candidates: list[dict] | None = None,
     evidence_candidates: list[dict] | None = None,
     limit: int = DEFAULT_LIMIT,
+    query_terms: Sequence[str] | None = None,
+    semantic_ranker: SemanticRanker | None = None,
 ) -> dict:
     """LLM-brain query envelope with local-ledger precedence.
 
@@ -188,9 +244,25 @@ def run_brain_query_v2(
     strict_eval_ranking = query_intent == "eval"
     candidate_limit = max(bounded_limit, LEDGER_QUERY_RANKING_CANDIDATE_LIMIT) if strict_eval_ranking else bounded_limit
     ledger_cards = list_ledger_accepted_cards(read_model, project=project, limit=candidate_limit)
+    semantic_ranker_used = False
+    semantic_ranker_error_type = ""
+    if strict_eval_ranking and semantic_ranker is not None:
+        try:
+            semantic_ranked = semantic_ranker(
+                query=normalized,
+                query_terms=query_terms,
+                cards=ledger_cards,
+                limit=candidate_limit,
+            )
+            if isinstance(semantic_ranked, list):
+                ledger_cards = [dict(card) for card in semantic_ranked if isinstance(card, Mapping)]
+                semantic_ranker_used = True
+        except Exception as exc:
+            semantic_ranker_error_type = type(exc).__name__
     ledger_cards = _rank_ledger_cards_for_query(
         cards=ledger_cards,
         query=normalized,
+        query_terms=query_terms,
         limit=bounded_limit,
         strict=strict_eval_ranking,
     )
@@ -215,7 +287,11 @@ def run_brain_query_v2(
         "query_hash": hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16],
         "path": "ledger_precedence_v2",
         "index_bound": index_search is not None,
+        "semantic_ranker_bound": semantic_ranker is not None,
+        "semantic_ranker_used": semantic_ranker_used,
     }
+    if semantic_ranker_error_type:
+        response["audit"]["semantic_ranker_error_type"] = semantic_ranker_error_type
     return response
 
 
@@ -370,6 +446,7 @@ def _normalize_query_memory_card(*, brain_id: str, card: dict) -> dict:
         "evidence_hashes": [str(item) for item in evidence_hashes],
         "authority": "local_ledger",
         "content_hash": str(normalized.get("content_hash") or normalized.get("card_hash") or ""),
+        "score": normalized.get("_semantic_score") if isinstance(normalized.get("_semantic_score"), (int, float)) else None,
     }
 
 
@@ -406,6 +483,7 @@ def _compat_results_from_query_lanes(response: Mapping[str, Any]) -> list[dict]:
                     "currentness": str(item.get("currentness") or ""),
                     "card_type": str(item.get("card_type") or ""),
                     "memory_id": memory_id,
+                    "score": item.get("score") if isinstance(item.get("score"), (int, float)) else None,
                 }
             )
     return results
