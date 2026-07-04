@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -350,6 +351,29 @@ def test_candidate_create_with_poisoned_field_writes_nothing_and_does_not_dos_qu
 
 
 # --------------------------------------------------------------- restricted gate
+
+
+def test_mcp_cli_review_commit_flag_enables_only_review_commit(tmp_path, monkeypatch):
+    from agent_knowledge import cli as cli_module
+
+    ledger = _ledger(tmp_path)
+    ledger_path = ledger.path
+    parser = argparse.ArgumentParser()
+    cli_module._add_recall_service_arguments(parser)
+
+    args = parser.parse_args([
+        "--ledger",
+        str(ledger_path),
+        "--allow-steward-proposals",
+        "--allow-steward-review-commit",
+    ])
+    monkeypatch.setattr(cli_module, "build_index_client", lambda: DisabledRetiredIndexBridgeClient())
+    monkeypatch.setattr(cli_module, "build_graph_adapter_from_env", lambda **_: None)
+
+    service = cli_module._build_recall_service(args)
+
+    assert service.allow_restricted_steward is True
+    assert service.allow_steward_auto_accept is False
 
 
 def test_restricted_tools_blocked_by_default_service(tmp_path):
