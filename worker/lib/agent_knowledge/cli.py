@@ -133,8 +133,12 @@ def _build_recall_service(args) -> KnowledgeSearchService:
     오류 메시지는 raw 예외를 에코하지 않고 type name만 노출한다(private path 비노출).
     """
     try:
-        if bool(getattr(args, "allow_steward_proposals", False)):
-            # Proposal-only MCP runtime attaches to an existing production ledger.
+        steward_write_enabled = bool(
+            getattr(args, "allow_steward_proposals", False)
+            or getattr(args, "allow_steward_review_commit", False)
+        )
+        if steward_write_enabled:
+            # MCP steward write runtimes attach to an existing production ledger.
             # Keep default Ledger(...) schema bootstrap for migration/parity tools,
             # but avoid running bootstrap during HTTP startup where SQLite-only
             # compatibility migrations can break server-backed stores.
@@ -165,6 +169,8 @@ def _build_recall_service(args) -> KnowledgeSearchService:
         native_memory_id=args.native_memory_id,
         graph_adapter=graph_adapter,
         mirror_search=mirror_search,
+        allow_restricted_steward=bool(getattr(args, "allow_steward_review_commit", False)),
+        allow_steward_auto_accept=False,
     )
 
 
@@ -180,7 +186,12 @@ def _add_recall_service_arguments(parser) -> None:
     parser.add_argument(
         "--allow-steward-proposals",
         action="store_true",
-        help="enable proposal-only Brain Steward writes; restricted approve/reject/auto-accept remain disabled",
+        help="enable proposal-only Brain Steward writes; restricted approve/reject/auto-accept remain disabled unless review commit is also enabled",
+    )
+    parser.add_argument(
+        "--allow-steward-review-commit",
+        action="store_true",
+        help="enable human-gated Brain Steward review commits approve/reject/supersede/stale; auto-accept remains disabled",
     )
 
 
