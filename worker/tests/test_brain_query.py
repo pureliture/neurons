@@ -3,6 +3,7 @@ from __future__ import annotations
 from agent_knowledge.session_memory.brain_query import (
     project_from_brain_id,
     run_brain_query,
+    run_brain_query_v2,
 )
 
 
@@ -252,6 +253,16 @@ class _CardReadModel:
         return []
 
 
+class _AcceptedCardReadModel(_CardReadModel):
+    def __init__(self, cards):
+        super().__init__(cards)
+        self.accepted_calls = []
+
+    def list_accepted_cards(self, *, project, limit):
+        self.accepted_calls.append((project, limit))
+        return [c for c in self._cards.values() if c.get("project") == project][:limit]
+
+
 def test_semantic_path_builds_envelopes_and_audit():
     cards = [_card(memory_id="mem_a"), _card(memory_id="mem_b", card_type="user_preference")]
     read_model = _CardReadModel(cards)
@@ -406,6 +417,50 @@ def test_limit_cutoff_keeps_top_score_regardless_of_input_order():
         brain_id="/project/p", query="q", limit=1,
     )
     assert [e["source_ref"] for e in result["results"]] == ["mem_high"]
+
+
+def test_brain_query_v2_ranks_accepted_cards_by_query_terms_before_limit_cutoff():
+    # Regression for eval quality: v2 must not return only the most recent accepted
+    # cards before query ranking, because older but exact expected cards then miss recall.
+    read_model = _AcceptedCardReadModel(
+        [
+            _card(memory_id="mem_recent_noise", summary="general operating note"),
+            _card(memory_id="mem_exact_expected", summary="needle ranking eval target"),
+        ]
+    )
+
+    result = run_brain_query_v2(
+        read_model=read_model,
+        brain_id="/project/p",
+        query="needle ranking eval target",
+        query_intent="eval",
+        limit=1,
+    )
+
+    assert [item["memory_id"] for item in result["results"]] == ["mem_exact_expected"]
+    assert read_model.accepted_calls == [("p", 50)]
+
+
+def test_brain_query_v2_does_not_fill_limit_with_weak_lexical_matches():
+    # Precision regression: if the exact expected card is the only strong lexical
+    # match, v2 should not pad the context with weakly-related accepted cards.
+    read_model = _AcceptedCardReadModel(
+        [
+            _card(memory_id="mem_recent_weak", summary="needle unrelated note"),
+            _card(memory_id="mem_recent_noise", summary="general operating note"),
+            _card(memory_id="mem_exact_expected", summary="needle ranking eval target"),
+        ]
+    )
+
+    result = run_brain_query_v2(
+        read_model=read_model,
+        brain_id="/project/p",
+        query="needle ranking eval target",
+        query_intent="eval",
+        limit=5,
+    )
+
+    assert [item["memory_id"] for item in result["results"]] == ["mem_exact_expected"]
 
 
 # --- brain.resolve ---
