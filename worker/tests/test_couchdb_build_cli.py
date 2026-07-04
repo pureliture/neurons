@@ -110,6 +110,16 @@ def _write_approval(tmp_path: Path, *, argv: list[str]) -> Path:
     return p
 
 
+class CountingGetStore(InMemoryCouchDBSourceStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.get_count = 0
+
+    def get(self, doc_id: str) -> dict | None:
+        self.get_count += 1
+        return super().get(doc_id)
+
+
 # ---------------------------------------------------------------------------
 # Helper that runs main() with an InMemoryCouchDBSourceStore
 # ---------------------------------------------------------------------------
@@ -308,6 +318,18 @@ class TestSelectSessionsNeedingProjection:
             )
         }
         assert scoped == {a}
+
+    def test_selection_does_not_get_each_projected_session(self) -> None:
+        store = CountingGetStore()
+        for i in range(20):
+            sid = _build_synthetic_session(store, provider="claude", project="neurons", raw_id=f"done-{i}")
+            _mark_projected(store, sid, "claude", "neurons")
+        pending = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="pending")
+
+        selected = _select_sessions_needing_projection(store, limit=1)
+
+        assert [s.get("session_id_hash") for s in selected] == [pending]
+        assert store.get_count == 0
 
 
 # ---------------------------------------------------------------------------
