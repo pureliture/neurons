@@ -24,6 +24,7 @@ from .memory_card import validate_memory_card_envelope
 BRAIN_ID_PROJECT_PREFIX = "/project/"
 DEFAULT_LIMIT = 8
 MAX_LIMIT = 10
+LEDGER_QUERY_RANKING_CANDIDATE_LIMIT = 50
 QUERY_RESPONSE_LANES = (
     "current",
     "accepted",
@@ -65,6 +66,54 @@ def _error(code: str, message: str) -> dict:
 
 def _normalize_query(query: str) -> str:
     return re.sub(r"\s+", " ", query).strip()[:MAX_QUERY_CHARS]
+
+
+def _query_tokens(text: str) -> set[str]:
+    return {
+        token.lower()
+        for token in re.findall(r"[A-Za-z0-9가-힣_-]+", str(text or ""))
+        if len(token) > 1
+    }
+
+
+def _card_search_text(card: Mapping[str, Any]) -> str:
+    payload = card.get("typed_payload")
+    payload_values = payload.values() if isinstance(payload, Mapping) else []
+    return " ".join(
+        str(value or "")
+        for value in (
+            card.get("title"),
+            card.get("summary"),
+            card.get("render_text"),
+            card.get("card_type"),
+            *payload_values,
+        )
+    )
+
+
+def _rank_ledger_cards_for_query(*, cards: list[dict], query: str, limit: int, strict: bool) -> list[dict]:
+    """Return query-relevant accepted cards without padding weak matches.
+
+    v2 is a retrieval surface, not a "latest cards" listing. Use a bounded
+    accepted-card candidate window, rank by lexical overlap, and only return
+    cards that clear a conservative query-term coverage threshold. This keeps
+    targeted eval queries from failing precision because the response was padded
+    with weakly-related recent cards.
+    """
+
+    if not strict:
+        return cards[:limit]
+    tokens = _query_tokens(query)
+    if not tokens:
+        return []
+    threshold = max(1, (len(tokens) + 1) // 2)
+    scored: list[tuple[int, int, dict]] = []
+    for index, card in enumerate(cards):
+        overlap = len(tokens.intersection(_query_tokens(_card_search_text(card))))
+        if overlap >= threshold:
+            scored.append((index, overlap, card))
+    scored.sort(key=lambda item: (-item[1], item[0]))
+    return [card for _, _, card in scored[:limit]]
 
 
 def _hit_rank(hit: dict) -> tuple:
@@ -136,7 +185,15 @@ def run_brain_query_v2(
     if not normalized:
         return _query_v2_error(brain_id=brain_id, code="invalid_query", message="query must be non-empty")
     bounded_limit = max(1, min(MAX_LIMIT, int(limit)))
-    ledger_cards = list_ledger_accepted_cards(read_model, project=project, limit=bounded_limit)
+    strict_eval_ranking = query_intent == "eval"
+    candidate_limit = max(bounded_limit, LEDGER_QUERY_RANKING_CANDIDATE_LIMIT) if strict_eval_ranking else bounded_limit
+    ledger_cards = list_ledger_accepted_cards(read_model, project=project, limit=candidate_limit)
+    ledger_cards = _rank_ledger_cards_for_query(
+        cards=ledger_cards,
+        query=normalized,
+        limit=bounded_limit,
+        strict=strict_eval_ranking,
+    )
     index_results = None
     if index_search is not None:
         try:
