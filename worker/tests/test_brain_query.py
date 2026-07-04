@@ -463,6 +463,102 @@ def test_brain_query_v2_does_not_fill_limit_with_weak_lexical_matches():
     assert [item["memory_id"] for item in result["results"]] == ["mem_exact_expected"]
 
 
+def test_brain_query_v2_uses_eval_query_terms_to_drop_single_phrase_noise():
+    # A card that only matches one broad phrase such as "live mutation" should not
+    # be returned when the eval query also names more specific phrases.
+    read_model = _AcceptedCardReadModel(
+        [
+            _card(
+                memory_id="mem_broad_live_mutation_noise",
+                card_type="decision",
+                summary="OCI app-plane context mentions live mutation but not the gate policy.",
+            ),
+            _card(
+                memory_id="mem_expected_gate",
+                card_type="decision",
+                summary="Dry-run work must not perform live mutation without separate approval gates.",
+            ),
+        ]
+    )
+
+    result = run_brain_query_v2(
+        read_model=read_model,
+        brain_id="/project/p",
+        query="neurons live mutation approval gate dry-run",
+        query_terms=["neurons", "live mutation", "approval gate", "dry-run"],
+        query_intent="eval",
+        limit=5,
+    )
+
+    assert [item["memory_id"] for item in result["results"]] == ["mem_expected_gate"]
+
+
+def test_brain_query_v2_keeps_token_covered_expected_cards_when_only_one_phrase_matches():
+    # If only one card has a single phrase match, do not use that weak signal to
+    # drop another expected card with strong token coverage.
+    read_model = _AcceptedCardReadModel(
+        [
+            _card(
+                memory_id="mem_phrase_expected",
+                summary="neurons authoritative MemoryCard accepted current",
+            ),
+            _card(
+                memory_id="mem_token_expected",
+                summary="MemoryCard accepted evidence current",
+            ),
+            _card(memory_id="mem_noise", summary="neurons generic status"),
+        ]
+    )
+
+    result = run_brain_query_v2(
+        read_model=read_model,
+        brain_id="/project/p",
+        query="neurons authoritative MemoryCard accepted current",
+        query_terms=["neurons", "authoritative", "MemoryCard", "accepted current"],
+        query_intent="eval",
+        limit=5,
+    )
+
+    assert [item["memory_id"] for item in result["results"]] == [
+        "mem_phrase_expected",
+        "mem_token_expected",
+    ]
+
+
+def test_brain_query_v2_uses_injected_semantic_ranker_for_eval_candidates():
+    read_model = _AcceptedCardReadModel(
+        [
+            _card(memory_id="mem_low_vector", summary="needle ranking eval target"),
+            _card(memory_id="mem_high_vector", summary="needle ranking eval target"),
+        ]
+    )
+    calls = []
+
+    def semantic_ranker(**kwargs):
+        calls.append(kwargs)
+        ranked = []
+        for card in kwargs["cards"]:
+            copy = dict(card)
+            copy["_semantic_score"] = 0.99 if card["memory_id"] == "mem_high_vector" else 0.10
+            ranked.append(copy)
+        return sorted(ranked, key=lambda item: item["_semantic_score"], reverse=True)
+
+    result = run_brain_query_v2(
+        read_model=read_model,
+        brain_id="/project/p",
+        query="needle ranking eval target",
+        query_terms=["needle ranking", "eval target"],
+        query_intent="eval",
+        limit=1,
+        semantic_ranker=semantic_ranker,
+    )
+
+    assert calls and calls[0]["query"] == "needle ranking eval target"
+    assert len(calls[0]["cards"]) == 2
+    assert [item["memory_id"] for item in result["results"]] == ["mem_high_vector"]
+    assert result["audit"]["semantic_ranker_used"] is True
+
+
 # --- brain.resolve ---
 
 
