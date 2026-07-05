@@ -27,7 +27,7 @@ def _sources(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
     sources = manifest.get("sources")
     if not isinstance(sources, list):
         raise ValueError("manifest.sources must be a list")
-    return [dict(source) for source in sources]
+    return [dict(source) for source in sources if isinstance(source, Mapping)]
 
 
 def _source_id(source: Mapping[str, Any]) -> str:
@@ -77,7 +77,7 @@ def build_corpus_ingest_plan(
         "source_url_gaps": gaps,
         "raw_body_policy": dict(RAW_BODY_POLICY),
         "rejected_inputs": [],
-        "gaps": [public_safe_text(str(gap), max_chars=160) for gap in manifest.get("gaps", []) if str(gap)],
+        "gaps": [public_safe_text(str(gap), max_chars=160) for gap in manifest.get("gaps", []) if gap],
     }
     ensure_public_safe(plan, "ReferenceCorpusIngestPlan")
     return plan
