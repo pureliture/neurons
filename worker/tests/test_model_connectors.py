@@ -60,6 +60,36 @@ def test_shared_structured_response_normalizer_contract_is_lightweight():
     assert normalized_edges["contradicted_facts"] == [0, 2, 6]
 
 
+def test_shared_structured_response_normalizer_handles_none_values_defensively():
+    from pydantic import BaseModel
+
+    from agent_knowledge.model_connectors.structured_response import (
+        existing_fact_idx_values_from_messages,
+        normalize_structured_response,
+    )
+
+    class ExtractedEntities(BaseModel):
+        extracted_entities: list[dict]
+
+    class EdgeDuplicate(BaseModel):
+        duplicate_facts: list[int]
+
+    normalized_entities = normalize_structured_response(
+        [{"entity_text": "Neo4j", "episode_indices": [None, "1"]}],
+        ExtractedEntities,
+    )
+    normalized_edges = normalize_structured_response(
+        {"duplicate_facts": [None, "2"]},
+        EdgeDuplicate,
+        valid_duplicate_fact_idxs={0, 2},
+    )
+
+    assert normalized_entities["extracted_entities"][0]["episode_indices"] == [0, 1]
+    assert normalized_edges["duplicate_facts"] == [2]
+    assert existing_fact_idx_values_from_messages(None) is None
+    assert existing_fact_idx_values_from_messages([]) is None
+
+
 def test_model_connection_config_preserves_env_precedence_and_omits_secrets():
     config = resolve_model_connection_config(
         {
