@@ -416,6 +416,39 @@ def test_memory_promotion_area_is_concrete_object_and_preserves_dirty_marking(tm
     assert project_dirty["reason"] == "area-test"
 
 
+def test_memory_promotion_area_fails_closed_when_session_readback_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    ledger = _ledger(tmp_path)
+    area = ledger._memory_promotion_area
+    monkeypatch.setattr(area, "get_dirty_session_memory", lambda session_id_hash: None)
+
+    with pytest.raises(ValueError, match="Failed to read back upserted dirty session memory"):
+        area.mark_session_memory_dirty(
+            session_id_hash="sha256:area-session",
+            provider="codex",
+            project=PROJECT,
+            reason="area-test",
+        )
+
+
+def test_memory_promotion_area_fails_closed_when_project_readback_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    ledger = _ledger(tmp_path)
+    area = ledger._memory_promotion_area
+    monkeypatch.setattr(area, "get_dirty_project_memory", lambda *, provider, project: None)
+
+    with pytest.raises(ValueError, match="Failed to read back upserted dirty project memory"):
+        area.mark_project_memory_dirty(
+            provider="codex",
+            project=PROJECT,
+            reason="area-test",
+        )
+
+
 def test_ledger_dirty_session_memory_state_machine(tmp_path: Path):
     ledger = _ledger(tmp_path)
 
