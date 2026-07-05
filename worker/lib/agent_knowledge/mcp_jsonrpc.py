@@ -8,15 +8,24 @@ from .knowledge_search_service import KnowledgeSearchService
 from .llm_brain_core.context import project_from_repository
 from .llm_brain_core.context_builder import normalize_context_consumer
 from .llm_brain_core.models import EvidenceRequest
+from .llm_brain_core.knowledge_objects import ReviewProposal, denied_payload
+from .llm_brain_core.reference_corpus import build_corpus_ingest_plan
 from .mcp_tools import (
+    BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
+    BRAIN_CORPUS_STATUS_TOOL_NAME,
     BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
     BRAIN_DRIFT_EXPLAIN_TOOL_NAME,
     BRAIN_EVIDENCE_GET_TOOL_NAME,
     BRAIN_INCIDENT_SEARCH_TOOL_NAME,
     BRAIN_MEMORY_SEARCH_TOOL_NAME,
+    BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+    BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
+    BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+    BRAIN_OBJECTS_QUERY_TOOL_NAME,
     BRAIN_PERSONA_CHECK_TOOL_NAME,
     BRAIN_PERSONA_GET_TOOL_NAME,
     BRAIN_QUERY_TOOL_NAME,
+    BRAIN_REVIEW_PROPOSALS_TOOL_NAME,
     BRAIN_RESOLVE_TOOL_NAME,
     MEMORY_AUTHORITY_PACK_READ_TOOL_NAME,
     MEMORY_CANDIDATE_APPROVE_TOOL_NAME,
@@ -182,6 +191,88 @@ def dispatch_tool_call(params: dict, service: KnowledgeSearchService) -> dict:
                 max_bytes=_bounded_limit(arguments.get("max_bytes"), default=4096, maximum=65536),
                 redaction_profile=str(arguments.get("redaction_profile") or "public_safe"),
             )
+        )
+        return _tool_result(result)
+    if tool_name == BRAIN_OBJECTS_QUERY_TOOL_NAME:
+        repository = _require_non_empty_string(arguments, "repository", tool_name=tool_name)
+        branch = _require_non_empty_string(arguments, "branch", tool_name=tool_name)
+        query = _require_non_empty_string(arguments, "query", tool_name=tool_name)
+        current_files = arguments.get("current_files") or []
+        if not isinstance(current_files, list):
+            raise ValueError("current_files must be an array")
+        object_types = arguments.get("object_types") or []
+        if not isinstance(object_types, list):
+            raise ValueError("object_types must be an array")
+        project = _project_arg(arguments)
+        result = service.core_brain(project=project).brain_objects_query(
+            repository=repository,
+            branch=branch,
+            query=query,
+            current_files=[str(item) for item in current_files],
+            project=project or None,
+            object_types=[str(item) for item in object_types],
+            route=str(arguments.get("route") or ""),
+            limit=_bounded_limit(arguments.get("limit"), default=20, maximum=50),
+            response_mode=_response_mode(arguments),
+            consumer=_consumer(arguments),
+        )
+        return _tool_result(result)
+    if tool_name == BRAIN_OBJECT_EXPLAIN_TOOL_NAME:
+        result = service.core_brain().brain_object_explain(
+            object_id=_require_non_empty_string(arguments, "object_id", tool_name=tool_name),
+            include_edges=bool(arguments.get("include_edges", True)),
+            include_evidence=bool(arguments.get("include_evidence", True)),
+            response_mode=_response_mode(arguments),
+        )
+        return _tool_result(result)
+    if tool_name == BRAIN_CORPUS_STATUS_TOOL_NAME:
+        result = service.core_brain(project=_project_arg(arguments)).brain_corpus_status(
+            corpus_id=str(arguments.get("corpus_id") or ""),
+            project=_project_arg(arguments),
+            limit=_bounded_limit(arguments.get("limit"), default=20, maximum=100),
+        )
+        return _tool_result(result)
+    if tool_name == BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME:
+        manifest = arguments.get("manifest")
+        if not isinstance(manifest, dict):
+            manifest = {"corpus_name": str(arguments.get("corpus_name") or "reference-corpus"), "sources": []}
+            if arguments.get("manifest_ref"):
+                manifest["manifest_ref"] = str(arguments.get("manifest_ref") or "")
+                manifest["gaps"] = ["manifest_ref_not_loaded"]
+        result = build_corpus_ingest_plan(
+            manifest,
+            project=_require_non_empty_string(arguments, "project", tool_name=tool_name),
+            storage_mode=str(arguments.get("storage_mode") or "metadata_only"),
+        )
+        return _tool_result(result)
+    if tool_name == BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME:
+        ledger_scope = str(arguments.get("ledger_scope") or "production")
+        if ledger_scope != "local_test":
+            return _tool_result(
+                denied_payload(
+                    tool_name,
+                    "proposal_write_requires_local_test_ledger_or_later_production_gate",
+                )
+            )
+        result = ReviewProposal.from_parts(
+            proposal_type=_require_non_empty_string(arguments, "proposal_type", tool_name=tool_name),
+            target_object_id=_require_non_empty_string(arguments, "target_object_id", tool_name=tool_name),
+            reason=_require_non_empty_string(arguments, "reason", tool_name=tool_name),
+            evidence_refs=[str(item) for item in arguments.get("evidence_refs") or []],
+            proposer=_steward_proposer(arguments),
+        ).to_dict(
+            proposal_write_performed=True,
+            proposal_write_target="local_test_ledger",
+        )
+        result["project"] = _project_arg(arguments)
+        service.append_object_review_proposal(result)
+        return _tool_result(result)
+    if tool_name == BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME:
+        return _tool_result(denied_payload(tool_name, "restricted_tool_requires_human_gate"))
+    if tool_name == BRAIN_REVIEW_PROPOSALS_TOOL_NAME:
+        result = service.object_review_proposals(
+            project=_project_arg(arguments),
+            limit=_bounded_limit(arguments.get("limit"), default=20, maximum=100),
         )
         return _tool_result(result)
     if tool_name == BRAIN_QUERY_TOOL_NAME:

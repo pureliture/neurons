@@ -156,6 +156,41 @@ def test_ledger_read_only_connection_blocks_direct_write_sql(tmp_path: Path):
     assert Ledger(path).get_by_knowledge_id("kn_ro_sql")["authorization_status"] == "active"
 
 
+def test_object_review_proposal_upsert_fails_closed_when_readback_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    ledger = _ledger(tmp_path)
+    calls: list[str] = []
+
+    class MissingReadbackCursor:
+        def fetchone(self):
+            return None
+
+    class MissingReadbackConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql: str, params=()):
+            calls.append(sql.strip().split()[0].upper())
+            return MissingReadbackCursor()
+
+    monkeypatch.setattr(ledger, "_connect", lambda: MissingReadbackConnection())
+
+    with pytest.raises(ValueError, match="Failed to read back upserted object review proposal"):
+        ledger.upsert_object_review_proposal(
+            {
+                "proposal_id": "rp_missing_readback",
+                "proposal_type": "propose_stale",
+                "target_object_id": "ko:RepoDocument:old",
+            }
+        )
+
+    assert calls == ["INSERT", "SELECT"]
+
+
 def test_server_backed_read_only_ledger_does_not_snapshot_path(tmp_path: Path):
     class ServerBackedAdapter:
         is_file_backed = False

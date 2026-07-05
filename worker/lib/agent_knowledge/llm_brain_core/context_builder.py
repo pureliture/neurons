@@ -7,7 +7,9 @@ from typing import Any
 from ._util import ensure_public_safe, public_safe_text, short_hash
 from .document_authority import document_authority_cards_from_memory_cards
 from .models import ContextPack, GraphMemoryResult
+from .object_packs import build_agent_context_object_packs
 from .preference_authority import preference_rule_cards_from_memory_cards
+from .repo_style_profile import repo_style_profile_from_memory_cards
 from .workflow_authority import workflow_contract_cards_from_memory_cards
 
 # Task statuses that mean a task is no longer open work. Kept here with the
@@ -17,7 +19,7 @@ from .workflow_authority import workflow_contract_cards_from_memory_cards
 NON_CURRENT_AUTHORITY = frozenset({"stale", "superseded", "archive_candidate"})
 
 TERMINAL_TASK_STATUSES = {"done", "resolved", "closed", "cancelled"}
-CONTEXT_AUTHORITY_CONSUMERS = {"unspecified", "codex", "claude-code", "hermes"}
+CONTEXT_AUTHORITY_CONSUMERS = {"unspecified", "codex", "claude-code", "gemini", "hermes"}
 SEARCH_MIRROR_STATUSES = {"unverified", "configured_unverified", "available", "degraded", "unavailable"}
 
 
@@ -177,6 +179,19 @@ def authority_block(
             "qdrant_docling": search_mirror_status_block(search_mirror_status)
         },
     }
+    block["object_packs"] = build_agent_context_object_packs(
+        documents=block["documents"],
+        preferences=block["preferences"],
+        style_profile=repo_style_profile_from_memory_cards(cards, repository=""),
+        current_work=unfinished_items(cards, graph_result),
+        required_verification=["cd worker && uv run pytest -q"],
+        guardrails=block["boundary_guardrails"],
+    )
+    block["object_substrate_status"] = {
+        "status": "degraded",
+        "authority": "model_available_object_store_not_configured",
+        "gaps": sorted({*gaps, "object_store_not_configured"}),
+    }
     ensure_public_safe(block, "context_authority")
     return block
 
@@ -205,7 +220,7 @@ def search_mirror_status_block(status: Mapping[str, Any] | None = None) -> dict[
 def normalize_context_consumer(consumer: str) -> str:
     safe = public_safe_text(str(consumer or "unspecified"), max_chars=80).lower()
     if safe not in CONTEXT_AUTHORITY_CONSUMERS:
-        raise ValueError("consumer must be unspecified, codex, claude-code, or hermes")
+        raise ValueError("consumer must be unspecified, codex, claude-code, gemini, or hermes")
     return safe
 
 
