@@ -32,6 +32,30 @@ def _manifest():
     }
 
 
+def _palantir_full_count_manifest():
+    sources = []
+    for idx in range(1, 66):
+        if idx <= 6:
+            source_type = "PDF"
+        elif idx <= 39:
+            source_type = "WEB_PAGE"
+        else:
+            source_type = "TEXT"
+        source = {
+            "source_id": f"palantir-ontology-{idx:03d}",
+            "title": f"Palantir ontology reference {idx:03d}",
+            "source_type": source_type,
+            "normalized_path": f"sources-normalized/palantir-ontology-{idx:03d}.md",
+            "content_hash": "sha256:" + f"{idx:064x}"[-64:],
+            "metadata_hash": "sha256:" + f"{idx + 100:064x}"[-64:],
+            "summary": "Public-safe metadata-only reference fixture.",
+        }
+        if idx <= 39:
+            source["source_url"] = f"https://example.test/palantir/ontology/{idx:03d}"
+        sources.append(source)
+    return {"corpus_name": "palantir-ontology", "sources": sources}
+
+
 def test_corpus_ingest_plan_reports_storage_policy_and_missing_url_gap():
     plan = build_corpus_ingest_plan(
         _manifest(),
@@ -41,6 +65,9 @@ def test_corpus_ingest_plan_reports_storage_policy_and_missing_url_gap():
 
     assert plan["schema_version"] == "reference_corpus_ingest_plan.v1"
     assert plan["corpus"]["source_count"] == 2
+    assert plan["source_url_count"] == 1
+    assert plan["manual_text_without_url_count"] == 1
+    assert plan["source_type_counts"] == {"TEXT": 1, "WEB_PAGE": 1}
     assert plan["storage_mode"] == "external_object_store"
     assert plan["manifest_hash"].startswith("sha256:")
     assert plan["hash_verification_status"] == "source_hash_verified"
@@ -102,6 +129,23 @@ def test_corpus_ingest_plan_skips_non_mapping_sources_and_none_gaps():
 
     assert plan["corpus"]["source_count"] == 1
     assert plan["gaps"] == ["freshness_gap"]
+
+
+def test_palantir_full_count_manifest_gate_is_metadata_only():
+    plan = build_corpus_ingest_plan(
+        _palantir_full_count_manifest(),
+        project="neurons",
+        storage_mode="external_object_store",
+    )
+
+    assert plan["corpus"]["name"] == "palantir-ontology"
+    assert plan["corpus"]["source_count"] == 65
+    assert plan["source_url_count"] == 39
+    assert plan["manual_text_without_url_count"] == 26
+    assert plan["missing_url_count"] == 26
+    assert plan["source_type_counts"] == {"PDF": 6, "TEXT": 26, "WEB_PAGE": 33}
+    assert plan["manifest_hash"].startswith("sha256:")
+    assert plan["writes_planned"] is False
 
 
 def test_reference_corpus_manifest_maps_to_reference_only_objects():

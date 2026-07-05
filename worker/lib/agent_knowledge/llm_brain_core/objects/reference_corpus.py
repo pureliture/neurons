@@ -73,6 +73,10 @@ def build_corpus_ingest_plan(
     mode = _storage_mode(storage_mode)
     sources = _sources(manifest)
     corpus_name = public_safe_text(str(manifest.get("corpus_name") or manifest.get("name") or "reference-corpus"), max_chars=160)
+    source_type_counts: dict[str, int] = {}
+    for source in sources:
+        source_type = public_safe_text(str(source.get("source_type") or "TEXT"), max_chars=80)
+        source_type_counts[source_type] = source_type_counts.get(source_type, 0) + 1
     gaps = [
         {
             "source_id": _source_id(source),
@@ -96,6 +100,9 @@ def build_corpus_ingest_plan(
         "storage_mode": mode,
         "authority_lane": "reference_only",
         "writes_planned": False,
+        "source_url_count": len(sources) - len(gaps),
+        "manual_text_without_url_count": len(gaps),
+        "source_type_counts": dict(sorted(source_type_counts.items())),
         "missing_url_count": len(gaps),
         "source_url_gaps": gaps,
         "raw_body_policy": dict(RAW_BODY_POLICY),

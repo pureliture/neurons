@@ -32,6 +32,30 @@ def _reference_manifest() -> dict:
     }
 
 
+def _palantir_full_count_manifest() -> dict:
+    sources = []
+    for idx in range(1, 66):
+        if idx <= 6:
+            source_type = "PDF"
+        elif idx <= 39:
+            source_type = "WEB_PAGE"
+        else:
+            source_type = "TEXT"
+        source = {
+            "source_id": f"palantir-ontology-{idx:03d}",
+            "title": f"Palantir ontology reference {idx:03d}",
+            "source_type": source_type,
+            "normalized_path": f"sources-normalized/palantir-ontology-{idx:03d}.md",
+            "content_hash": "sha256:" + f"{idx:064x}"[-64:],
+            "metadata_hash": "sha256:" + f"{idx + 100:064x}"[-64:],
+            "summary": "Public-safe metadata-only reference fixture.",
+        }
+        if idx <= 39:
+            source["source_url"] = f"https://example.test/palantir/ontology/{idx:03d}"
+        sources.append(source)
+    return {"corpus_name": "palantir-ontology", "sources": sources}
+
+
 def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
     assert main(["--help"]) == 0
     output = capsys.readouterr().out
@@ -134,6 +158,33 @@ def test_neuron_knowledge_corpus_status_reports_storage_policy(capsys):
     assert report["source_rights_policy"] == "operator_attested_reference_use"
     assert "managed_snapshot" in report["supported_storage_modes"]
     assert "reference_corpus_store_empty" in report["gaps"]
+
+
+def test_neuron_knowledge_corpus_ingest_plan_loads_full_count_manifest(tmp_path, capsys):
+    manifest = tmp_path / "palantir-manifest.json"
+    manifest.write_text(json.dumps(_palantir_full_count_manifest()), encoding="utf-8")
+
+    rc = main(
+        [
+            "corpus-ingest-plan",
+            "--project",
+            "neurons",
+            "--storage-mode",
+            "external_object_store",
+            "--manifest-file",
+            str(manifest),
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["corpus"]["name"] == "palantir-ontology"
+    assert report["corpus"]["source_count"] == 65
+    assert report["source_url_count"] == 39
+    assert report["manual_text_without_url_count"] == 26
+    assert report["source_type_counts"] == {"PDF": 6, "TEXT": 26, "WEB_PAGE": 33}
+    assert report["manifest_hash"].startswith("sha256:")
+    assert report["writes_planned"] is False
 
 
 def test_neuron_knowledge_corpus_ingest_local_test_is_preview_until_store_configured(capsys):
