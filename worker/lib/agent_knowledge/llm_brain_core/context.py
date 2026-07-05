@@ -18,6 +18,7 @@ from .document_bridge import DisabledDocumentBridge, DocumentBridge
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
 from .models import EvidenceRequest
 from .objects.object_packs import build_documentation_cleanup_pack
+from .objects.reference_corpus import default_corpus_policy_status
 from .source_ref import SourceRefResolver
 
 if TYPE_CHECKING:
@@ -229,6 +230,7 @@ class BrainReadService:
             "reference_object_count": 0,
             "freshness_gaps": [],
             "limit": min(max(int(limit or 20), 1), 100),
+            **default_corpus_policy_status(),
             "gaps": ["reference_corpus_store_empty"],
         }
         ensure_public_safe(result, "brain_corpus_status")

@@ -41,6 +41,8 @@ def test_corpus_ingest_plan_reports_storage_policy_and_missing_url_gap():
     assert plan["schema_version"] == "reference_corpus_ingest_plan.v1"
     assert plan["corpus"]["source_count"] == 2
     assert plan["storage_mode"] == "external_object_store"
+    assert plan["manifest_hash"].startswith("sha256:")
+    assert plan["hash_verification_status"] == "source_hash_verified"
     assert plan["writes_planned"] is False
     assert plan["authority_lane"] == "reference_only"
     assert plan["missing_url_count"] == 1
@@ -117,3 +119,70 @@ def test_reference_corpus_manifest_maps_to_reference_only_objects():
     assert result["extraction_run"]["evaluation"]["missing_url_count"] == 1
     assert all(obj["authority_lane"] == "reference_only" for obj in result["objects"])
     assert all(obj["verification_state"] == "source_hash_verified" for obj in result["objects"])
+
+
+def test_reference_corpus_manifest_maps_to_snapshot_chunk_and_freshness_objects():
+    result = reference_corpus_objects_from_manifest(
+        _manifest(),
+        project="neurons",
+        storage_mode="managed_snapshot",
+    )
+
+    assert len(result["snapshots"]) == 2
+    assert len(result["chunks"]) == 2
+    assert len(result["freshness_checks"]) == 2
+    assert all(snapshot["raw_body_returnable"] is False for snapshot in result["snapshots"])
+    assert all(snapshot["return_capability"] == "denied_without_explicit_approval" for snapshot in result["snapshots"])
+    assert all(snapshot["retention_class"] == "user_managed_reference" for snapshot in result["snapshots"])
+    assert all(snapshot["redaction_profile"] == "public_safe_summary" for snapshot in result["snapshots"])
+    assert all(snapshot["deletion_policy"] == "delete_snapshot_keep_metadata" for snapshot in result["snapshots"])
+    assert all(snapshot["license_source_rights"] == "operator_attested" for snapshot in result["snapshots"])
+    assert all(chunk["body_storage_ref"] == "" for chunk in result["chunks"])
+    assert [check["result"] for check in result["freshness_checks"]] == [
+        "source_url_present",
+        "source_url_missing_manual_text",
+    ]
+
+
+def test_reference_corpus_reingest_is_idempotent_for_stable_ids():
+    first = reference_corpus_objects_from_manifest(
+        _manifest(),
+        project="neurons",
+        storage_mode="managed_snapshot",
+    )
+    second = reference_corpus_objects_from_manifest(
+        _manifest(),
+        project="neurons",
+        storage_mode="managed_snapshot",
+    )
+
+    assert first["corpus"]["corpus_id"] == second["corpus"]["corpus_id"]
+    assert [source["source_id"] for source in first["sources"]] == [source["source_id"] for source in second["sources"]]
+    assert [snapshot["snapshot_id"] for snapshot in first["snapshots"]] == [
+        snapshot["snapshot_id"] for snapshot in second["snapshots"]
+    ]
+    assert [chunk["chunk_id"] for chunk in first["chunks"]] == [chunk["chunk_id"] for chunk in second["chunks"]]
+    assert first["extraction_run"]["run_id"] == second["extraction_run"]["run_id"]
+
+
+def test_reference_corpus_hash_mismatch_blocks_extraction_output():
+    manifest = _manifest()
+    manifest["sources"][0]["computed_content_hash"] = "sha256:" + "9" * 64
+
+    result = reference_corpus_objects_from_manifest(
+        manifest,
+        project="neurons",
+        storage_mode="managed_snapshot",
+    )
+
+    assert result["extraction_run"]["status"] == "blocked"
+    assert result["extraction_run"]["evaluation"]["hash_mismatch_count"] == 1
+    assert result["objects"] == []
+    assert result["snapshots"] == []
+    assert result["chunks"] == []
+    assert result["rejected_inputs"] == [
+        {
+            "source_id": "palantir-ontology-001",
+            "reason": "content_hash_mismatch",
+        }
+    ]

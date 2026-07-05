@@ -439,6 +439,32 @@ def test_mcp_corpus_ingest_plan_reports_manifest_ref_gap(tmp_path: Path):
     assert result["manifest_ref"] == "refs/palantir.json"
 
 
+def test_mcp_corpus_status_reports_policy_fields(tmp_path: Path):
+    service = _service(tmp_path)
+    result = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 107,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CORPUS_STATUS_TOOL_NAME,
+                "arguments": {
+                    "project": "neurons",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert result["raw_body_policy"]["return_capability"] == "denied_without_explicit_approval"
+    assert result["raw_body_policy"]["retention_class"] == "user_managed_reference"
+    assert result["raw_body_policy"]["redaction_profile"] == "public_safe_summary"
+    assert result["raw_body_policy"]["deletion_policy"] == "delete_snapshot_keep_metadata"
+    assert result["raw_body_policy"]["license_source_rights"] == "operator_attested"
+    assert result["source_rights_policy"] == "operator_attested_reference_use"
+    assert "managed_snapshot" in result["supported_storage_modes"]
+
+
 def test_mcp_object_decision_commit_is_restricted_denied_by_default(tmp_path: Path):
     service = _service(tmp_path)
     result = handle_jsonrpc_message(
