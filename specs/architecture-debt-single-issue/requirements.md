@@ -12,8 +12,8 @@ GitHub issue #40은 2026-06-28 `origin/main` `f222ea7` 기준 architecture deepe
 
 입력 자료:
 
-- `/tmp/architecture-review-followup-20260705191500.html`
-- `/Users/ddalkak/Projects/neurons/.agents/orchestrator_followup/handoff.md`
+- 2026-07-05 follow-up architecture review artifact
+- 2026-07-05 orchestrator follow-up handoff artifact
 - GitHub issue #40 updated body
 
 ## 질문-답변 흐름
@@ -86,7 +86,7 @@ GitHub issue #40은 2026-06-28 `origin/main` `f222ea7` 기준 architecture deepe
 
 ### FR6. `specs` drift 관리
 
-- `specs/*/requirements.md`, `design.md`, `implementation-matrix.md`의 주요 claims는 current code/runtime 상태와 대조 가능해야 합니다.
+- `specs/*/requirements.md`, `design.md`, `spec-drift-matrix.md`의 주요 claims는 current code/runtime 상태와 대조 가능해야 합니다.
 - spec 상태는 done, partial, stale, superseded, open으로 분류되어야 합니다.
 - 구현 세션은 관련 spec drift를 먼저 확인한 뒤 시작해야 합니다.
 
