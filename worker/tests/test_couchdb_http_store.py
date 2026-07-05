@@ -44,6 +44,7 @@ class FakeCouch:
 
     def __init__(self) -> None:
         self.dbs: dict[str, dict[str, dict]] = {}
+        self.find_bodies: list[dict] = []
         self.put_conflict_once = False
         self._conflicted = False
 
@@ -62,9 +63,7 @@ class FakeCouch:
         store = self.dbs.setdefault(db, {})
 
         if method == "POST" and len(parts) == 2 and parts[1] == "_find":
-            selector = json.loads(body.decode())["selector"]
-            docs = [d for d in store.values() if all(d.get(k) == v for k, v in selector.items())]
-            return self._json(200, {"docs": docs})
+            return self._handle_find(store, body)
 
         if len(parts) == 2:
             doc_id = parts[1]
@@ -95,6 +94,34 @@ class FakeCouch:
     @staticmethod
     def _json(status: int, payload: dict) -> ProxyResponse:
         return ProxyResponse(status_code=status, body=json.dumps(payload).encode("utf-8"))
+
+    def _handle_find(self, store: dict[str, dict], body: bytes) -> ProxyResponse:
+        request = json.loads(body.decode())
+        self.find_bodies.append(request)
+
+        docs = self._matching_docs(store, request["selector"])
+        start = int(str(request.get("bookmark") or "0"))
+        limit = int(request.get("limit") or len(docs) or 1)
+        page = self._project_fields(docs[start:start + limit], request.get("fields") or [])
+
+        payload = {"docs": page}
+        if start + limit < len(docs):
+            payload["bookmark"] = str(start + limit)
+        return self._json(200, payload)
+
+    @staticmethod
+    def _matching_docs(store: dict[str, dict], selector: dict) -> list[dict]:
+        return [
+            doc
+            for doc in sorted(store.values(), key=lambda item: str(item.get("_id")))
+            if all(doc.get(key) == value for key, value in selector.items())
+        ]
+
+    @staticmethod
+    def _project_fields(docs: list[dict], fields: list[str]) -> list[dict]:
+        if not fields:
+            return docs
+        return [{field: doc.get(field) for field in fields} for doc in docs]
 
 
 def _store(fake: FakeCouch) -> CouchDBHttpSourceStore:
@@ -171,6 +198,105 @@ def test_find_by_session_filters_by_doc_type():
     assert len(chunks) == 2
     everything = store.find_by_session(session_id_hash=_sid())
     assert len(everything) == 3
+
+
+def test_find_by_type_follows_bookmark_pages_and_applies_selector_fields():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    fake.dbs["transcript_source"].update(
+        {
+            "transcript_session:1": {
+                "_id": "transcript_session:1",
+                "doc_type": dm.SourceDocType.TRANSCRIPT_SESSION,
+                "session_id_hash": "s1",
+                "project": "neurons",
+                "provider": "codex",
+                "ignored": "x",
+            },
+            "transcript_session:2": {
+                "_id": "transcript_session:2",
+                "doc_type": dm.SourceDocType.TRANSCRIPT_SESSION,
+                "session_id_hash": "s2",
+                "project": "neurons",
+                "provider": "codex",
+                "ignored": "x",
+            },
+            "transcript_session:3": {
+                "_id": "transcript_session:3",
+                "doc_type": dm.SourceDocType.TRANSCRIPT_SESSION,
+                "session_id_hash": "s3",
+                "project": "neurons",
+                "provider": "codex",
+                "ignored": "x",
+            },
+            "transcript_session:other": {
+                "_id": "transcript_session:other",
+                "doc_type": dm.SourceDocType.TRANSCRIPT_SESSION,
+                "session_id_hash": "other",
+                "project": "other",
+                "provider": "codex",
+            },
+        }
+    )
+
+    docs = store.find_by_type(
+        dm.SourceDocType.TRANSCRIPT_SESSION,
+        fields=["_id", "session_id_hash"],
+        selector={"project": "neurons", "provider": "codex"},
+        page_size=2,
+    )
+
+    assert docs == [
+        {"_id": "transcript_session:1", "session_id_hash": "s1"},
+        {"_id": "transcript_session:2", "session_id_hash": "s2"},
+        {"_id": "transcript_session:3", "session_id_hash": "s3"},
+    ]
+    assert fake.find_bodies == [
+        {
+            "selector": {
+                "doc_type": dm.SourceDocType.TRANSCRIPT_SESSION,
+                "project": "neurons",
+                "provider": "codex",
+            },
+            "limit": 2,
+            "fields": ["_id", "session_id_hash"],
+        },
+        {
+            "selector": {
+                "doc_type": dm.SourceDocType.TRANSCRIPT_SESSION,
+                "project": "neurons",
+                "provider": "codex",
+            },
+            "limit": 2,
+            "fields": ["_id", "session_id_hash"],
+            "bookmark": "2",
+        },
+    ]
+
+
+def test_find_by_type_limit_stops_pagination_after_requested_docs():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    for i in range(5):
+        fake.dbs["transcript_source"][f"transcript_session:{i}"] = {
+            "_id": f"transcript_session:{i}",
+            "doc_type": dm.SourceDocType.TRANSCRIPT_SESSION,
+            "session_id_hash": f"s{i}",
+            "project": "neurons",
+            "provider": "codex",
+        }
+
+    docs = store.find_by_type(
+        dm.SourceDocType.TRANSCRIPT_SESSION,
+        fields=["session_id_hash"],
+        limit=3,
+        page_size=2,
+    )
+
+    assert docs == [{"session_id_hash": "s0"}, {"session_id_hash": "s1"}, {"session_id_hash": "s2"}]
+    assert [body["limit"] for body in fake.find_bodies] == [2, 1]
 
 
 def test_delete():
