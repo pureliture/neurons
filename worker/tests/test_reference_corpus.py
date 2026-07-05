@@ -71,6 +71,36 @@ def test_managed_snapshot_requires_raw_body_policy_fields():
     }
 
 
+def test_corpus_ingest_plan_skips_non_mapping_sources_and_none_gaps():
+    manifest = {
+        "corpus_name": "palantir-ontology-mini",
+        "sources": [
+            None,
+            "not-a-source",
+            {
+                "source_id": "palantir-ontology-001",
+                "title": "Ontology overview",
+                "source_type": "WEB_PAGE",
+                "source_url": "https://example.test/ontology",
+                "normalized_path": "sources-normalized/palantir-ontology-001.md",
+                "content_hash": "sha256:" + "1" * 64,
+                "metadata_hash": "sha256:" + "2" * 64,
+                "summary": "Objects, links, actions, functions.",
+            },
+        ],
+        "gaps": [None, "", "freshness_gap"],
+    }
+
+    plan = build_corpus_ingest_plan(
+        manifest,
+        project="neurons",
+        storage_mode="metadata_only",
+    )
+
+    assert plan["corpus"]["source_count"] == 1
+    assert plan["gaps"] == ["freshness_gap"]
+
+
 def test_reference_corpus_manifest_maps_to_reference_only_objects():
     result = reference_corpus_objects_from_manifest(
         _manifest(),
