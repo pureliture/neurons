@@ -138,7 +138,7 @@ class KnowledgeSearchService:
         return self.ledger.upsert_object_review_proposal(stored)
 
     def object_review_proposals(self, *, project: str = "", limit: int = 20) -> dict:
-        bounded = max(1, min(int(limit), 100))
+        bounded = max(1, min(int(limit or 20), 100))
         project_name = public_safe_text(project, max_chars=120)
         items = self.ledger.list_object_review_proposals(project=project_name, limit=bounded)
         response = {

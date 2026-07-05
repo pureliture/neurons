@@ -157,7 +157,7 @@ class BrainReadService:
             current_files=current_files,
             current_request=query,
             project=project_name,
-            limit=min(max(int(limit), 1), 20),
+            limit=min(max(int(limit or 20), 1), 20),
             consumer=consumer,
         ).to_dict()
         if selected_route == "documentation_cleanup":
@@ -228,7 +228,7 @@ class BrainReadService:
             "storage_modes": {},
             "reference_object_count": 0,
             "freshness_gaps": [],
-            "limit": min(max(int(limit), 1), 100),
+            "limit": min(max(int(limit or 20), 1), 100),
             "gaps": ["reference_corpus_store_empty"],
         }
         ensure_public_safe(result, "brain_corpus_status")

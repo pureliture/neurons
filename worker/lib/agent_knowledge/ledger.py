@@ -2323,10 +2323,12 @@ class Ledger(
                 "SELECT proposal_json FROM object_review_proposals WHERE proposal_id = ?",
                 (proposal_id,),
             ).fetchone()
-        return json.loads(row["proposal_json"]) if row is not None else {}
+        if row is None:
+            raise ValueError(f"Failed to read back upserted object review proposal: {proposal_id}")
+        return json.loads(row["proposal_json"])
 
     def list_object_review_proposals(self, *, project: str = "", limit: int = 20) -> list[dict]:
-        bounded = max(1, min(int(limit), 100))
+        bounded = max(1, min(int(limit or 20), 100))
         with self._connect() as connection:
             if project:
                 rows = connection.execute(

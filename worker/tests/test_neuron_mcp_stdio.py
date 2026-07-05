@@ -242,6 +242,7 @@ def test_mcp_brain_objects_query_roundtrip(tmp_path: Path):
                     "query": "이 repo 문서 최신화하려면 뭘 봐야 해?",
                     "current_files": ["README.md"],
                     "consumer": "gemini",
+                    "limit": None,
                 },
             },
         },
@@ -328,6 +329,7 @@ def test_mcp_object_proposal_create_local_test_and_production_denial(tmp_path: P
     assert local["authoritative_memory_changed"] is False
     ledger_items = service.ledger.list_object_review_proposals()
     assert ledger_items[0]["proposal_id"] == local["proposal_id"]
+    assert service.object_review_proposals(limit=None)["count"] == 1
     queued = handle_jsonrpc_message(
         {
             "jsonrpc": "2.0",
