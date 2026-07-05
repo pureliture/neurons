@@ -240,3 +240,45 @@ def test_neuron_knowledge_transcript_session_gc_execute_requires_approval(tmp_pa
     captured = capsys.readouterr()
     assert rc != 0
     assert not captured.out  # fails closed: no GC report emitted without the full live contract (token+approval)
+
+
+def test_neuron_knowledge_couchdb_command_surface_metadata_importable():
+    from agent_knowledge.cli import COMMAND_METADATA
+
+    assert isinstance(COMMAND_METADATA, dict)
+    assert COMMAND_METADATA
+
+
+def test_neuron_knowledge_couchdb_command_surface_classification():
+    from agent_knowledge.cli import COMMAND_METADATA
+
+    couchdb_build_metadata = COMMAND_METADATA["couchdb-session-memory-build"]
+    transcript_migration_metadata = COMMAND_METADATA["transcript-migration"]
+    couchdb_migration_flow_metadata = COMMAND_METADATA["couchdb-migration-flow"]
+    legacy_session_memory_metadata = COMMAND_METADATA["neuron-session-memory-build"]
+
+    assert set(COMMAND_METADATA).issubset(COMMAND_HANDLERS)
+
+    for command in (
+        "couchdb-session-memory-build",
+        "transcript-migration",
+        "couchdb-migration-flow",
+        "neuron-session-memory-build",
+    ):
+        assert command in COMMAND_HANDLERS, f"command '{command}' should exist in COMMAND_HANDLERS"
+        assert command in COMMAND_METADATA, f"command '{command}' should exist in COMMAND_METADATA"
+
+    assert couchdb_build_metadata["runtime_category"] == "active_runtime"
+    assert couchdb_build_metadata["deletion_candidate"] is False
+    assert couchdb_build_metadata["live_mutation_requires_approval"] is True
+
+    assert transcript_migration_metadata["runtime_category"] == "human_gated_migration"
+    assert transcript_migration_metadata["deletion_candidate"] is False
+    assert transcript_migration_metadata["live_mutation_requires_approval"] is True
+
+    assert couchdb_migration_flow_metadata["runtime_category"] == "human_gated_migration"
+    assert couchdb_migration_flow_metadata["deletion_candidate"] is False
+
+    assert legacy_session_memory_metadata["runtime_category"] == "legacy_compatibility"
+    assert legacy_session_memory_metadata["deletion_candidate"] is False
+    assert legacy_session_memory_metadata["live_mutation_requires_approval"] is True
