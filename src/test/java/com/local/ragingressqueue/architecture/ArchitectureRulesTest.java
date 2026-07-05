@@ -48,6 +48,23 @@ class ArchitectureRulesTest {
                     .should().dependOnClassesThat().resideInAPackage("..adapter..")
                     .because("port는 기술 중립 계약이며 adapter를 역참조하면 안 된다 (ADR-0002 Rule 3)");
 
+    /** Rule 3b — retired bridge 구현 상세는 ext adapter 패키지 밖으로 새면 안 된다. */
+    @ArchTest
+    static final ArchRule target_ports_should_not_depend_on_retired_bridge_implementation =
+            noClasses()
+                    .that().resideInAPackage("..target.port..")
+                    .should().dependOnClassesThat().resideInAPackage("..adapter.ext.retired_index_bridge..")
+                    .because("target port는 backend-neutral 계약이며 retired bridge 구현을 알면 안 된다");
+
+    /** Rule 3c — RetiredIndexBridge 구현 클래스는 현재 ext adapter boundary 안에 둔다. */
+    @ArchTest
+    static final ArchRule retired_bridge_implementation_classes_stay_in_ext_adapter_package =
+            classes()
+                    .that().haveSimpleNameContaining("RetiredIndexBridge")
+                    .and().resideOutsideOfPackage("..common..")
+                    .should().resideInAPackage("..adapter.ext.retired_index_bridge..")
+                    .because("RetiredIndexBridge 구현 상세는 adapter.ext.retired_index_bridge 경계에 격리한다");
+
     /** Rule 4 — 어댑터는 포트를 구현한다(포트 구현체는 adapter에, 포트 자체는 port 패키지에). */
     @ArchTest
     static final ArchRule port_implementations_reside_in_adapter =

@@ -156,6 +156,9 @@ def env_profile_dataset_resolver(getenv: Callable[[str], str | None]) -> Callabl
     in the wrong dataset."""
     def resolve(profile: str) -> str:
         key = str(profile).upper().replace("-", "_")
+        if key.startswith("INDEX_"):
+            key = key[len("INDEX_"):]
+        key = f"RETIRED_INDEX_BRIDGE_{key}"
         if not key.endswith("_DATASET_ID"):
             key = key + "_DATASET_ID"
         dataset = getenv(key)

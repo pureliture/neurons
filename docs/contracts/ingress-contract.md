@@ -52,8 +52,11 @@ Producer는 raw private hostname/path/token이 아니라 redacted 또는 stable 
 
 ## 3. Target profile registry — logical profile → backend kind
 
-`TargetProfileRegistry`가 유효 `targetProfile`의 **단일 진실 공급원(SSOT)** 이다.
+`TargetProfileRegistry`가 runtime의 유효 `targetProfile` 판정을 소유한다.
 각 profile은 `BackendKind` + logical `datasetRole`로 매핑된다. **물리 dataset id는 여기에 없다.**
+public-safe machine-readable contract는 `docs/contracts/target-profiles.yaml`이다. 이 artifact는 이 섹션의
+logical profile 표를 Java/Python/compose parity tests가 함께 읽을 수 있게 만든 하위 계약이며,
+physical dataset id, token, private ops value를 절대 담지 않는다.
 
 | targetProfile | backendKind | datasetRole (logical) | 물리 dataset id |
 |---|---|---|---|
@@ -68,6 +71,9 @@ Producer는 raw private hostname/path/token이 아니라 redacted 또는 stable 
 - `IngestJobValidator`는 이 registry에 known-profile 판정을 위임한다. 미지의 profile은 enqueue에서 거부된다.
 - registry는 `application.yml`의 `rag-ingress.target-profiles`와 **parity 테스트**로 일치가 강제된다
   (`adapter == backendKind.toLowerCase()`, `dataset-role == datasetRole`).
+- `docs/contracts/target-profiles.yaml`은 `TargetProfileRegistry.DEFAULT`, `application.yml`, Python
+  `env_profile_dataset_resolver`, `compose.yaml`, `.env.example`의 logical/env-key parity를 검증하는
+  public-safe contract artifact다.
 - **명명 주의**: `index-*` 접두는 현 단계의 **임시 adapter-prefix logical key**다. backend-neutral
   완성형에서는 backend 명을 떼고 의미 기반 profile 명으로 이행할 수 있으며, 물리 dataset id는 계속 private.
 - follow-up: 전면 `@ConfigurationProperties` 바인딩 + startup fail-fast 게이트(이번 slice는 Spring
