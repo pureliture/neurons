@@ -39,6 +39,7 @@ STEWARD_RESTRICTED_TOOL_NAMES = (
     MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
     MEMORY_STALE_COMMIT_TOOL_NAME,
 )
+_TOOL_REGISTRY_CACHE: dict[str, dict] | None = None
 
 
 @dataclass(frozen=True)
@@ -546,7 +547,7 @@ def list_tools() -> list[dict]:
     ]
 
 
-def tool_registry() -> dict[str, dict]:
+def _build_tool_registry() -> dict[str, dict]:
     registry: dict[str, dict] = {}
     for tool in list_tools():
         name = str(tool.get("name") or "")
@@ -556,6 +557,13 @@ def tool_registry() -> dict[str, dict]:
             raise ValueError(f"duplicate MCP tool name: {name}")
         registry[name] = tool
     return registry
+
+
+def tool_registry() -> dict[str, dict]:
+    global _TOOL_REGISTRY_CACHE
+    if _TOOL_REGISTRY_CACHE is None:
+        _TOOL_REGISTRY_CACHE = _build_tool_registry()
+    return dict(_TOOL_REGISTRY_CACHE)
 
 
 def tool_names() -> frozenset[str]:
