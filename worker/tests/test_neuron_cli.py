@@ -144,6 +144,37 @@ def test_neuron_knowledge_corpus_ingest_production_target_denied(capsys):
     assert report["reason"] == "production_corpus_ingest_requires_later_validation_goal"
 
 
+def test_neuron_knowledge_corpus_ingest_production_denied_even_with_configured_ledger_env(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "ledger.sqlite"
+    manifest.write_text(json.dumps(_reference_manifest()), encoding="utf-8")
+    monkeypatch.setenv("NEURON_REFERENCE_CORPUS_LEDGER", str(ledger))
+
+    rc = main(
+        [
+            "corpus-ingest",
+            "--project",
+            "neurons",
+            "--target",
+            "production",
+            "--manifest-file",
+            str(manifest),
+            "--storage-mode",
+            "managed_snapshot",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "denied"
+    assert report["mutation_performed"] is False
+    assert ledger.exists() is False
+
+
 def test_neuron_knowledge_corpus_status_reports_storage_policy(capsys):
     rc = main(["corpus-status", "--project", "neurons"])
 
@@ -308,6 +339,42 @@ def test_neuron_knowledge_corpus_ingest_local_test_writes_configured_store(tmp_p
     assert status["document_versions"][0]["schema_version"] == "document_version.v1"
     assert status["extraction_runs"][0]["status"] == "completed"
     assert status["freshness_gaps"][0]["source_url_status"] == "missing_manual_text"
+    assert status["gaps"] == []
+
+
+def test_neuron_knowledge_corpus_ingest_and_status_use_configured_local_test_ledger_env(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "ledger.sqlite"
+    manifest.write_text(json.dumps(_reference_manifest()), encoding="utf-8")
+    monkeypatch.setenv("NEURON_REFERENCE_CORPUS_LEDGER", str(ledger))
+
+    rc = main(
+        [
+            "corpus-ingest",
+            "--project",
+            "neurons",
+            "--target",
+            "local_test",
+            "--manifest-file",
+            str(manifest),
+            "--storage-mode",
+            "managed_snapshot",
+        ]
+    )
+    ingest = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert ingest["schema_version"] == "reference_corpus_store_write.v1"
+    assert ingest["status"] == "stored"
+    assert ingest["production_mutation_performed"] is False
+
+    assert main(["corpus-status", "--project", "neurons", "--corpus-id", ingest["corpus_id"]]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["source_count"] == 2
+    assert status["storage_modes"] == {"managed_snapshot": 2}
     assert status["gaps"] == []
 
 
