@@ -241,6 +241,16 @@ def test_eval_cli_returns_success_when_eval_fails_but_storage_succeeds(tmp_path,
     assert payload["evaluation_status"] == "fail"
     assert payload["mutation_performed"] is True
     assert payload["network_used"] is False
+    assert payload["readiness"]["classification"] == "dev_only_harness"
+    assert payload["readiness"]["product_readiness_gate"] is False
+    assert payload["readiness"]["runtime_verified"] is False
+    assert [level["code"] for level in payload["readiness"]["verification_levels"]] == [
+        "api_shape_only",
+        "api_queue_smoke",
+        "local_unit_contract",
+        "read_only_runtime",
+        "full_e2e_business",
+    ]
     assert payload["metrics"]["query_count"] == 1
     assert payload["metrics"]["failed_count"] == 1
     assert payload["failure_count"] == 1

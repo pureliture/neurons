@@ -38,7 +38,12 @@ if [[ "$MODE" == "offline" ]]; then
   "documentStatus": {"indexedCandidateCount": 0},
   "authorization": {"authorizedCount": 0},
   "externalStatus": "not_configured",
-  "runtime": {"verified": false, "reason": "offline postcheck does not contact API or NATS"}
+  "runtime": {
+    "verified": false,
+    "verificationLevel": "api_shape_only",
+    "fullE2EVerified": false,
+    "reason": "offline postcheck does not contact API or NATS"
+  }
 }
 JSON
 else
@@ -58,6 +63,8 @@ else
       externalStatus: $status.externalStatus,
       runtime: {
         verified: false,
+        verificationLevel: "api_shape_only",
+        fullE2EVerified: false,
         reason: "online postcheck verifies API shape only; JetStream and worker smoke require compose/runtime evidence"
       }
     }' > "$EVIDENCE_PATH"

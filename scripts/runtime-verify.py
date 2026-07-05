@@ -121,6 +121,57 @@ def require_blocked_pressure_queue_retained(evidence, *, before_messages, before
     require(ack_floor_stream_seq < new_seq, "blocked pressure message was acked")
 
 
+def build_runtime_verification_evidence(
+    *,
+    health,
+    status,
+    postcheck_json,
+    enqueue,
+    rejected,
+    stream,
+    consumer,
+    expected_pressure,
+):
+    postcheck_runtime = postcheck_json.get("runtime") or {}
+    stream_config = stream.get("config") or {}
+    stream_state = stream.get("state") or {}
+
+    return {
+        "runtime": {
+            "verified": True,
+            "verificationLevel": "api_queue_smoke",
+            "fullE2EVerified": False,
+            "scope": "ubuntu-compose-api-nats-pressure-worker-gate",
+            "expectedPressure": expected_pressure,
+        },
+        "health": health,
+        "status": status,
+        "postcheck": {
+            "passed": True,
+            "verificationLevel": postcheck_runtime.get("verificationLevel", "api_shape_only"),
+            "runtimeVerifiedByPostcheck": postcheck_runtime.get("verified"),
+        },
+        "enqueue": enqueue,
+        "redactionRejection": rejected,
+        "stream": {
+            "name": stream_config.get("name"),
+            "subjects": stream_config.get("subjects"),
+            "messages": stream_state.get("messages"),
+            "firstSeq": stream_state.get("first_seq"),
+            "lastSeq": stream_state.get("last_seq"),
+        },
+        "consumer": {
+            "name": consumer.get("name"),
+            "streamName": consumer.get("stream_name"),
+            "numPending": consumer.get("num_pending"),
+            "numAckPending": consumer.get("num_ack_pending"),
+            "numRedelivered": consumer.get("num_redelivered"),
+            "delivered": consumer.get("delivered"),
+            "ackFloor": consumer.get("ack_floor"),
+        },
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--api-url", default="http://127.0.0.1:18080")
@@ -178,37 +229,16 @@ def main():
         "$JS.API.CONSUMER.INFO.RAG_INGRESS_QUEUE.rag_target_delivery_worker",
     )
 
-    evidence = {
-        "runtime": {
-            "verified": True,
-            "scope": "ubuntu-compose-api-nats-pressure-worker-gate",
-            "expectedPressure": args.expected_pressure,
-        },
-        "health": health,
-        "status": status,
-        "postcheck": {
-            "passed": True,
-            "runtimeVerifiedByPostcheck": postcheck_json.get("runtime", {}).get("verified"),
-        },
-        "enqueue": enqueue,
-        "redactionRejection": rejected,
-        "stream": {
-            "name": stream.get("config", {}).get("name"),
-            "subjects": stream.get("config", {}).get("subjects"),
-            "messages": stream.get("state", {}).get("messages"),
-            "firstSeq": stream.get("state", {}).get("first_seq"),
-            "lastSeq": stream.get("state", {}).get("last_seq"),
-        },
-        "consumer": {
-            "name": consumer.get("name"),
-            "streamName": consumer.get("stream_name"),
-            "numPending": consumer.get("num_pending"),
-            "numAckPending": consumer.get("num_ack_pending"),
-            "numRedelivered": consumer.get("num_redelivered"),
-            "delivered": consumer.get("delivered"),
-            "ackFloor": consumer.get("ack_floor"),
-        },
-    }
+    evidence = build_runtime_verification_evidence(
+        health=health,
+        status=status,
+        postcheck_json=postcheck_json,
+        enqueue=enqueue,
+        rejected=rejected,
+        stream=stream,
+        consumer=consumer,
+        expected_pressure=args.expected_pressure,
+    )
 
     require(evidence["health"] == {"component": "ingress-api", "status": "ok"}, "healthz did not return ok")
     require(evidence["status"]["target"]["pressure"] == args.expected_pressure, "target pressure mismatch")
