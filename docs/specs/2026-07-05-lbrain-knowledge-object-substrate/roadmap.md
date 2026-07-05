@@ -11,6 +11,7 @@ Current state:
 - Phase 1 substrate implementation: complete in local/test scope.
 - Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates passed, deployed HTTP MCP runtime and configured endpoint validated, current Codex session tool registry still missing object-native tools, and current-source-main image identity is not proven live.
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, latest configured-endpoint smoke still passes with denied/no-mutation production writes, but the current Codex session's `mcp__lbrain` namespace still does not expose them and the live MCP image is not proven to include the #73/current-main source refactor.
+- P2 Living Reference Corpus Store: `in_progress`; local/test corpus policy and managed snapshot metadata mapping evidence exists, but no approved persistent corpus store or production ingest is open.
 - Product activation: not complete; configured agent read path refresh remains required.
 - UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
 
@@ -195,7 +196,7 @@ Next gate:
 
 ### P2. Living Reference Corpus Store
 
-State: planned.
+State: `in_progress`.
 
 Purpose:
 
@@ -219,6 +220,28 @@ Gate evidence:
 - corpus status reports source-rights, retention, deletion, redaction, and raw-return policy
 - repeated ingest is idempotent
 - production ingest remains gated
+
+Current local/test evidence summary:
+
+- sanitized reference corpus fixture maps to `ReferenceCorpus`, `DocumentSource`, `DocumentSnapshot`, `DocumentChunk`, `ExtractionRun`, and `FreshnessCheck` metadata without raw body return
+- ingest plan reports manifest hash, hash verification state, source count, missing manual URL gap count, storage mode, raw body policy, and no writes planned
+- managed snapshot metadata carries raw-return denial, retention, redaction, deletion, and source-rights policy
+- re-ingest produces stable corpus/source/snapshot/chunk/run ids for unchanged hashes
+- content hash mismatch blocks extraction output instead of creating reference objects
+- CLI and MCP `brain_corpus_status` report storage mode support and raw-body/source-rights policy even while the persistent reference corpus store is empty
+- focused evidence: `cd worker && uv run pytest -q tests/test_reference_corpus.py tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py`
+- focused result: `86 passed, 1 warning`
+- worker regression evidence: `cd worker && uv run pytest -q`
+- worker regression result: `1497 passed, 9 skipped, 1 warning`
+- root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
+- root regression result: `BUILD SUCCESSFUL`
+
+Remaining gaps:
+
+- full Palantir corpus manifest has not been loaded through an approved persistent LBrain corpus store in this phase branch
+- production corpus ingest remains denied/gated
+- corpus status still reports `reference_corpus_store_empty` until the approved store adapter is configured
+- no production ledger/corpus mutation has been performed or claimed
 
 ### P3. Processing And Object Extraction Pipeline
 

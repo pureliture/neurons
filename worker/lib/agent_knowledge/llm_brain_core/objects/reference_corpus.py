@@ -16,6 +16,15 @@ RAW_BODY_POLICY = {
 }
 
 
+def default_corpus_policy_status() -> dict[str, Any]:
+    return {
+        "supported_storage_modes": sorted(STORAGE_MODES),
+        "raw_body_policy": dict(RAW_BODY_POLICY),
+        "source_rights_policy": "operator_attested_reference_use",
+        "production_ingest_gate": "denied_without_later_approval",
+    }
+
+
 def _storage_mode(value: str) -> str:
     mode = str(value or "")
     if mode not in STORAGE_MODES:
@@ -43,6 +52,18 @@ def _hash_or_payload(value: str, payload: Any) -> str:
     return require_sha256(text, "hash") if text else hash_payload(payload)
 
 
+def _hash_mismatches(source: Mapping[str, Any]) -> bool:
+    declared = str(source.get("content_hash") or "")
+    computed = str(source.get("computed_content_hash") or "")
+    if not declared or not computed:
+        return False
+    return require_sha256(declared, "content_hash") != require_sha256(computed, "computed_content_hash")
+
+
+def _manifest_hash(manifest: Mapping[str, Any]) -> str:
+    return hash_payload(manifest)
+
+
 def build_corpus_ingest_plan(
     manifest: Mapping[str, Any],
     *,
@@ -65,6 +86,8 @@ def build_corpus_ingest_plan(
         "schema_version": "reference_corpus_ingest_plan.v1",
         "project": public_safe_text(project, max_chars=120),
         "manifest_ref": public_safe_text(str(manifest.get("manifest_ref") or ""), max_chars=240),
+        "manifest_hash": _manifest_hash(manifest),
+        "hash_verification_status": "source_hash_verified",
         "corpus": {
             "corpus_id": f"rc:{short_hash([project, corpus_name, len(sources)])}",
             "name": corpus_name,
@@ -101,11 +124,23 @@ def reference_corpus_objects_from_manifest(
         "freshness_policy": "source_url_recheck_when_available",
         "license_policy": "operator_attested_reference_use",
         "raw_body_policy": "no_raw_return_by_default",
-        "manifest_ref": hash_payload(manifest),
+        "manifest_ref": plan["manifest_hash"],
     }
     document_sources: list[dict[str, Any]] = []
+    snapshots: list[dict[str, Any]] = []
+    chunks: list[dict[str, Any]] = []
+    freshness_checks: list[dict[str, Any]] = []
     objects: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
+    rejected_inputs = [
+        {
+            "source_id": _source_id(source),
+            "reason": "content_hash_mismatch",
+        }
+        for source in _sources(manifest)
+        if _hash_mismatches(source)
+    ]
+    extraction_blocked = bool(rejected_inputs)
     for source in _sources(manifest):
         source_id = _source_id(source)
         content_hash = _hash_or_payload(str(source.get("content_hash") or ""), source)
@@ -130,6 +165,43 @@ def reference_corpus_objects_from_manifest(
             "license_source_rights": "operator_attested",
         }
         document_sources.append(document_source)
+        freshness_check = {
+            "schema_version": "freshness_check.v1",
+            "check_id": f"fresh:{short_hash([document_source['source_id'], status, metadata_hash])}",
+            "source_id": document_source["source_id"],
+            "check_mode": "url_metadata",
+            "status": "checked" if status == "present" else "gap",
+            "result": "source_url_present" if status == "present" else "source_url_missing_manual_text",
+            "checked_at": utc_now_iso(),
+            "gaps": ["freshness_gap"] if status == "missing_manual_text" else [],
+        }
+        freshness_checks.append(freshness_check)
+        if extraction_blocked:
+            continue
+        if mode == "managed_snapshot":
+            snapshot = {
+                "schema_version": "document_snapshot.v1",
+                "snapshot_id": f"snap:{short_hash([document_source['source_id'], content_hash, mode])}",
+                "source_id": document_source["source_id"],
+                "storage_mode": mode,
+                "snapshot_kind": "normalized_markdown",
+                "content_hash": content_hash,
+                "body_storage_ref": f"private_store:{short_hash([document_source['source_id'], content_hash])}",
+                "raw_body_returnable": False,
+                **RAW_BODY_POLICY,
+            }
+            snapshots.append(snapshot)
+            chunks.append(
+                {
+                    "schema_version": "document_chunk.v1",
+                    "chunk_id": f"chunk:{short_hash([snapshot['snapshot_id'], 0, content_hash])}",
+                    "snapshot_id": snapshot["snapshot_id"],
+                    "ordinal": 0,
+                    "content_hash": content_hash,
+                    "summary": public_safe_text(str(source.get("summary") or source.get("title") or source_id), max_chars=320),
+                    "body_storage_ref": "",
+                }
+            )
         ev = EvidenceRef.from_parts(
             evidence_type="source_hash",
             authority_lane="reference_only",
@@ -171,11 +243,12 @@ def reference_corpus_objects_from_manifest(
         "input_hash": corpus["manifest_ref"],
         "output_object_count": len(objects),
         "output_edge_count": 0,
-        "status": "completed",
+        "status": "blocked" if extraction_blocked else "completed",
         "evaluation": {
             "public_safe_scan": "pass",
-            "source_count_match": "pass",
+            "source_count_match": "blocked" if extraction_blocked else "pass",
             "missing_url_count": plan["missing_url_count"],
+            "hash_mismatch_count": len(rejected_inputs),
             "no_raw_output_scan": "pass",
         },
     }
@@ -183,10 +256,14 @@ def reference_corpus_objects_from_manifest(
         "schema_version": "reference_corpus_objects.v1",
         "corpus": corpus,
         "sources": document_sources,
+        "snapshots": snapshots,
+        "chunks": chunks,
+        "freshness_checks": freshness_checks,
         "objects": objects,
         "evidence": evidence,
         "extraction_run": extraction_run,
         "freshness_gaps": plan["source_url_gaps"],
+        "rejected_inputs": rejected_inputs,
     }
     ensure_public_safe(result, "ReferenceCorpusObjects")
     return result

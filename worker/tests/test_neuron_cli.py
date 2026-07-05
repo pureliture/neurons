@@ -93,6 +93,22 @@ def test_neuron_knowledge_corpus_ingest_production_target_denied(capsys):
     assert report["reason"] == "production_corpus_ingest_requires_later_validation_goal"
 
 
+def test_neuron_knowledge_corpus_status_reports_storage_policy(capsys):
+    rc = main(["corpus-status", "--project", "neurons"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["schema_version"] == "brain_corpus_status.v1"
+    assert report["raw_body_policy"]["return_capability"] == "denied_without_explicit_approval"
+    assert report["raw_body_policy"]["retention_class"] == "user_managed_reference"
+    assert report["raw_body_policy"]["redaction_profile"] == "public_safe_summary"
+    assert report["raw_body_policy"]["deletion_policy"] == "delete_snapshot_keep_metadata"
+    assert report["raw_body_policy"]["license_source_rights"] == "operator_attested"
+    assert report["source_rights_policy"] == "operator_attested_reference_use"
+    assert "managed_snapshot" in report["supported_storage_modes"]
+    assert "reference_corpus_store_empty" in report["gaps"]
+
+
 def test_neuron_knowledge_corpus_ingest_local_test_is_preview_until_store_configured(capsys):
     rc = main(["corpus-ingest", "--project", "neurons", "--target", "local_test"])
 

@@ -6,7 +6,7 @@ import json
 from .golden_query_eval import build_baseline_golden_query_report
 from .okf_export import build_okf_bundle
 from .object_packs import build_documentation_cleanup_pack
-from .reference_corpus import build_corpus_ingest_plan
+from .reference_corpus import build_corpus_ingest_plan, default_corpus_policy_status
 
 
 def _print_json(payload: dict) -> None:
@@ -56,6 +56,7 @@ def corpus_status_main(argv: list[str] | None = None) -> int:
             "storage_modes": {},
             "reference_object_count": 0,
             "freshness_gaps": [],
+            **default_corpus_policy_status(),
             "gaps": ["reference_corpus_store_empty"],
         }
     )
