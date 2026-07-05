@@ -47,6 +47,17 @@ def _select_sessions_needing_projection(
         SourceDocType.TRANSCRIPT_SESSION,
         fields=["_id", "session_id_hash", "provider", "project"],
     )
+    states = store.find_by_type(
+        SourceDocType.PROJECTION_STATE,
+        fields=["_id", "session_id_hash", "projection_status"],
+    )
+    projected_session_ids = {
+        session_id_hash
+        for state in states
+        if (session_id_hash := str(state.get("session_id_hash") or ""))
+        and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
+        and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
+    }
     selected: list[dict] = []
     for session in sessions:
         if limit > 0 and len(selected) >= limit:
@@ -58,8 +69,7 @@ def _select_sessions_needing_projection(
             continue
         if provider and str(session.get("provider") or "") != provider:
             continue
-        state_doc = store.get(projection_state_doc_id(session_id_hash))
-        if state_doc is None or str(state_doc.get("projection_status") or "") != ProjectionStatus.PROJECTED:
+        if session_id_hash not in projected_session_ids:
             selected.append(session)
     return selected
 
