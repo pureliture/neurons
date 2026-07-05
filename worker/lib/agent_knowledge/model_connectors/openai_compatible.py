@@ -1,31 +1,9 @@
 from __future__ import annotations
 
-from typing import Any
-
 from .policy import ModelConnectorConfigError, ModelPolicy
 from .reranker import GraphitiCrossEncoderAdapter, build_reranker_client
 from .specs import ModelConnectionConfig
-
-_STRUCTURED_KEY_ALIASES = {
-    "entity_name": "name",
-    "entity": "name",
-    "entity_value": "name",
-    "entity_text": "name",
-}
-
-
-def normalize_structured_response(value: Any, response_model: Any = None) -> Any:
-    normalized = _normalize_structured_keys(value)
-    if not isinstance(normalized, list) or response_model is None:
-        return normalized
-    fields = getattr(response_model, "model_fields", {}) or {}
-    list_field_names = [
-        name for name, field in fields.items()
-        if str(getattr(field, "annotation", "")).startswith("list[")
-    ]
-    if len(list_field_names) == 1:
-        return {list_field_names[0]: normalized}
-    return normalized
+from .structured_response import normalize_structured_response
 
 
 def build_openai_compatible_graphiti_components(
@@ -94,25 +72,3 @@ def build_openai_compatible_graphiti_components(
 def _require_configured(value: str, env_name: str) -> None:
     if not str(value or "").strip():
         raise ModelConnectorConfigError(f"model connector missing required config: {env_name}")
-
-
-def _normalize_structured_keys(value: Any) -> Any:
-    if isinstance(value, list):
-        return [_normalize_structured_keys(item) for item in value]
-    if isinstance(value, dict):
-        result = {key: _normalize_structured_keys(val) for key, val in value.items()}
-        for alias, canonical in _STRUCTURED_KEY_ALIASES.items():
-            if alias in result and canonical not in result:
-                result[canonical] = result.pop(alias)
-        if "name" in result and "entity_type_id" not in result:
-            result["entity_type_id"] = 0
-        if isinstance(result.get("episode_indices"), list):
-            indices: list[int] = []
-            for item in result["episode_indices"]:
-                try:
-                    indices.append(int(item))
-                except (TypeError, ValueError):
-                    indices.append(0)
-            result["episode_indices"] = indices
-        return result
-    return value
