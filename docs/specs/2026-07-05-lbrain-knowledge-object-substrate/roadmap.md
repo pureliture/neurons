@@ -11,7 +11,7 @@ Current state:
 - Phase 1 substrate implementation: complete in local/test scope.
 - Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates passed, deployed HTTP MCP runtime and configured endpoint validated, current Codex session tool registry still missing object-native tools, and current-source-main image identity is not proven live.
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, latest configured-endpoint smoke still passes with denied/no-mutation production writes, but the current Codex session's `mcp__lbrain` namespace still does not expose them and the live MCP image is not proven to include the #73/current-main source refactor.
-- P2 Living Reference Corpus Store: `in_progress`; local/test corpus policy and managed snapshot metadata mapping evidence exists, but no approved persistent corpus store or production ingest is open.
+- P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, and production-denial evidence exist, but real private Palantir manifest ingest and production ingest approval remain gaps.
 - Product activation: not complete; configured agent read path refresh remains required.
 - UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
 
@@ -196,7 +196,9 @@ Next gate:
 
 ### P2. Living Reference Corpus Store
 
-State: `in_progress`.
+State: `PASS_WITH_GAPS`.
+
+Local/test reference corpus store gates pass. The phase is not production-validated, and it is not proof that the private/local Palantir manifest has been ingested.
 
 Purpose:
 
@@ -515,6 +517,8 @@ P5 must not be declared green until data, processing, authority, runtime, prefer
 
 Use phase states, not percentages.
 
+Evidence result labels such as `PASS`, `PASS_WITH_GAPS`, and `FAIL` can appear in phase summaries and notes. They do not replace the progress states below.
+
 Allowed states:
 
 - `not_started`
@@ -531,7 +535,7 @@ Current accounting:
 | --- | --- | --- |
 | P0 Local Object Substrate Foundation | `complete` | complete for local/test scope |
 | P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; deployed/configured endpoint validated, current Codex session tool registry gap remains |
-| P2 Living Reference Corpus Store | `planned` | corpus store not configured |
+| P2 Living Reference Corpus Store | `local_validated` | `PASS_WITH_GAPS`; local/test store and status gates pass, real private manifest ingest and production approval remain gaps |
 | P3 Processing And Object Extraction Pipeline | `planned` | skeletal extraction only |
 | P4 Review Queue And Authority Promotion | `planned` | production authority write closed |
 | P5 Continuous Golden Query Quality Gates | `planned` | baseline red exists; runs across P1-P9 |
@@ -543,23 +547,25 @@ Current accounting:
 
 ## Next Design Targets
 
-The next `grill-to-spec` / `agentic-execution` loop should close the remaining P1 configured-agent read-path gap, then move to P2.
+Resolve the P2 delivery gate by linking the branch to an approved issue/PR, then start P3 Processing And Object Extraction Pipeline from this roadmap. The remaining P1 configured-agent read-path gap stays open until the current Codex `mcp__lbrain` namespace exposes object-native tools directly.
 
 Recommended goal:
 
 ```text
-Refresh the configured Codex LBrain MCP tool registry so object-native tools are available through the agent read path, without production authority mutation.
+Start P3 Processing And Object Extraction Pipeline with deterministic local/test extraction fixtures, public-safe chunk preview, strategy comparison, and evaluator evidence, without production authority or corpus mutation.
 ```
 
 Expected outputs:
 
-- activation `requirements.md`
-- activation `design.md`
-- deployment/read-path validation plan
-- live MCP tool-list smoke
+- P3 `requirements.md` or approved requirements section
+- P3 `design.md` or approved design section
+- deterministic fixture extraction smoke
+- public-safe chunk/object preview
+- extraction strategy comparison report
+- evaluator report tied to a golden query slice
 - read-only object query smoke
-- deployed artifact identity check against exact commit, image, or build artifact
-- production proposal/decision denial smoke
+- local/test artifact identity check against the exact branch commit
+- production extraction/proposal/decision denial smoke
 - phase-specific golden query slice result
 - explicit no-mutation report
 
