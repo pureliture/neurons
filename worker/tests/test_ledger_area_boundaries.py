@@ -3,8 +3,35 @@
 통과 단언 + 전수·배타 + 합성 위반 검출(falsifiable). seam-invariant 테스트와 동형.
 """
 
+from pathlib import Path
+
 import ledger_area_boundaries as lint
 from agent_knowledge import ledger_areas
+
+
+def _copy_ledger_fixture(tmp_path: Path, source: str | None = None) -> tuple[Path, Path]:
+    ledger_path = lint._ledger_path()
+    fake_ledger = tmp_path / "ledger.py"
+    if source is None:
+        source = ledger_path.read_text(encoding="utf-8")
+    fake_ledger.write_text(source, encoding="utf-8")
+    return ledger_path, fake_ledger
+
+
+def _copy_mixin_files(
+    tmp_path: Path,
+    ledger_path: Path,
+    *,
+    missing: str | None = None,
+    overrides: dict[str, str] | None = None,
+) -> None:
+    overrides = overrides or {}
+    for module in lint.MIXIN_AREAS:
+        if module == missing:
+            continue
+        mixin = ledger_path.with_name(f"{module}.py")
+        source = overrides.get(module, mixin.read_text(encoding="utf-8"))
+        (tmp_path / mixin.name).write_text(source, encoding="utf-8")
 
 
 def test_area_boundaries_pass_on_current_code():
@@ -54,6 +81,62 @@ def test_catch_stale_cross_area_allowlist(monkeypatch):
     monkeypatch.setattr(lint, "FROZEN_CROSS_AREA", extended)
     violations = lint.check_area_boundaries()
     assert any("no_such_method" in v and "stale" in v for v in violations)
+
+
+def test_check_area_boundaries_fails_when_expected_mixin_file_missing(tmp_path):
+    missing_module = "ledger_gc_safety_mixin"
+    ledger_path, fake_ledger = _copy_ledger_fixture(tmp_path)
+    _copy_mixin_files(tmp_path, ledger_path, missing=missing_module)
+
+    violations = lint.check_area_boundaries(fake_ledger)
+
+    assert any(missing_module in violation and "missing" in violation for violation in violations)
+
+
+def test_check_area_boundaries_fails_when_expected_ledger_base_missing(tmp_path):
+    ledger_path = lint._ledger_path()
+    source = ledger_path.read_text(encoding="utf-8")
+    ledger_path, fake_ledger = _copy_ledger_fixture(
+        tmp_path,
+        source=source.replace("GcSafetyMixin, ", ""),
+    )
+    _copy_mixin_files(tmp_path, ledger_path)
+
+    violations = lint.check_area_boundaries(fake_ledger)
+
+    assert any("GcSafetyMixin" in violation and "Ledger" in violation for violation in violations)
+
+
+def test_check_area_boundaries_catches_ingress_to_promotion_direct_call(tmp_path):
+    ledger_path, fake_ledger = _copy_ledger_fixture(tmp_path)
+    ingress_mixin = ledger_path.with_name("ledger_ingress_mixin.py")
+    direct_call_source = ingress_mixin.read_text(encoding="utf-8").replace(
+        "self._memory_promotion_area.mark_session_memory_dirty(",
+        "self.mark_session_memory_dirty(",
+    )
+    _copy_mixin_files(
+        tmp_path,
+        ledger_path,
+        overrides={"ledger_ingress_mixin": direct_call_source},
+    )
+
+    violations = lint.check_area_boundaries(fake_ledger)
+
+    assert any("self.mark_session_memory_dirty()" in violation for violation in violations)
+
+
+def test_check_area_boundaries_catches_memory_promotion_area_returning_self(tmp_path):
+    ledger_path = lint._ledger_path()
+    source = ledger_path.read_text(encoding="utf-8")
+    _, fake_ledger = _copy_ledger_fixture(
+        tmp_path,
+        source=source.replace("return self._memory_promotion_area_impl", "return self"),
+    )
+    _copy_mixin_files(tmp_path, ledger_path)
+
+    violations = lint.check_area_boundaries(fake_ledger)
+
+    assert any("_memory_promotion_area" in violation and "not self" in violation for violation in violations)
 
 
 def test_every_area_has_title():

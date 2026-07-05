@@ -40,12 +40,26 @@ from agent_knowledge.ledger_areas import (  # noqa: E402
 
 # god-class 분할 결과 area mixin: 모듈 파일명 -> area. 각 mixin 메서드는 자기 area(또는
 # core 테이블)만 만져야 한다. ledger.py에서 분할된 단일-area 메서드가 다른 area를 침범하면
-# (또는 cross-area인데 mixin에 들어가면) 위반. mixin 미존재(미분할 상태)면 스킵.
+# (또는 cross-area인데 mixin에 들어가면) 위반. 기대 mixin 파일이 없으면 경계 guard가
+# 비활성화되므로 위반으로 잡는다.
 MIXIN_AREAS = {
     "ledger_ingress_mixin": AREA_A,
     "ledger_gc_safety_mixin": AREA_B,
     "ledger_memory_promotion_mixin": AREA_C,
+    "ledger_memory_promotion_area": AREA_C,
     "ledger_native_memory_mixin": AREA_D,
+}
+EXPECTED_LEDGER_MIXIN_BASES = {
+    "IngressStatusMixin",
+    "GcSafetyMixin",
+    "MemoryPromotionMixin",
+    "NativeMemoryMixin",
+}
+FORBIDDEN_CROSS_AREA_INHERITED_CALLS = {
+    "ledger_ingress_mixin": {
+        "mark_session_memory_dirty",
+        "mark_project_memory_dirty",
+    },
 }
 
 # 두 비-core 영역 이상을 정당하게 가로지르는 Ledger 메서드의 frozen allowlist.
@@ -91,6 +105,14 @@ def _ledger_class(tree: ast.AST) -> ast.ClassDef:
     raise RuntimeError("class Ledger not found")
 
 
+def _base_name(base: ast.expr) -> str:
+    if isinstance(base, ast.Name):
+        return base.id
+    if isinstance(base, ast.Attribute):
+        return base.attr
+    return ""
+
+
 def _method_tables(source: str, method: ast.AST, tables: frozenset[str]) -> set[str]:
     seg = ast.get_source_segment(source, method) or ""
     hit: set[str] = set()
@@ -129,9 +151,11 @@ def _check_mixins(ledger_path: Path) -> list[str]:
     for module, area in MIXIN_AREAS.items():
         mpath = ledger_path.with_name(f"{module}.py")
         if not mpath.is_file():
-            continue  # 미분할 상태(예: 원복) — 스킵
+            violations.append(f"{module}: expected area {area!r} mixin file missing")
+            continue
         msrc = mpath.read_text(encoding="utf-8")
         mtree = ast.parse(msrc)
+        forbidden_calls = FORBIDDEN_CROSS_AREA_INHERITED_CALLS.get(module, set())
         for node in ast.walk(mtree):
             if not isinstance(node, ast.ClassDef):
                 continue
@@ -145,7 +169,54 @@ def _check_mixins(ledger_path: Path) -> list[str]:
                     violations.append(
                         f"{module}.{item.name}: area {area!r} mixin인데 {sorted(stray)} 테이블 침범(경계 위반)"
                     )
+                violations.extend(
+                    _forbidden_inherited_call_violations(module, item, forbidden_calls)
+                )
     return violations
+
+
+def _forbidden_inherited_call_violations(
+    module: str,
+    method: ast.FunctionDef | ast.AsyncFunctionDef,
+    forbidden_calls: set[str],
+) -> list[str]:
+    if not forbidden_calls:
+        return []
+    violations: list[str] = []
+    for node in ast.walk(method):
+        if _is_forbidden_self_call(node, forbidden_calls):
+            violations.append(
+                f"{module}.{method.name}: forbidden cross-area inherited call self.{node.func.attr}()"
+            )
+    return violations
+
+
+def _is_forbidden_self_call(node: ast.AST, forbidden_calls: set[str]) -> bool:
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        return False
+    if not isinstance(node.func.value, ast.Name) or node.func.value.id != "self":
+        return False
+    return node.func.attr in forbidden_calls
+
+
+def _check_ledger_mixin_bases(tree: ast.AST) -> list[str]:
+    ledger_class = _ledger_class(tree)
+    bases = {_base_name(base) for base in ledger_class.bases}
+    missing = EXPECTED_LEDGER_MIXIN_BASES - bases
+    if not missing:
+        return []
+    return [f"Ledger class missing expected mixin base {name!r}" for name in sorted(missing)]
+
+
+def _check_memory_promotion_area_seam(tree: ast.AST) -> list[str]:
+    ledger_class = _ledger_class(tree)
+    for item in ledger_class.body:
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == "_memory_promotion_area":
+            for node in ast.walk(item):
+                if isinstance(node, ast.Return) and isinstance(node.value, ast.Name) and node.value.id == "self":
+                    return ["Ledger._memory_promotion_area must return a concrete area object, not self"]
+            return []
+    return ["Ledger._memory_promotion_area seam missing"]
 
 
 def check_area_boundaries(ledger_path: Path | None = None) -> list[str]:
@@ -183,6 +254,8 @@ def check_area_boundaries(ledger_path: Path | None = None) -> list[str]:
         violations.append(f"메서드 {name!r} 가 allowlist엔 있으나 더는 cross-area 아님(stale)")
 
     # 3) 분할된 mixin 각 메서드가 자기 area 경계 안인지.
+    violations.extend(_check_ledger_mixin_bases(tree))
+    violations.extend(_check_memory_promotion_area_seam(tree))
     violations.extend(_check_mixins(path))
     return violations
 
