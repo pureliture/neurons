@@ -28,18 +28,48 @@ _READ_ONLY_SQL_ALLOWED_KEYWORDS = {"EXPLAIN", "PRAGMA", "SELECT"}
 _READ_ONLY_SQL_CTE_FINAL_KEYWORDS = {"SELECT"}
 
 
+def _introspection_query(
+    connection: sqlite3.Connection,
+    table: str,
+    *,
+    query_type: str,
+) -> tuple[str, tuple[str, ...]]:
+    if getattr(connection, "dialect", "sqlite") == "postgres":
+        if query_type == "table":
+            return (
+                "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?",
+                (table,),
+            )
+        if query_type == "columns":
+            return (
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = ?",
+                (table,),
+            )
+    elif query_type == "table":
+        return (
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        )
+    elif query_type == "columns":
+        _assert_safe_sql_identifier(table)
+        return (f"PRAGMA table_info({table})", ())
+    raise ValueError(f"unknown introspection query type: {query_type}")
+
+
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
-    row = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (table,),
-    ).fetchone()
+    sql, params = _introspection_query(connection, table, query_type="table")
+    row = connection.execute(sql, params).fetchone()
     return row is not None
 
 
 def _column_names(connection: sqlite3.Connection, table: str) -> set[str]:
     if not _table_exists(connection, table):
         return set()
-    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+    sql, params = _introspection_query(connection, table, query_type="columns")
+    if getattr(connection, "dialect", "sqlite") == "postgres":
+        return {str(row.get("column_name") or "") for row in connection.execute(sql, params).fetchall()}
+    return {str(row[1]) for row in connection.execute(sql, params).fetchall()}
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -142,17 +172,31 @@ def _copy_index_targets_from_legacy_table(connection: sqlite3.Connection, legacy
     }
     if not required_columns.issubset(legacy_columns):
         return
-    connection.execute(
-        f"""
-        INSERT OR IGNORE INTO index_targets (
-            logical_name, dataset_id, embedding_model, chunk_method,
-            metadata_policy_version, contract_version, created_at, enabled, disabled_at
+    if getattr(connection, "dialect", "sqlite") == "postgres":
+        connection.execute(
+            f"""
+            INSERT INTO index_targets (
+                logical_name, dataset_id, embedding_model, chunk_method,
+                metadata_policy_version, contract_version, created_at, enabled, disabled_at
+            )
+            SELECT logical_name, dataset_id, embedding_model, chunk_method,
+                   metadata_policy_version, contract_version, created_at, enabled, disabled_at
+            FROM {legacy_table}
+            ON CONFLICT DO NOTHING
+            """
         )
-        SELECT logical_name, dataset_id, embedding_model, chunk_method,
-               metadata_policy_version, contract_version, created_at, enabled, disabled_at
-        FROM {legacy_table}
-        """
-    )
+    else:
+        connection.execute(
+            f"""
+            INSERT OR IGNORE INTO index_targets (
+                logical_name, dataset_id, embedding_model, chunk_method,
+                metadata_policy_version, contract_version, created_at, enabled, disabled_at
+            )
+            SELECT logical_name, dataset_id, embedding_model, chunk_method,
+                   metadata_policy_version, contract_version, created_at, enabled, disabled_at
+            FROM {legacy_table}
+            """
+        )
 
 
 def _assert_safe_sql_identifier(value: str) -> None:
