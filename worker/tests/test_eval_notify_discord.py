@@ -99,10 +99,12 @@ def test_build_discord_digest_uses_aggregate_counts_and_no_raw_fields(tmp_path):
     assert snapshot["review_queue_count"] == 0
     assert snapshot["attention_required"] is False
     assert payload["username"] == "neurons-eval-notifier"
-    assert "status=pass" in payload["content"]
-    assert "queries=12" in payload["content"]
-    assert "recall=1.0" in payload["content"]
-    assert "precision=1.0" in payload["content"]
+    assert "✅ LBrain 운영 점검 — 정상" in payload["content"]
+    assert "검색 품질: 통과" in payload["content"]
+    assert "평가셋: 12개 중 12개 통과" in payload["content"]
+    assert "정확도: recall 1.00 / precision 1.00" in payload["content"]
+    assert "사람 검토 대기: 없음" in payload["content"]
+    assert "지금 할 일: 없음" in payload["content"]
     assert "raw-must-not-leak" not in text
     assert "memory_id" not in text
     assert "summary" not in text.lower()
@@ -145,7 +147,11 @@ def test_notifier_main_send_posts_webhook_and_prints_safe_status(tmp_path, capsy
         "schema_version": "llm_brain_eval_discord_notifier.v1",
     }
     assert sent and sent[0][0] == "https://discord.example/redacted"
-    assert "failed=1" in sent[0][1]["content"]
+    assert "🚨 LBrain 운영 점검 — 확인 필요" in sent[0][1]["content"]
+    assert "검색 품질: 실패" in sent[0][1]["content"]
+    assert "평가셋: 12개 중 11개 통과, 1개 실패" in sent[0][1]["content"]
+    assert "의미: 자동 검색 평가가 기대 Memory를 일부 못 찾았거나 불필요한 결과를 섞었습니다." in sent[0][1]["content"]
+    assert "다음 행동: eval 실패 원인을 확인하세요" in sent[0][1]["content"]
     assert "raw-must-not-leak" not in json.dumps(sent[0][1], sort_keys=True)
 
 
