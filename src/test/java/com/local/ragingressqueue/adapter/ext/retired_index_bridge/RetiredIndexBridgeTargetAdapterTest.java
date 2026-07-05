@@ -84,6 +84,36 @@ class RetiredIndexBridgeTargetAdapterTest {
     }
 
     @Test
+    void sessionMemoryDatasetDoesNotFallbackToSessionSummaryDataset() {
+        FakeRetiredIndexBridgeGateway gateway = new FakeRetiredIndexBridgeGateway();
+        RetiredIndexBridgeTargetAdapter adapter = new RetiredIndexBridgeTargetAdapter(
+            true,
+            "http://127.0.0.1:9380",
+            "token",
+            "ds_transcript",
+            " ",
+            "ds_summary",
+            "",
+            "",
+            "",
+            "",
+            20,
+            5,
+            100,
+            25,
+            600,
+            10_000,
+            false,
+            "logical_document_id",
+            gateway
+        );
+
+        assertThat(adapter.pressureSnapshot("index-session-memory").pressure()).isEqualTo(TargetPressure.CLOSED);
+        assertThat(adapter.deliver(sessionMemoryJob(), "index-session-memory").delivered()).isFalse();
+        assertThat(gateway.uploadCount).isZero();
+    }
+
+    @Test
     void enabledAdapterUploadsMetadataAndRequestsParse() {
         FakeRetiredIndexBridgeGateway gateway = new FakeRetiredIndexBridgeGateway();
         RetiredIndexBridgeTargetAdapter adapter = new RetiredIndexBridgeTargetAdapter(

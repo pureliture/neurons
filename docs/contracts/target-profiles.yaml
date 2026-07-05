@@ -1,0 +1,30 @@
+schemaVersion: neurons.target_profiles.v1
+profiles:
+  index-transcript-memory:
+    backendKind: RETIRED_INDEX_BRIDGE
+    datasetRole: transcript-memory
+    retiredIndexBridgeDatasetEnv: RETIRED_INDEX_BRIDGE_TRANSCRIPT_MEMORY_DATASET_ID
+  index-session-memory:
+    backendKind: RETIRED_INDEX_BRIDGE
+    datasetRole: session-memory
+    retiredIndexBridgeDatasetEnv: RETIRED_INDEX_BRIDGE_SESSION_MEMORY_DATASET_ID
+  index-session-summary:
+    backendKind: RETIRED_INDEX_BRIDGE
+    datasetRole: session-summary
+    retiredIndexBridgeDatasetEnv: RETIRED_INDEX_BRIDGE_SESSION_SUMMARY_DATASET_ID
+  index-project-memory:
+    backendKind: RETIRED_INDEX_BRIDGE
+    datasetRole: project-memory
+    retiredIndexBridgeDatasetEnv: RETIRED_INDEX_BRIDGE_PROJECT_MEMORY_DATASET_ID
+  index-task-summary:
+    backendKind: RETIRED_INDEX_BRIDGE
+    datasetRole: task-summary
+    retiredIndexBridgeDatasetEnv: RETIRED_INDEX_BRIDGE_TASK_SUMMARY_DATASET_ID
+  index-approved-memory-card:
+    backendKind: RETIRED_INDEX_BRIDGE
+    datasetRole: approved-memory-card
+    retiredIndexBridgeDatasetEnv: RETIRED_INDEX_BRIDGE_APPROVED_MEMORY_CARD_DATASET_ID
+  index-procedural-memory:
+    backendKind: RETIRED_INDEX_BRIDGE
+    datasetRole: procedural-memory
+    retiredIndexBridgeDatasetEnv: RETIRED_INDEX_BRIDGE_PROCEDURAL_MEMORY_DATASET_ID

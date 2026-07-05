@@ -6,7 +6,10 @@ import org.yaml.snakeyaml.Yaml;
 
 import java.io.InputStream;
 import java.lang.reflect.RecordComponent;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 
@@ -108,5 +111,56 @@ class TargetProfileRegistryTest {
             assertThat(ymlAdapter).isEqualTo(profile.backendKind().name().toLowerCase(Locale.ROOT));
             assertThat(ymlDatasetRole).isEqualTo(profile.datasetRole());
         });
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void registryAndApplicationYmlStayInParityWithSharedTargetProfileContract() throws Exception {
+        Map<String, Object> contract = new Yaml().load(
+            Files.readString(Path.of("docs/contracts/target-profiles.yaml"))
+        );
+        Map<String, Object> profiles = (Map<String, Object>) contract.get("profiles");
+        Map<String, Object> applicationProfiles = applicationTargetProfiles();
+
+        assertThat(contract.get("schemaVersion")).isEqualTo("neurons.target_profiles.v1");
+        assertThat(new ArrayList<>(profiles.keySet())).containsExactlyElementsOf(registry.knownProfileIds());
+        assertThat(new ArrayList<>(applicationProfiles.keySet())).containsExactlyElementsOf(profiles.keySet());
+
+        profiles.forEach((id, raw) -> {
+            Map<String, Object> profileContract = (Map<String, Object>) raw;
+            TargetProfile profile = registry.find(id).orElseThrow();
+            Map<String, Object> applicationProfile = (Map<String, Object>) applicationProfiles.get(id);
+
+            assertThat(profileContract)
+                .containsEntry("backendKind", profile.backendKind().name())
+                .containsEntry("datasetRole", profile.datasetRole());
+            assertThat(profileContract.get("retiredIndexBridgeDatasetEnv"))
+                .as("contract names the public env key for %s", id)
+                .isEqualTo(retiredIndexBridgeDatasetEnvKey(id));
+            assertThat(applicationProfile.get("dataset-role")).isEqualTo(profileContract.get("datasetRole"));
+            assertThat(applicationProfile.get("adapter")).isEqualTo("retired_index_bridge");
+
+            assertThat(profileContract.keySet())
+                .doesNotContain("datasetId", "dataset_id", "token", "apiKey", "api_key");
+            assertThat(profileContract.values().toString().toLowerCase(Locale.ROOT))
+                .doesNotContain("ds_")
+                .doesNotContain("token");
+        });
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> applicationTargetProfiles() throws Exception {
+        Map<String, Object> root;
+        try (InputStream yml = getClass().getResourceAsStream("/application.yml")) {
+            assertThat(yml).as("application.yml must be on the test classpath").isNotNull();
+            root = new Yaml().load(yml);
+        }
+        Map<String, Object> ragIngress = (Map<String, Object>) root.get("rag-ingress");
+        return new LinkedHashMap<>((Map<String, Object>) ragIngress.get("target-profiles"));
+    }
+
+    private static String retiredIndexBridgeDatasetEnvKey(String profileId) {
+        String role = profileId.substring("index-".length()).replace("-", "_").toUpperCase(Locale.ROOT);
+        return "RETIRED_INDEX_BRIDGE_" + role + "_DATASET_ID";
     }
 }
