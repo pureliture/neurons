@@ -225,6 +225,8 @@ Current local/test evidence summary:
 
 - sanitized reference corpus fixture maps to `ReferenceCorpus`, `DocumentSource`, `DocumentVersion`, `DocumentSnapshot`, `DocumentChunk`, `ExtractionRun`, and `FreshnessCheck` metadata without raw body return
 - ingest plan reports manifest hash, hash verification state, source count, missing manual URL gap count, storage mode, raw body policy, and no writes planned
+- `corpus-ingest-plan --manifest-file ...` loads an operator-supplied manifest read-only and reports source URL count, manual text count, source type distribution, and manifest hash
+- sanitized full-count Palantir-shaped fixture proves the P2 count gate shape for 65 sources, 39 sources with URL, 26 manual text sources without URL, and PDF/Web/Text distribution 6/33/26 without raw body access
 - managed snapshot metadata carries raw-return denial, retention, redaction, deletion, and source-rights policy
 - re-ingest produces stable corpus/source/snapshot/chunk/run ids for unchanged hashes
 - content hash mismatch blocks extraction output instead of creating reference objects
@@ -235,17 +237,17 @@ Current local/test evidence summary:
 - MCP `brain_corpus_status` reads the local/test ledger-backed corpus store through `KnowledgeSearchService.core_brain()`
 - ledger area boundary manifest assigns `reference_corpus_bundles` and `reference_corpus_document_versions` to the LBrain object/native-memory area and the boundary guard passes
 - focused evidence: `cd worker && uv run pytest -q tests/test_reference_corpus.py tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py`
-- focused result: `89 passed, 1 warning`
+- focused result: `91 passed, 1 warning`
 - ledger boundary evidence: `cd worker && uv run pytest -q tests/test_ledger_area_boundaries.py`
 - ledger boundary result: `10 passed`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1500 passed, 9 skipped, 1 warning`
+- worker regression result: `1502 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
 Remaining gaps:
 
-- full Palantir corpus manifest has not been loaded through an approved persistent LBrain corpus store in this phase branch
+- real local/private Palantir corpus manifest has not been loaded through an approved persistent LBrain corpus store in this phase branch
 - production corpus ingest remains denied/gated
 - default corpus status still reports `reference_corpus_store_empty` when no configured local/test ledger-backed corpus store is supplied
 - no production ledger/corpus mutation has been performed or claimed

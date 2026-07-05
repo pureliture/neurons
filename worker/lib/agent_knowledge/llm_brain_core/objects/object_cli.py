@@ -90,10 +90,12 @@ def corpus_ingest_plan_main(argv: list[str] | None = None) -> int:
         default="metadata_only",
     )
     parser.add_argument("--corpus-name", default="reference-corpus")
+    parser.add_argument("--manifest-file", default="")
     args = parser.parse_args(argv)
+    manifest = _load_manifest(args.manifest_file) if args.manifest_file else {"corpus_name": args.corpus_name, "sources": []}
     _print_json(
         build_corpus_ingest_plan(
-            {"corpus_name": args.corpus_name, "sources": []},
+            manifest,
             project=args.project,
             storage_mode=args.storage_mode,
         )
