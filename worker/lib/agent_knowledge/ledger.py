@@ -29,16 +29,31 @@ _READ_ONLY_SQL_CTE_FINAL_KEYWORDS = {"SELECT"}
 
 
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
-    row = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (table,),
-    ).fetchone()
+    if getattr(connection, "dialect", "sqlite") == "postgres":
+        row = connection.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?",
+            (table,),
+        ).fetchone()
+    else:
+        row = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
     return row is not None
 
 
 def _column_names(connection: sqlite3.Connection, table: str) -> set[str]:
     if not _table_exists(connection, table):
         return set()
+    if getattr(connection, "dialect", "sqlite") == "postgres":
+        return {
+            str(row["column_name"])
+            for row in connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = ?",
+                (table,),
+            ).fetchall()
+        }
     return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
@@ -142,17 +157,31 @@ def _copy_index_targets_from_legacy_table(connection: sqlite3.Connection, legacy
     }
     if not required_columns.issubset(legacy_columns):
         return
-    connection.execute(
-        f"""
-        INSERT OR IGNORE INTO index_targets (
-            logical_name, dataset_id, embedding_model, chunk_method,
-            metadata_policy_version, contract_version, created_at, enabled, disabled_at
+    if getattr(connection, "dialect", "sqlite") == "postgres":
+        connection.execute(
+            f"""
+            INSERT INTO index_targets (
+                logical_name, dataset_id, embedding_model, chunk_method,
+                metadata_policy_version, contract_version, created_at, enabled, disabled_at
+            )
+            SELECT logical_name, dataset_id, embedding_model, chunk_method,
+                   metadata_policy_version, contract_version, created_at, enabled, disabled_at
+            FROM {legacy_table}
+            ON CONFLICT DO NOTHING
+            """
         )
-        SELECT logical_name, dataset_id, embedding_model, chunk_method,
-               metadata_policy_version, contract_version, created_at, enabled, disabled_at
-        FROM {legacy_table}
-        """
-    )
+    else:
+        connection.execute(
+            f"""
+            INSERT OR IGNORE INTO index_targets (
+                logical_name, dataset_id, embedding_model, chunk_method,
+                metadata_policy_version, contract_version, created_at, enabled, disabled_at
+            )
+            SELECT logical_name, dataset_id, embedding_model, chunk_method,
+                   metadata_policy_version, contract_version, created_at, enabled, disabled_at
+            FROM {legacy_table}
+            """
+        )
 
 
 def _assert_safe_sql_identifier(value: str) -> None:
