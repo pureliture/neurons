@@ -43,13 +43,11 @@ def _select_sessions_needing_projection(
     """
     from .document_model import ProjectionStatus, SourceDocType, projection_state_doc_id
 
-    sessions = store.find_by_type(
-        SourceDocType.TRANSCRIPT_SESSION,
-        fields=["_id", "session_id_hash", "provider", "project"],
-    )
+    scope_selector = _scope_selector(project=project, provider=provider)
     states = store.find_by_type(
         SourceDocType.PROJECTION_STATE,
         fields=["_id", "session_id_hash", "projection_status"],
+        selector={"projection_status": ProjectionStatus.PROJECTED, **scope_selector},
     )
     projected_session_ids = {
         session_id_hash
@@ -59,19 +57,52 @@ def _select_sessions_needing_projection(
         and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
     }
     selected: list[dict] = []
-    for session in sessions:
-        if limit > 0 and len(selected) >= limit:
+    sessions = iter(
+        _iter_by_type(
+            store,
+            SourceDocType.TRANSCRIPT_SESSION,
+            fields=["_id", "session_id_hash", "provider", "project"],
+            selector=scope_selector,
+            page_size=max(1, limit) if limit > 0 else 10000,
+        )
+    )
+    while limit <= 0 or len(selected) < limit:
+        try:
+            session = next(sessions)
+        except StopIteration:
             break
         session_id_hash = str(session.get("session_id_hash") or "")
         if not session_id_hash:
             continue
-        if project and str(session.get("project") or "") != project:
-            continue
-        if provider and str(session.get("provider") or "") != provider:
-            continue
         if session_id_hash not in projected_session_ids:
             selected.append(session)
     return selected
+
+
+def _scope_selector(*, project: str, provider: str) -> dict[str, str]:
+    selector = {}
+    if project:
+        selector["project"] = project
+    if provider:
+        selector["provider"] = provider
+    return selector
+
+
+def _iter_by_type(store, doc_type: str, *, fields: list[str], selector: dict, page_size: int = 10000):
+    iterator = getattr(store, "iter_by_type", None)
+    if callable(iterator):
+        return iterator(doc_type, fields=fields, selector=selector, page_size=page_size)
+    try:
+        return iter(store.find_by_type(doc_type, fields=fields, selector=selector, page_size=page_size))
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        docs = store.find_by_type(doc_type, fields=fields)
+        return (
+            doc
+            for doc in docs
+            if all(doc.get(key) == value for key, value in selector.items())
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

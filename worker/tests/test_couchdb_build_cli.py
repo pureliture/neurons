@@ -120,6 +120,81 @@ class CountingGetStore(InMemoryCouchDBSourceStore):
         return super().get(doc_id)
 
 
+class RecordingSelectionStore(InMemoryCouchDBSourceStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.find_calls: list[dict] = []
+        self.iter_calls: list[dict] = []
+        self.iter_yield_counts: dict[str, int] = {}
+
+    def find_by_type(
+        self,
+        doc_type: str,
+        *,
+        fields: list[str] | None = None,
+        selector: dict | None = None,
+        limit: int = 0,
+        page_size: int = 10000,
+    ) -> list[dict]:
+        self._record_call(self.find_calls, doc_type, fields, selector, limit, page_size)
+        docs = self._matching_docs(doc_type, selector=selector, fields=fields)
+        return docs[:limit] if limit > 0 else docs
+
+    def iter_by_type(
+        self,
+        doc_type: str,
+        *,
+        fields: list[str] | None = None,
+        selector: dict | None = None,
+        limit: int = 0,
+        page_size: int = 10000,
+    ):
+        self._record_call(self.iter_calls, doc_type, fields, selector, limit, page_size)
+        yielded = 0
+        for doc in self._matching_docs(doc_type, selector=selector, fields=fields):
+            if limit > 0 and yielded >= limit:
+                break
+            yielded += 1
+            self.iter_yield_counts[doc_type] = self.iter_yield_counts.get(doc_type, 0) + 1
+            yield doc
+
+    def _matching_docs(
+        self,
+        doc_type: str,
+        *,
+        selector: dict | None = None,
+        fields: list[str] | None = None,
+    ) -> list[dict]:
+        selector = selector or {}
+        docs: list[dict] = []
+        for doc in sorted(self._docs.values(), key=lambda item: str(item.get("_id") or "")):
+            if doc.get("doc_type") != doc_type:
+                continue
+            if any(doc.get(key) != value for key, value in selector.items()):
+                continue
+            docs.append({field: doc.get(field) for field in fields} if fields else dict(doc))
+        return docs
+
+    @staticmethod
+    def _record_call(
+        calls: list[dict],
+        doc_type: str,
+        fields: list[str] | None,
+        selector: dict | None,
+        limit: int,
+        page_size: int,
+    ) -> None:
+        calls.append(
+            {
+                "doc_type": doc_type,
+                "fields": fields,
+                "selector": selector,
+                "limit": limit,
+                "page_size": page_size,
+            }
+        )
+
+
 # ---------------------------------------------------------------------------
 # Helper that runs main() with an InMemoryCouchDBSourceStore
 # ---------------------------------------------------------------------------
@@ -216,6 +291,9 @@ def _run(argv: list[str], store: InMemoryCouchDBSourceStore, *, projector=None, 
 
         def find_by_type(self, *a, **kw):
             return store.find_by_type(*a, **kw)
+
+        def iter_by_type(self, *a, **kw):
+            return store.iter_by_type(*a, **kw)
 
         def get(self, *a, **kw):
             return store.get(*a, **kw)
@@ -348,6 +426,58 @@ class TestSelectSessionsNeedingProjection:
 
         assert [s.get("session_id_hash") for s in selected] == [pending]
         assert store.get_count == 0
+
+    def test_pushes_projected_status_and_scope_to_store_selectors(self) -> None:
+        store = RecordingSelectionStore()
+        pending = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="pending")
+        other_project = _build_synthetic_session(store, provider="claude", project="dendrite", raw_id="other")
+        projected = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="projected")
+        _mark_projected(store, projected, "claude", "neurons")
+        _mark_projected(store, other_project, "claude", "dendrite")
+
+        selected = _select_sessions_needing_projection(
+            store,
+            limit=0,
+            project="neurons",
+            provider="claude",
+        )
+
+        assert [s.get("session_id_hash") for s in selected] == [pending]
+        state_call = next(
+            call for call in store.find_calls if call["doc_type"] == dm.SourceDocType.PROJECTION_STATE
+        )
+        assert state_call["selector"] == {
+            "projection_status": dm.ProjectionStatus.PROJECTED,
+            "project": "neurons",
+            "provider": "claude",
+        }
+        session_call = next(
+            call for call in store.iter_calls if call["doc_type"] == dm.SourceDocType.TRANSCRIPT_SESSION
+        )
+        assert session_call["selector"] == {"project": "neurons", "provider": "claude"}
+
+    def test_limit_stops_session_iteration_before_full_corpus(self) -> None:
+        store = RecordingSelectionStore()
+        for i in range(20):
+            _build_synthetic_session(store, provider="claude", project="neurons", raw_id=f"pending-{i:02d}")
+
+        selected = _select_sessions_needing_projection(store, limit=2)
+
+        assert len(selected) == 2
+        assert store.iter_yield_counts[dm.SourceDocType.TRANSCRIPT_SESSION] == 2
+        session_call = next(
+            call for call in store.iter_calls if call["doc_type"] == dm.SourceDocType.TRANSCRIPT_SESSION
+        )
+        assert session_call["page_size"] == 2
+
+    def test_in_memory_selection_uses_deterministic_id_order(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        second = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="b")
+        first = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="a")
+
+        selected = _select_sessions_needing_projection(store, limit=1)
+
+        assert [s.get("session_id_hash") for s in selected] == sorted([first, second])[:1]
 
 
 # ---------------------------------------------------------------------------
