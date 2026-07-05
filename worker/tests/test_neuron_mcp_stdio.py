@@ -162,6 +162,25 @@ def test_mcp_tool_registry_matches_listed_tools_without_duplicate_names():
         assert registered["inputSchema"] == tool["inputSchema"]
 
 
+def test_mcp_tool_registry_uses_lazy_internal_cache(monkeypatch):
+    calls = 0
+    original_list_tools = mcp_tools.list_tools
+    monkeypatch.setattr(mcp_tools, "_TOOL_REGISTRY_CACHE", None)
+
+    def _counting_list_tools():
+        nonlocal calls
+        calls += 1
+        return original_list_tools()
+
+    monkeypatch.setattr(mcp_tools, "list_tools", _counting_list_tools)
+
+    first = mcp_tools.tool_registry()
+    second = mcp_tools.tool_registry()
+
+    assert calls == 1
+    assert second == first
+
+
 def test_mcp_tool_contract_registry_tracks_dispatch_ownership():
     registry = tool_registry()
     contracts = tool_contract_registry()
