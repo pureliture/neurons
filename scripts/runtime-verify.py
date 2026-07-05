@@ -132,7 +132,9 @@ def build_runtime_verification_evidence(
     consumer,
     expected_pressure,
 ):
-    postcheck_runtime = postcheck_json.get("runtime", {})
+    postcheck_runtime = postcheck_json.get("runtime") or {}
+    stream_config = stream.get("config") or {}
+    stream_state = stream.get("state") or {}
 
     return {
         "runtime": {
@@ -152,11 +154,11 @@ def build_runtime_verification_evidence(
         "enqueue": enqueue,
         "redactionRejection": rejected,
         "stream": {
-            "name": stream.get("config", {}).get("name"),
-            "subjects": stream.get("config", {}).get("subjects"),
-            "messages": stream.get("state", {}).get("messages"),
-            "firstSeq": stream.get("state", {}).get("first_seq"),
-            "lastSeq": stream.get("state", {}).get("last_seq"),
+            "name": stream_config.get("name"),
+            "subjects": stream_config.get("subjects"),
+            "messages": stream_state.get("messages"),
+            "firstSeq": stream_state.get("first_seq"),
+            "lastSeq": stream_state.get("last_seq"),
         },
         "consumer": {
             "name": consumer.get("name"),
