@@ -10,6 +10,26 @@ run_build()    { /app/deploy/build-once.sh; }
 run_gc()       { python /app/deploy/gc-run.py; }
 run_backfill() { python /app/deploy/backfill.py; }
 
+retired_index_bridge_configured() {
+  [ -n "${RETIRED_INDEX_BRIDGE_API_KEY:-}" ]
+}
+
+run_scheduled_gc() {
+  if ! retired_index_bridge_configured; then
+    echo "[scheduler] gc skipped: RETIRED_INDEX_BRIDGE_API_KEY not set"
+    return 0
+  fi
+  run_gc
+}
+
+run_scheduled_backfill() {
+  if ! retired_index_bridge_configured; then
+    echo "[scheduler] backfill skipped: RETIRED_INDEX_BRIDGE_API_KEY not set"
+    return 0
+  fi
+  run_backfill
+}
+
 positive_int_or_default() {
   local value="${1:-}"
   local default_value="$2"
@@ -62,7 +82,7 @@ main() {
           last_build="$now"
         fi
         if [ "$minute_of_day" -ge $((2 * 60 + 15)) ] && [ "$last_bf" != "$day" ]; then
-          if run_backfill; then
+          if run_scheduled_backfill; then
             last_bf="$day"
             write_day_stamp "$last_bf_stamp" "$day"
           else
@@ -70,7 +90,7 @@ main() {
           fi
         fi
         if [ "$minute_of_day" -ge $((4 * 60 + 30)) ] && [ "$last_gc" != "$day" ]; then
-          if run_gc; then
+          if run_scheduled_gc; then
             last_gc="$day"
             write_day_stamp "$last_gc_stamp" "$day"
           else
