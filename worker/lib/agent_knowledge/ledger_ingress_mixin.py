@@ -1236,7 +1236,7 @@ class IngressStatusMixin:
             ).fetchone()
         if row is None:
             return
-        self.mark_session_memory_dirty(
+        self._memory_promotion_area.mark_session_memory_dirty(
             session_id_hash=str(row["session_id_hash"] or ""),
             provider=str(row["provider"] or item.get("provider") or ""),
             project=str(row["project"] or item.get("project") or ""),
@@ -1258,7 +1258,7 @@ class IngressStatusMixin:
             ).fetchone()
         if row is None:
             return
-        self.mark_project_memory_dirty(
+        self._memory_promotion_area.mark_project_memory_dirty(
             provider=str(row["provider"] or item.get("provider") or ""),
             project=str(row["project"] or item.get("project") or ""),
             reason="new_chunk_indexed",
