@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--current-request", required=True)
     parser.add_argument("--limit", type=int, default=8)
     parser.add_argument("--response-mode", choices=["full", "compact", "degraded"], default="full")
-    parser.add_argument("--consumer", choices=["unspecified", "codex", "claude-code", "hermes"], default="unspecified")
+    parser.add_argument("--consumer", choices=["unspecified", "codex", "claude-code", "gemini", "hermes"], default="unspecified")
     parser.add_argument("--enable-graph", action="store_true")
     parser.add_argument("--graph-required", action="store_true")
     args = parser.parse_args(argv)

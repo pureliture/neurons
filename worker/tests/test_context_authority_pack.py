@@ -78,6 +78,9 @@ def test_context_pack_exposes_m1_authority_sections_and_guardrails():
     assert authority["workflow_contracts"][0]["rule"] == "Use a dedicated branch/worktree before repository edits."
     assert authority["preferences"][0]["rule"] == "자연어 응답과 문서는 한국어로 작성한다."
     assert authority["projection"]["neo4j"]["authority"] == "derived_authority_graph"
+    assert authority["object_substrate_status"]["status"] == "degraded"
+    assert authority["object_substrate_status"]["authority"] == "model_available_object_store_not_configured"
+    assert "object_store_not_configured" in authority["object_substrate_status"]["gaps"]
     assert authority["search_mirror"]["qdrant_docling"] == {
         "status": "unverified",
         "authority": "searchable_document_mirror",

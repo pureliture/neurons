@@ -1321,6 +1321,18 @@ class Ledger(
                 );
                 CREATE INDEX IF NOT EXISTS idx_memory_gc_audit_kind_created
                     ON memory_gc_audit(gc_kind, created_at);
+                CREATE TABLE IF NOT EXISTS object_review_proposals (
+                    proposal_id TEXT PRIMARY KEY,
+                    project TEXT NOT NULL DEFAULT '',
+                    proposal_type TEXT NOT NULL,
+                    target_object_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    proposal_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_object_review_proposals_project_status
+                    ON object_review_proposals(project, status, updated_at);
                 CREATE TABLE IF NOT EXISTS schema_migrations (
                     version TEXT PRIMARY KEY,
                     applied_at TEXT NOT NULL
@@ -1363,6 +1375,8 @@ class Ledger(
                 VALUES ('agent_knowledge_qdrant_collections.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
                 VALUES ('agent_knowledge_graph_projection_state.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_object_review_proposals.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 UPDATE knowledge_items SET type = 'session_memory' WHERE type = 'session_memory_sot';
                 """
                 # Single-source graph projection_state schema: injected from
@@ -2275,3 +2289,64 @@ class Ledger(
                 (data["evidence_id_hash"],),
             ).fetchone()
         return dict(row) if row is not None else {}
+
+    def upsert_object_review_proposal(self, proposal: dict) -> dict:
+        if self.read_only:
+            raise sqlite3.OperationalError("read-only ledger는 object proposal write를 허용하지 않습니다")
+        proposal_id = str(proposal.get("proposal_id") or "")
+        proposal_type = str(proposal.get("proposal_type") or "")
+        target_object_id = str(proposal.get("target_object_id") or "")
+        if not proposal_id or not proposal_type or not target_object_id:
+            raise ValueError("object review proposal requires proposal_id, proposal_type and target_object_id")
+        project = str(proposal.get("project") or "")
+        status = str(proposal.get("status") or "needs_review")
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        payload = json.dumps(proposal, ensure_ascii=False, sort_keys=True)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO object_review_proposals (
+                    proposal_id, project, proposal_type, target_object_id,
+                    status, proposal_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(proposal_id) DO UPDATE SET
+                    project=excluded.project,
+                    proposal_type=excluded.proposal_type,
+                    target_object_id=excluded.target_object_id,
+                    status=excluded.status,
+                    proposal_json=excluded.proposal_json,
+                    updated_at=excluded.updated_at
+                """,
+                (proposal_id, project, proposal_type, target_object_id, status, payload, now, now),
+            )
+            row = connection.execute(
+                "SELECT proposal_json FROM object_review_proposals WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        return json.loads(row["proposal_json"]) if row is not None else {}
+
+    def list_object_review_proposals(self, *, project: str = "", limit: int = 20) -> list[dict]:
+        bounded = max(1, min(int(limit), 100))
+        with self._connect() as connection:
+            if project:
+                rows = connection.execute(
+                    """
+                    SELECT proposal_json
+                    FROM object_review_proposals
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project, bounded),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT proposal_json
+                    FROM object_review_proposals
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+        return [json.loads(row["proposal_json"]) for row in rows]
