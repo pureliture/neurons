@@ -8,6 +8,7 @@ from agent_knowledge.couchdb_source.migration_cli import (
     convert_gemini_json_to_fixture,
     enumerate_provider_files,
     extract_cwd,
+    main,
     reconcile_coverage,
     run_migration,
 )
@@ -132,3 +133,15 @@ def test_run_migration_writes_source_families(tmp_path):
     assert dm.SourceDocType.TRANSCRIPT_SESSION in types
     assert dm.SourceDocType.CONVERSATION_CHUNK in types
     assert dm.SourceDocType.COVERAGE_MANIFEST in types
+
+
+def test_transcript_migration_live_run_requires_approval_before_store_setup(capsys):
+    rc = main(["--provider", "codex", "--limit", "1"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["schema_version"] == "transcript_migration_cli.v1"
+    assert report["error"] == "approval_rejected"
+    assert report["reason"] == "approval is required"
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
