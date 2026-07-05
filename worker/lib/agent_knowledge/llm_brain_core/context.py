@@ -17,7 +17,7 @@ from .context_builder import (
 from .document_bridge import DisabledDocumentBridge, DocumentBridge
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
 from .models import EvidenceRequest
-from .object_packs import build_documentation_cleanup_pack
+from .objects.object_packs import build_documentation_cleanup_pack
 from .source_ref import SourceRefResolver
 
 if TYPE_CHECKING:

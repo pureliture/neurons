@@ -17,7 +17,7 @@ from .llm_brain_core import bulk_semantic_trigger_cli as llm_brain_bulk_semantic
 from .llm_brain_core import couchdb_projection_cli as llm_brain_couchdb_projection_cli
 from .llm_brain_core import graph_projection_status_cli as llm_brain_graph_projection_status_cli
 from .llm_brain_core import graph_trigger_cli as llm_brain_graph_trigger_cli
-from .llm_brain_core import object_cli as llm_brain_object_cli
+from .llm_brain_core.objects import object_cli as llm_brain_object_cli
 from .llm_brain_core import portable_cli as llm_brain_portable_cli
 from .llm_brain_core import projection_cli as llm_brain_projection_cli
 from .llm_brain_core import regression_gate_cli as llm_brain_regression_gate_cli

@@ -7,7 +7,7 @@ from typing import Any
 from ._util import ensure_public_safe, public_safe_text, short_hash
 from .document_authority import document_authority_cards_from_memory_cards
 from .models import ContextPack, GraphMemoryResult
-from .object_packs import build_agent_context_object_packs
+from .objects.object_packs import build_agent_context_object_packs
 from .preference_authority import preference_rule_cards_from_memory_cards
 from .repo_style_profile import repo_style_profile_from_memory_cards
 from .workflow_authority import workflow_contract_cards_from_memory_cards
