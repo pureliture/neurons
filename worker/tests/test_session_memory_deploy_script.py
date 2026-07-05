@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 
@@ -44,3 +45,39 @@ def test_entrypoint_build_interval_is_env_configurable() -> None:
     assert '"${SESSION_MEMORY_BUILD_INTERVAL_SECONDS:-}" 180' in script
     assert '"${SESSION_MEMORY_SCHEDULER_SLEEP_SECONDS:-}" 60' in script
     assert "10#$m % 3" not in script
+
+
+def test_entrypoint_positive_int_helper_uses_base_10_values() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "\n".join(
+                [
+                    "set -euo pipefail",
+                    "source deploy/session-memory/entrypoint.sh",
+                    "positive_int_or_default 010 60",
+                    "positive_int_or_default 0 60",
+                    "positive_int_or_default abc 60",
+                    "positive_int_or_default -5 60",
+                ]
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.splitlines() == ["10", "60", "60", "60"]
+
+
+def test_entrypoint_daily_jobs_use_due_window_not_exact_minute() -> None:
+    script = Path("deploy/session-memory/entrypoint.sh").read_text(encoding="utf-8")
+
+    assert 'read -r now hour minute day <<< "$(date -u "+%s %H %M %Y%m%d")"' in script
+    assert "minute_of_day=$((10#$hour * 60 + 10#$minute))" in script
+    assert '[ "$hm" = "04:30" ]' not in script
+    assert '[ "$hm" = "02:15" ]' not in script
+    assert '[ "$minute_of_day" -ge $((4 * 60 + 30)) ]' in script
+    assert '[ "$minute_of_day" -ge $((2 * 60 + 15)) ]' in script
