@@ -23,7 +23,7 @@
 
 - local `pytest` 통과만으로 production MCP가 새 object tools를 제공한다고 말한다.
 - production corpus ingest denied가 아니라 실제 write를 시도한다.
-- live production에 배포되지 않은 브랜치 기능을 “운영 검증 완료”로 표현한다.
+- live production에 배포되지 않은 branch 기능을 “운영 검증 완료”로 표현한다.
 - LBrain current memory read가 stale인데도 object substrate 품질 개선을 accepted/current로 주장한다.
 - raw private path, secret, raw transcript, raw external ids를 validation report에 출력한다.
 
