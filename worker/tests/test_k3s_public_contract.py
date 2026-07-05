@@ -90,6 +90,7 @@ def test_k3s_public_contract_does_not_contain_live_apply_or_private_values() -> 
         "real hostnames",
         "private filesystem paths",
         "token values",
+        "cookie values",
         "bearer values",
         "api key values",
         "raw transcript bodies",
