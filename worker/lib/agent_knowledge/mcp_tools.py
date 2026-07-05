@@ -10,6 +10,13 @@ BRAIN_DRIFT_EXPLAIN_TOOL_NAME = "brain_drift_explain"
 BRAIN_PERSONA_GET_TOOL_NAME = "brain_persona_get"
 BRAIN_PERSONA_CHECK_TOOL_NAME = "brain_persona_check"
 BRAIN_EVIDENCE_GET_TOOL_NAME = "brain_evidence_get"
+BRAIN_OBJECTS_QUERY_TOOL_NAME = "brain_objects_query"
+BRAIN_OBJECT_EXPLAIN_TOOL_NAME = "brain_object_explain"
+BRAIN_CORPUS_STATUS_TOOL_NAME = "brain_corpus_status"
+BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME = "brain_corpus_ingest_plan"
+BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME = "brain_object_proposal_create"
+BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME = "brain_object_decision_commit"
+BRAIN_REVIEW_PROPOSALS_TOOL_NAME = "brain_review_proposals"
 
 # Brain Steward — agent-facing, proposal-only memory management surface.
 MEMORY_AUTHORITY_PACK_READ_TOOL_NAME = "memory_authority_pack_read"
@@ -56,7 +63,7 @@ _STEWARD_SOURCE_SPAN_REQUIRED = ["card_type", "project", "provider", "typed_payl
 _STEWARD_PROPOSER_PROPERTY = {
     "proposer": {
         "type": "string",
-        "enum": ["unspecified", "codex", "claude-code", "hermes"],
+            "enum": ["unspecified", "codex", "claude-code", "gemini", "hermes"],
         "default": "unspecified",
     },
 }
@@ -122,7 +129,7 @@ def list_tools() -> list[dict]:
                     },
                     "consumer": {
                         "type": "string",
-                        "enum": ["unspecified", "codex", "claude-code", "hermes"],
+                        "enum": ["unspecified", "codex", "claude-code", "gemini", "hermes"],
                         "default": "unspecified",
                     },
                 },
@@ -218,6 +225,132 @@ def list_tools() -> list[dict]:
                     "redaction_profile": {"type": "string", "default": "public_safe"},
                 },
                 "required": ["source_ref_id", "requesting_device_id_hash"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+            "description": "typed KnowledgeObject pack을 lane/evidence/gap/recommended_action과 함께 조회한다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repository": {"type": "string"},
+                    "branch": {"type": "string"},
+                    "query": {"type": "string"},
+                    "current_files": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "project": {"type": "string"},
+                    "object_types": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "route": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
+                    "response_mode": {"type": "string", "enum": ["full", "compact", "degraded"], "default": "full"},
+                    "consumer": {
+                        "type": "string",
+                        "enum": ["unspecified", "codex", "claude-code", "gemini", "hermes"],
+                        "default": "unspecified",
+                    },
+                },
+                "required": ["repository", "branch", "query"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
+            "description": "KnowledgeObject 하나의 authority lane, evidence view, edges, freshness gap을 설명한다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "object_id": {"type": "string"},
+                    "include_edges": {"type": "boolean", "default": True},
+                    "include_evidence": {"type": "boolean", "default": True},
+                    "response_mode": {"type": "string", "enum": ["full", "compact", "degraded"], "default": "full"},
+                },
+                "required": ["object_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_CORPUS_STATUS_TOOL_NAME,
+            "description": "reference corpus 상태, storage mode, freshness gap, reference-only object count를 조회한다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "corpus_id": {"type": "string"},
+                    "project": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
+            "description": "operator manifest의 reference corpus ingest 계획을 read-only로 검토한다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "manifest": {"type": "object"},
+                    "manifest_ref": {"type": "string"},
+                    "storage_mode": {
+                        "type": "string",
+                        "enum": ["external_object_store", "managed_snapshot", "metadata_only"],
+                        "default": "metadata_only",
+                    },
+                    "project": {"type": "string"},
+                    "corpus_name": {"type": "string"},
+                },
+                "required": ["storage_mode", "project"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+            "description": "[object/proposal_write] local/test ledger review queue에만 ReviewProposal을 만들며 accepted/current authority는 바꾸지 않는다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "proposal_type": {
+                        "type": "string",
+                        "enum": ["propose_current", "propose_stale", "propose_supersede", "propose_retire", "request_evidence"],
+                    },
+                    "target_object_id": {"type": "string"},
+                    "proposed_object": {"type": "object"},
+                    "reason": {"type": "string"},
+                    "evidence_refs": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "ledger_scope": {"type": "string", "enum": ["local_test", "production"], "default": "production"},
+                    **_STEWARD_PROPOSER_PROPERTY,
+                },
+                "required": ["proposal_type", "target_object_id", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+            "description": "[object/restricted] object proposal을 accepted/current/stale/superseded/retired authority로 commit한다. 기본 권한에서는 거부된다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "proposal_id": {"type": "string"},
+                    "decision_type": {
+                        "type": "string",
+                        "enum": ["accept_current", "reject_candidate", "commit_supersession", "commit_stale", "retire"],
+                    },
+                    "approved_by": {"type": "string"},
+                    "decision_id": {"type": "string"},
+                },
+                "required": ["proposal_id", "decision_type", "approved_by", "decision_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_REVIEW_PROPOSALS_TOOL_NAME,
+            "description": "object-native proposal/review queue를 redacted metadata로 조회한다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string"},
+                    "repository": {"type": "string"},
+                    "proposal_types": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                },
                 "additionalProperties": False,
             },
         },

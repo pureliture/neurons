@@ -17,6 +17,7 @@ from .llm_brain_core import bulk_semantic_trigger_cli as llm_brain_bulk_semantic
 from .llm_brain_core import couchdb_projection_cli as llm_brain_couchdb_projection_cli
 from .llm_brain_core import graph_projection_status_cli as llm_brain_graph_projection_status_cli
 from .llm_brain_core import graph_trigger_cli as llm_brain_graph_trigger_cli
+from .llm_brain_core import object_cli as llm_brain_object_cli
 from .llm_brain_core import portable_cli as llm_brain_portable_cli
 from .llm_brain_core import projection_cli as llm_brain_projection_cli
 from .llm_brain_core import regression_gate_cli as llm_brain_regression_gate_cli
@@ -93,6 +94,13 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "session-memory-quarantine-terminal-skipped": terminal_skipped_quarantine.main,
     "session-memory-repair-zombie-snapshots": zombie_snapshot_repair.main,
     "brain-context-resolve": llm_brain_core_cli.main,
+    "object-query": llm_brain_object_cli.object_query_main,
+    "object-explain": llm_brain_object_cli.object_explain_main,
+    "corpus-status": llm_brain_object_cli.corpus_status_main,
+    "corpus-ingest-plan": llm_brain_object_cli.corpus_ingest_plan_main,
+    "corpus-ingest": llm_brain_object_cli.corpus_ingest_main,
+    "golden-query-eval": llm_brain_object_cli.golden_query_eval_main,
+    "okf-export": llm_brain_object_cli.okf_export_main,
     "brain-regression-gate": llm_brain_regression_gate_cli.main,
     "brain-export": llm_brain_portable_cli.export_main,
     "brain-import": llm_brain_portable_cli.import_main,

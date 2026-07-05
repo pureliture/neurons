@@ -18,6 +18,13 @@ from agent_knowledge.mcp_server import (
     BRAIN_EVIDENCE_GET_TOOL_NAME,
     BRAIN_INCIDENT_SEARCH_TOOL_NAME,
     BRAIN_MEMORY_SEARCH_TOOL_NAME,
+    BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+    BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
+    BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+    BRAIN_OBJECTS_QUERY_TOOL_NAME,
+    BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
+    BRAIN_CORPUS_STATUS_TOOL_NAME,
+    BRAIN_REVIEW_PROPOSALS_TOOL_NAME,
     BRAIN_PERSONA_CHECK_TOOL_NAME,
     BRAIN_PERSONA_GET_TOOL_NAME,
     TOOL_NAME,
@@ -158,11 +165,28 @@ def test_brain_context_resolve_schema_exposes_response_mode():
         "enum": ["full", "compact", "degraded"],
         "default": "full",
     }
-    assert schema["properties"]["consumer"] == {
-        "type": "string",
-        "enum": ["unspecified", "codex", "claude-code", "hermes"],
-        "default": "unspecified",
-    }
+    assert schema["properties"]["consumer"]["enum"] == ["unspecified", "codex", "claude-code", "gemini", "hermes"]
+    assert schema["properties"]["consumer"]["default"] == "unspecified"
+
+
+def test_mcp_tool_list_exposes_object_substrate_tools():
+    tools = {tool["name"]: tool for tool in list_tools()}
+
+    for tool_name in [
+        BRAIN_OBJECTS_QUERY_TOOL_NAME,
+        BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
+        BRAIN_CORPUS_STATUS_TOOL_NAME,
+        BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
+        BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+        BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+        BRAIN_REVIEW_PROPOSALS_TOOL_NAME,
+    ]:
+        assert tool_name in tools
+
+    assert tools[BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME]["inputSchema"]["properties"]["ledger_scope"]["enum"] == [
+        "local_test",
+        "production",
+    ]
 
 
 def test_project_deriving_brain_tool_schemas_allow_repository():
@@ -201,6 +225,173 @@ def test_mcp_brain_query_roundtrip(tmp_path: Path):
     assert result["audit"]["path"] == "ledger_precedence_v2"
     assert result["current"][0]["summary"] == "한국어로 응답한다"
     assert json.loads(response["result"]["content"][0]["text"]) == result
+
+
+def test_mcp_brain_objects_query_roundtrip(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "이 repo 문서 최신화하려면 뭘 봐야 해?",
+                    "current_files": ["README.md"],
+                    "consumer": "gemini",
+                    "limit": None,
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["schema_version"] == "brain_objects_query.v1"
+    assert result["route"] == "documentation_cleanup"
+    assert result["object_pack"]["schema_version"] == "object_pack.v1"
+
+
+def test_mcp_brain_objects_query_applies_object_type_filter_and_response_mode(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "이 repo 문서 최신화하려면 뭘 봐야 해?",
+                    "current_files": ["README.md"],
+                    "object_types": ["ReferenceDocument"],
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["response_mode"] == "compact"
+    assert result["object_pack"]["audit"]["object_type_filter"] == ["ReferenceDocument"]
+    assert result["object_pack"]["objects"] == []
+
+
+def test_mcp_object_proposal_create_local_test_and_production_denial(tmp_path: Path):
+    service = _service(tmp_path)
+    local = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_stale",
+                    "target_object_id": "ko:RepoDocument:old",
+                    "reason": "Old doc needs review.",
+                    "evidence_refs": ["ev:source_hash:old"],
+                    "ledger_scope": "local_test",
+                    "proposer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    denied = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 103,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_stale",
+                    "target_object_id": "ko:RepoDocument:old",
+                    "reason": "Old doc needs review.",
+                    "ledger_scope": "production",
+                    "proposer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert local["proposal_write_performed"] is True
+    assert local["proposal_write_target"] == "local_test_ledger"
+    assert local["authority_write_performed"] is False
+    assert local["authoritative_memory_changed"] is False
+    ledger_items = service.ledger.list_object_review_proposals()
+    assert ledger_items[0]["proposal_id"] == local["proposal_id"]
+    assert service.object_review_proposals(limit=None)["count"] == 1
+    queued = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 105,
+            "method": "tools/call",
+            "params": {"name": BRAIN_REVIEW_PROPOSALS_TOOL_NAME, "arguments": {}},
+        },
+        service,
+    )["result"]["structuredContent"]
+    assert queued["count"] == 1
+    assert queued["items"][0]["proposal_id"] == local["proposal_id"]
+    assert denied["permission"] == "denied"
+    assert denied["proposal_write_performed"] is False
+    assert denied["authoritative_memory_changed"] is False
+
+
+def test_mcp_corpus_ingest_plan_reports_manifest_ref_gap(tmp_path: Path):
+    service = _service(tmp_path)
+    result = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 106,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
+                "arguments": {
+                    "manifest_ref": "refs/palantir.json",
+                    "storage_mode": "metadata_only",
+                    "project": "neurons",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert "manifest_ref_not_loaded" in result["gaps"]
+    assert result["manifest_ref"] == "refs/palantir.json"
+
+
+def test_mcp_object_decision_commit_is_restricted_denied_by_default(tmp_path: Path):
+    service = _service(tmp_path)
+    result = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 104,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": "proposal:old",
+                    "decision_type": "commit_stale",
+                    "approved_by": "human",
+                    "decision_id": "decision:old",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert result["permission"] == "denied"
+    assert result["authority_write_performed"] is False
+    assert result["authoritative_memory_changed"] is False
 
 
 def test_brain_query_semantic_recall_type_error_is_audited(tmp_path: Path, monkeypatch):
