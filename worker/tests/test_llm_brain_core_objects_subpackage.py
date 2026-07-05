@@ -9,6 +9,7 @@ OBJECT_MODULES = (
     "knowledge_objects",
     "object_packs",
     "reference_corpus",
+    "extraction_pipeline",
     "golden_query_eval",
     "okf_export",
     "object_cli",
@@ -28,6 +29,10 @@ OBJECT_PARITY_SYMBOLS: dict[str, tuple[str, ...]] = {
     "reference_corpus": (
         "build_corpus_ingest_plan",
         "reference_corpus_objects_from_manifest",
+    ),
+    "extraction_pipeline": (
+        "build_extractor_registry_report",
+        "run_reference_corpus_extraction_preview",
     ),
     "golden_query_eval": (
         "build_baseline_golden_query_report",
