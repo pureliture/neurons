@@ -78,7 +78,7 @@ def normalize_response_model_item(item: dict[str, Any], field_name: str) -> dict
         indices: list[int] = []
         for value in result["episode_indices"]:
             try:
-                indices.append(int(value))
+                indices.append(int(value or 0))
             except (TypeError, ValueError):
                 indices.append(0)
         result["episode_indices"] = indices
@@ -98,6 +98,8 @@ def sanitize_duplicate_fact_idxs(
 
     filtered: list[int] = []
     for value in duplicate_facts:
+        if value is None:
+            continue
         try:
             idx = int(value)
         except (TypeError, ValueError):
@@ -110,7 +112,9 @@ def sanitize_duplicate_fact_idxs(
     return result
 
 
-def existing_fact_idx_values_from_messages(messages: list[Any]) -> set[int] | None:
+def existing_fact_idx_values_from_messages(messages: list[Any] | None) -> set[int] | None:
+    if not messages:
+        return None
     for message in reversed(messages):
         content = getattr(message, "content", None)
         if content is None and isinstance(message, dict):
