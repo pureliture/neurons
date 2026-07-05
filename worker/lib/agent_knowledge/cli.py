@@ -130,7 +130,7 @@ COMMAND_METADATA: dict[str, dict[str, object]] = {
     "neuron-session-memory-build": {
         "runtime_category": "legacy_compatibility",
         "deletion_candidate": False,
-        "live_mutation_requires_approval": False,
+        "live_mutation_requires_approval": True,
     },
     "couchdb-session-memory-build": {
         "runtime_category": "active_runtime",
