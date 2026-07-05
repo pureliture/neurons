@@ -274,9 +274,11 @@ def test_neuron_knowledge_couchdb_command_surface_classification():
 
     assert transcript_migration_metadata["runtime_category"] == "human_gated_migration"
     assert transcript_migration_metadata["deletion_candidate"] is False
+    assert transcript_migration_metadata["live_mutation_requires_approval"] is True
 
     assert couchdb_migration_flow_metadata["runtime_category"] == "human_gated_migration"
     assert couchdb_migration_flow_metadata["deletion_candidate"] is False
 
     assert legacy_session_memory_metadata["runtime_category"] == "legacy_compatibility"
     assert legacy_session_memory_metadata["deletion_candidate"] is False
+    assert legacy_session_memory_metadata["live_mutation_requires_approval"] is True

@@ -23,6 +23,7 @@ import argparse
 import base64
 import json
 import os
+import sys
 from pathlib import Path
 
 from .couchdb_http_store import CouchDBHttpSourceStore
@@ -31,7 +32,11 @@ from .session_memory_materializer import update_coverage_with_tool_evidence
 from .source_store import InMemoryCouchDBSourceStore
 from .tool_evidence_bundler import store_tool_evidence_bundles
 from .document_model import build_source_locator_hash
+from ..session_memory.native_memory_sync_approval import ApprovalError, validate_memory_enqueue_approval
 from ..session_memory.transcript_parsers import extract_tool_evidence
+
+MIGRATION_CLI_SCHEMA_VERSION = "transcript_migration_cli.v1"
+MIGRATION_CLI_OPERATION = "transcript_migration"
 
 MIGRATION_PROVIDERS = ("codex", "claude", "gemini", "antigravity")
 _CWD_SCAN_MAX_LINES = 50
@@ -289,11 +294,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--provider", action="append", choices=list(MIGRATION_PROVIDERS))
     parser.add_argument("--limit", type=int)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--approval", default="", help="Path to live-approval JSON (required for non-dry-run).")
     parser.add_argument("--source-root", action="append", help="provider=/path override; repeatable")
     parser.add_argument("--runtime-dir")
     parser.add_argument("--reconcile-coverage", action="store_true", help="recompute coverage manifests from stored chunks and exit")
     parser.add_argument("--tool-evidence", action="store_true", help="second pass: store tool_evidence_bundle docs and exit")
     args = parser.parse_args(argv if argv is not None else None)
+    effective_argv = list(sys.argv[1:] if argv is None else argv)
 
     roots_override: dict[str, Path] = {}
     for raw in args.source_root or []:
@@ -302,6 +309,10 @@ def main(argv: list[str] | None = None) -> int:
             roots_override[prov.strip()] = Path(p.strip()).expanduser()
 
     if args.tool_evidence:
+        approval_error = _live_approval_error(args.approval, dry_run=args.dry_run, effective_argv=effective_argv)
+        if approval_error is not None:
+            print(json.dumps(approval_error, sort_keys=True))
+            return 1
         store = InMemoryCouchDBSourceStore() if args.dry_run else build_store_from_env()
         roots = default_source_roots()
         roots.update(roots_override)
@@ -314,6 +325,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.reconcile_coverage:
+        approval_error = _live_approval_error(args.approval, dry_run=args.dry_run, effective_argv=effective_argv)
+        if approval_error is not None:
+            print(json.dumps(approval_error, sort_keys=True))
+            return 1
         store = InMemoryCouchDBSourceStore() if args.dry_run else build_store_from_env()
         report = reconcile_coverage(store)
         print(json.dumps(report, sort_keys=True))
@@ -327,6 +342,11 @@ def main(argv: list[str] | None = None) -> int:
         prov, _, p = raw.partition("=")
         roots[prov.strip()] = Path(p.strip()).expanduser()
 
+    approval_error = _live_approval_error(args.approval, dry_run=args.dry_run, effective_argv=effective_argv)
+    if approval_error is not None:
+        print(json.dumps(approval_error, sort_keys=True))
+        return 1
+
     store = InMemoryCouchDBSourceStore() if args.dry_run else build_store_from_env()
     report = run_migration(
         store=store,
@@ -339,6 +359,27 @@ def main(argv: list[str] | None = None) -> int:
     report["status"] = "ok"
     print(json.dumps(report, sort_keys=True))
     return 0
+
+
+def _live_approval_error(approval: str, *, dry_run: bool, effective_argv: list[str]) -> dict | None:
+    if dry_run:
+        return None
+    try:
+        validate_memory_enqueue_approval(
+            approval or None,
+            operation=MIGRATION_CLI_OPERATION,
+            command_argv=effective_argv,
+        )
+    except ApprovalError as exc:
+        return {
+            "schema_version": MIGRATION_CLI_SCHEMA_VERSION,
+            "error": "approval_rejected",
+            "reason": str(exc),
+            "dry_run": False,
+            "mutation_performed": False,
+            "network_used": False,
+        }
+    return None
 
 
 __all__ = [
