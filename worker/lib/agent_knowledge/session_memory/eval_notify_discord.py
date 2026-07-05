@@ -120,20 +120,62 @@ def build_discord_payload(snapshot: Mapping[str, Any]) -> dict:
     project = str(snapshot.get("project") or "")
     provider = str(snapshot.get("provider") or "")
     icon = "🚨" if snapshot.get("attention_required") else "✅"
-    content = (
-        f"{icon} LLM-Brain eval digest project={project} provider={provider} "
-        f"status={status} queries={metrics.get('query_count', (latest or {}).get('query_count', 0))} "
-        f"passed={metrics.get('passed_count', 0)} failed={metrics.get('failed_count', 0)} "
-        f"recall={metrics.get('avg_recall', 'n/a')} precision={metrics.get('avg_precision', 'n/a')} "
-        f"network_used={str(bool((latest or {}).get('network_used'))).lower()} "
-        f"review_queue={int(snapshot.get('review_queue_count') or 0)} "
-        f"enabled_eval_queries={int(snapshot.get('enabled_eval_queries') or 0)}"
+    query_count = int(metrics.get("query_count") or (latest or {}).get("query_count") or 0)
+    passed_count = int(metrics.get("passed_count") or 0)
+    failed_count = int(metrics.get("failed_count") or 0)
+    review_queue_count = int(snapshot.get("review_queue_count") or 0)
+    enabled_eval_queries = int(snapshot.get("enabled_eval_queries") or 0)
+    quality_label = "통과" if status == "pass" and failed_count == 0 else "실패"
+    if latest is None:
+        quality_label = "결과 없음"
+    recall = _format_metric(metrics.get("avg_recall"))
+    precision = _format_metric(metrics.get("avg_precision"))
+    eval_summary = f"평가셋: {query_count}개 중 {passed_count}개 통과"
+    if failed_count:
+        eval_summary += f", {failed_count}개 실패"
+    review_summary = f"사람 검토 대기: {review_queue_count}건" if review_queue_count else "사람 검토 대기: 없음"
+    if not snapshot.get("attention_required"):
+        action = "지금 할 일: 없음"
+        meaning = "의미: 검색 품질과 사람 검토 대기열이 모두 정상입니다."
+    elif review_queue_count and failed_count:
+        action = "다음 행동: 사람 검토 대기를 먼저 승인/거절하고, 이어서 eval 실패 원인을 확인하세요."
+        meaning = "의미: 사람이 판단할 Memory 후보가 있고, 자동 검색 평가도 기대 결과와 어긋났습니다."
+    elif review_queue_count:
+        action = "다음 행동: 사람 검토 대기 항목을 승인/거절하세요."
+        meaning = "의미: accepted/current Memory로 올릴지 사람이 판단할 후보가 있습니다."
+    elif failed_count or status != "pass":
+        action = "다음 행동: eval 실패 원인을 확인하세요."
+        meaning = "의미: 자동 검색 평가가 기대 Memory를 일부 못 찾았거나 불필요한 결과를 섞었습니다."
+    else:
+        action = "다음 행동: 상태를 확인하세요."
+        meaning = "의미: 운영자가 확인해야 하는 신호가 있습니다."
+    content = "\n".join(
+        [
+            f"{icon} LBrain 운영 점검 — {'확인 필요' if snapshot.get('attention_required') else '정상'}",
+            f"대상: {project}/{provider}",
+            f"검색 품질: {quality_label}",
+            eval_summary,
+            f"정확도: recall {recall} / precision {precision}",
+            review_summary,
+            meaning,
+            action,
+            f"참고: 활성 평가 쿼리 {enabled_eval_queries}개, semantic/model lane {'사용' if bool((latest or {}).get('network_used')) else '미사용'}",
+        ]
     )
     return {
         "username": "neurons-eval-notifier",
         "content": content[:1900],
         "allowed_mentions": {"parse": []},
     }
+
+
+def _format_metric(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "n/a"
 
 
 def post_discord_webhook(url: str, payload: dict, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> dict:
