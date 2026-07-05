@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Iterator
 from urllib.parse import quote
 
 from ..rag_ingress.idempotency import IdempotencyOutcome, classify_idempotency
@@ -149,14 +150,66 @@ class CouchDBHttpSourceStore:
             raise CouchDBError(f"PUT {doc_id} failed: HTTP {status}")
         return str(payload.get("rev", ""))
 
-    def find_by_type(self, doc_type: str, *, fields: list[str] | None = None) -> list[dict]:
-        body: dict = {"selector": {"doc_type": doc_type}, "limit": 200000}
-        if fields:
-            body["fields"] = fields
-        status, payload = self._request("POST", f"/{self.db}/_find", json_body=body)
-        if status != 200:
-            raise CouchDBError(f"_find by type failed: HTTP {status}")
-        return payload.get("docs", [])
+    def iter_by_type(
+        self,
+        doc_type: str,
+        *,
+        fields: list[str] | None = None,
+        selector: dict | None = None,
+        limit: int = 0,
+        page_size: int = 10000,
+    ) -> Iterator[dict]:
+        page_size = max(1, int(page_size or 10000))
+        selector = {**(selector or {}), "doc_type": doc_type}
+        yielded = 0
+        bookmark = ""
+        while True:
+            page_limit = page_size
+            if limit > 0:
+                remaining = limit - yielded
+                if remaining <= 0:
+                    return
+                page_limit = min(page_size, remaining)
+
+            body: dict = {"selector": selector, "limit": page_limit}
+            if fields:
+                body["fields"] = fields
+            if bookmark:
+                body["bookmark"] = bookmark
+            status, payload = self._request("POST", f"/{self.db}/_find", json_body=body)
+            if status != 200:
+                raise CouchDBError(f"_find by type failed: HTTP {status}")
+            docs = payload.get("docs", [])
+            if not docs:
+                return
+            for doc in docs:
+                if limit > 0 and yielded >= limit:
+                    return
+                yielded += 1
+                yield doc
+            next_bookmark = str(payload.get("bookmark") or "")
+            if not next_bookmark or next_bookmark == bookmark:
+                return
+            bookmark = next_bookmark
+
+    def find_by_type(
+        self,
+        doc_type: str,
+        *,
+        fields: list[str] | None = None,
+        selector: dict | None = None,
+        limit: int = 0,
+        page_size: int = 10000,
+    ) -> list[dict]:
+        return list(
+            self.iter_by_type(
+                doc_type,
+                fields=fields,
+                selector=selector,
+                limit=limit,
+                page_size=page_size,
+            )
+        )
 
     def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]:
         selector: dict = {"session_id_hash": session_id_hash}

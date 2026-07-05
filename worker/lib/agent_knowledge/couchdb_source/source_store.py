@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -40,13 +41,39 @@ class StoredRevision:
     outcome: str  # accepted | duplicate | conflict_resolved
 
 
+def _matches_selector(doc: dict, selector: dict) -> bool:
+    return all(doc.get(key) == value for key, value in selector.items())
+
+
+def _project_fields(doc: dict, fields: list[str] | None) -> dict:
+    return copy.deepcopy(doc) if not fields else {key: doc.get(key) for key in fields}
+
+
 @runtime_checkable
 class CouchDBSourceStore(Protocol):
     def put(self, document: dict) -> StoredRevision: ...
 
     def get(self, doc_id: str) -> dict | None: ...
 
-    def find_by_type(self, doc_type: str, *, fields: list[str] | None = None) -> list[dict]: ...
+    def iter_by_type(
+        self,
+        doc_type: str,
+        *,
+        fields: list[str] | None = None,
+        selector: dict | None = None,
+        limit: int = 0,
+        page_size: int = 10000,
+    ) -> Iterator[dict]: ...
+
+    def find_by_type(
+        self,
+        doc_type: str,
+        *,
+        fields: list[str] | None = None,
+        selector: dict | None = None,
+        limit: int = 0,
+        page_size: int = 10000,
+    ) -> list[dict]: ...
 
     def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]: ...
 
@@ -142,13 +169,44 @@ class InMemoryCouchDBSourceStore:
     def all_docs(self) -> list[dict]:
         return [copy.deepcopy(doc) for doc in self._docs.values()]
 
-    def find_by_type(self, doc_type: str, *, fields: list[str] | None = None) -> list[dict]:
-        out = []
-        for doc in self._docs.values():
-            if doc.get("doc_type") != doc_type:
+    def iter_by_type(
+        self,
+        doc_type: str,
+        *,
+        fields: list[str] | None = None,
+        selector: dict | None = None,
+        limit: int = 0,
+        page_size: int = 10000,
+    ) -> Iterator[dict]:
+        del page_size
+        selector = {**(selector or {}), "doc_type": doc_type}
+        yielded = 0
+        for doc in sorted(self._docs.values(), key=lambda item: str(item.get("_id"))):
+            if not _matches_selector(doc, selector):
                 continue
-            out.append(copy.deepcopy(doc) if not fields else {k: doc.get(k) for k in fields})
-        return out
+            if limit > 0 and yielded >= limit:
+                break
+            yielded += 1
+            yield _project_fields(doc, fields)
+
+    def find_by_type(
+        self,
+        doc_type: str,
+        *,
+        fields: list[str] | None = None,
+        selector: dict | None = None,
+        limit: int = 0,
+        page_size: int = 10000,
+    ) -> list[dict]:
+        return list(
+            self.iter_by_type(
+                doc_type,
+                fields=fields,
+                selector=selector,
+                limit=limit,
+                page_size=page_size,
+            )
+        )
 
 
 __all__ = [
