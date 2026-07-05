@@ -46,7 +46,7 @@ def _matches_selector(doc: dict, selector: dict) -> bool:
 
 
 def _project_fields(doc: dict, fields: list[str] | None) -> dict:
-    return copy.deepcopy(doc) if not fields else {key: doc.get(key) for key in fields}
+    return copy.deepcopy(doc) if not fields else {key: copy.deepcopy(doc.get(key)) for key in fields}
 
 
 @runtime_checkable
@@ -181,7 +181,7 @@ class InMemoryCouchDBSourceStore:
         del page_size
         selector = {**(selector or {}), "doc_type": doc_type}
         yielded = 0
-        for doc in sorted(self._docs.values(), key=lambda item: str(item.get("_id"))):
+        for doc in sorted(self._docs.values(), key=lambda item: str(item.get("_id") or "")):
             if not _matches_selector(doc, selector):
                 continue
             if limit > 0 and yielded >= limit:

@@ -94,7 +94,9 @@ def _iter_by_type(store, doc_type: str, *, fields: list[str], selector: dict, pa
         return iterator(doc_type, fields=fields, selector=selector, page_size=page_size)
     try:
         return iter(store.find_by_type(doc_type, fields=fields, selector=selector, page_size=page_size))
-    except TypeError:
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
         docs = store.find_by_type(doc_type, fields=fields)
         return (
             doc

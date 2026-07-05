@@ -113,7 +113,7 @@ class FakeCouch:
     def _matching_docs(store: dict[str, dict], selector: dict) -> list[dict]:
         return [
             doc
-            for doc in sorted(store.values(), key=lambda item: str(item.get("_id")))
+            for doc in sorted(store.values(), key=lambda item: str(item.get("_id") or ""))
             if all(doc.get(key) == value for key, value in selector.items())
         ]
 
