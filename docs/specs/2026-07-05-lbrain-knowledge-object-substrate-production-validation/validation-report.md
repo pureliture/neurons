@@ -4,7 +4,9 @@
 
 `PASS_WITH_GAPS`
 
-Local implementation, package-level contracts, MCP dispatch tests, CLI smoke tests, and production-denial safety gates passed. Live production inclusion is not validated: the current worktree has uncommitted implementation files, and the configured LBrain MCP read path does not yet expose the new object-native tools.
+Local implementation, package-level contracts, MCP dispatch tests, CLI smoke tests, and production-denial safety gates passed.
+
+P1 live production activation follow-up now validates the deployed HTTP MCP runtime and the user-level configured endpoint: object-native tools are exposed, `brain_objects_query` returns an object pack, and production proposal/decision calls deny with no mutation. The remaining gap is the current Codex session's `mcp__lbrain` tool registry, which still does not expose object-native tools even though the configured endpoint smoke passes.
 
 ## Validated
 
@@ -74,6 +76,42 @@ Local implementation, package-level contracts, MCP dispatch tests, CLI smoke tes
   - compact context resolves current design file as active inventory candidate
   - runtime evidence remains `runtime_evidence_unverified`
 
+### live.production.http-mcp-object-tools-loaded
+
+- status: `validated`
+- evidence: read-only live MCP smoke against the deployed production HTTP MCP runtime.
+- result:
+  - deployed runtime exposes `brain_objects_query`, `brain_object_explain`, `brain_corpus_status`, `brain_corpus_ingest_plan`, `brain_object_proposal_create`, `brain_object_decision_commit`, and `brain_review_proposals`.
+  - tool count: 27
+  - deployment health: `Synced/Healthy`, ready `1/1`, restart count `0`
+  - service health: `status=ok`
+
+### configured.codex-endpoint.http-mcp-object-tools-loaded
+
+- status: `validated`
+- evidence: standalone MCP client smoke against the user-level Codex LBrain MCP endpoint from local config.
+- result:
+  - configured endpoint exposes `brain_objects_query`, `brain_object_explain`, `brain_corpus_status`, `brain_corpus_ingest_plan`, `brain_object_proposal_create`, `brain_object_decision_commit`, and `brain_review_proposals`.
+  - tool count: 27
+  - `brain_objects_query` returned `brain_objects_query.v1` with `object_pack.v1`, `route=documentation_cleanup`, one public-safe object, and two explicit gaps.
+  - production proposal and restricted decision calls returned denied/no-mutation.
+
+### live.production.brain-objects-query
+
+- status: `validated`
+- evidence: read-only live `brain_objects_query` smoke.
+- result: returned `brain_objects_query.v1` with `object_pack.v1`, `route=documentation_cleanup`, one public-safe object, and two explicit gaps.
+
+### live.production.deployed-version-identity
+
+- status: `validated`
+- evidence: deployed MCP image identity and Git ancestry check.
+- result:
+  - production Argo application tracks `main` and is `Synced/Healthy`.
+  - deployed MCP image source commit is `c216ff4`.
+  - source commit `c216ff4` includes PR #64 merge commit `7a0b6a6`.
+  - repo `origin/main` is ahead at PR #66; that does not invalidate the P1 MCP evidence because the deployed MCP image identity still includes the object-native tool merge.
+
 ## Denied As Expected
 
 ### production.corpus-ingest
@@ -85,39 +123,35 @@ Local implementation, package-level contracts, MCP dispatch tests, CLI smoke tes
 ### production.object-proposal-and-decision
 
 - status: `denied_as_expected`
-- evidence: focused MCP stdio tests
+- evidence: focused MCP stdio tests and read-only live HTTP MCP smoke
 - result:
   - production-scope object proposal is denied with no authoritative memory change.
   - object decision commit is restricted-denied by default with `authority_write_performed=false`.
+  - live smoke returned `proposal_write_performed=false`, `authority_write_performed=false`, and `authoritative_memory_changed=false` for both production proposal denial and restricted decision denial.
 
 ## Not Validated
 
-### live.production.object-tools-loaded
+### configured.codex-mcp.object-tools-loaded
 
 - status: `not_validated`
-- reason: `not_deployed_to_production`
+- reason: `current_session_tool_registry_stale`
 - evidence:
-  - current worktree branch is `codex/lbrain-knowledge-object-substrate`.
-  - implementation is still working-tree/untracked changes, not a deployed artifact.
-  - available live/configured LBrain MCP namespace exposes existing read tools such as `memory_authority_pack_read`, `brain_context_resolve`, and `brain_memory_search`; it does not expose the new object-native tools in this session.
+  - deployed HTTP MCP runtime exposes object-native tools.
+  - local Codex MCP allowlist source has been updated to include object-native tool names.
+  - standalone smoke against the configured endpoint exposes and calls object-native tools successfully.
+  - current Codex `mcp__lbrain` callable namespace still exposes the pre-object-native read tools only in this session.
+  - `brain_objects_query` is not callable from the configured Codex namespace in this session.
 
-### live.production.runtime-verified-answers
-
-- status: `not_validated`
-- reason: `runtime_surface_missing_new_tools`
-- evidence: configured LBrain MCP read path still reports stale/no-recent-source and runtime evidence gaps; no live `brain_objects_query` call is available on the deployed/configured tool surface.
-
-### production.deployed-version-identity
+### configured.codex-mcp.runtime-verified-answers
 
 - status: `not_validated`
-- reason: `no_deployed_artifact_contains_worktree_changes`
-- evidence: current changes are not committed or promoted through deployment. No image/GitOps/runtime identity check can honestly prove inclusion of these working-tree changes.
+- reason: `current_session_tool_registry_missing_new_tools`
+- evidence: configured Codex namespace cannot yet run `brain_objects_query` directly, so agent-facing product activation is not complete from this session's callable tool surface.
 
 ## Gaps
 
-- Production deployment/promotion is outside this goal.
-- Live MCP `tools/list` for the deployed runtime must expose the new object-native tool names before runtime verification can pass.
-- A later production validation run should compare deployed source/image identity against the commit that contains this implementation.
+- Current Codex session's `mcp__lbrain` tool registry must refresh/reload to expose object-native tools directly.
+- P1 remains `PASS_WITH_GAPS` until the agent-visible `mcp__lbrain` namespace can call `brain_objects_query` without a separate standalone MCP client probe.
 - Reference corpus store remains not configured; local CLI correctly reports planned/no mutation rather than pretending ingest completed.
 - Golden query baseline remains red by design; future goal must evaluate the new object-pack answers against those queries after deployment.
 
@@ -125,9 +159,9 @@ Local implementation, package-level contracts, MCP dispatch tests, CLI smoke tes
 
 - No production ledger write was performed.
 - No corpus production ingest was performed.
-- No deployment, GitOps, image push, Argo sync, restart, graph/Qdrant write, GC, or raw private evidence access was performed.
+- No graph/Qdrant write, GC, accepted/current promotion, corpus write, ledger write, or raw private evidence access was performed during validation.
 - Production denial gate did not mutate state.
 
 ## Conclusion
 
-The implementation is locally and contractually validated, and safety gates fail closed. It is not production-runtime verified because the deployed/configured LBrain read path does not yet include this working-tree implementation. The correct next production step is a separate promotion/deployment plan, followed by read-only live `tools/list` and object-query smoke against that deployed artifact.
+The implementation is locally and contractually validated, safety gates fail closed, and the deployed/configured HTTP MCP runtime is now production-runtime verified for P1 read-only object tools. The result remains `PASS_WITH_GAPS` because the current Codex session's `mcp__lbrain` tool registry still does not expose object-native tools directly.
