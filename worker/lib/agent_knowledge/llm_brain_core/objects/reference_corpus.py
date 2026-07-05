@@ -127,6 +127,7 @@ def reference_corpus_objects_from_manifest(
         "manifest_ref": plan["manifest_hash"],
     }
     document_sources: list[dict[str, Any]] = []
+    versions: list[dict[str, Any]] = []
     snapshots: list[dict[str, Any]] = []
     chunks: list[dict[str, Any]] = []
     freshness_checks: list[dict[str, Any]] = []
@@ -178,11 +179,28 @@ def reference_corpus_objects_from_manifest(
         freshness_checks.append(freshness_check)
         if extraction_blocked:
             continue
+        version = {
+            "schema_version": "document_version.v1",
+            "version_id": f"ver:{short_hash([document_source['source_id'], content_hash, metadata_hash])}",
+            "source_id": document_source["source_id"],
+            "corpus_id": corpus["corpus_id"],
+            "storage_mode": mode,
+            "content_hash": content_hash,
+            "metadata_hash": metadata_hash,
+            "source_version_ref": public_safe_text(str(source.get("source_version") or content_hash), max_chars=160),
+            "manifest_ref": corpus["manifest_ref"],
+            "authority_lane": "reference_only",
+            "verification_state": "source_hash_verified",
+            "freshness_state": status,
+            "observed_at": utc_now_iso(),
+        }
+        versions.append(version)
         if mode == "managed_snapshot":
             snapshot = {
                 "schema_version": "document_snapshot.v1",
                 "snapshot_id": f"snap:{short_hash([document_source['source_id'], content_hash, mode])}",
                 "source_id": document_source["source_id"],
+                "version_id": version["version_id"],
                 "storage_mode": mode,
                 "snapshot_kind": "normalized_markdown",
                 "content_hash": content_hash,
@@ -256,6 +274,7 @@ def reference_corpus_objects_from_manifest(
         "schema_version": "reference_corpus_objects.v1",
         "corpus": corpus,
         "sources": document_sources,
+        "versions": versions,
         "snapshots": snapshots,
         "chunks": chunks,
         "freshness_checks": freshness_checks,

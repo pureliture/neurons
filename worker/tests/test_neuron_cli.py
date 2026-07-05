@@ -181,8 +181,10 @@ def test_neuron_knowledge_corpus_ingest_local_test_writes_configured_store(tmp_p
     assert status["source_count"] == 2
     assert status["storage_modes"] == {"managed_snapshot": 2}
     assert status["reference_object_count"] == 2
+    assert status["version_count"] == 2
     assert status["snapshot_count"] == 2
     assert status["chunk_count"] == 2
+    assert status["document_versions"][0]["schema_version"] == "document_version.v1"
     assert status["extraction_runs"][0]["status"] == "completed"
     assert status["freshness_gaps"][0]["source_url_status"] == "missing_manual_text"
     assert status["gaps"] == []

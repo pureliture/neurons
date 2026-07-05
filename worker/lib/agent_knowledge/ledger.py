@@ -1413,6 +1413,19 @@ class Ledger(
                 );
                 CREATE INDEX IF NOT EXISTS idx_reference_corpus_bundles_project_updated
                     ON reference_corpus_bundles(project, updated_at);
+                CREATE TABLE IF NOT EXISTS reference_corpus_document_versions (
+                    version_id TEXT PRIMARY KEY,
+                    corpus_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    project TEXT NOT NULL DEFAULT '',
+                    content_hash TEXT NOT NULL,
+                    metadata_hash TEXT NOT NULL,
+                    version_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_corpus_versions_project_corpus
+                    ON reference_corpus_document_versions(project, corpus_id, updated_at);
                 CREATE TABLE IF NOT EXISTS schema_migrations (
                     version TEXT PRIMARY KEY,
                     applied_at TEXT NOT NULL
@@ -1459,6 +1472,8 @@ class Ledger(
                 VALUES ('agent_knowledge_object_review_proposals.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
                 VALUES ('agent_knowledge_reference_corpus_bundles.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_reference_corpus_document_versions.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 UPDATE knowledge_items SET type = 'session_memory' WHERE type = 'session_memory_sot';
                 """
                 # Single-source graph projection_state schema: injected from
@@ -2448,6 +2463,7 @@ class Ledger(
             raise ValueError("reference corpus bundle requires corpus_id, name, storage_mode and manifest hash")
         project_name = public_safe_text(project or str(bundle.get("project") or ""), max_chars=120)
         source_count = len(bundle.get("sources") or [])
+        versions = [dict(version) for version in bundle.get("versions") or [] if isinstance(version, dict)]
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         payload = json.dumps(bundle, ensure_ascii=False, sort_keys=True)
         with self._connect() as connection:
@@ -2473,6 +2489,46 @@ class Ledger(
                 """,
                 (corpus_id, project_name, name, storage_mode, manifest_hash, source_count, payload, created_at, now),
             )
+            for version in versions:
+                version_id = str(version.get("version_id") or "")
+                source_id = str(version.get("source_id") or "")
+                content_hash = str(version.get("content_hash") or "")
+                metadata_hash = str(version.get("metadata_hash") or "")
+                if not version_id or not source_id or not content_hash or not metadata_hash:
+                    raise ValueError("document version requires version_id, source_id, content_hash and metadata_hash")
+                version_payload = json.dumps(version, ensure_ascii=False, sort_keys=True)
+                existing_version = connection.execute(
+                    "SELECT created_at FROM reference_corpus_document_versions WHERE version_id = ?",
+                    (version_id,),
+                ).fetchone()
+                version_created_at = existing_version["created_at"] if existing_version is not None else now
+                connection.execute(
+                    """
+                    INSERT INTO reference_corpus_document_versions (
+                        version_id, corpus_id, source_id, project, content_hash,
+                        metadata_hash, version_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(version_id) DO UPDATE SET
+                        corpus_id=excluded.corpus_id,
+                        source_id=excluded.source_id,
+                        project=excluded.project,
+                        content_hash=excluded.content_hash,
+                        metadata_hash=excluded.metadata_hash,
+                        version_json=excluded.version_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        version_id,
+                        corpus_id,
+                        source_id,
+                        project_name,
+                        content_hash,
+                        metadata_hash,
+                        version_payload,
+                        version_created_at,
+                        now,
+                    ),
+                )
             row = connection.execute(
                 "SELECT bundle_json FROM reference_corpus_bundles WHERE corpus_id = ?",
                 (corpus_id,),
@@ -2492,6 +2548,7 @@ class Ledger(
             "project": project_name,
             "write_count": int(count_row["c"] if count_row is not None else 0),
             "source_count": source_count,
+            "version_count": len(versions),
             "mutation_performed": True,
             "production_mutation_performed": False,
         }
@@ -2533,7 +2590,40 @@ class Ledger(
                     """,
                     (bounded,),
                 ).fetchall()
+            if corpus_key:
+                version_rows = connection.execute(
+                    """
+                    SELECT version_json
+                    FROM reference_corpus_document_versions
+                    WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (corpus_key, project_name, project_name, bounded),
+                ).fetchall()
+            elif project_name:
+                version_rows = connection.execute(
+                    """
+                    SELECT version_json
+                    FROM reference_corpus_document_versions
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+            else:
+                version_rows = connection.execute(
+                    """
+                    SELECT version_json
+                    FROM reference_corpus_document_versions
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
         bundles = [json.loads(row["bundle_json"]) for row in rows]
+        document_versions = [json.loads(row["version_json"]) for row in version_rows]
         storage_modes: dict[str, int] = {}
         freshness_gaps: list[dict] = []
         extraction_runs: list[dict] = []
@@ -2575,6 +2665,8 @@ class Ledger(
             "source_count": source_count,
             "storage_modes": storage_modes,
             "reference_object_count": reference_object_count,
+            "version_count": len(document_versions),
+            "document_versions": document_versions,
             "snapshot_count": snapshot_count,
             "chunk_count": chunk_count,
             "freshness_gaps": freshness_gaps,

@@ -129,9 +129,14 @@ def test_reference_corpus_manifest_maps_to_snapshot_chunk_and_freshness_objects(
         storage_mode="managed_snapshot",
     )
 
+    assert len(result["versions"]) == 2
     assert len(result["snapshots"]) == 2
     assert len(result["chunks"]) == 2
     assert len(result["freshness_checks"]) == 2
+    assert all(version["schema_version"] == "document_version.v1" for version in result["versions"])
+    assert all(version["authority_lane"] == "reference_only" for version in result["versions"])
+    assert all(version["verification_state"] == "source_hash_verified" for version in result["versions"])
+    assert result["snapshots"][0]["version_id"] == result["versions"][0]["version_id"]
     assert all(snapshot["raw_body_returnable"] is False for snapshot in result["snapshots"])
     assert all(snapshot["return_capability"] == "denied_without_explicit_approval" for snapshot in result["snapshots"])
     assert all(snapshot["retention_class"] == "user_managed_reference" for snapshot in result["snapshots"])
@@ -162,6 +167,9 @@ def test_reference_corpus_reingest_is_idempotent_for_stable_ids():
     assert [snapshot["snapshot_id"] for snapshot in first["snapshots"]] == [
         snapshot["snapshot_id"] for snapshot in second["snapshots"]
     ]
+    assert [version["version_id"] for version in first["versions"]] == [
+        version["version_id"] for version in second["versions"]
+    ]
     assert [chunk["chunk_id"] for chunk in first["chunks"]] == [chunk["chunk_id"] for chunk in second["chunks"]]
     assert first["extraction_run"]["run_id"] == second["extraction_run"]["run_id"]
 
@@ -179,6 +187,7 @@ def test_reference_corpus_hash_mismatch_blocks_extraction_output():
     assert result["extraction_run"]["status"] == "blocked"
     assert result["extraction_run"]["evaluation"]["hash_mismatch_count"] == 1
     assert result["objects"] == []
+    assert result["versions"] == []
     assert result["snapshots"] == []
     assert result["chunks"] == []
     assert result["rejected_inputs"] == [
@@ -207,8 +216,11 @@ def test_reference_corpus_bundle_persists_to_local_test_ledger(tmp_path):
     assert status["source_count"] == 2
     assert status["storage_modes"] == {"managed_snapshot": 2}
     assert status["reference_object_count"] == 2
+    assert status["version_count"] == 2
     assert status["snapshot_count"] == 2
     assert status["chunk_count"] == 2
+    assert status["document_versions"][0]["schema_version"] == "document_version.v1"
+    assert status["document_versions"][0]["authority_lane"] == "reference_only"
     assert status["extraction_runs"][0]["status"] == "completed"
     assert status["freshness_gaps"] == [
         {
