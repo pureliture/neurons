@@ -64,11 +64,90 @@ def _manifest_hash(manifest: Mapping[str, Any]) -> str:
     return hash_payload(manifest)
 
 
+def _expected_int(value: Any, field: str) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a non-negative integer")
+    count = int(value)
+    if count < 0:
+        raise ValueError(f"{field} must be a non-negative integer")
+    return count
+
+
+def _expected_type_counts(value: Mapping[str, Any] | None) -> dict[str, int]:
+    if not value:
+        return {}
+    counts: dict[str, int] = {}
+    for source_type, expected in value.items():
+        key = public_safe_text(str(source_type or ""), max_chars=80)
+        if not key:
+            raise ValueError("expected_source_type_counts keys must be non-empty")
+        count = _expected_int(expected, f"expected_source_type_counts.{key}")
+        counts[key] = int(count or 0)
+    return dict(sorted(counts.items()))
+
+
+def _count_gate(
+    *,
+    source_count: int,
+    source_url_count: int,
+    manual_text_without_url_count: int,
+    source_type_counts: Mapping[str, int],
+    expected_source_count: int | None,
+    expected_source_url_count: int | None,
+    expected_manual_text_without_url_count: int | None,
+    expected_source_type_counts: Mapping[str, int],
+) -> dict[str, Any]:
+    expected_counts: dict[str, Any] = {}
+    gaps: list[dict[str, Any]] = []
+
+    def compare(field: str, expected: int | None, actual: int) -> None:
+        if expected is None:
+            return
+        expected_counts[field] = expected
+        if expected != actual:
+            gaps.append({"field": field, "expected": expected, "actual": actual})
+
+    compare("source_count", expected_source_count, source_count)
+    compare("source_url_count", expected_source_url_count, source_url_count)
+    compare(
+        "manual_text_without_url_count",
+        expected_manual_text_without_url_count,
+        manual_text_without_url_count,
+    )
+    if expected_source_type_counts:
+        expected_counts["source_type_counts"] = dict(sorted(expected_source_type_counts.items()))
+        actual_types = set(source_type_counts)
+        expected_types = set(expected_source_type_counts)
+        for source_type in sorted(actual_types | expected_types):
+            expected = int(expected_source_type_counts.get(source_type, 0))
+            actual = int(source_type_counts.get(source_type, 0))
+            if expected != actual:
+                gaps.append({"field": f"source_type_counts.{source_type}", "expected": expected, "actual": actual})
+
+    if not expected_counts:
+        status = "not_requested"
+    elif gaps:
+        status = "fail"
+    else:
+        status = "pass"
+    return {
+        "expected_counts": expected_counts,
+        "count_gate_status": status,
+        "count_gate_gaps": gaps,
+    }
+
+
 def build_corpus_ingest_plan(
     manifest: Mapping[str, Any],
     *,
     project: str,
     storage_mode: str,
+    expected_source_count: int | None = None,
+    expected_source_url_count: int | None = None,
+    expected_manual_text_without_url_count: int | None = None,
+    expected_source_type_counts: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     mode = _storage_mode(storage_mode)
     sources = _sources(manifest)
@@ -86,6 +165,21 @@ def build_corpus_ingest_plan(
         for source in sources
         if _source_url_status(source) == "missing_manual_text"
     ]
+    source_url_count = len(sources) - len(gaps)
+    manual_text_without_url_count = len(gaps)
+    gate = _count_gate(
+        source_count=len(sources),
+        source_url_count=source_url_count,
+        manual_text_without_url_count=manual_text_without_url_count,
+        source_type_counts=source_type_counts,
+        expected_source_count=_expected_int(expected_source_count, "expected_source_count"),
+        expected_source_url_count=_expected_int(expected_source_url_count, "expected_source_url_count"),
+        expected_manual_text_without_url_count=_expected_int(
+            expected_manual_text_without_url_count,
+            "expected_manual_text_without_url_count",
+        ),
+        expected_source_type_counts=_expected_type_counts(expected_source_type_counts),
+    )
     plan = {
         "schema_version": "reference_corpus_ingest_plan.v1",
         "project": public_safe_text(project, max_chars=120),
@@ -100,9 +194,10 @@ def build_corpus_ingest_plan(
         "storage_mode": mode,
         "authority_lane": "reference_only",
         "writes_planned": False,
-        "source_url_count": len(sources) - len(gaps),
-        "manual_text_without_url_count": len(gaps),
+        "source_url_count": source_url_count,
+        "manual_text_without_url_count": manual_text_without_url_count,
         "source_type_counts": dict(sorted(source_type_counts.items())),
+        **gate,
         "missing_url_count": len(gaps),
         "source_url_gaps": gaps,
         "raw_body_policy": dict(RAW_BODY_POLICY),

@@ -27,6 +27,32 @@ def _load_manifest(path: str) -> dict[str, Any]:
     return loaded
 
 
+def _parse_expected_source_type_counts(values: list[str], parser: argparse.ArgumentParser) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        if "=" not in value:
+            parser.error("--expect-source-type-count must use TYPE=N")
+        source_type, count_text = value.split("=", 1)
+        source_type = source_type.strip()
+        if not source_type:
+            parser.error("--expect-source-type-count source type must be non-empty")
+        try:
+            count = int(count_text)
+        except ValueError:
+            parser.error("--expect-source-type-count count must be an integer")
+        if count < 0:
+            parser.error("--expect-source-type-count count must be non-negative")
+        counts[source_type] = count
+    return counts
+
+
+def _non_negative_int(value: str) -> int:
+    count = int(value)
+    if count < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return count
+
+
 def object_query_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="neuron-knowledge object-query")
     parser.add_argument("--query", required=True)
@@ -91,16 +117,27 @@ def corpus_ingest_plan_main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--corpus-name", default="reference-corpus")
     parser.add_argument("--manifest-file", default="")
+    parser.add_argument("--expect-source-count", type=_non_negative_int, default=None)
+    parser.add_argument("--expect-source-url-count", type=_non_negative_int, default=None)
+    parser.add_argument("--expect-manual-text-without-url-count", type=_non_negative_int, default=None)
+    parser.add_argument("--expect-source-type-count", action="append", default=[])
     args = parser.parse_args(argv)
-    manifest = _load_manifest(args.manifest_file) if args.manifest_file else {"corpus_name": args.corpus_name, "sources": []}
-    _print_json(
-        build_corpus_ingest_plan(
-            manifest,
-            project=args.project,
-            storage_mode=args.storage_mode,
-        )
+    manifest = (
+        _load_manifest(args.manifest_file)
+        if args.manifest_file
+        else {"corpus_name": args.corpus_name, "sources": []}
     )
-    return 0
+    report = build_corpus_ingest_plan(
+        manifest,
+        project=args.project,
+        storage_mode=args.storage_mode,
+        expected_source_count=args.expect_source_count,
+        expected_source_url_count=args.expect_source_url_count,
+        expected_manual_text_without_url_count=args.expect_manual_text_without_url_count,
+        expected_source_type_counts=_parse_expected_source_type_counts(args.expect_source_type_count, parser),
+    )
+    _print_json(report)
+    return 1 if report["count_gate_status"] == "fail" else 0
 
 
 def corpus_ingest_main(argv: list[str] | None = None) -> int:
