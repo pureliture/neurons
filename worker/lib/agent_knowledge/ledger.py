@@ -16,6 +16,7 @@ from .db_adapter import ClosingSqliteConnection, SqliteLedgerDbAdapter
 from .ledger_base import *  # noqa: F401,F403 (상수/helper re-export 호환)
 from .ledger_ingress_mixin import IngressStatusMixin
 from .ledger_gc_safety_mixin import GcSafetyMixin
+from .ledger_memory_promotion_area import MemoryPromotionArea
 from .ledger_memory_promotion_mixin import MemoryPromotionMixin
 from .ledger_native_memory_mixin import NativeMemoryMixin
 
@@ -728,6 +729,7 @@ class Ledger(
         self.read_only = bool(read_only)
         self._temp_dir: Path | None = None
         self._transaction_active = False
+        self._memory_promotion_area_impl = MemoryPromotionArea(self)
         # B: DB 엔진 접근 seam. None이면 현행 SQLite 어댑터를 lazy 생성(behavior-preserving).
         self._db_adapter = db_adapter
         # C cutover switch: 명시 어댑터가 없고 NEURON_LEDGER_PG_DSN 이 설정돼 있으면 PostgreSQL
@@ -772,6 +774,10 @@ class Ledger(
                 shutil.rmtree(self._temp_dir)
             except OSError:
                 pass
+
+    @property
+    def _memory_promotion_area(self) -> MemoryPromotionArea:
+        return self._memory_promotion_area_impl
 
     def _validate_existing_file_backed_schema(self) -> None:
         parent = self.path.parent
