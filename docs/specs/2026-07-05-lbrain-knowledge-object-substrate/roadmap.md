@@ -237,14 +237,16 @@ Current local/test evidence summary:
 - local/test ledger-backed `reference_corpus_bundles` store persists sanitized corpus metadata, keeps repeated ingest idempotent by corpus id, and returns read-after-write corpus status counts
 - local/test ledger-backed `reference_corpus_document_versions` rows persist first-class `DocumentVersion` metadata and `brain_corpus_status` reports `version_count` plus public-safe version rows
 - CLI `corpus-ingest --target local_test --ledger ... --manifest-file ...` can load a sanitized manifest into the local/test store; production target remains denied before manifest/store write
+- CLI `corpus-ingest --target local_test --manifest-file ...` and `corpus-status` can use configured `NEURON_REFERENCE_CORPUS_LEDGER` for a local/test store read-after-write path without printing the ledger path
+- CLI production corpus ingest remains denied/no-mutation even when a local/test reference corpus ledger is configured
 - MCP `brain_corpus_status` reads the local/test ledger-backed corpus store through `KnowledgeSearchService.core_brain()`
 - ledger area boundary manifest assigns `reference_corpus_bundles` and `reference_corpus_document_versions` to the LBrain object/native-memory area and the boundary guard passes
 - focused evidence: `cd worker && uv run pytest -q tests/test_reference_corpus.py tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py`
-- focused result: `96 passed, 1 warning`
+- focused result: `98 passed, 1 warning`
 - ledger boundary evidence: `cd worker && uv run pytest -q tests/test_ledger_area_boundaries.py`
 - ledger boundary result: `10 passed`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1507 passed, 9 skipped, 1 warning`
+- worker regression result: `1509 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
@@ -253,7 +255,7 @@ Remaining gaps:
 - real local/private Palantir corpus manifest has not been loaded through an approved persistent LBrain corpus store in this phase branch
 - sanitized full-count fixture and expected-count gate are local/test contract evidence only; they are not proof that a private/local Palantir manifest exists or has been ingested
 - production corpus ingest remains denied/gated
-- default corpus status still reports `reference_corpus_store_empty` when no configured local/test ledger-backed corpus store is supplied
+- standalone corpus status still reports `reference_corpus_store_empty` when neither `--ledger` nor configured `NEURON_REFERENCE_CORPUS_LEDGER` is supplied
 - no production ledger/corpus mutation has been performed or claimed
 
 ### P3. Processing And Object Extraction Pipeline

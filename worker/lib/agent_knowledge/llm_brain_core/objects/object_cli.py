@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,8 @@ from .golden_query_eval import build_baseline_golden_query_report
 from .okf_export import build_okf_bundle
 from .object_packs import build_documentation_cleanup_pack
 from .reference_corpus import build_corpus_ingest_plan, default_corpus_policy_status, reference_corpus_objects_from_manifest
+
+REFERENCE_CORPUS_LEDGER_ENV = "NEURON_REFERENCE_CORPUS_LEDGER"
 
 
 def _print_json(payload: dict) -> None:
@@ -53,6 +56,10 @@ def _non_negative_int(value: str) -> int:
     return count
 
 
+def _configured_reference_corpus_ledger(arg_value: str) -> str:
+    return str(arg_value or os.environ.get(REFERENCE_CORPUS_LEDGER_ENV, "")).strip()
+
+
 def object_query_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="neuron-knowledge object-query")
     parser.add_argument("--query", required=True)
@@ -88,8 +95,9 @@ def corpus_status_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--corpus-id", default="")
     parser.add_argument("--ledger", default="")
     args = parser.parse_args(argv)
-    if args.ledger:
-        _print_json(Ledger(Path(args.ledger)).reference_corpus_status(project=args.project, corpus_id=args.corpus_id))
+    ledger_path = _configured_reference_corpus_ledger(args.ledger)
+    if ledger_path:
+        _print_json(Ledger(Path(ledger_path)).reference_corpus_status(project=args.project, corpus_id=args.corpus_id))
         return 0
     _print_json(
         {
@@ -163,14 +171,15 @@ def corpus_ingest_main(argv: list[str] | None = None) -> int:
             }
         )
         return 1
-    if args.ledger and args.manifest_file:
+    ledger_path = _configured_reference_corpus_ledger(args.ledger)
+    if ledger_path and args.manifest_file:
         manifest = _load_manifest(args.manifest_file)
         bundle = reference_corpus_objects_from_manifest(
             manifest,
             project=args.project,
             storage_mode=args.storage_mode,
         )
-        _print_json(Ledger(Path(args.ledger)).upsert_reference_corpus_bundle(bundle, project=args.project))
+        _print_json(Ledger(Path(ledger_path)).upsert_reference_corpus_bundle(bundle, project=args.project))
         return 0
     _print_json(
         {
