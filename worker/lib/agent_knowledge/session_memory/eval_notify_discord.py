@@ -136,7 +136,7 @@ def build_discord_payload(snapshot: Mapping[str, Any]) -> dict:
     review_summary = f"사람 검토 대기: {review_queue_count}건" if review_queue_count else "사람 검토 대기: 없음"
     if not snapshot.get("attention_required"):
         action = "지금 할 일: 없음"
-        meaning = "의미: 검색 품질과 사람 검토 대기열이 모두 정상입니다."
+        meaning = "의미: eval 검색 품질과 사람 검토 대기열이 모두 정상입니다."
     elif review_queue_count and failed_count:
         action = "다음 행동: 사람 검토 대기를 먼저 승인/거절하고, 이어서 eval 실패 원인을 확인하세요."
         meaning = "의미: 사람이 판단할 Memory 후보가 있고, 자동 검색 평가도 기대 결과와 어긋났습니다."
@@ -151,7 +151,7 @@ def build_discord_payload(snapshot: Mapping[str, Any]) -> dict:
         meaning = "의미: 운영자가 확인해야 하는 신호가 있습니다."
     content = "\n".join(
         [
-            f"{icon} LBrain 운영 점검 — {'확인 필요' if snapshot.get('attention_required') else '정상'}",
+            f"{icon} LBrain eval 점검 — {'확인 필요' if snapshot.get('attention_required') else '정상'}",
             f"대상: {project}/{provider}",
             f"검색 품질: {quality_label}",
             eval_summary,
