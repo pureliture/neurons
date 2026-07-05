@@ -5,6 +5,33 @@ import json
 from agent_knowledge.cli import BOUNDARY, COMMAND_HANDLERS, main
 
 
+def _reference_manifest() -> dict:
+    return {
+        "corpus_name": "palantir-ontology-mini",
+        "sources": [
+            {
+                "source_id": "palantir-ontology-001",
+                "title": "Ontology overview",
+                "source_type": "WEB_PAGE",
+                "source_url": "https://example.test/ontology",
+                "normalized_path": "sources-normalized/palantir-ontology-001.md",
+                "content_hash": "sha256:" + "1" * 64,
+                "metadata_hash": "sha256:" + "2" * 64,
+                "summary": "Objects, links, actions, functions.",
+            },
+            {
+                "source_id": "palantir-ontology-002",
+                "title": "Manual excerpt",
+                "source_type": "TEXT",
+                "normalized_path": "sources-normalized/palantir-ontology-002.md",
+                "content_hash": "sha256:" + "3" * 64,
+                "metadata_hash": "sha256:" + "4" * 64,
+                "summary": "Manual source with missing URL.",
+            },
+        ],
+    }
+
+
 def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
     assert main(["--help"]) == 0
     output = capsys.readouterr().out
@@ -119,6 +146,46 @@ def test_neuron_knowledge_corpus_ingest_local_test_is_preview_until_store_config
     assert report["mutation_performed"] is False
     assert report["writes_planned"] is True
     assert "reference_corpus_store_not_configured" in report["gaps"]
+
+
+def test_neuron_knowledge_corpus_ingest_local_test_writes_configured_store(tmp_path, capsys):
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "ledger.sqlite"
+    manifest.write_text(json.dumps(_reference_manifest()), encoding="utf-8")
+
+    rc = main(
+        [
+            "corpus-ingest",
+            "--project",
+            "neurons",
+            "--target",
+            "local_test",
+            "--ledger",
+            str(ledger),
+            "--manifest-file",
+            str(manifest),
+            "--storage-mode",
+            "managed_snapshot",
+        ]
+    )
+    ingest = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert ingest["schema_version"] == "reference_corpus_store_write.v1"
+    assert ingest["status"] == "stored"
+    assert ingest["source_count"] == 2
+    assert ingest["mutation_performed"] is True
+    assert ingest["production_mutation_performed"] is False
+
+    assert main(["corpus-status", "--project", "neurons", "--ledger", str(ledger), "--corpus-id", ingest["corpus_id"]]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["source_count"] == 2
+    assert status["storage_modes"] == {"managed_snapshot": 2}
+    assert status["reference_object_count"] == 2
+    assert status["snapshot_count"] == 2
+    assert status["chunk_count"] == 2
+    assert status["extraction_runs"][0]["status"] == "completed"
+    assert status["freshness_gaps"][0]["source_url_status"] == "missing_manual_text"
+    assert status["gaps"] == []
 
 
 def test_neuron_knowledge_golden_query_eval_baseline(capsys):

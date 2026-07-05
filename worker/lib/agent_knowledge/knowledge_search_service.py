@@ -160,6 +160,7 @@ class KnowledgeSearchService:
             graph_adapter=self.graph_adapter,
             document_bridge=RetiredIndexBridgeDocumentBridge(retired_index_bridge=self.retired_index_bridge, dataset_ids=self.dataset_ids),
             search_mirror_status=self._search_mirror_status(),
+            reference_corpus_status_reader=self.ledger.reference_corpus_status,
         )
 
     def _search_mirror_status(self) -> dict:

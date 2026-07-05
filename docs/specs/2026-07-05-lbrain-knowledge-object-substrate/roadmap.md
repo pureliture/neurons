@@ -229,10 +229,16 @@ Current local/test evidence summary:
 - re-ingest produces stable corpus/source/snapshot/chunk/run ids for unchanged hashes
 - content hash mismatch blocks extraction output instead of creating reference objects
 - CLI and MCP `brain_corpus_status` report storage mode support and raw-body/source-rights policy even while the persistent reference corpus store is empty
+- local/test ledger-backed `reference_corpus_bundles` store persists sanitized corpus metadata, keeps repeated ingest idempotent by corpus id, and returns read-after-write corpus status counts
+- CLI `corpus-ingest --target local_test --ledger ... --manifest-file ...` can load a sanitized manifest into the local/test store; production target remains denied before manifest/store write
+- MCP `brain_corpus_status` reads the local/test ledger-backed corpus store through `KnowledgeSearchService.core_brain()`
+- ledger area boundary manifest assigns `reference_corpus_bundles` to the LBrain object/native-memory area and the boundary guard passes
 - focused evidence: `cd worker && uv run pytest -q tests/test_reference_corpus.py tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py`
-- focused result: `86 passed, 1 warning`
+- focused result: `89 passed, 1 warning`
+- ledger boundary evidence: `cd worker && uv run pytest -q tests/test_ledger_area_boundaries.py`
+- ledger boundary result: `10 passed`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1497 passed, 9 skipped, 1 warning`
+- worker regression result: `1500 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
@@ -240,7 +246,8 @@ Remaining gaps:
 
 - full Palantir corpus manifest has not been loaded through an approved persistent LBrain corpus store in this phase branch
 - production corpus ingest remains denied/gated
-- corpus status still reports `reference_corpus_store_empty` until the approved store adapter is configured
+- default corpus status still reports `reference_corpus_store_empty` when no configured local/test ledger-backed corpus store is supplied
+- `DocumentVersion` is still represented only implicitly through source/snapshot hash metadata, not as a first-class stored row
 - no production ledger/corpus mutation has been performed or claimed
 
 ### P3. Processing And Object Extraction Pipeline

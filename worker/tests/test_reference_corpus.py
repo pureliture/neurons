@@ -2,6 +2,7 @@ from agent_knowledge.llm_brain_core.reference_corpus import (
     build_corpus_ingest_plan,
     reference_corpus_objects_from_manifest,
 )
+from agent_knowledge.ledger import Ledger
 
 
 def _manifest():
@@ -186,3 +187,35 @@ def test_reference_corpus_hash_mismatch_blocks_extraction_output():
             "reason": "content_hash_mismatch",
         }
     ]
+
+
+def test_reference_corpus_bundle_persists_to_local_test_ledger(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    bundle = reference_corpus_objects_from_manifest(
+        _manifest(),
+        project="neurons",
+        storage_mode="managed_snapshot",
+    )
+
+    first = ledger.upsert_reference_corpus_bundle(bundle, project="neurons")
+    second = ledger.upsert_reference_corpus_bundle(bundle, project="neurons")
+    status = ledger.reference_corpus_status(project="neurons", corpus_id=bundle["corpus"]["corpus_id"])
+
+    assert first["corpus_id"] == bundle["corpus"]["corpus_id"]
+    assert second["write_count"] == first["write_count"]
+    assert status["schema_version"] == "brain_corpus_status.v1"
+    assert status["source_count"] == 2
+    assert status["storage_modes"] == {"managed_snapshot": 2}
+    assert status["reference_object_count"] == 2
+    assert status["snapshot_count"] == 2
+    assert status["chunk_count"] == 2
+    assert status["extraction_runs"][0]["status"] == "completed"
+    assert status["freshness_gaps"] == [
+        {
+            "source_id": "palantir-ontology-002",
+            "source_url_status": "missing_manual_text",
+            "gap": "freshness_gap",
+        }
+    ]
+    assert status["raw_body_policy"]["return_capability"] == "denied_without_explicit_approval"
+    assert status["gaps"] == []
