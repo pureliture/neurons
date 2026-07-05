@@ -73,7 +73,7 @@ public class RetiredIndexBridgeTargetAdapter implements RagTargetAdapter {
             apiKey,
             Map.of(
                 "index-transcript-memory", transcriptMemoryDatasetId,
-                "index-session-memory", firstNonBlank(sessionMemoryDatasetId, sessionSummaryDatasetId),
+                "index-session-memory", sessionMemoryDatasetId,
                 "index-session-summary", sessionSummaryDatasetId,
                 "index-project-memory", projectMemoryDatasetId,
                 "index-task-summary", taskSummaryDatasetId,
@@ -495,8 +495,4 @@ public class RetiredIndexBridgeTargetAdapter implements RagTargetAdapter {
         return value == null ? "" : value.trim();
     }
 
-    private static String firstNonBlank(String first, String fallback) {
-        String trimmed = trimToEmpty(first);
-        return trimmed.isEmpty() ? trimToEmpty(fallback) : trimmed;
-    }
 }
