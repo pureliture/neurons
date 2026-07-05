@@ -126,7 +126,7 @@ GitHub issue #40은 2026-06-28 `origin/main` `f222ea7` 기준 architecture deepe
 - `requirements.md`는 What의 SoT입니다.
 - 승인된 `design.md`는 How의 SoT입니다.
 - 구현 중 새로운 사실이 design과 충돌하면 agent가 임의로 설계를 바꾸면 안 됩니다.
-- SoT 변경이 필요하면 구현 루프를 멈추고 grill-to-spec 상류로 회귀해야 합니다.
+- SoT 변경이 필요하면 implementation loop를 멈추고 grill-to-spec upstream으로 회귀해야 합니다.
 - 진행 상태는 design의 milestone/evidence checklist에 기록되어야 합니다.
 - 완료 선언은 SoT checklist와 verification evidence가 맞을 때만 허용됩니다.
 
@@ -221,9 +221,9 @@ GitHub issue #40은 2026-06-28 `origin/main` `f222ea7` 기준 architecture deepe
 - 각 active debt가 resolved, active, partial, stale, follow-up debt 중 하나로 분류됩니다.
 - 구현 대상 항목마다 최소 하나의 verification expectation이 있습니다.
 - API-only verification과 full E2E verification의 표현이 분리됩니다.
-- `requirements.md 승인` 후 design phase에서 2-3개 접근안을 비교할 수 있을 만큼 요구사항이 닫혀 있습니다.
+- `requirements.md 승인` 후 design phase에서 2-3개 접근안을 비교할 수 있을 만큼 requirements가 닫혀 있습니다.
 - 승인된 `design.md`를 장기 실행 goal로 넘길 수 있습니다.
-- 실행 루프가 SoT drift 없이 진행·중단·완료를 판단하는 조건을 가집니다.
+- execution loop가 SoT drift 없이 진행·중단·완료를 판단하는 조건을 가집니다.
 - MCP schema/owner/handler가 하나의 내부 contract source에서 유도되고 public schema compatibility가 유지됩니다.
 - Ledger area-object extraction이 public API와 durable-state semantics를 유지한 채 boundary tests로 보호됩니다.
 - TargetProfile shared artifact가 Java/Python/compose/env-example drift를 잡습니다.
