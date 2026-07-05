@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from .._util import ensure_public_safe, hash_payload, public_safe_text
+from .golden_query_eval import evaluate_object_pack_response
 from .knowledge_objects import KnowledgeEdge, KnowledgeObjectEnvelope
+from .object_packs import build_documentation_cleanup_pack
 from .reference_corpus import reference_corpus_objects_from_manifest
 
 
@@ -123,6 +125,84 @@ def run_reference_corpus_extraction_preview(
     return result
 
 
+def run_documentation_cleanup_strategy_comparison(
+    *,
+    documents: list[Mapping[str, Any]],
+    consumer: str = "unspecified",
+) -> dict[str, Any]:
+    pack = build_documentation_cleanup_pack(
+        documents=documents,
+        route="documentation_cleanup",
+        consumer=consumer,
+    )
+    eval_result = evaluate_object_pack_response(
+        "이 repo 문서 최신화하려면 뭘 봐야 해?",
+        pack,
+    )
+    failures = list(eval_result["failures"])
+    lane_counts = _lane_counts(pack)
+    if lane_counts.get("accepted_current", 0) == 0:
+        failures.append("accepted_current_lane_empty")
+    if lane_counts.get("proposal_only", 0) == 0:
+        failures.append("archive_or_stale_candidate_lane_empty")
+    status = "pass" if not failures else "fail"
+    result = {
+        "schema_version": "object_extraction_strategy_comparison.v1",
+        "status": status,
+        "consumer": public_safe_text(consumer, max_chars=80),
+        "selected_strategy": "document_authority_pack_v1",
+        "production_mutation_performed": False,
+        "pack_preview": {
+            "route": pack["route"],
+            "object_count": len(pack["objects"]),
+            "edge_count": len(pack["edges"]),
+            "evidence_count": len(pack["evidence"]),
+            "lane_counts": lane_counts,
+            "recommended_action_count": len(pack["recommended_actions"]),
+            "gaps": list(pack["gaps"]),
+        },
+        "strategy_comparison": [
+            {
+                "strategy": "document_authority_pack_v1",
+                "scope": "repo_document_cleanup_mapping",
+                "selected": True,
+                "status": status,
+                "object_count": len(pack["objects"]),
+                "edge_count": len(pack["edges"]),
+                "evidence_count": len(pack["evidence"]),
+                "lane_counts": lane_counts,
+                "gaps": failures,
+            },
+            {
+                "strategy": "path_inventory_only_v1",
+                "scope": "repo_document_cleanup_mapping",
+                "selected": False,
+                "status": "available_with_gap",
+                "object_count": len(documents),
+                "edge_count": 0,
+                "evidence_count": len(documents),
+                "lane_counts": {"reference_only": len(documents)},
+                "gaps": ["authority_lane_inference_missing"],
+            },
+        ],
+        "evaluator_report": {
+            "schema_version": "object_extraction_evaluator_report.v1",
+            "golden_query_slice": "documentation cleanup current-vs-archive",
+            "passes": not failures,
+            "failures": failures,
+            "gaps": list(pack["gaps"]),
+            "assertions": [
+                "separates_current_from_archive",
+                "includes_recommended_action",
+                "includes_evidence_or_gap",
+                "production_mutation_performed_false",
+            ],
+        },
+    }
+    ensure_public_safe(result, "DocumentationCleanupStrategyComparison")
+    return result
+
+
 def _blocked_preview(
     *,
     bundle: Mapping[str, Any],
@@ -230,6 +310,14 @@ def _stable_edge(edge: Mapping[str, Any]) -> dict[str, Any]:
         "payload",
     }
     return {key: edge[key] for key in edge if key in allowed}
+
+
+def _lane_counts(pack: Mapping[str, Any]) -> dict[str, int]:
+    lanes = pack.get("lanes") if isinstance(pack.get("lanes"), Mapping) else {}
+    return {
+        str(lane): len(items) if isinstance(items, list) else 0
+        for lane, items in sorted(lanes.items())
+    }
 
 
 def _chunk_preview(chunk: Mapping[str, Any]) -> dict[str, Any]:
