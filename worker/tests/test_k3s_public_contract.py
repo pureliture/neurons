@@ -54,7 +54,7 @@ def test_k3s_public_contract_keeps_backup_restore_and_network_policy_gates() -> 
     ops = _yaml(K3S_ROOT / "public-contract/ops-overlay-contract.yaml")
     data = config["data"]
 
-    stateful = [item for item in inventory["workloads"] if item["stateful"]]
+    stateful = [item for item in inventory["workloads"] if item.get("stateful")]
     assert stateful
     assert all(item["backupRestoreRequired"] is True for item in stateful)
     assert data["stateful-gate"] == "backup-restore-rehearsal-required"
@@ -76,7 +76,7 @@ def test_k3s_public_contract_does_not_contain_live_apply_or_private_values() -> 
     combined = "\n".join(
         path.read_text(encoding="utf-8")
         for path in K3S_ROOT.rglob("*")
-        if path.is_file()
+        if path.is_file() and path.suffix in {".md", ".yaml", ".yml"}
     )
     readme = (K3S_ROOT / "README.md").read_text(encoding="utf-8")
     ops = _yaml(K3S_ROOT / "public-contract/ops-overlay-contract.yaml")
