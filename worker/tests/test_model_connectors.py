@@ -28,6 +28,38 @@ from agent_knowledge.model_connectors.openai_compatible import (
 )
 
 
+def test_shared_structured_response_normalizer_contract_is_lightweight():
+    from pydantic import BaseModel
+
+    from agent_knowledge.model_connectors.structured_response import normalize_structured_response
+
+    class ExtractedEntities(BaseModel):
+        extracted_entities: list[dict]
+
+    class EdgeDuplicate(BaseModel):
+        duplicate_facts: list[int]
+        contradicted_facts: list[int]
+
+    normalized_entities = normalize_structured_response(
+        [{"entity_text": "Neo4j", "episode_indices": ["bad", "1"]}],
+        ExtractedEntities,
+    )
+    normalized_edges = normalize_structured_response(
+        {
+            "duplicate_facts": [0, "2", 6, -1, "bad"],
+            "contradicted_facts": [0, 2, 6],
+        },
+        EdgeDuplicate,
+        valid_duplicate_fact_idxs={0, 2},
+    )
+
+    assert normalized_entities == {
+        "extracted_entities": [{"name": "Neo4j", "entity_type_id": 0, "episode_indices": [0, 1]}]
+    }
+    assert normalized_edges["duplicate_facts"] == [0, 2]
+    assert normalized_edges["contradicted_facts"] == [0, 2, 6]
+
+
 def test_model_connection_config_preserves_env_precedence_and_omits_secrets():
     config = resolve_model_connection_config(
         {
@@ -155,6 +187,76 @@ def test_openai_compatible_reranker_client_preserves_duplicate_passage_scores():
     )
 
     assert asyncio.run(client.ascore("q", ["same", "same"])) == [1.0, 0.0]
+
+
+def test_openai_compatible_reranker_client_uses_top_logprobs_true_probability():
+    class _Choice:
+        def __init__(self, content: str, token: str, logprob: float) -> None:
+            self.message = type("_Message", (), {"content": content})()
+            self.logprobs = type(
+                "_Logprobs",
+                (),
+                {
+                    "content": [type("_Content", (), {"top_logprobs": [type("_Top", (), {"token": token, "logprob": logprob})]})()]
+                },
+            )()
+
+    class _Response:
+        def __init__(self, content: str, token: str, logprob: float) -> None:
+            self.choices = [_Choice(content, token, logprob)]
+
+    class _Completions:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def create(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return _Response("False", "true", -0.10536051565782628)
+            return _Response("False", "true", -0.6931471805599453)
+
+    class _Client:
+        def __init__(self) -> None:
+            self.chat = type("_Chat", (), {"completions": _Completions()})()
+
+    client = OpenAICompatibleRerankerClient(
+        RerankerSpec(provider="openai-compatible", model="rerank", base_url="http://example.test/v1"),
+        openai_client=_Client(),
+    )
+
+    assert asyncio.run(client.ascore("q", ["a", "b"])) == [0.9, 0.5]
+
+
+def test_openai_compatible_reranker_client_uses_top_logprobs_false_inverted_probability():
+    class _Choice:
+        def __init__(self, content: str, token: str, logprob: float) -> None:
+            self.message = type("_Message", (), {"content": content})()
+            self.logprobs = type(
+                "_Logprobs",
+                (),
+                {
+                    "content": [type("_Content", (), {"top_logprobs": [type("_Top", (), {"token": token, "logprob": logprob})]})()]
+                },
+            )()
+
+    class _Response:
+        def __init__(self, content: str, token: str, logprob: float) -> None:
+            self.choices = [_Choice(content, token, logprob)]
+
+    class _Completions:
+        async def create(self, **_kwargs):
+            return _Response("True", "false", -1.6094379124341003)
+
+    class _Client:
+        def __init__(self) -> None:
+            self.chat = type("_Chat", (), {"completions": _Completions()})()
+
+    client = OpenAICompatibleRerankerClient(
+        RerankerSpec(provider="openai-compatible", model="rerank", base_url="http://example.test/v1"),
+        openai_client=_Client(),
+    )
+
+    assert asyncio.run(client.ascore("q", ["a"])) == [0.8]
 
 
 def test_candidate_reranker_honors_zero_top_n():

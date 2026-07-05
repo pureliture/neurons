@@ -126,6 +126,30 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
 }
 
 
+COMMAND_METADATA: dict[str, dict[str, object]] = {
+    "neuron-session-memory-build": {
+        "runtime_category": "legacy_compatibility",
+        "deletion_candidate": False,
+        "live_mutation_requires_approval": False,
+    },
+    "couchdb-session-memory-build": {
+        "runtime_category": "active_runtime",
+        "deletion_candidate": False,
+        "live_mutation_requires_approval": True,
+    },
+    "couchdb-migration-flow": {
+        "runtime_category": "human_gated_migration",
+        "deletion_candidate": False,
+        "live_mutation_requires_approval": True,
+    },
+    "transcript-migration": {
+        "runtime_category": "human_gated_migration",
+        "deletion_candidate": False,
+        "live_mutation_requires_approval": True,
+    },
+}
+
+
 class _ServiceWiringError(Exception):
     """recall service 와이어링 실패 + 매핑할 종료 코드(stderr 메시지는 redaction 완료)."""
 
