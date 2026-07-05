@@ -19,6 +19,7 @@ from .ledger_gc_safety_mixin import GcSafetyMixin
 from .ledger_memory_promotion_area import MemoryPromotionArea
 from .ledger_memory_promotion_mixin import MemoryPromotionMixin
 from .ledger_native_memory_mixin import NativeMemoryMixin
+from .public_safe_util import ensure_public_safe, public_safe_text
 
 
 _READ_ONLY_SQL_KEYWORD_RE = re.compile(
@@ -27,6 +28,22 @@ _READ_ONLY_SQL_KEYWORD_RE = re.compile(
 )
 _READ_ONLY_SQL_ALLOWED_KEYWORDS = {"EXPLAIN", "PRAGMA", "SELECT"}
 _READ_ONLY_SQL_CTE_FINAL_KEYWORDS = {"SELECT"}
+
+
+def _reference_corpus_default_policy_status() -> dict:
+    return {
+        "supported_storage_modes": ["external_object_store", "managed_snapshot", "metadata_only"],
+        "raw_body_policy": {
+            "raw_body_policy": "no_raw_return_by_default",
+            "return_capability": "denied_without_explicit_approval",
+            "retention_class": "user_managed_reference",
+            "redaction_profile": "public_safe_summary",
+            "deletion_policy": "delete_snapshot_keep_metadata",
+            "license_source_rights": "operator_attested",
+        },
+        "source_rights_policy": "operator_attested_reference_use",
+        "production_ingest_gate": "denied_without_later_approval",
+    }
 
 
 def _introspection_query(
@@ -1383,6 +1400,19 @@ class Ledger(
                 );
                 CREATE INDEX IF NOT EXISTS idx_object_review_proposals_project_status
                     ON object_review_proposals(project, status, updated_at);
+                CREATE TABLE IF NOT EXISTS reference_corpus_bundles (
+                    corpus_id TEXT PRIMARY KEY,
+                    project TEXT NOT NULL DEFAULT '',
+                    name TEXT NOT NULL DEFAULT '',
+                    storage_mode TEXT NOT NULL DEFAULT '',
+                    manifest_hash TEXT NOT NULL DEFAULT '',
+                    source_count INTEGER NOT NULL DEFAULT 0,
+                    bundle_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_corpus_bundles_project_updated
+                    ON reference_corpus_bundles(project, updated_at);
                 CREATE TABLE IF NOT EXISTS schema_migrations (
                     version TEXT PRIMARY KEY,
                     applied_at TEXT NOT NULL
@@ -1427,6 +1457,8 @@ class Ledger(
                 VALUES ('agent_knowledge_graph_projection_state.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
                 VALUES ('agent_knowledge_object_review_proposals.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_reference_corpus_bundles.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 UPDATE knowledge_items SET type = 'session_memory' WHERE type = 'session_memory_sot';
                 """
                 # Single-source graph projection_state schema: injected from
@@ -2402,3 +2434,155 @@ class Ledger(
                     (bounded,),
                 ).fetchall()
         return [json.loads(row["proposal_json"]) for row in rows]
+
+    def upsert_reference_corpus_bundle(self, bundle: dict, *, project: str = "") -> dict:
+        if self.read_only:
+            raise sqlite3.OperationalError("read-only ledger는 reference corpus write를 허용하지 않습니다")
+        ensure_public_safe(bundle, "reference_corpus_bundle")
+        corpus = dict(bundle.get("corpus") or {})
+        corpus_id = str(corpus.get("corpus_id") or "")
+        name = str(corpus.get("name") or "")
+        storage_mode = str(corpus.get("storage_mode") or "")
+        manifest_hash = str(corpus.get("manifest_ref") or "")
+        if not corpus_id or not name or not storage_mode or not manifest_hash:
+            raise ValueError("reference corpus bundle requires corpus_id, name, storage_mode and manifest hash")
+        project_name = public_safe_text(project or str(bundle.get("project") or ""), max_chars=120)
+        source_count = len(bundle.get("sources") or [])
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        payload = json.dumps(bundle, ensure_ascii=False, sort_keys=True)
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT created_at FROM reference_corpus_bundles WHERE corpus_id = ?",
+                (corpus_id,),
+            ).fetchone()
+            created_at = existing["created_at"] if existing is not None else now
+            connection.execute(
+                """
+                INSERT INTO reference_corpus_bundles (
+                    corpus_id, project, name, storage_mode, manifest_hash,
+                    source_count, bundle_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(corpus_id) DO UPDATE SET
+                    project=excluded.project,
+                    name=excluded.name,
+                    storage_mode=excluded.storage_mode,
+                    manifest_hash=excluded.manifest_hash,
+                    source_count=excluded.source_count,
+                    bundle_json=excluded.bundle_json,
+                    updated_at=excluded.updated_at
+                """,
+                (corpus_id, project_name, name, storage_mode, manifest_hash, source_count, payload, created_at, now),
+            )
+            row = connection.execute(
+                "SELECT bundle_json FROM reference_corpus_bundles WHERE corpus_id = ?",
+                (corpus_id,),
+            ).fetchone()
+            count_row = connection.execute(
+                "SELECT COUNT(*) AS c FROM reference_corpus_bundles WHERE corpus_id = ?",
+                (corpus_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"Failed to read back upserted reference corpus bundle: {corpus_id}")
+        stored = json.loads(row["bundle_json"])
+        ensure_public_safe(stored, "reference_corpus_bundle")
+        return {
+            "schema_version": "reference_corpus_store_write.v1",
+            "status": "stored",
+            "corpus_id": corpus_id,
+            "project": project_name,
+            "write_count": int(count_row["c"] if count_row is not None else 0),
+            "source_count": source_count,
+            "mutation_performed": True,
+            "production_mutation_performed": False,
+        }
+
+    def reference_corpus_status(self, *, project: str = "", corpus_id: str = "", limit: int = 20) -> dict:
+        bounded = max(1, min(int(limit or 20), 100))
+        project_name = public_safe_text(project, max_chars=120)
+        corpus_key = public_safe_text(corpus_id, max_chars=180)
+        with self._connect() as connection:
+            if corpus_key:
+                rows = connection.execute(
+                    """
+                    SELECT bundle_json
+                    FROM reference_corpus_bundles
+                    WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (corpus_key, project_name, project_name, bounded),
+                ).fetchall()
+            elif project_name:
+                rows = connection.execute(
+                    """
+                    SELECT bundle_json
+                    FROM reference_corpus_bundles
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT bundle_json
+                    FROM reference_corpus_bundles
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+        bundles = [json.loads(row["bundle_json"]) for row in rows]
+        storage_modes: dict[str, int] = {}
+        freshness_gaps: list[dict] = []
+        extraction_runs: list[dict] = []
+        source_count = 0
+        reference_object_count = 0
+        snapshot_count = 0
+        chunk_count = 0
+        manifest_hashes: list[str] = []
+        for bundle in bundles:
+            sources = list(bundle.get("sources") or [])
+            source_count += len(sources)
+            reference_object_count += len(bundle.get("objects") or [])
+            snapshot_count += len(bundle.get("snapshots") or [])
+            chunk_count += len(bundle.get("chunks") or [])
+            for source in sources:
+                mode = str(source.get("storage_mode") or "")
+                if mode:
+                    storage_modes[mode] = storage_modes.get(mode, 0) + 1
+            freshness_gaps.extend(dict(gap) for gap in bundle.get("freshness_gaps") or [] if isinstance(gap, dict))
+            run = bundle.get("extraction_run")
+            if isinstance(run, dict):
+                extraction_runs.append(
+                    {
+                        "run_id": str(run.get("run_id") or ""),
+                        "corpus_id": str(run.get("corpus_id") or ""),
+                        "status": str(run.get("status") or ""),
+                        "input_hash": str(run.get("input_hash") or ""),
+                        "output_object_count": int(run.get("output_object_count") or 0),
+                    }
+                )
+            manifest_hash = str((bundle.get("corpus") or {}).get("manifest_ref") or "")
+            if manifest_hash:
+                manifest_hashes.append(manifest_hash)
+        status = {
+            "schema_version": "brain_corpus_status.v1",
+            "project": project_name,
+            "corpus_id": corpus_key,
+            "corpus_count": len(bundles),
+            "source_count": source_count,
+            "storage_modes": storage_modes,
+            "reference_object_count": reference_object_count,
+            "snapshot_count": snapshot_count,
+            "chunk_count": chunk_count,
+            "freshness_gaps": freshness_gaps,
+            "extraction_runs": extraction_runs,
+            "manifest_hashes": manifest_hashes,
+            "limit": bounded,
+            **_reference_corpus_default_policy_status(),
+            "gaps": [] if bundles else ["reference_corpus_store_empty"],
+        }
+        ensure_public_safe(status, "reference_corpus_status")
+        return status

@@ -2,15 +2,29 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from ...ledger import Ledger
 
 from .golden_query_eval import build_baseline_golden_query_report
 from .okf_export import build_okf_bundle
 from .object_packs import build_documentation_cleanup_pack
-from .reference_corpus import build_corpus_ingest_plan, default_corpus_policy_status
+from .reference_corpus import build_corpus_ingest_plan, default_corpus_policy_status, reference_corpus_objects_from_manifest
 
 
 def _print_json(payload: dict) -> None:
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
+def _load_manifest(path: str) -> dict[str, Any]:
+    text = Path(path).read_text(encoding="utf-8")
+    loaded = yaml.safe_load(text)
+    if not isinstance(loaded, dict):
+        raise ValueError("manifest file must contain a mapping")
+    return loaded
 
 
 def object_query_main(argv: list[str] | None = None) -> int:
@@ -46,7 +60,11 @@ def corpus_status_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="neuron-knowledge corpus-status")
     parser.add_argument("--project", default="")
     parser.add_argument("--corpus-id", default="")
+    parser.add_argument("--ledger", default="")
     args = parser.parse_args(argv)
+    if args.ledger:
+        _print_json(Ledger(Path(args.ledger)).reference_corpus_status(project=args.project, corpus_id=args.corpus_id))
+        return 0
     _print_json(
         {
             "schema_version": "brain_corpus_status.v1",
@@ -87,6 +105,13 @@ def corpus_ingest_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="neuron-knowledge corpus-ingest")
     parser.add_argument("--project", required=True)
     parser.add_argument("--target", choices=["local_test", "production"], default="local_test")
+    parser.add_argument("--ledger", default="")
+    parser.add_argument("--manifest-file", default="")
+    parser.add_argument(
+        "--storage-mode",
+        choices=["external_object_store", "managed_snapshot", "metadata_only"],
+        default="metadata_only",
+    )
     args = parser.parse_args(argv)
     if args.target == "production":
         _print_json(
@@ -99,6 +124,15 @@ def corpus_ingest_main(argv: list[str] | None = None) -> int:
             }
         )
         return 1
+    if args.ledger and args.manifest_file:
+        manifest = _load_manifest(args.manifest_file)
+        bundle = reference_corpus_objects_from_manifest(
+            manifest,
+            project=args.project,
+            storage_mode=args.storage_mode,
+        )
+        _print_json(Ledger(Path(args.ledger)).upsert_reference_corpus_bundle(bundle, project=args.project))
+        return 0
     _print_json(
         {
             "schema_version": "reference_corpus_ingest.v1",

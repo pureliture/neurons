@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agent_knowledge.cli import main
+from agent_knowledge.llm_brain_core.reference_corpus import reference_corpus_objects_from_manifest
 from agent_knowledge.session_memory.curation import CurationService
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.mcp_server import (
@@ -86,6 +87,33 @@ def _source_span(**overrides):
     }
     span.update(overrides)
     return span
+
+
+def _reference_manifest() -> dict:
+    return {
+        "corpus_name": "palantir-ontology-mini",
+        "sources": [
+            {
+                "source_id": "palantir-ontology-001",
+                "title": "Ontology overview",
+                "source_type": "WEB_PAGE",
+                "source_url": "https://example.test/ontology",
+                "normalized_path": "sources-normalized/palantir-ontology-001.md",
+                "content_hash": "sha256:" + "1" * 64,
+                "metadata_hash": "sha256:" + "2" * 64,
+                "summary": "Objects, links, actions, functions.",
+            },
+            {
+                "source_id": "palantir-ontology-002",
+                "title": "Manual excerpt",
+                "source_type": "TEXT",
+                "normalized_path": "sources-normalized/palantir-ontology-002.md",
+                "content_hash": "sha256:" + "3" * 64,
+                "metadata_hash": "sha256:" + "4" * 64,
+                "summary": "Manual source with missing URL.",
+            },
+        ],
+    }
 
 
 def _service(tmp_path: Path) -> KnowledgeSearchService:
@@ -463,6 +491,41 @@ def test_mcp_corpus_status_reports_policy_fields(tmp_path: Path):
     assert result["raw_body_policy"]["license_source_rights"] == "operator_attested"
     assert result["source_rights_policy"] == "operator_attested_reference_use"
     assert "managed_snapshot" in result["supported_storage_modes"]
+
+
+def test_mcp_corpus_status_reads_local_test_ledger_store(tmp_path: Path):
+    service = _service(tmp_path)
+    bundle = reference_corpus_objects_from_manifest(
+        _reference_manifest(),
+        project=PROJECT,
+        storage_mode="managed_snapshot",
+    )
+    service.ledger.upsert_reference_corpus_bundle(bundle, project=PROJECT)
+
+    result = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 108,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CORPUS_STATUS_TOOL_NAME,
+                "arguments": {
+                    "project": PROJECT,
+                    "corpus_id": bundle["corpus"]["corpus_id"],
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert result["source_count"] == 2
+    assert result["storage_modes"] == {"managed_snapshot": 2}
+    assert result["reference_object_count"] == 2
+    assert result["snapshot_count"] == 2
+    assert result["chunk_count"] == 2
+    assert result["extraction_runs"][0]["status"] == "completed"
+    assert result["freshness_gaps"][0]["source_url_status"] == "missing_manual_text"
+    assert result["gaps"] == []
 
 
 def test_mcp_object_decision_commit_is_restricted_denied_by_default(tmp_path: Path):
