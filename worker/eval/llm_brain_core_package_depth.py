@@ -20,6 +20,7 @@ ROOT_MODULE_AREA_MANIFEST: dict[str, frozenset[str]] = {
         "central_federation",
         "document_authority",
         "event_replay",
+        "extraction_pipeline",
         "golden_query_eval",
         "infra_baseline",
         "knowledge_objects",
@@ -75,6 +76,7 @@ ROOT_MODULE_AREAS = ROOT_MODULE_AREA_MANIFEST
 
 OBJECT_SUBPACKAGE_MODULES = frozenset({
     "golden_query_eval",
+    "extraction_pipeline",
     "knowledge_objects",
     "object_cli",
     "object_packs",

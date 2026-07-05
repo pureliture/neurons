@@ -12,6 +12,7 @@ Current state:
 - Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates passed, deployed HTTP MCP runtime and configured endpoint validated, current Codex session tool registry still missing object-native tools, and current-source-main image identity is not proven live.
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, latest configured-endpoint smoke still passes with denied/no-mutation production writes, but the current Codex session's `mcp__lbrain` namespace still does not expose them and the live MCP image is not proven to include the #73/current-main source refactor.
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, and production-denial evidence exist, but real private Palantir manifest ingest and production ingest approval remain gaps.
+- P3 Processing And Object Extraction Pipeline: in progress; local/test reference corpus extraction preview creates deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, and blocked-extraction gaps.
 - Product activation: not complete; configured agent read path refresh remains required.
 - UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
 
@@ -263,7 +264,7 @@ Remaining gaps:
 
 ### P3. Processing And Object Extraction Pipeline
 
-State: planned.
+State: in_progress.
 
 Purpose:
 
@@ -288,6 +289,30 @@ Gate evidence:
 - chunk preview proves evidence can be inspected without raw/private leakage
 - evaluator report ties extractor output to at least one golden query slice
 - graph/search projection can join to objects but cannot become canonical authority
+
+Current local/test evidence:
+
+- stacked branch note: this phase branch is based on the P2 reference corpus store branch because P2 is not merged to `main` yet
+- extractor registry report exists for implemented `reference_corpus_manifest` and planned-gap extractor entries
+- deterministic reference corpus extraction preview creates `ReferenceCorpus` and `ReferenceDocument` objects plus `member_of_corpus` edges
+- chunk preview omits raw body storage refs and keeps raw body return denied
+- extraction run preview reports quality metrics, zero model calls, zero LLM token budget, speed class, and debug trace availability
+- hash mismatch blocks extraction output and reports gaps without inventing authority
+- focused evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py`
+- focused result: `3 passed, 1 warning`
+- adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_reference_corpus.py tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py tests/test_llm_brain_core_package_depth.py tests/test_llm_brain_core_objects_subpackage.py tests/test_llm_brain_core_layering.py`
+- adjacent regression result: `114 passed, 1 warning`
+- worker regression evidence: `cd worker && uv run pytest -q`
+- worker regression result: `1512 passed, 9 skipped, 1 warning`
+
+Remaining gaps:
+
+- P3 is not complete; only the first reference corpus extraction preview slice is implemented
+- repo documentation cleanup strategy comparison is still planned
+- session, PR, commit, runtime, style, and preference extractors are still planned
+- evaluator coverage is tied to one reference corpus golden query slice only
+- graph/search projection join remains unproven
+- no production authority, corpus, graph, search, or deployment mutation has been performed or claimed
 
 ### P4. Review Queue And Authority Promotion
 
@@ -536,7 +561,7 @@ Current accounting:
 | P0 Local Object Substrate Foundation | `complete` | complete for local/test scope |
 | P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; deployed/configured endpoint validated, current Codex session tool registry gap remains |
 | P2 Living Reference Corpus Store | `local_validated` | `PASS_WITH_GAPS`; local/test store and status gates pass, real private manifest ingest and production approval remain gaps |
-| P3 Processing And Object Extraction Pipeline | `planned` | skeletal extraction only |
+| P3 Processing And Object Extraction Pipeline | `in_progress` | first local/test reference corpus extraction preview slice passes; repo/session/runtime/style extractors, graph/search join, and broader evaluator coverage remain gaps |
 | P4 Review Queue And Authority Promotion | `planned` | production authority write closed |
 | P5 Continuous Golden Query Quality Gates | `planned` | baseline red exists; runs across P1-P9 |
 | P6 Session, Device, Project, And Work-Unit 360 | `planned` | object types specified, productized/live flow missing |
@@ -547,7 +572,7 @@ Current accounting:
 
 ## Next Design Targets
 
-Resolve the P2 delivery gate by linking the branch to an approved issue/PR, then start P3 Processing And Object Extraction Pipeline from this roadmap. The remaining P1 configured-agent read-path gap stays open until the current Codex `mcp__lbrain` namespace exposes object-native tools directly.
+Resolve the P2 delivery gate by linking the branch to an approved issue/PR, then continue P3 Processing And Object Extraction Pipeline from the first reference corpus extraction preview slice into repo documentation cleanup strategy comparison. The remaining P1 configured-agent read-path gap stays open until the current Codex `mcp__lbrain` namespace exposes object-native tools directly.
 
 Recommended goal:
 
