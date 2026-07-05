@@ -72,13 +72,13 @@ public class RetiredIndexBridgeTargetAdapter implements RagTargetAdapter {
             baseUrl,
             apiKey,
             Map.of(
-                "index-transcript-memory", transcriptMemoryDatasetId,
-                "index-session-memory", sessionMemoryDatasetId,
-                "index-session-summary", sessionSummaryDatasetId,
-                "index-project-memory", projectMemoryDatasetId,
-                "index-task-summary", taskSummaryDatasetId,
-                "index-approved-memory-card", approvedMemoryCardDatasetId,
-                "index-procedural-memory", proceduralMemoryDatasetId
+                "index-transcript-memory", trimToEmpty(transcriptMemoryDatasetId),
+                "index-session-memory", trimToEmpty(sessionMemoryDatasetId),
+                "index-session-summary", trimToEmpty(sessionSummaryDatasetId),
+                "index-project-memory", trimToEmpty(projectMemoryDatasetId),
+                "index-task-summary", trimToEmpty(taskSummaryDatasetId),
+                "index-approved-memory-card", trimToEmpty(approvedMemoryCardDatasetId),
+                "index-procedural-memory", trimToEmpty(proceduralMemoryDatasetId)
             ),
             gateway,
             new RetiredIndexBridgePressurePolicy(
