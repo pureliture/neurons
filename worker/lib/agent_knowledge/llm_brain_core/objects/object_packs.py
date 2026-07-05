@@ -161,7 +161,7 @@ def build_documentation_cleanup_pack(
         lane = _doc_lane(status)
         path = str(doc.get("path") or doc.get("document_path") or "")
         content_hash = hash_payload({"path": path, "status": status, "reason": doc.get("reason")})
-        evidence_refs = [str(item) for item in doc.get("evidence_refs") or []]
+        evidence_refs = [str(item) for item in doc.get("evidence_refs") or [] if item]
         evs = []
         if not evidence_refs:
             ev = EvidenceRef.from_parts(
