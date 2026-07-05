@@ -2,7 +2,7 @@
 
 ## Overview
 
-`neurons-graph-trigger`의 ledger engine을 SQLite fallback에서 cluster PostgreSQL로 되돌린다. 구현은 두 부분이다: (1) `ledger.py`의 PostgreSQL dialect table/column introspection을 고쳐 Postgres adapter path에서 `sqlite_master`를 조회하지 않게 한다. (2) 새 Secret 생성이나 shell DSN 조립 없이, 기존 `neurons-brain-runtime` Secret의 `NEURON_LEDGER_PG_DSN` key를 graph-trigger Deployment가 명시적으로 참조하도록 바꾼다.
+`neurons-graph-trigger`의 ledger engine을 SQLite fallback에서 cluster PostgreSQL로 되돌린다. 구현은 두 부분이다: (1) `ledger.py`의 PostgreSQL dialect table/column introspection을 고쳐 Postgres adapter path에서 `sqlite_master`를 조회하지 않게 한다. (2) 새 Secret 생성이나 shell DSN 조립 없이, 기존 runtime Secret의 `NEURON_LEDGER_PG_DSN` key를 graph-trigger Deployment가 명시적으로 참조하도록 바꾼다.
 
 ## Requirements Reference
 
@@ -11,7 +11,7 @@
 - 핵심 요구사항:
   - 새 K8s Secret을 만들지 않는다.
   - `NEURON_LEDGER_PG_DSN` 빈 값 override를 제거한다.
-  - 기존 `neurons-brain-runtime/NEURON_LEDGER_PG_DSN` Secret key를 `secretKeyRef`로 사용한다.
+  - 기존 runtime Secret의 `NEURON_LEDGER_PG_DSN` key를 `secretKeyRef`로 사용한다.
   - raw DSN/password/token은 출력하지 않는다.
   - rollout 후 graph-trigger `status: ok`, pod ready, restart 0을 확인한다.
 
@@ -23,7 +23,7 @@
 - name: NEURON_LEDGER_PG_DSN
   valueFrom:
     secretKeyRef:
-      name: neurons-brain-runtime
+      name: <runtime-secret-name>
       key: NEURON_LEDGER_PG_DSN
 ```
 
@@ -32,7 +32,7 @@
 - 새 Secret duplication이 없다.
 - manifest에 raw DSN이 없다.
 - `envFrom`에 묻혀 있는 key보다 의도가 명확하다.
-- 기존 `neurons-brain-runtime` Secret rotation path를 그대로 쓴다.
+- 기존 runtime Secret rotation path를 그대로 쓴다.
 - Postgres adapter code는 이미 `is_file_backed = False`라 code change가 작다.
 
 단점:
@@ -43,18 +43,18 @@
 
 장점: DSN 전용 Secret이라 이름이 직관적이다.
 
-단점: 이미 `neurons-brain-runtime`에 동일 key가 있으므로 SoT가 중복되고 rotation/audit surface가 늘어난다. 이번 design에서는 채택하지 않는다.
+단점: 이미 기존 runtime Secret에 동일 key가 있으므로 SoT가 중복되고 rotation/audit surface가 늘어난다. 이번 design에서는 채택하지 않는다.
 
 ### 대안 2: shell command에서 `POSTGRES_*` env로 DSN 조립
 
-장점: 기존 `neurons-stateful-auth`의 개별 credential만으로 작동한다.
+장점: 기존 stateful auth Secret의 개별 credential만으로 작동한다.
 
 단점: shell escaping과 accidental logging 위험이 있고, Deployment command가 secret construction logic을 소유하게 된다. 이번 design에서는 채택하지 않는다.
 
 ## Architecture
 
 ```text
-Kubernetes Secret: neurons-brain-runtime
+Kubernetes Secret: <runtime-secret-name>
   key: NEURON_LEDGER_PG_DSN
         |
         | secretKeyRef
@@ -80,7 +80,7 @@ No SQLite parent permission validation and no sqlite_master/PRAGMA introspection
 
 ## Data Flow
 
-1. Kubernetes resolves `NEURON_LEDGER_PG_DSN` from `neurons-brain-runtime` into the graph-trigger container environment.
+1. Kubernetes resolves `NEURON_LEDGER_PG_DSN` from the existing runtime Secret into the graph-trigger container environment.
 2. The shell loop invokes:
 
    ```text
@@ -94,24 +94,15 @@ No SQLite parent permission validation and no sqlite_master/PRAGMA introspection
 
 ## Data State And Migration
 
-Live evidence before final cutover showed existing PostgreSQL graph projection state; PostgreSQL is not a fresh migration target:
+Sanitized private ops evidence before final cutover showed existing PostgreSQL graph projection state; PostgreSQL is not a fresh migration target.
 
-```text
-sqlite entity Session 14
-sqlite episodic Session 3835
-postgres entity Decision 2
-postgres entity Drift 1
-postgres entity Evidence 1
-postgres entity Session 4557
-postgres entity Status 3
-postgres episodic Session 3770
-```
+Before treating PostgreSQL projection state as the active resume state, verify parity/completeness against SQLite or another definitive private ops completeness check. If parity is not proven, do not skip reconciliation and do not resume from PostgreSQL alone; require a safe reconciliation path that preserves the existing graph projection/resume flow.
 
-Do not run SQLite-to-Postgres graph projection state migration as part of this cutover. Use existing PostgreSQL projection state as active resume state and let graph-trigger catch up any sessions missing from PostgreSQL.
+Do not run an unconditional SQLite-to-Postgres graph projection state migration as part of this cutover. Use existing PostgreSQL projection state as active resume state only after the parity/completeness gate passes, then let graph-trigger catch up any sessions missing from PostgreSQL through the normal projection flow.
 
 ## Component Details
 
-### `neurons-ops/k3s/neurons/overlays/oci-production/homelab-worker-workloads.yaml`
+### Private ops graph-trigger Deployment manifest
 
 Change only the `neurons-graph-trigger` Deployment env section:
 
@@ -128,7 +119,7 @@ Change only the `neurons-graph-trigger` Deployment env section:
   - name: NEURON_LEDGER_PG_DSN
     valueFrom:
       secretKeyRef:
-        name: neurons-brain-runtime
+        name: <runtime-secret-name>
         key: NEURON_LEDGER_PG_DSN
   ```
 
@@ -136,7 +127,7 @@ Keep:
 
 ```yaml
 - name: LLM_BRAIN_LEDGER_PATH
-  value: /var/lib/agent-knowledge/llm-brain/graph-trigger/private-ledger/ledger.sqlite
+  value: $LLM_BRAIN_LEDGER_PATH
 ```
 
 ### `neurons` public repo
@@ -150,7 +141,7 @@ Production code change is required in `worker/lib/agent_knowledge/ledger.py`:
 
 Regression tests live in `worker/tests/test_ledger_postgres_dialect_helpers.py` and use a fake PostgreSQL-dialect connection so no live credential is needed.
 
-### Live Kubernetes
+### Private ops rollout
 
 Apply the same env shape to the live Deployment, then check rollout and graph-trigger output. Do not print the DSN value.
 
@@ -176,13 +167,13 @@ Apply the same env shape to the live Deployment, then check rollout and graph-tr
 Static / source checks:
 
 - Add regression tests proving PostgreSQL dialect helpers use `information_schema` and never `sqlite_master`/`PRAGMA table_info`.
-- Parse `homelab-worker-workloads.yaml` as multi-document YAML and assert `neurons-graph-trigger` has `NEURON_LEDGER_PG_DSN.valueFrom.secretKeyRef.name == neurons-brain-runtime` and `key == NEURON_LEDGER_PG_DSN`.
+- Parse the private ops manifest as multi-document YAML and assert `neurons-graph-trigger` has `NEURON_LEDGER_PG_DSN.valueFrom.secretKeyRef.name == <runtime-secret-name>` and `key == NEURON_LEDGER_PG_DSN`.
 - Assert `NEURON_LEDGER_PG_DSN.value == ''` no longer appears in the graph-trigger env list.
 - Run `kubectl apply --dry-run=client --validate=false -f ...`.
 
 Live checks:
 
-- `kubectl -n neurons get secret neurons-brain-runtime` key existence check only, no value output.
+- `kubectl` key existence check against the runtime Secret only, no value output.
 - `kubectl -n neurons set env deployment/neurons-graph-trigger NEURON_LEDGER_PG_DSN-` or equivalent manifest apply/patch to remove the empty override and use secret ref.
 - `kubectl -n neurons rollout status deployment/neurons-graph-trigger --timeout=240s`.
 - Pod env existence check:
@@ -220,7 +211,7 @@ This work has two code-changing/static milestones:
 - M2: Ledger dialect fix
   - Done: PostgreSQL helper tests fail first, then pass after `ledger.py` uses `information_schema` for PostgreSQL table/column introspection.
 - M3: Manifest cutover
-  - Done: graph-trigger env references `neurons-brain-runtime/NEURON_LEDGER_PG_DSN` via `secretKeyRef`; static assertion and `kubectl --dry-run` pass.
+  - Done: graph-trigger env references the existing runtime Secret's `NEURON_LEDGER_PG_DSN` via `secretKeyRef`; static assertion and `kubectl --dry-run` pass.
 - M4: Live rollout
   - Done: graph-trigger image includes the code fix, Deployment rolls out with Secret reference, pod ready 1/1, restart 0, env presence true without printing value.
 - M5: Runtime proof

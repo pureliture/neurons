@@ -28,33 +28,48 @@ _READ_ONLY_SQL_ALLOWED_KEYWORDS = {"EXPLAIN", "PRAGMA", "SELECT"}
 _READ_ONLY_SQL_CTE_FINAL_KEYWORDS = {"SELECT"}
 
 
-def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+def _introspection_query(
+    connection: sqlite3.Connection,
+    table: str,
+    *,
+    query_type: str,
+) -> tuple[str, tuple[str, ...]]:
     if getattr(connection, "dialect", "sqlite") == "postgres":
-        row = connection.execute(
-            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?",
-            (table,),
-        ).fetchone()
-    else:
-        row = connection.execute(
+        if query_type == "table":
+            return (
+                "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?",
+                (table,),
+            )
+        if query_type == "columns":
+            return (
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = ?",
+                (table,),
+            )
+    elif query_type == "table":
+        return (
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
             (table,),
-        ).fetchone()
+        )
+    elif query_type == "columns":
+        _assert_safe_sql_identifier(table)
+        return (f"PRAGMA table_info({table})", ())
+    raise ValueError(f"unknown introspection query type: {query_type}")
+
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    sql, params = _introspection_query(connection, table, query_type="table")
+    row = connection.execute(sql, params).fetchone()
     return row is not None
 
 
 def _column_names(connection: sqlite3.Connection, table: str) -> set[str]:
     if not _table_exists(connection, table):
         return set()
+    sql, params = _introspection_query(connection, table, query_type="columns")
     if getattr(connection, "dialect", "sqlite") == "postgres":
-        return {
-            str(row["column_name"])
-            for row in connection.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema = 'public' AND table_name = ?",
-                (table,),
-            ).fetchall()
-        }
-    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+        return {str(row.get("column_name") or "") for row in connection.execute(sql, params).fetchall()}
+    return {str(row[1]) for row in connection.execute(sql, params).fetchall()}
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
