@@ -438,8 +438,8 @@ Read first:
 - specs/architecture-debt-single-issue/requirements.md
 - specs/architecture-debt-single-issue/design.md
 - GitHub issue #40
-- /tmp/architecture-review-followup-20260705191500.html
-- /Users/ddalkak/Projects/neurons/.agents/orchestrator_followup/handoff.md
+- 2026-07-05 follow-up architecture review artifact
+- 2026-07-05 orchestrator follow-up handoff artifact
 
 Execution rule:
 - Start with M0/M1.
