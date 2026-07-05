@@ -304,11 +304,29 @@ def test_reference_corpus_bundle_persists_to_local_test_ledger(tmp_path):
     assert status["source_count"] == 2
     assert status["storage_modes"] == {"managed_snapshot": 2}
     assert status["reference_object_count"] == 2
+    assert status["document_source_count"] == 2
     assert status["version_count"] == 2
     assert status["snapshot_count"] == 2
     assert status["chunk_count"] == 2
+    assert status["freshness_check_count"] == 2
+    assert status["extraction_run_count"] == 1
+    assert status["first_class_store_counts"] == {
+        "document_sources": 2,
+        "document_versions": 2,
+        "document_snapshots": 2,
+        "document_chunks": 2,
+        "freshness_checks": 2,
+        "extraction_runs": 1,
+    }
+    assert status["document_sources"][0]["schema_version"] == "document_source.v1"
+    assert status["document_sources"][0]["authority_lane"] == "reference_only"
     assert status["document_versions"][0]["schema_version"] == "document_version.v1"
     assert status["document_versions"][0]["authority_lane"] == "reference_only"
+    assert status["document_snapshots"][0]["schema_version"] == "document_snapshot.v1"
+    assert status["document_snapshots"][0]["raw_body_returnable"] is False
+    assert status["document_chunks"][0]["schema_version"] == "document_chunk.v1"
+    assert status["document_chunks"][0]["body_storage_ref"] == ""
+    assert status["freshness_checks"][0]["schema_version"] == "freshness_check.v1"
     assert status["extraction_runs"][0]["status"] == "completed"
     assert status["freshness_gaps"] == [
         {

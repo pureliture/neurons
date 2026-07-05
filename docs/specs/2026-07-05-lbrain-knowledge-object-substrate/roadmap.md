@@ -235,12 +235,13 @@ Current local/test evidence summary:
 - content hash mismatch blocks extraction output instead of creating reference objects
 - CLI and MCP `brain_corpus_status` report storage mode support and raw-body/source-rights policy even while the persistent reference corpus store is empty
 - local/test ledger-backed `reference_corpus_bundles` store persists sanitized corpus metadata, keeps repeated ingest idempotent by corpus id, and returns read-after-write corpus status counts
-- local/test ledger-backed `reference_corpus_document_versions` rows persist first-class `DocumentVersion` metadata and `brain_corpus_status` reports `version_count` plus public-safe version rows
+- local/test ledger-backed first-class rows persist public-safe `DocumentSource`, `DocumentVersion`, `DocumentSnapshot`, `DocumentChunk`, `FreshnessCheck`, and `ExtractionRun` metadata separately from the aggregate bundle
+- `brain_corpus_status` reports first-class store counts plus limited public-safe rows for document sources, versions, snapshots, chunks, freshness checks, and extraction runs
 - CLI `corpus-ingest --target local_test --ledger ... --manifest-file ...` can load a sanitized manifest into the local/test store; production target remains denied before manifest/store write
 - CLI `corpus-ingest --target local_test --manifest-file ...` and `corpus-status` can use configured `NEURON_REFERENCE_CORPUS_LEDGER` for a local/test store read-after-write path without printing the ledger path
 - CLI production corpus ingest remains denied/no-mutation even when a local/test reference corpus ledger is configured
 - MCP `brain_corpus_status` reads the local/test ledger-backed corpus store through `KnowledgeSearchService.core_brain()`
-- ledger area boundary manifest assigns `reference_corpus_bundles` and `reference_corpus_document_versions` to the LBrain object/native-memory area and the boundary guard passes
+- ledger area boundary manifest assigns reference corpus bundle and first-class object tables to the LBrain object/native-memory area and the boundary guard passes
 - focused evidence: `cd worker && uv run pytest -q tests/test_reference_corpus.py tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py`
 - focused result: `98 passed, 1 warning`
 - ledger boundary evidence: `cd worker && uv run pytest -q tests/test_ledger_area_boundaries.py`

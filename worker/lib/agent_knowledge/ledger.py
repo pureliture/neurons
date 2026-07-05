@@ -1426,6 +1426,66 @@ class Ledger(
                 );
                 CREATE INDEX IF NOT EXISTS idx_reference_corpus_versions_project_corpus
                     ON reference_corpus_document_versions(project, corpus_id, updated_at);
+                CREATE TABLE IF NOT EXISTS reference_corpus_document_sources (
+                    source_id TEXT PRIMARY KEY,
+                    corpus_id TEXT NOT NULL,
+                    project TEXT NOT NULL DEFAULT '',
+                    storage_mode TEXT NOT NULL DEFAULT '',
+                    source_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_corpus_sources_project_corpus
+                    ON reference_corpus_document_sources(project, corpus_id, updated_at);
+                CREATE TABLE IF NOT EXISTS reference_corpus_document_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    corpus_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    version_id TEXT NOT NULL DEFAULT '',
+                    project TEXT NOT NULL DEFAULT '',
+                    content_hash TEXT NOT NULL DEFAULT '',
+                    snapshot_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_corpus_snapshots_project_corpus
+                    ON reference_corpus_document_snapshots(project, corpus_id, updated_at);
+                CREATE TABLE IF NOT EXISTS reference_corpus_document_chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    corpus_id TEXT NOT NULL,
+                    snapshot_id TEXT NOT NULL,
+                    project TEXT NOT NULL DEFAULT '',
+                    chunk_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_corpus_chunks_project_corpus
+                    ON reference_corpus_document_chunks(project, corpus_id, updated_at);
+                CREATE TABLE IF NOT EXISTS reference_corpus_freshness_checks (
+                    check_id TEXT PRIMARY KEY,
+                    corpus_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    project TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT '',
+                    result TEXT NOT NULL DEFAULT '',
+                    check_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_corpus_freshness_project_corpus
+                    ON reference_corpus_freshness_checks(project, corpus_id, updated_at);
+                CREATE TABLE IF NOT EXISTS reference_corpus_extraction_runs (
+                    run_id TEXT PRIMARY KEY,
+                    corpus_id TEXT NOT NULL,
+                    project TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT '',
+                    input_hash TEXT NOT NULL DEFAULT '',
+                    run_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_corpus_runs_project_corpus
+                    ON reference_corpus_extraction_runs(project, corpus_id, updated_at);
                 CREATE TABLE IF NOT EXISTS schema_migrations (
                     version TEXT PRIMARY KEY,
                     applied_at TEXT NOT NULL
@@ -1474,6 +1534,8 @@ class Ledger(
                 VALUES ('agent_knowledge_reference_corpus_bundles.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
                 VALUES ('agent_knowledge_reference_corpus_document_versions.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_reference_corpus_first_class_objects.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 UPDATE knowledge_items SET type = 'session_memory' WHERE type = 'session_memory_sot';
                 """
                 # Single-source graph projection_state schema: injected from
@@ -2462,8 +2524,12 @@ class Ledger(
         if not corpus_id or not name or not storage_mode or not manifest_hash:
             raise ValueError("reference corpus bundle requires corpus_id, name, storage_mode and manifest hash")
         project_name = public_safe_text(project or str(bundle.get("project") or ""), max_chars=120)
-        source_count = len(bundle.get("sources") or [])
+        sources = [dict(source) for source in bundle.get("sources") or [] if isinstance(source, dict)]
         versions = [dict(version) for version in bundle.get("versions") or [] if isinstance(version, dict)]
+        snapshots = [dict(snapshot) for snapshot in bundle.get("snapshots") or [] if isinstance(snapshot, dict)]
+        chunks = [dict(chunk) for chunk in bundle.get("chunks") or [] if isinstance(chunk, dict)]
+        freshness_checks = [dict(check) for check in bundle.get("freshness_checks") or [] if isinstance(check, dict)]
+        extraction_run = dict(bundle.get("extraction_run") or {})
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         payload = json.dumps(bundle, ensure_ascii=False, sort_keys=True)
         with self._connect() as connection:
@@ -2487,8 +2553,33 @@ class Ledger(
                     bundle_json=excluded.bundle_json,
                     updated_at=excluded.updated_at
                 """,
-                (corpus_id, project_name, name, storage_mode, manifest_hash, source_count, payload, created_at, now),
+                (corpus_id, project_name, name, storage_mode, manifest_hash, len(sources), payload, created_at, now),
             )
+            for source in sources:
+                source_id = str(source.get("source_id") or "")
+                source_mode = str(source.get("storage_mode") or "")
+                if not source_id or not source_mode:
+                    raise ValueError("document source requires source_id and storage_mode")
+                source_payload = json.dumps(source, ensure_ascii=False, sort_keys=True)
+                existing_source = connection.execute(
+                    "SELECT created_at FROM reference_corpus_document_sources WHERE source_id = ?",
+                    (source_id,),
+                ).fetchone()
+                source_created_at = existing_source["created_at"] if existing_source is not None else now
+                connection.execute(
+                    """
+                    INSERT INTO reference_corpus_document_sources (
+                        source_id, corpus_id, project, storage_mode, source_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_id) DO UPDATE SET
+                        corpus_id=excluded.corpus_id,
+                        project=excluded.project,
+                        storage_mode=excluded.storage_mode,
+                        source_json=excluded.source_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (source_id, corpus_id, project_name, source_mode, source_payload, source_created_at, now),
+                )
             for version in versions:
                 version_id = str(version.get("version_id") or "")
                 source_id = str(version.get("source_id") or "")
@@ -2529,6 +2620,129 @@ class Ledger(
                         now,
                     ),
                 )
+            for snapshot in snapshots:
+                snapshot_id = str(snapshot.get("snapshot_id") or "")
+                source_id = str(snapshot.get("source_id") or "")
+                version_id = str(snapshot.get("version_id") or "")
+                content_hash = str(snapshot.get("content_hash") or "")
+                if not snapshot_id or not source_id or not content_hash:
+                    raise ValueError("document snapshot requires snapshot_id, source_id and content_hash")
+                snapshot_payload = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+                existing_snapshot = connection.execute(
+                    "SELECT created_at FROM reference_corpus_document_snapshots WHERE snapshot_id = ?",
+                    (snapshot_id,),
+                ).fetchone()
+                snapshot_created_at = existing_snapshot["created_at"] if existing_snapshot is not None else now
+                connection.execute(
+                    """
+                    INSERT INTO reference_corpus_document_snapshots (
+                        snapshot_id, corpus_id, source_id, version_id, project,
+                        content_hash, snapshot_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(snapshot_id) DO UPDATE SET
+                        corpus_id=excluded.corpus_id,
+                        source_id=excluded.source_id,
+                        version_id=excluded.version_id,
+                        project=excluded.project,
+                        content_hash=excluded.content_hash,
+                        snapshot_json=excluded.snapshot_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        snapshot_id,
+                        corpus_id,
+                        source_id,
+                        version_id,
+                        project_name,
+                        content_hash,
+                        snapshot_payload,
+                        snapshot_created_at,
+                        now,
+                    ),
+                )
+            for chunk in chunks:
+                chunk_id = str(chunk.get("chunk_id") or "")
+                snapshot_id = str(chunk.get("snapshot_id") or "")
+                if not chunk_id or not snapshot_id:
+                    raise ValueError("document chunk requires chunk_id and snapshot_id")
+                chunk_payload = json.dumps(chunk, ensure_ascii=False, sort_keys=True)
+                existing_chunk = connection.execute(
+                    "SELECT created_at FROM reference_corpus_document_chunks WHERE chunk_id = ?",
+                    (chunk_id,),
+                ).fetchone()
+                chunk_created_at = existing_chunk["created_at"] if existing_chunk is not None else now
+                connection.execute(
+                    """
+                    INSERT INTO reference_corpus_document_chunks (
+                        chunk_id, corpus_id, snapshot_id, project, chunk_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(chunk_id) DO UPDATE SET
+                        corpus_id=excluded.corpus_id,
+                        snapshot_id=excluded.snapshot_id,
+                        project=excluded.project,
+                        chunk_json=excluded.chunk_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (chunk_id, corpus_id, snapshot_id, project_name, chunk_payload, chunk_created_at, now),
+                )
+            for check in freshness_checks:
+                check_id = str(check.get("check_id") or "")
+                source_id = str(check.get("source_id") or "")
+                status = str(check.get("status") or "")
+                result = str(check.get("result") or "")
+                if not check_id or not source_id:
+                    raise ValueError("freshness check requires check_id and source_id")
+                check_payload = json.dumps(check, ensure_ascii=False, sort_keys=True)
+                existing_check = connection.execute(
+                    "SELECT created_at FROM reference_corpus_freshness_checks WHERE check_id = ?",
+                    (check_id,),
+                ).fetchone()
+                check_created_at = existing_check["created_at"] if existing_check is not None else now
+                connection.execute(
+                    """
+                    INSERT INTO reference_corpus_freshness_checks (
+                        check_id, corpus_id, source_id, project, status, result,
+                        check_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(check_id) DO UPDATE SET
+                        corpus_id=excluded.corpus_id,
+                        source_id=excluded.source_id,
+                        project=excluded.project,
+                        status=excluded.status,
+                        result=excluded.result,
+                        check_json=excluded.check_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (check_id, corpus_id, source_id, project_name, status, result, check_payload, check_created_at, now),
+                )
+            if extraction_run:
+                run_id = str(extraction_run.get("run_id") or "")
+                status = str(extraction_run.get("status") or "")
+                input_hash = str(extraction_run.get("input_hash") or "")
+                if not run_id or not status or not input_hash:
+                    raise ValueError("extraction run requires run_id, status and input_hash")
+                run_payload = json.dumps(extraction_run, ensure_ascii=False, sort_keys=True)
+                existing_run = connection.execute(
+                    "SELECT created_at FROM reference_corpus_extraction_runs WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                run_created_at = existing_run["created_at"] if existing_run is not None else now
+                connection.execute(
+                    """
+                    INSERT INTO reference_corpus_extraction_runs (
+                        run_id, corpus_id, project, status, input_hash,
+                        run_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id) DO UPDATE SET
+                        corpus_id=excluded.corpus_id,
+                        project=excluded.project,
+                        status=excluded.status,
+                        input_hash=excluded.input_hash,
+                        run_json=excluded.run_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (run_id, corpus_id, project_name, status, input_hash, run_payload, run_created_at, now),
+                )
             row = connection.execute(
                 "SELECT bundle_json FROM reference_corpus_bundles WHERE corpus_id = ?",
                 (corpus_id,),
@@ -2547,8 +2761,13 @@ class Ledger(
             "corpus_id": corpus_id,
             "project": project_name,
             "write_count": int(count_row["c"] if count_row is not None else 0),
-            "source_count": source_count,
+            "source_count": len(sources),
+            "document_source_count": len(sources),
             "version_count": len(versions),
+            "snapshot_count": len(snapshots),
+            "chunk_count": len(chunks),
+            "freshness_check_count": len(freshness_checks),
+            "extraction_run_count": 1 if extraction_run else 0,
             "mutation_performed": True,
             "production_mutation_performed": False,
         }
@@ -2622,8 +2841,161 @@ class Ledger(
                     """,
                     (bounded,),
                 ).fetchall()
+            if corpus_key:
+                source_rows = connection.execute(
+                    """
+                    SELECT source_json
+                    FROM reference_corpus_document_sources
+                    WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (corpus_key, project_name, project_name, bounded),
+                ).fetchall()
+                snapshot_rows = connection.execute(
+                    """
+                    SELECT snapshot_json
+                    FROM reference_corpus_document_snapshots
+                    WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (corpus_key, project_name, project_name, bounded),
+                ).fetchall()
+                chunk_rows = connection.execute(
+                    """
+                    SELECT chunk_json
+                    FROM reference_corpus_document_chunks
+                    WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (corpus_key, project_name, project_name, bounded),
+                ).fetchall()
+                freshness_rows = connection.execute(
+                    """
+                    SELECT check_json
+                    FROM reference_corpus_freshness_checks
+                    WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (corpus_key, project_name, project_name, bounded),
+                ).fetchall()
+                run_rows = connection.execute(
+                    """
+                    SELECT run_json
+                    FROM reference_corpus_extraction_runs
+                    WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (corpus_key, project_name, project_name, bounded),
+                ).fetchall()
+            elif project_name:
+                source_rows = connection.execute(
+                    """
+                    SELECT source_json
+                    FROM reference_corpus_document_sources
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+                snapshot_rows = connection.execute(
+                    """
+                    SELECT snapshot_json
+                    FROM reference_corpus_document_snapshots
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+                chunk_rows = connection.execute(
+                    """
+                    SELECT chunk_json
+                    FROM reference_corpus_document_chunks
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+                freshness_rows = connection.execute(
+                    """
+                    SELECT check_json
+                    FROM reference_corpus_freshness_checks
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+                run_rows = connection.execute(
+                    """
+                    SELECT run_json
+                    FROM reference_corpus_extraction_runs
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+            else:
+                source_rows = connection.execute(
+                    """
+                    SELECT source_json
+                    FROM reference_corpus_document_sources
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+                snapshot_rows = connection.execute(
+                    """
+                    SELECT snapshot_json
+                    FROM reference_corpus_document_snapshots
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+                chunk_rows = connection.execute(
+                    """
+                    SELECT chunk_json
+                    FROM reference_corpus_document_chunks
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+                freshness_rows = connection.execute(
+                    """
+                    SELECT check_json
+                    FROM reference_corpus_freshness_checks
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+                run_rows = connection.execute(
+                    """
+                    SELECT run_json
+                    FROM reference_corpus_extraction_runs
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
         bundles = [json.loads(row["bundle_json"]) for row in rows]
+        document_sources = [json.loads(row["source_json"]) for row in source_rows]
         document_versions = [json.loads(row["version_json"]) for row in version_rows]
+        document_snapshots = [json.loads(row["snapshot_json"]) for row in snapshot_rows]
+        document_chunks = [json.loads(row["chunk_json"]) for row in chunk_rows]
+        freshness_checks = [json.loads(row["check_json"]) for row in freshness_rows]
+        stored_extraction_runs = [json.loads(row["run_json"]) for row in run_rows]
         storage_modes: dict[str, int] = {}
         freshness_gaps: list[dict] = []
         extraction_runs: list[dict] = []
@@ -2632,19 +3004,36 @@ class Ledger(
         snapshot_count = 0
         chunk_count = 0
         manifest_hashes: list[str] = []
+        for source in document_sources:
+            mode = str(source.get("storage_mode") or "")
+            if mode:
+                storage_modes[mode] = storage_modes.get(mode, 0) + 1
+        for run in stored_extraction_runs:
+            extraction_runs.append(
+                {
+                    "run_id": str(run.get("run_id") or ""),
+                    "corpus_id": str(run.get("corpus_id") or ""),
+                    "status": str(run.get("status") or ""),
+                    "input_hash": str(run.get("input_hash") or ""),
+                    "output_object_count": int(run.get("output_object_count") or 0),
+                }
+            )
         for bundle in bundles:
             sources = list(bundle.get("sources") or [])
             source_count += len(sources)
             reference_object_count += len(bundle.get("objects") or [])
-            snapshot_count += len(bundle.get("snapshots") or [])
-            chunk_count += len(bundle.get("chunks") or [])
-            for source in sources:
-                mode = str(source.get("storage_mode") or "")
-                if mode:
-                    storage_modes[mode] = storage_modes.get(mode, 0) + 1
+            if not document_snapshots:
+                snapshot_count += len(bundle.get("snapshots") or [])
+            if not document_chunks:
+                chunk_count += len(bundle.get("chunks") or [])
+            if not document_sources:
+                for source in sources:
+                    mode = str(source.get("storage_mode") or "")
+                    if mode:
+                        storage_modes[mode] = storage_modes.get(mode, 0) + 1
             freshness_gaps.extend(dict(gap) for gap in bundle.get("freshness_gaps") or [] if isinstance(gap, dict))
             run = bundle.get("extraction_run")
-            if isinstance(run, dict):
+            if isinstance(run, dict) and not stored_extraction_runs:
                 extraction_runs.append(
                     {
                         "run_id": str(run.get("run_id") or ""),
@@ -2657,6 +3046,10 @@ class Ledger(
             manifest_hash = str((bundle.get("corpus") or {}).get("manifest_ref") or "")
             if manifest_hash:
                 manifest_hashes.append(manifest_hash)
+        if document_snapshots:
+            snapshot_count = len(document_snapshots)
+        if document_chunks:
+            chunk_count = len(document_chunks)
         status = {
             "schema_version": "brain_corpus_status.v1",
             "project": project_name,
@@ -2665,12 +3058,27 @@ class Ledger(
             "source_count": source_count,
             "storage_modes": storage_modes,
             "reference_object_count": reference_object_count,
+            "document_source_count": len(document_sources) if document_sources else source_count,
+            "document_sources": document_sources,
             "version_count": len(document_versions),
             "document_versions": document_versions,
             "snapshot_count": snapshot_count,
+            "document_snapshots": document_snapshots,
             "chunk_count": chunk_count,
+            "document_chunks": document_chunks,
+            "freshness_check_count": len(freshness_checks),
+            "freshness_checks": freshness_checks,
+            "extraction_run_count": len(extraction_runs),
             "freshness_gaps": freshness_gaps,
             "extraction_runs": extraction_runs,
+            "first_class_store_counts": {
+                "document_sources": len(document_sources),
+                "document_versions": len(document_versions),
+                "document_snapshots": len(document_snapshots),
+                "document_chunks": len(document_chunks),
+                "freshness_checks": len(freshness_checks),
+                "extraction_runs": len(stored_extraction_runs),
+            },
             "manifest_hashes": manifest_hashes,
             "limit": bounded,
             **_reference_corpus_default_policy_status(),

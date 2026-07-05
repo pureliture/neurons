@@ -554,10 +554,22 @@ def test_mcp_corpus_status_reads_local_test_ledger_store(tmp_path: Path):
     assert result["source_count"] == 2
     assert result["storage_modes"] == {"managed_snapshot": 2}
     assert result["reference_object_count"] == 2
+    assert result["document_source_count"] == 2
     assert result["version_count"] == 2
     assert result["snapshot_count"] == 2
     assert result["chunk_count"] == 2
+    assert result["freshness_check_count"] == 2
+    assert result["extraction_run_count"] == 1
+    assert result["first_class_store_counts"]["document_sources"] == 2
+    assert result["first_class_store_counts"]["document_snapshots"] == 2
+    assert result["first_class_store_counts"]["document_chunks"] == 2
+    assert result["first_class_store_counts"]["freshness_checks"] == 2
+    assert result["first_class_store_counts"]["extraction_runs"] == 1
+    assert result["document_sources"][0]["schema_version"] == "document_source.v1"
     assert result["document_versions"][0]["schema_version"] == "document_version.v1"
+    assert result["document_snapshots"][0]["schema_version"] == "document_snapshot.v1"
+    assert result["document_chunks"][0]["schema_version"] == "document_chunk.v1"
+    assert result["freshness_checks"][0]["schema_version"] == "freshness_check.v1"
     assert result["extraction_runs"][0]["status"] == "completed"
     assert result["freshness_gaps"][0]["source_url_status"] == "missing_manual_text"
     assert result["gaps"] == []
