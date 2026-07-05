@@ -14,26 +14,26 @@
 - 주요 요구사항:
   - #40 하나만 GitHub issue tracker로 사용
   - `requirements.md`는 What SoT, 승인된 `design.md`는 How SoT
-  - R1 기준선 고정 후 장기 루프 자동 계속
+  - R1 baseline 고정 후 long-running loop 자동 계속
   - SoT 변경 필요, live mutation 승인 필요, 반복된 외부 blocker에서만 중단
   - API-only verification과 full E2E verification 표현 분리
 
 ## Approach Proposal
 
-### 선택된 접근: R1 기준선 먼저, self-check 후 자동 계속
+### 선택된 접근: R1 baseline 먼저, self-check 후 자동 계속
 
 R1 correction을 첫 milestone으로 고정합니다. eval/readiness, specs drift, verification wording을 먼저 정리하면 이후 PR의 evidence language와 stop condition이 안정됩니다. 그 뒤 #40 backlog를 우선순위대로 계속 처리합니다.
 
 선택 이유:
 
-- 장기 실행 loop가 무엇을 믿어야 하는지 먼저 고정합니다.
+- long-running loop가 무엇을 믿어야 하는지 먼저 고정합니다.
 - runtime verification 과장 표현을 먼저 막아 이후 완료 선언이 흔들리지 않습니다.
 - 설계 drift가 생겼을 때 멈출 기준이 명확해집니다.
 - 사용자 확인 없이 다음 milestone으로 넘어가는 정책과 잘 맞습니다.
 
 ### 대안 1: quick-win cleanup 동시 포함
 
-R1과 함께 model connector, CouchDB dead code, compose env cleanup까지 묶는 방식입니다. 빠른 변화는 만들 수 있지만, 기준선이 흔들린 상태에서 cleanup이 먼저 진행될 수 있어 완료 판단이 흐려집니다.
+R1과 함께 model connector, CouchDB dead code, compose env cleanup까지 묶는 방식입니다. 빠른 변화는 만들 수 있지만, baseline이 흔들린 상태에서 cleanup이 먼저 진행될 수 있어 완료 판단이 흐려집니다.
 
 ### 대안 2: #40 전체 big-bang campaign
 
