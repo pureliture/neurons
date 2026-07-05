@@ -371,6 +371,84 @@ def test_ledger_transcript_tables_store_sessions_and_chunks(tmp_path: Path):
     assert ledger.get_by_knowledge_id(item["knowledge_id"])["type"] == "conversation_chunk"
 
 
+def test_mark_indexed_transcript_chunk_marks_session_and_project_memory_dirty(tmp_path: Path):
+    ledger = _ledger(tmp_path)
+    session = FakeTranscriptSession()
+    chunk = FakeTranscriptChunk()
+
+    ledger.upsert_transcript_session(session)
+    item = ledger.upsert_transcript_chunk(knowledge_id=chunk.knowledge_id, chunk=chunk)
+    ledger.mark_indexed(item["knowledge_id"], run="DONE")
+
+    dirty_session = ledger.get_dirty_session_memory(session.session_id_hash)
+    assert dirty_session["reason"] == "new_chunk_indexed"
+    assert dirty_session["source_knowledge_id"] == item["knowledge_id"]
+
+    dirty_project = ledger.get_dirty_project_memory(provider="codex", project=PROJECT)
+    assert dirty_project["reason"] == "new_chunk_indexed"
+    assert dirty_project["source_knowledge_id"] == item["knowledge_id"]
+
+
+def test_memory_promotion_area_is_concrete_object_and_preserves_dirty_marking(tmp_path: Path):
+    ledger = _ledger(tmp_path)
+    area = ledger._memory_promotion_area
+
+    assert area is not ledger
+    assert type(area).__name__ == "MemoryPromotionArea"
+
+    session_dirty = area.mark_session_memory_dirty(
+        session_id_hash="sha256:area-session",
+        provider="codex",
+        project=PROJECT,
+        reason="area-test",
+        source_knowledge_id="kn_area_chunk",
+    )
+    assert session_dirty == ledger.get_dirty_session_memory("sha256:area-session")
+    assert session_dirty["reason"] == "area-test"
+
+    project_dirty = area.mark_project_memory_dirty(
+        provider="codex",
+        project=PROJECT,
+        reason="area-test",
+        source_knowledge_id="kn_area_chunk",
+    )
+    assert project_dirty == ledger.get_dirty_project_memory(provider="codex", project=PROJECT)
+    assert project_dirty["reason"] == "area-test"
+
+
+def test_memory_promotion_area_fails_closed_when_session_readback_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    ledger = _ledger(tmp_path)
+    area = ledger._memory_promotion_area
+    monkeypatch.setattr(area, "get_dirty_session_memory", lambda session_id_hash: None)
+
+    with pytest.raises(ValueError, match="Failed to read back upserted dirty session memory"):
+        area.mark_session_memory_dirty(
+            session_id_hash="sha256:area-session",
+            provider="codex",
+            project=PROJECT,
+            reason="area-test",
+        )
+
+
+def test_memory_promotion_area_fails_closed_when_project_readback_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    ledger = _ledger(tmp_path)
+    area = ledger._memory_promotion_area
+    monkeypatch.setattr(area, "get_dirty_project_memory", lambda *, provider, project: None)
+
+    with pytest.raises(ValueError, match="Failed to read back upserted dirty project memory"):
+        area.mark_project_memory_dirty(
+            provider="codex",
+            project=PROJECT,
+            reason="area-test",
+        )
+
+
 def test_ledger_dirty_session_memory_state_machine(tmp_path: Path):
     ledger = _ledger(tmp_path)
 
