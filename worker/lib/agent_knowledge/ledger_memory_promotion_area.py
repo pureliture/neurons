@@ -48,7 +48,10 @@ class MemoryPromotionArea:
                 """,
                 (session_id_hash, provider, project, reason, source_knowledge_id, now, now),
             )
-        return self.get_dirty_session_memory(session_id_hash)
+        result = self.get_dirty_session_memory(session_id_hash)
+        if result is None:
+            raise ValueError(f"Failed to read back upserted dirty session memory: {session_id_hash}")
+        return result
 
     def get_dirty_session_memory(self, session_id_hash: str) -> dict | None:
         with self._ledger._connect() as connection:
@@ -97,7 +100,12 @@ class MemoryPromotionArea:
                 """,
                 (project_key_hash, provider, project, reason, source_knowledge_id, now, now),
             )
-        return self.get_dirty_project_memory(provider=provider, project=project)
+        result = self.get_dirty_project_memory(provider=provider, project=project)
+        if result is None:
+            raise ValueError(
+                f"Failed to read back upserted dirty project memory for provider={provider}, project={project}"
+            )
+        return result
 
     def get_dirty_project_memory(self, *, provider: str, project: str) -> dict | None:
         with self._ledger._connect() as connection:
