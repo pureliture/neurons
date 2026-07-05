@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 TOOL_NAME = "knowledge.search"
 BRAIN_QUERY_TOOL_NAME = "brain.query"
 BRAIN_RESOLVE_TOOL_NAME = "brain.resolve"
@@ -37,6 +39,53 @@ STEWARD_RESTRICTED_TOOL_NAMES = (
     MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
     MEMORY_STALE_COMMIT_TOOL_NAME,
 )
+_TOOL_REGISTRY_CACHE: dict[str, dict] | None = None
+
+
+@dataclass(frozen=True)
+class ToolContract:
+    name: str
+    description: str
+    input_schema: dict
+    dispatch_owner: str
+
+    def to_tool(self) -> dict:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "inputSchema": self.input_schema,
+        }
+
+
+_DISPATCH_OWNER_BY_TOOL_NAME = {
+    TOOL_NAME: "legacy_search",
+    BRAIN_QUERY_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_RESOLVE_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_CONTEXT_RESOLVE_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_MEMORY_SEARCH_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_INCIDENT_SEARCH_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_DRIFT_EXPLAIN_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_PERSONA_GET_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_PERSONA_CHECK_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_EVIDENCE_GET_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_OBJECTS_QUERY_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_OBJECT_EXPLAIN_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_CORPUS_STATUS_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_REVIEW_PROPOSALS_TOOL_NAME: "jsonrpc_brain",
+    MEMORY_AUTHORITY_PACK_READ_TOOL_NAME: "brain_steward",
+    MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME: "brain_steward",
+    MEMORY_CANDIDATE_CREATE_TOOL_NAME: "brain_steward",
+    MEMORY_STALE_MARK_TOOL_NAME: "brain_steward",
+    MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME: "brain_steward",
+    MEMORY_CANDIDATE_APPROVE_TOOL_NAME: "brain_steward_restricted",
+    MEMORY_CANDIDATE_REJECT_TOOL_NAME: "brain_steward_restricted",
+    MEMORY_CANDIDATE_AUTO_ACCEPT_TOOL_NAME: "brain_steward_restricted",
+    MEMORY_SUPERSEDE_COMMIT_TOOL_NAME: "brain_steward_restricted",
+    MEMORY_STALE_COMMIT_TOOL_NAME: "brain_steward_restricted",
+}
 
 # candidate / supersede proposal 이 공유하는 redacted source_span 입력 스키마.
 # raw transcript/body 가 아니라 redacted summary + opaque locator + sha256 hash 만 받는다.
@@ -496,3 +545,51 @@ def list_tools() -> list[dict]:
             },
         },
     ]
+
+
+def _build_tool_registry() -> dict[str, dict]:
+    registry: dict[str, dict] = {}
+    for tool in list_tools():
+        name = str(tool.get("name") or "")
+        if not name:
+            raise ValueError("MCP tool is missing a name")
+        if name in registry:
+            raise ValueError(f"duplicate MCP tool name: {name}")
+        registry[name] = tool
+    return registry
+
+
+def tool_registry() -> dict[str, dict]:
+    global _TOOL_REGISTRY_CACHE
+    if _TOOL_REGISTRY_CACHE is None:
+        _TOOL_REGISTRY_CACHE = _build_tool_registry()
+    return dict(_TOOL_REGISTRY_CACHE)
+
+
+def tool_names() -> frozenset[str]:
+    return frozenset(tool_registry())
+
+
+def _validate_dispatch_owner_metadata(tool_names: set[str], dispatch_owner_names: set[str]) -> None:
+    missing_dispatch_owners = sorted(tool_names - dispatch_owner_names)
+    if missing_dispatch_owners:
+        raise ValueError(f"MCP tools missing dispatch owner metadata: {missing_dispatch_owners}")
+
+    stale_dispatch_owners = sorted(dispatch_owner_names - tool_names)
+    if stale_dispatch_owners:
+        raise ValueError(f"MCP dispatch owner metadata is stale: {stale_dispatch_owners}")
+
+
+def tool_contract_registry() -> dict[str, ToolContract]:
+    registry = tool_registry()
+    owners = dict(_DISPATCH_OWNER_BY_TOOL_NAME)
+    _validate_dispatch_owner_metadata(set(registry), set(owners))
+    return {
+        name: ToolContract(
+            name=name,
+            description=tool["description"],
+            input_schema=tool["inputSchema"],
+            dispatch_owner=owners[name],
+        )
+        for name, tool in registry.items()
+    }
