@@ -1,5 +1,6 @@
 from agent_knowledge.llm_brain_core.objects.extraction_pipeline import (
     build_extractor_registry_report,
+    run_documentation_cleanup_strategy_comparison,
     run_reference_corpus_extraction_preview,
 )
 
@@ -100,3 +101,42 @@ def test_reference_corpus_extraction_preview_blocks_hash_mismatch_without_object
     assert result["gaps"] == ["content_hash_mismatch", "freshness_gap"]
     assert result["evaluator_report"]["passes"] is False
     assert result["evaluator_report"]["failures"] == ["extraction_blocked"]
+
+
+def test_documentation_cleanup_strategy_comparison_reports_lane_evaluator_evidence():
+    result = run_documentation_cleanup_strategy_comparison(
+        documents=[
+            {
+                "path": "README.md",
+                "status": "source_of_truth",
+                "reason": "approved_markdown_source",
+                "confidence": 0.9,
+                "evidence_refs": ["file_inventory:README.md"],
+            },
+            {
+                "path": "docs/old.md",
+                "status": "archive_candidate",
+                "reason": "stale_or_superseded_memory_card",
+                "confidence": 0.7,
+                "evidence_refs": ["file_inventory:docs/old.md"],
+            },
+        ],
+        consumer="codex",
+    )
+
+    assert result["schema_version"] == "object_extraction_strategy_comparison.v1"
+    assert result["status"] == "pass"
+    assert result["production_mutation_performed"] is False
+    assert result["selected_strategy"] == "document_authority_pack_v1"
+    assert result["pack_preview"]["route"] == "documentation_cleanup"
+    assert result["pack_preview"]["object_count"] == 2
+    assert result["pack_preview"]["lane_counts"]["accepted_current"] == 1
+    assert result["pack_preview"]["lane_counts"]["proposal_only"] == 1
+    assert result["pack_preview"]["recommended_action_count"] == 2
+    assert result["pack_preview"]["evidence_count"] == 2
+    assert result["strategy_comparison"][0]["selected"] is True
+    assert result["strategy_comparison"][0]["gaps"] == []
+    assert result["strategy_comparison"][1]["strategy"] == "path_inventory_only_v1"
+    assert result["strategy_comparison"][1]["gaps"] == ["authority_lane_inference_missing"]
+    assert result["evaluator_report"]["golden_query_slice"] == "documentation cleanup current-vs-archive"
+    assert result["evaluator_report"]["passes"] is True
