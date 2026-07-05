@@ -20,6 +20,23 @@ positive_int_or_default() {
   fi
 }
 
+read_day_stamp() {
+  local path="$1"
+  local value=""
+  if [ -r "$path" ]; then
+    read -r value < "$path" || value=""
+  fi
+  if [[ "$value" =~ ^[0-9]{8}$ ]]; then
+    printf '%s\n' "$value"
+  fi
+}
+
+write_day_stamp() {
+  local path="$1"
+  local value="$2"
+  printf '%s\n' "$value" > "$path" || echo "[scheduler] stamp write failed: $path"
+}
+
 main() {
   cd /app
   mkdir -p state
@@ -32,8 +49,11 @@ main() {
       build_interval_seconds=$(positive_int_or_default "${SESSION_MEMORY_BUILD_INTERVAL_SECONDS:-}" 180)
       scheduler_sleep_seconds=$(positive_int_or_default "${SESSION_MEMORY_SCHEDULER_SLEEP_SECONDS:-}" 60)
       echo "[entrypoint] scheduler 시작 (build=${build_interval_seconds}s, sleep=${scheduler_sleep_seconds}s, gc=04:30, backfill=02:15 UTC)"
+      last_bf_stamp="state/session-memory-backfill-last-day"
+      last_gc_stamp="state/session-memory-gc-last-day"
       last_build=0
-      last_gc=""; last_bf=""
+      last_bf=$(read_day_stamp "$last_bf_stamp")
+      last_gc=$(read_day_stamp "$last_gc_stamp")
       while true; do
         read -r now hour minute day <<< "$(date -u "+%s %H %M %Y%m%d")"
         minute_of_day=$((10#$hour * 60 + 10#$minute))
@@ -42,10 +62,14 @@ main() {
           last_build="$now"
         fi
         if [ "$minute_of_day" -ge $((2 * 60 + 15)) ] && [ "$last_bf" != "$day" ]; then
-          run_backfill || echo "[scheduler] backfill rc=$?"; last_bf="$day"
+          run_backfill || echo "[scheduler] backfill rc=$?"
+          last_bf="$day"
+          write_day_stamp "$last_bf_stamp" "$day"
         fi
         if [ "$minute_of_day" -ge $((4 * 60 + 30)) ] && [ "$last_gc" != "$day" ]; then
-          run_gc || echo "[scheduler] gc rc=$?"; last_gc="$day"
+          run_gc || echo "[scheduler] gc rc=$?"
+          last_gc="$day"
+          write_day_stamp "$last_gc_stamp" "$day"
         fi
         sleep "$scheduler_sleep_seconds"
       done

@@ -81,3 +81,41 @@ def test_entrypoint_daily_jobs_use_due_window_not_exact_minute() -> None:
     assert '[ "$hm" = "02:15" ]' not in script
     assert '[ "$minute_of_day" -ge $((4 * 60 + 30)) ]' in script
     assert '[ "$minute_of_day" -ge $((2 * 60 + 15)) ]' in script
+
+
+def test_entrypoint_daily_job_stamps_survive_scheduler_restart(tmp_path: Path) -> None:
+    stamp_path = tmp_path / "last-day"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "\n".join(
+                [
+                    "set -euo pipefail",
+                    "source deploy/session-memory/entrypoint.sh",
+                    f"stamp={stamp_path}",
+                    "write_day_stamp \"$stamp\" 20260705",
+                    "read_day_stamp \"$stamp\"",
+                    "printf '%s\\n' bad-value > \"$stamp\"",
+                    "read_day_stamp \"$stamp\"",
+                ]
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.splitlines() == ["20260705"]
+
+
+def test_entrypoint_daily_scheduler_uses_persisted_stamps() -> None:
+    script = Path("deploy/session-memory/entrypoint.sh").read_text(encoding="utf-8")
+
+    assert 'last_bf_stamp="state/session-memory-backfill-last-day"' in script
+    assert 'last_gc_stamp="state/session-memory-gc-last-day"' in script
+    assert 'last_bf=$(read_day_stamp "$last_bf_stamp")' in script
+    assert 'last_gc=$(read_day_stamp "$last_gc_stamp")' in script
+    assert 'write_day_stamp "$last_bf_stamp" "$day"' in script
+    assert 'write_day_stamp "$last_gc_stamp" "$day"' in script
