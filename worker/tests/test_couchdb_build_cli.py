@@ -277,6 +277,24 @@ class TestSelectSessionsNeedingProjection:
         assert sid1 not in sids
         assert sid2 in sids
 
+    def test_ignores_projected_state_with_non_authoritative_id(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s1")
+        stale_state = dm.build_projection_state_document(
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            projection_status=dm.ProjectionStatus.PROJECTED,
+            session_memory_knowledge_id="index-ref-fake",
+            active_content_hash="sha256:" + "a" * 64,
+        )
+        stale_state["_id"] = "projection_state:legacy-stale-id"
+        store.put(stale_state)
+
+        selected = _select_sessions_needing_projection(store, limit=0)
+
+        assert [s.get("session_id_hash") for s in selected] == [sid]
+
     def test_limit_caps_selection(self) -> None:
         store = InMemoryCouchDBSourceStore()
         for i in range(5):
