@@ -119,7 +119,32 @@ def test_entrypoint_daily_scheduler_uses_persisted_stamps() -> None:
     assert 'last_gc_stamp="state/session-memory-gc-last-day"' in script
     assert 'last_bf=$(read_day_stamp "$last_bf_stamp")' in script
     assert 'last_gc=$(read_day_stamp "$last_gc_stamp")' in script
-    assert "if run_backfill; then" in script
-    assert "if run_gc; then" in script
+    assert "if run_scheduled_backfill; then" in script
+    assert "if run_scheduled_gc; then" in script
     assert 'write_day_stamp "$last_bf_stamp" "$day"' in script
     assert 'write_day_stamp "$last_gc_stamp" "$day"' in script
+
+
+def test_entrypoint_scheduled_retired_bridge_jobs_skip_without_token() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "\n".join(
+                [
+                    "set -euo pipefail",
+                    "source deploy/session-memory/entrypoint.sh",
+                    "unset RETIRED_INDEX_BRIDGE_API_KEY",
+                    "run_scheduled_backfill",
+                    "run_scheduled_gc",
+                ]
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "backfill skipped: RETIRED_INDEX_BRIDGE_API_KEY not set" in result.stdout
+    assert "gc skipped: RETIRED_INDEX_BRIDGE_API_KEY not set" in result.stdout
