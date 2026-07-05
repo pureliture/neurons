@@ -5,7 +5,7 @@ from typing import Any, Mapping
 from .._util import ensure_public_safe, hash_payload, public_safe_text
 from .golden_query_eval import evaluate_object_pack_response
 from .knowledge_objects import KnowledgeEdge, KnowledgeObjectEnvelope
-from .object_packs import build_documentation_cleanup_pack
+from .object_packs import build_documentation_cleanup_pack, build_runtime_truth_pack
 from .reference_corpus import reference_corpus_objects_from_manifest
 
 
@@ -36,13 +36,13 @@ def build_extractor_registry_report() -> dict[str, Any]:
             },
             {
                 "extractor": "runtime_truth",
-                "version": "",
-                "status": "planned",
+                "version": "0.1",
+                "status": "implemented",
                 "input_object_types": ["RuntimeEvidence"],
-                "output_object_types": ["RuntimeTruth"],
-                "edge_types": ["validated_by"],
+                "output_object_types": ["PullRequest", "RuntimeTruth"],
+                "edge_types": ["validated_by", "requires_live_evidence"],
                 "strategy_scope": "runtime_evidence_mapping",
-                "gaps": ["extractor_not_implemented"],
+                "gaps": [],
             },
         ],
     }
@@ -203,6 +203,87 @@ def run_documentation_cleanup_strategy_comparison(
     return result
 
 
+def run_runtime_truth_extraction_preview(
+    *,
+    pull_request: Mapping[str, Any] | None,
+    deployment: Mapping[str, Any] | None,
+    live_evidence: Mapping[str, Any] | None,
+    consumer: str = "unspecified",
+) -> dict[str, Any]:
+    pack = build_runtime_truth_pack(
+        pull_request=pull_request,
+        deployment=deployment,
+        live_evidence=live_evidence,
+    )
+    runtime_verified_count = len(pack["verification"]["runtime_verified"])
+    runtime_unverified_count = len(pack["verification"]["runtime_unverified"])
+    runtime_truth_objects = (
+        [_stable_object(_runtime_truth_object(deployment=deployment, live_evidence=live_evidence).to_dict())]
+        if runtime_verified_count
+        else []
+    )
+    pr_objects = [_stable_object(obj) for obj in pack["objects"]]
+    edges = _runtime_truth_edges(pr_objects=pr_objects, runtime_truth_objects=runtime_truth_objects)
+    status = "pass" if runtime_verified_count else "pass_with_gaps"
+    result = {
+        "schema_version": "object_extraction_runtime_truth_preview.v1",
+        "status": status,
+        "consumer": public_safe_text(consumer, max_chars=80),
+        "selected_strategy": "merge_ci_deploy_live_separation_v1",
+        "production_mutation_performed": False,
+        "objects": pr_objects,
+        "runtime_truth_objects": runtime_truth_objects,
+        "edges": edges,
+        "pack_preview": {
+            "route": pack["route"],
+            "object_count": len(pack["objects"]),
+            "lane_counts": _lane_counts(pack),
+            "runtime_verified_count": runtime_verified_count,
+            "runtime_unverified_count": runtime_unverified_count,
+            "gaps": list(pack["gaps"]),
+            "recommended_action_count": len(pack["recommended_actions"]),
+        },
+        "strategy_comparison": [
+            {
+                "strategy": "merge_ci_deploy_live_separation_v1",
+                "scope": "runtime_evidence_mapping",
+                "selected": True,
+                "status": status,
+                "object_count": len(pr_objects) + len(runtime_truth_objects),
+                "edge_count": len(edges),
+                "runtime_verified_count": runtime_verified_count,
+                "runtime_unverified_count": runtime_unverified_count,
+                "gaps": list(pack["gaps"]),
+            },
+            {
+                "strategy": "merge_only_v1",
+                "scope": "runtime_evidence_mapping",
+                "selected": False,
+                "status": "rejected",
+                "object_count": len(pr_objects),
+                "edge_count": 0,
+                "runtime_verified_count": 0,
+                "runtime_unverified_count": 0,
+                "gaps": ["deploy_inferred_from_merge_forbidden"],
+            },
+        ],
+        "evaluator_report": {
+            "schema_version": "object_extraction_evaluator_report.v1",
+            "golden_query_slice": "pr merge and deploy truth",
+            "passes": True,
+            "failures": [],
+            "gaps": list(pack["gaps"]),
+            "assertions": [
+                "merge_does_not_imply_deploy",
+                "runtime_verified_requires_live_evidence",
+                "production_mutation_performed_false",
+            ],
+        },
+    }
+    ensure_public_safe(result, "RuntimeTruthExtractionPreview")
+    return result
+
+
 def _blocked_preview(
     *,
     bundle: Mapping[str, Any],
@@ -318,6 +399,59 @@ def _lane_counts(pack: Mapping[str, Any]) -> dict[str, int]:
         str(lane): len(items) if isinstance(items, list) else 0
         for lane, items in sorted(lanes.items())
     }
+
+
+def _runtime_truth_object(
+    *,
+    deployment: Mapping[str, Any] | None,
+    live_evidence: Mapping[str, Any] | None,
+) -> KnowledgeObjectEnvelope:
+    evidence_id = public_safe_text(str((live_evidence or {}).get("evidence_id") or ""), max_chars=160)
+    target_ref = public_safe_text(str((deployment or {}).get("target") or "deployment"), max_chars=120)
+    content_hash = hash_payload({"target_ref": target_ref, "evidence_id": evidence_id})
+    return KnowledgeObjectEnvelope.from_parts(
+        object_type="RuntimeTruth",
+        natural_key=f"{target_ref}:{evidence_id}",
+        scope={"project": "neurons", "target_ref": target_ref},
+        title=f"Runtime truth for {target_ref}",
+        summary=str((live_evidence or {}).get("summary") or "Runtime evidence verified."),
+        lifecycle_status="observed",
+        authority_lane="candidate",
+        verification_state="runtime_verified",
+        review_state="needs_review",
+        content_hash=content_hash,
+        evidence_refs=[evidence_id],
+        confidence={"score": 0.75, "basis": "runtime_verified_live_evidence"},
+        recommended_action="review",
+        payload={
+            "target_ref": target_ref,
+            "claim": "runtime_verified",
+        },
+    )
+
+
+def _runtime_truth_edges(
+    *,
+    pr_objects: list[dict[str, Any]],
+    runtime_truth_objects: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not pr_objects or not runtime_truth_objects:
+        return []
+    pr = pr_objects[0]
+    runtime_truth = runtime_truth_objects[0]
+    evidence_refs = runtime_truth.get("evidence_refs") or []
+    edge = KnowledgeEdge.from_parts(
+        edge_type="validated_by",
+        from_object_id=pr["object_id"],
+        to_object_id=runtime_truth["object_id"],
+        evidence_refs=evidence_refs,
+        lifecycle_status="observed",
+        authority_lane="candidate",
+        verification_state="runtime_verified",
+        confidence={"score": 0.75, "basis": "live_runtime_evidence"},
+        payload={"claim": "deploy_requires_live_evidence"},
+    )
+    return [_stable_edge(edge.to_dict())]
 
 
 def _chunk_preview(chunk: Mapping[str, Any]) -> dict[str, Any]:

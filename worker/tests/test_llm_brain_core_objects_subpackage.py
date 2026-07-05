@@ -34,6 +34,7 @@ OBJECT_PARITY_SYMBOLS: dict[str, tuple[str, ...]] = {
         "build_extractor_registry_report",
         "run_documentation_cleanup_strategy_comparison",
         "run_reference_corpus_extraction_preview",
+        "run_runtime_truth_extraction_preview",
     ),
     "golden_query_eval": (
         "build_baseline_golden_query_report",
