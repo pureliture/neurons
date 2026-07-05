@@ -148,6 +148,50 @@ def test_palantir_full_count_manifest_gate_is_metadata_only():
     assert plan["writes_planned"] is False
 
 
+def test_corpus_ingest_plan_expected_count_gate_passes_without_writes():
+    plan = build_corpus_ingest_plan(
+        _palantir_full_count_manifest(),
+        project="neurons",
+        storage_mode="external_object_store",
+        expected_source_count=65,
+        expected_source_url_count=39,
+        expected_manual_text_without_url_count=26,
+        expected_source_type_counts={"PDF": 6, "WEB_PAGE": 33, "TEXT": 26},
+    )
+
+    assert plan["count_gate_status"] == "pass"
+    assert plan["count_gate_gaps"] == []
+    assert plan["expected_counts"] == {
+        "source_count": 65,
+        "source_url_count": 39,
+        "manual_text_without_url_count": 26,
+        "source_type_counts": {"PDF": 6, "TEXT": 26, "WEB_PAGE": 33},
+    }
+    assert plan["writes_planned"] is False
+
+
+def test_corpus_ingest_plan_expected_count_gate_fails_closed_on_mismatch():
+    plan = build_corpus_ingest_plan(
+        _palantir_full_count_manifest(),
+        project="neurons",
+        storage_mode="external_object_store",
+        expected_source_count=66,
+        expected_source_url_count=40,
+        expected_manual_text_without_url_count=25,
+        expected_source_type_counts={"PDF": 7, "WEB_PAGE": 32, "TEXT": 26},
+    )
+
+    assert plan["count_gate_status"] == "fail"
+    assert plan["count_gate_gaps"] == [
+        {"field": "source_count", "expected": 66, "actual": 65},
+        {"field": "source_url_count", "expected": 40, "actual": 39},
+        {"field": "manual_text_without_url_count", "expected": 25, "actual": 26},
+        {"field": "source_type_counts.PDF", "expected": 7, "actual": 6},
+        {"field": "source_type_counts.WEB_PAGE", "expected": 32, "actual": 33},
+    ]
+    assert plan["writes_planned"] is False
+
+
 def test_reference_corpus_manifest_maps_to_reference_only_objects():
     result = reference_corpus_objects_from_manifest(
         _manifest(),

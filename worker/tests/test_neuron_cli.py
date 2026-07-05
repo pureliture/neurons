@@ -187,6 +187,76 @@ def test_neuron_knowledge_corpus_ingest_plan_loads_full_count_manifest(tmp_path,
     assert report["writes_planned"] is False
 
 
+def test_neuron_knowledge_corpus_ingest_plan_expected_count_gate_passes(tmp_path, capsys):
+    manifest = tmp_path / "palantir-manifest.json"
+    manifest.write_text(json.dumps(_palantir_full_count_manifest()), encoding="utf-8")
+
+    rc = main(
+        [
+            "corpus-ingest-plan",
+            "--project",
+            "neurons",
+            "--storage-mode",
+            "external_object_store",
+            "--manifest-file",
+            str(manifest),
+            "--expect-source-count",
+            "65",
+            "--expect-source-url-count",
+            "39",
+            "--expect-manual-text-without-url-count",
+            "26",
+            "--expect-source-type-count",
+            "PDF=6",
+            "--expect-source-type-count",
+            "WEB_PAGE=33",
+            "--expect-source-type-count",
+            "TEXT=26",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["count_gate_status"] == "pass"
+    assert report["count_gate_gaps"] == []
+    assert report["writes_planned"] is False
+
+
+def test_neuron_knowledge_corpus_ingest_plan_expected_count_gate_fails_closed(tmp_path, capsys):
+    manifest = tmp_path / "palantir-manifest.json"
+    manifest.write_text(json.dumps(_palantir_full_count_manifest()), encoding="utf-8")
+
+    rc = main(
+        [
+            "corpus-ingest-plan",
+            "--project",
+            "neurons",
+            "--storage-mode",
+            "external_object_store",
+            "--manifest-file",
+            str(manifest),
+            "--expect-source-count",
+            "66",
+            "--expect-source-url-count",
+            "39",
+            "--expect-manual-text-without-url-count",
+            "26",
+            "--expect-source-type-count",
+            "PDF=6",
+            "--expect-source-type-count",
+            "WEB_PAGE=33",
+            "--expect-source-type-count",
+            "TEXT=26",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["count_gate_status"] == "fail"
+    assert report["count_gate_gaps"] == [{"field": "source_count", "expected": 66, "actual": 65}]
+    assert report["writes_planned"] is False
+
+
 def test_neuron_knowledge_corpus_ingest_local_test_is_preview_until_store_configured(capsys):
     rc = main(["corpus-ingest", "--project", "neurons", "--target", "local_test"])
 

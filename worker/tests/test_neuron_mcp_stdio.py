@@ -285,6 +285,11 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
         "local_test",
         "production",
     ]
+    corpus_plan_properties = tools[BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME]["inputSchema"]["properties"]
+    assert "expected_source_count" in corpus_plan_properties
+    assert "expected_source_url_count" in corpus_plan_properties
+    assert "expected_manual_text_without_url_count" in corpus_plan_properties
+    assert "expected_source_type_counts" in corpus_plan_properties
 
 
 def test_project_deriving_brain_tool_schemas_allow_repository():
@@ -465,6 +470,34 @@ def test_mcp_corpus_ingest_plan_reports_manifest_ref_gap(tmp_path: Path):
 
     assert "manifest_ref_not_loaded" in result["gaps"]
     assert result["manifest_ref"] == "refs/palantir.json"
+
+
+def test_mcp_corpus_ingest_plan_expected_count_gate(tmp_path: Path):
+    service = _service(tmp_path)
+    result = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 109,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
+                "arguments": {
+                    "manifest": _reference_manifest(),
+                    "storage_mode": "metadata_only",
+                    "project": "neurons",
+                    "expected_source_count": 2,
+                    "expected_source_url_count": 1,
+                    "expected_manual_text_without_url_count": 1,
+                    "expected_source_type_counts": {"WEB_PAGE": 1, "TEXT": 1},
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert result["count_gate_status"] == "pass"
+    assert result["count_gate_gaps"] == []
+    assert result["writes_planned"] is False
 
 
 def test_mcp_corpus_status_reports_policy_fields(tmp_path: Path):
