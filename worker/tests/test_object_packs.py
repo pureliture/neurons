@@ -47,6 +47,21 @@ def test_documentation_cleanup_pack_reports_empty_current_lane():
     assert "review_proposals_needed" in pack["gaps"]
 
 
+def test_documentation_cleanup_pack_skips_empty_evidence_refs():
+    pack = build_documentation_cleanup_pack(
+        documents=[
+            {
+                "path": "README.md",
+                "status": "source_of_truth",
+                "evidence_refs": [None, "", "mem_readme"],
+            },
+        ],
+        route="documentation_cleanup",
+    )
+
+    assert [evidence["evidence_id"] for evidence in pack["evidence"]] == ["mem_readme"]
+
+
 def test_runtime_truth_pack_keeps_merge_and_deploy_verification_separate():
     pack = build_runtime_truth_pack(
         pull_request={"id": "pr:1", "merged": True},
