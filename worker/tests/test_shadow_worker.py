@@ -39,8 +39,8 @@ def test_env_profile_dataset_resolver_covers_application_profiles_and_compose_en
     for profile, key in expected_keys.items():
         assert resolve(profile) == env[key]
 
-    compose = (REPO_ROOT / "compose.yaml").read_text()
-    env_example = (REPO_ROOT / ".env.example").read_text()
+    compose = (REPO_ROOT / "compose.yaml").read_text(encoding="utf-8")
+    env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
     application_profiles = _application_target_profiles()
     for key in expected_keys.values():
         assert key in compose
@@ -51,11 +51,15 @@ def test_env_profile_dataset_resolver_covers_application_profiles_and_compose_en
 
 
 def _target_profile_contract() -> dict[str, object]:
-    contract = yaml.safe_load((REPO_ROOT / "docs/contracts/target-profiles.yaml").read_text())
+    contract = yaml.safe_load(
+        (REPO_ROOT / "docs/contracts/target-profiles.yaml").read_text(encoding="utf-8")
+    )
     assert contract["schemaVersion"] == "neurons.target_profiles.v1"
     return contract["profiles"]
 
 
 def _application_target_profiles() -> dict[str, object]:
-    application = yaml.safe_load((REPO_ROOT / "src/main/resources/application.yml").read_text())
+    application = yaml.safe_load(
+        (REPO_ROOT / "src/main/resources/application.yml").read_text(encoding="utf-8")
+    )
     return application["rag-ingress"]["target-profiles"]
