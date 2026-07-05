@@ -167,7 +167,7 @@ class RecordingSelectionStore(InMemoryCouchDBSourceStore):
     ) -> list[dict]:
         selector = selector or {}
         docs: list[dict] = []
-        for doc in sorted(self._docs.values(), key=lambda item: str(item.get("_id"))):
+        for doc in sorted(self._docs.values(), key=lambda item: str(item.get("_id") or "")):
             if doc.get("doc_type") != doc_type:
                 continue
             if any(doc.get(key) != value for key, value in selector.items()):
