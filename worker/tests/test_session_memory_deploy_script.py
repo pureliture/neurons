@@ -113,6 +113,8 @@ def test_entrypoint_daily_job_stamps_survive_scheduler_restart(tmp_path: Path) -
 def test_entrypoint_daily_scheduler_uses_persisted_stamps() -> None:
     script = Path("deploy/session-memory/entrypoint.sh").read_text(encoding="utf-8")
 
+    assert "cd /app || exit 1" in script
+    assert "[entrypoint] scheduler started" in script
     assert 'last_bf_stamp="state/session-memory-backfill-last-day"' in script
     assert 'last_gc_stamp="state/session-memory-gc-last-day"' in script
     assert 'last_bf=$(read_day_stamp "$last_bf_stamp")' in script

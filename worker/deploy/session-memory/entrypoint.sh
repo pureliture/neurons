@@ -38,7 +38,7 @@ write_day_stamp() {
 }
 
 main() {
-  cd /app
+  cd /app || exit 1
   mkdir -p state
 
   case "${RUN_MODE:-cron}" in
@@ -48,7 +48,7 @@ main() {
     cron)
       build_interval_seconds=$(positive_int_or_default "${SESSION_MEMORY_BUILD_INTERVAL_SECONDS:-}" 180)
       scheduler_sleep_seconds=$(positive_int_or_default "${SESSION_MEMORY_SCHEDULER_SLEEP_SECONDS:-}" 60)
-      echo "[entrypoint] scheduler 시작 (build=${build_interval_seconds}s, sleep=${scheduler_sleep_seconds}s, gc=04:30, backfill=02:15 UTC)"
+      echo "[entrypoint] scheduler started (build=${build_interval_seconds}s, sleep=${scheduler_sleep_seconds}s, gc=04:30, backfill=02:15 UTC)"
       last_bf_stamp="state/session-memory-backfill-last-day"
       last_gc_stamp="state/session-memory-gc-last-day"
       last_build=0
