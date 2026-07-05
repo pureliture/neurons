@@ -437,7 +437,7 @@ def _dispatch_brain_query_tool(tool_name: str, arguments: dict, service: Knowled
 
 
 def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
-    _ = (tool_name, service)
+    _ = tool_name
     result = service.brain_resolve(query=str(arguments.get("query") or ""))
     return _tool_result(result)
 
