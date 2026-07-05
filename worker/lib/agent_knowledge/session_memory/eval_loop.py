@@ -17,6 +17,7 @@ from typing import Any
 
 from .brain_query import run_brain_query_v2
 from .brain_read_model import LegacyLedgerBrainReadModel
+from .eval_readiness import build_eval_readiness_report
 
 EVAL_LOOP_SCHEMA_VERSION = "llm_brain_eval_loop.v1"
 
@@ -409,6 +410,7 @@ def run_enabled_eval_queries(
         "network_used": semantic_ranker is not None,
         "project": project or "",
         "provider": provider or "",
+        "readiness": build_eval_readiness_report(),
         "metrics": metrics,
         "failures": failures,
         "retention": retention,
