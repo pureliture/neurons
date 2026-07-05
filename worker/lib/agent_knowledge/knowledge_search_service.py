@@ -10,6 +10,7 @@ from .llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore, Led
 from .llm_brain_core.runtime import build_runtime_brain_service
 from .memory_read_pipeline import AuthorizedMemoryReader, MemoryReadPipeline, MemorySearchQuery
 from .index_client import RetiredIndexBridgeHttpClient
+from .public_safe_util import ensure_public_safe, public_safe_text
 from .session_memory.brain_query import resolve_brain_ids, run_brain_query_v2
 from .session_memory.brain_read_model import LegacyLedgerBrainReadModel, build_semantic_recall
 
@@ -130,6 +131,25 @@ class KnowledgeSearchService:
             allow_restricted=self.allow_restricted_steward,
             allow_auto_accept=self.allow_steward_auto_accept,
         )
+
+    def append_object_review_proposal(self, proposal: dict) -> dict:
+        stored = dict(proposal)
+        ensure_public_safe(stored, "object_review_proposal")
+        return self.ledger.upsert_object_review_proposal(stored)
+
+    def object_review_proposals(self, *, project: str = "", limit: int = 20) -> dict:
+        bounded = max(1, min(int(limit), 100))
+        project_name = public_safe_text(project, max_chars=120)
+        items = self.ledger.list_object_review_proposals(project=project_name, limit=bounded)
+        response = {
+            "schema_version": "brain_review_proposals.v1",
+            "project": project_name,
+            "count": len(items),
+            "items": items,
+            "gaps": [] if items else ["review_queue_empty"],
+        }
+        ensure_public_safe(response, "object_review_proposals")
+        return response
 
     def core_brain(self, *, project: str = ""):
         return build_runtime_brain_service(

@@ -17,6 +17,7 @@ from .context_builder import (
 from .document_bridge import DisabledDocumentBridge, DocumentBridge
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
 from .models import EvidenceRequest
+from .object_packs import build_documentation_cleanup_pack
 from .source_ref import SourceRefResolver
 
 if TYPE_CHECKING:
@@ -132,6 +133,105 @@ class BrainReadService:
             "graph_results": [episode.to_dict() for episode in graph.episodes],
         }
         ensure_public_safe(result, "brain_memory_search")
+        return result
+
+    def brain_objects_query(
+        self,
+        *,
+        repository: str,
+        branch: str,
+        query: str,
+        current_files: list[str],
+        project: str | None = None,
+        object_types: list[str] | None = None,
+        route: str = "",
+        limit: int = 20,
+        response_mode: str = "full",
+        consumer: str = "unspecified",
+    ) -> dict[str, Any]:
+        project_name = project or project_from_repository(repository)
+        selected_route = route or _route_for_query(query)
+        pack = self.brain_context_resolve(
+            repository=repository,
+            branch=branch,
+            current_files=current_files,
+            current_request=query,
+            project=project_name,
+            limit=min(max(int(limit), 1), 20),
+            consumer=consumer,
+        ).to_dict()
+        if selected_route == "documentation_cleanup":
+            object_pack = build_documentation_cleanup_pack(
+                documents=_authority_documents(pack),
+                route=selected_route,
+                consumer=consumer,
+            )
+        else:
+            object_pack = {
+                "schema_version": "object_pack.v1",
+                "route": selected_route,
+                "objects": [],
+                "edges": [],
+                "evidence": [],
+                "lanes": {
+                    "accepted_current": [],
+                    "reference_only": [],
+                    "proposal_only": [],
+                    "archive_only": [],
+                    "derived_projection": [],
+                },
+                "verification": {"runtime_verified": [], "runtime_unverified": [], "unverified": []},
+                "recommended_actions": [],
+                "confidence": {"score": 0.0, "basis": ""},
+                "gaps": ["object_pack_route_not_implemented"],
+                "audit": {"consumer": consumer},
+            }
+        result = {
+            "schema_version": "brain_objects_query.v1",
+            "route": selected_route,
+            "response_mode": response_mode if response_mode in {"full", "compact", "degraded"} else "full",
+            "object_pack": _object_pack_view(
+                object_pack,
+                object_types=[str(item) for item in object_types or []],
+                response_mode=response_mode,
+            ),
+        }
+        ensure_public_safe(result, "brain_objects_query")
+        return result
+
+    def brain_object_explain(
+        self,
+        *,
+        object_id: str,
+        include_edges: bool = True,
+        include_evidence: bool = True,
+        response_mode: str = "full",
+    ) -> dict[str, Any]:
+        result = {
+            "schema_version": "brain_object_explain.v1",
+            "object_id": public_safe_text(object_id, max_chars=180),
+            "response_mode": response_mode if response_mode in {"full", "compact", "degraded"} else "full",
+            "object": {},
+            "edges": [] if include_edges else [],
+            "evidence": [] if include_evidence else [],
+            "gaps": ["object_store_not_configured"],
+        }
+        ensure_public_safe(result, "brain_object_explain")
+        return result
+
+    def brain_corpus_status(self, *, corpus_id: str = "", project: str = "", limit: int = 20) -> dict[str, Any]:
+        result = {
+            "schema_version": "brain_corpus_status.v1",
+            "corpus_id": public_safe_text(corpus_id, max_chars=180),
+            "project": public_safe_text(project, max_chars=120),
+            "source_count": 0,
+            "storage_modes": {},
+            "reference_object_count": 0,
+            "freshness_gaps": [],
+            "limit": min(max(int(limit), 1), 100),
+            "gaps": ["reference_corpus_store_empty"],
+        }
+        ensure_public_safe(result, "brain_corpus_status")
         return result
 
     def brain_docs_current(
@@ -410,10 +510,82 @@ def project_from_repository(repository: str) -> str:
 _project_from_repository = project_from_repository
 
 
+def _route_for_query(query: str) -> str:
+    text = str(query or "").lower()
+    if "문서" in text or "doc" in text or "stale" in text or "archive" in text:
+        return "documentation_cleanup"
+    if "merge" in text or "배포" in text or "deploy" in text:
+        return "deployment_runtime_truth"
+    if "style" in text or "스타일" in text:
+        return "code_style_preference"
+    return "authority_archive_separation"
+
+
 def _authority_documents(pack: Mapping[str, Any]) -> list[dict[str, Any]]:
     authority = pack.get("authority") if isinstance(pack.get("authority"), Mapping) else {}
     documents = authority.get("documents") if isinstance(authority.get("documents"), list) else []
     return [dict(doc) for doc in documents if isinstance(doc, Mapping)]
+
+
+def _object_pack_view(
+    pack: Mapping[str, Any],
+    *,
+    object_types: list[str],
+    response_mode: str,
+) -> dict[str, Any]:
+    view = dict(pack)
+    wanted = {item for item in object_types if item}
+    if wanted:
+        objects = [
+            dict(obj)
+            for obj in view.get("objects", [])
+            if isinstance(obj, Mapping) and str(obj.get("object_type")) in wanted
+        ]
+        object_ids = {str(obj.get("object_id")) for obj in objects}
+        view["objects"] = objects
+        lanes = view.get("lanes") if isinstance(view.get("lanes"), Mapping) else {}
+        view["lanes"] = {
+            str(lane): [
+                dict(obj)
+                for obj in lane_objects
+                if isinstance(obj, Mapping) and str(obj.get("object_id")) in object_ids
+            ]
+            for lane, lane_objects in lanes.items()
+            if isinstance(lane_objects, list)
+        }
+        view["recommended_actions"] = [
+            dict(action)
+            for action in view.get("recommended_actions", [])
+            if isinstance(action, Mapping) and str(action.get("object_id")) in object_ids
+        ]
+    audit = dict(view.get("audit") or {})
+    audit["object_type_filter"] = sorted(wanted)
+    view["audit"] = audit
+    mode = response_mode if response_mode in {"full", "compact", "degraded"} else "full"
+    if mode != "full":
+        view["objects"] = [_compact_object(obj) for obj in view.get("objects", []) if isinstance(obj, Mapping)]
+        lanes = view.get("lanes") if isinstance(view.get("lanes"), Mapping) else {}
+        view["lanes"] = {
+            str(lane): [_compact_object(obj) for obj in lane_objects if isinstance(obj, Mapping)]
+            for lane, lane_objects in lanes.items()
+            if isinstance(lane_objects, list)
+        }
+    view["response_mode"] = mode
+    return view
+
+
+def _compact_object(obj: Mapping[str, Any]) -> dict[str, Any]:
+    keep = [
+        "object_id",
+        "object_type",
+        "title",
+        "lifecycle_status",
+        "authority_lane",
+        "verification_state",
+        "review_state",
+        "recommended_action",
+    ]
+    return {key: obj[key] for key in keep if key in obj}
 
 
 def _authority_workflow_contracts(pack: Mapping[str, Any]) -> list[dict[str, Any]]:

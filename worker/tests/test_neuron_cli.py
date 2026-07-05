@@ -34,6 +34,13 @@ def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
         "session-memory-quarantine-terminal-skipped",
         "session-memory-repair-zombie-snapshots",
         "brain-context-resolve",
+        "object-query",
+        "object-explain",
+        "corpus-status",
+        "corpus-ingest-plan",
+        "corpus-ingest",
+        "golden-query-eval",
+        "okf-export",
         "brain-regression-gate",
         "couchdb-migration-flow",
         "couchdb-graph-trigger",
@@ -73,6 +80,37 @@ def test_neuron_knowledge_delegates_memory_regeneration_help(capsys):
 def test_neuron_knowledge_delegates_session_private_sync_help(capsys):
     assert main(["session-memory-private-sync", "--help"]) == 0
     assert "usage: session-memory-private-sync" in capsys.readouterr().out
+
+
+def test_neuron_knowledge_corpus_ingest_production_target_denied(capsys):
+    rc = main(["corpus-ingest", "--project", "neurons", "--target", "production"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["schema_version"] == "object_substrate_cli_denied.v1"
+    assert report["status"] == "denied"
+    assert report["mutation_performed"] is False
+    assert report["reason"] == "production_corpus_ingest_requires_later_validation_goal"
+
+
+def test_neuron_knowledge_corpus_ingest_local_test_is_preview_until_store_configured(capsys):
+    rc = main(["corpus-ingest", "--project", "neurons", "--target", "local_test"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["schema_version"] == "reference_corpus_ingest.v1"
+    assert report["status"] == "planned"
+    assert report["mutation_performed"] is False
+    assert report["writes_planned"] is True
+    assert "reference_corpus_store_not_configured" in report["gaps"]
+
+
+def test_neuron_knowledge_golden_query_eval_baseline(capsys):
+    assert main(["golden-query-eval", "--baseline"]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "baseline_red"
+    assert len(report["queries"]) >= 10
 
 
 def test_neuron_knowledge_memory_regeneration_live_args_fail_closed(tmp_path, capsys):
