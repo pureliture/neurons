@@ -40,6 +40,8 @@ from agent_knowledge.mcp_server import (
     handle_jsonrpc_message,
     list_tools,
 )
+from agent_knowledge import mcp_tools
+from agent_knowledge.mcp_tools import tool_contract_registry, tool_registry, tool_names
 from agent_knowledge.session_memory.memory_card import build_memory_candidate
 from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
 from agent_knowledge.llm_brain_core.ledger_adapter import LedgerSourceRefCatalog
@@ -144,6 +146,74 @@ def test_mcp_tool_list_exposes_neuron_owned_tools():
     legacy_search = next(tool for tool in tools if tool["name"] == TOOL_NAME)
     assert "legacy external index bridge is retired" in legacy_search["description"]
     assert "brain_context_resolve" in legacy_search["description"]
+
+
+def test_mcp_tool_registry_matches_listed_tools_without_duplicate_names():
+    tools = list_tools()
+    names = [tool["name"] for tool in tools]
+    registry = tool_registry()
+
+    assert len(names) == len(set(names))
+    assert set(registry) == set(names)
+    assert tool_names() == frozenset(names)
+    for tool in tools:
+        registered = registry[tool["name"]]
+        assert registered["description"] == tool["description"]
+        assert registered["inputSchema"] == tool["inputSchema"]
+
+
+def test_mcp_tool_registry_uses_lazy_internal_cache(monkeypatch):
+    calls = 0
+    original_list_tools = mcp_tools.list_tools
+    monkeypatch.setattr(mcp_tools, "_TOOL_REGISTRY_CACHE", None)
+
+    def _counting_list_tools():
+        nonlocal calls
+        calls += 1
+        return original_list_tools()
+
+    monkeypatch.setattr(mcp_tools, "list_tools", _counting_list_tools)
+
+    first = mcp_tools.tool_registry()
+    second = mcp_tools.tool_registry()
+
+    assert calls == 1
+    assert second == first
+
+
+def test_mcp_tool_contract_registry_tracks_dispatch_ownership():
+    registry = tool_registry()
+    contracts = tool_contract_registry()
+
+    assert set(contracts) == set(registry)
+    for name, contract in contracts.items():
+        assert contract.name == name
+        assert contract.dispatch_owner
+        assert contract.to_tool() == registry[name]
+
+
+def test_mcp_public_tool_list_does_not_expose_dispatch_metadata():
+    for tool in list_tools():
+        assert "dispatch_owner" not in tool
+        assert "handler" not in tool
+
+
+def test_mcp_tool_contract_registry_fails_when_dispatch_owner_metadata_missing(monkeypatch):
+    dispatch_owners = dict(mcp_tools._DISPATCH_OWNER_BY_TOOL_NAME)
+    dispatch_owners.pop(TOOL_NAME)
+    monkeypatch.setattr(mcp_tools, "_DISPATCH_OWNER_BY_TOOL_NAME", dispatch_owners)
+
+    with pytest.raises(ValueError, match="missing dispatch owner"):
+        mcp_tools.tool_contract_registry()
+
+
+def test_mcp_tool_contract_registry_fails_when_dispatch_owner_metadata_stale(monkeypatch):
+    dispatch_owners = dict(mcp_tools._DISPATCH_OWNER_BY_TOOL_NAME)
+    dispatch_owners["stale.tool"] = "jsonrpc_brain"
+    monkeypatch.setattr(mcp_tools, "_DISPATCH_OWNER_BY_TOOL_NAME", dispatch_owners)
+
+    with pytest.raises(ValueError, match="stale"):
+        mcp_tools.tool_contract_registry()
 
 
 def test_brain_memory_search_schema_matches_repository_project_derivation():

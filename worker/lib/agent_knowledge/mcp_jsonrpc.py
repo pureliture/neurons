@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TextIO
 
 from .knowledge_search_service import KnowledgeSearchService
 from .llm_brain_core.context import project_from_repository
 from .llm_brain_core.context_builder import normalize_context_consumer
 from .llm_brain_core.models import EvidenceRequest
-from .llm_brain_core.knowledge_objects import ReviewProposal, denied_payload
-from .llm_brain_core.reference_corpus import build_corpus_ingest_plan
+from .llm_brain_core.objects.knowledge_objects import ReviewProposal, denied_payload
+from .llm_brain_core.objects.reference_corpus import build_corpus_ingest_plan
 from .mcp_tools import (
     BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
     BRAIN_CORPUS_STATUS_TOOL_NAME,
@@ -39,7 +41,9 @@ from .mcp_tools import (
     MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
     STEWARD_RESTRICTED_TOOL_NAMES,
     TOOL_NAME,
+    ToolContract,
     list_tools,
+    tool_contract_registry,
 )
 from .session_memory.brain_steward import StewardPermissionError
 
@@ -53,6 +57,29 @@ _STEWARD_TOOL_NAMES = frozenset(
         *STEWARD_RESTRICTED_TOOL_NAMES,
     }
 )
+_STEWARD_READ_PROPOSAL_TOOL_NAMES = _STEWARD_TOOL_NAMES - frozenset(STEWARD_RESTRICTED_TOOL_NAMES)
+
+ToolHandler = Callable[[dict, KnowledgeSearchService], dict]
+ToolDispatch = Callable[[str, dict, KnowledgeSearchService], dict]
+StewardReadProposalDispatch = Callable[[str, dict, object], dict]
+StewardRestrictedDispatch = Callable[[str, dict, object], dict]
+
+
+@dataclass(frozen=True)
+class ToolRuntimeContract:
+    tool_contract: ToolContract
+    handler: ToolHandler
+
+    @property
+    def name(self) -> str:
+        return self.tool_contract.name
+
+    @property
+    def dispatch_owner(self) -> str:
+        return self.tool_contract.dispatch_owner
+
+    def to_tool(self) -> dict:
+        return self.tool_contract.to_tool()
 
 
 def handle_jsonrpc_message(message: dict, service: KnowledgeSearchService) -> dict | None:
@@ -111,186 +138,312 @@ def run_stdio_server(
 def dispatch_tool_call(params: dict, service: KnowledgeSearchService) -> dict:
     tool_name = params.get("name")
     arguments = params.get("arguments") or {}
-    if tool_name == BRAIN_CONTEXT_RESOLVE_TOOL_NAME:
-        repository = _require_non_empty_string(arguments, "repository", tool_name=tool_name)
-        branch = _require_non_empty_string(arguments, "branch", tool_name=tool_name)
-        current_request = _require_non_empty_string(arguments, "current_request", tool_name=tool_name)
-        current_files = arguments.get("current_files") or []
-        if not isinstance(current_files, list):
-            raise ValueError("current_files must be an array")
-        project = _project_arg(arguments)
-        result = service.core_brain(project=project).brain_context_resolve(
-            repository=repository,
-            branch=branch,
-            current_files=[str(item) for item in current_files],
-            current_request=current_request,
-            project=project or None,
-            limit=_bounded_limit(arguments.get("limit"), default=8, maximum=20),
-            consumer=_consumer(arguments),
-        ).to_dict(mode=_response_mode(arguments))
-        return _tool_result(result)
-    if tool_name == BRAIN_MEMORY_SEARCH_TOOL_NAME:
-        query = _require_non_empty_string(arguments, "query", tool_name=tool_name)
-        card_types = arguments.get("card_types")
-        if card_types is not None and not isinstance(card_types, list):
-            raise ValueError("card_types must be an array")
-        project = _require_project_scope(arguments, tool_name=tool_name)
-        result = service.core_brain(project=project).brain_memory_search(
-            query=query,
-            project=project,
-            card_types=[str(item) for item in card_types] if isinstance(card_types, list) else None,
-            limit=_bounded_limit(arguments.get("limit"), default=8, maximum=20),
-        )
-        return _tool_result(result)
-    if tool_name == BRAIN_INCIDENT_SEARCH_TOOL_NAME:
-        symptom = _require_non_empty_string(arguments, "symptom", tool_name=tool_name)
-        project = _project_arg(arguments)
-        result = service.core_brain(project=project).brain_incident_search(
-            symptom=symptom,
-            project=project,
-            limit=_bounded_limit(arguments.get("limit"), default=5, maximum=20),
-        )
-        return _tool_result(result)
-    if tool_name == BRAIN_DRIFT_EXPLAIN_TOOL_NAME:
-        subject = _require_non_empty_string(arguments, "subject", tool_name=tool_name)
-        project = _project_arg(arguments)
-        result = service.core_brain(project=project).brain_drift_explain(
-            subject=subject,
-            project=project,
-        )
-        return _tool_result(result)
-    if tool_name == BRAIN_PERSONA_GET_TOOL_NAME:
-        project = _project_arg(arguments)
-        result = service.core_brain(project=project).brain_persona_get(
-            project=project or None,
-            scope=str(arguments.get("scope") or "") or None,
-        )
-        return _tool_result(result)
-    if tool_name == BRAIN_PERSONA_CHECK_TOOL_NAME:
-        plan = _require_non_empty_string(arguments, "plan", tool_name=tool_name)
-        project = _project_arg(arguments)
-        result = service.core_brain(project=project).brain_persona_check(
-            plan=plan,
-            project=project or None,
-        )
-        return _tool_result(result)
-    if tool_name == BRAIN_EVIDENCE_GET_TOOL_NAME:
-        source_ref_id = _require_non_empty_string(arguments, "source_ref_id", tool_name=tool_name)
-        requesting_device_id_hash = _require_non_empty_string(
-            arguments,
-            "requesting_device_id_hash",
-            tool_name=tool_name,
-        )
-        result = service.core_brain().brain_evidence_get(
-            EvidenceRequest(
-                source_ref_id=source_ref_id,
-                requesting_device_id_hash=requesting_device_id_hash,
-                span_ref_id=str(arguments.get("span_ref_id") or ""),
-                approval_ref=str(arguments.get("approval_ref") or ""),
-                expected_content_hash=str(arguments.get("expected_content_hash") or ""),
-                max_bytes=_bounded_limit(arguments.get("max_bytes"), default=4096, maximum=65536),
-                redaction_profile=str(arguments.get("redaction_profile") or "public_safe"),
-            )
-        )
-        return _tool_result(result)
-    if tool_name == BRAIN_OBJECTS_QUERY_TOOL_NAME:
-        repository = _require_non_empty_string(arguments, "repository", tool_name=tool_name)
-        branch = _require_non_empty_string(arguments, "branch", tool_name=tool_name)
-        query = _require_non_empty_string(arguments, "query", tool_name=tool_name)
-        current_files = arguments.get("current_files") or []
-        if not isinstance(current_files, list):
-            raise ValueError("current_files must be an array")
-        object_types = arguments.get("object_types") or []
-        if not isinstance(object_types, list):
-            raise ValueError("object_types must be an array")
-        project = _project_arg(arguments)
-        result = service.core_brain(project=project).brain_objects_query(
-            repository=repository,
-            branch=branch,
-            query=query,
-            current_files=[str(item) for item in current_files],
-            project=project or None,
-            object_types=[str(item) for item in object_types],
-            route=str(arguments.get("route") or ""),
-            limit=_bounded_limit(arguments.get("limit"), default=20, maximum=50),
-            response_mode=_response_mode(arguments),
-            consumer=_consumer(arguments),
-        )
-        return _tool_result(result)
-    if tool_name == BRAIN_OBJECT_EXPLAIN_TOOL_NAME:
-        result = service.core_brain().brain_object_explain(
-            object_id=_require_non_empty_string(arguments, "object_id", tool_name=tool_name),
-            include_edges=bool(arguments.get("include_edges", True)),
-            include_evidence=bool(arguments.get("include_evidence", True)),
-            response_mode=_response_mode(arguments),
-        )
-        return _tool_result(result)
-    if tool_name == BRAIN_CORPUS_STATUS_TOOL_NAME:
-        result = service.core_brain(project=_project_arg(arguments)).brain_corpus_status(
-            corpus_id=str(arguments.get("corpus_id") or ""),
-            project=_project_arg(arguments),
-            limit=_bounded_limit(arguments.get("limit"), default=20, maximum=100),
-        )
-        return _tool_result(result)
-    if tool_name == BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME:
-        manifest = arguments.get("manifest")
-        if not isinstance(manifest, dict):
-            manifest = {"corpus_name": str(arguments.get("corpus_name") or "reference-corpus"), "sources": []}
-            if arguments.get("manifest_ref"):
-                manifest["manifest_ref"] = str(arguments.get("manifest_ref") or "")
-                manifest["gaps"] = ["manifest_ref_not_loaded"]
-        result = build_corpus_ingest_plan(
-            manifest,
-            project=_require_non_empty_string(arguments, "project", tool_name=tool_name),
-            storage_mode=str(arguments.get("storage_mode") or "metadata_only"),
-        )
-        return _tool_result(result)
-    if tool_name == BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME:
-        ledger_scope = str(arguments.get("ledger_scope") or "production")
-        if ledger_scope != "local_test":
-            return _tool_result(
-                denied_payload(
-                    tool_name,
-                    "proposal_write_requires_local_test_ledger_or_later_production_gate",
-                )
-            )
-        result = ReviewProposal.from_parts(
-            proposal_type=_require_non_empty_string(arguments, "proposal_type", tool_name=tool_name),
-            target_object_id=_require_non_empty_string(arguments, "target_object_id", tool_name=tool_name),
-            reason=_require_non_empty_string(arguments, "reason", tool_name=tool_name),
-            evidence_refs=[str(item) for item in arguments.get("evidence_refs") or []],
-            proposer=_steward_proposer(arguments),
-        ).to_dict(
-            proposal_write_performed=True,
-            proposal_write_target="local_test_ledger",
-        )
-        result["project"] = _project_arg(arguments)
-        service.append_object_review_proposal(result)
-        return _tool_result(result)
-    if tool_name == BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME:
-        return _tool_result(denied_payload(tool_name, "restricted_tool_requires_human_gate"))
-    if tool_name == BRAIN_REVIEW_PROPOSALS_TOOL_NAME:
-        result = service.object_review_proposals(
-            project=_project_arg(arguments),
-            limit=_bounded_limit(arguments.get("limit"), default=20, maximum=100),
-        )
-        return _tool_result(result)
-    if tool_name == BRAIN_QUERY_TOOL_NAME:
-        brain_id = _require_non_empty_string(arguments, "brain_id", tool_name=tool_name)
-        query = _require_non_empty_string(arguments, "query", tool_name=tool_name)
-        result = service.brain_query(
-            brain_id=brain_id,
-            query=query,
-            limit=_bounded_limit(arguments.get("limit"), default=8, maximum=10),
-        )
-        return _tool_result(result)
-    if tool_name == BRAIN_RESOLVE_TOOL_NAME:
-        result = service.brain_resolve(query=str(arguments.get("query") or ""))
-        return _tool_result(result)
-    if tool_name in _STEWARD_TOOL_NAMES:
-        return _dispatch_steward_tool(tool_name, arguments, service)
-    if tool_name != TOOL_NAME:
+    registry = tool_handler_registry()
+    handler = registry.get(tool_name)
+    if handler is None:
         raise ValueError(f"unknown tool: {tool_name}")
+    return handler(arguments, service)
+
+
+def tool_runtime_contract_registry() -> dict[str, ToolRuntimeContract]:
+    contracts = tool_contract_registry()
+    handlers = _tool_handler_candidates()
+    _validate_tool_handler_registry(handlers, expected_names=set(contracts))
+    return {
+        name: ToolRuntimeContract(tool_contract=contract, handler=handlers[name])
+        for name, contract in contracts.items()
+    }
+
+
+def tool_handler_registry() -> dict[str, ToolHandler]:
+    return {
+        name: runtime_contract.handler
+        for name, runtime_contract in tool_runtime_contract_registry().items()
+    }
+
+
+def _tool_handler_candidates() -> dict[str, ToolHandler]:
+    registry = {
+        tool_name: _bind_tool_handler(tool_name, dispatch)
+        for tool_name, dispatch in _tool_dispatch_registry().items()
+    }
+    registry.update(
+        {
+            tool_name: _bind_read_proposal_steward_handler(tool_name, dispatch)
+            for tool_name, dispatch in _steward_read_proposal_dispatch_registry().items()
+        }
+    )
+    registry.update(
+        {
+            tool_name: _bind_restricted_steward_handler(tool_name, dispatch)
+            for tool_name, dispatch in _steward_restricted_dispatch_registry().items()
+        }
+    )
+    return registry
+
+
+def _tool_dispatch_registry() -> dict[str, ToolDispatch]:
+    dispatches: tuple[tuple[str, ToolDispatch], ...] = (
+        (BRAIN_CONTEXT_RESOLVE_TOOL_NAME, _dispatch_brain_context_resolve_tool),
+        (BRAIN_MEMORY_SEARCH_TOOL_NAME, _dispatch_brain_memory_search_tool),
+        (BRAIN_INCIDENT_SEARCH_TOOL_NAME, _dispatch_brain_incident_search_tool),
+        (BRAIN_DRIFT_EXPLAIN_TOOL_NAME, _dispatch_brain_drift_explain_tool),
+        (BRAIN_PERSONA_GET_TOOL_NAME, _dispatch_brain_persona_get_tool),
+        (BRAIN_PERSONA_CHECK_TOOL_NAME, _dispatch_brain_persona_check_tool),
+        (BRAIN_EVIDENCE_GET_TOOL_NAME, _dispatch_brain_evidence_get_tool),
+        (BRAIN_OBJECTS_QUERY_TOOL_NAME, _dispatch_brain_objects_query_tool),
+        (BRAIN_OBJECT_EXPLAIN_TOOL_NAME, _dispatch_brain_object_explain_tool),
+        (BRAIN_CORPUS_STATUS_TOOL_NAME, _dispatch_brain_corpus_status_tool),
+        (BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME, _dispatch_brain_corpus_ingest_plan_tool),
+        (BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME, _dispatch_brain_object_proposal_create_tool),
+        (BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME, _dispatch_brain_object_decision_commit_tool),
+        (BRAIN_REVIEW_PROPOSALS_TOOL_NAME, _dispatch_brain_review_proposals_tool),
+        (BRAIN_QUERY_TOOL_NAME, _dispatch_brain_query_tool),
+        (BRAIN_RESOLVE_TOOL_NAME, _dispatch_brain_resolve_tool),
+        (TOOL_NAME, _dispatch_knowledge_search_tool),
+    )
+    return dict(dispatches)
+
+
+def _bind_tool_handler(tool_name: str, dispatch: ToolDispatch) -> ToolHandler:
+    def handle(arguments: dict, service: KnowledgeSearchService) -> dict:
+        return dispatch(tool_name, arguments, service)
+
+    return handle
+
+
+def _validate_tool_handler_registry(
+    registry: dict[str, ToolHandler],
+    *,
+    expected_names: set[str] | None = None,
+) -> None:
+    tool_names = expected_names or set(tool_contract_registry())
+    handler_names = set(registry)
+    missing_handlers = sorted(tool_names - handler_names)
+    if missing_handlers:
+        raise ValueError(f"MCP tools missing handlers: {missing_handlers}")
+    stale_handlers = sorted(handler_names - tool_names)
+    if stale_handlers:
+        raise ValueError(f"MCP tool handlers are stale: {stale_handlers}")
+
+
+def _dispatch_brain_context_resolve_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    repository = _require_non_empty_string(arguments, "repository", tool_name=tool_name)
+    branch = _require_non_empty_string(arguments, "branch", tool_name=tool_name)
+    current_request = _require_non_empty_string(arguments, "current_request", tool_name=tool_name)
+    current_files = arguments.get("current_files") or []
+    if not isinstance(current_files, list):
+        raise ValueError("current_files must be an array")
+    project = _project_arg(arguments)
+    result = service.core_brain(project=project).brain_context_resolve(
+        repository=repository,
+        branch=branch,
+        current_files=[str(item) for item in current_files],
+        current_request=current_request,
+        project=project or None,
+        limit=_bounded_limit(arguments.get("limit"), default=8, maximum=20),
+        consumer=_consumer(arguments),
+    ).to_dict(mode=_response_mode(arguments))
+    return _tool_result(result)
+
+
+def _dispatch_brain_memory_search_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    query = _require_non_empty_string(arguments, "query", tool_name=tool_name)
+    card_types = arguments.get("card_types")
+    if card_types is not None and not isinstance(card_types, list):
+        raise ValueError("card_types must be an array")
+    project = _require_project_scope(arguments, tool_name=tool_name)
+    result = service.core_brain(project=project).brain_memory_search(
+        query=query,
+        project=project,
+        card_types=[str(item) for item in card_types] if isinstance(card_types, list) else None,
+        limit=_bounded_limit(arguments.get("limit"), default=8, maximum=20),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_incident_search_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    symptom = _require_non_empty_string(arguments, "symptom", tool_name=tool_name)
+    project = _project_arg(arguments)
+    result = service.core_brain(project=project).brain_incident_search(
+        symptom=symptom,
+        project=project,
+        limit=_bounded_limit(arguments.get("limit"), default=5, maximum=20),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_drift_explain_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    subject = _require_non_empty_string(arguments, "subject", tool_name=tool_name)
+    project = _project_arg(arguments)
+    result = service.core_brain(project=project).brain_drift_explain(
+        subject=subject,
+        project=project,
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_persona_get_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    _ = tool_name
+    project = _project_arg(arguments)
+    result = service.core_brain(project=project).brain_persona_get(
+        project=project or None,
+        scope=str(arguments.get("scope") or "") or None,
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_persona_check_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    plan = _require_non_empty_string(arguments, "plan", tool_name=tool_name)
+    project = _project_arg(arguments)
+    result = service.core_brain(project=project).brain_persona_check(
+        plan=plan,
+        project=project or None,
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_evidence_get_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    source_ref_id = _require_non_empty_string(arguments, "source_ref_id", tool_name=tool_name)
+    requesting_device_id_hash = _require_non_empty_string(
+        arguments,
+        "requesting_device_id_hash",
+        tool_name=tool_name,
+    )
+    result = service.core_brain().brain_evidence_get(
+        EvidenceRequest(
+            source_ref_id=source_ref_id,
+            requesting_device_id_hash=requesting_device_id_hash,
+            span_ref_id=str(arguments.get("span_ref_id") or ""),
+            approval_ref=str(arguments.get("approval_ref") or ""),
+            expected_content_hash=str(arguments.get("expected_content_hash") or ""),
+            max_bytes=_bounded_limit(arguments.get("max_bytes"), default=4096, maximum=65536),
+            redaction_profile=str(arguments.get("redaction_profile") or "public_safe"),
+        )
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_objects_query_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    repository = _require_non_empty_string(arguments, "repository", tool_name=tool_name)
+    branch = _require_non_empty_string(arguments, "branch", tool_name=tool_name)
+    query = _require_non_empty_string(arguments, "query", tool_name=tool_name)
+    current_files = arguments.get("current_files") or []
+    if not isinstance(current_files, list):
+        raise ValueError("current_files must be an array")
+    object_types = arguments.get("object_types") or []
+    if not isinstance(object_types, list):
+        raise ValueError("object_types must be an array")
+    project = _project_arg(arguments)
+    result = service.core_brain(project=project).brain_objects_query(
+        repository=repository,
+        branch=branch,
+        query=query,
+        current_files=[str(item) for item in current_files],
+        project=project or None,
+        object_types=[str(item) for item in object_types],
+        route=str(arguments.get("route") or ""),
+        limit=_bounded_limit(arguments.get("limit"), default=20, maximum=50),
+        response_mode=_response_mode(arguments),
+        consumer=_consumer(arguments),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_object_explain_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    result = service.core_brain().brain_object_explain(
+        object_id=_require_non_empty_string(arguments, "object_id", tool_name=tool_name),
+        include_edges=bool(arguments.get("include_edges", True)),
+        include_evidence=bool(arguments.get("include_evidence", True)),
+        response_mode=_response_mode(arguments),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_corpus_status_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    _ = tool_name
+    project = _project_arg(arguments)
+    result = service.core_brain(project=project).brain_corpus_status(
+        corpus_id=str(arguments.get("corpus_id") or ""),
+        project=project,
+        limit=_bounded_limit(arguments.get("limit"), default=20, maximum=100),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_corpus_ingest_plan_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    _ = service
+    manifest = arguments.get("manifest")
+    if not isinstance(manifest, dict):
+        manifest = {"corpus_name": str(arguments.get("corpus_name") or "reference-corpus"), "sources": []}
+        if arguments.get("manifest_ref"):
+            manifest["manifest_ref"] = str(arguments.get("manifest_ref") or "")
+            manifest["gaps"] = ["manifest_ref_not_loaded"]
+    result = build_corpus_ingest_plan(
+        manifest,
+        project=_require_non_empty_string(arguments, "project", tool_name=tool_name),
+        storage_mode=str(arguments.get("storage_mode") or "metadata_only"),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    ledger_scope = str(arguments.get("ledger_scope") or "production")
+    if ledger_scope != "local_test":
+        return _tool_result(
+            denied_payload(
+                tool_name,
+                "proposal_write_requires_local_test_ledger_or_later_production_gate",
+            )
+        )
+    result = ReviewProposal.from_parts(
+        proposal_type=_require_non_empty_string(arguments, "proposal_type", tool_name=tool_name),
+        target_object_id=_require_non_empty_string(arguments, "target_object_id", tool_name=tool_name),
+        reason=_require_non_empty_string(arguments, "reason", tool_name=tool_name),
+        evidence_refs=[str(item) for item in arguments.get("evidence_refs") or []],
+        proposer=_steward_proposer(arguments),
+    ).to_dict(
+        proposal_write_performed=True,
+        proposal_write_target="local_test_ledger",
+    )
+    result["project"] = _project_arg(arguments)
+    service.append_object_review_proposal(result)
+    return _tool_result(result)
+
+
+def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    _ = (arguments, service)
+    return _tool_result(denied_payload(tool_name, "restricted_tool_requires_human_gate"))
+
+
+def _dispatch_brain_review_proposals_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    _ = tool_name
+    result = service.object_review_proposals(
+        project=_project_arg(arguments),
+        limit=_bounded_limit(arguments.get("limit"), default=20, maximum=100),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_query_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    brain_id = _require_non_empty_string(arguments, "brain_id", tool_name=tool_name)
+    query = _require_non_empty_string(arguments, "query", tool_name=tool_name)
+    result = service.brain_query(
+        brain_id=brain_id,
+        query=query,
+        limit=_bounded_limit(arguments.get("limit"), default=8, maximum=10),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    _ = tool_name
+    result = service.brain_resolve(query=str(arguments.get("query") or ""))
+    return _tool_result(result)
+
+
+def _dispatch_knowledge_search_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    _ = tool_name
     query = arguments.get("query")
     if not isinstance(query, str) or not query.strip():
         raise ValueError("knowledge.search requires a non-empty query")
@@ -316,88 +469,195 @@ def _steward_proposer(arguments: dict) -> str:
 
 
 def _dispatch_steward_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
-    steward = service.brain_steward()
-    if tool_name == MEMORY_AUTHORITY_PACK_READ_TOOL_NAME:
-        project = _require_project_scope(arguments, tool_name=tool_name)
-        result = steward.authority_pack_read(
-            project=project,
-            limit=_bounded_limit(arguments.get("limit"), default=8, maximum=50),
-        )
+    handler = steward_read_proposal_handler_registry().get(tool_name)
+    if handler is None:
+        handler = steward_restricted_handler_registry().get(tool_name)
+    if handler is None:
+        # 새 restricted tool 이 분기 없이 auto_accept 로직으로 흘러드는 것을 막는다.
+        raise ValueError(f"unhandled steward tool: {tool_name}")
+    return handler(arguments, service)
+
+
+def steward_read_proposal_handler_registry() -> dict[str, ToolHandler]:
+    registry = _tool_handlers_for_dispatch_owner("brain_steward")
+    _validate_read_proposal_steward_handler_registry(registry)
+    return registry
+
+
+def _steward_read_proposal_dispatch_registry() -> dict[str, StewardReadProposalDispatch]:
+    dispatches: tuple[tuple[str, StewardReadProposalDispatch], ...] = (
+        (MEMORY_AUTHORITY_PACK_READ_TOOL_NAME, _dispatch_steward_authority_pack_read_tool),
+        (MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME, _dispatch_steward_review_queue_list_tool),
+        (MEMORY_CANDIDATE_CREATE_TOOL_NAME, _dispatch_steward_candidate_create_tool),
+        (MEMORY_STALE_MARK_TOOL_NAME, _dispatch_steward_stale_mark_tool),
+        (MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME, _dispatch_steward_supersede_propose_tool),
+    )
+    return dict(dispatches)
+
+
+def _bind_read_proposal_steward_handler(tool_name: str, dispatch: StewardReadProposalDispatch) -> ToolHandler:
+    def handle(arguments: dict, service: KnowledgeSearchService) -> dict:
+        result = dispatch(tool_name, arguments, service.brain_steward())
         return _tool_result(result)
-    if tool_name == MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME:
-        result = steward.review_queue_list(
-            project=_project_arg(arguments),
-            limit=_bounded_limit(arguments.get("limit"), default=20, maximum=100),
-        )
+
+    return handle
+
+
+def _validate_read_proposal_steward_handler_registry(registry: dict[str, ToolHandler]) -> None:
+    expected = set(_STEWARD_READ_PROPOSAL_TOOL_NAMES)
+    actual = set(registry)
+    missing = sorted(expected - actual)
+    if missing:
+        raise ValueError(f"steward read/proposal tools missing handlers: {missing}")
+    stale = sorted(actual - expected)
+    if stale:
+        raise ValueError(f"steward read/proposal handlers are stale: {stale}")
+    overlap = sorted(actual & set(STEWARD_RESTRICTED_TOOL_NAMES))
+    if overlap:
+        raise ValueError(f"steward read/proposal handlers include restricted tools: {overlap}")
+
+
+def _dispatch_steward_authority_pack_read_tool(tool_name: str, arguments: dict, steward: object) -> dict:
+    project = _require_project_scope(arguments, tool_name=tool_name)
+    return steward.authority_pack_read(
+        project=project,
+        limit=_bounded_limit(arguments.get("limit"), default=8, maximum=50),
+    )
+
+
+def _dispatch_steward_review_queue_list_tool(tool_name: str, arguments: dict, steward: object) -> dict:
+    _ = tool_name
+    return steward.review_queue_list(
+        project=_project_arg(arguments),
+        limit=_bounded_limit(arguments.get("limit"), default=20, maximum=100),
+    )
+
+
+def _dispatch_steward_candidate_create_tool(tool_name: str, arguments: dict, steward: object) -> dict:
+    _ = tool_name
+    return steward.candidate_create(
+        source_span=steward.select_source_span(arguments),
+        mark_needs_review=bool(arguments.get("mark_needs_review", False)),
+        review_reason=str(arguments.get("review_reason") or ""),
+        proposer=_steward_proposer(arguments),
+    )
+
+
+def _dispatch_steward_stale_mark_tool(tool_name: str, arguments: dict, steward: object) -> dict:
+    return steward.stale_mark(
+        memory_id=_require_non_empty_string(arguments, "memory_id", tool_name=tool_name),
+        reason=_require_non_empty_string(arguments, "reason", tool_name=tool_name),
+        proposer=_steward_proposer(arguments),
+    )
+
+
+def _dispatch_steward_supersede_propose_tool(tool_name: str, arguments: dict, steward: object) -> dict:
+    return steward.supersede_propose(
+        old_memory_id=_require_non_empty_string(arguments, "old_memory_id", tool_name=tool_name),
+        source_span=steward.select_source_span(arguments),
+        proposer=_steward_proposer(arguments),
+    )
+
+
+def restricted_steward_handler_registry() -> dict[str, ToolHandler]:
+    return steward_restricted_handler_registry()
+
+
+def steward_restricted_handler_registry() -> dict[str, ToolHandler]:
+    registry = _tool_handlers_for_dispatch_owner("brain_steward_restricted")
+    _validate_restricted_steward_handler_registry(registry)
+    return registry
+
+
+def _tool_handlers_for_dispatch_owner(dispatch_owner: str) -> dict[str, ToolHandler]:
+    return {
+        name: runtime_contract.handler
+        for name, runtime_contract in tool_runtime_contract_registry().items()
+        if runtime_contract.dispatch_owner == dispatch_owner
+    }
+
+
+def _steward_restricted_dispatch_registry() -> dict[str, StewardRestrictedDispatch]:
+    dispatches: tuple[tuple[str, StewardRestrictedDispatch], ...] = (
+        (MEMORY_CANDIDATE_APPROVE_TOOL_NAME, _dispatch_steward_candidate_approve_tool),
+        (MEMORY_CANDIDATE_REJECT_TOOL_NAME, _dispatch_steward_candidate_reject_tool),
+        (MEMORY_CANDIDATE_AUTO_ACCEPT_TOOL_NAME, _dispatch_steward_candidate_auto_accept_tool),
+        (MEMORY_SUPERSEDE_COMMIT_TOOL_NAME, _dispatch_steward_supersede_commit_tool),
+        (MEMORY_STALE_COMMIT_TOOL_NAME, _dispatch_steward_stale_commit_tool),
+    )
+    return dict(dispatches)
+
+
+def _bind_restricted_steward_handler(tool_name: str, dispatch: StewardRestrictedDispatch) -> ToolHandler:
+    def handle(arguments: dict, service: KnowledgeSearchService) -> dict:
+        steward = service.brain_steward()
+        # restricted tools: 기본 권한에서는 어떤 write 도 하지 않고 거부한다.
+        try:
+            result = dispatch(tool_name, arguments, steward)
+        except StewardPermissionError:
+            # denied 계약은 service 가 소유한다(M5). dispatch 는 그대로 전달만 한다.
+            return _tool_result(steward.restricted_denied_payload(tool_name))
+        # restricted commit 은 accepted/current authority 를 바꾼다. 같은 세션 card 캐시를
+        # 무효화해 이후 core_brain() 읽기가 demote 전 snapshot 을 반환하지 않게 한다(read-after-write).
+        service.invalidate_brain_card_cache()
         return _tool_result(result)
-    if tool_name == MEMORY_CANDIDATE_CREATE_TOOL_NAME:
-        result = steward.candidate_create(
-            source_span=steward.select_source_span(arguments),
-            mark_needs_review=bool(arguments.get("mark_needs_review", False)),
-            review_reason=str(arguments.get("review_reason") or ""),
-            proposer=_steward_proposer(arguments),
-        )
-        return _tool_result(result)
-    if tool_name == MEMORY_STALE_MARK_TOOL_NAME:
-        result = steward.stale_mark(
-            memory_id=_require_non_empty_string(arguments, "memory_id", tool_name=tool_name),
-            reason=_require_non_empty_string(arguments, "reason", tool_name=tool_name),
-            proposer=_steward_proposer(arguments),
-        )
-        return _tool_result(result)
-    if tool_name == MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME:
-        result = steward.supersede_propose(
-            old_memory_id=_require_non_empty_string(arguments, "old_memory_id", tool_name=tool_name),
-            source_span=steward.select_source_span(arguments),
-            proposer=_steward_proposer(arguments),
-        )
-        return _tool_result(result)
-    # restricted tools: 기본 권한에서는 어떤 write 도 하지 않고 거부한다.
-    try:
-        if tool_name == MEMORY_CANDIDATE_APPROVE_TOOL_NAME:
-            result = steward.candidate_approve(
-                candidate_memory_id=_require_non_empty_string(arguments, "candidate_memory_id", tool_name=tool_name),
-                approved_by=_require_non_empty_string(arguments, "approved_by", tool_name=tool_name),
-                decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
-            )
-        elif tool_name == MEMORY_CANDIDATE_REJECT_TOOL_NAME:
-            result = steward.candidate_reject(
-                candidate_memory_id=_require_non_empty_string(arguments, "candidate_memory_id", tool_name=tool_name),
-                rejected_by=_require_non_empty_string(arguments, "rejected_by", tool_name=tool_name),
-                decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
-                reason=_require_non_empty_string(arguments, "reason", tool_name=tool_name),
-            )
-        elif tool_name == MEMORY_CANDIDATE_AUTO_ACCEPT_TOOL_NAME:
-            evaluation = arguments.get("evaluation")
-            if not isinstance(evaluation, dict):
-                raise ValueError("memory_candidate_auto_accept requires an evaluation object")
-            result = steward.candidate_auto_accept(
-                candidate_memory_id=_require_non_empty_string(arguments, "candidate_memory_id", tool_name=tool_name),
-                evaluation=evaluation,
-                operator_approval_ref=_require_non_empty_string(arguments, "operator_approval_ref", tool_name=tool_name),
-            )
-        elif tool_name == MEMORY_SUPERSEDE_COMMIT_TOOL_NAME:
-            result = steward.supersede_commit(
-                proposal_memory_id=_require_non_empty_string(arguments, "proposal_memory_id", tool_name=tool_name),
-                approved_by=_require_non_empty_string(arguments, "approved_by", tool_name=tool_name),
-                decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
-            )
-        elif tool_name == MEMORY_STALE_COMMIT_TOOL_NAME:
-            result = steward.stale_commit(
-                proposal_memory_id=_require_non_empty_string(arguments, "proposal_memory_id", tool_name=tool_name),
-                approved_by=_require_non_empty_string(arguments, "approved_by", tool_name=tool_name),
-                decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
-            )
-        else:
-            # 새 restricted tool 이 분기 없이 auto_accept 로직으로 흘러드는 것을 막는다.
-            raise ValueError(f"unhandled steward tool: {tool_name}")
-    except StewardPermissionError:
-        # denied 계약은 service 가 소유한다(M5). dispatch 는 그대로 전달만 한다.
-        return _tool_result(steward.restricted_denied_payload(tool_name))
-    # restricted commit 은 accepted/current authority 를 바꾼다. 같은 세션 card 캐시를
-    # 무효화해 이후 core_brain() 읽기가 demote 전 snapshot 을 반환하지 않게 한다(read-after-write).
-    service.invalidate_brain_card_cache()
-    return _tool_result(result)
+
+    return handle
+
+
+def _validate_restricted_steward_handler_registry(registry: dict[str, ToolHandler]) -> None:
+    expected = set(STEWARD_RESTRICTED_TOOL_NAMES)
+    actual = set(registry)
+    missing = sorted(expected - actual)
+    if missing:
+        raise ValueError(f"restricted steward tools missing handlers: {missing}")
+    stale = sorted(actual - expected)
+    if stale:
+        raise ValueError(f"restricted steward handlers are stale: {stale}")
+
+
+def _dispatch_steward_candidate_approve_tool(tool_name: str, arguments: dict, steward: object) -> dict:
+    return steward.candidate_approve(
+        candidate_memory_id=_require_non_empty_string(arguments, "candidate_memory_id", tool_name=tool_name),
+        approved_by=_require_non_empty_string(arguments, "approved_by", tool_name=tool_name),
+        decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
+    )
+
+
+def _dispatch_steward_candidate_reject_tool(tool_name: str, arguments: dict, steward: object) -> dict:
+    return steward.candidate_reject(
+        candidate_memory_id=_require_non_empty_string(arguments, "candidate_memory_id", tool_name=tool_name),
+        rejected_by=_require_non_empty_string(arguments, "rejected_by", tool_name=tool_name),
+        decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
+        reason=_require_non_empty_string(arguments, "reason", tool_name=tool_name),
+    )
+
+
+def _dispatch_steward_candidate_auto_accept_tool(tool_name: str, arguments: dict, steward: object) -> dict:
+    evaluation = arguments.get("evaluation")
+    if not isinstance(evaluation, dict):
+        raise ValueError("memory_candidate_auto_accept requires an evaluation object")
+    return steward.candidate_auto_accept(
+        candidate_memory_id=_require_non_empty_string(arguments, "candidate_memory_id", tool_name=tool_name),
+        evaluation=evaluation,
+        operator_approval_ref=_require_non_empty_string(arguments, "operator_approval_ref", tool_name=tool_name),
+    )
+
+
+def _dispatch_steward_supersede_commit_tool(tool_name: str, arguments: dict, steward: object) -> dict:
+    return steward.supersede_commit(
+        proposal_memory_id=_require_non_empty_string(arguments, "proposal_memory_id", tool_name=tool_name),
+        approved_by=_require_non_empty_string(arguments, "approved_by", tool_name=tool_name),
+        decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
+    )
+
+
+def _dispatch_steward_stale_commit_tool(tool_name: str, arguments: dict, steward: object) -> dict:
+    return steward.stale_commit(
+        proposal_memory_id=_require_non_empty_string(arguments, "proposal_memory_id", tool_name=tool_name),
+        approved_by=_require_non_empty_string(arguments, "approved_by", tool_name=tool_name),
+        decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
+    )
 
 
 def _bounded_limit(value, *, default: int, maximum: int) -> int:
