@@ -62,14 +62,20 @@ main() {
           last_build="$now"
         fi
         if [ "$minute_of_day" -ge $((2 * 60 + 15)) ] && [ "$last_bf" != "$day" ]; then
-          run_backfill || echo "[scheduler] backfill rc=$?"
-          last_bf="$day"
-          write_day_stamp "$last_bf_stamp" "$day"
+          if run_backfill; then
+            last_bf="$day"
+            write_day_stamp "$last_bf_stamp" "$day"
+          else
+            echo "[scheduler] backfill rc=$?"
+          fi
         fi
         if [ "$minute_of_day" -ge $((4 * 60 + 30)) ] && [ "$last_gc" != "$day" ]; then
-          run_gc || echo "[scheduler] gc rc=$?"
-          last_gc="$day"
-          write_day_stamp "$last_gc_stamp" "$day"
+          if run_gc; then
+            last_gc="$day"
+            write_day_stamp "$last_gc_stamp" "$day"
+          else
+            echo "[scheduler] gc rc=$?"
+          fi
         fi
         sleep "$scheduler_sleep_seconds"
       done

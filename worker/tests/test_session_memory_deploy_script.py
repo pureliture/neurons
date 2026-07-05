@@ -119,5 +119,7 @@ def test_entrypoint_daily_scheduler_uses_persisted_stamps() -> None:
     assert 'last_gc_stamp="state/session-memory-gc-last-day"' in script
     assert 'last_bf=$(read_day_stamp "$last_bf_stamp")' in script
     assert 'last_gc=$(read_day_stamp "$last_gc_stamp")' in script
+    assert "if run_backfill; then" in script
+    assert "if run_gc; then" in script
     assert 'write_day_stamp "$last_bf_stamp" "$day"' in script
     assert 'write_day_stamp "$last_gc_stamp" "$day"' in script
