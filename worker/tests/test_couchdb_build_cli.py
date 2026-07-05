@@ -110,6 +110,16 @@ def _write_approval(tmp_path: Path, *, argv: list[str]) -> Path:
     return p
 
 
+class CountingGetStore(InMemoryCouchDBSourceStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.get_count = 0
+
+    def get(self, doc_id: str) -> dict | None:
+        self.get_count += 1
+        return super().get(doc_id)
+
+
 # ---------------------------------------------------------------------------
 # Helper that runs main() with an InMemoryCouchDBSourceStore
 # ---------------------------------------------------------------------------
@@ -267,6 +277,24 @@ class TestSelectSessionsNeedingProjection:
         assert sid1 not in sids
         assert sid2 in sids
 
+    def test_ignores_projected_state_with_non_authoritative_id(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s1")
+        stale_state = dm.build_projection_state_document(
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            projection_status=dm.ProjectionStatus.PROJECTED,
+            session_memory_knowledge_id="index-ref-fake",
+            active_content_hash="sha256:" + "a" * 64,
+        )
+        stale_state["_id"] = "projection_state:legacy-stale-id"
+        store.put(stale_state)
+
+        selected = _select_sessions_needing_projection(store, limit=0)
+
+        assert [s.get("session_id_hash") for s in selected] == [sid]
+
     def test_limit_caps_selection(self) -> None:
         store = InMemoryCouchDBSourceStore()
         for i in range(5):
@@ -308,6 +336,18 @@ class TestSelectSessionsNeedingProjection:
             )
         }
         assert scoped == {a}
+
+    def test_selection_does_not_get_each_projected_session(self) -> None:
+        store = CountingGetStore()
+        for i in range(20):
+            sid = _build_synthetic_session(store, provider="claude", project="neurons", raw_id=f"done-{i}")
+            _mark_projected(store, sid, "claude", "neurons")
+        pending = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="pending")
+
+        selected = _select_sessions_needing_projection(store, limit=1)
+
+        assert [s.get("session_id_hash") for s in selected] == [pending]
+        assert store.get_count == 0
 
 
 # ---------------------------------------------------------------------------
