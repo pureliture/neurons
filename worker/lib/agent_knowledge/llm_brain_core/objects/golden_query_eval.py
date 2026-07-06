@@ -35,6 +35,10 @@ REQUIRED_QUALITY_AXES = [
 ACTIVATION_SCOPE_PHASES = ("P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9")
 MINIMUM_REVIEW_LOOP_PHASES = ("P2", "P3", "P4")
 PRODUCT_EVIDENCE_PHASES = ("P2", "P6", "P7", "P8", "P9")
+DEFERRED_SCOPE_GAPS = {
+    "future_phase_golden_query_slices_planned",
+    "future_phase_slices_planned",
+}
 
 _LOCAL_VALIDATED_PHASES = {"P2", "P3", "P4", "P6", "P7", "P8", "P9"}
 
@@ -1388,11 +1392,15 @@ def _activation_goal_blockers(
     blockers = [
         str(gap)
         for gap in phase_coverage.get("gaps", [])
-        if str(gap or "")
+        if str(gap or "") and str(gap) not in DEFERRED_SCOPE_GAPS
     ]
     blockers.extend(str(gap) for gap in source_gate.get("gaps", []) if str(gap or ""))
     for item in phase_progress:
-        blockers.extend(str(gap) for gap in item.get("gaps", []) if str(gap or ""))
+        blockers.extend(
+            str(gap)
+            for gap in item.get("gaps", [])
+            if str(gap or "") and str(gap) not in DEFERRED_SCOPE_GAPS
+        )
     if source_gate.get("release_quality_gate") != "green":
         blockers.append("production_quality_not_green")
     return _dedupe(blockers)

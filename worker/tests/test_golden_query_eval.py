@@ -331,6 +331,8 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert report["product_evidence_status"] == "PASS_WITH_GAPS"
     assert "production_quality_not_green" in report["goal_completion_blockers"]
     assert "live_runtime_read_path_unverified" in report["goal_completion_blockers"]
+    assert "future_phase_golden_query_slices_planned" not in report["goal_completion_blockers"]
+    assert "future_phase_slices_planned" not in report["goal_completion_blockers"]
     checks = {item["phase"]: item for item in report["product_evidence_checks"]}
     assert set(checks) == {"P2", "P6", "P7", "P8", "P9"}
     assert checks["P2"]["result"] == "PASS_WITH_GAPS"
