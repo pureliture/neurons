@@ -337,3 +337,82 @@ def test_reference_corpus_bundle_persists_to_local_test_ledger(tmp_path):
     ]
     assert status["raw_body_policy"]["return_capability"] == "denied_without_explicit_approval"
     assert status["gaps"] == []
+
+
+def test_reference_corpus_status_counts_full_store_beyond_preview_limit(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    bundle = reference_corpus_objects_from_manifest(
+        _palantir_full_count_manifest(),
+        project="neurons",
+        storage_mode="managed_snapshot",
+    )
+
+    ledger.upsert_reference_corpus_bundle(bundle, project="neurons")
+    status = ledger.reference_corpus_status(project="neurons", corpus_id=bundle["corpus"]["corpus_id"], limit=20)
+
+    assert len(status["document_sources"]) == 20
+    assert len(status["document_versions"]) == 20
+    assert len(status["document_snapshots"]) == 20
+    assert len(status["document_chunks"]) == 20
+    assert len(status["freshness_checks"]) == 20
+    assert status["source_count"] == 65
+    assert status["storage_modes"] == {"managed_snapshot": 65}
+    assert status["document_source_count"] == 65
+    assert status["version_count"] == 65
+    assert status["snapshot_count"] == 65
+    assert status["chunk_count"] == 65
+    assert status["freshness_check_count"] == 65
+    assert status["extraction_run_count"] == 1
+    assert status["first_class_store_counts"] == {
+        "document_sources": 65,
+        "document_versions": 65,
+        "document_snapshots": 65,
+        "document_chunks": 65,
+        "freshness_checks": 65,
+        "extraction_runs": 1,
+    }
+
+
+def test_reference_corpus_reingest_prunes_rows_removed_from_manifest(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    updated_manifest = _manifest()
+    updated_manifest["sources"][1] = {
+        "source_id": "palantir-ontology-003",
+        "title": "Replacement manual excerpt",
+        "source_type": "TEXT",
+        "normalized_path": "sources-normalized/palantir-ontology-003.md",
+        "content_hash": "sha256:" + "5" * 64,
+        "metadata_hash": "sha256:" + "6" * 64,
+        "summary": "Replacement source with missing URL.",
+    }
+    first = reference_corpus_objects_from_manifest(
+        _manifest(),
+        project="neurons",
+        storage_mode="managed_snapshot",
+    )
+    second = reference_corpus_objects_from_manifest(
+        updated_manifest,
+        project="neurons",
+        storage_mode="managed_snapshot",
+    )
+
+    assert second["corpus"]["corpus_id"] == first["corpus"]["corpus_id"]
+
+    ledger.upsert_reference_corpus_bundle(first, project="neurons")
+    ledger.upsert_reference_corpus_bundle(second, project="neurons")
+    status = ledger.reference_corpus_status(project="neurons", corpus_id=second["corpus"]["corpus_id"])
+
+    assert {source["natural_source_id"] for source in status["document_sources"]} == {
+        "palantir-ontology-001",
+        "palantir-ontology-003",
+    }
+    assert status["document_source_count"] == 2
+    assert status["version_count"] == 2
+    assert status["snapshot_count"] == 2
+    assert status["chunk_count"] == 2
+    assert status["freshness_check_count"] == 2
+    assert status["extraction_run_count"] == 1
+    assert status["first_class_store_counts"]["document_sources"] == 2
+    assert status["first_class_store_counts"]["document_versions"] == 2
+    assert status["first_class_store_counts"]["document_snapshots"] == 2
+    assert status["first_class_store_counts"]["document_chunks"] == 2
