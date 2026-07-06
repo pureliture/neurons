@@ -8,7 +8,7 @@ Local implementation, package-level contracts, MCP dispatch tests, CLI smoke tes
 
 P1 live production activation follow-up는 deployed HTTP MCP runtime 및 user-level configured endpoint를 검증했습니다: object-native read/proposal tools 일부가 노출되고, production proposal/decision calls는 mutation 없이 deny됩니다. 남은 gaps는 분리되어 있습니다: current Codex-session `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 branch-local source/review/readiness tools는 아직 노출하지 않으며, live MCP image가 #95 source-to-candidate activation branch를 포함하는지는 증명되지 않았습니다.
 
-PR #73 및 ops deploy-button merge 이후의 이전 recheck는 P1 object-tool availability를 뒷받침하는 historical evidence입니다. 현재 #95 continuation 기준 최신 recheck는 `PASS_WITH_GAPS`로 유지됩니다: current Codex-session `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 `deployment_runtime_truth` route는 `object_pack_route_not_implemented`를 반환했고, #95 branch-local MCP tools 및 image identity는 증명되지 않은 상태입니다.
+PR #73 및 ops deploy-button merge 이후의 이전 recheck는 P1 object-tool availability를 뒷받침하는 historical evidence입니다. 현재 #95 continuation 기준 최신 recheck는 `PASS_WITH_GAPS`로 유지됩니다: current Codex-session `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 required route smokes for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth` all returned `object_pack_route_not_implemented`, and #95 branch-local MCP tools 및 image identity는 증명되지 않은 상태입니다.
 
 PR #95 source-to-candidate activation continuation은 local/test product surface를 P6-P9까지 확장했으며, post-deploy sanitized evidence packet을 평가하는 `source-to-candidate-runtime-readiness` CLI와 `brain_source_to_candidate_runtime_readiness` MCP tool을 branch-local로 추가했습니다. 같은 surface는 `source_to_candidate_runtime_evidence_packet_template.v1` packet template도 반환해 external post-deploy runner가 채울 public-safe evidence shape를 제공합니다. PR은 draft/open이며, branch-local `neuron-knowledge object-query` CLI도 MCP `brain_objects_query`와 같은 route-aware read-side contract를 사용합니다. Local activation progress는 `product_evidence_status=PASS_WITH_GAPS`로 유지됩니다: P8 runtime evidence는 `runtime_unverified_count=1`, `runtime_verified_count=0`이므로 `PASS`가 아니라 `PASS_WITH_GAPS`입니다. Current Codex-session LBrain MCP read path는 `brain_objects_query`를 호출할 수 있지만 `deployment_runtime_truth` route는 `object_pack_route_not_implemented`를 반환했고, branch-local source/review/readiness MCP tools와 CLI route parity source는 아직 live MCP image/current session callable registry에 반영되었다고 증명되지 않았습니다. 이 branch-local command/tool smoke는 network나 production mutation을 수행하지 않습니다.
 
@@ -21,6 +21,8 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 이번 continuation은 P8/P9 runtime readiness에 `live.production.object_authority_bounded_execution` claim도 추가했습니다. 이 claim은 sanitized `production_authority_execution` evidence packet의 proposal/decision gate hash, single-object scope, read-after-write, rollback/supersession path, postcheck, and raw-private-evidence guard를 검증합니다. Evidence packet이 없으면 `bounded_production_authority_execution_unverified` gap을 반환하고, 완전한 local/fake-ledger execution packet은 `PASS`와 `production_mutation_performed=true`를 반환합니다. 이는 branch-local/sanitized evidence validation이며, 이 세션에서 live production ledger/corpus/runtime mutation을 수행했다는 뜻이 아닙니다.
 
 이번 continuation은 `live.evidence.provenance` claim도 추가했습니다. 이 claim은 evaluator의 `network_used=false`와 evidence 수집 경로의 `evidence_collection_network_used`를 분리하고, evidence packet의 collection mode, mutation scope, redaction checks를 검증합니다. Raw private evidence, secret, host topology, raw dataset/document id는 값으로 출력하지 않고 boolean guard와 gap id로만 표시합니다.
+
+Latest current-session shadow packet evaluation populated the public-safe evidence template from the configured `mcp__lbrain` read path and then evaluated it with branch-local runtime readiness. Result: `status=PASS_WITH_GAPS`, `failed_claims=[]`, `production_mutation_performed=false`, evaluator `network_used=false`, evidence-side `evidence_collection_network_used=true`, and `redaction_check=redacted_only`. Remaining gaps include missing branch-local source/review/readiness tools, missing live agent-context sections, `brain_objects_query_route_unimplemented:<route>` and `shadow_route_smoke_not_implemented:<route>` for all four required routes, expected branch commit identity unverified, production-denial smokes unverified, and bounded production authority execution unverified. This is current read-path evidence of the gap, not production readiness.
 
 ## Validated
 
@@ -296,12 +298,30 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
   - direct live runtime controller status could not be re-read from this shell, so no stronger live rollout identity evidence was captured.
   - this does not invalidate the object-native P1 tool proof, but it prevents claiming that the #73/current-main source is deployed in MCP.
 
+### live.current-session.shadow-evidence-packet
+
+- status: `PASS_WITH_GAPS`
+- evidence:
+  - current Codex-session `mcp__lbrain.brain_objects_query` was called read-only for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth`.
+  - all four route smokes returned `object_pack_route_not_implemented`.
+  - a sanitized `source_to_candidate_runtime_evidence.v1` packet was evaluated locally with expected branch commit identity left unproven.
+- result:
+  - `failed_claims=[]`
+  - `gap_count=31`
+  - missing tools include `brain_source_to_candidate_graph`, `brain_candidate_review_edit`, `brain_approval_board_decide`, and `brain_source_to_candidate_runtime_readiness`
+  - route gaps include `brain_objects_query_route_unimplemented:<route>` and `shadow_route_smoke_not_implemented:<route>` for all four required routes
+  - `production_mutation_performed=false`
+  - evaluator `network_used=false`
+  - evidence-side `evidence_collection_network_used=true`
+  - evidence provenance redaction check is `redacted_only`
+- interpretation: this packet proves the current configured read path is still behind the branch-local route/tool contract. It does not prove #95 is deployed, and it does not mutate production ledger, corpus, graph, or runtime state.
+
 ## Gaps
 
 - Current Codex session's `mcp__lbrain` read path can call `brain_objects_query`, but branch-local source/review/readiness tools must be deployed/reloaded before P3/P4/P9 runtime-readiness claims can be runtime-verified.
 - P1/P6/P7/P8/P9 remain `PASS_WITH_GAPS` until live `brain_objects_query` route smokes return implemented object packs for authority/archive, style/preference, temporal work recall, and deployment/runtime truth, and until P7 HTML/visualization preference route evidence is intentionally promoted into live smoke requirements.
-- P8 evidence packet template is branch-local handoff metadata only. It remains `template_only_not_runtime_evidence`; until a deployed read-path runner populates and validates a sanitized `source_to_candidate_runtime_evidence.v1` packet, it is not live proof.
-- P8 shadow collection registration artifact is branch-local request metadata only. It records the external post-deploy runner handoff shape and remains `registration_only_not_runtime_evidence`; until a sanitized evidence packet is collected, route smokes remain run-pending gaps.
+- P8 evidence packet template is branch-local handoff metadata only. It remains `template_only_not_runtime_evidence`; the latest current-session packet populated from the configured read path validates the gap state, but it is not a passing deployed-readiness packet.
+- P8 shadow collection registration artifact is branch-local request metadata only. It records the external post-deploy runner handoff shape and remains `registration_only_not_runtime_evidence`; until a deployed post-rollout runner collects a passing sanitized evidence packet, route smokes remain run-pending gaps.
 - P8 bounded production authority execution has branch-local/sanitized packet validation, but it remains a gap for production readiness until a deployed/live execution packet with postcheck and rollback/supersession evidence is attached.
 - Post-deploy runtime readiness evidence must include sanitized provenance. Missing provenance is a validation failure for injected evidence packets, and missing live evidence remains `PASS_WITH_GAPS`.
 - Live MCP image identity must move to a source revision containing PR #95 before claiming this branch's source-to-candidate activation is deployed in MCP.
