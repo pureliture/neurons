@@ -116,6 +116,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
             "raw_external_ids_returned": False,
         },
         "collection_steps": _runtime_evidence_collection_steps(),
+        "shadow_collection_requests": [_shadow_brain_objects_query_route_smoke_request()],
         "forbidden_outputs": [
             "raw_private_transcript",
             "secret_value",
@@ -132,6 +133,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
             "probe_production_no_mutation_denials": "production_denial_smokes_unverified",
             "collect_object_authority_gate_policy": "live_object_authority_gate_policy_unverified",
             "collect_evidence_provenance": "live_evidence_provenance_unverified",
+            "shadow_brain_objects_query_route_smoke": "shadow_route_smoke_collection_pending",
         },
         "expected_readiness_outcomes": {
             "no_live_evidence": "PASS_WITH_GAPS",
@@ -142,6 +144,32 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
     }
     ensure_public_safe(plan, "SourceToCandidateRuntimeEvidenceCollectionPlan")
     return plan
+
+
+def _shadow_brain_objects_query_route_smoke_request() -> dict[str, Any]:
+    return {
+        "schema_version": "source_to_candidate_runtime_shadow_collection_request.v1",
+        "request_id": "shadow_brain_objects_query_route_smoke",
+        "status": "requested",
+        "trigger": "post_deploy_route_smoke",
+        "target": "configured_deployed_mcp_read_path",
+        "routes": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
+        "required_evidence_fields": [
+            "brain_objects_query_smokes",
+            "deployed_identity",
+            "evidence_provenance",
+        ],
+        "forbidden_gap": "object_pack_route_not_implemented",
+        "expected_gap_if_not_collected": "shadow_route_smoke_collection_pending",
+        "expected_gaps_if_not_collected": [
+            f"shadow_route_smoke_collection_pending:{route}"
+            for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+        ],
+        "network_used": False,
+        "mutation_allowed": False,
+        "production_mutation_performed": False,
+        "readiness_claim": "request_only_not_live_evidence",
+    }
 
 
 def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
