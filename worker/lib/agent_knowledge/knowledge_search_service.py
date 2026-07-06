@@ -13,6 +13,7 @@ from .llm_brain_core.runtime import build_runtime_brain_service
 from .llm_brain_core.objects.extraction_pipeline import run_source_to_candidate_graph_activation_preview
 from .llm_brain_core.objects.object_packs import apply_approval_board_decisions, apply_candidate_review_edits
 from .llm_brain_core.objects.runtime_readiness import (
+    build_source_to_candidate_runtime_collected_shadow_evidence_packet,
     build_source_to_candidate_runtime_evidence_collection_plan,
     build_source_to_candidate_runtime_evidence_packet_template,
     build_source_to_candidate_runtime_readiness_report,
@@ -275,6 +276,7 @@ class KnowledgeSearchService:
         expected_commit: str = "",
         evidence_collection_plan: bool = False,
         evidence_packet_template: bool = False,
+        collect_shadow_evidence: bool = False,
         repository: str = "",
         branch: str = "",
         consumer: str = "codex",
@@ -292,6 +294,26 @@ class KnowledgeSearchService:
                 repository=repository,
                 branch=branch,
                 consumer=consumer,
+            )
+        if collect_shadow_evidence:
+            def route_runner(route: str) -> Mapping[str, Any]:
+                return self.brain_objects_query(
+                    repository=repository,
+                    branch=branch,
+                    query=f"source-to-candidate runtime readiness route smoke: {route}",
+                    current_files=[],
+                    route=route,
+                    limit=5,
+                    response_mode="full",
+                    consumer=consumer,
+                )
+
+            return build_source_to_candidate_runtime_collected_shadow_evidence_packet(
+                expected_commit=expected_commit,
+                repository=repository,
+                branch=branch,
+                consumer=consumer,
+                route_runner=route_runner,
             )
         if isinstance(normalize_shadow_evidence, Mapping):
             return build_source_to_candidate_runtime_shadow_evidence_packet(

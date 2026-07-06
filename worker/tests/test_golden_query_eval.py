@@ -341,6 +341,7 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert "p8_runtime_evidence_unverified" in checks["P8"]["gaps"]
     assert "p8_runtime_evidence_collection_plan_not_live_evidence" in checks["P8"]["gaps"]
     assert "p8_runtime_evidence_packet_template_not_live_evidence" in checks["P8"]["gaps"]
+    assert "p8_runtime_evidence_collector_not_live_evidence" in checks["P8"]["gaps"]
     assert "p8_shadow_route_smoke_collection_pending" in checks["P8"]["gaps"]
     assert "p8_shadow_route_smoke_collection_pending:deployment_runtime_truth" in checks["P8"]["gaps"]
     assert "p8_shadow_collection_run_pending" in checks["P8"]["gaps"]
@@ -410,6 +411,17 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert (
         evidence["P8"]["shadow_collection_registration_readiness_claim"]
         == "registration_only_not_runtime_evidence"
+    )
+    assert (
+        evidence["P8"]["runtime_evidence_collector_packet_schema"]
+        == "source_to_candidate_runtime_evidence.v1"
+    )
+    assert evidence["P8"]["runtime_evidence_collector_route_count"] == 4
+    assert evidence["P8"]["runtime_evidence_collector_network_used"] is False
+    assert evidence["P8"]["runtime_evidence_collector_production_mutation_performed"] is False
+    assert (
+        evidence["P8"]["runtime_evidence_collector_readiness_claim"]
+        == "collector_packet_not_live_evidence"
     )
     assert evidence["P9"]["schema_version"] == "agent_context_product_pack.v1"
     assert evidence["P9"]["section_counts"]["style_preference"] >= 1
@@ -536,6 +548,11 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "shadow_collection_registration_mutation_allowed": False,
                 "shadow_collection_registration_production_mutation_performed": False,
                 "shadow_collection_registration_readiness_claim": "registration_only_not_runtime_evidence",
+                "runtime_evidence_collector_packet_schema": "source_to_candidate_runtime_evidence.v1",
+                "runtime_evidence_collector_route_count": 4,
+                "runtime_evidence_collector_network_used": False,
+                "runtime_evidence_collector_production_mutation_performed": False,
+                "runtime_evidence_collector_readiness_claim": "collector_packet_not_live_evidence",
                 "production_mutation_performed": False,
             },
             {
@@ -559,6 +576,7 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
         "p8_runtime_verified_evidence_missing",
         "p8_runtime_evidence_collection_plan_not_live_evidence",
         "p8_runtime_evidence_packet_template_not_live_evidence",
+        "p8_runtime_evidence_collector_not_live_evidence",
         "p8_shadow_route_smoke_collection_pending",
         "p8_shadow_route_smoke_collection_pending:authority_archive_separation",
         "p8_shadow_route_smoke_collection_pending:code_style_preference",

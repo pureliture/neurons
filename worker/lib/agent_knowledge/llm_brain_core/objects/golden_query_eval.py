@@ -690,6 +690,16 @@ def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
         failures.append("p8_runtime_evidence_packet_template_fields_missing")
     if int(evidence.get("runtime_evidence_packet_template_route_count") or 0) < 1:
         failures.append("p8_runtime_evidence_packet_template_routes_missing")
+    if evidence.get("runtime_evidence_collector_packet_schema") != "source_to_candidate_runtime_evidence.v1":
+        failures.append("p8_runtime_evidence_collector_missing")
+    if int(evidence.get("runtime_evidence_collector_route_count") or 0) < 1:
+        failures.append("p8_runtime_evidence_collector_routes_missing")
+    if bool(evidence.get("runtime_evidence_collector_network_used")):
+        failures.append("p8_runtime_evidence_collector_used_network")
+    if bool(evidence.get("runtime_evidence_collector_production_mutation_performed")):
+        failures.append("p8_runtime_evidence_collector_mutated_production")
+    if evidence.get("runtime_evidence_collector_readiness_claim") != "collector_packet_not_live_evidence":
+        failures.append("p8_runtime_evidence_collector_claims_live_evidence")
     if evidence.get("shadow_route_smoke_request_schema") != "source_to_candidate_runtime_shadow_collection_request.v1":
         failures.append("p8_shadow_route_smoke_request_missing")
     if evidence.get("shadow_route_smoke_request_status") != "requested":
@@ -748,6 +758,8 @@ def _p8_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
         gaps.append("p8_runtime_evidence_collection_plan_not_live_evidence")
     if evidence.get("runtime_evidence_packet_template_readiness_claim") == "template_only_not_runtime_evidence":
         gaps.append("p8_runtime_evidence_packet_template_not_live_evidence")
+    if evidence.get("runtime_evidence_collector_readiness_claim") == "collector_packet_not_live_evidence":
+        gaps.append("p8_runtime_evidence_collector_not_live_evidence")
     if evidence.get("shadow_route_smoke_readiness_claim") == "request_only_not_live_evidence":
         gaps.append("p8_shadow_route_smoke_collection_pending")
         gaps.extend(
@@ -902,6 +914,7 @@ def _p7_preference_artifact_evidence() -> dict[str, Any]:
 def _p8_runtime_authority_evidence() -> dict[str, Any]:
     from .extraction_pipeline import run_runtime_truth_extraction_preview
     from .runtime_readiness import (
+        build_source_to_candidate_runtime_collected_shadow_evidence_packet,
         build_source_to_candidate_runtime_evidence_collection_plan,
         build_source_to_candidate_runtime_evidence_packet_template,
     )
@@ -952,6 +965,14 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
     shadow_request = shadow_requests[0] if shadow_requests else {}
     shadow_registration = collection_plan.get("shadow_collection_registration")
     shadow_registration = shadow_registration if isinstance(shadow_registration, Mapping) else {}
+    collector_packet = build_source_to_candidate_runtime_collected_shadow_evidence_packet(
+        expected_commit=expected_commit,
+        repository="pureliture/neurons",
+        branch="codex/knowledge-object-review-flow-roadmap",
+        consumer="codex",
+        route_runner=_p8_branch_local_runtime_route_smoke,
+    )
+    collector = collector_packet.get("collector") if isinstance(collector_packet.get("collector"), Mapping) else {}
     return {
         "phase": "P8",
         "schema_version": str(report.get("schema_version") or ""),
@@ -1016,8 +1037,38 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         "shadow_collection_registration_readiness_claim": str(
             shadow_registration.get("readiness_claim") or ""
         ),
+        "runtime_evidence_collector_packet_schema": str(collector_packet.get("schema_version") or ""),
+        "runtime_evidence_collector_route_count": len(collector_packet.get("brain_objects_query_smokes") or []),
+        "runtime_evidence_collector_network_used": bool(
+            (collector_packet.get("evidence_provenance") or {}).get("network_used")
+            if isinstance(collector_packet.get("evidence_provenance"), Mapping)
+            else False
+        ),
+        "runtime_evidence_collector_production_mutation_performed": bool(
+            collector_packet.get("production_mutation_performed")
+        ),
+        "runtime_evidence_collector_readiness_claim": str(collector.get("readiness_claim") or ""),
         "gaps": list(preview.get("gaps") or []),
         "production_mutation_performed": bool(report.get("production_mutation_performed")),
+    }
+
+
+def _p8_branch_local_runtime_route_smoke(route: str) -> dict[str, Any]:
+    gaps = ["runtime_evidence_unverified"] if route == "deployment_runtime_truth" else []
+    return {
+        "schema_version": "brain_objects_query.v1",
+        "route": route,
+        "production_mutation_performed": False,
+        "object_pack": {
+            "schema_version": "object_pack.v1",
+            "route": route,
+            "objects": [{"object_id": f"ko:RuntimeRoute:{route}", "object_type": "RuntimeTruth"}],
+            "edges": [],
+            "evidence": [],
+            "lanes": {"candidate": [{"object_id": f"ko:RuntimeRoute:{route}", "object_type": "RuntimeTruth"}]},
+            "recommended_actions": [{"object_id": f"ko:RuntimeRoute:{route}", "action": "request_evidence"}],
+            "gaps": gaps,
+        },
     }
 
 

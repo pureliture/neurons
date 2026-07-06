@@ -10,6 +10,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     REQUIRED_RUNTIME_TOOL_NAMES,
     build_source_to_candidate_runtime_evidence_collection_plan,
     build_source_to_candidate_runtime_evidence_packet_template,
+    build_source_to_candidate_runtime_collected_shadow_evidence_packet,
     build_source_to_candidate_runtime_readiness_report,
     build_source_to_candidate_runtime_shadow_readiness_report,
     build_source_to_candidate_runtime_shadow_evidence_packet,
@@ -1839,6 +1840,77 @@ def test_neuron_knowledge_runtime_readiness_cli_outputs_evidence_packet_template
     assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == len(
         REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
     )
+
+
+def test_runtime_readiness_collector_builds_shadow_evidence_packet_without_mutation():
+    def route_runner(route: str) -> dict:
+        return {
+            "schema_version": "brain_objects_query.v1",
+            "route": route,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": route,
+                "objects": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}],
+                "lanes": {"candidate": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}]},
+                "recommended_actions": [{"object_id": f"ko:test:{route}", "action": "request_evidence"}],
+                "gaps": [],
+            },
+            "production_mutation_performed": False,
+        }
+
+    packet = build_source_to_candidate_runtime_collected_shadow_evidence_packet(
+        repository="pureliture/neurons",
+        branch="codex/knowledge-object-review-flow-roadmap",
+        consumer="codex",
+        route_runner=route_runner,
+        tool_names=REQUIRED_RUNTIME_TOOL_NAMES,
+    )
+
+    assert packet["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert packet["production_mutation_performed"] is False
+    assert packet["collector"]["readiness_claim"] == "collector_packet_not_live_evidence"
+    assert packet["collector"]["routes_collected"] == list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    assert packet["evidence_provenance"]["collection_mode"] == "local_test_replay"
+    assert packet["evidence_provenance"]["network_used"] is False
+    assert len(packet["brain_objects_query_smokes"]) == len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    assert all(
+        "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])
+        for smoke in packet["brain_objects_query_smokes"]
+    )
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=packet)
+    assert "live.brain_objects_query.route_smokes" not in report["failed_claims"]
+
+
+def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys):
+    assert (
+        main(
+            [
+                "source-to-candidate-runtime-readiness",
+                "--collect-shadow-evidence",
+                "--repository",
+                "pureliture/neurons",
+                "--branch",
+                "codex/knowledge-object-review-flow-roadmap",
+                "--consumer",
+                "codex",
+            ]
+        )
+        == 0
+    )
+
+    packet = json.loads(capsys.readouterr().out)
+    assert packet["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert packet["production_mutation_performed"] is False
+    assert packet["collector"]["readiness_claim"] == "collector_packet_not_live_evidence"
+    assert packet["evidence_provenance"]["collection_mode"] == "local_test_replay"
+    assert packet["evidence_provenance"]["network_used"] is False
+    assert len(packet["brain_objects_query_smokes"]) == len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    assert all(
+        "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])
+        for smoke in packet["brain_objects_query_smokes"]
+    )
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=packet)
+    assert "live.brain_objects_query.route_smokes" not in report["failed_claims"]
 
 
 def test_neuron_knowledge_runtime_readiness_cli_normalizes_shadow_evidence_file(tmp_path, capsys):
