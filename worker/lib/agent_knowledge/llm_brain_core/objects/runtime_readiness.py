@@ -27,6 +27,12 @@ REQUIRED_AGENT_CONTEXT_SECTIONS = (
     "active_work",
     "required_verification",
 )
+PRODUCTION_DENIAL_CLAIMS = (
+    ("live.production.source_to_candidate_denial", "brain_source_to_candidate_graph"),
+    ("live.production.approval_board_denial", "brain_approval_board_decide"),
+    ("live.production.object_proposal_denial", "brain_object_proposal_create"),
+    ("live.production.object_decision_denial", "brain_object_decision_commit"),
+)
 
 
 def build_source_to_candidate_runtime_readiness_report(
@@ -43,16 +49,10 @@ def build_source_to_candidate_runtime_readiness_report(
         _live_agent_context_product_sections_claim(evidence),
         _live_brain_objects_query_route_smokes_claim(evidence),
         _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
-        _production_denial_claim(
-            evidence,
-            claim_id="live.production.source_to_candidate_denial",
-            tool_name="brain_source_to_candidate_graph",
-        ),
-        _production_denial_claim(
-            evidence,
-            claim_id="live.production.approval_board_denial",
-            tool_name="brain_approval_board_decide",
-        ),
+        *[
+            _production_denial_claim(evidence, claim_id=claim_id, tool_name=tool_name)
+            for claim_id, tool_name in PRODUCTION_DENIAL_CLAIMS
+        ],
     ]
     gaps = _dedupe(
         gap
@@ -227,6 +227,8 @@ def _production_denial_claim(
         payload.get("production_mutation_performed") is True
         or payload.get("mutation_performed") is True
         or payload.get("authority_write_performed") is True
+        or payload.get("proposal_write_performed") is True
+        or payload.get("decision_write_performed") is True
     )
     denied = str(payload.get("status") or payload.get("permission") or "").lower() == "denied"
     if mutation_performed or not denied:

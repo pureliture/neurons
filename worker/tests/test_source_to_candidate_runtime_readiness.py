@@ -41,6 +41,18 @@ def _sanitized_live_evidence(**overrides):
                 "production_mutation_performed": False,
                 "authority_write_performed": False,
             },
+            "brain_object_proposal_create": {
+                "status": "denied",
+                "production_mutation_performed": False,
+                "proposal_write_performed": False,
+                "authority_write_performed": False,
+            },
+            "brain_object_decision_commit": {
+                "permission": "denied",
+                "production_mutation_performed": False,
+                "decision_write_performed": False,
+                "authority_write_performed": False,
+            },
         },
         "deployed_identity": {
             "contains_expected_commit": True,
@@ -82,6 +94,8 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert claims["live.brain_objects_query.route_smokes"]["status"] == "not_validated"
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "not_validated"
     assert claims["live.production.source_to_candidate_denial"]["status"] == "not_validated"
+    assert claims["live.production.object_proposal_denial"]["status"] == "not_validated"
+    assert claims["live.production.object_decision_denial"]["status"] == "not_validated"
     assert "live_mcp_review_tools_unverified" in report["gaps"]
     assert "live_brain_objects_query_route_smokes_unverified" in report["gaps"]
     assert "live_deployed_identity_unverified" in report["gaps"]
@@ -104,6 +118,8 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "validated"
     assert claims["live.production.source_to_candidate_denial"]["status"] == "denied_as_expected"
     assert claims["live.production.approval_board_denial"]["status"] == "denied_as_expected"
+    assert claims["live.production.object_proposal_denial"]["status"] == "denied_as_expected"
+    assert claims["live.production.object_decision_denial"]["status"] == "denied_as_expected"
 
 
 def test_runtime_readiness_fails_when_live_object_query_smoke_falls_back_to_unimplemented_route():
@@ -188,6 +204,32 @@ def test_runtime_readiness_fails_when_live_agent_context_allows_mutation():
     section_claim = claims["live.agent_context.product_sections"]
     assert section_claim["status"] == "failed"
     assert "live_agent_context_mutation_allowed" in report["gaps"]
+
+
+def test_runtime_readiness_requires_proposal_and_decision_production_safety_smokes():
+    evidence = _sanitized_live_evidence(
+        production_denials={
+            "brain_source_to_candidate_graph": {
+                "status": "denied",
+                "production_mutation_performed": False,
+                "mutation_performed": False,
+            },
+            "brain_approval_board_decide": {
+                "permission": "denied",
+                "production_mutation_performed": False,
+                "authority_write_performed": False,
+            },
+        }
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "PASS_WITH_GAPS"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["live.production.object_proposal_denial"]["status"] == "not_validated"
+    assert claims["live.production.object_decision_denial"]["status"] == "not_validated"
+    assert "brain_object_proposal_create_production_denial_unverified" in report["gaps"]
+    assert "brain_object_decision_commit_production_denial_unverified" in report["gaps"]
 
 
 def test_runtime_readiness_fails_on_unexpected_production_mutation():

@@ -405,6 +405,18 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
                 "production_mutation_performed": False,
                 "authority_write_performed": False,
             },
+            BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: {
+                "status": "denied",
+                "production_mutation_performed": False,
+                "proposal_write_performed": False,
+                "authority_write_performed": False,
+            },
+            BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: {
+                "permission": "denied",
+                "production_mutation_performed": False,
+                "decision_write_performed": False,
+                "authority_write_performed": False,
+            },
         },
         "deployed_identity": {
             "contains_expected_commit": True,

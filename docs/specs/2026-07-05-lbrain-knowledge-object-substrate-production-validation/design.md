@@ -58,6 +58,7 @@ Final status:
    - verify `brain_objects_query`, `brain_object_proposal_create`, `brain_review_proposals`, and `brain_object_decision_commit`
    - verify live/readiness `brain_objects_query` route smokes include `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth`
    - verify live/readiness agent context product includes non-empty `style_preference`, `active_work`, and `required_verification` sections with mutation disabled
+   - verify live/readiness production safety claims for `brain_source_to_candidate_graph`, `brain_approval_board_decide`, `brain_object_proposal_create`, and `brain_object_decision_commit`
    - expected: local/test proposal writes to local/test ledger; production/restricted decision denies
 
 5. LBrain read-path gates
