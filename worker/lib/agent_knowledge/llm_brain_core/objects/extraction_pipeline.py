@@ -695,7 +695,7 @@ def run_pr_commit_extraction_preview(
     commit_objects = [_stable_object(_commit_object(item, repository=repository).to_dict()) for item in commits]
     test_objects = [_stable_object(_test_run_object(item, repository=repository).to_dict()) for item in test_runs]
     test_by_id = {
-        str(item.get("test_id") or item.get("id") or item.get("ref") or ""): obj
+        public_safe_text(str(item.get("test_id") or item.get("id") or item.get("ref") or ""), max_chars=160): obj
         for item, obj in zip(test_runs, test_objects, strict=False)
     }
     edges = [
