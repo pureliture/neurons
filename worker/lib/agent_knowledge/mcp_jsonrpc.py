@@ -352,7 +352,7 @@ def _dispatch_brain_objects_query_tool(tool_name: str, arguments: dict, service:
 
 
 def _dispatch_brain_object_explain_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
-    result = service.core_brain().brain_object_explain(
+    result = service.brain_object_explain(
         object_id=_require_non_empty_string(arguments, "object_id", tool_name=tool_name),
         include_edges=bool(arguments.get("include_edges", True)),
         include_evidence=bool(arguments.get("include_evidence", True)),

@@ -216,6 +216,45 @@ class KnowledgeSearchService:
         ensure_public_safe(response, "brain_objects_query_authority_overlay")
         return response
 
+    def brain_object_explain(
+        self,
+        *,
+        object_id: str,
+        include_edges: bool = True,
+        include_evidence: bool = True,
+        response_mode: str = "full",
+    ) -> dict[str, Any]:
+        safe_object_id = public_safe_text(object_id, max_chars=180)
+        result = self.core_brain().brain_object_explain(
+            object_id=safe_object_id,
+            include_edges=include_edges,
+            include_evidence=include_evidence,
+            response_mode=response_mode,
+        )
+        state = self.ledger.get_object_authority_state(safe_object_id)
+        history = self.ledger.list_object_authority_decisions(target_object_id=safe_object_id, limit=20)
+        result["decision_history"] = [dict(item) for item in history]
+        if state:
+            obj = dict(result.get("object") or {})
+            obj.setdefault("object_id", safe_object_id)
+            obj.setdefault("object_type", _object_type_from_object_id(safe_object_id))
+            obj.setdefault("title", safe_object_id)
+            obj.setdefault("summary", "Object authority state from ledger decision history.")
+            obj.setdefault("lifecycle_status", "observed")
+            obj.setdefault("authority_lane", str(state.get("previous_authority_lane") or "candidate"))
+            obj.setdefault("verification_state", "unverified")
+            obj.setdefault("review_state", "needs_review")
+            obj.setdefault("recommended_action", "review")
+            _apply_object_authority_state(obj, state)
+            result["object"] = obj
+            result["authority_state"] = _object_authority_state_view(state)
+            gaps = [str(item) for item in result.get("gaps", []) if item]
+            if "authority_state_from_ledger_only" not in gaps:
+                gaps.append("authority_state_from_ledger_only")
+            result["gaps"] = gaps
+        ensure_public_safe(result, "brain_object_explain_authority_overlay")
+        return result
+
     def core_brain(self, *, project: str = ""):
         return build_runtime_brain_service(
             project=project,
@@ -369,14 +408,18 @@ def _apply_object_authority_state(obj: dict[str, Any], state: Mapping[str, Any])
     obj["lifecycle_status"] = _lifecycle_status_for_authority_state(lane, decision_type, obj)
     obj["review_state"] = _review_state_for_authority_state(lane, obj)
     obj["recommended_action"] = _recommended_action_for_authority_state(lane, decision_type, obj)
-    obj["authority_state"] = {
+    obj["authority_state"] = _object_authority_state_view(state)
+
+
+def _object_authority_state_view(state: Mapping[str, Any]) -> dict[str, str]:
+    return {
         "schema_version": str(state.get("schema_version") or "object_authority_state.v1"),
         "source": "ledger_object_authority_state",
         "decision_id": public_safe_text(str(state.get("decision_id") or ""), max_chars=180),
         "proposal_id": public_safe_text(str(state.get("proposal_id") or ""), max_chars=180),
-        "decision_type": decision_type,
+        "decision_type": public_safe_text(str(state.get("decision_type") or ""), max_chars=120),
         "previous_authority_lane": public_safe_text(str(state.get("previous_authority_lane") or ""), max_chars=80),
-        "authority_lane": lane,
+        "authority_lane": public_safe_text(str(state.get("authority_lane") or ""), max_chars=80),
         "updated_at": public_safe_text(str(state.get("updated_at") or ""), max_chars=80),
     }
 
@@ -442,3 +485,10 @@ def _rebuild_object_lanes(object_pack: Mapping[str, Any], objects: list[dict[str
         lane = str(obj.get("authority_lane") or "reference_only")
         lanes.setdefault(lane, []).append(obj)
     return lanes
+
+
+def _object_type_from_object_id(object_id: str) -> str:
+    parts = str(object_id or "").split(":")
+    if len(parts) >= 3 and parts[0] == "ko" and parts[1]:
+        return public_safe_text(parts[1], max_chars=80)
+    return "KnowledgeObject"
