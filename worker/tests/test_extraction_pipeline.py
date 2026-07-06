@@ -7,6 +7,7 @@ from agent_knowledge.llm_brain_core.objects.extraction_pipeline import (
     run_reference_corpus_extraction_preview,
     run_repo_document_extraction_preview,
     run_runtime_truth_extraction_preview,
+    run_session_detail_extraction_preview,
     run_work_unit_extraction_preview,
 )
 
@@ -73,6 +74,8 @@ def test_extractor_registry_reports_implemented_and_gap_extractors():
     assert by_name["graph_search_projection_join"]["output_object_types"] == [
         "ProjectionHit",
     ]
+    assert by_name["session_detail"]["status"] == "implemented"
+    assert by_name["session_detail"]["output_object_types"] == ["Session"]
 
 
 def test_reference_corpus_extraction_preview_creates_deterministic_objects_edges_and_chunk_preview():
@@ -444,6 +447,77 @@ def test_work_unit_extraction_preview_reports_gap_without_evidence():
     assert result["gaps"] == ["work_unit_evidence_missing"]
     assert result["evaluator_report"]["passes"] is False
     assert result["evaluator_report"]["failures"] == ["work_unit_evidence_missing"]
+
+
+def test_session_detail_extraction_preview_maps_session_metadata_without_raw_body():
+    result = run_session_detail_extraction_preview(
+        sessions=[
+            {
+                "session_id_hash": "session:alpha",
+                "device_id_hash": "device:one",
+                "provider": "codex",
+                "summary": "Implemented P3 extraction preview.",
+                "work_unit_id": "work:p3",
+                "evidence_refs": ["commit:edabc0a", "pytest:worker"],
+            },
+            {
+                "session_id_hash": "session:beta",
+                "device_id_hash": "device:one",
+                "provider": "codex",
+                "summary": "Verified projection join preview.",
+                "work_unit_id": "work:p3",
+                "evidence_refs": ["commit:52b613e"],
+            },
+        ],
+        repository="neurons",
+    )
+
+    assert result["schema_version"] == "object_extraction_session_detail_preview.v1"
+    assert result["status"] == "pass"
+    assert result["production_mutation_performed"] is False
+    assert result["selected_strategy"] == "session_metadata_evidence_v1"
+    assert result["object_count"] == 2
+    assert result["edge_count"] == 5
+    assert result["evidence_count"] == 3
+    assert all(item["object_type"] == "Session" for item in result["objects"])
+    assert all(item["payload"]["raw_body_returnable"] is False for item in result["objects"])
+    assert [edge["edge_type"] for edge in result["edges"]] == [
+        "part_of_work_unit",
+        "supported_by_evidence",
+        "supported_by_evidence",
+        "part_of_work_unit",
+        "supported_by_evidence",
+    ]
+    assert result["strategy_comparison"][1]["strategy"] == "raw_session_body_inference_v1"
+    assert result["strategy_comparison"][1]["status"] == "rejected"
+    assert result["strategy_comparison"][1]["gaps"] == ["raw_session_body_forbidden"]
+    assert result["evaluator_report"]["golden_query_slice"] == "session detail extraction"
+    assert result["evaluator_report"]["passes"] is True
+
+
+def test_session_detail_extraction_preview_reports_gap_when_raw_body_is_ignored():
+    result = run_session_detail_extraction_preview(
+        sessions=[
+            {
+                "session_id_hash": "session:raw",
+                "summary": "Synthetic summary only.",
+                "raw_transcript": "synthetic body that must not be returned",
+            },
+        ],
+        repository="neurons",
+    )
+
+    assert result["status"] == "pass_with_gaps"
+    assert result["object_count"] == 1
+    assert result["edge_count"] == 0
+    assert result["evidence_count"] == 0
+    assert result["gaps"] == ["raw_session_body_ignored", "session_evidence_missing"]
+    assert "synthetic body" not in str(result)
+    assert result["evaluator_report"]["passes"] is False
+    assert result["evaluator_report"]["failures"] == [
+        "raw_session_body_ignored",
+        "session_evidence_missing",
+    ]
 
 
 def test_pr_commit_extraction_preview_maps_pr_commits_and_tests_without_runtime_inference():

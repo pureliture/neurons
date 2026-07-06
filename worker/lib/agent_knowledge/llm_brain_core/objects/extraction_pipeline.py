@@ -67,6 +67,16 @@ def build_extractor_registry_report() -> dict[str, Any]:
                 "gaps": [],
             },
             {
+                "extractor": "session_detail",
+                "version": "0.1",
+                "status": "implemented",
+                "input_object_types": ["Session"],
+                "output_object_types": ["Session"],
+                "edge_types": ["part_of_work_unit", "supported_by_evidence"],
+                "strategy_scope": "session_metadata_evidence_mapping",
+                "gaps": [],
+            },
+            {
                 "extractor": "pr_commit_detail",
                 "version": "0.1",
                 "status": "implemented",
@@ -604,6 +614,76 @@ def run_work_unit_extraction_preview(
     return result
 
 
+def run_session_detail_extraction_preview(
+    *,
+    sessions: list[Mapping[str, Any]],
+    repository: str,
+) -> dict[str, Any]:
+    objects = [_stable_object(_session_object(session, repository=repository).to_dict()) for session in sessions]
+    evidence = _session_evidence_views(sessions)
+    edges = _session_edges(sessions=sessions, objects=objects)
+    gaps = _session_detail_gaps(sessions=sessions, evidence=evidence)
+    status = "pass" if objects and not gaps else "pass_with_gaps"
+    result = {
+        "schema_version": "object_extraction_session_detail_preview.v1",
+        "status": status,
+        "repository": public_safe_text(repository, max_chars=180),
+        "selected_strategy": "session_metadata_evidence_v1",
+        "production_mutation_performed": False,
+        "objects": objects,
+        "evidence": evidence,
+        "edges": edges,
+        "object_count": len(objects),
+        "edge_count": len(edges),
+        "evidence_count": len(evidence),
+        "gaps": gaps,
+        "extraction_run": _session_extraction_run(
+            sessions=sessions,
+            object_count=len(objects),
+            edge_count=len(edges),
+            evidence_count=len(evidence),
+            gaps=gaps,
+        ),
+        "strategy_comparison": [
+            {
+                "strategy": "session_metadata_evidence_v1",
+                "scope": "session_metadata_evidence_mapping",
+                "selected": True,
+                "status": status,
+                "object_count": len(objects),
+                "edge_count": len(edges),
+                "evidence_count": len(evidence),
+                "gaps": gaps,
+            },
+            {
+                "strategy": "raw_session_body_inference_v1",
+                "scope": "session_metadata_evidence_mapping",
+                "selected": False,
+                "status": "rejected",
+                "object_count": 0,
+                "edge_count": 0,
+                "evidence_count": 0,
+                "gaps": ["raw_session_body_forbidden"],
+            },
+        ],
+        "evaluator_report": {
+            "schema_version": "object_extraction_evaluator_report.v1",
+            "golden_query_slice": "session detail extraction",
+            "passes": status == "pass",
+            "failures": [] if status == "pass" else gaps or ["session_detail_extraction_empty"],
+            "gaps": gaps,
+            "assertions": [
+                "session_objects_use_metadata_only",
+                "raw_session_body_not_returned",
+                "session_edges_preserve_evidence_refs",
+                "production_mutation_performed_false",
+            ],
+        },
+    }
+    ensure_public_safe(result, "SessionDetailExtractionPreview")
+    return result
+
+
 def run_pr_commit_extraction_preview(
     *,
     pull_request: Mapping[str, Any],
@@ -1030,6 +1110,203 @@ def _repo_document_extraction_run(
             "public_safe_preview",
         ],
     }
+
+
+def _session_object(
+    session: Mapping[str, Any],
+    *,
+    repository: str,
+) -> KnowledgeObjectEnvelope:
+    session_ref = public_safe_text(
+        str(session.get("session_id_hash") or session.get("session_ref") or session.get("id") or ""),
+        max_chars=180,
+    )
+    device_ref = public_safe_text(str(session.get("device_id_hash") or ""), max_chars=180)
+    provider = public_safe_text(str(session.get("provider") or "unknown"), max_chars=80)
+    summary = public_safe_text(str(session.get("summary") or "Session metadata."), max_chars=360)
+    work_unit_id = public_safe_text(str(session.get("work_unit_id") or ""), max_chars=180)
+    evidence_refs = _session_evidence_ids(session)
+    return KnowledgeObjectEnvelope.from_parts(
+        object_type="Session",
+        natural_key=session_ref,
+        scope={
+            "repository": public_safe_text(repository, max_chars=180),
+            "device_id_hash": device_ref,
+        },
+        title=session_ref or "Session",
+        summary=summary,
+        lifecycle_status="observed",
+        authority_lane="candidate",
+        verification_state="source_hash_verified" if evidence_refs else "unverified",
+        review_state="needs_review",
+        content_hash=hash_payload(
+            {
+                "session_ref": session_ref,
+                "device_ref": device_ref,
+                "provider": provider,
+                "summary": summary,
+                "work_unit_id": work_unit_id,
+                "evidence_refs": evidence_refs,
+            }
+        ),
+        evidence_refs=evidence_refs,
+        confidence={"score": 0.68 if evidence_refs else 0.25, "basis": "session_metadata_evidence"},
+        recommended_action="review",
+        payload={
+            "session_ref": session_ref,
+            "provider": provider,
+            "work_unit_id": work_unit_id,
+            "evidence_count": len(evidence_refs),
+            "raw_body_returnable": False,
+        },
+    )
+
+
+def _session_evidence_views(sessions: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    evidence: list[dict[str, Any]] = []
+    for session in sessions:
+        for ref in _session_evidence_ids(session):
+            if ref in seen:
+                continue
+            seen.add(ref)
+            ev = EvidenceRef.from_parts(
+                evidence_type="session_evidence",
+                authority_lane="candidate",
+                verification_state="source_hash_verified",
+                locator={"kind": "evidence_ref", "value": ref},
+                content_hash=hash_payload({"session_evidence_ref": ref}),
+                summary=f"Session evidence reference {ref}.",
+                producer={"extractor": "session_detail"},
+            )
+            evidence.append(ev.to_view())
+    return evidence
+
+
+def _session_edges(
+    *,
+    sessions: list[Mapping[str, Any]],
+    objects: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    edges: list[dict[str, Any]] = []
+    for session, obj in zip(sessions, objects, strict=False):
+        work_unit_id = public_safe_text(str(session.get("work_unit_id") or ""), max_chars=180)
+        if work_unit_id:
+            edge = KnowledgeEdge.from_parts(
+                edge_type="part_of_work_unit",
+                from_object_id=obj["object_id"],
+                to_object_id=f"work_unit:{hash_payload({'work_unit_id': work_unit_id})[7:19]}",
+                evidence_refs=obj.get("evidence_refs") or [],
+                lifecycle_status="observed",
+                authority_lane="candidate",
+                verification_state=obj["verification_state"],
+                confidence={"score": 0.66, "basis": "session_work_unit_ref"},
+                payload={"work_unit_id": work_unit_id},
+            )
+            edges.append(_stable_edge(edge.to_dict()))
+        for ref in _session_evidence_ids(session):
+            edge = KnowledgeEdge.from_parts(
+                edge_type="supported_by_evidence",
+                from_object_id=obj["object_id"],
+                to_object_id=f"evidence:{ref}",
+                evidence_refs=[ref],
+                lifecycle_status="observed",
+                authority_lane="candidate",
+                verification_state="source_hash_verified",
+                confidence={"score": 0.65, "basis": "session_evidence_ref"},
+                payload={"evidence_ref": ref},
+            )
+            edges.append(_stable_edge(edge.to_dict()))
+    return edges
+
+
+def _session_detail_gaps(
+    *,
+    sessions: list[Mapping[str, Any]],
+    evidence: list[dict[str, Any]],
+) -> list[str]:
+    gaps: list[str] = []
+    if any(_session_has_raw_body(session) for session in sessions):
+        gaps.append("raw_session_body_ignored")
+    if sessions and not evidence:
+        gaps.append("session_evidence_missing")
+    if not sessions:
+        gaps.append("session_objects_empty")
+    return gaps
+
+
+def _session_extraction_run(
+    *,
+    sessions: list[Mapping[str, Any]],
+    object_count: int,
+    edge_count: int,
+    evidence_count: int,
+    gaps: list[str],
+) -> dict[str, Any]:
+    safe_inputs = [
+        {
+            "session_id_hash": public_safe_text(
+                str(session.get("session_id_hash") or session.get("session_ref") or session.get("id") or ""),
+                max_chars=180,
+            ),
+            "device_id_hash": public_safe_text(str(session.get("device_id_hash") or ""), max_chars=180),
+            "provider": public_safe_text(str(session.get("provider") or ""), max_chars=80),
+            "summary": public_safe_text(str(session.get("summary") or ""), max_chars=360),
+            "work_unit_id": public_safe_text(str(session.get("work_unit_id") or ""), max_chars=180),
+            "evidence_refs": _session_evidence_ids(session),
+        }
+        for session in sessions
+    ]
+    input_hash = hash_payload(safe_inputs)
+    return {
+        "schema_version": "object_extraction_run_preview.v1",
+        "run_id": f"run:session-detail:{input_hash[7:19]}",
+        "status": "completed" if object_count else "blocked",
+        "input_hash": input_hash,
+        "extractor": "session_detail",
+        "extractor_version": "0.1",
+        "output_object_count": object_count,
+        "output_edge_count": edge_count,
+        "output_evidence_count": evidence_count,
+        "quality_metrics": {
+            "public_safe_scan": "pass",
+            "raw_body_return": "denied",
+            "gap_count": len(gaps),
+        },
+        "cost_estimate": {
+            "model_calls": 0,
+            "estimated_usd": 0.0,
+        },
+        "speed": {
+            "runtime_class": "local_deterministic_fixture",
+            "external_network_calls": 0,
+        },
+        "token_budget": {
+            "llm_tokens": 0,
+            "budget_required": False,
+        },
+        "debug_trace_available": True,
+        "debug_trace": [
+            "load_session_metadata",
+            "drop_raw_body_fields",
+            "map_session_objects",
+            "build_session_edges",
+            "public_safe_preview",
+        ],
+    }
+
+
+def _session_evidence_ids(session: Mapping[str, Any]) -> list[str]:
+    return [
+        public_safe_text(str(ref or ""), max_chars=180)
+        for ref in session.get("evidence_refs") or []
+        if public_safe_text(str(ref or ""), max_chars=180)
+    ]
+
+
+def _session_has_raw_body(session: Mapping[str, Any]) -> bool:
+    raw_keys = {"raw_transcript", "transcript", "raw_body", "body"}
+    return any(key in session and bool(session.get(key)) for key in raw_keys)
 
 
 def _runtime_truth_edges(
