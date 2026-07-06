@@ -133,7 +133,7 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
             title="Preference, Style, And Artifact Memory",
             golden_query_family="code style drift",
             query=GOLDEN_QUERIES[8],
-            result="in_progress",
+            result="PASS_WITH_GAPS",
             evaluator="artifact preference pack local/test preview",
             gaps=[
                 "accepted_preference_context_pack_live_unproven",
@@ -145,7 +145,7 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
             title="Runtime Truth, Security, And Deployment Authority",
             golden_query_family="pr merge and deploy truth",
             query=GOLDEN_QUERIES[4],
-            result="in_progress",
+            result="PASS_WITH_GAPS",
             evaluator="runtime authority policy local/test preview",
             gaps=[
                 "live_runtime_rollout_identity_unproven",
@@ -157,7 +157,7 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
             title="Agent Context Productization",
             golden_query_family="agent context productization",
             query=GOLDEN_QUERIES[3],
-            result="in_progress",
+            result="PASS_WITH_GAPS",
             evaluator="consumer-specific compact context pack local/test preview",
             gaps=[
                 "production_consumer_context_pack_live_unproven",

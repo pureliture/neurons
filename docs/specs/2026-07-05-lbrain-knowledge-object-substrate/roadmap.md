@@ -875,7 +875,7 @@ Delivery integration status:
 - PR #84 through PR #93 are merged into `main`.
 - Final head and merge SHAs below are GitHub delivery evidence only. They are not deploy, live runtime, or production readiness evidence.
 - P1 through P10 phase branches were cleaned up or are eligible for cleanup after merge verification.
-- This delivery record does not close the P1 configured-agent namespace gap, full source-to-candidate graph runtime wiring, P5-P9 product activation gaps, or production authority promotion gates.
+- This delivery record does not close the P1 configured-agent namespace gap, full source-to-candidate graph runtime wiring, P5 release-quality `not_green` status, P6-P9 production/live proof gaps, or production authority promotion gates.
 - Historical PR body previews and issue drafts remain in `pr-delivery-package.md`; use the delivery record below as the current SHA source.
 
 Merged PR delivery record:
