@@ -10,7 +10,7 @@ Current state:
 
 - Phase 1 substrate implementation: complete in local/test scope.
 - Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates passed, deployed HTTP MCP runtime and configured endpoint validated, current Codex session tool registry still missing object-native tools, and current-source-main image identity is not proven live.
-- P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, but the current Codex session's `mcp__lbrain` namespace still does not expose them and the live MCP image is not proven to include the #73/current-main source refactor.
+- P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, latest configured-endpoint smoke still passes with denied/no-mutation production writes, but the current Codex session's `mcp__lbrain` namespace still does not expose them and the live MCP image is not proven to include the #73/current-main source refactor.
 - Product activation: not complete; configured agent read path refresh remains required.
 - UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
 
@@ -144,9 +144,9 @@ This phase does not prove production deployment or live LBrain quality.
 
 ### P1. Production MCP Activation
 
-State: `PASS_WITH_GAPS` as of 2026-07-06.
+State: `PASS_WITH_GAPS` as of 2026-07-06 latest recheck.
 
-Deployed HTTP MCP runtime activation and configured endpoint smoke passed. Current Codex session tool-registry activation remains a gap. Current-source-main image identity is also a gap: source `origin/main` is at PR #73, while the live MCP image proof remains tied to the earlier object-native artifact.
+Deployed HTTP MCP runtime activation and configured endpoint smoke passed. The latest configured-endpoint smoke still exposes object-native tools and denies production proposal/decision mutation without writes. Current Codex session tool-registry activation remains a gap. Current-source-main image identity is also a gap: source `origin/main` is at PR #73, while the live MCP image proof remains tied to the earlier object-native artifact.
 
 Purpose:
 
@@ -172,7 +172,7 @@ Gate evidence:
 
 Current evidence summary:
 
-- live production Argo application tracks `main` and is `Synced/Healthy`
+- previous live production evidence recorded the Argo application tracking `main` and `Synced/Healthy`
 - source repo `origin/main` contains PR #73 merge commit `c3f3e34`; the P1 branch is rebased onto that commit
 - production GitOps desired state is the ops repo `main` revision `dbc6ded`
 - deployed MCP image identity is tied to source commit `c216ff4`, which contains PR #64 merge commit `7a0b6a6`
@@ -180,15 +180,18 @@ Current evidence summary:
 - live HTTP MCP `tools/list` exposes `brain_objects_query`, `brain_object_explain`, `brain_corpus_status`, `brain_corpus_ingest_plan`, `brain_object_proposal_create`, `brain_object_decision_commit`, and `brain_review_proposals`
 - live read-only `brain_objects_query` returns `brain_objects_query.v1` with `object_pack.v1`, `route=documentation_cleanup`, and explicit authority gaps
 - user-level Codex LBrain MCP config source includes object-native tools, and standalone smoke against the configured endpoint returns the same object-native tool list and read-only query shape
+- latest standalone configured-endpoint smoke after PR #73 merge still exposes all required object-native tools, returns `brain_objects_query.v1` / `object_pack.v1`, and denies production proposal/decision mutation with no authoritative memory change
 - production-scope `brain_object_proposal_create` returns denied/no-mutation
 - `brain_object_decision_commit` returns denied/no-mutation
 - no production ledger/corpus mutation was performed
 - current Codex session's `mcp__lbrain` namespace does not expose `brain_objects_query` even though the configured endpoint smoke passes; this keeps P1 at `PASS_WITH_GAPS`, not `PASS`
+- latest direct Kubernetes/Argo live status recheck could not be completed from this shell because no usable kube context, non-interactive sudo-backed kube access, or configured local Argo server address was available; this prevents upgrading GitOps desired-state evidence into a fresh live rollout identity claim
 
 Next gate:
 
 - restart or refresh the Codex LBrain MCP tool registry until the configured `mcp__lbrain` namespace exposes object-native tools directly, then rerun read-only smoke through that configured path.
 - rebuild/deploy the MCP image from current source `main` and rerun the artifact identity smoke before claiming the live MCP image includes PR #73.
+- rerun direct live Argo/Kubernetes status once an approved control-plane path is available; do not treat GitOps desired state alone as live rollout evidence.
 
 ### P2. Living Reference Corpus Store
 

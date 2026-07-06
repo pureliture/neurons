@@ -8,6 +8,12 @@ Local implementation, package-level contracts, MCP dispatch tests, CLI smoke tes
 
 P1 live production activation follow-up now validates the deployed HTTP MCP runtime and the user-level configured endpoint: object-native tools are exposed, `brain_objects_query` returns an object pack with explicit authority gaps, and production proposal/decision calls deny with no mutation. The remaining gaps are separated: the current Codex session's `mcp__lbrain` tool registry still does not expose object-native tools even though the configured endpoint smoke passes, and the live MCP image is not proven to include the #73/current-main source refactor.
 
+Latest recheck after PR #73 and the ops deploy-button merge keeps the result at
+`PASS_WITH_GAPS`: the configured endpoint still exposes object-native tools and
+denies production proposal/decision mutation, but this Codex session still has a
+stale `mcp__lbrain` callable registry and current-main MCP image identity remains
+unproven.
+
 ## Validated
 
 ### local.worker.full-regression
@@ -89,11 +95,11 @@ P1 live production activation follow-up now validates the deployed HTTP MCP runt
 ### configured.codex-endpoint.http-mcp-object-tools-loaded
 
 - status: `validated`
-- evidence: standalone MCP client smoke against the user-level Codex LBrain MCP endpoint from local config.
+- evidence: standalone MCP client smoke against the user-level Codex LBrain MCP endpoint from local config; rechecked 2026-07-06 after PR #73 was merged.
 - result:
   - configured endpoint exposes `brain_objects_query`, `brain_object_explain`, `brain_corpus_status`, `brain_corpus_ingest_plan`, `brain_object_proposal_create`, `brain_object_decision_commit`, and `brain_review_proposals`.
   - tool count: 27
-  - `brain_objects_query` returned `brain_objects_query.v1` with `object_pack.v1`, `route=documentation_cleanup`, and explicit gaps: `accepted_current documents empty`, `review_proposals_needed`.
+  - latest `brain_objects_query` smoke returned `brain_objects_query.v1` with `object_pack.v1` and `route=authority_archive_separation`.
   - production proposal and restricted decision calls returned denied/no-mutation.
 
 ### live.production.brain-objects-query
@@ -105,13 +111,15 @@ P1 live production activation follow-up now validates the deployed HTTP MCP runt
 ### live.production.deployed-version-identity
 
 - status: `validated_for_object_tools` / `gap_for_current_main_identity`
-- evidence: deployed MCP image identity, Git ancestry check, source main check, and Argo revision check.
+- evidence: deployed MCP image identity, Git ancestry check, source main check, Argo revision check, and latest GitOps desired-state recheck.
 - result:
   - source repo `origin/main` contains PR #73 merge commit `c3f3e34`.
   - production Argo application tracks ops `main`, is `Synced/Healthy`, and is at ops revision `dbc6ded`.
   - deployed MCP image source commit is `c216ff4`.
   - source commit `c216ff4` includes PR #64 merge commit `7a0b6a6`.
   - deployed MCP image identity does not prove that PR #73/current source `main` is live in the MCP image.
+  - latest ops `main` desired state still does not provide a `c3f3e34` MCP image identity; the active production overlay resource set still points the MCP workload at a pre-#73 source tag.
+  - current shell could not directly query live Kubernetes/Argo runtime status because no usable kube context or non-interactive sudo-backed kube access was available, and the local Argo CLI had no server address configured. This is not production failure evidence, but it prevents upgrading desired-state evidence into a live rollout identity claim.
 
 ## Denied As Expected
 
@@ -156,6 +164,8 @@ P1 live production activation follow-up now validates the deployed HTTP MCP runt
 - evidence:
   - source `origin/main` is at PR #73 merge commit `c3f3e34`.
   - live MCP image proof remains tied to `c216ff4`.
+  - latest GitOps desired-state recheck still does not show a `c3f3e34` MCP image.
+  - direct live K8s/Argo status could not be re-read from this shell, so no stronger live rollout identity evidence was captured.
   - this does not invalidate the object-native P1 tool proof, because `c216ff4` includes PR #64, but it prevents claiming that the #73/current-main source is deployed in MCP.
 
 ## Gaps
@@ -163,6 +173,7 @@ P1 live production activation follow-up now validates the deployed HTTP MCP runt
 - Current Codex session's `mcp__lbrain` tool registry must refresh/reload to expose object-native tools directly.
 - P1 remains `PASS_WITH_GAPS` until the agent-visible `mcp__lbrain` namespace can call `brain_objects_query` without a separate standalone MCP client probe.
 - Live MCP image identity must move to current source `main` before claiming PR #73 is deployed in MCP.
+- Direct live Kubernetes/Argo status access must be available, or equivalent redacted live evidence must be supplied, before desired-state GitOps evidence is described as live rollout evidence.
 - Reference corpus store remains not configured; local CLI correctly reports planned/no mutation rather than pretending ingest completed.
 - Golden query baseline remains red by design; future goal must evaluate the new object-pack answers against those queries after deployment.
 
