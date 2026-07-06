@@ -1,6 +1,7 @@
 from agent_knowledge.llm_brain_core.golden_query_eval import (
     GOLDEN_QUERIES,
     build_baseline_golden_query_report,
+    build_phase_golden_query_coverage_report,
     evaluate_object_pack_response,
 )
 
@@ -41,3 +42,27 @@ def test_eval_requires_lane_evidence_gap_and_recommended_action():
     assert "missing_evidence_or_gap" in failing["failures"]
     assert "missing_recommended_action" in failing["failures"]
     assert passing["passes"] is True
+
+
+def test_phase_golden_query_coverage_reports_pass_with_gaps_not_green():
+    report = build_phase_golden_query_coverage_report()
+
+    assert report["schema_version"] == "knowledge_object_phase_golden_query_coverage.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["release_quality_gate"] == "not_green"
+    phases = {item["phase"]: item for item in report["phases"]}
+    assert set(phases) >= {"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10"}
+    assert phases["P1"]["result"] == "PASS_WITH_GAPS"
+    assert phases["P4"]["golden_query_family"] == "review queue and authority promotion"
+    assert phases["P4"]["result"] == "PASS_WITH_GAPS"
+    assert phases["P4"]["required_axes"] == [
+        "object",
+        "edge",
+        "evidence",
+        "freshness",
+        "gap",
+        "recommended_action",
+    ]
+    assert "approved_production_pilot_missing" in phases["P4"]["gaps"]
+    assert phases["P6"]["result"] == "planned"
+    assert "phase_slice_not_implemented" in phases["P6"]["gaps"]
