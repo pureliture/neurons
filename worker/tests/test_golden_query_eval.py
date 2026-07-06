@@ -218,6 +218,17 @@ def test_source_to_authority_quality_gate_covers_review_approval_and_read_path_w
     assert checks["source_to_candidate_graph"]["result"] == "PASS"
     assert checks["source_to_candidate_graph"]["quality_eval"]["passes"] is True
     assert checks["candidate_review_edit"]["result"] == "PASS"
+    assert checks["candidate_review_edit"]["target_scope"] == "production"
+    assert checks["candidate_review_edit"]["mutation_mode"] == "no_mutation"
+    assert checks["candidate_review_edit"]["accepted_edit_actions"] == [
+        "update_object",
+        "add_evidence",
+        "add_edge",
+        "remove_edge",
+        "remove_evidence",
+    ]
+    assert checks["candidate_review_edit"]["updated_edge_count"] == 1
+    assert checks["candidate_review_edit"]["updated_evidence_count"] == 1
     assert checks["approval_board_local_test"]["result"] == "PASS"
     assert checks["authority_read_after_write"]["result"] == "PASS"
     assert checks["authority_read_after_write"]["quality_eval"]["passes"] is True

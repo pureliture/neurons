@@ -190,6 +190,16 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
 def build_source_to_authority_quality_gate_report() -> dict[str, Any]:
     review_pack = _source_to_authority_fixture_pack()
     candidate_object = review_pack["objects"][0]
+    original_edge = review_pack["edges"][0]
+    original_evidence = review_pack["evidence"][0]
+    replacement_evidence = EvidenceRef.from_parts(
+        evidence_type="source_freshness",
+        authority_lane="reference_only",
+        verification_state="freshness_checked",
+        locator={"kind": "relative_repo_path", "value": "docs/specs/lbrain-source-fixture-reviewed.md"},
+        content_hash=hash_payload({"fixture": "source-to-authority-quality-gate-reviewed"}),
+        summary="Reviewer-attached replacement freshness evidence.",
+    )
     product_surface_checks = _object_native_product_surface_checks()
     review_eval = evaluate_object_pack_response(
         "새 자료를 candidate object, edge, evidence로 쪼개서 review surface에 올려줘.",
@@ -207,9 +217,33 @@ def build_source_to_authority_quality_gate_report() -> dict[str, Any]:
                     "recommended_action": "promote",
                     "freshness": {"source_checked": True, "state": "freshness_checked"},
                 },
-            }
+            },
+            {
+                "action": "add_evidence",
+                "attach_to_object_id": candidate_object["object_id"],
+                "fields": {
+                    "evidence_type": "source_freshness",
+                    "locator": {"kind": "relative_repo_path", "value": "docs/specs/lbrain-source-fixture-reviewed.md"},
+                    "content_hash": hash_payload({"fixture": "source-to-authority-quality-gate-reviewed"}),
+                    "summary": "Reviewer-attached replacement freshness evidence.",
+                    "verification_state": "freshness_checked",
+                },
+            },
+            {
+                "action": "add_edge",
+                "fields": {
+                    "edge_type": "supports",
+                    "from_object_id": candidate_object["object_id"],
+                    "to_object_id": candidate_object["object_id"],
+                    "evidence_refs": [replacement_evidence.evidence_id],
+                },
+            },
+            {"action": "remove_edge", "edge_id": original_edge["edge_id"]},
+            {"action": "remove_evidence", "evidence_id": original_evidence["evidence_id"]},
         ],
         reviewer={"id": "quality-gate-reviewer"},
+        target_scope="production",
+        mutation_mode="no_mutation",
     )
     edited_pack = edit_result["updated_pack"]
     edit_eval = evaluate_object_pack_response(
@@ -270,9 +304,20 @@ def build_source_to_authority_quality_gate_report() -> dict[str, Any]:
                 edit_result["candidate_state_changed"] is True
                 and edit_result["authority_write_performed"] is False
                 and edit_result["production_mutation_performed"] is False
+                and edit_result["mutation_mode"] == "no_mutation"
+                and not edit_result["rejected_edits"]
                 and edit_eval["passes"]
             ),
             "quality_eval": edit_eval,
+            "target_scope": str(edit_result.get("target_scope") or ""),
+            "mutation_mode": str(edit_result.get("mutation_mode") or ""),
+            "accepted_edit_actions": [
+                str(item.get("action") or "")
+                for item in edit_result.get("accepted_edits", [])
+                if isinstance(item, Mapping)
+            ],
+            "updated_edge_count": len(edited_pack.get("edges") or []),
+            "updated_evidence_count": len(edited_pack.get("evidence") or []),
             "production_mutation_performed": False,
         },
         {
