@@ -359,12 +359,13 @@ Closes #<ISSUE_NUMBER>
 
 - branch: `codex/p10-ui-object-browser-defer-decision`
 - base: `codex/p9-agent-context-productization`
-- head: `4ec66b2`
+- head: verify with `git rev-parse --short codex/p10-ui-object-browser-defer-decision` immediately before PR creation; this package edits the P10 branch and therefore cannot carry a stable self-referential head SHA.
 - commits:
   - `c5389e9 P10 UI surface defer decision을 기록`
   - `b5a6f59 로드맵 PR stack delivery gap을 기록`
   - `746f15b PR delivery package를 추가`
   - `4ec66b2 PR delivery issue draft를 추가`
+  - package refresh commit(s) after `4ec66b2` update this delivery metadata only
 - diff: `2 files changed, 460 insertions(+), 2 deletions(-)`
 
 Body preview:
