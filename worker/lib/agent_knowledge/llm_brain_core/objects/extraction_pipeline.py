@@ -7,7 +7,12 @@ from ..preference_authority import preference_rule_cards_from_memory_cards
 from ..repo_style_profile import repo_style_profile_from_memory_cards
 from .golden_query_eval import evaluate_object_pack_response
 from .knowledge_objects import EvidenceRef, KnowledgeEdge, KnowledgeObjectEnvelope
-from .object_packs import build_agent_context_object_packs, build_documentation_cleanup_pack, build_runtime_truth_pack
+from .object_packs import (
+    build_agent_context_object_packs,
+    build_candidate_graph_review_pack,
+    build_documentation_cleanup_pack,
+    build_runtime_truth_pack,
+)
 from .reference_corpus import reference_corpus_objects_from_manifest
 
 
@@ -25,6 +30,16 @@ def build_extractor_registry_report() -> dict[str, Any]:
                 "edge_types": ["member_of_corpus"],
                 "strategy_scope": "reference_corpus_document_mapping",
                 "gaps": [],
+            },
+            {
+                "extractor": "source_to_candidate_graph",
+                "version": "0.1",
+                "status": "implemented",
+                "input_object_types": ["ReferenceCorpusStoreStatus"],
+                "output_object_types": ["ReferenceCorpus", "ReferenceDocument", "CandidateGraphReviewPack"],
+                "edge_types": ["member_of_corpus"],
+                "strategy_scope": "stored_reference_corpus_to_candidate_graph_review",
+                "gaps": ["live_projection_join_unproven"],
             },
             {
                 "extractor": "repo_document_cleanup",
@@ -206,6 +221,69 @@ def run_reference_corpus_extraction_preview(
         "gaps": gaps,
     }
     ensure_public_safe(result, "ObjectExtractionPreview")
+    return result
+
+
+def run_source_to_candidate_graph_activation_preview(
+    *,
+    corpus_status: Mapping[str, Any],
+    project: str,
+    consumer: str = "codex",
+) -> dict[str, Any]:
+    candidate_objects, candidate_edges, evidence = _candidate_graph_from_corpus_status(
+        corpus_status=corpus_status,
+        project=project,
+    )
+    pack = build_candidate_graph_review_pack(
+        objects=candidate_objects,
+        edges=candidate_edges,
+        evidence=evidence,
+        extractor="stored_reference_corpus_to_candidate_graph_v1",
+        consumer=consumer,
+    )
+    source_to_candidate_pass = (
+        bool(pack["lanes"]["candidate"])
+        and bool(pack["edges"])
+        and bool(pack["evidence"])
+        and pack["production_mutation_performed"] is False
+        and pack["authority_write_performed"] is False
+    )
+    review_surface_pass = bool(pack["minimal_edit_surface"]["supported"])
+    no_mutation_pass = (
+        pack["production_mutation_performed"] is False
+        and pack["authority_write_performed"] is False
+        and pack["authoritative_memory_changed"] is False
+    )
+    gaps = _source_to_candidate_activation_gaps(
+        corpus_status=corpus_status,
+        pack=pack,
+        source_to_candidate_pass=source_to_candidate_pass,
+    )
+    result = {
+        "schema_version": "source_to_candidate_graph_activation.v1",
+        "status": "PASS_WITH_GAPS" if source_to_candidate_pass else "FAIL",
+        "project": public_safe_text(project, max_chars=120),
+        "consumer": public_safe_text(consumer, max_chars=80),
+        "selected_strategy": "stored_reference_corpus_to_candidate_graph_v1",
+        "production_mutation_performed": False,
+        "ledger_mutation_performed": False,
+        "input_store": {
+            "schema_version": public_safe_text(str(corpus_status.get("schema_version") or ""), max_chars=120),
+            "corpus_id": public_safe_text(str(corpus_status.get("corpus_id") or ""), max_chars=180),
+            "source_count": int(corpus_status.get("source_count") or 0),
+            "reference_object_count": int(corpus_status.get("reference_object_count") or 0),
+            "extraction_run_count": int(corpus_status.get("extraction_run_count") or 0),
+            "storage_modes": dict(corpus_status.get("storage_modes") or {}),
+        },
+        "candidate_graph_review_pack": pack,
+        "quality_gate": {
+            "source_to_candidate_graph": "PASS" if source_to_candidate_pass else "FAIL",
+            "candidate_review_surface": "PASS" if review_surface_pass else "FAIL",
+            "authority_no_mutation": "PASS" if no_mutation_pass else "FAIL",
+        },
+        "gaps": gaps,
+    }
+    ensure_public_safe(result, "SourceToCandidateGraphActivationPreview")
     return result
 
 
@@ -1614,6 +1692,124 @@ def _corpus_object(corpus: Mapping[str, Any], *, project: str) -> KnowledgeObjec
             "source_count": int(corpus.get("source_count") or 0),
         },
     )
+
+
+def _candidate_graph_from_corpus_status(
+    *,
+    corpus_status: Mapping[str, Any],
+    project: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    sources = corpus_status.get("document_sources") if isinstance(corpus_status.get("document_sources"), list) else []
+    corpus_id = public_safe_text(str(corpus_status.get("corpus_id") or ""), max_chars=180)
+    manifest_hashes = corpus_status.get("manifest_hashes") if isinstance(corpus_status.get("manifest_hashes"), list) else []
+    corpus_hash = _candidate_content_hash(str(manifest_hashes[0] if manifest_hashes else ""), corpus_status)
+    corpus_object = KnowledgeObjectEnvelope.from_parts(
+        object_type="ReferenceCorpus",
+        natural_key=corpus_id or "reference-corpus",
+        scope={"project": project},
+        title=corpus_id or "reference corpus",
+        summary=f"Stored reference corpus with {int(corpus_status.get('source_count') or 0)} sources.",
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="source_hash_verified",
+        review_state="needs_review",
+        content_hash=corpus_hash,
+        confidence={"score": 0.66, "basis": "stored_reference_corpus_status"},
+        recommended_action="review",
+        freshness={"gaps": list(corpus_status.get("freshness_gaps") or [])},
+        payload={
+            "corpus_id": corpus_id,
+            "source_count": int(corpus_status.get("source_count") or 0),
+            "storage_modes": dict(corpus_status.get("storage_modes") or {}),
+        },
+    ).to_dict()
+    objects = [_stable_object(corpus_object)]
+    edges: list[dict[str, Any]] = []
+    evidence: list[dict[str, Any]] = []
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        source_id = public_safe_text(str(source.get("source_id") or source.get("natural_source_id") or ""), max_chars=180)
+        source_title = public_safe_text(str(source.get("title") or source_id or "reference source"), max_chars=240)
+        source_hash = _candidate_content_hash(str(source.get("content_hash") or ""), source)
+        source_url_status = public_safe_text(str(source.get("source_url_status") or ""), max_chars=80)
+        freshness_gaps = ["freshness_gap"] if source_url_status == "missing_manual_text" else []
+        ev = EvidenceRef.from_parts(
+            evidence_type="source_hash",
+            authority_lane="candidate",
+            verification_state=str(source.get("verification_state") or "source_hash_verified"),
+            locator={"kind": "reference_source_id", "value": source_id},
+            content_hash=source_hash,
+            summary=f"Stored reference source hash for {source_title}.",
+            gaps=freshness_gaps,
+        )
+        evidence.append(ev.to_view())
+        obj = KnowledgeObjectEnvelope.from_parts(
+            object_type="ReferenceDocument",
+            natural_key=source_id or source_title,
+            scope={"project": project, "corpus_id": corpus_id},
+            title=source_title,
+            summary=f"Candidate reference document from stored corpus metadata: {source_title}.",
+            lifecycle_status="proposed",
+            authority_lane="candidate",
+            verification_state=str(source.get("verification_state") or "source_hash_verified"),
+            review_state="needs_review",
+            content_hash=source_hash,
+            evidence_refs=[ev.evidence_id],
+            confidence={"score": 0.64, "basis": "stored_reference_corpus_source"},
+            recommended_action="review",
+            freshness={"state": source_url_status, "gaps": freshness_gaps},
+            payload={
+                "source_id": source_id,
+                "source_url_status": source_url_status,
+                "normalized_path_ref": public_safe_text(str(source.get("normalized_path_ref") or ""), max_chars=240),
+            },
+        ).to_dict()
+        stable_obj = _stable_object(obj)
+        objects.append(stable_obj)
+        edges.append(
+            _stable_edge(
+                KnowledgeEdge.from_parts(
+                    edge_type="member_of_corpus",
+                    from_object_id=stable_obj["object_id"],
+                    to_object_id=corpus_object["object_id"],
+                    evidence_refs=[ev.evidence_id],
+                    lifecycle_status="proposed",
+                    authority_lane="candidate",
+                    verification_state=str(source.get("verification_state") or "source_hash_verified"),
+                    confidence={"score": 0.7, "basis": "stored_reference_corpus_membership"},
+                    payload={"extractor": "stored_reference_corpus_to_candidate_graph_v1"},
+                ).to_dict()
+            )
+        )
+    return objects, edges, evidence
+
+
+def _candidate_content_hash(value: str, fallback: Mapping[str, Any]) -> str:
+    text = str(value or "")
+    if text.startswith("sha256:") and len(text) == 71:
+        return text
+    return hash_payload(fallback)
+
+
+def _source_to_candidate_activation_gaps(
+    *,
+    corpus_status: Mapping[str, Any],
+    pack: Mapping[str, Any],
+    source_to_candidate_pass: bool,
+) -> list[str]:
+    gaps = [public_safe_text(str(gap), max_chars=180) for gap in corpus_status.get("gaps") or [] if gap]
+    gaps.extend(public_safe_text(str(gap), max_chars=180) for gap in pack.get("gaps") or [] if gap)
+    if not source_to_candidate_pass:
+        gaps.append("source_to_candidate_graph_not_ready")
+    gaps.extend(
+        [
+            "live_projection_join_unproven",
+            "approval_board_runtime_integration_unproven",
+            "production_authority_write_denied",
+        ]
+    )
+    return sorted(set(gaps))
 
 
 def _stable_object(obj: Mapping[str, Any]) -> dict[str, Any]:

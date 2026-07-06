@@ -15,6 +15,7 @@ from .golden_query_eval import (
     build_phase_golden_query_coverage_report,
     build_source_to_authority_quality_gate_report,
 )
+from .extraction_pipeline import run_source_to_candidate_graph_activation_preview
 from .okf_export import build_okf_bundle
 from .object_packs import build_documentation_cleanup_pack
 from .reference_corpus import build_corpus_ingest_plan, default_corpus_policy_status, reference_corpus_objects_from_manifest
@@ -199,6 +200,62 @@ def corpus_ingest_main(argv: list[str] | None = None) -> int:
         }
     )
     return 0
+
+
+def source_to_candidate_graph_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="neuron-knowledge source-to-candidate-graph")
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--target", choices=["local_test", "production"], default="local_test")
+    parser.add_argument("--ledger", default="")
+    parser.add_argument("--corpus-id", default="")
+    parser.add_argument("--consumer", default="codex")
+    args = parser.parse_args(argv)
+    if args.target == "production":
+        _print_json(
+            {
+                "schema_version": "object_substrate_cli_denied.v1",
+                "status": "denied",
+                "reason": "production_source_to_candidate_graph_requires_later_validation_goal",
+                "mutation_performed": False,
+                "production_mutation_performed": False,
+                "network_used": False,
+            }
+        )
+        return 1
+    ledger_path = _configured_reference_corpus_ledger(args.ledger)
+    if not ledger_path:
+        _print_json(
+            {
+                "schema_version": "source_to_candidate_graph_activation.v1",
+                "status": "FAIL",
+                "project": args.project,
+                "production_mutation_performed": False,
+                "ledger_mutation_performed": False,
+                "gaps": ["reference_corpus_store_not_configured"],
+            }
+        )
+        return 1
+    ledger_file = Path(ledger_path)
+    if not ledger_file.exists():
+        _print_json(
+            {
+                "schema_version": "source_to_candidate_graph_activation.v1",
+                "status": "FAIL",
+                "project": args.project,
+                "production_mutation_performed": False,
+                "ledger_mutation_performed": False,
+                "gaps": ["reference_corpus_store_missing"],
+            }
+        )
+        return 1
+    status = Ledger(ledger_file).reference_corpus_status(project=args.project, corpus_id=args.corpus_id)
+    report = run_source_to_candidate_graph_activation_preview(
+        corpus_status=status,
+        project=args.project,
+        consumer=args.consumer,
+    )
+    _print_json(report)
+    return 0 if report["quality_gate"]["source_to_candidate_graph"] == "PASS" else 1
 
 
 def golden_query_eval_main(argv: list[str] | None = None) -> int:

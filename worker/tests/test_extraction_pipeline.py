@@ -52,6 +52,12 @@ def test_extractor_registry_reports_implemented_and_gap_extractors():
         "ReferenceCorpus",
         "ReferenceDocument",
     ]
+    assert by_name["source_to_candidate_graph"]["status"] == "implemented"
+    assert by_name["source_to_candidate_graph"]["output_object_types"] == [
+        "ReferenceCorpus",
+        "ReferenceDocument",
+        "CandidateGraphReviewPack",
+    ]
     assert by_name["repo_document_cleanup"]["status"] == "implemented"
     assert by_name["repo_document_cleanup"]["gaps"] == []
     assert by_name["runtime_truth"]["status"] == "implemented"
