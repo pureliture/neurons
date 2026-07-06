@@ -228,6 +228,36 @@ def test_neuron_knowledge_object_query_infers_deployment_route_with_runtime_gap(
     assert "object_pack_route_not_implemented" not in report["object_pack"]["gaps"]
 
 
+def test_neuron_knowledge_object_query_infers_code_change_impact_route(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--query",
+            "이 파일 바꾸면 어떤 테스트/런타임 영향 있어?",
+            "--current-file",
+            "worker/lib/agent_knowledge/llm_brain_core/objects/runtime_readiness.py",
+            "--consumer",
+            "codex",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    pack = report["object_pack"]
+    object_types = {obj["object_type"] for obj in pack["objects"]}
+    assert rc == 0
+    assert report["route"] == "code_change_impact"
+    assert pack["route"] == "code_change_impact"
+    assert {"RepoFile", "VerificationCommand", "RuntimeSurface"} <= object_types
+    assert "live_runtime_impact_unverified" in pack["gaps"]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+
+
 def test_neuron_knowledge_delegates_memory_regeneration_help(capsys):
     assert main(["memory-regeneration", "--help"]) == 0
     assert "usage: memory-regeneration" in capsys.readouterr().out

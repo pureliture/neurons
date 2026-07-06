@@ -8,6 +8,7 @@ from agent_knowledge.llm_brain_core.golden_query_eval import (
     evaluate_object_pack_response,
     evaluate_product_evidence_summary,
 )
+from agent_knowledge.llm_brain_core.object_packs import build_code_change_impact_pack
 
 
 def test_golden_query_baseline_records_current_low_quality_failures():
@@ -66,7 +67,11 @@ def test_eval_strict_axes_require_edge_freshness_and_gap_fields():
             "lanes": {"candidate": [{"object_id": "ko:Commit:change"}]},
             "edges": [{"edge_id": "ke:validated_by:test", "edge_type": "validated_by"}],
             "evidence": [{"evidence_id": "ev:test", "verification_state": "test_verified"}],
-            "verification": {"freshness_checked": [{"evidence_id": "ev:test"}]},
+            "verification": {
+                "freshness_checked": [{"evidence_id": "ev:test"}],
+                "runtime_verified": [],
+                "runtime_unverified": [{"reason": "live_runtime_impact_unverified"}],
+            },
             "gaps": [],
             "recommended_actions": [{"object_id": "ko:Commit:change", "action": "run_tests"}],
         },
@@ -160,6 +165,54 @@ def test_eval_strict_axes_require_runtime_evidence_for_runtime_claims():
     assert failing["passes"] is False
     assert "runtime_evidence_missing" in failing["failures"]
     assert passing["passes"] is True
+
+
+def test_eval_strict_axes_detect_korean_runtime_claims():
+    base_response = {
+        "route": "code_change_impact",
+        "lanes": {"candidate": [{"object_id": "ko:RuntimeSurface:lbrain"}]},
+        "edges": [{"edge_id": "ke:requires_live_evidence:lbrain", "edge_type": "requires_live_evidence"}],
+        "evidence": [{"evidence_id": "ev:test", "verification_state": "freshness_checked"}],
+        "verification": {"freshness_checked": [{"evidence_id": "ev:test"}]},
+        "gaps": [],
+        "recommended_actions": [{"object_id": "ko:RuntimeSurface:lbrain", "action": "verify_runtime"}],
+    }
+    failing = evaluate_object_pack_response(
+        GOLDEN_QUERIES[3],
+        {**base_response, "verification": {"freshness_checked": [{"evidence_id": "ev:test"}]}},
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+    passing = evaluate_object_pack_response(
+        GOLDEN_QUERIES[3],
+        {
+            **base_response,
+            "verification": {
+                "freshness_checked": [{"evidence_id": "ev:test"}],
+                "runtime_verified": [],
+                "runtime_unverified": [{"reason": "live_runtime_impact_unverified"}],
+            },
+        },
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+
+    assert failing["passes"] is False
+    assert "runtime_evidence_missing" in failing["failures"]
+    assert passing["passes"] is True
+
+
+def test_code_change_impact_pack_passes_strict_axes_with_runtime_gap():
+    pack = build_code_change_impact_pack(
+        current_files=["worker/lib/agent_knowledge/llm_brain_core/objects/runtime_readiness.py"],
+        consumer="codex",
+    )
+
+    result = evaluate_object_pack_response(
+        GOLDEN_QUERIES[3],
+        pack,
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+
+    assert result["passes"] is True
 
 
 def test_phase_golden_query_coverage_reports_pass_with_gaps_not_green():

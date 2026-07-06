@@ -12,13 +12,15 @@ PR #73 및 ops deploy-button merge 이후의 이전 recheck는 P1 object-tool av
 
 PR #95 source-to-candidate activation continuation은 local/test product surface를 P6-P9까지 확장했으며, post-deploy sanitized evidence packet을 평가하는 `source-to-candidate-runtime-readiness` CLI와 `brain_source_to_candidate_runtime_readiness` MCP tool을 branch-local로 추가했습니다. PR은 draft/open이며, branch-local `neuron-knowledge object-query` CLI도 MCP `brain_objects_query`와 같은 route-aware read-side contract를 사용합니다. Local activation progress는 `product_evidence_status=PASS_WITH_GAPS`로 유지됩니다: P8 runtime evidence는 `runtime_unverified_count=1`, `runtime_verified_count=0`이므로 `PASS`가 아니라 `PASS_WITH_GAPS`입니다. Current Codex-session LBrain MCP read path는 `brain_objects_query`를 호출할 수 있지만 `deployment_runtime_truth` route는 `object_pack_route_not_implemented`를 반환했고, branch-local source/review/readiness MCP tools와 CLI route parity source는 아직 live MCP image/current session callable registry에 반영되었다고 증명되지 않았습니다. 이 branch-local command/tool smoke는 network나 production mutation을 수행하지 않습니다.
 
+이번 continuation은 FR8 `code_change_impact` branch-local route를 추가했습니다. 해당 route는 "이 파일 바꾸면 어떤 테스트/런타임 영향 있어?"류 질문을 `RepoFile`, `VerificationCommand`, `RuntimeSurface`, `McpTool` object pack과 `validated_by`, `requires_live_evidence`, `exposes_tool` edges로 반환하고, `live_runtime_impact_unverified`, `source_freshness_unverified`, `production_mutation_forbidden` gaps를 유지합니다. 이는 local/branch evidence이며, deployed MCP image나 live runtime route proof로 승격하지 않았습니다.
+
 ## Validated
 
 ### local.worker.full-regression
 
 - status: `validated`
 - evidence: `cd worker && uv run pytest -q`
-- result: `1615 passed, 9 skipped, 1 warning`
+- result: `1621 passed, 9 skipped, 1 warning`
 - note: covers object model, reference corpus, object packs, MCP stdio, CLI, context authority, ledger area boundary, and existing worker regression surface.
 
 ### local.root.gradle
@@ -49,9 +51,11 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 - status: `validated`
 - evidence: `uv run pytest -q tests/test_neuron_cli.py`
-- result: CLI route tests pass for default `authority_archive_separation`, explicit `code_style_preference`, inferred `temporal_work_recall`, and inferred `deployment_runtime_truth`.
+- result: CLI route tests pass for default `authority_archive_separation`, explicit `code_style_preference`, inferred `temporal_work_recall`, inferred `code_change_impact`, and inferred `deployment_runtime_truth`.
 - evidence: `uv run neuron-knowledge object-query --repository pureliture/neurons --branch codex/knowledge-object-review-flow-roadmap --route deployment_runtime_truth --query '이 PR merge됐어? 배포도 됐어?' --response-mode compact --consumer codex`
 - result: returned `brain_objects_query.v1` with `object_pack.v1`, `route=deployment_runtime_truth`, `runtime_evidence_unverified`, and no `object_pack_route_not_implemented`.
+- evidence: `uv run neuron-knowledge object-query --repository pureliture/neurons --branch codex/knowledge-object-review-flow-roadmap --query '이 파일 바꾸면 어떤 테스트/런타임 영향 있어?' --current-file worker/lib/agent_knowledge/llm_brain_core/objects/runtime_readiness.py --response-mode compact --consumer codex`
+- result: returned `brain_objects_query.v1` with `object_pack.v1`, `route=code_change_impact`, object types `RepoFile`, `VerificationCommand`, `RuntimeSurface`, `McpTool`, and gaps `live_runtime_impact_unverified`, `source_freshness_unverified`, `production_mutation_forbidden`.
 - interpretation: this is branch-local CLI parity with the MCP read-side route contract. It is read-only, does not use network, does not mutate production ledger/corpus/runtime, and does not prove that the deployed MCP image has the same route implementation.
 
 ### local.cli.okf-export
@@ -91,8 +95,15 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 - status: `validated`
 - evidence: focused MCP stdio tests for `brain_objects_query`
-- result: broad authority/archive queries return context-authority object packs, style queries return preference/style object packs, and merge/deploy queries return runtime truth gap packs without `object_pack_route_not_implemented`.
+- result: broad authority/archive queries return context-authority object packs, style queries return preference/style object packs, temporal work recall queries return current-work packs, code-change-impact queries return file/test/runtime-surface impact packs, and merge/deploy queries return runtime truth gap packs without `object_pack_route_not_implemented`.
 - interpretation: this validates the branch-local MCP read path routing only. Together with `local.cli.object-query`, local CLI and branch-local MCP now share route-aware behavior, but this still does not prove the deployed MCP runtime has this branch image.
+
+### local.golden-query.fr8-code-change-impact
+
+- status: `validated`
+- evidence: `uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_keeps_fr8_route_out_of_required_live_smokes_until_deployed tests/test_golden_query_eval.py::test_eval_strict_axes_detect_korean_runtime_claims tests/test_golden_query_eval.py::test_code_change_impact_pack_passes_strict_axes_with_runtime_gap tests/test_object_packs.py::test_code_change_impact_pack_links_file_to_tests_and_runtime_surface tests/test_neuron_cli.py::test_neuron_knowledge_object_query_infers_code_change_impact_route tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_code_change_impact_route_returns_impact_pack`
+- result: `6 passed, 1 warning`
+- interpretation: FR8 local pack passes object, edge, evidence, freshness/gap, runtime-gap, and recommended-action checks while preserving local-vs-live separation. Korean `런타임` claims now trigger runtime-evidence/gap evaluation.
 
 ### local.mcp.source-to-candidate-runtime-readiness-tool
 
@@ -221,6 +232,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - reason: `live_evidence_packet_not_supplied`
 - evidence:
   - local readiness report expects read-only live `brain_objects_query` smoke for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth`.
+  - `code_change_impact` is validated only as branch-local FR8 route evidence in this slice and is not yet promoted into the required live route-smoke set.
   - current branch-local smoke did not contact live MCP and therefore reports `live_brain_objects_query_route_smokes_unverified`.
 
 ### live.production.source-to-candidate-denial-smokes
