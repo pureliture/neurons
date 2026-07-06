@@ -12,7 +12,7 @@ Current state:
 - Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates passed, deployed HTTP MCP runtime and configured endpoint validated, current Codex session tool registry still missing object-native tools, and current-source-main image identity is not proven live.
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, latest configured-endpoint smoke still passes with denied/no-mutation production writes, but the current Codex session's `mcp__lbrain` namespace still does not expose them and the live MCP image is not proven to include the #73/current-main source refactor.
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, and production-denial evidence exist, but real private Palantir manifest ingest and production ingest approval remain gaps.
-- P3 Processing And Object Extraction Pipeline: in progress; local/test reference corpus extraction preview creates deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, and blocked-extraction gaps; repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, and broader evaluator suite previews now have local/test evaluator evidence.
+- P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / local_validated; local/test reference corpus extraction preview creates deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, and blocked-extraction gaps; repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, and broader evaluator suite previews have local/test evaluator evidence; live graph/Qdrant projection join remains unproven.
 - Product activation: not complete; configured agent read path refresh remains required.
 - UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
 
@@ -264,7 +264,7 @@ Remaining gaps:
 
 ### P3. Processing And Object Extraction Pipeline
 
-State: in_progress.
+State: local_validated / PASS_WITH_GAPS.
 
 Purpose:
 
@@ -324,9 +324,15 @@ Current local/test evidence:
 - worker regression evidence: `cd worker && uv run pytest -q`
 - worker regression result: `1528 passed, 9 skipped, 1 warning`
 
+PASS_WITH_GAPS rationale:
+
+- Local/test P3 gate evidence is present for deterministic extraction, failed extraction gaps, strategy comparison, chunk preview, evaluator reports, and derived projection join authority separation.
+- The remaining live graph/Qdrant projection join proof requires configured runtime evidence and is not proven by local fixture tests.
+- This phase did not perform or claim production authority, corpus, graph, search, or deployment mutation.
+
 Remaining gaps:
 
-- P3 is not complete; only the reference corpus extraction preview, repo-document extraction preview, documentation cleanup strategy comparison, runtime truth extraction preview, preference/style extraction preview, work-unit extraction preview, session-detail extraction preview, PR/commit detail extraction preview, graph/search projection join preview, and broader evaluator suite preview slices are implemented
+- P3 is not production-complete; local/test reference corpus extraction preview, repo-document extraction preview, documentation cleanup strategy comparison, runtime truth extraction preview, preference/style extraction preview, work-unit extraction preview, session-detail extraction preview, PR/commit detail extraction preview, graph/search projection join preview, and broader evaluator suite preview slices are implemented
 - evaluator coverage is still local/test only; it covers reference corpus, repo-document cleanup, documentation cleanup, PR merge/deploy truth, preference/style, temporal work recall, session detail extraction, PR commit/test provenance, graph/search projection join, deterministic variance, and no-LLM model/prompt applicability
 - graph/search projection join is proven only for local/test fixture hits, not for a live graph/Qdrant projection surface
 - no production authority, corpus, graph, search, or deployment mutation has been performed or claimed
@@ -578,7 +584,7 @@ Current accounting:
 | P0 Local Object Substrate Foundation | `complete` | complete for local/test scope |
 | P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; deployed/configured endpoint validated, current Codex session tool registry gap remains |
 | P2 Living Reference Corpus Store | `local_validated` | `PASS_WITH_GAPS`; local/test store and status gates pass, real private manifest ingest and production approval remain gaps |
-| P3 Processing And Object Extraction Pipeline | `in_progress` | local/test reference corpus extraction preview, repo-document extraction preview, documentation cleanup strategy comparison, runtime truth extraction preview, preference/style extraction preview, work-unit extraction preview, session-detail extraction preview, PR/commit detail extraction preview, graph/search projection join preview, and broader evaluator suite preview pass; live projection join remains a gap |
+| P3 Processing And Object Extraction Pipeline | `local_validated` | `PASS_WITH_GAPS`; local/test reference corpus extraction preview, repo-document extraction preview, documentation cleanup strategy comparison, runtime truth extraction preview, preference/style extraction preview, work-unit extraction preview, session-detail extraction preview, PR/commit detail extraction preview, graph/search projection join preview, and broader evaluator suite preview pass; live projection join remains a gap |
 | P4 Review Queue And Authority Promotion | `planned` | production authority write closed |
 | P5 Continuous Golden Query Quality Gates | `planned` | baseline red exists; runs across P1-P9 |
 | P6 Session, Device, Project, And Work-Unit 360 | `planned` | object types specified, productized/live flow missing |
