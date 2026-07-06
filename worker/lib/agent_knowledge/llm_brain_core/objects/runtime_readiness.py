@@ -7,6 +7,7 @@ from .._util import ensure_public_safe, public_safe_text
 from .golden_query_eval import build_source_to_authority_quality_gate_report
 
 REQUIRED_REVIEW_TOOL_NAMES = (
+    "brain_objects_query",
     "brain_source_to_candidate_graph",
     "brain_candidate_review_edit",
     "brain_approval_board_decide",

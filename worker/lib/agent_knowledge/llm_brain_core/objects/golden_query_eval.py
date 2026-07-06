@@ -1057,6 +1057,7 @@ def _object_native_product_surface_checks() -> list[dict[str, Any]]:
     from agent_knowledge.mcp_tools import (
         BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
         BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+        BRAIN_OBJECTS_QUERY_TOOL_NAME,
         BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
         BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
         tool_registry,
@@ -1064,6 +1065,20 @@ def _object_native_product_surface_checks() -> list[dict[str, Any]]:
 
     registry = tool_registry()
     return [
+        {
+            "id": "mcp_brain_objects_query_tool",
+            "surface": "mcp",
+            "tool": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+            "result": _pass_fail(
+                _tool_requires_fields(
+                    registry,
+                    BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                    ("repository", "branch", "query"),
+                )
+            ),
+            "read_path": True,
+            "production_mutation_performed": False,
+        },
         {
             "id": "mcp_source_to_candidate_graph_tool",
             "surface": "mcp",

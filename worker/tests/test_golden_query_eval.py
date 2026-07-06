@@ -225,11 +225,15 @@ def test_source_to_authority_quality_gate_covers_review_approval_and_read_path_w
     assert checks["production_decision_denial"]["production_mutation_performed"] is False
     surface_checks = {item["id"]: item for item in report["product_surface_checks"]}
     assert set(surface_checks) >= {
+        "mcp_brain_objects_query_tool",
         "mcp_source_to_candidate_graph_tool",
         "mcp_candidate_review_edit_tool",
         "mcp_approval_board_decide_tool",
         "mcp_source_to_candidate_runtime_readiness_tool",
     }
+    assert surface_checks["mcp_brain_objects_query_tool"]["result"] == "PASS"
+    assert surface_checks["mcp_brain_objects_query_tool"]["tool"] == "brain_objects_query"
+    assert surface_checks["mcp_brain_objects_query_tool"]["production_mutation_performed"] is False
     assert surface_checks["mcp_source_to_candidate_graph_tool"]["result"] == "PASS"
     assert surface_checks["mcp_source_to_candidate_graph_tool"]["tool"] == "brain_source_to_candidate_graph"
     assert surface_checks["mcp_source_to_candidate_graph_tool"]["production_target_denied"] is True
@@ -281,7 +285,7 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert evidence["P8"]["authority_write_performed"] is False
     assert evidence["P9"]["schema_version"] == "agent_context_product_pack.v1"
     assert evidence["P9"]["section_counts"]["style_preference"] >= 1
-    assert evidence["P9"]["tool_hint_count"] >= 4
+    assert evidence["P9"]["tool_hint_count"] >= 5
     assert evidence["P9"]["mutation_allowed"] is False
     assert all(item["production_mutation_performed"] is False for item in evidence.values())
 

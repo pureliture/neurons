@@ -17,7 +17,7 @@ from .context_builder import (
 from .document_bridge import DisabledDocumentBridge, DocumentBridge
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
 from .models import EvidenceRequest
-from .objects.object_packs import build_documentation_cleanup_pack
+from .objects.object_packs import build_documentation_cleanup_pack, build_runtime_truth_pack
 from .objects.reference_corpus import default_corpus_policy_status
 from .source_ref import SourceRefResolver
 
@@ -169,26 +169,39 @@ class BrainReadService:
                 route=selected_route,
                 consumer=consumer,
             )
-        else:
-            object_pack = {
-                "schema_version": "object_pack.v1",
-                "route": selected_route,
-                "objects": [],
-                "edges": [],
-                "evidence": [],
-                "lanes": {
-                    "accepted_current": [],
-                    "reference_only": [],
-                    "proposal_only": [],
-                    "archive_only": [],
-                    "derived_projection": [],
-                },
-                "verification": {"runtime_verified": [], "runtime_unverified": [], "unverified": []},
-                "recommended_actions": [],
-                "confidence": {"score": 0.0, "basis": ""},
-                "gaps": ["object_pack_route_not_implemented"],
-                "audit": {"consumer": consumer},
+        elif selected_route == "deployment_runtime_truth":
+            object_pack = build_runtime_truth_pack(
+                pull_request={"id": _query_object_ref(query), "merged": False},
+                deployment={"target": "production"},
+                live_evidence=None,
+            )
+            object_pack["audit"] = {
+                "request_hash": pack.get("audit", {}).get("request_hash", ""),
+                "consumer": consumer,
+                "object_pack_route_source": "runtime_truth_pack",
             }
+        elif selected_route == "code_style_preference":
+            object_pack = _context_authority_object_pack(
+                pack,
+                route=selected_route,
+                pack_names=("preferences", "style"),
+                consumer=consumer,
+            )
+        else:
+            object_pack = _context_authority_object_pack(
+                pack,
+                route=selected_route,
+                pack_names=(
+                    "documentation_cleanup",
+                    "reference_corpus",
+                    "preferences",
+                    "style",
+                    "current_work",
+                    "required_verification",
+                    "do_not_touch_boundaries",
+                ),
+                consumer=consumer,
+            )
         result = {
             "schema_version": "brain_objects_query.v1",
             "route": selected_route,
@@ -524,7 +537,7 @@ def _route_for_query(query: str) -> str:
         return "documentation_cleanup"
     if "merge" in text or "배포" in text or "deploy" in text:
         return "deployment_runtime_truth"
-    if "style" in text or "스타일" in text:
+    if "style" in text or "스타일" in text or "preference" in text or "선호" in text:
         return "code_style_preference"
     return "authority_archive_separation"
 
@@ -533,6 +546,132 @@ def _authority_documents(pack: Mapping[str, Any]) -> list[dict[str, Any]]:
     authority = pack.get("authority") if isinstance(pack.get("authority"), Mapping) else {}
     documents = authority.get("documents") if isinstance(authority.get("documents"), list) else []
     return [dict(doc) for doc in documents if isinstance(doc, Mapping)]
+
+
+def _context_authority_object_pack(
+    pack: Mapping[str, Any],
+    *,
+    route: str,
+    pack_names: tuple[str, ...],
+    consumer: str,
+) -> dict[str, Any]:
+    authority = pack.get("authority") if isinstance(pack.get("authority"), Mapping) else {}
+    object_packs = authority.get("object_packs") if isinstance(authority.get("object_packs"), Mapping) else {}
+    merged = _empty_read_object_pack(route=route, consumer=consumer)
+    seen_objects: set[str] = set()
+    seen_edges: set[str] = set()
+    seen_evidence: set[str] = set()
+    seen_actions: set[tuple[str, str]] = set()
+    for name in pack_names:
+        source = object_packs.get(name) if isinstance(object_packs.get(name), Mapping) else {}
+        _merge_object_pack(
+            merged,
+            source,
+            seen_objects=seen_objects,
+            seen_edges=seen_edges,
+            seen_evidence=seen_evidence,
+            seen_actions=seen_actions,
+        )
+    if not merged["objects"]:
+        merged["gaps"].append("context_authority_object_pack_empty")
+    merged["confidence"] = {
+        "score": 0.75 if merged["objects"] else 0.0,
+        "basis": "context_authority_object_packs",
+    }
+    merged["audit"] = {
+        "request_hash": str((pack.get("audit") or {}).get("request_hash") or ""),
+        "consumer": consumer,
+        "object_pack_route_source": "context_authority_object_packs",
+        "source_pack_names": list(pack_names),
+    }
+    ensure_public_safe(merged, "ContextAuthorityObjectPack")
+    return merged
+
+
+def _empty_read_object_pack(*, route: str, consumer: str) -> dict[str, Any]:
+    return {
+        "schema_version": "object_pack.v1",
+        "route": route,
+        "objects": [],
+        "edges": [],
+        "evidence": [],
+        "lanes": {
+            "accepted_current": [],
+            "accepted_non_current": [],
+            "candidate": [],
+            "reference_only": [],
+            "proposal_only": [],
+            "archive_only": [],
+            "derived_projection": [],
+            "rejected": [],
+        },
+        "verification": {"runtime_verified": [], "runtime_unverified": [], "unverified": []},
+        "recommended_actions": [],
+        "confidence": {"score": 0.0, "basis": ""},
+        "gaps": [],
+        "audit": {"consumer": consumer},
+    }
+
+
+def _merge_object_pack(
+    target: dict[str, Any],
+    source: Mapping[str, Any],
+    *,
+    seen_objects: set[str],
+    seen_edges: set[str],
+    seen_evidence: set[str],
+    seen_actions: set[tuple[str, str]],
+) -> None:
+    for obj in source.get("objects", []) if isinstance(source.get("objects"), list) else []:
+        if not isinstance(obj, Mapping):
+            continue
+        object_id = str(obj.get("object_id") or "")
+        if object_id and object_id in seen_objects:
+            continue
+        if object_id:
+            seen_objects.add(object_id)
+        safe_obj = dict(obj)
+        target["objects"].append(safe_obj)
+        lane = str(safe_obj.get("authority_lane") or "reference_only")
+        target["lanes"].setdefault(lane, []).append(safe_obj)
+    for edge in source.get("edges", []) if isinstance(source.get("edges"), list) else []:
+        if not isinstance(edge, Mapping):
+            continue
+        edge_id = str(edge.get("edge_id") or "")
+        if edge_id and edge_id in seen_edges:
+            continue
+        if edge_id:
+            seen_edges.add(edge_id)
+        target["edges"].append(dict(edge))
+    for evidence in source.get("evidence", []) if isinstance(source.get("evidence"), list) else []:
+        if not isinstance(evidence, Mapping):
+            continue
+        evidence_id = str(evidence.get("evidence_id") or "")
+        if evidence_id and evidence_id in seen_evidence:
+            continue
+        if evidence_id:
+            seen_evidence.add(evidence_id)
+        target["evidence"].append(dict(evidence))
+    verification = source.get("verification") if isinstance(source.get("verification"), Mapping) else {}
+    for lane in ("runtime_verified", "runtime_unverified", "unverified"):
+        values = verification.get(lane) if isinstance(verification.get(lane), list) else []
+        target["verification"].setdefault(lane, []).extend(dict(item) for item in values if isinstance(item, Mapping))
+    for action in source.get("recommended_actions", []) if isinstance(source.get("recommended_actions"), list) else []:
+        if not isinstance(action, Mapping):
+            continue
+        key = (str(action.get("object_id") or ""), str(action.get("action") or ""))
+        if key in seen_actions:
+            continue
+        seen_actions.add(key)
+        target["recommended_actions"].append(dict(action))
+    for gap in source.get("gaps", []) if isinstance(source.get("gaps"), list) else []:
+        safe_gap = str(gap or "")
+        if safe_gap and safe_gap not in target["gaps"]:
+            target["gaps"].append(safe_gap)
+
+
+def _query_object_ref(query: str) -> str:
+    return "query:" + public_safe_text(str(query or "runtime_truth"), max_chars=80)
 
 
 def _object_pack_view(
