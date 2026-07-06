@@ -1,5 +1,6 @@
 from agent_knowledge.llm_brain_core.golden_query_eval import (
     GOLDEN_QUERIES,
+    REQUIRED_QUALITY_AXES,
     build_baseline_golden_query_report,
     build_phase_golden_query_coverage_report,
     evaluate_object_pack_response,
@@ -42,6 +43,39 @@ def test_eval_requires_lane_evidence_gap_and_recommended_action():
     assert "missing_evidence_or_gap" in failing["failures"]
     assert "missing_recommended_action" in failing["failures"]
     assert passing["passes"] is True
+
+
+def test_eval_strict_axes_require_edge_freshness_and_gap_fields():
+    failing = evaluate_object_pack_response(
+        GOLDEN_QUERIES[3],
+        {
+            "route": "code_change_impact",
+            "lanes": {"candidate": [{"object_id": "ko:Commit:change"}]},
+            "evidence": [{"evidence_id": "ev:test"}],
+            "recommended_actions": [{"object_id": "ko:Commit:change", "action": "run_tests"}],
+        },
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+    passing = evaluate_object_pack_response(
+        GOLDEN_QUERIES[3],
+        {
+            "route": "code_change_impact",
+            "lanes": {"candidate": [{"object_id": "ko:Commit:change"}]},
+            "edges": [{"edge_id": "ke:validated_by:test", "edge_type": "validated_by"}],
+            "evidence": [{"evidence_id": "ev:test", "verification_state": "test_verified"}],
+            "verification": {"freshness_checked": [{"evidence_id": "ev:test"}]},
+            "gaps": [],
+            "recommended_actions": [{"object_id": "ko:Commit:change", "action": "run_tests"}],
+        },
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+
+    assert failing["passes"] is False
+    assert "missing_edge" in failing["failures"]
+    assert "missing_freshness" in failing["failures"]
+    assert "missing_gap_field" in failing["failures"]
+    assert passing["passes"] is True
+    assert passing["checked_axes"] == REQUIRED_QUALITY_AXES
 
 
 def test_phase_golden_query_coverage_reports_pass_with_gaps_not_green():

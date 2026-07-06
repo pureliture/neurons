@@ -132,13 +132,20 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
     return report
 
 
-def evaluate_object_pack_response(query: str, response: Mapping[str, Any]) -> dict[str, Any]:
+def evaluate_object_pack_response(
+    query: str,
+    response: Mapping[str, Any],
+    *,
+    required_axes: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     failures: list[str] = []
+    checked_axes = [str(axis) for axis in required_axes or []]
     lanes = response.get("lanes") if isinstance(response.get("lanes"), Mapping) else {}
     lane_items = []
     for value in lanes.values():
         if isinstance(value, list):
             lane_items.extend(value)
+    edges = response.get("edges") if isinstance(response.get("edges"), list) else []
     evidence = response.get("evidence") if isinstance(response.get("evidence"), list) else []
     gaps = response.get("gaps") if isinstance(response.get("gaps"), list) else []
     actions = response.get("recommended_actions") if isinstance(response.get("recommended_actions"), list) else []
@@ -150,10 +157,17 @@ def evaluate_object_pack_response(query: str, response: Mapping[str, Any]) -> di
         failures.append("missing_evidence_or_gap")
     if not actions:
         failures.append("missing_recommended_action")
+    if "edge" in checked_axes and not edges and not _gap_declares_not_applicable(gaps, "edge"):
+        failures.append("missing_edge")
+    if "freshness" in checked_axes and not _has_freshness_signal(response, evidence):
+        failures.append("missing_freshness")
+    if "gap" in checked_axes and not isinstance(response.get("gaps"), list):
+        failures.append("missing_gap_field")
     result = {
         "query": query,
         "passes": not failures,
         "failures": failures,
+        "checked_axes": checked_axes,
     }
     ensure_public_safe(result, "GoldenQueryEvalResult")
     return result
@@ -191,3 +205,33 @@ def _planned_phase(phase: str, title: str, golden_query_family: str, query: str)
         evaluator="not_implemented",
         gaps=["phase_slice_not_implemented"],
     )
+
+
+def _gap_declares_not_applicable(gaps: list[Any], axis: str) -> bool:
+    wanted = {f"{axis}_not_applicable", f"{axis}s_not_applicable"}
+    return any(str(item) in wanted for item in gaps)
+
+
+def _has_freshness_signal(response: Mapping[str, Any], evidence: list[Any]) -> bool:
+    if response.get("freshness") or response.get("freshness_gaps"):
+        return True
+    verification = response.get("verification")
+    if isinstance(verification, Mapping):
+        for value in verification.values():
+            if isinstance(value, list) and value:
+                return True
+            if isinstance(value, Mapping) and value:
+                return True
+    for item in evidence:
+        if not isinstance(item, Mapping):
+            continue
+        verification_state = str(item.get("verification_state") or "")
+        if verification_state in {
+            "freshness_checked",
+            "source_hash_verified",
+            "test_verified",
+            "runtime_verified",
+            "runtime_unverified",
+        }:
+            return True
+    return False
