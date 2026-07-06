@@ -633,6 +633,39 @@ def test_session_project_rollup_preview_links_specs_prs_and_commits_bidirectiona
     assert result["evaluator_report"]["passes"] is True
 
 
+def test_session_project_rollup_preview_builds_safe_handoff_pack():
+    result = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "sha256:session-alpha",
+                "device_id_hash": "sha256:device-one",
+                "provider": "codex",
+                "summary": "Prepared handoff pack.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["commit:p6d"],
+                "raw_transcript": "SOURCE_BODY_SENTINEL",
+            },
+        ],
+        specs=[{"spec_ref": "docs/specs/p6/design.md", "work_unit_id": "work:p6"}],
+        pull_requests=[{"pr_id": "pr:73", "number": 73, "work_unit_id": "work:p6"}],
+        commits=[{"commit_id": "commit:def456", "pull_request_id": "pr:73", "work_unit_id": "work:p6"}],
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+    )
+
+    handoff = result["handoff_pack"]
+    assert handoff["schema_version"] == "session_project_handoff_pack.v1"
+    assert handoff["raw_return_capability"] == "denied"
+    assert handoff["visible_session_count"] == 1
+    assert handoff["object_refs"]["Session"]
+    assert handoff["object_refs"]["WorkUnit"]
+    assert handoff["object_refs"]["PullRequest"]
+    assert "raw_session_body_ignored" in handoff["gaps"]
+    assert "verify_live_multi_device_rollup" in handoff["recommended_next_actions"]
+    assert "SOURCE_BODY_SENTINEL" not in str(handoff)
+
+
 def test_pr_commit_extraction_preview_maps_pr_commits_and_tests_without_runtime_inference():
     result = run_pr_commit_extraction_preview(
         pull_request={
