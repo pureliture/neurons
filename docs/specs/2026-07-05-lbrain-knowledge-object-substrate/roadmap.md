@@ -9,8 +9,8 @@ It does not assign percentage completion. The first formal denominator starts he
 Current state:
 
 - Phase 1 substrate implementation: complete in local/test scope.
-- Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates passed, deployed HTTP MCP runtime and configured endpoint validated, current Codex session tool registry still missing object-native tools.
-- P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, but the current Codex session's `mcp__lbrain` namespace still does not expose them.
+- Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates passed, deployed HTTP MCP runtime and configured endpoint validated, current Codex session tool registry still missing object-native tools, and current-source-main image identity is not proven live.
+- P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, but the current Codex session's `mcp__lbrain` namespace still does not expose them and the live MCP image is not proven to include the #73/current-main source refactor.
 - Product activation: not complete; configured agent read path refresh remains required.
 - UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
 
@@ -89,6 +89,7 @@ Completed local/test substrate gates:
 Known production gaps:
 
 - deployed/configured HTTP LBrain MCP exposes object-native tools, but the current Codex session's `mcp__lbrain` namespace is still stale and does not expose them.
+- deployed MCP image identity proves the object-native PR #64 merge is included, but does not prove the #73/current-main source refactor is in the live MCP image.
 - reference corpus store is not configured as a living LBrain corpus store.
 - golden queries are baseline red, not production-quality green.
 - accepted/current promotion workflow is not open for production object decisions.
@@ -143,9 +144,9 @@ This phase does not prove production deployment or live LBrain quality.
 
 ### P1. Production MCP Activation
 
-State: `PASS_WITH_GAPS` as of 2026-07-05.
+State: `PASS_WITH_GAPS` as of 2026-07-06.
 
-Deployed HTTP MCP runtime activation and configured endpoint smoke passed. Current Codex session tool-registry activation remains a gap.
+Deployed HTTP MCP runtime activation and configured endpoint smoke passed. Current Codex session tool-registry activation remains a gap. Current-source-main image identity is also a gap: source `origin/main` is at PR #73, while the live MCP image proof remains tied to the earlier object-native artifact.
 
 Purpose:
 
@@ -172,9 +173,12 @@ Gate evidence:
 Current evidence summary:
 
 - live production Argo application tracks `main` and is `Synced/Healthy`
+- source repo `origin/main` contains PR #73 merge commit `c3f3e34`; the P1 branch is rebased onto that commit
+- production GitOps desired state is the ops repo `main` revision `dbc6ded`
 - deployed MCP image identity is tied to source commit `c216ff4`, which contains PR #64 merge commit `7a0b6a6`
+- deployed MCP image identity is not proof that PR #73/current source `main` is live in the MCP image
 - live HTTP MCP `tools/list` exposes `brain_objects_query`, `brain_object_explain`, `brain_corpus_status`, `brain_corpus_ingest_plan`, `brain_object_proposal_create`, `brain_object_decision_commit`, and `brain_review_proposals`
-- live read-only `brain_objects_query` returns `brain_objects_query.v1` with `object_pack.v1`
+- live read-only `brain_objects_query` returns `brain_objects_query.v1` with `object_pack.v1`, `route=documentation_cleanup`, and explicit authority gaps
 - user-level Codex LBrain MCP config source includes object-native tools, and standalone smoke against the configured endpoint returns the same object-native tool list and read-only query shape
 - production-scope `brain_object_proposal_create` returns denied/no-mutation
 - `brain_object_decision_commit` returns denied/no-mutation
@@ -184,6 +188,7 @@ Current evidence summary:
 Next gate:
 
 - restart or refresh the Codex LBrain MCP tool registry until the configured `mcp__lbrain` namespace exposes object-native tools directly, then rerun read-only smoke through that configured path.
+- rebuild/deploy the MCP image from current source `main` and rerun the artifact identity smoke before claiming the live MCP image includes PR #73.
 
 ### P2. Living Reference Corpus Store
 
