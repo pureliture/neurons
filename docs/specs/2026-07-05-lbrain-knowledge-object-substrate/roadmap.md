@@ -808,6 +808,7 @@ Delivery integration status:
 - PR creation remains a delivery gap because the repository PR workflow requires a linked issue or explicit approval before GitHub mutation.
 - This gap does not convert local/test evidence into production readiness and does not close P1 live read-path gaps.
 - PR-ready titles, body previews, stack bases, and creation commands are captured in `pr-delivery-package.md`.
+- Phase-specific linked issue draft titles and labels are also captured there so a single closing issue is not accidentally reused across the full stack.
 
 PR-ready branch stack:
 

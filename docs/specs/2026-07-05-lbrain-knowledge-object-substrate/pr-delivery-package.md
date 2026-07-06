@@ -13,6 +13,46 @@ Do not create GitHub PRs from this package until one of the following is true:
 
 The active GitHub PR workflow expects a real closing reference such as `Closes #N`. Replace every `<ISSUE_NUMBER>` token before using any body preview below. Do not submit a preview with placeholder text.
 
+Recommended issue strategy:
+
+- Create one `type:task` issue per stack PR.
+- Do not reuse a single closing issue across the whole stack unless premature issue closure after the first merged PR is acceptable.
+- If a single tracking issue is preferred, use it as an epic/reference issue and create separate task issues for the PR closing references.
+- Issue creation is also a GitHub mutation; do not create these issues without explicit user approval.
+
+## Linked Issue Drafts
+
+Use these drafts only after the issue creation gate is satisfied.
+
+| PR | Issue title | Labels |
+| --- | --- | --- |
+| P1 | `task: validate LBrain production MCP activation gaps` | `type:task`, `area:lbrain` |
+| P2 | `task: deliver LBrain living reference corpus store` | `type:task`, `area:lbrain` |
+| P3 | `task: deliver LBrain object extraction pipeline previews` | `type:task`, `area:lbrain` |
+| P4 | `task: deliver LBrain review authority promotion previews` | `type:task`, `area:lbrain` |
+| P5 | `task: deliver LBrain golden query quality gates` | `type:task`, `area:lbrain` |
+| P6 | `task: deliver LBrain session project work-unit rollup` | `type:task`, `area:lbrain` |
+| P7 | `task: deliver LBrain artifact preference packs` | `type:task`, `area:lbrain` |
+| P8 | `task: deliver LBrain runtime authority truth previews` | `type:task`, `area:lbrain` |
+| P9 | `task: deliver LBrain agent context product packs` | `type:task`, `area:lbrain` |
+| P10 | `task: record LBrain UI object browser defer decision` | `type:task`, `area:lbrain` |
+
+Issue body template:
+
+```markdown
+## Goal
+
+Deliver the corresponding phase from the LBrain Ontology-Style Knowledge Product Roadmap without design drift.
+
+## Acceptance Criteria
+
+- Phase branch is reviewed through a PR.
+- PR body separates merge, CI, deploy, and live runtime evidence.
+- Result is reported as PASS, PASS_WITH_GAPS, or FAIL.
+- Production mutation remains denied unless a separate approved gate exists.
+- No protected content, credential, topology, or raw external ID is exposed.
+```
+
 ## Current Evidence
 
 - `origin/main` includes PR #73 merge commit `c3f3e34`.
