@@ -18,7 +18,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 - status: `validated`
 - evidence: `cd worker && uv run pytest -q`
-- result: `1614 passed, 9 skipped, 1 warning`
+- result: `1615 passed, 9 skipped, 1 warning`
 - note: covers object model, reference corpus, object packs, MCP stdio, CLI, context authority, ledger area boundary, and existing worker regression surface.
 
 ### local.root.gradle
@@ -85,7 +85,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - status: `validated`
 - evidence: `uv run neuron-knowledge source-to-candidate-runtime-readiness --expected-commit 789b95cd2c248ee89394dcb20917a8e13d89db89`
 - result: returned `source_to_candidate_runtime_readiness.v1`, `status=PASS_WITH_GAPS`, `live_evidence_provided=false`, `production_mutation_performed=false`, `network_used=false`
-- interpretation: this validates the report surface and local product-surface claim only. The local claim now includes `brain_objects_query` plus source-to-candidate/review/approval/readiness tools, and live evidence must now include `brain_objects_query` route smokes for authority/archive, style/preference, temporal work recall, and deploy/runtime queries. It also requires live agent context product evidence to include the `agent_context_product_pack.v1` schema, allowed consumer, degraded-gap disclosure, `missing_evidence_before_promotion`, mutation-disabled policy, and safe `sanitized_evidence_packet` runtime-readiness target. It does not prove deployed/runtime source-to-candidate activation.
+- interpretation: this validates the report surface and local product-surface claim only. The local claim now includes `brain_objects_query` plus source-to-candidate/review/approval/readiness tools, and live evidence must now include `brain_objects_query` route smokes for authority/archive, style/preference, temporal work recall, and deploy/runtime queries. It also requires live agent context product evidence to include the `agent_context_product_pack.v1` schema, allowed consumer, degraded-gap disclosure, `missing_evidence_before_promotion`, mutation-disabled policy, and safe `sanitized_evidence_packet` runtime-readiness target. Missing live evidence is now decomposed into actionable gap ids such as `live_mcp_tool_missing:<tool>`, `live_agent_context_tool_hint_missing:<tool>`, `live_agent_context_section_missing:<section>`, and `live_brain_objects_query_route_missing:<route>`. It does not prove deployed/runtime source-to-candidate activation.
 
 ### local.mcp.brain-objects-query-routes
 
@@ -105,6 +105,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
   - `network_used=false`
   - malformed or incomplete live agent context product evidence fails instead of being accepted from section counts alone.
   - runtime-readiness tool hints must target `sanitized_evidence_packet` and block `raw_private_runtime_evidence`.
+  - partial live evidence returns specific gap ids for missing review tools, missing agent-context tool hints, missing agent-context sections, missing object-query routes, and unverified deployed identity.
 
 ### lbrain.current-read-path
 

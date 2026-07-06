@@ -116,7 +116,7 @@ def _live_tools_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
         "status": "not_validated" if missing else "validated",
         "required_tools": list(REQUIRED_RUNTIME_TOOL_NAMES),
         "missing_tools": missing,
-        "gaps": ["live_mcp_review_tools_unverified"] if missing else [],
+        "gaps": ["live_mcp_review_tools_unverified", *_named_gaps("live_mcp_tool_missing", missing)] if missing else [],
     }
 
 
@@ -146,12 +146,21 @@ def _live_agent_context_tool_hints_claim(evidence: Mapping[str, Any]) -> dict[st
         return {
             **base,
             "status": "failed",
-            "gaps": [*safety_failures, *(["live_agent_context_tool_hints_unverified"] if missing else [])],
+            "gaps": [
+                *safety_failures,
+                *(["live_agent_context_tool_hints_unverified"] if missing else []),
+                *_named_gaps("live_agent_context_tool_hint_missing", missing),
+            ],
         }
     return {
         **base,
         "status": "not_validated" if missing else "validated",
-        "gaps": ["live_agent_context_tool_hints_unverified"] if missing else [],
+        "gaps": [
+            "live_agent_context_tool_hints_unverified",
+            *_named_gaps("live_agent_context_tool_hint_missing", missing),
+        ]
+        if missing
+        else [],
     }
 
 
@@ -191,7 +200,12 @@ def _live_agent_context_product_sections_claim(evidence: Mapping[str, Any]) -> d
     return {
         **base,
         "status": "not_validated" if missing else "validated",
-        "gaps": ["live_agent_context_product_sections_unverified"] if missing else [],
+        "gaps": [
+            "live_agent_context_product_sections_unverified",
+            *_named_gaps("live_agent_context_section_missing", missing),
+        ]
+        if missing
+        else [],
     }
 
 
@@ -244,7 +258,12 @@ def _live_brain_objects_query_route_smokes_claim(evidence: Mapping[str, Any]) ->
     return {
         **base,
         "status": "not_validated" if missing else "validated",
-        "gaps": ["live_brain_objects_query_route_smokes_unverified"] if missing else [],
+        "gaps": [
+            "live_brain_objects_query_route_smokes_unverified",
+            *_named_gaps("live_brain_objects_query_route_missing", missing),
+        ]
+        if missing
+        else [],
     }
 
 
@@ -252,14 +271,16 @@ def _live_deployed_identity_claim(evidence: Mapping[str, Any], *, expected_commi
     identity = evidence.get("deployed_identity")
     identity = identity if isinstance(identity, Mapping) else {}
     contains_expected = identity.get("contains_expected_commit") is True
-    gap = "" if contains_expected else "live_deployed_identity_unverified"
+    gaps = [] if contains_expected else ["live_deployed_identity_unverified"]
+    if identity and not contains_expected:
+        gaps.append("live_deployed_identity_expected_commit_unverified")
     return {
         "claim_id": "live.deployed_identity.includes_expected_commit",
         "evidence_class": "runtime_artifact_identity",
         "status": "validated" if contains_expected else "not_validated",
         "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
         "identity_source": public_safe_text(str(identity.get("identity_source") or ""), max_chars=160),
-        "gaps": [gap] if gap else [],
+        "gaps": gaps,
     }
 
 
@@ -496,3 +517,7 @@ def _dedupe(values) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _named_gaps(prefix: str, values: list[str]) -> list[str]:
+    return [f"{prefix}:{public_safe_text(str(value), max_chars=120)}" for value in values if str(value or "")]
