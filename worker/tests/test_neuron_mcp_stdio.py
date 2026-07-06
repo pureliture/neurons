@@ -728,6 +728,19 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_
     assert packet["preference_artifact_memory"]["preference_object_pack"]["proposal_preference_count"] >= 1
     assert packet["preference_artifact_memory"]["html_visualization_route_smoke"]["route"] == "html_visualization_preference"
     assert packet["preference_artifact_memory"]["artifact_review_check"]["raw_artifact_body_returned"] is False
+    assert packet["permission_sensitive_audit"]["schema_version"] == "permission_sensitive_runtime_audit_evidence.v1"
+    assert len(packet["permission_sensitive_audit"]["audit_events"]) == 2
+    assert {event["action"] for event in packet["permission_sensitive_audit"]["audit_events"]} == {
+        BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+        BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+    }
+    assert all(
+        event["permission"] == "denied"
+        and event["authority_write_performed"] is False
+        and event["production_mutation_performed"] is False
+        for event in packet["permission_sensitive_audit"]["audit_events"]
+    )
+    assert packet["permission_sensitive_audit"]["audit_store"]["status"] == "recorded"
     assert len(packet["brain_objects_query_smokes"]) == 4
     assert all(
         "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])

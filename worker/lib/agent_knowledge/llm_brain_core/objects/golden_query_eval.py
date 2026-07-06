@@ -700,6 +700,14 @@ def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
         failures.append("p8_runtime_evidence_collector_mutated_production")
     if evidence.get("runtime_evidence_collector_readiness_claim") != "collector_packet_not_live_evidence":
         failures.append("p8_runtime_evidence_collector_claims_live_evidence")
+    if evidence.get("runtime_evidence_collector_permission_audit_schema") != (
+        "permission_sensitive_runtime_audit_evidence.v1"
+    ):
+        failures.append("p8_permission_sensitive_audit_collector_missing")
+    if int(evidence.get("runtime_evidence_collector_permission_audit_event_count") or 0) < 2:
+        failures.append("p8_permission_sensitive_audit_events_missing")
+    if evidence.get("runtime_evidence_collector_permission_audit_store_status") != "recorded":
+        failures.append("p8_permission_sensitive_audit_store_not_recorded")
     if evidence.get("shadow_route_smoke_request_schema") != "source_to_candidate_runtime_shadow_collection_request.v1":
         failures.append("p8_shadow_route_smoke_request_missing")
     if evidence.get("shadow_route_smoke_request_status") != "requested":
@@ -914,6 +922,7 @@ def _p7_preference_artifact_evidence() -> dict[str, Any]:
 def _p8_runtime_authority_evidence() -> dict[str, Any]:
     from .extraction_pipeline import run_runtime_truth_extraction_preview
     from .runtime_readiness import (
+        PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA,
         build_source_to_candidate_runtime_collected_shadow_evidence_packet,
         build_source_to_candidate_runtime_evidence_collection_plan,
         build_source_to_candidate_runtime_evidence_packet_template,
@@ -1028,6 +1037,16 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         if isinstance(collector_preference_memory.get("artifact_review_check"), Mapping)
         else {}
     )
+    collector_permission_audit = (
+        collector_packet.get("permission_sensitive_audit")
+        if isinstance(collector_packet.get("permission_sensitive_audit"), Mapping)
+        else {}
+    )
+    collector_permission_audit_store = (
+        collector_permission_audit.get("audit_store")
+        if isinstance(collector_permission_audit.get("audit_store"), Mapping)
+        else {}
+    )
     return {
         "phase": "P8",
         "schema_version": str(report.get("schema_version") or ""),
@@ -1140,6 +1159,16 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         ),
         "runtime_evidence_collector_preference_artifact_check_status": str(
             collector_preference_artifact_check.get("status") or ""
+        ),
+        "runtime_evidence_collector_permission_audit_schema": str(
+            collector_permission_audit.get("schema_version") or ""
+        ),
+        "runtime_evidence_collector_permission_audit_expected_schema": PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA,
+        "runtime_evidence_collector_permission_audit_event_count": len(
+            collector_permission_audit.get("audit_events") or []
+        ),
+        "runtime_evidence_collector_permission_audit_store_status": str(
+            collector_permission_audit_store.get("status") or ""
         ),
         "gaps": list(preview.get("gaps") or []),
         "production_mutation_performed": bool(report.get("production_mutation_performed")),

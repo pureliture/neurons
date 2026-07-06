@@ -446,6 +446,12 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert evidence["P8"]["runtime_evidence_collector_preference_proposal_count"] >= 1
     assert evidence["P8"]["runtime_evidence_collector_preference_html_route"] == "html_visualization_preference"
     assert evidence["P8"]["runtime_evidence_collector_preference_artifact_check_status"] == "pass"
+    assert (
+        evidence["P8"]["runtime_evidence_collector_permission_audit_schema"]
+        == "permission_sensitive_runtime_audit_evidence.v1"
+    )
+    assert evidence["P8"]["runtime_evidence_collector_permission_audit_event_count"] == 2
+    assert evidence["P8"]["runtime_evidence_collector_permission_audit_store_status"] == "recorded"
     assert evidence["P9"]["schema_version"] == "agent_context_product_pack.v1"
     assert evidence["P9"]["section_counts"]["style_preference"] >= 1
     assert evidence["P9"]["section_counts"]["active_work"] >= 1
@@ -590,6 +596,9 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "runtime_evidence_collector_preference_proposal_count": 1,
                 "runtime_evidence_collector_preference_html_route": "html_visualization_preference",
                 "runtime_evidence_collector_preference_artifact_check_status": "pass",
+                "runtime_evidence_collector_permission_audit_schema": "permission_sensitive_runtime_audit_evidence.v1",
+                "runtime_evidence_collector_permission_audit_event_count": 2,
+                "runtime_evidence_collector_permission_audit_store_status": "recorded",
                 "production_mutation_performed": False,
             },
             {

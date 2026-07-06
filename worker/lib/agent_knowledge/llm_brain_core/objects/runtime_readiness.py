@@ -310,6 +310,7 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
     review_loop_runner: Callable[[], Mapping[str, Any]] | None = None,
     session_project_rollup_runner: Callable[[], Mapping[str, Any]] | None = None,
     preference_artifact_memory_runner: Callable[[], Mapping[str, Any]] | None = None,
+    permission_sensitive_audit_runner: Callable[[], Mapping[str, Any]] | None = None,
     tool_names: Any = None,
     collection_mode: str = "local_test_replay",
     network_used: bool = False,
@@ -330,6 +331,9 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
         preference_artifact_memory_runner,
         repository=repository,
     )
+    permission_sensitive_audit = _collect_permission_sensitive_audit_shadow(
+        permission_sensitive_audit_runner,
+    )
     capture = {
         "schema_version": "source_to_candidate_runtime_shadow_capture.v1",
         "tool_names": _string_list(tool_names) or list(REQUIRED_RUNTIME_TOOL_NAMES),
@@ -337,6 +341,7 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
         "source_to_candidate_review_loop": review_loop,
         "session_project_rollup_runtime": session_project_rollup,
         "preference_artifact_memory": preference_artifact_memory,
+        "permission_sensitive_audit": permission_sensitive_audit,
         "deployed_identity": {
             "contains_expected_commit": False,
             "identity_source": "collector_not_deployed_identity_proof",
@@ -360,6 +365,11 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
             "preference_artifact_memory_collected": bool(preference_artifact_memory),
             "preference_artifact_memory_schema": public_safe_text(
                 str(preference_artifact_memory.get("schema_version") or ""),
+                max_chars=80,
+            ),
+            "permission_sensitive_audit_collected": bool(permission_sensitive_audit),
+            "permission_sensitive_audit_schema": public_safe_text(
+                str(permission_sensitive_audit.get("schema_version") or ""),
                 max_chars=80,
             ),
             "network_used": network_used is True,
@@ -945,6 +955,85 @@ def _collect_preference_artifact_memory_shadow(
         }
     evidence = _public_safe_mapping(raw)
     ensure_public_safe(evidence, "CollectedPreferenceArtifactMemoryShadowEvidence")
+    return evidence
+
+
+def build_permission_sensitive_audit_shadow_evidence() -> dict[str, Any]:
+    """Build a branch-local local_test P8 denial/audit summary without mutation."""
+
+    event_base = {
+        "schema_version": PERMISSION_AUDIT_EVENT_SCHEMA,
+        "event_type": "permission_sensitive_runtime_action",
+        "ledger_scope": "production",
+        "permission": "denied",
+        "authority_write_performed": False,
+        "production_mutation_performed": False,
+        "protected_values_returned": False,
+        "raw_private_evidence_returned": False,
+        "secret_returned": False,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": False,
+    }
+    events = [
+        {
+            **event_base,
+            "action": tool_name,
+            "actor_ref_hash": "sha256:" + "a" * 64,
+            "request_hash": "sha256:" + str(index) * 64,
+        }
+        for index, tool_name in enumerate(OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS, start=1)
+    ]
+    evidence = {
+        "schema_version": PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA,
+        "audit_events": events,
+        "audit_store": {
+            "status": "recorded",
+            "event_count": len(events),
+            "production_mutation_performed": False,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": False,
+    }
+    ensure_public_safe(evidence, "PermissionSensitiveAuditShadowEvidence")
+    return evidence
+
+
+def _collect_permission_sensitive_audit_shadow(
+    permission_sensitive_audit_runner: Callable[[], Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    try:
+        raw = (
+            permission_sensitive_audit_runner()
+            if permission_sensitive_audit_runner is not None
+            else build_permission_sensitive_audit_shadow_evidence()
+        )
+    except Exception as exc:  # pragma: no cover - defensive public-safe guard
+        raw = {
+            "schema_version": PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA,
+            "collector_error_type": public_safe_text(type(exc).__name__, max_chars=80),
+            "audit_events": [],
+            "audit_store": {
+                "status": "failed",
+                "event_count": 0,
+                "production_mutation_performed": False,
+            },
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+            "production_mutation_performed": False,
+        }
+    evidence = _public_safe_mapping(raw)
+    ensure_public_safe(evidence, "CollectedPermissionSensitiveAuditShadowEvidence")
     return evidence
 
 
@@ -2294,6 +2383,9 @@ def _permission_sensitive_audit_failures(
     postcheck: Mapping[str, Any],
 ) -> list[str]:
     failures: list[str] = []
+    collector_error_type = public_safe_text(str(audit.get("collector_error_type") or ""), max_chars=80)
+    if collector_error_type:
+        failures.append(f"permission_sensitive_audit_collector_error:{collector_error_type}")
     if audit.get("schema_version") != PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA:
         failures.append("permission_sensitive_audit_schema_mismatch")
     missing_actions = [tool_name for tool_name in OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS if tool_name not in by_action]
