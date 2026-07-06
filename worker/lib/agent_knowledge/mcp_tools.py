@@ -345,6 +345,13 @@ def list_tools() -> list[dict]:
                     },
                     "project": {"type": "string"},
                     "corpus_name": {"type": "string"},
+                    "expected_source_count": {"type": "integer", "minimum": 0},
+                    "expected_source_url_count": {"type": "integer", "minimum": 0},
+                    "expected_manual_text_without_url_count": {"type": "integer", "minimum": 0},
+                    "expected_source_type_counts": {
+                        "type": "object",
+                        "additionalProperties": {"type": "integer", "minimum": 0},
+                    },
                 },
                 "required": ["storage_mode", "project"],
                 "additionalProperties": False,

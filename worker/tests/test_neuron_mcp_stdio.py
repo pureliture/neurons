@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agent_knowledge.cli import main
+from agent_knowledge.llm_brain_core.reference_corpus import reference_corpus_objects_from_manifest
 from agent_knowledge.session_memory.curation import CurationService
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.mcp_server import (
@@ -86,6 +87,33 @@ def _source_span(**overrides):
     }
     span.update(overrides)
     return span
+
+
+def _reference_manifest() -> dict:
+    return {
+        "corpus_name": "palantir-ontology-mini",
+        "sources": [
+            {
+                "source_id": "palantir-ontology-001",
+                "title": "Ontology overview",
+                "source_type": "WEB_PAGE",
+                "source_url": "https://example.test/ontology",
+                "normalized_path": "sources-normalized/palantir-ontology-001.md",
+                "content_hash": "sha256:" + "1" * 64,
+                "metadata_hash": "sha256:" + "2" * 64,
+                "summary": "Objects, links, actions, functions.",
+            },
+            {
+                "source_id": "palantir-ontology-002",
+                "title": "Manual excerpt",
+                "source_type": "TEXT",
+                "normalized_path": "sources-normalized/palantir-ontology-002.md",
+                "content_hash": "sha256:" + "3" * 64,
+                "metadata_hash": "sha256:" + "4" * 64,
+                "summary": "Manual source with missing URL.",
+            },
+        ],
+    }
 
 
 def _service(tmp_path: Path) -> KnowledgeSearchService:
@@ -257,6 +285,11 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
         "local_test",
         "production",
     ]
+    corpus_plan_properties = tools[BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME]["inputSchema"]["properties"]
+    assert "expected_source_count" in corpus_plan_properties
+    assert "expected_source_url_count" in corpus_plan_properties
+    assert "expected_manual_text_without_url_count" in corpus_plan_properties
+    assert "expected_source_type_counts" in corpus_plan_properties
 
 
 def test_project_deriving_brain_tool_schemas_allow_repository():
@@ -437,6 +470,109 @@ def test_mcp_corpus_ingest_plan_reports_manifest_ref_gap(tmp_path: Path):
 
     assert "manifest_ref_not_loaded" in result["gaps"]
     assert result["manifest_ref"] == "refs/palantir.json"
+
+
+def test_mcp_corpus_ingest_plan_expected_count_gate(tmp_path: Path):
+    service = _service(tmp_path)
+    result = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 109,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
+                "arguments": {
+                    "manifest": _reference_manifest(),
+                    "storage_mode": "metadata_only",
+                    "project": "neurons",
+                    "expected_source_count": 2,
+                    "expected_source_url_count": 1,
+                    "expected_manual_text_without_url_count": 1,
+                    "expected_source_type_counts": {"WEB_PAGE": 1, "TEXT": 1},
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert result["count_gate_status"] == "pass"
+    assert result["count_gate_gaps"] == []
+    assert result["writes_planned"] is False
+
+
+def test_mcp_corpus_status_reports_policy_fields(tmp_path: Path):
+    service = _service(tmp_path)
+    result = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 107,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CORPUS_STATUS_TOOL_NAME,
+                "arguments": {
+                    "project": "neurons",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert result["raw_body_policy"]["return_capability"] == "denied_without_explicit_approval"
+    assert result["raw_body_policy"]["retention_class"] == "user_managed_reference"
+    assert result["raw_body_policy"]["redaction_profile"] == "public_safe_summary"
+    assert result["raw_body_policy"]["deletion_policy"] == "delete_snapshot_keep_metadata"
+    assert result["raw_body_policy"]["license_source_rights"] == "operator_attested"
+    assert result["source_rights_policy"] == "operator_attested_reference_use"
+    assert "managed_snapshot" in result["supported_storage_modes"]
+
+
+def test_mcp_corpus_status_reads_local_test_ledger_store(tmp_path: Path):
+    service = _service(tmp_path)
+    bundle = reference_corpus_objects_from_manifest(
+        _reference_manifest(),
+        project=PROJECT,
+        storage_mode="managed_snapshot",
+    )
+    service.ledger.upsert_reference_corpus_bundle(bundle, project=PROJECT)
+
+    result = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 108,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CORPUS_STATUS_TOOL_NAME,
+                "arguments": {
+                    "project": PROJECT,
+                    "corpus_id": bundle["corpus"]["corpus_id"],
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert result["source_count"] == 2
+    assert result["storage_modes"] == {"managed_snapshot": 2}
+    assert result["reference_object_count"] == 2
+    assert result["document_source_count"] == 2
+    assert result["version_count"] == 2
+    assert result["snapshot_count"] == 2
+    assert result["chunk_count"] == 2
+    assert result["freshness_check_count"] == 2
+    assert result["extraction_run_count"] == 1
+    assert result["first_class_store_counts"]["document_sources"] == 2
+    assert result["first_class_store_counts"]["document_snapshots"] == 2
+    assert result["first_class_store_counts"]["document_chunks"] == 2
+    assert result["first_class_store_counts"]["freshness_checks"] == 2
+    assert result["first_class_store_counts"]["extraction_runs"] == 1
+    assert result["document_sources"][0]["schema_version"] == "document_source.v1"
+    assert result["document_versions"][0]["schema_version"] == "document_version.v1"
+    assert result["document_snapshots"][0]["schema_version"] == "document_snapshot.v1"
+    assert result["document_chunks"][0]["schema_version"] == "document_chunk.v1"
+    assert result["freshness_checks"][0]["schema_version"] == "freshness_check.v1"
+    assert result["extraction_runs"][0]["status"] == "completed"
+    assert result["freshness_gaps"][0]["source_url_status"] == "missing_manual_text"
+    assert result["gaps"] == []
 
 
 def test_mcp_object_decision_commit_is_restricted_denied_by_default(tmp_path: Path):

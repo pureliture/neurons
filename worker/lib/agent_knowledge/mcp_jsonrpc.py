@@ -379,10 +379,19 @@ def _dispatch_brain_corpus_ingest_plan_tool(tool_name: str, arguments: dict, ser
         if arguments.get("manifest_ref"):
             manifest["manifest_ref"] = str(arguments.get("manifest_ref") or "")
             manifest["gaps"] = ["manifest_ref_not_loaded"]
+    expected_source_type_counts = arguments.get("expected_source_type_counts")
     result = build_corpus_ingest_plan(
         manifest,
         project=_require_non_empty_string(arguments, "project", tool_name=tool_name),
         storage_mode=str(arguments.get("storage_mode") or "metadata_only"),
+        expected_source_count=arguments.get("expected_source_count"),
+        expected_source_url_count=arguments.get("expected_source_url_count"),
+        expected_manual_text_without_url_count=arguments.get("expected_manual_text_without_url_count"),
+        expected_source_type_counts=(
+            expected_source_type_counts
+            if isinstance(expected_source_type_counts, dict)
+            else None
+        ),
     )
     return _tool_result(result)
 

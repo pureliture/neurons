@@ -5,6 +5,57 @@ import json
 from agent_knowledge.cli import BOUNDARY, COMMAND_HANDLERS, main
 
 
+def _reference_manifest() -> dict:
+    return {
+        "corpus_name": "palantir-ontology-mini",
+        "sources": [
+            {
+                "source_id": "palantir-ontology-001",
+                "title": "Ontology overview",
+                "source_type": "WEB_PAGE",
+                "source_url": "https://example.test/ontology",
+                "normalized_path": "sources-normalized/palantir-ontology-001.md",
+                "content_hash": "sha256:" + "1" * 64,
+                "metadata_hash": "sha256:" + "2" * 64,
+                "summary": "Objects, links, actions, functions.",
+            },
+            {
+                "source_id": "palantir-ontology-002",
+                "title": "Manual excerpt",
+                "source_type": "TEXT",
+                "normalized_path": "sources-normalized/palantir-ontology-002.md",
+                "content_hash": "sha256:" + "3" * 64,
+                "metadata_hash": "sha256:" + "4" * 64,
+                "summary": "Manual source with missing URL.",
+            },
+        ],
+    }
+
+
+def _palantir_full_count_manifest() -> dict:
+    sources = []
+    for idx in range(1, 66):
+        if idx <= 6:
+            source_type = "PDF"
+        elif idx <= 39:
+            source_type = "WEB_PAGE"
+        else:
+            source_type = "TEXT"
+        source = {
+            "source_id": f"palantir-ontology-{idx:03d}",
+            "title": f"Palantir ontology reference {idx:03d}",
+            "source_type": source_type,
+            "normalized_path": f"sources-normalized/palantir-ontology-{idx:03d}.md",
+            "content_hash": "sha256:" + f"{idx:064x}"[-64:],
+            "metadata_hash": "sha256:" + f"{idx + 100:064x}"[-64:],
+            "summary": "Public-safe metadata-only reference fixture.",
+        }
+        if idx <= 39:
+            source["source_url"] = f"https://example.test/palantir/ontology/{idx:03d}"
+        sources.append(source)
+    return {"corpus_name": "palantir-ontology", "sources": sources}
+
+
 def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
     assert main(["--help"]) == 0
     output = capsys.readouterr().out
@@ -93,6 +144,150 @@ def test_neuron_knowledge_corpus_ingest_production_target_denied(capsys):
     assert report["reason"] == "production_corpus_ingest_requires_later_validation_goal"
 
 
+def test_neuron_knowledge_corpus_ingest_production_denied_even_with_configured_ledger_env(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "ledger.sqlite"
+    manifest.write_text(json.dumps(_reference_manifest()), encoding="utf-8")
+    monkeypatch.setenv("NEURON_REFERENCE_CORPUS_LEDGER", str(ledger))
+
+    rc = main(
+        [
+            "corpus-ingest",
+            "--project",
+            "neurons",
+            "--target",
+            "production",
+            "--manifest-file",
+            str(manifest),
+            "--storage-mode",
+            "managed_snapshot",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "denied"
+    assert report["mutation_performed"] is False
+    assert ledger.exists() is False
+
+
+def test_neuron_knowledge_corpus_status_reports_storage_policy(capsys):
+    rc = main(["corpus-status", "--project", "neurons"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["schema_version"] == "brain_corpus_status.v1"
+    assert report["raw_body_policy"]["return_capability"] == "denied_without_explicit_approval"
+    assert report["raw_body_policy"]["retention_class"] == "user_managed_reference"
+    assert report["raw_body_policy"]["redaction_profile"] == "public_safe_summary"
+    assert report["raw_body_policy"]["deletion_policy"] == "delete_snapshot_keep_metadata"
+    assert report["raw_body_policy"]["license_source_rights"] == "operator_attested"
+    assert report["source_rights_policy"] == "operator_attested_reference_use"
+    assert "managed_snapshot" in report["supported_storage_modes"]
+    assert "reference_corpus_store_empty" in report["gaps"]
+
+
+def test_neuron_knowledge_corpus_ingest_plan_loads_full_count_manifest(tmp_path, capsys):
+    manifest = tmp_path / "palantir-manifest.json"
+    manifest.write_text(json.dumps(_palantir_full_count_manifest()), encoding="utf-8")
+
+    rc = main(
+        [
+            "corpus-ingest-plan",
+            "--project",
+            "neurons",
+            "--storage-mode",
+            "external_object_store",
+            "--manifest-file",
+            str(manifest),
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["corpus"]["name"] == "palantir-ontology"
+    assert report["corpus"]["source_count"] == 65
+    assert report["source_url_count"] == 39
+    assert report["manual_text_without_url_count"] == 26
+    assert report["source_type_counts"] == {"PDF": 6, "TEXT": 26, "WEB_PAGE": 33}
+    assert report["manifest_hash"].startswith("sha256:")
+    assert report["writes_planned"] is False
+
+
+def test_neuron_knowledge_corpus_ingest_plan_expected_count_gate_passes(tmp_path, capsys):
+    manifest = tmp_path / "palantir-manifest.json"
+    manifest.write_text(json.dumps(_palantir_full_count_manifest()), encoding="utf-8")
+
+    rc = main(
+        [
+            "corpus-ingest-plan",
+            "--project",
+            "neurons",
+            "--storage-mode",
+            "external_object_store",
+            "--manifest-file",
+            str(manifest),
+            "--expect-source-count",
+            "65",
+            "--expect-source-url-count",
+            "39",
+            "--expect-manual-text-without-url-count",
+            "26",
+            "--expect-source-type-count",
+            "PDF=6",
+            "--expect-source-type-count",
+            "WEB_PAGE=33",
+            "--expect-source-type-count",
+            "TEXT=26",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["count_gate_status"] == "pass"
+    assert report["count_gate_gaps"] == []
+    assert report["writes_planned"] is False
+
+
+def test_neuron_knowledge_corpus_ingest_plan_expected_count_gate_fails_closed(tmp_path, capsys):
+    manifest = tmp_path / "palantir-manifest.json"
+    manifest.write_text(json.dumps(_palantir_full_count_manifest()), encoding="utf-8")
+
+    rc = main(
+        [
+            "corpus-ingest-plan",
+            "--project",
+            "neurons",
+            "--storage-mode",
+            "external_object_store",
+            "--manifest-file",
+            str(manifest),
+            "--expect-source-count",
+            "66",
+            "--expect-source-url-count",
+            "39",
+            "--expect-manual-text-without-url-count",
+            "26",
+            "--expect-source-type-count",
+            "PDF=6",
+            "--expect-source-type-count",
+            "WEB_PAGE=33",
+            "--expect-source-type-count",
+            "TEXT=26",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["count_gate_status"] == "fail"
+    assert report["count_gate_gaps"] == [{"field": "source_count", "expected": 66, "actual": 65}]
+    assert report["writes_planned"] is False
+
+
 def test_neuron_knowledge_corpus_ingest_local_test_is_preview_until_store_configured(capsys):
     rc = main(["corpus-ingest", "--project", "neurons", "--target", "local_test"])
 
@@ -103,6 +298,96 @@ def test_neuron_knowledge_corpus_ingest_local_test_is_preview_until_store_config
     assert report["mutation_performed"] is False
     assert report["writes_planned"] is True
     assert "reference_corpus_store_not_configured" in report["gaps"]
+
+
+def test_neuron_knowledge_corpus_ingest_local_test_writes_configured_store(tmp_path, capsys):
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "ledger.sqlite"
+    manifest.write_text(json.dumps(_reference_manifest()), encoding="utf-8")
+
+    rc = main(
+        [
+            "corpus-ingest",
+            "--project",
+            "neurons",
+            "--target",
+            "local_test",
+            "--ledger",
+            str(ledger),
+            "--manifest-file",
+            str(manifest),
+            "--storage-mode",
+            "managed_snapshot",
+        ]
+    )
+    ingest = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert ingest["schema_version"] == "reference_corpus_store_write.v1"
+    assert ingest["status"] == "stored"
+    assert ingest["source_count"] == 2
+    assert ingest["mutation_performed"] is True
+    assert ingest["production_mutation_performed"] is False
+
+    assert main(["corpus-status", "--project", "neurons", "--ledger", str(ledger), "--corpus-id", ingest["corpus_id"]]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["source_count"] == 2
+    assert status["storage_modes"] == {"managed_snapshot": 2}
+    assert status["reference_object_count"] == 2
+    assert status["document_source_count"] == 2
+    assert status["version_count"] == 2
+    assert status["snapshot_count"] == 2
+    assert status["chunk_count"] == 2
+    assert status["freshness_check_count"] == 2
+    assert status["extraction_run_count"] == 1
+    assert status["first_class_store_counts"]["document_sources"] == 2
+    assert status["first_class_store_counts"]["document_snapshots"] == 2
+    assert status["first_class_store_counts"]["document_chunks"] == 2
+    assert status["first_class_store_counts"]["freshness_checks"] == 2
+    assert status["first_class_store_counts"]["extraction_runs"] == 1
+    assert status["document_sources"][0]["schema_version"] == "document_source.v1"
+    assert status["document_versions"][0]["schema_version"] == "document_version.v1"
+    assert status["document_snapshots"][0]["schema_version"] == "document_snapshot.v1"
+    assert status["document_chunks"][0]["schema_version"] == "document_chunk.v1"
+    assert status["freshness_checks"][0]["schema_version"] == "freshness_check.v1"
+    assert status["extraction_runs"][0]["status"] == "completed"
+    assert status["freshness_gaps"][0]["source_url_status"] == "missing_manual_text"
+    assert status["gaps"] == []
+
+
+def test_neuron_knowledge_corpus_ingest_and_status_use_configured_local_test_ledger_env(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "ledger.sqlite"
+    manifest.write_text(json.dumps(_reference_manifest()), encoding="utf-8")
+    monkeypatch.setenv("NEURON_REFERENCE_CORPUS_LEDGER", str(ledger))
+
+    rc = main(
+        [
+            "corpus-ingest",
+            "--project",
+            "neurons",
+            "--target",
+            "local_test",
+            "--manifest-file",
+            str(manifest),
+            "--storage-mode",
+            "managed_snapshot",
+        ]
+    )
+    ingest = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert ingest["schema_version"] == "reference_corpus_store_write.v1"
+    assert ingest["status"] == "stored"
+    assert ingest["production_mutation_performed"] is False
+
+    assert main(["corpus-status", "--project", "neurons", "--corpus-id", ingest["corpus_id"]]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["source_count"] == 2
+    assert status["storage_modes"] == {"managed_snapshot": 2}
+    assert status["gaps"] == []
 
 
 def test_neuron_knowledge_golden_query_eval_baseline(capsys):

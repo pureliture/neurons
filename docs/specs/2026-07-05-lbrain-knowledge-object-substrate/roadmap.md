@@ -11,6 +11,7 @@ Current state:
 - Phase 1 substrate implementation: local/test scope에서는 완료되었습니다.
 - Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates는 통과했고 deployed HTTP MCP runtime 및 configured endpoint는 검증되었지만, 현재 Codex session tool registry에는 object-native tools가 아직 없으며 current-source-main image identity가 live 상태임은 증명되지 않았습니다.
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP는 object-native tools를 노출하고, 최신 configured-endpoint smoke는 production write에 대해 denied/no-mutation으로 통과하지만, 현재 Codex session의 `mcp__lbrain` namespace는 아직 이를 노출하지 않으며 live MCP image가 #73/current-main source refactor를 포함하는지는 증명되지 않았습니다.
+- P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, production-denial evidence는 존재하지만, real private Palantir manifest ingest 및 production ingest approval은 여전히 gap입니다.
 - Product activation: 완료되지 않았습니다; configured agent read path refresh가 여전히 필요합니다.
 - UI/object browser: product activation prerequisite는 아니지만, 이후 product surface로 열어 둡니다.
 
@@ -195,7 +196,9 @@ Next gate:
 
 ### P2. Living Reference Corpus Store
 
-State: planned.
+State: `PASS_WITH_GAPS`.
+
+Local/test reference corpus store gates pass. The phase is not production-validated, and it is not proof that the private/local Palantir manifest has been ingested.
 
 Purpose:
 
@@ -219,6 +222,44 @@ Gate evidence:
 - corpus status reports source-rights, retention, deletion, redaction, and raw-return policy
 - repeated ingest is idempotent
 - production ingest remains gated
+
+Current local/test evidence summary:
+
+- sanitized reference corpus fixture maps to `ReferenceCorpus`, `DocumentSource`, `DocumentVersion`, `DocumentSnapshot`, `DocumentChunk`, `ExtractionRun`, and `FreshnessCheck` metadata without raw body return
+- ingest plan reports manifest hash, hash verification state, source count, missing manual URL gap count, storage mode, raw body policy, and no writes planned
+- `corpus-ingest-plan --manifest-file ...` loads an operator-supplied manifest read-only and reports source URL count, manual text count, source type distribution, and manifest hash
+- sanitized full-count Palantir-shaped fixture proves the P2 count gate shape for 65 sources, 39 sources with URL, 26 manual text sources without URL, and PDF/Web/Text distribution 6/33/26 without raw body access
+- `corpus-ingest-plan --expect-source-count ... --expect-source-url-count ... --expect-manual-text-without-url-count ... --expect-source-type-count ...` compares operator expected counts against the loaded manifest and returns `count_gate_status=pass` without writes
+- expected-count mismatches return `count_gate_status=fail`, public-safe `count_gate_gaps`, CLI exit 1, and `writes_planned=false`
+- MCP `brain_corpus_ingest_plan` schema and dispatch expose the same expected-count gate for read-only plan validation
+- managed snapshot metadata carries raw-return denial, retention, redaction, deletion, and source-rights policy
+- re-ingest produces stable corpus/source/snapshot/chunk/run ids for unchanged hashes
+- content hash mismatch blocks extraction output instead of creating reference objects
+- CLI and MCP `brain_corpus_status` report storage mode support and raw-body/source-rights policy even while the persistent reference corpus store is empty
+- local/test ledger-backed `reference_corpus_bundles` store persists sanitized corpus metadata, keeps repeated ingest idempotent by corpus id, and returns read-after-write corpus status counts
+- local/test ledger-backed first-class rows persist public-safe `DocumentSource`, `DocumentVersion`, `DocumentSnapshot`, `DocumentChunk`, `FreshnessCheck`, and `ExtractionRun` metadata separately from the aggregate bundle
+- `brain_corpus_status` reports first-class store counts plus limited public-safe rows for document sources, versions, snapshots, chunks, freshness checks, and extraction runs
+- CLI `corpus-ingest --target local_test --ledger ... --manifest-file ...` can load a sanitized manifest into the local/test store; production target remains denied before manifest/store write
+- CLI `corpus-ingest --target local_test --manifest-file ...` and `corpus-status` can use configured `NEURON_REFERENCE_CORPUS_LEDGER` for a local/test store read-after-write path without printing the ledger path
+- CLI production corpus ingest remains denied/no-mutation even when a local/test reference corpus ledger is configured
+- MCP `brain_corpus_status` reads the local/test ledger-backed corpus store through `KnowledgeSearchService.core_brain()`
+- ledger area boundary manifest assigns reference corpus bundle and first-class object tables to the LBrain object/native-memory area and the boundary guard passes
+- focused evidence: `cd worker && uv run pytest -q tests/test_reference_corpus.py tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py`
+- focused result: `98 passed, 1 warning`
+- ledger boundary evidence: `cd worker && uv run pytest -q tests/test_ledger_area_boundaries.py`
+- ledger boundary result: `10 passed`
+- worker regression evidence: `cd worker && uv run pytest -q`
+- worker regression result: `1509 passed, 9 skipped, 1 warning`
+- root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
+- root regression result: `BUILD SUCCESSFUL`
+
+Remaining gaps:
+
+- real local/private Palantir corpus manifest has not been loaded through an approved persistent LBrain corpus store in this phase branch
+- sanitized full-count fixture and expected-count gate are local/test contract evidence only; they are not proof that a private/local Palantir manifest exists or has been ingested
+- production corpus ingest remains denied/gated
+- standalone corpus status still reports `reference_corpus_store_empty` when neither `--ledger` nor configured `NEURON_REFERENCE_CORPUS_LEDGER` is supplied
+- no production ledger/corpus mutation has been performed or claimed
 
 ### P3. Processing And Object Extraction Pipeline
 
@@ -476,6 +517,8 @@ P5 must not be declared green until data, processing, authority, runtime, prefer
 
 Use phase states, not percentages.
 
+Evidence result labels such as `PASS`, `PASS_WITH_GAPS`, and `FAIL` can appear in phase summaries and notes. They do not replace the progress states below.
+
 Allowed states:
 
 - `not_started`
@@ -492,7 +535,7 @@ Current accounting:
 | --- | --- | --- |
 | P0 Local Object Substrate Foundation | `complete` | complete for local/test scope |
 | P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; deployed/configured endpoint validated, current Codex session tool registry gap remains |
-| P2 Living Reference Corpus Store | `planned` | corpus store not configured |
+| P2 Living Reference Corpus Store | `local_validated` | `PASS_WITH_GAPS`; local/test store and status gates pass, real private manifest ingest and production approval remain gaps |
 | P3 Processing And Object Extraction Pipeline | `planned` | skeletal extraction only |
 | P4 Review Queue And Authority Promotion | `planned` | production authority write closed |
 | P5 Continuous Golden Query Quality Gates | `planned` | baseline red exists; runs across P1-P9 |
@@ -504,23 +547,25 @@ Current accounting:
 
 ## Next Design Targets
 
-The next `grill-to-spec` / `agentic-execution` loop should close the remaining P1 configured-agent read-path gap, then move to P2.
+Resolve the P2 delivery gate by linking the branch to an approved issue/PR, then start P3 Processing And Object Extraction Pipeline from this roadmap. The remaining P1 configured-agent read-path gap stays open until the current Codex `mcp__lbrain` namespace exposes object-native tools directly.
 
 Recommended goal:
 
 ```text
-Refresh the configured Codex LBrain MCP tool registry so object-native tools are available through the agent read path, without production authority mutation.
+Start P3 Processing And Object Extraction Pipeline with deterministic local/test extraction fixtures, public-safe chunk preview, strategy comparison, and evaluator evidence, without production authority or corpus mutation.
 ```
 
 Expected outputs:
 
-- activation `requirements.md`
-- activation `design.md`
-- deployment/read-path validation plan
-- live MCP tool-list smoke
+- P3 `requirements.md` or approved requirements section
+- P3 `design.md` or approved design section
+- deterministic fixture extraction smoke
+- public-safe chunk/object preview
+- extraction strategy comparison report
+- evaluator report tied to a golden query slice
 - read-only object query smoke
-- deployed artifact identity check against exact commit, image, or build artifact
-- production proposal/decision denial smoke
+- local/test artifact identity check against the exact branch commit
+- production extraction/proposal/decision denial smoke
 - phase-specific golden query slice result
 - explicit no-mutation report
 
