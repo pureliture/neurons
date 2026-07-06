@@ -213,11 +213,13 @@ def test_repo_document_extraction_preview_reports_full_run_edges_and_metrics():
     assert result["evidence_count"] == 3
     assert result["lane_counts"] == {
         "accepted_current": 1,
+        "accepted_non_current": 0,
         "archive_only": 0,
         "candidate": 0,
         "derived_projection": 1,
         "proposal_only": 1,
         "reference_only": 0,
+        "rejected": 0,
     }
     assert all(item["object_type"] == "RepoDocument" for item in result["objects"])
     assert [edge["edge_type"] for edge in result["edges"]] == [

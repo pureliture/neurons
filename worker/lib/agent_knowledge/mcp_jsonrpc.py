@@ -336,7 +336,7 @@ def _dispatch_brain_objects_query_tool(tool_name: str, arguments: dict, service:
     if not isinstance(object_types, list):
         raise ValueError("object_types must be an array")
     project = _project_arg(arguments)
-    result = service.core_brain(project=project).brain_objects_query(
+    result = service.brain_objects_query(
         repository=repository,
         branch=branch,
         query=query,

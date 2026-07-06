@@ -12,10 +12,12 @@ ROUTE_SPECS: dict[str, dict[str, Any]] = {
         "optional_object_types": ["ReferenceDocument", "Spec"],
         "allowed_authority_lanes": [
             "accepted_current",
+            "accepted_non_current",
             "reference_only",
             "proposal_only",
             "archive_only",
             "derived_projection",
+            "rejected",
         ],
         "verification_policy": "allow_unverified_with_gap",
         "evidence_policy": "require_evidence_or_gap",
@@ -67,11 +69,13 @@ def _empty_pack(route: str) -> dict[str, Any]:
         "evidence": [],
         "lanes": {
             "accepted_current": [],
+            "accepted_non_current": [],
             "candidate": [],
             "reference_only": [],
             "proposal_only": [],
             "archive_only": [],
             "derived_projection": [],
+            "rejected": [],
         },
         "verification": {
             "runtime_verified": [],
