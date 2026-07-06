@@ -87,7 +87,7 @@ def test_eval_strict_axes_require_empty_authority_lane_disclosure():
         },
         "edges": [{"edge_id": "ke:requires_evidence:legacy", "edge_type": "requires_evidence"}],
         "evidence": [{"evidence_id": "ev:inventory:legacy", "verification_state": "source_hash_verified"}],
-        "verification": {"unverified": [{"evidence_id": "ev:inventory:legacy"}]},
+        "verification": {"freshness_checked": [{"evidence_id": "ev:inventory:legacy"}]},
         "recommended_actions": [{"object_id": "ko:RepoDocument:legacy", "action": "review_archive"}],
     }
     failing = evaluate_object_pack_response(
@@ -104,6 +104,27 @@ def test_eval_strict_axes_require_empty_authority_lane_disclosure():
     assert failing["passes"] is False
     assert "empty_authority_lane_not_stated:accepted_current" in failing["failures"]
     assert passing["passes"] is True
+
+
+def test_eval_strict_axes_require_freshness_specific_verification():
+    response = {
+        "route": "documentation_cleanup",
+        "lanes": {"candidate": [{"object_id": "ko:RepoDocument:legacy"}]},
+        "edges": [{"edge_id": "ke:requires_evidence:legacy", "edge_type": "requires_evidence"}],
+        "evidence": [{"evidence_id": "ev:inventory:legacy", "verification_state": "source_hash_verified"}],
+        "verification": {"unverified": [{"evidence_id": "ev:inventory:legacy"}]},
+        "gaps": [],
+        "recommended_actions": [{"object_id": "ko:RepoDocument:legacy", "action": "review_archive"}],
+    }
+
+    result = evaluate_object_pack_response(
+        GOLDEN_QUERIES[1],
+        response,
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+
+    assert result["passes"] is False
+    assert "missing_freshness" in result["failures"]
 
 
 def test_eval_strict_axes_require_runtime_evidence_for_runtime_claims():
@@ -125,6 +146,7 @@ def test_eval_strict_axes_require_runtime_evidence_for_runtime_claims():
         {
             **base_response,
             "verification": {
+                "freshness_checked": [{"evidence_id": "ev:runtime-freshness"}],
                 "runtime_verified": [],
                 "runtime_unverified": [{"reason": "runtime_evidence_unverified"}],
             },
