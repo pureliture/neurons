@@ -6,6 +6,7 @@ from agent_knowledge.llm_brain_core.golden_query_eval import (
     build_phase_golden_query_coverage_report,
     build_source_to_authority_quality_gate_report,
     evaluate_object_pack_response,
+    evaluate_product_evidence_summary,
 )
 
 
@@ -180,7 +181,7 @@ def test_phase_golden_query_coverage_reports_pass_with_gaps_not_green():
         "gap",
         "recommended_action",
     ]
-    assert "approved_production_pilot_missing" in phases["P4"]["gaps"]
+    assert "production_authority_pilot_not_executed" in phases["P4"]["gaps"]
     assert phases["P6"]["result"] == "PASS_WITH_GAPS"
     assert "handoff_pack_not_implemented" not in phases["P6"]["gaps"]
     assert "live_multi_device_rollup_unproven" in phases["P6"]["gaps"]
@@ -202,6 +203,8 @@ def test_source_to_authority_quality_gate_covers_review_approval_and_read_path_w
     assert report["status"] == "PASS_WITH_GAPS"
     assert report["release_quality_gate"] == "not_green"
     assert report["production_mutation_performed"] is False
+    assert report["production_approval_gate"] == "preapproved"
+    assert report["production_mutation_execution"] == "not_performed_by_local_gate"
     assert report["authority_write_scope"] == "local_test"
     checks = {item["id"]: item for item in report["path_checks"]}
 
@@ -237,7 +240,7 @@ def test_source_to_authority_quality_gate_covers_review_approval_and_read_path_w
     assert surface_checks["mcp_source_to_candidate_runtime_readiness_tool"]["result"] == "PASS"
     assert surface_checks["mcp_source_to_candidate_runtime_readiness_tool"]["network_used"] is False
     assert surface_checks["mcp_source_to_candidate_runtime_readiness_tool"]["production_mutation_performed"] is False
-    assert "production_authority_gate_not_approved" in report["gaps"]
+    assert "production_authority_gate_preapproved_not_executed" in report["gaps"]
 
 
 def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
@@ -249,14 +252,20 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert report["production_ready"] is False
     assert report["release_quality_gate"] == "not_green"
     assert report["production_mutation_performed"] is False
+    assert report["production_approval_gate"] == "preapproved"
+    assert report["production_mutation_execution"] == "not_performed_by_local_gate"
     assert report["scope_phases"] == ["P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9"]
     assert report["minimum_review_loop_checkpoint"]["phases"] == ["P2", "P3", "P4"]
     assert report["minimum_review_loop_checkpoint"]["status"] == "PASS_WITH_GAPS"
     assert report["next_phase"] == "P5"
     assert set(report["remaining_phases"]) >= {"P5", "P6", "P7", "P8", "P9"}
     assert report["hard_failures"] == []
+    assert report["product_evidence_status"] == "PASS"
     assert "production_quality_not_green" in report["goal_completion_blockers"]
     assert "live_runtime_read_path_unverified" in report["goal_completion_blockers"]
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    assert set(checks) == {"P6", "P7", "P8", "P9"}
+    assert all(item["result"] == "PASS" for item in checks.values())
     evidence = {item["phase"]: item for item in report["product_evidence_summary"]}
     assert set(evidence) == {"P6", "P7", "P8", "P9"}
     assert evidence["P6"]["schema_version"] == "object_extraction_session_project_rollup_preview.v1"
@@ -267,7 +276,9 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert evidence["P7"]["artifact_preference_pack_status"] == "pass"
     assert evidence["P8"]["schema_version"] == "object_extraction_runtime_truth_preview.v1"
     assert evidence["P8"]["runtime_unverified_count"] == 1
-    assert evidence["P8"]["permission"] == "denied"
+    assert evidence["P8"]["permission"] == "allowed"
+    assert evidence["P8"]["permission_reason"] == "approved_scope_present"
+    assert evidence["P8"]["authority_write_performed"] is False
     assert evidence["P9"]["schema_version"] == "agent_context_product_pack.v1"
     assert evidence["P9"]["section_counts"]["style_preference"] >= 1
     assert evidence["P9"]["tool_hint_count"] >= 4
@@ -279,3 +290,35 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert phase_progress["P5"]["state"] == "in_progress"
     assert phase_progress["P6"]["state"] == "local_validated"
     assert phase_progress["P9"]["state"] == "local_validated"
+
+
+def test_product_evidence_summary_fails_closed_when_required_phase_evidence_is_missing():
+    result = evaluate_product_evidence_summary(
+        [
+            {
+                "phase": "P6",
+                "schema_version": "object_extraction_session_project_rollup_preview.v1",
+                "object_count": 1,
+                "edge_count": 0,
+                "evidence_count": 0,
+                "production_mutation_performed": False,
+            },
+            {
+                "phase": "P8",
+                "schema_version": "object_extraction_runtime_truth_preview.v1",
+                "runtime_unverified_count": 0,
+                "permission": "allowed",
+                "permission_reason": "approved_scope_present",
+                "authority_write_performed": True,
+                "production_mutation_performed": True,
+            },
+        ]
+    )
+
+    assert result["status"] == "FAIL"
+    assert "P6:product_evidence_failed" in result["hard_failures"]
+    assert "P7:product_evidence_missing" in result["hard_failures"]
+    assert "P8:product_evidence_failed" in result["hard_failures"]
+    checks = {item["phase"]: item for item in result["checks"]}
+    assert "p6_session_rollup_incomplete" in checks["P6"]["failures"]
+    assert "p8_production_mutation_performed" in checks["P8"]["failures"]
