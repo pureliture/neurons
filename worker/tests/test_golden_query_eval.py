@@ -285,6 +285,7 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert evidence["P8"]["authority_write_performed"] is False
     assert evidence["P9"]["schema_version"] == "agent_context_product_pack.v1"
     assert evidence["P9"]["section_counts"]["style_preference"] >= 1
+    assert evidence["P9"]["section_counts"]["active_work"] >= 1
     assert evidence["P9"]["tool_hint_count"] >= 5
     assert evidence["P9"]["mutation_allowed"] is False
     assert all(item["production_mutation_performed"] is False for item in evidence.values())
@@ -326,3 +327,50 @@ def test_product_evidence_summary_fails_closed_when_required_phase_evidence_is_m
     checks = {item["phase"]: item for item in result["checks"]}
     assert "p6_session_rollup_incomplete" in checks["P6"]["failures"]
     assert "p8_production_mutation_performed" in checks["P8"]["failures"]
+
+
+def test_product_evidence_summary_fails_when_p9_active_work_is_missing():
+    result = evaluate_product_evidence_summary(
+        [
+            {
+                "phase": "P6",
+                "schema_version": "object_extraction_session_project_rollup_preview.v1",
+                "object_count": 8,
+                "edge_count": 16,
+                "evidence_count": 1,
+                "handoff_pack_schema": "session_project_handoff_pack.v1",
+                "production_mutation_performed": False,
+            },
+            {
+                "phase": "P7",
+                "schema_version": "object_extraction_preference_style_preview.v1",
+                "object_count": 2,
+                "artifact_preference_pack_status": "pass",
+                "accepted_preference_count": 1,
+                "source_evidence_ref_count": 1,
+                "production_mutation_performed": False,
+            },
+            {
+                "phase": "P8",
+                "schema_version": "object_extraction_runtime_truth_preview.v1",
+                "runtime_unverified_count": 1,
+                "permission": "allowed",
+                "permission_reason": "approved_scope_present",
+                "authority_write_performed": False,
+                "production_mutation_performed": False,
+            },
+            {
+                "phase": "P9",
+                "schema_version": "agent_context_product_pack.v1",
+                "section_counts": {"style_preference": 1, "active_work": 0},
+                "tool_hint_count": 5,
+                "mutation_allowed": False,
+                "production_mutation_performed": False,
+            },
+        ]
+    )
+
+    checks = {item["phase"]: item for item in result["checks"]}
+    assert result["status"] == "FAIL"
+    assert "P9:product_evidence_failed" in result["hard_failures"]
+    assert "p9_active_work_section_missing" in checks["P9"]["failures"]
