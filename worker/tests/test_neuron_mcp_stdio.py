@@ -741,6 +741,12 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_
         for event in packet["permission_sensitive_audit"]["audit_events"]
     )
     assert packet["permission_sensitive_audit"]["audit_store"]["status"] == "recorded"
+    assert packet["agent_context_startup_runtime"]["schema_version"] == "agent_context_startup_runtime_evidence.v1"
+    assert packet["agent_context_startup_runtime"]["startup_context"]["loaded_on_startup"] is True
+    assert packet["agent_context_startup_runtime"]["startup_context"]["surface_policy"]["mutation_allowed"] is False
+    assert packet["agent_context_startup_runtime"]["read_path_smoke"]["tool"] == BRAIN_OBJECTS_QUERY_TOOL_NAME
+    assert packet["agent_context_startup_runtime"]["read_path_smoke"]["read_only"] is True
+    assert packet["agent_context_startup_runtime"]["runtime_enforcement"]["raw_private_context_blocked"] is True
     assert len(packet["brain_objects_query_smokes"]) == 4
     assert all(
         "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])

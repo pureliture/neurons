@@ -708,6 +708,16 @@ def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
         failures.append("p8_permission_sensitive_audit_events_missing")
     if evidence.get("runtime_evidence_collector_permission_audit_store_status") != "recorded":
         failures.append("p8_permission_sensitive_audit_store_not_recorded")
+    if evidence.get("runtime_evidence_collector_agent_context_startup_schema") != (
+        "agent_context_startup_runtime_evidence.v1"
+    ):
+        failures.append("p8_agent_context_startup_collector_missing")
+    if evidence.get("runtime_evidence_collector_agent_context_startup_loaded") is not True:
+        failures.append("p8_agent_context_startup_not_loaded")
+    if evidence.get("runtime_evidence_collector_agent_context_startup_read_path_tool") != "brain_objects_query":
+        failures.append("p8_agent_context_startup_read_path_missing")
+    if int(evidence.get("runtime_evidence_collector_agent_context_startup_route_count") or 0) < 4:
+        failures.append("p8_agent_context_startup_routes_missing")
     if evidence.get("shadow_route_smoke_request_schema") != "source_to_candidate_runtime_shadow_collection_request.v1":
         failures.append("p8_shadow_route_smoke_request_missing")
     if evidence.get("shadow_route_smoke_request_status") != "requested":
@@ -922,6 +932,7 @@ def _p7_preference_artifact_evidence() -> dict[str, Any]:
 def _p8_runtime_authority_evidence() -> dict[str, Any]:
     from .extraction_pipeline import run_runtime_truth_extraction_preview
     from .runtime_readiness import (
+        AGENT_CONTEXT_STARTUP_RUNTIME_SCHEMA,
         PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA,
         build_source_to_candidate_runtime_collected_shadow_evidence_packet,
         build_source_to_candidate_runtime_evidence_collection_plan,
@@ -1047,6 +1058,21 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         if isinstance(collector_permission_audit.get("audit_store"), Mapping)
         else {}
     )
+    collector_agent_context_startup = (
+        collector_packet.get("agent_context_startup_runtime")
+        if isinstance(collector_packet.get("agent_context_startup_runtime"), Mapping)
+        else {}
+    )
+    collector_startup_context = (
+        collector_agent_context_startup.get("startup_context")
+        if isinstance(collector_agent_context_startup.get("startup_context"), Mapping)
+        else {}
+    )
+    collector_startup_read_path = (
+        collector_agent_context_startup.get("read_path_smoke")
+        if isinstance(collector_agent_context_startup.get("read_path_smoke"), Mapping)
+        else {}
+    )
     return {
         "phase": "P8",
         "schema_version": str(report.get("schema_version") or ""),
@@ -1169,6 +1195,19 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         ),
         "runtime_evidence_collector_permission_audit_store_status": str(
             collector_permission_audit_store.get("status") or ""
+        ),
+        "runtime_evidence_collector_agent_context_startup_schema": str(
+            collector_agent_context_startup.get("schema_version") or ""
+        ),
+        "runtime_evidence_collector_agent_context_startup_expected_schema": AGENT_CONTEXT_STARTUP_RUNTIME_SCHEMA,
+        "runtime_evidence_collector_agent_context_startup_loaded": (
+            collector_startup_context.get("loaded_on_startup") is True
+        ),
+        "runtime_evidence_collector_agent_context_startup_read_path_tool": str(
+            collector_startup_read_path.get("tool") or ""
+        ),
+        "runtime_evidence_collector_agent_context_startup_route_count": len(
+            collector_startup_read_path.get("routes_checked") or []
         ),
         "gaps": list(preview.get("gaps") or []),
         "production_mutation_performed": bool(report.get("production_mutation_performed")),
