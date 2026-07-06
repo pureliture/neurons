@@ -49,6 +49,8 @@ SESSION_PROJECT_HANDOFF_SCHEMA = "session_project_handoff_pack.v1"
 SESSION_PROJECT_RESUME_SCHEMA = "session_project_resume_context.v1"
 PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA = "preference_artifact_memory_runtime_evidence.v1"
 ARTIFACT_REVIEW_PREFERENCE_CHECK_SCHEMA = "artifact_review_preference_check.v1"
+PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA = "permission_sensitive_runtime_audit_evidence.v1"
+PERMISSION_AUDIT_EVENT_SCHEMA = "runtime_permission_audit_event.v1"
 REQUIRED_SESSION_PROJECT_OBJECT_TYPES = ("Device", "Session", "Repository", "Branch", "WorkUnit")
 REQUIRED_SESSION_PROJECT_EDGE_TYPES = (
     "repository_has_branch",
@@ -92,6 +94,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
         "probe_source_to_candidate_review_loop",
         "probe_session_project_rollup_runtime",
         "probe_preference_artifact_memory_runtime",
+        "collect_permission_sensitive_audit_runtime",
         "collect_deployed_identity",
         "probe_production_no_mutation_denials",
         "collect_object_authority_gate_policy",
@@ -154,6 +157,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
             "probe_source_to_candidate_review_loop": "live_source_to_candidate_review_loop_unverified",
             "probe_session_project_rollup_runtime": "live_session_project_rollup_unverified",
             "probe_preference_artifact_memory_runtime": "live_preference_artifact_memory_unverified",
+            "collect_permission_sensitive_audit_runtime": "permission_sensitive_audit_unverified",
             "collect_deployed_identity": "live_deployed_identity_unverified",
             "probe_production_no_mutation_denials": "production_denial_smokes_unverified",
             "collect_object_authority_gate_policy": "live_object_authority_gate_policy_unverified",
@@ -213,6 +217,7 @@ def build_source_to_candidate_runtime_evidence_packet_template(
             "source_to_candidate_review_loop",
             "session_project_rollup_runtime",
             "preference_artifact_memory",
+            "permission_sensitive_audit",
             "deployed_identity",
             "production_denials",
             "tool_schemas",
@@ -246,6 +251,7 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         "source_to_candidate_review_loop": _public_safe_mapping(captured.get("source_to_candidate_review_loop")),
         "session_project_rollup_runtime": _public_safe_mapping(captured.get("session_project_rollup_runtime")),
         "preference_artifact_memory": _public_safe_mapping(captured.get("preference_artifact_memory")),
+        "permission_sensitive_audit": _public_safe_mapping(captured.get("permission_sensitive_audit")),
         "deployed_identity": _public_safe_mapping(captured.get("deployed_identity")),
         "production_denials": _public_safe_mapping(captured.get("production_denials")),
         "tool_schemas": _public_safe_mapping(captured.get("tool_schemas")),
@@ -422,6 +428,40 @@ def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
                 "raw_external_ids_returned": False,
             },
         },
+        "permission_sensitive_audit": {
+            "schema_version": PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA,
+            "audit_events": [
+                {
+                    "schema_version": PERMISSION_AUDIT_EVENT_SCHEMA,
+                    "event_type": "permission_sensitive_runtime_action",
+                    "action": tool_name,
+                    "ledger_scope": "production",
+                    "permission": "denied",
+                    "authority_write_performed": False,
+                    "production_mutation_performed": False,
+                    "actor_ref_hash": "collector_sets_sha256",
+                    "request_hash": "collector_sets_sha256",
+                    "protected_values_returned": False,
+                    "raw_private_evidence_returned": False,
+                    "secret_returned": False,
+                    "host_topology_returned": False,
+                    "raw_external_ids_returned": False,
+                }
+                for tool_name in OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS
+            ],
+            "audit_store": {
+                "status": "recorded",
+                "event_count": len(OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS),
+                "production_mutation_performed": False,
+            },
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
         "deployed_identity": {
             "contains_expected_commit": "collector_sets_boolean",
             "identity_source": "redacted_artifact_identity_summary",
@@ -579,6 +619,20 @@ def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
             "production_mutation_performed": False,
         },
         {
+            "step_id": "collect_permission_sensitive_audit_runtime",
+            "evidence_field": "permission_sensitive_audit",
+            "required_values": [
+                PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA,
+                PERMISSION_AUDIT_EVENT_SCHEMA,
+                *OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS,
+                "permission=denied",
+                "protected_values_returned=false",
+            ],
+            "safe_target": "sanitized_permission_sensitive_audit_runtime_evidence",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
             "step_id": "collect_deployed_identity",
             "evidence_field": "deployed_identity",
             "required_values": ["contains_expected_commit"],
@@ -630,6 +684,7 @@ def build_source_to_candidate_runtime_readiness_report(
         _live_source_to_candidate_review_loop_claim(evidence),
         _live_session_project_rollup_claim(evidence),
         _live_preference_artifact_memory_claim(evidence),
+        _live_permission_sensitive_audit_claim(evidence),
         _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
         _live_object_authority_production_gate_policy_claim(evidence),
         _live_object_authority_bounded_execution_claim(evidence),
@@ -1423,6 +1478,134 @@ def _preference_artifact_memory_reports_mutation(
         preference.get("production_mutation_performed") is True
         or pack.get("production_mutation_performed") is True
         or html_smoke.get("production_mutation_performed") is True
+    )
+
+
+def _live_permission_sensitive_audit_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    audit = evidence.get("permission_sensitive_audit")
+    audit = audit if isinstance(audit, Mapping) else {}
+    if not audit:
+        return {
+            "claim_id": "live.production.permission_sensitive_audit",
+            "evidence_class": "runtime_safety_audit",
+            "status": "not_validated",
+            "schema_version": "",
+            "event_count": 0,
+            "production_mutation_performed": False,
+            "gaps": ["permission_sensitive_audit_unverified"],
+        }
+    events_raw = audit.get("audit_events")
+    events = [dict(item) for item in events_raw if isinstance(item, Mapping)] if isinstance(events_raw, list) else []
+    by_action = {public_safe_text(str(item.get("action") or ""), max_chars=120): item for item in events}
+    store = audit.get("audit_store") if isinstance(audit.get("audit_store"), Mapping) else {}
+    postcheck = audit.get("postcheck") if isinstance(audit.get("postcheck"), Mapping) else {}
+    failures = _permission_sensitive_audit_failures(
+        audit=audit,
+        events=events,
+        by_action=by_action,
+        store=store,
+        postcheck=postcheck,
+    )
+    return {
+        "claim_id": "live.production.permission_sensitive_audit",
+        "evidence_class": "runtime_safety_audit",
+        "status": "failed" if failures else "validated",
+        "schema_version": public_safe_text(str(audit.get("schema_version") or ""), max_chars=80),
+        "event_count": len(events),
+        "required_actions": list(OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS),
+        "recorded_actions": sorted(action for action in by_action if action),
+        "audit_store_status": public_safe_text(str(store.get("status") or ""), max_chars=80),
+        "production_mutation_performed": _permission_sensitive_audit_reports_mutation(
+            audit=audit,
+            events=events,
+            store=store,
+        ),
+        "gaps": failures,
+    }
+
+
+def _permission_sensitive_audit_failures(
+    *,
+    audit: Mapping[str, Any],
+    events: list[Mapping[str, Any]],
+    by_action: Mapping[str, Mapping[str, Any]],
+    store: Mapping[str, Any],
+    postcheck: Mapping[str, Any],
+) -> list[str]:
+    failures: list[str] = []
+    if audit.get("schema_version") != PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA:
+        failures.append("permission_sensitive_audit_schema_mismatch")
+    missing_actions = [tool_name for tool_name in OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS if tool_name not in by_action]
+    failures.extend(_named_gaps("permission_sensitive_audit_missing_action", missing_actions))
+    for action, event in by_action.items():
+        if action not in OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS:
+            continue
+        failures.extend(_permission_audit_event_failures(action, event))
+    if store.get("status") != "recorded":
+        failures.append("permission_sensitive_audit_store_not_recorded")
+    if _int_value(store.get("event_count")) < len(OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS):
+        failures.append("permission_sensitive_audit_event_count_incomplete")
+    if _permission_sensitive_audit_reports_mutation(audit=audit, events=events, store=store):
+        failures.append("permission_sensitive_audit_production_mutation_performed")
+    if postcheck.get("status") != "validated":
+        failures.append("permission_sensitive_audit_postcheck_missing")
+    for field, gap in (
+        ("raw_private_evidence_returned", "permission_sensitive_audit_raw_private_evidence_returned"),
+        ("secret_returned", "permission_sensitive_audit_secret_returned"),
+        ("host_topology_returned", "permission_sensitive_audit_host_topology_returned"),
+        ("raw_external_ids_returned", "permission_sensitive_audit_raw_external_ids_returned"),
+    ):
+        if postcheck.get(field) is not False:
+            failures.append(gap)
+    return _dedupe(failures)
+
+
+def _permission_audit_event_failures(action: str, event: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if event.get("schema_version") != PERMISSION_AUDIT_EVENT_SCHEMA:
+        failures.append(f"permission_sensitive_audit_event_schema_mismatch:{action}")
+    if event.get("event_type") != "permission_sensitive_runtime_action":
+        failures.append(f"permission_sensitive_audit_event_type_mismatch:{action}")
+    if event.get("ledger_scope") != "production":
+        failures.append(f"permission_sensitive_audit_ledger_scope_mismatch:{action}")
+    if str(event.get("permission") or "") != "denied":
+        failures.append(f"permission_sensitive_audit_event_not_denied:{action}")
+    if event.get("authority_write_performed") is not False:
+        failures.append(f"permission_sensitive_audit_authority_write_performed:{action}")
+    if event.get("production_mutation_performed") is True:
+        failures.append(f"permission_sensitive_audit_event_mutation_performed:{action}")
+    actor_hash = public_safe_text(str(event.get("actor_ref_hash") or ""), max_chars=120)
+    request_hash = public_safe_text(str(event.get("request_hash") or ""), max_chars=120)
+    if not actor_hash.startswith("sha256:"):
+        failures.append(f"permission_sensitive_audit_actor_hash_missing:{action}")
+    if not request_hash.startswith("sha256:"):
+        failures.append(f"permission_sensitive_audit_request_hash_missing:{action}")
+    for field, gap in (
+        ("protected_values_returned", "permission_sensitive_audit_protected_values_returned"),
+        ("raw_private_evidence_returned", "permission_sensitive_audit_raw_private_evidence_returned"),
+        ("secret_returned", "permission_sensitive_audit_secret_returned"),
+        ("host_topology_returned", "permission_sensitive_audit_host_topology_returned"),
+        ("raw_external_ids_returned", "permission_sensitive_audit_raw_external_ids_returned"),
+    ):
+        if event.get(field) is not False:
+            failures.append(f"{gap}:{action}")
+    return failures
+
+
+def _permission_sensitive_audit_reports_mutation(
+    *,
+    audit: Mapping[str, Any],
+    events: list[Mapping[str, Any]],
+    store: Mapping[str, Any],
+) -> bool:
+    return (
+        audit.get("production_mutation_performed") is True
+        or store.get("production_mutation_performed") is True
+        or any(
+            event.get("production_mutation_performed") is True
+            or event.get("authority_write_performed") is True
+            for event in events
+        )
     )
 
 

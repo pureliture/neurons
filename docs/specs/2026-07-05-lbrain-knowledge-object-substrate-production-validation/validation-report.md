@@ -26,6 +26,8 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 이번 continuation은 P7 runtime readiness에 `live.preference_artifact.memory` claim도 추가했습니다. 이 claim은 sanitized `preference_artifact_memory_runtime_evidence.v1` packet에서 accepted/proposal preference lane separation, accepted preference context-pack presence, explicit `html_visualization_preference` route smoke, no-UI/no-raw-body artifact review check, and public-safe postcheck를 검증합니다. Evidence packet이 없으면 `live_preference_artifact_memory_unverified` 및 `accepted_preference_context_pack_live_unproven` gaps를 반환하고, route fallback, missing accepted/proposal lanes, mutation-enabled context, raw artifact body, raw/private/secret/topology/raw external id return, or production mutation report는 fail-closed 처리합니다. 이는 branch-local evaluator gate이며 live P7 preference memory proof 자체가 아닙니다.
 
+이번 continuation은 P8 runtime readiness에 `live.production.permission_sensitive_audit` claim도 추가했습니다. 이 claim은 sanitized `permission_sensitive_runtime_audit_evidence.v1` packet에서 production-scope proposal/decision denial events, denied permission, no authority write, hashed actor/request refs, protected-value redaction, audit-store recording, and public-safe postcheck를 검증합니다. Evidence packet이 없으면 `permission_sensitive_audit_unverified` gap을 반환하고, missing action events, allowed/mutating audit events, missing hashes, protected value return, raw/private/secret/topology/raw external id return, or production mutation report는 fail-closed 처리합니다. 이는 branch-local evaluator gate이며 live permission-sensitive audit proof 자체가 아닙니다.
+
 Latest current-session shadow packet evaluation populated the public-safe evidence template from the configured `mcp__lbrain` read path and then evaluated it with branch-local runtime readiness. Result: `status=PASS_WITH_GAPS`, `failed_claims=[]`, `production_mutation_performed=false`, evaluator `network_used=false`, evidence-side `evidence_collection_network_used=true`, and `redaction_check=redacted_only`. Remaining gaps include missing branch-local source/review/readiness tools, missing live agent-context sections, `brain_objects_query_route_unimplemented:<route>` and `shadow_route_smoke_not_implemented:<route>` for all four required routes, expected branch commit identity unverified, production-denial smokes unverified, and bounded production authority execution unverified. This is current read-path evidence of the gap, not production readiness.
 
 ## Validated
@@ -34,7 +36,7 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
 
 - status: `validated`
 - evidence: `cd worker && uv run pytest -q`
-- result: `1659 passed, 9 skipped, 1 warning`
+- result: `1660 passed, 9 skipped, 1 warning`
 - note: covers object model, reference corpus, object packs, MCP stdio, CLI, context authority, ledger area boundary, and existing worker regression surface.
 
 ### local.root.gradle
@@ -140,6 +142,16 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
 - adjacent MCP result: `44 passed, 1 warning`
 - CLI template smoke: `preference_artifact_memory` appears in `required_packet_fields`; no-evidence smoke returns `live.preference_artifact.memory.status=not_validated`, `live_preference_artifact_memory_unverified`, and `accepted_preference_context_pack_live_unproven`.
 - interpretation: this adds a branch-local P7 runtime-readiness evaluator for future post-deploy evidence. Supplied preference/artifact memory evidence must prove accepted/proposal lane separation, accepted context-pack availability, explicit HTML/visualization preference route smoke, no-UI/no-raw-body artifact review check, and public-safe postcheck. Missing evidence remains `PASS_WITH_GAPS`; unsafe or incomplete supplied evidence fails. It is not live P7 preference-memory proof by itself.
+
+### local.runtime-readiness.permission-sensitive-audit
+
+- status: `validated`
+- evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_evidence tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_passes_with_sanitized_live_evidence tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_fails_when_permission_sensitive_audit_is_unsafe_or_incomplete`
+- result: `4 passed, 1 warning`
+- adjacent MCP evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_without_mutation tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_plan tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_template tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_accepts_bounded_execution_evidence_from_local_production_gate_simulation tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_without_evidence_preserves_live_gaps`
+- adjacent MCP result: `45 passed, 1 warning`
+- CLI template smoke: `permission_sensitive_audit` appears in `required_packet_fields`; no-evidence smoke returns `live.production.permission_sensitive_audit.status=not_validated` and `permission_sensitive_audit_unverified`.
+- interpretation: this adds a branch-local P8 runtime-readiness evaluator for future post-deploy audit evidence. Supplied audit evidence must prove production-scope proposal/decision denial audit events, hashed actor/request refs, no authority write, no protected value return, audit-store recording, and public-safe postcheck. Missing evidence remains `PASS_WITH_GAPS`; unsafe or incomplete supplied evidence fails. It is not live permission-sensitive audit proof by itself.
 
 ### local.mcp.brain-objects-query-routes
 
@@ -347,10 +359,11 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
   - branch-local evaluator `build_source_to_candidate_runtime_shadow_readiness_report`, CLI `--shadow-evidence-file`, and MCP `shadow_evidence` can now normalize and evaluate the same sanitized capture in one read-only step.
 - result:
   - `failed_claims=[]`
-  - `gap_count=35`
+  - `gap_count=36`
   - missing tools include `brain_source_to_candidate_graph`, `brain_candidate_review_edit`, `brain_approval_board_decide`, and `brain_source_to_candidate_runtime_readiness`
   - P6 rollup gaps include `live_session_project_rollup_unverified` and `live_multi_device_rollup_unproven`
   - P7 preference/artifact gaps include `live_preference_artifact_memory_unverified` and `accepted_preference_context_pack_live_unproven`
+  - P8 audit gaps include `permission_sensitive_audit_unverified`
   - route gaps include `brain_objects_query_route_unimplemented:<route>` and `shadow_route_smoke_not_implemented:<route>` for all four required routes
   - `production_mutation_performed=false`
   - evaluator `network_used=false`
@@ -367,6 +380,7 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
 - P3/P4 source-to-candidate review-loop evidence has branch-local/sanitized packet validation, but it remains a production-readiness gap until a deployed/live packet proves the source-to-candidate graph, candidate-review edit, approval-board local_test decision, read-after-write, and postcheck path.
 - P6 session/project/work-unit rollup evidence has branch-local/sanitized packet validation, but it remains a production-readiness gap until a deployed/live packet proves multi-device rollup, safe handoff/resume context, temporal read-after-write, and public-safe postcheck.
 - P7 preference/artifact memory evidence has branch-local/sanitized packet validation, but it remains a production-readiness gap until a deployed/live packet proves accepted/proposal preference lanes, accepted context-pack availability, explicit HTML/visualization preference route smoke, no-UI artifact review check, and public-safe postcheck.
+- P8 permission-sensitive audit evidence has branch-local/sanitized packet validation, but it remains a production-readiness gap until a deployed/live packet proves production-scope denial events, hashed actor/request refs, no authority write, audit-store recording, and public-safe postcheck.
 - P8 bounded production authority execution has branch-local/sanitized packet validation, but it remains a gap for production readiness until a deployed/live execution packet with postcheck and rollback/supersession evidence is attached.
 - P2 bounded production corpus ingest has branch-local/sanitized packet validation, but it remains a gap for production readiness until a deployed/live corpus-ingest packet with approval, read-after-write, rollback/deletion, postcheck, and provenance evidence is attached.
 - Post-deploy runtime readiness evidence must include sanitized provenance. Missing provenance is a validation failure for injected evidence packets, and missing live evidence remains `PASS_WITH_GAPS`.

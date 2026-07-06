@@ -453,6 +453,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
         "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
         "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
         "preference_artifact_memory": _preference_artifact_memory_evidence(),
+        "permission_sensitive_audit": _permission_sensitive_audit_evidence(),
         "production_denials": {
             BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
                 "status": "denied",
@@ -609,6 +610,11 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_templ
     assert (
         template["packet_field_templates"]["preference_artifact_memory"]["schema_version"]
         == "preference_artifact_memory_runtime_evidence.v1"
+    )
+    assert "permission_sensitive_audit" in template["required_packet_fields"]
+    assert (
+        template["packet_field_templates"]["permission_sensitive_audit"]["schema_version"]
+        == "permission_sensitive_runtime_audit_evidence.v1"
     )
     assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == 4
 
@@ -790,6 +796,7 @@ def _runtime_readiness_complete_evidence(
         "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
         "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
         "preference_artifact_memory": _preference_artifact_memory_evidence(),
+        "permission_sensitive_audit": _permission_sensitive_audit_evidence(),
         "production_denials": {
             BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
                 "status": "denied",
@@ -1010,6 +1017,43 @@ def _preference_artifact_memory_evidence() -> dict:
             "ui_required": False,
             "raw_artifact_body_returned": False,
             "assertions": ["accepted_html_preference_available"],
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+
+
+def _permission_sensitive_audit_evidence() -> dict:
+    event_base = {
+        "schema_version": "runtime_permission_audit_event.v1",
+        "event_type": "permission_sensitive_runtime_action",
+        "ledger_scope": "production",
+        "permission": "denied",
+        "authority_write_performed": False,
+        "production_mutation_performed": False,
+        "actor_ref_hash": "sha256:" + "c" * 24,
+        "request_hash": "sha256:" + "d" * 24,
+        "protected_values_returned": False,
+        "raw_private_evidence_returned": False,
+        "secret_returned": False,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": False,
+    }
+    return {
+        "schema_version": "permission_sensitive_runtime_audit_evidence.v1",
+        "audit_events": [
+            {**event_base, "action": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME},
+            {**event_base, "action": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME},
+        ],
+        "audit_store": {
+            "status": "recorded",
+            "event_count": 2,
+            "production_mutation_performed": False,
         },
         "postcheck": {
             "status": "validated",

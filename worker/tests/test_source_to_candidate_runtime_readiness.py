@@ -42,6 +42,7 @@ def _sanitized_live_evidence(**overrides):
         "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
         "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
         "preference_artifact_memory": _preference_artifact_memory_evidence(),
+        "permission_sensitive_audit": _permission_sensitive_audit_evidence(),
         "production_denials": {
             "brain_source_to_candidate_graph": {
                 "status": "denied",
@@ -285,6 +286,45 @@ def _preference_artifact_memory_evidence(**overrides):
             "ui_required": False,
             "raw_artifact_body_returned": False,
             "assertions": ["accepted_html_preference_available"],
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+    evidence.update(overrides)
+    return evidence
+
+
+def _permission_sensitive_audit_evidence(**overrides):
+    event_base = {
+        "schema_version": "runtime_permission_audit_event.v1",
+        "event_type": "permission_sensitive_runtime_action",
+        "ledger_scope": "production",
+        "permission": "denied",
+        "authority_write_performed": False,
+        "production_mutation_performed": False,
+        "actor_ref_hash": "sha256:" + "c" * 24,
+        "request_hash": "sha256:" + "d" * 24,
+        "protected_values_returned": False,
+        "raw_private_evidence_returned": False,
+        "secret_returned": False,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": False,
+    }
+    evidence = {
+        "schema_version": "permission_sensitive_runtime_audit_evidence.v1",
+        "audit_events": [
+            {**event_base, "action": "brain_object_proposal_create"},
+            {**event_base, "action": "brain_object_decision_commit"},
+        ],
+        "audit_store": {
+            "status": "recorded",
+            "event_count": 2,
+            "production_mutation_performed": False,
         },
         "postcheck": {
             "status": "validated",
@@ -572,6 +612,7 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
         "source_to_candidate_review_loop",
         "session_project_rollup_runtime",
         "preference_artifact_memory",
+        "permission_sensitive_audit",
         "deployed_identity",
         "production_denials",
         "tool_schemas",
@@ -593,6 +634,10 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
     assert (
         template["packet_field_templates"]["preference_artifact_memory"]["schema_version"]
         == "preference_artifact_memory_runtime_evidence.v1"
+    )
+    assert (
+        template["packet_field_templates"]["permission_sensitive_audit"]["schema_version"]
+        == "permission_sensitive_runtime_audit_evidence.v1"
     )
     assert template["packet_field_templates"]["evidence_provenance"]["mutation_scope"] == "none"
     assert template["packet_field_templates"]["evidence_provenance"]["network_used"] == "collector_sets_boolean"
@@ -693,6 +738,7 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert claims["live.source_to_candidate.review_loop"]["status"] == "not_validated"
     assert claims["live.session_project.rollup"]["status"] == "not_validated"
     assert claims["live.preference_artifact.memory"]["status"] == "not_validated"
+    assert claims["live.production.permission_sensitive_audit"]["status"] == "not_validated"
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "not_validated"
     assert claims["live.production.source_to_candidate_denial"]["status"] == "not_validated"
     assert claims["live.production.object_proposal_denial"]["status"] == "not_validated"
@@ -707,6 +753,7 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert "live_multi_device_rollup_unproven" in report["gaps"]
     assert "live_preference_artifact_memory_unverified" in report["gaps"]
     assert "accepted_preference_context_pack_live_unproven" in report["gaps"]
+    assert "permission_sensitive_audit_unverified" in report["gaps"]
     assert "live_deployed_identity_unverified" in report["gaps"]
     assert "live_object_authority_gate_policy_unverified" in report["gaps"]
     assert "bounded_production_authority_execution_unverified" in report["gaps"]
@@ -735,6 +782,8 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.preference_artifact.memory"]["status"] == "validated"
     assert claims["live.preference_artifact.memory"]["accepted_preference_count"] == 1
     assert claims["live.preference_artifact.memory"]["html_route_status"] == "validated"
+    assert claims["live.production.permission_sensitive_audit"]["status"] == "validated"
+    assert claims["live.production.permission_sensitive_audit"]["event_count"] == 2
     assert "temporal_work_recall" in claims["live.brain_objects_query.route_smokes"]["required_routes"]
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "validated"
     assert claims["live.production.source_to_candidate_denial"]["status"] == "denied_as_expected"
@@ -874,6 +923,62 @@ def test_runtime_readiness_fails_when_preference_artifact_memory_is_unsafe_or_in
     assert "preference_artifact_raw_private_evidence_returned" in report["gaps"]
     assert "preference_artifact_secret_returned" in report["gaps"]
     assert "preference_artifact_raw_external_ids_returned" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_permission_sensitive_audit_is_unsafe_or_incomplete():
+    event = {
+        "schema_version": "runtime_permission_audit_event.v1",
+        "event_type": "permission_sensitive_runtime_action",
+        "action": "brain_object_proposal_create",
+        "ledger_scope": "production",
+        "permission": "allowed",
+        "authority_write_performed": True,
+        "production_mutation_performed": True,
+        "actor_ref_hash": "",
+        "request_hash": "",
+        "protected_values_returned": True,
+        "raw_private_evidence_returned": True,
+        "secret_returned": True,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": True,
+    }
+    evidence = _sanitized_live_evidence(
+        permission_sensitive_audit=_permission_sensitive_audit_evidence(
+            audit_events=[event],
+            audit_store={
+                "status": "missing",
+                "event_count": 1,
+                "production_mutation_performed": True,
+            },
+            postcheck={
+                "status": "validated",
+                "raw_private_evidence_returned": True,
+                "secret_returned": False,
+                "host_topology_returned": True,
+                "raw_external_ids_returned": False,
+            },
+        )
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    audit = claims["live.production.permission_sensitive_audit"]
+    assert audit["status"] == "failed"
+    assert audit["production_mutation_performed"] is True
+    assert "permission_sensitive_audit_missing_action:brain_object_decision_commit" in report["gaps"]
+    assert "permission_sensitive_audit_event_not_denied:brain_object_proposal_create" in report["gaps"]
+    assert "permission_sensitive_audit_authority_write_performed:brain_object_proposal_create" in report["gaps"]
+    assert "permission_sensitive_audit_actor_hash_missing:brain_object_proposal_create" in report["gaps"]
+    assert "permission_sensitive_audit_request_hash_missing:brain_object_proposal_create" in report["gaps"]
+    assert "permission_sensitive_audit_protected_values_returned:brain_object_proposal_create" in report["gaps"]
+    assert "permission_sensitive_audit_raw_private_evidence_returned:brain_object_proposal_create" in report["gaps"]
+    assert "permission_sensitive_audit_secret_returned:brain_object_proposal_create" in report["gaps"]
+    assert "permission_sensitive_audit_raw_external_ids_returned:brain_object_proposal_create" in report["gaps"]
+    assert "permission_sensitive_audit_store_not_recorded" in report["gaps"]
+    assert "permission_sensitive_audit_raw_private_evidence_returned" in report["gaps"]
+    assert "permission_sensitive_audit_host_topology_returned" in report["gaps"]
 
 
 def test_runtime_readiness_fails_when_live_evidence_provenance_is_missing():
