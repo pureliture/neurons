@@ -43,6 +43,7 @@ def _sanitized_live_evidence(**overrides):
         "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
         "preference_artifact_memory": _preference_artifact_memory_evidence(),
         "permission_sensitive_audit": _permission_sensitive_audit_evidence(),
+        "agent_context_startup_runtime": _agent_context_startup_runtime_evidence(),
         "production_denials": {
             "brain_source_to_candidate_graph": {
                 "status": "denied",
@@ -338,6 +339,47 @@ def _permission_sensitive_audit_evidence(**overrides):
     return evidence
 
 
+def _agent_context_startup_runtime_evidence(**overrides):
+    evidence = {
+        "schema_version": "agent_context_startup_runtime_evidence.v1",
+        "startup_context": {
+            "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
+            "loaded_on_startup": True,
+            "section_counts": {
+                "style_preference": 1,
+                "active_work": 1,
+                "required_verification": 1,
+            },
+            "surface_policy": {"mutation_allowed": False},
+            "degraded_gap_disclosure_present": True,
+            "missing_evidence_before_promotion_present": True,
+        },
+        "read_path_smoke": {
+            "tool": "brain_objects_query",
+            "read_only": True,
+            "routes_checked": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
+            "production_mutation_performed": False,
+        },
+        "runtime_enforcement": {
+            "direct_execution_allowed": False,
+            "production_mutation_allowed": False,
+            "raw_private_context_blocked": True,
+            "approval_scope_blocker_enforced": True,
+            "stale_or_degraded_disclosure_present": True,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+    evidence.update(overrides)
+    return evidence
+
+
 def _shadow_brain_objects_query_smoke(route: str):
     return {
         "schema_version": "brain_objects_query.v1",
@@ -613,6 +655,7 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
         "session_project_rollup_runtime",
         "preference_artifact_memory",
         "permission_sensitive_audit",
+        "agent_context_startup_runtime",
         "deployed_identity",
         "production_denials",
         "tool_schemas",
@@ -638,6 +681,10 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
     assert (
         template["packet_field_templates"]["permission_sensitive_audit"]["schema_version"]
         == "permission_sensitive_runtime_audit_evidence.v1"
+    )
+    assert (
+        template["packet_field_templates"]["agent_context_startup_runtime"]["schema_version"]
+        == "agent_context_startup_runtime_evidence.v1"
     )
     assert template["packet_field_templates"]["evidence_provenance"]["mutation_scope"] == "none"
     assert template["packet_field_templates"]["evidence_provenance"]["network_used"] == "collector_sets_boolean"
@@ -739,6 +786,7 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert claims["live.session_project.rollup"]["status"] == "not_validated"
     assert claims["live.preference_artifact.memory"]["status"] == "not_validated"
     assert claims["live.production.permission_sensitive_audit"]["status"] == "not_validated"
+    assert claims["live.agent_context.startup_read_path"]["status"] == "not_validated"
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "not_validated"
     assert claims["live.production.source_to_candidate_denial"]["status"] == "not_validated"
     assert claims["live.production.object_proposal_denial"]["status"] == "not_validated"
@@ -754,6 +802,8 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert "live_preference_artifact_memory_unverified" in report["gaps"]
     assert "accepted_preference_context_pack_live_unproven" in report["gaps"]
     assert "permission_sensitive_audit_unverified" in report["gaps"]
+    assert "live_agent_context_startup_unverified" in report["gaps"]
+    assert "production_startup_read_path_unproven" in report["gaps"]
     assert "live_deployed_identity_unverified" in report["gaps"]
     assert "live_object_authority_gate_policy_unverified" in report["gaps"]
     assert "bounded_production_authority_execution_unverified" in report["gaps"]
@@ -784,6 +834,8 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.preference_artifact.memory"]["html_route_status"] == "validated"
     assert claims["live.production.permission_sensitive_audit"]["status"] == "validated"
     assert claims["live.production.permission_sensitive_audit"]["event_count"] == 2
+    assert claims["live.agent_context.startup_read_path"]["status"] == "validated"
+    assert claims["live.agent_context.startup_read_path"]["startup_loaded"] is True
     assert "temporal_work_recall" in claims["live.brain_objects_query.route_smokes"]["required_routes"]
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "validated"
     assert claims["live.production.source_to_candidate_denial"]["status"] == "denied_as_expected"
@@ -979,6 +1031,67 @@ def test_runtime_readiness_fails_when_permission_sensitive_audit_is_unsafe_or_in
     assert "permission_sensitive_audit_store_not_recorded" in report["gaps"]
     assert "permission_sensitive_audit_raw_private_evidence_returned" in report["gaps"]
     assert "permission_sensitive_audit_host_topology_returned" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_agent_context_startup_runtime_is_unsafe_or_incomplete():
+    evidence = _sanitized_live_evidence(
+        agent_context_startup_runtime=_agent_context_startup_runtime_evidence(
+            startup_context={
+                "schema_version": "agent_context_product_pack.v1",
+                "consumer": "unknown-agent",
+                "loaded_on_startup": False,
+                "section_counts": {"style_preference": 0},
+                "surface_policy": {"mutation_allowed": True},
+                "degraded_gap_disclosure_present": False,
+                "missing_evidence_before_promotion_present": False,
+            },
+            read_path_smoke={
+                "tool": "brain_write",
+                "read_only": False,
+                "routes_checked": ["code_style_preference"],
+                "production_mutation_performed": True,
+            },
+            runtime_enforcement={
+                "direct_execution_allowed": True,
+                "production_mutation_allowed": True,
+                "raw_private_context_blocked": False,
+                "approval_scope_blocker_enforced": False,
+                "stale_or_degraded_disclosure_present": False,
+            },
+            postcheck={
+                "status": "validated",
+                "raw_private_evidence_returned": True,
+                "secret_returned": False,
+                "host_topology_returned": True,
+                "raw_external_ids_returned": True,
+            },
+        )
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    startup = claims["live.agent_context.startup_read_path"]
+    assert startup["status"] == "failed"
+    assert startup["production_mutation_performed"] is True
+    assert "agent_context_startup_consumer_unknown" in report["gaps"]
+    assert "agent_context_startup_not_loaded" in report["gaps"]
+    assert "agent_context_startup_section_missing:style_preference" in report["gaps"]
+    assert "agent_context_startup_section_missing:active_work" in report["gaps"]
+    assert "agent_context_startup_section_missing:required_verification" in report["gaps"]
+    assert "agent_context_startup_mutation_allowed" in report["gaps"]
+    assert "agent_context_startup_degraded_gap_disclosure_missing" in report["gaps"]
+    assert "agent_context_startup_read_path_tool_mismatch" in report["gaps"]
+    assert "agent_context_startup_read_path_not_read_only" in report["gaps"]
+    assert "agent_context_startup_route_missing:authority_archive_separation" in report["gaps"]
+    assert "agent_context_startup_direct_execution_allowed" in report["gaps"]
+    assert "agent_context_startup_production_mutation_allowed" in report["gaps"]
+    assert "agent_context_startup_raw_private_context_not_blocked" in report["gaps"]
+    assert "agent_context_startup_approval_scope_blocker_missing" in report["gaps"]
+    assert "agent_context_startup_raw_private_evidence_returned" in report["gaps"]
+    assert "agent_context_startup_host_topology_returned" in report["gaps"]
+    assert "agent_context_startup_raw_external_ids_returned" in report["gaps"]
 
 
 def test_runtime_readiness_fails_when_live_evidence_provenance_is_missing():

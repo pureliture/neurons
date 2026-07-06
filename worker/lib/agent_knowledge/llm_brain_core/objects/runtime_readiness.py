@@ -51,6 +51,7 @@ PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA = "preference_artifact_memory_runtime_
 ARTIFACT_REVIEW_PREFERENCE_CHECK_SCHEMA = "artifact_review_preference_check.v1"
 PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA = "permission_sensitive_runtime_audit_evidence.v1"
 PERMISSION_AUDIT_EVENT_SCHEMA = "runtime_permission_audit_event.v1"
+AGENT_CONTEXT_STARTUP_RUNTIME_SCHEMA = "agent_context_startup_runtime_evidence.v1"
 REQUIRED_SESSION_PROJECT_OBJECT_TYPES = ("Device", "Session", "Repository", "Branch", "WorkUnit")
 REQUIRED_SESSION_PROJECT_EDGE_TYPES = (
     "repository_has_branch",
@@ -95,6 +96,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
         "probe_session_project_rollup_runtime",
         "probe_preference_artifact_memory_runtime",
         "collect_permission_sensitive_audit_runtime",
+        "probe_agent_context_startup_runtime",
         "collect_deployed_identity",
         "probe_production_no_mutation_denials",
         "collect_object_authority_gate_policy",
@@ -158,6 +160,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
             "probe_session_project_rollup_runtime": "live_session_project_rollup_unverified",
             "probe_preference_artifact_memory_runtime": "live_preference_artifact_memory_unverified",
             "collect_permission_sensitive_audit_runtime": "permission_sensitive_audit_unverified",
+            "probe_agent_context_startup_runtime": "live_agent_context_startup_unverified",
             "collect_deployed_identity": "live_deployed_identity_unverified",
             "probe_production_no_mutation_denials": "production_denial_smokes_unverified",
             "collect_object_authority_gate_policy": "live_object_authority_gate_policy_unverified",
@@ -218,6 +221,7 @@ def build_source_to_candidate_runtime_evidence_packet_template(
             "session_project_rollup_runtime",
             "preference_artifact_memory",
             "permission_sensitive_audit",
+            "agent_context_startup_runtime",
             "deployed_identity",
             "production_denials",
             "tool_schemas",
@@ -252,6 +256,7 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         "session_project_rollup_runtime": _public_safe_mapping(captured.get("session_project_rollup_runtime")),
         "preference_artifact_memory": _public_safe_mapping(captured.get("preference_artifact_memory")),
         "permission_sensitive_audit": _public_safe_mapping(captured.get("permission_sensitive_audit")),
+        "agent_context_startup_runtime": _public_safe_mapping(captured.get("agent_context_startup_runtime")),
         "deployed_identity": _public_safe_mapping(captured.get("deployed_identity")),
         "production_denials": _public_safe_mapping(captured.get("production_denials")),
         "tool_schemas": _public_safe_mapping(captured.get("tool_schemas")),
@@ -462,6 +467,38 @@ def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
                 "raw_external_ids_returned": False,
             },
         },
+        "agent_context_startup_runtime": {
+            "schema_version": AGENT_CONTEXT_STARTUP_RUNTIME_SCHEMA,
+            "startup_context": {
+                "schema_version": REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA,
+                "consumer": "collector_sets_allowed_consumer",
+                "loaded_on_startup": True,
+                "required_sections": list(REQUIRED_AGENT_CONTEXT_SECTIONS),
+                "surface_policy": {"mutation_allowed": False},
+                "degraded_gap_disclosure_present": True,
+                "missing_evidence_before_promotion_present": True,
+            },
+            "read_path_smoke": {
+                "tool": "brain_objects_query",
+                "read_only": True,
+                "routes_checked": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
+                "production_mutation_performed": False,
+            },
+            "runtime_enforcement": {
+                "direct_execution_allowed": False,
+                "production_mutation_allowed": False,
+                "raw_private_context_blocked": True,
+                "approval_scope_blocker_enforced": True,
+                "stale_or_degraded_disclosure_present": True,
+            },
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
         "deployed_identity": {
             "contains_expected_commit": "collector_sets_boolean",
             "identity_source": "redacted_artifact_identity_summary",
@@ -633,6 +670,21 @@ def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
             "production_mutation_performed": False,
         },
         {
+            "step_id": "probe_agent_context_startup_runtime",
+            "evidence_field": "agent_context_startup_runtime",
+            "required_values": [
+                AGENT_CONTEXT_STARTUP_RUNTIME_SCHEMA,
+                REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA,
+                "brain_objects_query",
+                "read_only=true",
+                "mutation_allowed=false",
+                "raw_private_context_blocked=true",
+            ],
+            "safe_target": "sanitized_agent_context_startup_runtime_smoke",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
             "step_id": "collect_deployed_identity",
             "evidence_field": "deployed_identity",
             "required_values": ["contains_expected_commit"],
@@ -685,6 +737,7 @@ def build_source_to_candidate_runtime_readiness_report(
         _live_session_project_rollup_claim(evidence),
         _live_preference_artifact_memory_claim(evidence),
         _live_permission_sensitive_audit_claim(evidence),
+        _live_agent_context_startup_claim(evidence),
         _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
         _live_object_authority_production_gate_policy_claim(evidence),
         _live_object_authority_bounded_execution_claim(evidence),
@@ -1606,6 +1659,132 @@ def _permission_sensitive_audit_reports_mutation(
             or event.get("authority_write_performed") is True
             for event in events
         )
+    )
+
+
+def _live_agent_context_startup_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    startup = evidence.get("agent_context_startup_runtime")
+    startup = startup if isinstance(startup, Mapping) else {}
+    if not startup:
+        return {
+            "claim_id": "live.agent_context.startup_read_path",
+            "evidence_class": "runtime_startup_read_path",
+            "status": "not_validated",
+            "schema_version": "",
+            "startup_loaded": False,
+            "production_mutation_performed": False,
+            "gaps": ["live_agent_context_startup_unverified", "production_startup_read_path_unproven"],
+        }
+    context = startup.get("startup_context") if isinstance(startup.get("startup_context"), Mapping) else {}
+    read_path = startup.get("read_path_smoke") if isinstance(startup.get("read_path_smoke"), Mapping) else {}
+    enforcement = (
+        startup.get("runtime_enforcement") if isinstance(startup.get("runtime_enforcement"), Mapping) else {}
+    )
+    postcheck = startup.get("postcheck") if isinstance(startup.get("postcheck"), Mapping) else {}
+    failures = _agent_context_startup_failures(
+        startup=startup,
+        context=context,
+        read_path=read_path,
+        enforcement=enforcement,
+        postcheck=postcheck,
+    )
+    return {
+        "claim_id": "live.agent_context.startup_read_path",
+        "evidence_class": "runtime_startup_read_path",
+        "status": "failed" if failures else "validated",
+        "schema_version": public_safe_text(str(startup.get("schema_version") or ""), max_chars=80),
+        "consumer": public_safe_text(str(context.get("consumer") or ""), max_chars=80),
+        "startup_loaded": context.get("loaded_on_startup") is True,
+        "read_path_tool": public_safe_text(str(read_path.get("tool") or ""), max_chars=120),
+        "routes_checked": _string_list(read_path.get("routes_checked")),
+        "production_mutation_performed": _agent_context_startup_reports_mutation(
+            startup=startup,
+            read_path=read_path,
+            enforcement=enforcement,
+        ),
+        "gaps": failures,
+    }
+
+
+def _agent_context_startup_failures(
+    *,
+    startup: Mapping[str, Any],
+    context: Mapping[str, Any],
+    read_path: Mapping[str, Any],
+    enforcement: Mapping[str, Any],
+    postcheck: Mapping[str, Any],
+) -> list[str]:
+    failures: list[str] = []
+    if startup.get("schema_version") != AGENT_CONTEXT_STARTUP_RUNTIME_SCHEMA:
+        failures.append("agent_context_startup_schema_mismatch")
+    if context.get("schema_version") != REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA:
+        failures.append("agent_context_startup_product_schema_mismatch")
+    if str(context.get("consumer") or "") not in ALLOWED_AGENT_CONTEXT_CONSUMERS:
+        failures.append("agent_context_startup_consumer_unknown")
+    if context.get("loaded_on_startup") is not True:
+        failures.append("agent_context_startup_not_loaded")
+    section_counts = context.get("section_counts") if isinstance(context.get("section_counts"), Mapping) else {}
+    missing_sections = [
+        section
+        for section in REQUIRED_AGENT_CONTEXT_SECTIONS
+        if _int_value(section_counts.get(section)) < 1
+    ]
+    failures.extend(_named_gaps("agent_context_startup_section_missing", missing_sections))
+    policy = context.get("surface_policy") if isinstance(context.get("surface_policy"), Mapping) else {}
+    if policy.get("mutation_allowed") is not False:
+        failures.append("agent_context_startup_mutation_allowed")
+    if context.get("degraded_gap_disclosure_present") is not True:
+        failures.append("agent_context_startup_degraded_gap_disclosure_missing")
+    if context.get("missing_evidence_before_promotion_present") is not True:
+        failures.append("agent_context_startup_missing_evidence_before_promotion_missing")
+    if read_path.get("tool") != "brain_objects_query":
+        failures.append("agent_context_startup_read_path_tool_mismatch")
+    if read_path.get("read_only") is not True:
+        failures.append("agent_context_startup_read_path_not_read_only")
+    routes_checked = set(_string_list(read_path.get("routes_checked")))
+    missing_routes = [route for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES if route not in routes_checked]
+    failures.extend(_named_gaps("agent_context_startup_route_missing", missing_routes))
+    if read_path.get("production_mutation_performed") is True:
+        failures.append("agent_context_startup_read_path_mutation_performed")
+    if enforcement.get("direct_execution_allowed") is not False:
+        failures.append("agent_context_startup_direct_execution_allowed")
+    if enforcement.get("production_mutation_allowed") is not False:
+        failures.append("agent_context_startup_production_mutation_allowed")
+    if enforcement.get("raw_private_context_blocked") is not True:
+        failures.append("agent_context_startup_raw_private_context_not_blocked")
+    if enforcement.get("approval_scope_blocker_enforced") is not True:
+        failures.append("agent_context_startup_approval_scope_blocker_missing")
+    if enforcement.get("stale_or_degraded_disclosure_present") is not True:
+        failures.append("agent_context_startup_stale_or_degraded_disclosure_missing")
+    if _agent_context_startup_reports_mutation(
+        startup=startup,
+        read_path=read_path,
+        enforcement=enforcement,
+    ):
+        failures.append("agent_context_startup_production_mutation_performed")
+    if postcheck.get("status") != "validated":
+        failures.append("agent_context_startup_postcheck_missing")
+    for field, gap in (
+        ("raw_private_evidence_returned", "agent_context_startup_raw_private_evidence_returned"),
+        ("secret_returned", "agent_context_startup_secret_returned"),
+        ("host_topology_returned", "agent_context_startup_host_topology_returned"),
+        ("raw_external_ids_returned", "agent_context_startup_raw_external_ids_returned"),
+    ):
+        if postcheck.get(field) is not False:
+            failures.append(gap)
+    return _dedupe(failures)
+
+
+def _agent_context_startup_reports_mutation(
+    *,
+    startup: Mapping[str, Any],
+    read_path: Mapping[str, Any],
+    enforcement: Mapping[str, Any],
+) -> bool:
+    return (
+        startup.get("production_mutation_performed") is True
+        or read_path.get("production_mutation_performed") is True
+        or enforcement.get("production_mutation_allowed") is True
     )
 
 
