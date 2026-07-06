@@ -21,7 +21,10 @@ from .extraction_pipeline import run_source_to_candidate_graph_activation_previe
 from .okf_export import build_okf_bundle
 from .object_packs import apply_approval_board_decisions, apply_candidate_review_edits, build_documentation_cleanup_pack
 from .reference_corpus import build_corpus_ingest_plan, default_corpus_policy_status, reference_corpus_objects_from_manifest
-from .runtime_readiness import build_source_to_candidate_runtime_readiness_report
+from .runtime_readiness import (
+    build_source_to_candidate_runtime_evidence_collection_plan,
+    build_source_to_candidate_runtime_readiness_report,
+)
 
 REFERENCE_CORPUS_LEDGER_ENV = "NEURON_REFERENCE_CORPUS_LEDGER"
 
@@ -352,7 +355,21 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     parser = argparse.ArgumentParser(prog="neuron-knowledge source-to-candidate-runtime-readiness")
     parser.add_argument("--live-evidence-file", default="")
     parser.add_argument("--expected-commit", default="")
+    parser.add_argument("--evidence-collection-plan", action="store_true")
+    parser.add_argument("--repository", default="")
+    parser.add_argument("--branch", default="")
+    parser.add_argument("--consumer", default="codex")
     args = parser.parse_args(argv)
+    if args.evidence_collection_plan:
+        _print_json(
+            build_source_to_candidate_runtime_evidence_collection_plan(
+                expected_commit=args.expected_commit,
+                repository=args.repository,
+                branch=args.branch,
+                consumer=args.consumer,
+            )
+        )
+        return 0
     live_evidence = (
         _load_json_mapping(args.live_evidence_file, label="live evidence")
         if args.live_evidence_file

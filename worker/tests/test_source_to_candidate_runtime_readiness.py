@@ -5,8 +5,10 @@ import json
 from agent_knowledge.cli import main
 from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
+    EVIDENCE_PROVENANCE_SCHEMA,
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
     REQUIRED_RUNTIME_TOOL_NAMES,
+    build_source_to_candidate_runtime_evidence_collection_plan,
     build_source_to_candidate_runtime_readiness_report,
 )
 
@@ -204,6 +206,47 @@ def _evidence_provenance(**overrides):
     }
     provenance.update(overrides)
     return provenance
+
+
+def test_runtime_readiness_evidence_collection_plan_is_public_safe_and_read_only():
+    plan = build_source_to_candidate_runtime_evidence_collection_plan(
+        expected_commit="7218cb2",
+        repository="pureliture/neurons",
+        branch="main",
+        consumer="codex",
+    )
+
+    assert plan["schema_version"] == "source_to_candidate_runtime_evidence_collection_plan.v1"
+    assert plan["status"] == "ready"
+    assert plan["expected_commit"] == "7218cb2"
+    assert plan["repository"] == "pureliture/neurons"
+    assert plan["branch"] == "main"
+    assert plan["consumer"] == "codex"
+    assert plan["output_schema"] == "source_to_candidate_runtime_evidence.v1"
+    assert plan["evidence_provenance_schema"] == EVIDENCE_PROVENANCE_SCHEMA
+    assert plan["network_used"] is False
+    assert plan["production_mutation_performed"] is False
+    assert plan["mutation_allowed"] is False
+    assert plan["collection_mode"] == "post_deploy_read_only_smoke"
+    assert plan["required_tools"] == list(REQUIRED_RUNTIME_TOOL_NAMES)
+    assert plan["required_routes"] == list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    assert plan["required_production_denials"] == [
+        "brain_source_to_candidate_graph",
+        "brain_approval_board_decide",
+        "brain_object_proposal_create",
+        "brain_object_decision_commit",
+    ]
+    assert plan["expected_readiness_outcomes"]["no_live_evidence"] == "PASS_WITH_GAPS"
+    assert plan["expected_readiness_outcomes"]["complete_sanitized_packet"] == "PASS"
+    assert plan["expected_readiness_outcomes"]["unsafe_or_incomplete_packet"] == "FAIL"
+    assert {step["step_id"] for step in plan["collection_steps"]} == set(plan["required_steps"])
+    assert all(step["mutation_allowed"] is False for step in plan["collection_steps"])
+    assert all(step["production_mutation_performed"] is False for step in plan["collection_steps"])
+    assert "raw_private_transcript" in plan["forbidden_outputs"]
+    assert "secret_value" in plan["forbidden_outputs"]
+    assert "host_topology" in plan["forbidden_outputs"]
+    assert "raw_dataset_id" in plan["forbidden_outputs"]
+    assert "raw_document_id" in plan["forbidden_outputs"]
 
 
 def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation():
@@ -817,3 +860,33 @@ def test_neuron_knowledge_runtime_readiness_cli_accepts_sanitized_evidence_file(
     assert report["schema_version"] == "source_to_candidate_runtime_readiness.v1"
     assert report["status"] == "PASS"
     assert report["production_mutation_performed"] is True
+
+
+def test_neuron_knowledge_runtime_readiness_cli_outputs_evidence_collection_plan(capsys):
+    assert (
+        main(
+            [
+                "source-to-candidate-runtime-readiness",
+                "--evidence-collection-plan",
+                "--expected-commit",
+                "7218cb2",
+                "--repository",
+                "pureliture/neurons",
+                "--branch",
+                "main",
+                "--consumer",
+                "codex",
+            ]
+        )
+        == 0
+    )
+
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["schema_version"] == "source_to_candidate_runtime_evidence_collection_plan.v1"
+    assert plan["expected_commit"] == "7218cb2"
+    assert plan["repository"] == "pureliture/neurons"
+    assert plan["branch"] == "main"
+    assert plan["consumer"] == "codex"
+    assert plan["network_used"] is False
+    assert plan["production_mutation_performed"] is False
+    assert plan["mutation_allowed"] is False

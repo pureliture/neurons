@@ -46,6 +46,7 @@
 - CLI smoke for object/query/corpus/golden/OKF surfaces
 - JSON-RPC/MCP tool-list and call smoke against local test service
 - production write-denial proof
+- source-to-candidate runtime evidence collection plan/template smoke
 - read-only LBrain MCP authority/context check if available
 - live production deployment/read-path 확인은 read-only로만 수행
 - validation report 작성
@@ -66,6 +67,7 @@
 - secret, token, private path, raw transcript, raw dataset/document id는 출력하지 않는다.
 - live host/runtime evidence는 public-safe summary 또는 redacted digest만 기록한다.
 - production deployment 여부를 확인할 때 merge/deploy/runtime-loaded를 분리한다.
+- runtime evidence collection plan/template는 live evidence 자체가 아니며, 생성 성공만으로 production readiness를 주장하지 않는다.
 
 ## Acceptance Criteria
 
@@ -74,4 +76,5 @@
 - production mutation denial evidence를 최소 2개 포함한다: corpus ingest production denial, object decision/restricted denial.
 - live production이 새 branch code를 포함하지 않으면 `not_validated: not_deployed_to_production`으로 기록한다.
 - validation report는 validated/not_validated/denied_as_expected/gaps를 분리한다.
+- source-to-candidate runtime evidence collection plan은 필요한 MCP tool list, `brain_objects_query` route smoke, deployed identity, production denied/no-mutation smoke, authority gate policy, evidence provenance/redaction 조건을 public-safe/read-only로 열거해야 한다.
 - final status는 `PASS`, `PASS_WITH_GAPS`, `NO_GO`, `BLOCKED` 중 하나로 끝난다.

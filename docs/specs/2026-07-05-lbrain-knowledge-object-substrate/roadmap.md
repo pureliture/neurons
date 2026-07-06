@@ -786,6 +786,8 @@ Local validation evidence:
 - runtime authority policy result: `1 passed, 1 warning`
 - phase coverage gate: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
 - phase coverage result: `1 passed, 1 warning`
+- runtime evidence collection plan gate: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_evidence_collection_plan_is_public_safe_and_read_only tests/test_source_to_candidate_runtime_readiness.py::test_neuron_knowledge_runtime_readiness_cli_outputs_evidence_collection_plan tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_plan`
+- runtime evidence collection plan result: `3 passed, 1 warning`
 
 Implemented local/test scope:
 
@@ -798,12 +800,14 @@ Implemented local/test scope:
 - runtime readiness validates sanitized `production_authority_execution` evidence packets for single-object production authority proposal/decision execution, gate-hash continuity, read-after-write, rollback/supersession path, postcheck, and raw-private-evidence redaction
 - missing bounded execution evidence returns `bounded_production_authority_execution_unverified` instead of silently passing P8 production authority execution
 - runtime readiness validates sanitized evidence provenance so a post-deploy evidence packet must disclose collection mode, evidence-side network usage, mutation scope, and public-safe redaction checks without returning raw private evidence, secret, host topology, or raw external ids
+- `source-to-candidate-runtime-readiness --evidence-collection-plan` and `brain_source_to_candidate_runtime_readiness(evidence_collection_plan=true)` return a public-safe post-deploy read-only collection plan for the required MCP tools, `brain_objects_query` route smokes, deployed identity, production denied/no-mutation checks, authority gate policy, and evidence provenance schema
 
 Remaining gaps:
 
 - no live rollout artifact identity proof is attached to this local/test branch
 - production permission-sensitive audit flow is not live-proven
 - production authority promotion is preapproved, but only branch-local/sanitized bounded execution packet validation exists; no deployed/live runtime write gate execution evidence is attached yet
+- the collection plan is a branch-local template, not collected live evidence; it must not be reported as production readiness until an actual sanitized evidence packet is collected from the deployed read path
 
 ### P9. Agent Context Productization
 
@@ -857,6 +861,7 @@ Implemented local/test scope:
 - runtime readiness fails incomplete live agent context products when schema/consumer/degraded gap disclosure or `missing_evidence_before_promotion` is absent, and requires the runtime-readiness tool hint to target `sanitized_evidence_packet` while blocking `raw_private_runtime_evidence`
 - runtime readiness surfaces `live.production.object_authority_bounded_execution` so agent context/product-readiness checks can distinguish preapproved authority mutation from actual bounded execution evidence
 - runtime readiness surfaces `live.evidence.provenance` so agent context/product-readiness checks can distinguish evaluator-local no-network execution from external live evidence collection
+- runtime readiness exposes a plan/template mode for agents and operators to collect the missing post-deploy evidence without performing production mutation or returning protected values
 
 Remaining gaps:
 

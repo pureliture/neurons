@@ -410,6 +410,10 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
     readiness_schema = tools[BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME]["inputSchema"]
     assert readiness_schema["properties"]["live_evidence"]["type"] == "object"
     assert readiness_schema["properties"]["expected_commit"]["type"] == "string"
+    assert readiness_schema["properties"]["evidence_collection_plan"]["type"] == "boolean"
+    assert readiness_schema["properties"]["repository"]["type"] == "string"
+    assert readiness_schema["properties"]["branch"]["type"] == "string"
+    assert readiness_schema["properties"]["consumer"]["type"] == "string"
 
 
 def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_without_mutation(tmp_path: Path):
@@ -511,6 +515,39 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
     assert report["network_used"] is False
     assert report["evidence_collection_network_used"] is True
     assert "bounded_production_authority_execution_unverified" in report["gaps"]
+
+
+def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_plan(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 120,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "evidence_collection_plan": True,
+                    "expected_commit": "d38bcfa",
+                    "repository": "pureliture/neurons",
+                    "branch": "main",
+                    "consumer": "codex",
+                },
+            },
+        },
+        service,
+    )
+
+    plan = response["result"]["structuredContent"]
+    assert plan["schema_version"] == "source_to_candidate_runtime_evidence_collection_plan.v1"
+    assert plan["expected_commit"] == "d38bcfa"
+    assert plan["repository"] == "pureliture/neurons"
+    assert plan["branch"] == "main"
+    assert plan["consumer"] == "codex"
+    assert plan["network_used"] is False
+    assert plan["production_mutation_performed"] is False
+    assert plan["mutation_allowed"] is False
 
 
 def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None) -> dict:

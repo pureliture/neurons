@@ -474,6 +474,10 @@ def _dispatch_brain_source_to_candidate_runtime_readiness_tool(
     result = service.brain_source_to_candidate_runtime_readiness(
         live_evidence=live_evidence if isinstance(live_evidence, Mapping) else None,
         expected_commit=str(arguments.get("expected_commit") or ""),
+        evidence_collection_plan=arguments.get("evidence_collection_plan") is True,
+        repository=str(arguments.get("repository") or ""),
+        branch=str(arguments.get("branch") or ""),
+        consumer=str(arguments.get("consumer") or "codex"),
     )
     return _tool_result(result)
 
