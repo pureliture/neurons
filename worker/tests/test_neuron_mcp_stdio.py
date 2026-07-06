@@ -450,6 +450,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
             _brain_objects_query_smoke("temporal_work_recall"),
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
+        "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
         "production_denials": {
             BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
                 "status": "denied",
@@ -771,6 +772,7 @@ def _runtime_readiness_complete_evidence(
             _brain_objects_query_smoke("temporal_work_recall"),
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
+        "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
         "production_denials": {
             BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
                 "status": "denied",
@@ -820,6 +822,56 @@ def _runtime_readiness_complete_evidence(
     if production_authority_execution is not None:
         evidence["production_authority_execution"] = production_authority_execution
     return evidence
+
+
+def _source_to_candidate_review_loop_evidence() -> dict:
+    return {
+        "schema_version": "source_to_candidate_review_loop_evidence.v1",
+        "source_to_candidate_graph": {
+            "schema_version": "source_to_candidate_graph_activation.v1",
+            "status": "PASS_WITH_GAPS",
+            "target_scope": "local_test",
+            "pack_type": "candidate_graph_review",
+            "candidate_count": 3,
+            "accepted_count": 0,
+            "quality_gate": {"source_to_candidate_graph": "PASS"},
+            "production_mutation_performed": False,
+            "mutation_performed": False,
+        },
+        "candidate_review_edit": {
+            "schema_version": "candidate_review_edit_result.v1",
+            "status": "PASS",
+            "target_scope": "local_test",
+            "mutation_mode": "no_mutation",
+            "edited_candidate_count": 3,
+            "rejected_edit_count": 0,
+            "production_mutation_performed": False,
+            "authority_write_performed": False,
+        },
+        "approval_board_decision": {
+            "schema_version": "approval_board_decision_result.v1",
+            "status": "PASS",
+            "ledger_scope": "local_test",
+            "authority_write_scope": "local_test",
+            "decision_count": 1,
+            "authority_write_performed": True,
+            "production_mutation_performed": False,
+        },
+        "read_after_write": {
+            "status": "validated",
+            "object_pack_schema": "object_pack.v1",
+            "route": "authority_archive_separation",
+            "authority_lane": "accepted_current",
+            "object_count": 1,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
 
 
 def _production_authority_execution_from_smoke(

@@ -39,6 +39,7 @@ def _sanitized_live_evidence(**overrides):
             _brain_objects_query_smoke("temporal_work_recall"),
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
+        "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
         "production_denials": {
             "brain_source_to_candidate_graph": {
                 "status": "denied",
@@ -107,6 +108,58 @@ def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None):
             "gaps": list(gaps or []),
         },
     }
+
+
+def _source_to_candidate_review_loop_evidence(**overrides):
+    evidence = {
+        "schema_version": "source_to_candidate_review_loop_evidence.v1",
+        "source_to_candidate_graph": {
+            "schema_version": "source_to_candidate_graph_activation.v1",
+            "status": "PASS_WITH_GAPS",
+            "target_scope": "local_test",
+            "pack_type": "candidate_graph_review",
+            "candidate_count": 3,
+            "accepted_count": 0,
+            "quality_gate": {"source_to_candidate_graph": "PASS"},
+            "production_mutation_performed": False,
+            "mutation_performed": False,
+        },
+        "candidate_review_edit": {
+            "schema_version": "candidate_review_edit_result.v1",
+            "status": "PASS",
+            "target_scope": "local_test",
+            "mutation_mode": "no_mutation",
+            "edited_candidate_count": 3,
+            "rejected_edit_count": 0,
+            "production_mutation_performed": False,
+            "authority_write_performed": False,
+        },
+        "approval_board_decision": {
+            "schema_version": "approval_board_decision_result.v1",
+            "status": "PASS",
+            "ledger_scope": "local_test",
+            "authority_write_scope": "local_test",
+            "decision_count": 1,
+            "authority_write_performed": True,
+            "production_mutation_performed": False,
+        },
+        "read_after_write": {
+            "status": "validated",
+            "object_pack_schema": "object_pack.v1",
+            "route": "authority_archive_separation",
+            "authority_lane": "accepted_current",
+            "object_count": 1,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+    evidence.update(overrides)
+    return evidence
 
 
 def _shadow_brain_objects_query_smoke(route: str):
@@ -283,6 +336,8 @@ def test_runtime_readiness_evidence_collection_plan_is_public_safe_and_read_only
     assert plan["collection_mode"] == "post_deploy_read_only_smoke"
     assert plan["required_tools"] == list(REQUIRED_RUNTIME_TOOL_NAMES)
     assert plan["required_routes"] == list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    assert "probe_source_to_candidate_review_loop" in plan["required_steps"]
+    assert plan["gap_mapping"]["probe_source_to_candidate_review_loop"] == "live_source_to_candidate_review_loop_unverified"
     assert plan["shadow_collection_registration"] == {
         "schema_version": "source_to_candidate_runtime_shadow_collection_registration.v1",
         "registration_id": "shadow_route_smoke_post_deploy_registration",
@@ -378,6 +433,7 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
         "tool_names",
         "agent_context_product",
         "brain_objects_query_smokes",
+        "source_to_candidate_review_loop",
         "deployed_identity",
         "production_denials",
         "tool_schemas",
@@ -385,7 +441,12 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
         "evidence_provenance",
     ]
     assert template["packet_field_templates"]["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert "source_to_candidate_review_loop" in template["required_packet_fields"]
     assert template["packet_field_templates"]["evidence_provenance"]["schema_version"] == EVIDENCE_PROVENANCE_SCHEMA
+    assert (
+        template["packet_field_templates"]["source_to_candidate_review_loop"]["schema_version"]
+        == "source_to_candidate_review_loop_evidence.v1"
+    )
     assert template["packet_field_templates"]["evidence_provenance"]["mutation_scope"] == "none"
     assert template["packet_field_templates"]["evidence_provenance"]["network_used"] == "collector_sets_boolean"
     assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == len(
@@ -482,6 +543,7 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert claims["live.mcp.review_tools_loaded"]["status"] == "not_validated"
     assert claims["live.agent_context.tool_hints"]["status"] == "not_validated"
     assert claims["live.brain_objects_query.route_smokes"]["status"] == "not_validated"
+    assert claims["live.source_to_candidate.review_loop"]["status"] == "not_validated"
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "not_validated"
     assert claims["live.production.source_to_candidate_denial"]["status"] == "not_validated"
     assert claims["live.production.object_proposal_denial"]["status"] == "not_validated"
@@ -491,6 +553,7 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert claims["live.evidence.provenance"]["status"] == "not_validated"
     assert "live_mcp_review_tools_unverified" in report["gaps"]
     assert "live_brain_objects_query_route_smokes_unverified" in report["gaps"]
+    assert "live_source_to_candidate_review_loop_unverified" in report["gaps"]
     assert "live_deployed_identity_unverified" in report["gaps"]
     assert "live_object_authority_gate_policy_unverified" in report["gaps"]
     assert "bounded_production_authority_execution_unverified" in report["gaps"]
@@ -510,6 +573,9 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.agent_context.tool_hints"]["status"] == "validated"
     assert claims["live.agent_context.product_sections"]["status"] == "validated"
     assert claims["live.brain_objects_query.route_smokes"]["status"] == "validated"
+    assert claims["live.source_to_candidate.review_loop"]["status"] == "validated"
+    assert claims["live.source_to_candidate.review_loop"]["candidate_count"] == 3
+    assert claims["live.source_to_candidate.review_loop"]["authority_write_scope"] == "local_test"
     assert "temporal_work_recall" in claims["live.brain_objects_query.route_smokes"]["required_routes"]
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "validated"
     assert claims["live.production.source_to_candidate_denial"]["status"] == "denied_as_expected"
@@ -1095,6 +1161,61 @@ def test_runtime_readiness_requires_proposal_and_decision_production_safety_smok
     assert claims["live.production.object_decision_denial"]["status"] == "not_validated"
     assert "brain_object_proposal_create_production_denial_unverified" in report["gaps"]
     assert "brain_object_decision_commit_production_denial_unverified" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_review_loop_smoke_mutates_production():
+    review_loop = _source_to_candidate_review_loop_evidence(
+        approval_board_decision={
+            "schema_version": "approval_board_decision_result.v1",
+            "status": "PASS",
+            "ledger_scope": "production",
+            "authority_write_scope": "production_ledger",
+            "decision_count": 1,
+            "authority_write_performed": True,
+            "production_mutation_performed": True,
+        },
+    )
+    evidence = _sanitized_live_evidence(source_to_candidate_review_loop=review_loop)
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    review_claim = claims["live.source_to_candidate.review_loop"]
+    assert review_claim["status"] == "failed"
+    assert review_claim["production_mutation_performed"] is True
+    assert "source_to_candidate_review_loop_production_mutation_performed" in report["gaps"]
+    assert "source_to_candidate_review_loop_authority_scope_not_local_test" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_review_loop_smoke_returns_private_or_incomplete_evidence():
+    review_loop = _source_to_candidate_review_loop_evidence(
+        candidate_review_edit={
+            "schema_version": "candidate_review_edit_result.v1",
+            "status": "PASS",
+            "target_scope": "local_test",
+            "mutation_mode": "authority_write",
+            "edited_candidate_count": 3,
+            "rejected_edit_count": 2,
+            "production_mutation_performed": False,
+            "authority_write_performed": True,
+        },
+        postcheck={
+            "status": "validated",
+            "raw_private_evidence_returned": True,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    )
+    evidence = _sanitized_live_evidence(source_to_candidate_review_loop=review_loop)
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    assert "source_to_candidate_review_loop_candidate_review_not_no_mutation" in report["gaps"]
+    assert "source_to_candidate_review_loop_rejected_edits_present" in report["gaps"]
+    assert "source_to_candidate_review_loop_raw_private_evidence_returned" in report["gaps"]
 
 
 def test_runtime_readiness_fails_on_unexpected_production_mutation():
