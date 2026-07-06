@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from ._util import ensure_public_safe, public_safe_text
 from .artifact_store import InMemorySessionMemoryArtifactStore, SessionMemoryArtifactStore
@@ -18,6 +18,7 @@ from .document_bridge import DisabledDocumentBridge, DocumentBridge
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
 from .models import EvidenceRequest
 from .objects.object_packs import build_documentation_cleanup_pack
+from .objects.reference_corpus import default_corpus_policy_status
 from .source_ref import SourceRefResolver
 
 if TYPE_CHECKING:
@@ -43,6 +44,7 @@ class BrainReadService:
         source_resolver: SourceRefResolver | None = None,
         document_bridge: DocumentBridge | None = None,
         search_mirror_status: Mapping[str, Any] | None = None,
+        reference_corpus_status_reader: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self.artifact_store = artifact_store or InMemorySessionMemoryArtifactStore()
         self.memory_cards = [dict(card) for card in memory_cards or [] if _is_accepted_card(card)]
@@ -50,6 +52,7 @@ class BrainReadService:
         self.source_resolver = source_resolver or SourceRefResolver()
         self.document_bridge = document_bridge or DisabledDocumentBridge()
         self.search_mirror_status = dict(search_mirror_status or {})
+        self.reference_corpus_status_reader = reference_corpus_status_reader
         # The merge/ranking policy (card > artifact > graph) lives in the builder;
         # the service stays the I/O + seam layer.
         self._context_builder = ContextPackBuilder()
@@ -220,6 +223,10 @@ class BrainReadService:
         return result
 
     def brain_corpus_status(self, *, corpus_id: str = "", project: str = "", limit: int = 20) -> dict[str, Any]:
+        if self.reference_corpus_status_reader is not None:
+            result = self.reference_corpus_status_reader(corpus_id=corpus_id, project=project, limit=limit)
+            ensure_public_safe(result, "brain_corpus_status")
+            return result
         result = {
             "schema_version": "brain_corpus_status.v1",
             "corpus_id": public_safe_text(corpus_id, max_chars=180),
@@ -229,6 +236,7 @@ class BrainReadService:
             "reference_object_count": 0,
             "freshness_gaps": [],
             "limit": min(max(int(limit or 20), 1), 100),
+            **default_corpus_policy_status(),
             "gaps": ["reference_corpus_store_empty"],
         }
         ensure_public_safe(result, "brain_corpus_status")

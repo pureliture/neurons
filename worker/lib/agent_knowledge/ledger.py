@@ -19,6 +19,7 @@ from .ledger_gc_safety_mixin import GcSafetyMixin
 from .ledger_memory_promotion_area import MemoryPromotionArea
 from .ledger_memory_promotion_mixin import MemoryPromotionMixin
 from .ledger_native_memory_mixin import NativeMemoryMixin
+from .public_safe_util import ensure_public_safe, public_safe_text
 
 
 _READ_ONLY_SQL_KEYWORD_RE = re.compile(
@@ -27,6 +28,22 @@ _READ_ONLY_SQL_KEYWORD_RE = re.compile(
 )
 _READ_ONLY_SQL_ALLOWED_KEYWORDS = {"EXPLAIN", "PRAGMA", "SELECT"}
 _READ_ONLY_SQL_CTE_FINAL_KEYWORDS = {"SELECT"}
+
+
+def _reference_corpus_default_policy_status() -> dict:
+    return {
+        "supported_storage_modes": ["external_object_store", "managed_snapshot", "metadata_only"],
+        "raw_body_policy": {
+            "raw_body_policy": "no_raw_return_by_default",
+            "return_capability": "denied_without_explicit_approval",
+            "retention_class": "user_managed_reference",
+            "redaction_profile": "public_safe_summary",
+            "deletion_policy": "delete_snapshot_keep_metadata",
+            "license_source_rights": "operator_attested",
+        },
+        "source_rights_policy": "operator_attested_reference_use",
+        "production_ingest_gate": "denied_without_later_approval",
+    }
 
 
 def _introspection_query(
@@ -1383,6 +1400,92 @@ class Ledger(
                 );
                 CREATE INDEX IF NOT EXISTS idx_object_review_proposals_project_status
                     ON object_review_proposals(project, status, updated_at);
+                CREATE TABLE IF NOT EXISTS reference_corpus_bundles (
+                    corpus_id TEXT PRIMARY KEY,
+                    project TEXT NOT NULL DEFAULT '',
+                    name TEXT NOT NULL DEFAULT '',
+                    storage_mode TEXT NOT NULL DEFAULT '',
+                    manifest_hash TEXT NOT NULL DEFAULT '',
+                    source_count INTEGER NOT NULL DEFAULT 0,
+                    bundle_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_corpus_bundles_project_updated
+                    ON reference_corpus_bundles(project, updated_at);
+                CREATE TABLE IF NOT EXISTS reference_corpus_document_versions (
+                    version_id TEXT PRIMARY KEY,
+                    corpus_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    project TEXT NOT NULL DEFAULT '',
+                    content_hash TEXT NOT NULL,
+                    metadata_hash TEXT NOT NULL,
+                    version_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_corpus_versions_project_corpus
+                    ON reference_corpus_document_versions(project, corpus_id, updated_at);
+                CREATE TABLE IF NOT EXISTS reference_corpus_document_sources (
+                    source_id TEXT PRIMARY KEY,
+                    corpus_id TEXT NOT NULL,
+                    project TEXT NOT NULL DEFAULT '',
+                    storage_mode TEXT NOT NULL DEFAULT '',
+                    source_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_corpus_sources_project_corpus
+                    ON reference_corpus_document_sources(project, corpus_id, updated_at);
+                CREATE TABLE IF NOT EXISTS reference_corpus_document_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    corpus_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    version_id TEXT NOT NULL DEFAULT '',
+                    project TEXT NOT NULL DEFAULT '',
+                    content_hash TEXT NOT NULL DEFAULT '',
+                    snapshot_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_corpus_snapshots_project_corpus
+                    ON reference_corpus_document_snapshots(project, corpus_id, updated_at);
+                CREATE TABLE IF NOT EXISTS reference_corpus_document_chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    corpus_id TEXT NOT NULL,
+                    snapshot_id TEXT NOT NULL,
+                    project TEXT NOT NULL DEFAULT '',
+                    chunk_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_corpus_chunks_project_corpus
+                    ON reference_corpus_document_chunks(project, corpus_id, updated_at);
+                CREATE TABLE IF NOT EXISTS reference_corpus_freshness_checks (
+                    check_id TEXT PRIMARY KEY,
+                    corpus_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    project TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT '',
+                    result TEXT NOT NULL DEFAULT '',
+                    check_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_corpus_freshness_project_corpus
+                    ON reference_corpus_freshness_checks(project, corpus_id, updated_at);
+                CREATE TABLE IF NOT EXISTS reference_corpus_extraction_runs (
+                    run_id TEXT PRIMARY KEY,
+                    corpus_id TEXT NOT NULL,
+                    project TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT '',
+                    input_hash TEXT NOT NULL DEFAULT '',
+                    run_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reference_corpus_runs_project_corpus
+                    ON reference_corpus_extraction_runs(project, corpus_id, updated_at);
                 CREATE TABLE IF NOT EXISTS schema_migrations (
                     version TEXT PRIMARY KEY,
                     applied_at TEXT NOT NULL
@@ -1427,6 +1530,12 @@ class Ledger(
                 VALUES ('agent_knowledge_graph_projection_state.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
                 VALUES ('agent_knowledge_object_review_proposals.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_reference_corpus_bundles.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_reference_corpus_document_versions.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_reference_corpus_first_class_objects.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 UPDATE knowledge_items SET type = 'session_memory' WHERE type = 'session_memory_sot';
                 """
                 # Single-source graph projection_state schema: injected from
@@ -2402,3 +2511,648 @@ class Ledger(
                     (bounded,),
                 ).fetchall()
         return [json.loads(row["proposal_json"]) for row in rows]
+
+    def upsert_reference_corpus_bundle(self, bundle: dict, *, project: str = "") -> dict:
+        if self.read_only:
+            raise sqlite3.OperationalError("read-only ledger는 reference corpus write를 허용하지 않습니다")
+        ensure_public_safe(bundle, "reference_corpus_bundle")
+        corpus = dict(bundle.get("corpus") or {})
+        corpus_id = str(corpus.get("corpus_id") or "")
+        name = str(corpus.get("name") or "")
+        storage_mode = str(corpus.get("storage_mode") or "")
+        manifest_hash = str(corpus.get("manifest_ref") or "")
+        if not corpus_id or not name or not storage_mode or not manifest_hash:
+            raise ValueError("reference corpus bundle requires corpus_id, name, storage_mode and manifest hash")
+        project_name = public_safe_text(project or str(bundle.get("project") or ""), max_chars=120)
+        sources = [dict(source) for source in bundle.get("sources") or [] if isinstance(source, dict)]
+        versions = [dict(version) for version in bundle.get("versions") or [] if isinstance(version, dict)]
+        snapshots = [dict(snapshot) for snapshot in bundle.get("snapshots") or [] if isinstance(snapshot, dict)]
+        chunks = [dict(chunk) for chunk in bundle.get("chunks") or [] if isinstance(chunk, dict)]
+        freshness_checks = [dict(check) for check in bundle.get("freshness_checks") or [] if isinstance(check, dict)]
+        extraction_run = dict(bundle.get("extraction_run") or {})
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        payload = json.dumps(bundle, ensure_ascii=False, sort_keys=True)
+        source_ids = [str(source.get("source_id") or "") for source in sources]
+        version_ids = [str(version.get("version_id") or "") for version in versions]
+        snapshot_ids = [str(snapshot.get("snapshot_id") or "") for snapshot in snapshots]
+        chunk_ids = [str(chunk.get("chunk_id") or "") for chunk in chunks]
+        freshness_check_ids = [str(check.get("check_id") or "") for check in freshness_checks]
+        extraction_run_ids = [str(extraction_run.get("run_id") or "")] if extraction_run else []
+        with self._connect() as connection:
+            def delete_missing_child_rows(table: str, id_column: str, current_ids: list[str]) -> None:
+                ids = [current_id for current_id in current_ids if current_id]
+                if not ids:
+                    connection.execute(f"DELETE FROM {table} WHERE corpus_id = ?", (corpus_id,))
+                    return
+                placeholders = ", ".join("?" for _ in ids)
+                connection.execute(
+                    f"DELETE FROM {table} WHERE corpus_id = ? AND {id_column} NOT IN ({placeholders})",
+                    (corpus_id, *ids),
+                )
+
+            delete_missing_child_rows("reference_corpus_extraction_runs", "run_id", extraction_run_ids)
+            delete_missing_child_rows("reference_corpus_freshness_checks", "check_id", freshness_check_ids)
+            delete_missing_child_rows("reference_corpus_document_chunks", "chunk_id", chunk_ids)
+            delete_missing_child_rows("reference_corpus_document_snapshots", "snapshot_id", snapshot_ids)
+            delete_missing_child_rows("reference_corpus_document_versions", "version_id", version_ids)
+            delete_missing_child_rows("reference_corpus_document_sources", "source_id", source_ids)
+            connection.execute(
+                """
+                INSERT INTO reference_corpus_bundles (
+                    corpus_id, project, name, storage_mode, manifest_hash,
+                    source_count, bundle_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(corpus_id) DO UPDATE SET
+                    project=excluded.project,
+                    name=excluded.name,
+                    storage_mode=excluded.storage_mode,
+                    manifest_hash=excluded.manifest_hash,
+                    source_count=excluded.source_count,
+                    bundle_json=excluded.bundle_json,
+                    updated_at=excluded.updated_at
+                """,
+                (corpus_id, project_name, name, storage_mode, manifest_hash, len(sources), payload, now, now),
+            )
+            for source in sources:
+                source_id = str(source.get("source_id") or "")
+                source_mode = str(source.get("storage_mode") or "")
+                if not source_id or not source_mode:
+                    raise ValueError("document source requires source_id and storage_mode")
+                source_payload = json.dumps(source, ensure_ascii=False, sort_keys=True)
+                connection.execute(
+                    """
+                    INSERT INTO reference_corpus_document_sources (
+                        source_id, corpus_id, project, storage_mode, source_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_id) DO UPDATE SET
+                        corpus_id=excluded.corpus_id,
+                        project=excluded.project,
+                        storage_mode=excluded.storage_mode,
+                        source_json=excluded.source_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (source_id, corpus_id, project_name, source_mode, source_payload, now, now),
+                )
+            for version in versions:
+                version_id = str(version.get("version_id") or "")
+                source_id = str(version.get("source_id") or "")
+                content_hash = str(version.get("content_hash") or "")
+                metadata_hash = str(version.get("metadata_hash") or "")
+                if not version_id or not source_id or not content_hash or not metadata_hash:
+                    raise ValueError("document version requires version_id, source_id, content_hash and metadata_hash")
+                version_payload = json.dumps(version, ensure_ascii=False, sort_keys=True)
+                connection.execute(
+                    """
+                    INSERT INTO reference_corpus_document_versions (
+                        version_id, corpus_id, source_id, project, content_hash,
+                        metadata_hash, version_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(version_id) DO UPDATE SET
+                        corpus_id=excluded.corpus_id,
+                        source_id=excluded.source_id,
+                        project=excluded.project,
+                        content_hash=excluded.content_hash,
+                        metadata_hash=excluded.metadata_hash,
+                        version_json=excluded.version_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        version_id,
+                        corpus_id,
+                        source_id,
+                        project_name,
+                        content_hash,
+                        metadata_hash,
+                        version_payload,
+                        now,
+                        now,
+                    ),
+                )
+            for snapshot in snapshots:
+                snapshot_id = str(snapshot.get("snapshot_id") or "")
+                source_id = str(snapshot.get("source_id") or "")
+                version_id = str(snapshot.get("version_id") or "")
+                content_hash = str(snapshot.get("content_hash") or "")
+                if not snapshot_id or not source_id or not content_hash:
+                    raise ValueError("document snapshot requires snapshot_id, source_id and content_hash")
+                snapshot_payload = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+                connection.execute(
+                    """
+                    INSERT INTO reference_corpus_document_snapshots (
+                        snapshot_id, corpus_id, source_id, version_id, project,
+                        content_hash, snapshot_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(snapshot_id) DO UPDATE SET
+                        corpus_id=excluded.corpus_id,
+                        source_id=excluded.source_id,
+                        version_id=excluded.version_id,
+                        project=excluded.project,
+                        content_hash=excluded.content_hash,
+                        snapshot_json=excluded.snapshot_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        snapshot_id,
+                        corpus_id,
+                        source_id,
+                        version_id,
+                        project_name,
+                        content_hash,
+                        snapshot_payload,
+                        now,
+                        now,
+                    ),
+                )
+            for chunk in chunks:
+                chunk_id = str(chunk.get("chunk_id") or "")
+                snapshot_id = str(chunk.get("snapshot_id") or "")
+                if not chunk_id or not snapshot_id:
+                    raise ValueError("document chunk requires chunk_id and snapshot_id")
+                chunk_payload = json.dumps(chunk, ensure_ascii=False, sort_keys=True)
+                connection.execute(
+                    """
+                    INSERT INTO reference_corpus_document_chunks (
+                        chunk_id, corpus_id, snapshot_id, project, chunk_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(chunk_id) DO UPDATE SET
+                        corpus_id=excluded.corpus_id,
+                        snapshot_id=excluded.snapshot_id,
+                        project=excluded.project,
+                        chunk_json=excluded.chunk_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (chunk_id, corpus_id, snapshot_id, project_name, chunk_payload, now, now),
+                )
+            for check in freshness_checks:
+                check_id = str(check.get("check_id") or "")
+                source_id = str(check.get("source_id") or "")
+                status = str(check.get("status") or "")
+                result = str(check.get("result") or "")
+                if not check_id or not source_id:
+                    raise ValueError("freshness check requires check_id and source_id")
+                check_payload = json.dumps(check, ensure_ascii=False, sort_keys=True)
+                connection.execute(
+                    """
+                    INSERT INTO reference_corpus_freshness_checks (
+                        check_id, corpus_id, source_id, project, status, result,
+                        check_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(check_id) DO UPDATE SET
+                        corpus_id=excluded.corpus_id,
+                        source_id=excluded.source_id,
+                        project=excluded.project,
+                        status=excluded.status,
+                        result=excluded.result,
+                        check_json=excluded.check_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (check_id, corpus_id, source_id, project_name, status, result, check_payload, now, now),
+                )
+            if extraction_run:
+                run_id = str(extraction_run.get("run_id") or "")
+                status = str(extraction_run.get("status") or "")
+                input_hash = str(extraction_run.get("input_hash") or "")
+                if not run_id or not status or not input_hash:
+                    raise ValueError("extraction run requires run_id, status and input_hash")
+                run_payload = json.dumps(extraction_run, ensure_ascii=False, sort_keys=True)
+                connection.execute(
+                    """
+                    INSERT INTO reference_corpus_extraction_runs (
+                        run_id, corpus_id, project, status, input_hash,
+                        run_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id) DO UPDATE SET
+                        corpus_id=excluded.corpus_id,
+                        project=excluded.project,
+                        status=excluded.status,
+                        input_hash=excluded.input_hash,
+                        run_json=excluded.run_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (run_id, corpus_id, project_name, status, input_hash, run_payload, now, now),
+                )
+            row = connection.execute(
+                "SELECT bundle_json FROM reference_corpus_bundles WHERE corpus_id = ?",
+                (corpus_id,),
+            ).fetchone()
+            count_row = connection.execute(
+                "SELECT COUNT(*) AS c FROM reference_corpus_bundles WHERE corpus_id = ?",
+                (corpus_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"Failed to read back upserted reference corpus bundle: {corpus_id}")
+        stored = json.loads(row["bundle_json"])
+        ensure_public_safe(stored, "reference_corpus_bundle")
+        return {
+            "schema_version": "reference_corpus_store_write.v1",
+            "status": "stored",
+            "corpus_id": corpus_id,
+            "project": project_name,
+            "write_count": int(count_row["c"] if count_row is not None else 0),
+            "source_count": len(sources),
+            "document_source_count": len(sources),
+            "version_count": len(versions),
+            "snapshot_count": len(snapshots),
+            "chunk_count": len(chunks),
+            "freshness_check_count": len(freshness_checks),
+            "extraction_run_count": 1 if extraction_run else 0,
+            "mutation_performed": True,
+            "production_mutation_performed": False,
+        }
+
+    def reference_corpus_status(self, *, project: str = "", corpus_id: str = "", limit: int = 20) -> dict:
+        bounded = max(1, min(int(limit or 20), 100))
+        project_name = public_safe_text(project, max_chars=120)
+        corpus_key = public_safe_text(corpus_id, max_chars=180)
+        with self._connect() as connection:
+            def count_rows(table: str) -> int:
+                if corpus_key:
+                    row = connection.execute(
+                        f"""
+                        SELECT COUNT(*) AS c
+                        FROM {table}
+                        WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                        """,
+                        (corpus_key, project_name, project_name),
+                    ).fetchone()
+                elif project_name:
+                    row = connection.execute(
+                        f"""
+                        SELECT COUNT(*) AS c
+                        FROM {table}
+                        WHERE project = ? OR project = ''
+                        """,
+                        (project_name,),
+                    ).fetchone()
+                else:
+                    row = connection.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
+                return int(row["c"] if row is not None else 0)
+
+            def sum_bundle_source_count() -> int:
+                if corpus_key:
+                    row = connection.execute(
+                        """
+                        SELECT COALESCE(SUM(source_count), 0) AS c
+                        FROM reference_corpus_bundles
+                        WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                        """,
+                        (corpus_key, project_name, project_name),
+                    ).fetchone()
+                elif project_name:
+                    row = connection.execute(
+                        """
+                        SELECT COALESCE(SUM(source_count), 0) AS c
+                        FROM reference_corpus_bundles
+                        WHERE project = ? OR project = ''
+                        """,
+                        (project_name,),
+                    ).fetchone()
+                else:
+                    row = connection.execute(
+                        "SELECT COALESCE(SUM(source_count), 0) AS c FROM reference_corpus_bundles"
+                    ).fetchone()
+                return int(row["c"] if row is not None else 0)
+
+            def storage_mode_counts() -> dict[str, int]:
+                if corpus_key:
+                    rows_for_modes = connection.execute(
+                        """
+                        SELECT storage_mode, COUNT(*) AS c
+                        FROM reference_corpus_document_sources
+                        WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                        GROUP BY storage_mode
+                        """,
+                        (corpus_key, project_name, project_name),
+                    ).fetchall()
+                elif project_name:
+                    rows_for_modes = connection.execute(
+                        """
+                        SELECT storage_mode, COUNT(*) AS c
+                        FROM reference_corpus_document_sources
+                        WHERE project = ? OR project = ''
+                        GROUP BY storage_mode
+                        """,
+                        (project_name,),
+                    ).fetchall()
+                else:
+                    rows_for_modes = connection.execute(
+                        """
+                        SELECT storage_mode, COUNT(*) AS c
+                        FROM reference_corpus_document_sources
+                        GROUP BY storage_mode
+                        """
+                    ).fetchall()
+                return {
+                    str(row["storage_mode"]): int(row["c"])
+                    for row in rows_for_modes
+                    if str(row["storage_mode"] or "")
+                }
+
+            total_bundles = count_rows("reference_corpus_bundles")
+            total_document_sources = count_rows("reference_corpus_document_sources")
+            total_document_versions = count_rows("reference_corpus_document_versions")
+            total_document_snapshots = count_rows("reference_corpus_document_snapshots")
+            total_document_chunks = count_rows("reference_corpus_document_chunks")
+            total_freshness_checks = count_rows("reference_corpus_freshness_checks")
+            total_extraction_runs = count_rows("reference_corpus_extraction_runs")
+            total_bundle_sources = sum_bundle_source_count()
+            if corpus_key:
+                rows = connection.execute(
+                    """
+                    SELECT bundle_json
+                    FROM reference_corpus_bundles
+                    WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (corpus_key, project_name, project_name, bounded),
+                ).fetchall()
+            elif project_name:
+                rows = connection.execute(
+                    """
+                    SELECT bundle_json
+                    FROM reference_corpus_bundles
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT bundle_json
+                    FROM reference_corpus_bundles
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+            if corpus_key:
+                version_rows = connection.execute(
+                    """
+                    SELECT version_json
+                    FROM reference_corpus_document_versions
+                    WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (corpus_key, project_name, project_name, bounded),
+                ).fetchall()
+            elif project_name:
+                version_rows = connection.execute(
+                    """
+                    SELECT version_json
+                    FROM reference_corpus_document_versions
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+            else:
+                version_rows = connection.execute(
+                    """
+                    SELECT version_json
+                    FROM reference_corpus_document_versions
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+            if corpus_key:
+                source_rows = connection.execute(
+                    """
+                    SELECT source_json
+                    FROM reference_corpus_document_sources
+                    WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (corpus_key, project_name, project_name, bounded),
+                ).fetchall()
+                snapshot_rows = connection.execute(
+                    """
+                    SELECT snapshot_json
+                    FROM reference_corpus_document_snapshots
+                    WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (corpus_key, project_name, project_name, bounded),
+                ).fetchall()
+                chunk_rows = connection.execute(
+                    """
+                    SELECT chunk_json
+                    FROM reference_corpus_document_chunks
+                    WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (corpus_key, project_name, project_name, bounded),
+                ).fetchall()
+                freshness_rows = connection.execute(
+                    """
+                    SELECT check_json
+                    FROM reference_corpus_freshness_checks
+                    WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (corpus_key, project_name, project_name, bounded),
+                ).fetchall()
+                run_rows = connection.execute(
+                    """
+                    SELECT run_json
+                    FROM reference_corpus_extraction_runs
+                    WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (corpus_key, project_name, project_name, bounded),
+                ).fetchall()
+            elif project_name:
+                source_rows = connection.execute(
+                    """
+                    SELECT source_json
+                    FROM reference_corpus_document_sources
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+                snapshot_rows = connection.execute(
+                    """
+                    SELECT snapshot_json
+                    FROM reference_corpus_document_snapshots
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+                chunk_rows = connection.execute(
+                    """
+                    SELECT chunk_json
+                    FROM reference_corpus_document_chunks
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+                freshness_rows = connection.execute(
+                    """
+                    SELECT check_json
+                    FROM reference_corpus_freshness_checks
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+                run_rows = connection.execute(
+                    """
+                    SELECT run_json
+                    FROM reference_corpus_extraction_runs
+                    WHERE project = ? OR project = ''
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+            else:
+                source_rows = connection.execute(
+                    """
+                    SELECT source_json
+                    FROM reference_corpus_document_sources
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+                snapshot_rows = connection.execute(
+                    """
+                    SELECT snapshot_json
+                    FROM reference_corpus_document_snapshots
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+                chunk_rows = connection.execute(
+                    """
+                    SELECT chunk_json
+                    FROM reference_corpus_document_chunks
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+                freshness_rows = connection.execute(
+                    """
+                    SELECT check_json
+                    FROM reference_corpus_freshness_checks
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+                run_rows = connection.execute(
+                    """
+                    SELECT run_json
+                    FROM reference_corpus_extraction_runs
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+            storage_modes = storage_mode_counts()
+        bundles = [json.loads(row["bundle_json"]) for row in rows]
+        document_sources = [json.loads(row["source_json"]) for row in source_rows]
+        document_versions = [json.loads(row["version_json"]) for row in version_rows]
+        document_snapshots = [json.loads(row["snapshot_json"]) for row in snapshot_rows]
+        document_chunks = [json.loads(row["chunk_json"]) for row in chunk_rows]
+        freshness_checks = [json.loads(row["check_json"]) for row in freshness_rows]
+        stored_extraction_runs = [json.loads(row["run_json"]) for row in run_rows]
+        freshness_gaps: list[dict] = []
+        extraction_runs: list[dict] = []
+        source_count = total_document_sources or total_bundle_sources
+        reference_object_count = 0
+        snapshot_count = total_document_snapshots
+        chunk_count = total_document_chunks
+        manifest_hashes: list[str] = []
+        for run in stored_extraction_runs:
+            extraction_runs.append(
+                {
+                    "run_id": str(run.get("run_id") or ""),
+                    "corpus_id": str(run.get("corpus_id") or ""),
+                    "status": str(run.get("status") or ""),
+                    "input_hash": str(run.get("input_hash") or ""),
+                    "output_object_count": int(run.get("output_object_count") or 0),
+                }
+            )
+        for bundle in bundles:
+            sources = list(bundle.get("sources") or [])
+            reference_object_count += len(bundle.get("objects") or [])
+            if not total_document_snapshots:
+                snapshot_count += len(bundle.get("snapshots") or [])
+            if not total_document_chunks:
+                chunk_count += len(bundle.get("chunks") or [])
+            if not storage_modes:
+                for source in sources:
+                    mode = str(source.get("storage_mode") or "")
+                    if mode:
+                        storage_modes[mode] = storage_modes.get(mode, 0) + 1
+            freshness_gaps.extend(dict(gap) for gap in bundle.get("freshness_gaps") or [] if isinstance(gap, dict))
+            run = bundle.get("extraction_run")
+            if isinstance(run, dict) and not stored_extraction_runs:
+                extraction_runs.append(
+                    {
+                        "run_id": str(run.get("run_id") or ""),
+                        "corpus_id": str(run.get("corpus_id") or ""),
+                        "status": str(run.get("status") or ""),
+                        "input_hash": str(run.get("input_hash") or ""),
+                        "output_object_count": int(run.get("output_object_count") or 0),
+                    }
+                )
+            manifest_hash = str((bundle.get("corpus") or {}).get("manifest_ref") or "")
+            if manifest_hash:
+                manifest_hashes.append(manifest_hash)
+        status = {
+            "schema_version": "brain_corpus_status.v1",
+            "project": project_name,
+            "corpus_id": corpus_key,
+            "corpus_count": total_bundles,
+            "source_count": source_count,
+            "storage_modes": storage_modes,
+            "reference_object_count": reference_object_count,
+            "document_source_count": total_document_sources if total_document_sources else source_count,
+            "document_sources": document_sources,
+            "version_count": total_document_versions,
+            "document_versions": document_versions,
+            "snapshot_count": snapshot_count,
+            "document_snapshots": document_snapshots,
+            "chunk_count": chunk_count,
+            "document_chunks": document_chunks,
+            "freshness_check_count": total_freshness_checks,
+            "freshness_checks": freshness_checks,
+            "extraction_run_count": total_extraction_runs,
+            "freshness_gaps": freshness_gaps,
+            "extraction_runs": extraction_runs,
+            "first_class_store_counts": {
+                "document_sources": total_document_sources,
+                "document_versions": total_document_versions,
+                "document_snapshots": total_document_snapshots,
+                "document_chunks": total_document_chunks,
+                "freshness_checks": total_freshness_checks,
+                "extraction_runs": total_extraction_runs,
+            },
+            "manifest_hashes": manifest_hashes,
+            "limit": bounded,
+            **_reference_corpus_default_policy_status(),
+            "gaps": [] if bundles else ["reference_corpus_store_empty"],
+        }
+        ensure_public_safe(status, "reference_corpus_status")
+        return status
