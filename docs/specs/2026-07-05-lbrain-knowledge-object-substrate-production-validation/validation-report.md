@@ -18,7 +18,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 - status: `validated`
 - evidence: `cd worker && uv run pytest -q`
-- result: `1589 passed, 9 skipped, 1 warning`
+- result: `1590 passed, 9 skipped, 1 warning`
 - note: covers object model, reference corpus, object packs, MCP stdio, CLI, context authority, ledger area boundary, and existing worker regression surface.
 
 ### local.root.gradle
@@ -82,7 +82,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - status: `validated`
 - evidence: `uv run neuron-knowledge source-to-candidate-runtime-readiness --expected-commit 7218cb2`
 - result: returned `source_to_candidate_runtime_readiness.v1`, `status=PASS_WITH_GAPS`, `live_evidence_provided=false`, `production_mutation_performed=false`, `network_used=false`
-- interpretation: this validates the report surface and local product-surface claim only. The local claim now includes `brain_objects_query` plus source-to-candidate/review/approval/readiness tools. It does not prove deployed/runtime source-to-candidate activation.
+- interpretation: this validates the report surface and local product-surface claim only. The local claim now includes `brain_objects_query` plus source-to-candidate/review/approval/readiness tools, and live evidence must now include `brain_objects_query` route smokes for authority/archive, style/preference, and deploy/runtime queries. It does not prove deployed/runtime source-to-candidate activation.
 
 ### local.mcp.brain-objects-query-routes
 
@@ -198,6 +198,14 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - evidence:
   - local readiness report expects live `agent_context_product_pack.v1` to include object-native read/review `tool_hints`.
   - current branch-local smoke did not read deployed agent startup/context output and therefore reports `live_agent_context_tool_hints_unverified`.
+
+### live.production.brain-objects-query-route-smokes
+
+- status: `not_validated`
+- reason: `live_evidence_packet_not_supplied`
+- evidence:
+  - local readiness report expects read-only live `brain_objects_query` smoke for `authority_archive_separation`, `code_style_preference`, and `deployment_runtime_truth`.
+  - current branch-local smoke did not contact live MCP and therefore reports `live_brain_objects_query_route_smokes_unverified`.
 
 ### live.production.source-to-candidate-denial-smokes
 

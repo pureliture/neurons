@@ -16,6 +16,11 @@ REQUIRED_RUNTIME_TOOL_NAMES = (
     *REQUIRED_REVIEW_TOOL_NAMES,
     "brain_source_to_candidate_runtime_readiness",
 )
+REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES = (
+    "authority_archive_separation",
+    "code_style_preference",
+    "deployment_runtime_truth",
+)
 
 
 def build_source_to_candidate_runtime_readiness_report(
@@ -29,6 +34,7 @@ def build_source_to_candidate_runtime_readiness_report(
         _local_product_surface_claim(local_gate),
         _live_tools_claim(evidence),
         _live_agent_context_tool_hints_claim(evidence),
+        _live_brain_objects_query_route_smokes_claim(evidence),
         _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
         _production_denial_claim(
             evidence,
@@ -111,6 +117,41 @@ def _live_agent_context_tool_hints_claim(evidence: Mapping[str, Any]) -> dict[st
     }
 
 
+def _live_brain_objects_query_route_smokes_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    smokes = evidence.get("brain_objects_query_smokes")
+    smoke_items = [dict(item) for item in smokes if isinstance(item, Mapping)] if isinstance(smokes, list) else []
+    by_route = {
+        str(item.get("route") or (item.get("object_pack") or {}).get("route") or ""): item
+        for item in smoke_items
+    }
+    missing = [route for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES if route not in by_route]
+    failures = [
+        failure
+        for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+        if route in by_route
+        for failure in _brain_objects_query_smoke_failures(route, by_route[route])
+    ]
+    base = {
+        "claim_id": "live.brain_objects_query.route_smokes",
+        "evidence_class": "runtime_read_path",
+        "required_routes": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
+        "validated_routes": sorted(route for route in by_route if route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
+        "missing_routes": missing,
+        "production_mutation_performed": _object_query_smokes_report_mutation(smoke_items),
+    }
+    if failures:
+        return {
+            **base,
+            "status": "failed",
+            "gaps": failures,
+        }
+    return {
+        **base,
+        "status": "not_validated" if missing else "validated",
+        "gaps": ["live_brain_objects_query_route_smokes_unverified"] if missing else [],
+    }
+
+
 def _live_deployed_identity_claim(evidence: Mapping[str, Any], *, expected_commit: str) -> dict[str, Any]:
     identity = evidence.get("deployed_identity")
     identity = identity if isinstance(identity, Mapping) else {}
@@ -179,6 +220,34 @@ def _agent_context_tool_hints(evidence: Mapping[str, Any]) -> list[Any]:
     product = authority.get("agent_context_product") if isinstance(authority, Mapping) else {}
     hints = product.get("tool_hints") if isinstance(product, Mapping) else []
     return list(hints) if isinstance(hints, list) else []
+
+
+def _brain_objects_query_smoke_failures(route: str, smoke: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    object_pack = smoke.get("object_pack") if isinstance(smoke.get("object_pack"), Mapping) else {}
+    gaps = [str(gap) for gap in object_pack.get("gaps", []) if str(gap or "")]
+    if smoke.get("schema_version") != "brain_objects_query.v1":
+        failures.append(f"brain_objects_query_schema_mismatch:{route}")
+    if object_pack.get("schema_version") != "object_pack.v1":
+        failures.append(f"brain_objects_query_object_pack_schema_mismatch:{route}")
+    if str(smoke.get("route") or object_pack.get("route") or "") != route:
+        failures.append(f"brain_objects_query_route_mismatch:{route}")
+    if "object_pack_route_not_implemented" in gaps:
+        failures.append(f"brain_objects_query_route_unimplemented:{route}")
+    if bool(smoke.get("production_mutation_performed")) or bool(smoke.get("mutation_performed")):
+        failures.append(f"brain_objects_query_mutation_performed:{route}")
+    if not isinstance(object_pack.get("recommended_actions"), list):
+        failures.append(f"brain_objects_query_recommended_actions_missing:{route}")
+    if not isinstance(object_pack.get("lanes"), Mapping):
+        failures.append(f"brain_objects_query_lanes_missing:{route}")
+    return failures
+
+
+def _object_query_smokes_report_mutation(smoke_items: list[Mapping[str, Any]]) -> bool:
+    return any(
+        bool(item.get("production_mutation_performed")) or bool(item.get("mutation_performed"))
+        for item in smoke_items
+    )
 
 
 def _string_list(value: Any) -> list[str]:
