@@ -803,10 +803,32 @@ Current accounting:
 
 Delivery integration status:
 
-- P7, P8, P9, and P10 continuation branches are pushed as phase-specific branches.
-- No PR currently exists for the `codex/p*` continuation branches.
+- P1 through P10 continuation branches are pushed as phase-specific branches and all include PR #73 merge commit `c3f3e34`.
+- No PR currently exists for the `codex/p1` through `codex/p10` continuation branches.
 - PR creation remains a delivery gap because the repository PR workflow requires a linked issue or explicit approval before GitHub mutation.
 - This gap does not convert local/test evidence into production readiness and does not close P1 live read-path gaps.
+
+PR-ready branch stack:
+
+| Phase | Branch | Head | Recommended PR base |
+| --- | --- | --- | --- |
+| P1 Production MCP Activation | `codex/p1-production-mcp-activation-live` | `0b2cf1d` | `main` |
+| P2 Living Reference Corpus Store | `codex/p2-living-reference-corpus-store` | `f1572b4` | `codex/p1-production-mcp-activation-live` |
+| P3 Processing And Object Extraction Pipeline | `codex/p3-processing-object-extraction-pipeline` | `52aaed1` | `codex/p2-living-reference-corpus-store` |
+| P4 Review Queue And Authority Promotion | `codex/p4-review-authority-promotion` | `d0b7a44` | `codex/p3-processing-object-extraction-pipeline` |
+| P5 Continuous Golden Query Quality Gates | `codex/p5-continuous-golden-query-quality` | `42a9f90` | `codex/p4-review-authority-promotion` |
+| P6 Session, Device, Project, And Work-Unit 360 | `codex/p6-session-device-project-workunit-360` | `ce2518a` | `codex/p5-continuous-golden-query-quality` |
+| P7 Preference, Style, And Artifact Memory | `codex/p7-preference-style-artifact-memory` | `2e97dcb` | `codex/p6-session-device-project-workunit-360` |
+| P8 Runtime Truth, Security, And Deployment Authority | `codex/p8-runtime-truth-security-deployment-authority` | `77fdc11` | `codex/p7-preference-style-artifact-memory` |
+| P9 Agent Context Productization | `codex/p9-agent-context-productization` | `4d44ec2` | `codex/p8-runtime-truth-security-deployment-authority` |
+| P10 UI And Object Browser Surface | `codex/p10-ui-object-browser-defer-decision` | `193a514` | `codex/p9-agent-context-productization` |
+
+PR creation gate:
+
+- Required: linked issue number or explicit user approval for GitHub PR mutation.
+- Required PR body constraint: include a real closing reference such as `Closes #N`.
+- If no linked issue exists, prepare PR body previews but do not create PRs.
+- Do not claim merge, CI, deploy, or live runtime evidence from branch push alone.
 
 ## Next Design Targets
 
