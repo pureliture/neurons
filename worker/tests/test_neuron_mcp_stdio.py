@@ -380,11 +380,14 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
         ],
         "agent_context_product": {
             "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
             "sections": {
                 "style_preference": {"object_count": 1},
                 "active_work": {"object_count": 1},
                 "required_verification": {"object_count": 1},
             },
+            "degraded_mode": {"active": True, "gaps": ["runtime_evidence_unverified"]},
+            "missing_evidence_before_promotion": ["runtime_evidence_unverified"],
             "surface_policy": {"mutation_allowed": False},
             "tool_hints": object_native_review_tool_hints([]),
         },

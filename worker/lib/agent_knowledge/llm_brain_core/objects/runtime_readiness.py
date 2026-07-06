@@ -27,6 +27,8 @@ REQUIRED_AGENT_CONTEXT_SECTIONS = (
     "active_work",
     "required_verification",
 )
+REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA = "agent_context_product_pack.v1"
+ALLOWED_AGENT_CONTEXT_CONSUMERS = ("codex", "claude-code", "gemini", "hermes")
 PRODUCTION_DENIAL_CLAIMS = (
     ("live.production.source_to_candidate_denial", "brain_source_to_candidate_graph"),
     ("live.production.approval_board_denial", "brain_approval_board_decide"),
@@ -39,6 +41,7 @@ OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS = (
 )
 OBJECT_AUTHORITY_PRODUCTION_RUNTIME_FLAG = "--allow-object-authority-production-writes"
 PERMISSION_SENSITIVE_AGENT_CONTEXT_TOOLS = ("brain_approval_board_decide",)
+RUNTIME_READINESS_AGENT_CONTEXT_TOOL = "brain_source_to_candidate_runtime_readiness"
 
 
 def build_source_to_candidate_runtime_readiness_report(
@@ -163,13 +166,22 @@ def _live_agent_context_product_sections_claim(evidence: Mapping[str, Any]) -> d
     mutation_allowed = (
         product.get("surface_policy") if isinstance(product.get("surface_policy"), Mapping) else {}
     ).get("mutation_allowed")
+    contract_failures = _agent_context_product_contract_failures(product)
     base = {
         "claim_id": "live.agent_context.product_sections",
         "evidence_class": "runtime_read_path",
+        "schema_version": public_safe_text(str(product.get("schema_version") or ""), max_chars=80),
+        "consumer": public_safe_text(str(product.get("consumer") or ""), max_chars=80),
         "required_sections": list(REQUIRED_AGENT_CONTEXT_SECTIONS),
         "missing_sections": missing,
         "mutation_allowed": bool(mutation_allowed),
     }
+    if contract_failures:
+        return {
+            **base,
+            "status": "failed",
+            "gaps": contract_failures,
+        }
     if bool(mutation_allowed):
         return {
             **base,
@@ -181,6 +193,24 @@ def _live_agent_context_product_sections_claim(evidence: Mapping[str, Any]) -> d
         "status": "not_validated" if missing else "validated",
         "gaps": ["live_agent_context_product_sections_unverified"] if missing else [],
     }
+
+
+def _agent_context_product_contract_failures(product: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if not product:
+        return failures
+    if product.get("schema_version") != REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA:
+        failures.append("live_agent_context_product_schema_mismatch")
+    if str(product.get("consumer") or "") not in ALLOWED_AGENT_CONTEXT_CONSUMERS:
+        failures.append("live_agent_context_consumer_unknown")
+    degraded = product.get("degraded_mode")
+    degraded_gaps = degraded.get("gaps") if isinstance(degraded, Mapping) else None
+    if not isinstance(degraded_gaps, list):
+        failures.append("live_agent_context_degraded_gap_disclosure_missing")
+    missing_before_promotion = product.get("missing_evidence_before_promotion")
+    if not isinstance(missing_before_promotion, list):
+        failures.append("live_agent_context_missing_evidence_before_promotion_missing")
+    return failures
 
 
 def _live_brain_objects_query_route_smokes_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
@@ -378,18 +408,25 @@ def _agent_context_tool_hints(evidence: Mapping[str, Any]) -> list[Any]:
 
 def _agent_context_tool_hint_safety_failures(tool_name: str, hint: Mapping[str, Any]) -> list[str]:
     failures: list[str] = []
+    safe_targets = _string_list(hint.get("safe_targets"))
+    blocked_targets = _string_list(hint.get("blocked_targets"))
     if hint.get("suggest_allowed") is not True:
         failures.append(f"{tool_name}_tool_hint_suggest_not_allowed")
     if hint.get("execute_allowed") is not False:
         failures.append(f"{tool_name}_tool_hint_execute_allowed")
     if hint.get("production_mutation_allowed") is not False:
         failures.append(f"{tool_name}_tool_hint_production_mutation_allowed")
-    if not _string_list(hint.get("safe_targets")):
+    if not safe_targets:
         failures.append(f"{tool_name}_tool_hint_safe_targets_missing")
     if tool_name in PERMISSION_SENSITIVE_AGENT_CONTEXT_TOOLS and "approved_scope_required" not in _string_list(
         hint.get("blocked_by")
     ):
         failures.append(f"{tool_name}_tool_hint_approved_scope_blocker_missing")
+    if tool_name == RUNTIME_READINESS_AGENT_CONTEXT_TOOL:
+        if "sanitized_evidence_packet" not in safe_targets:
+            failures.append(f"{tool_name}_tool_hint_sanitized_evidence_target_missing")
+        if "raw_private_runtime_evidence" not in blocked_targets:
+            failures.append(f"{tool_name}_tool_hint_raw_private_blocker_missing")
     return failures
 
 
