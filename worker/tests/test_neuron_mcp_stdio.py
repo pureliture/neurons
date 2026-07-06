@@ -720,6 +720,9 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_
         packet["source_to_candidate_review_loop"]["approval_board_decision"]["authority_write_scope"]
         == "local_test"
     )
+    assert packet["session_project_rollup_runtime"]["schema_version"] == "session_project_rollup_runtime_evidence.v1"
+    assert packet["session_project_rollup_runtime"]["rollup_preview"]["scope"] == "all_devices"
+    assert packet["session_project_rollup_runtime"]["rollup_preview"]["device_count"] >= 2
     assert len(packet["brain_objects_query_smokes"]) == 4
     assert all(
         "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])

@@ -1922,6 +1922,88 @@ def test_runtime_readiness_collector_includes_review_loop_shadow_evidence_withou
     assert report["status"] == "PASS_WITH_GAPS"
 
 
+def test_runtime_readiness_collector_includes_session_project_rollup_shadow_evidence():
+    def route_runner(route: str) -> dict:
+        return {
+            "schema_version": "brain_objects_query.v1",
+            "route": route,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": route,
+                "objects": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}],
+                "lanes": {"candidate": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}]},
+                "recommended_actions": [{"object_id": f"ko:test:{route}", "action": "request_evidence"}],
+                "gaps": [],
+            },
+            "production_mutation_performed": False,
+        }
+
+    packet = build_source_to_candidate_runtime_collected_shadow_evidence_packet(
+        repository="pureliture/neurons",
+        branch="codex/knowledge-object-review-flow-roadmap",
+        consumer="codex",
+        route_runner=route_runner,
+        review_loop_runner=_source_to_candidate_review_loop_evidence,
+        session_project_rollup_runner=_session_project_rollup_runtime_evidence,
+    )
+
+    rollup = packet["session_project_rollup_runtime"]
+    assert rollup["schema_version"] == "session_project_rollup_runtime_evidence.v1"
+    assert rollup["rollup_preview"]["scope"] == "all_devices"
+    assert rollup["rollup_preview"]["device_count"] >= 2
+    assert rollup["handoff_pack"]["raw_return_capability"] == "denied"
+    assert rollup["read_after_write"]["route"] == "temporal_work_recall"
+    assert rollup["postcheck"]["status"] == "validated"
+    assert packet["collector"]["readiness_claim"] == "collector_packet_not_live_evidence"
+    assert packet["production_mutation_performed"] is False
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=packet)
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["live.session_project.rollup"]["status"] == "validated"
+    assert "live_session_project_rollup_unverified" not in report["gaps"]
+    assert "live_multi_device_rollup_unproven" not in report["gaps"]
+    assert report["status"] == "PASS_WITH_GAPS"
+
+
+def test_runtime_readiness_collector_reports_session_project_rollup_collector_errors_public_safely():
+    def route_runner(route: str) -> dict:
+        return {
+            "schema_version": "brain_objects_query.v1",
+            "route": route,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": route,
+                "objects": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}],
+                "lanes": {"candidate": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}]},
+                "recommended_actions": [{"object_id": f"ko:test:{route}", "action": "request_evidence"}],
+                "gaps": [],
+            },
+            "production_mutation_performed": False,
+        }
+
+    def broken_session_rollup() -> dict:
+        raise RuntimeError("sensitive path should not be returned")
+
+    packet = build_source_to_candidate_runtime_collected_shadow_evidence_packet(
+        repository="pureliture/neurons",
+        branch="codex/knowledge-object-review-flow-roadmap",
+        consumer="codex",
+        route_runner=route_runner,
+        review_loop_runner=_source_to_candidate_review_loop_evidence,
+        session_project_rollup_runner=broken_session_rollup,
+    )
+
+    rollup = packet["session_project_rollup_runtime"]
+    assert rollup["collector_error_type"] == "RuntimeError"
+    assert "sensitive path" not in json.dumps(packet)
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=packet)
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["live.session_project.rollup"]["status"] == "failed"
+    assert "session_project_rollup_collector_error:RuntimeError" in report["gaps"]
+    assert report["status"] == "FAIL"
+
+
 def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys):
     assert (
         main(
@@ -1951,6 +2033,8 @@ def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys)
         packet["source_to_candidate_review_loop"]["approval_board_decision"]["authority_write_scope"]
         == "local_test"
     )
+    assert packet["session_project_rollup_runtime"]["schema_version"] == "session_project_rollup_runtime_evidence.v1"
+    assert packet["session_project_rollup_runtime"]["rollup_preview"]["device_count"] >= 2
     assert len(packet["brain_objects_query_smokes"]) == len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
     assert all(
         "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])
@@ -1960,6 +2044,7 @@ def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys)
     assert "live.brain_objects_query.route_smokes" not in report["failed_claims"]
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     assert claims["live.source_to_candidate.review_loop"]["status"] == "validated"
+    assert claims["live.session_project.rollup"]["status"] == "validated"
 
 
 def test_neuron_knowledge_runtime_readiness_cli_normalizes_shadow_evidence_file(tmp_path, capsys):
