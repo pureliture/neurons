@@ -20,6 +20,7 @@ def _sanitized_live_evidence(**overrides):
         "brain_objects_query_smokes": [
             _brain_objects_query_smoke("authority_archive_separation"),
             _brain_objects_query_smoke("code_style_preference"),
+            _brain_objects_query_smoke("temporal_work_recall"),
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
         "production_denials": {
@@ -92,6 +93,7 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.mcp.review_tools_loaded"]["status"] == "validated"
     assert claims["live.agent_context.tool_hints"]["status"] == "validated"
     assert claims["live.brain_objects_query.route_smokes"]["status"] == "validated"
+    assert "temporal_work_recall" in claims["live.brain_objects_query.route_smokes"]["required_routes"]
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "validated"
     assert claims["live.production.source_to_candidate_denial"]["status"] == "denied_as_expected"
     assert claims["live.production.approval_board_denial"]["status"] == "denied_as_expected"
@@ -102,6 +104,7 @@ def test_runtime_readiness_fails_when_live_object_query_smoke_falls_back_to_unim
         brain_objects_query_smokes=[
             _brain_objects_query_smoke("authority_archive_separation", gaps=["object_pack_route_not_implemented"]),
             _brain_objects_query_smoke("code_style_preference"),
+            _brain_objects_query_smoke("temporal_work_recall"),
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
     )
@@ -112,6 +115,25 @@ def test_runtime_readiness_fails_when_live_object_query_smoke_falls_back_to_unim
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     assert claims["live.brain_objects_query.route_smokes"]["status"] == "failed"
     assert "brain_objects_query_route_unimplemented:authority_archive_separation" in report["gaps"]
+
+
+def test_runtime_readiness_requires_temporal_work_recall_live_smoke():
+    evidence = _sanitized_live_evidence(
+        brain_objects_query_smokes=[
+            _brain_objects_query_smoke("authority_archive_separation"),
+            _brain_objects_query_smoke("code_style_preference"),
+            _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
+        ],
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "PASS_WITH_GAPS"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    route_claim = claims["live.brain_objects_query.route_smokes"]
+    assert route_claim["status"] == "not_validated"
+    assert "temporal_work_recall" in route_claim["missing_routes"]
+    assert "live_brain_objects_query_route_smokes_unverified" in report["gaps"]
 
 
 def test_runtime_readiness_fails_on_unexpected_production_mutation():

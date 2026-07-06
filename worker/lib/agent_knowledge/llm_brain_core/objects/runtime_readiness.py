@@ -19,6 +19,7 @@ REQUIRED_RUNTIME_TOOL_NAMES = (
 REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES = (
     "authority_archive_separation",
     "code_style_preference",
+    "temporal_work_recall",
     "deployment_runtime_truth",
 )
 

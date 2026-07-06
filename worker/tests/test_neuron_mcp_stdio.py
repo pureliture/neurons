@@ -385,6 +385,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
         "brain_objects_query_smokes": [
             _brain_objects_query_smoke("authority_archive_separation"),
             _brain_objects_query_smoke("code_style_preference"),
+            _brain_objects_query_smoke("temporal_work_recall"),
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
         "production_denials": {

@@ -56,6 +56,7 @@ Final status:
 4. MCP contract gates
    - run focused JSON-RPC tests for object tools and restricted denial
    - verify `brain_objects_query`, `brain_object_proposal_create`, `brain_review_proposals`, and `brain_object_decision_commit`
+   - verify live/readiness `brain_objects_query` route smokes include `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth`
    - expected: local/test proposal writes to local/test ledger; production/restricted decision denies
 
 5. LBrain read-path gates
