@@ -307,6 +307,7 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
     consumer: str = "codex",
     expected_commit: str = "",
     route_runner: Callable[[str], Mapping[str, Any]],
+    review_loop_runner: Callable[[], Mapping[str, Any]] | None = None,
     tool_names: Any = None,
     collection_mode: str = "local_test_replay",
     network_used: bool = False,
@@ -317,10 +318,12 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
         _collect_brain_objects_query_route_smoke(route_runner, route)
         for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
     ]
+    review_loop = _collect_source_to_candidate_review_loop_shadow(review_loop_runner)
     capture = {
         "schema_version": "source_to_candidate_runtime_shadow_capture.v1",
         "tool_names": _string_list(tool_names) or list(REQUIRED_RUNTIME_TOOL_NAMES),
         "brain_objects_query_smokes": smokes,
+        "source_to_candidate_review_loop": review_loop,
         "deployed_identity": {
             "contains_expected_commit": False,
             "identity_source": "collector_not_deployed_identity_proof",
@@ -334,6 +337,8 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
             "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
             "routes_collected": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
             "route_failure_count": sum(1 for smoke in smokes if "collector_route_smoke_failed" in _smoke_gaps(smoke)),
+            "review_loop_collected": bool(review_loop),
+            "review_loop_schema": public_safe_text(str(review_loop.get("schema_version") or ""), max_chars=80),
             "network_used": network_used is True,
             "mutation_allowed": False,
             "production_mutation_performed": False,
@@ -355,6 +360,199 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
     packet["collector"] = capture["collector"]
     ensure_public_safe(packet, "SourceToCandidateRuntimeCollectedShadowEvidencePacket")
     return packet
+
+
+def build_source_to_candidate_review_loop_shadow_evidence(
+    *,
+    project: str = "neurons",
+    consumer: str = "codex",
+) -> dict[str, Any]:
+    """Build a branch-local local_test source->candidate->review->approval smoke summary."""
+
+    from .extraction_pipeline import run_source_to_candidate_graph_activation_preview
+    from .object_packs import apply_approval_board_decisions, apply_candidate_review_edits
+
+    corpus_status = _source_to_candidate_shadow_corpus_status(project=project)
+    graph = run_source_to_candidate_graph_activation_preview(
+        corpus_status=corpus_status,
+        project=project,
+        consumer=consumer,
+    )
+    pack = graph.get("candidate_graph_review_pack") if isinstance(graph.get("candidate_graph_review_pack"), Mapping) else {}
+    candidates = pack.get("lanes", {}).get("candidate") if isinstance(pack.get("lanes"), Mapping) else []
+    candidates = candidates if isinstance(candidates, list) else []
+    candidate_id = public_safe_text(
+        str(candidates[0].get("object_id") if candidates and isinstance(candidates[0], Mapping) else ""),
+        max_chars=180,
+    )
+    edit_result = apply_candidate_review_edits(
+        pack,
+        edits=[
+            {
+                "action": "update_object",
+                "object_id": candidate_id,
+                "fields": {
+                    "summary": "Reviewer clarified branch-local source-to-candidate shadow evidence.",
+                    "recommended_action": "promote",
+                },
+            }
+        ],
+        reviewer={"id": "runtime-shadow-reviewer"},
+        target_scope="local_test",
+        mutation_mode="no_mutation",
+    )
+    edited_pack = edit_result.get("updated_pack") if isinstance(edit_result.get("updated_pack"), Mapping) else pack
+    decision_result = apply_approval_board_decisions(
+        edited_pack,
+        decisions=[
+            {
+                "action": "promote",
+                "object_id": candidate_id,
+                "reason": "Branch-local source-to-candidate shadow approval smoke.",
+                "approved_by": "runtime-shadow-reviewer",
+            }
+        ],
+        reviewer={"id": "runtime-shadow-reviewer"},
+        ledger_scope="local_test",
+    )
+    decided_pack = (
+        decision_result.get("updated_pack")
+        if isinstance(decision_result.get("updated_pack"), Mapping)
+        else edited_pack
+    )
+    accepted_current = (
+        decided_pack.get("lanes", {}).get("accepted_current")
+        if isinstance(decided_pack.get("lanes"), Mapping)
+        else []
+    )
+    accepted_current = accepted_current if isinstance(accepted_current, list) else []
+    evidence = {
+        "schema_version": "source_to_candidate_review_loop_evidence.v1",
+        "source_to_candidate_graph": {
+            "schema_version": public_safe_text(str(graph.get("schema_version") or ""), max_chars=80),
+            "status": public_safe_text(str(graph.get("status") or ""), max_chars=80),
+            "target_scope": "local_test",
+            "pack_type": public_safe_text(str(pack.get("route") or "candidate_graph_review"), max_chars=80),
+            "candidate_count": len(candidates),
+            "accepted_count": len(accepted_current),
+            "quality_gate": _public_safe_mapping(graph.get("quality_gate")),
+            "production_mutation_performed": graph.get("production_mutation_performed") is True,
+            "mutation_performed": False,
+        },
+        "candidate_review_edit": {
+            "schema_version": public_safe_text(str(edit_result.get("schema_version") or ""), max_chars=80),
+            "status": "PASS" if edit_result.get("permission") == "allowed" else "FAIL",
+            "target_scope": public_safe_text(str(edit_result.get("target_scope") or ""), max_chars=80),
+            "mutation_mode": public_safe_text(str(edit_result.get("mutation_mode") or ""), max_chars=80),
+            "edited_candidate_count": len(edit_result.get("accepted_edits") or []),
+            "rejected_edit_count": len(edit_result.get("rejected_edits") or []),
+            "production_mutation_performed": edit_result.get("production_mutation_performed") is True,
+            "authority_write_performed": edit_result.get("authority_write_performed") is True,
+        },
+        "approval_board_decision": {
+            "schema_version": public_safe_text(str(decision_result.get("schema_version") or ""), max_chars=80),
+            "status": "PASS" if decision_result.get("permission") == "allowed" else "FAIL",
+            "ledger_scope": public_safe_text(str(decision_result.get("ledger_scope") or ""), max_chars=80),
+            "authority_write_scope": public_safe_text(
+                str(decision_result.get("authority_write_scope") or ""),
+                max_chars=80,
+            ),
+            "decision_count": _int_value(decision_result.get("decision_count")),
+            "authority_write_performed": decision_result.get("authority_write_performed") is True,
+            "production_mutation_performed": decision_result.get("production_mutation_performed") is True,
+        },
+        "read_after_write": {
+            "status": "validated" if accepted_current else "missing",
+            "object_pack_schema": public_safe_text(str(decided_pack.get("schema_version") or "object_pack.v1"), max_chars=80),
+            "route": public_safe_text(str(decided_pack.get("route") or "candidate_graph_review"), max_chars=80),
+            "authority_lane": "accepted_current",
+            "object_count": len(accepted_current),
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+    ensure_public_safe(evidence, "SourceToCandidateReviewLoopShadowEvidence")
+    return evidence
+
+
+def _collect_source_to_candidate_review_loop_shadow(
+    review_loop_runner: Callable[[], Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    try:
+        raw = review_loop_runner() if review_loop_runner is not None else build_source_to_candidate_review_loop_shadow_evidence()
+    except Exception as exc:  # pragma: no cover - defensive public-safe guard
+        raw = {
+            "schema_version": "source_to_candidate_review_loop_evidence.v1",
+            "collector_error_type": public_safe_text(type(exc).__name__, max_chars=80),
+            "source_to_candidate_graph": {
+                "schema_version": "",
+                "target_scope": "local_test",
+                "pack_type": "candidate_graph_review",
+                "candidate_count": 0,
+                "production_mutation_performed": False,
+                "mutation_performed": False,
+            },
+            "candidate_review_edit": {
+                "schema_version": "",
+                "target_scope": "local_test",
+                "mutation_mode": "no_mutation",
+                "edited_candidate_count": 0,
+                "rejected_edit_count": 0,
+                "production_mutation_performed": False,
+                "authority_write_performed": False,
+            },
+            "approval_board_decision": {
+                "schema_version": "",
+                "ledger_scope": "local_test",
+                "authority_write_scope": "",
+                "decision_count": 0,
+                "authority_write_performed": False,
+                "production_mutation_performed": False,
+            },
+            "read_after_write": {"status": "missing", "object_pack_schema": ""},
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        }
+    evidence = _public_safe_mapping(raw)
+    ensure_public_safe(evidence, "CollectedSourceToCandidateReviewLoopShadowEvidence")
+    return evidence
+
+
+def _source_to_candidate_shadow_corpus_status(*, project: str) -> dict[str, Any]:
+    safe_project = public_safe_text(str(project or "neurons"), max_chars=120)
+    return {
+        "schema_version": "brain_corpus_status.v1",
+        "project": safe_project,
+        "corpus_id": "local-test-shadow-corpus",
+        "source_count": 1,
+        "reference_object_count": 1,
+        "document_source_count": 1,
+        "extraction_run_count": 1,
+        "storage_modes": {"managed_snapshot": 1},
+        "manifest_hashes": ["sha256:" + "1" * 64],
+        "document_sources": [
+            {
+                "source_id": "local-test-shadow-source",
+                "title": "Branch-local source-to-candidate shadow source",
+                "content_hash": "sha256:" + "2" * 64,
+                "verification_state": "source_hash_verified",
+                "source_url_status": "verified",
+                "normalized_path_ref": "docs/specs/redacted-shadow-source.md",
+            }
+        ],
+        "freshness_gaps": [],
+        "gaps": [],
+    }
 
 
 def _collect_brain_objects_query_route_smoke(

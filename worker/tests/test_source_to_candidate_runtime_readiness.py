@@ -1881,6 +1881,47 @@ def test_runtime_readiness_collector_builds_shadow_evidence_packet_without_mutat
     assert "live.brain_objects_query.route_smokes" not in report["failed_claims"]
 
 
+def test_runtime_readiness_collector_includes_review_loop_shadow_evidence_without_live_claim():
+    def route_runner(route: str) -> dict:
+        return {
+            "schema_version": "brain_objects_query.v1",
+            "route": route,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": route,
+                "objects": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}],
+                "lanes": {"candidate": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}]},
+                "recommended_actions": [{"object_id": f"ko:test:{route}", "action": "request_evidence"}],
+                "gaps": [],
+            },
+            "production_mutation_performed": False,
+        }
+
+    packet = build_source_to_candidate_runtime_collected_shadow_evidence_packet(
+        repository="pureliture/neurons",
+        branch="codex/knowledge-object-review-flow-roadmap",
+        consumer="codex",
+        route_runner=route_runner,
+        review_loop_runner=_source_to_candidate_review_loop_evidence,
+    )
+
+    loop = packet["source_to_candidate_review_loop"]
+    assert loop["schema_version"] == "source_to_candidate_review_loop_evidence.v1"
+    assert loop["source_to_candidate_graph"]["target_scope"] == "local_test"
+    assert loop["candidate_review_edit"]["mutation_mode"] == "no_mutation"
+    assert loop["approval_board_decision"]["authority_write_scope"] == "local_test"
+    assert loop["postcheck"]["status"] == "validated"
+    assert packet["collector"]["readiness_claim"] == "collector_packet_not_live_evidence"
+    assert packet["evidence_provenance"]["collection_mode"] == "local_test_replay"
+    assert packet["production_mutation_performed"] is False
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=packet)
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["live.source_to_candidate.review_loop"]["status"] == "validated"
+    assert "live_source_to_candidate_review_loop_unverified" not in report["gaps"]
+    assert report["status"] == "PASS_WITH_GAPS"
+
+
 def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys):
     assert (
         main(
@@ -1904,6 +1945,12 @@ def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys)
     assert packet["collector"]["readiness_claim"] == "collector_packet_not_live_evidence"
     assert packet["evidence_provenance"]["collection_mode"] == "local_test_replay"
     assert packet["evidence_provenance"]["network_used"] is False
+    assert packet["source_to_candidate_review_loop"]["schema_version"] == "source_to_candidate_review_loop_evidence.v1"
+    assert packet["source_to_candidate_review_loop"]["candidate_review_edit"]["mutation_mode"] == "no_mutation"
+    assert (
+        packet["source_to_candidate_review_loop"]["approval_board_decision"]["authority_write_scope"]
+        == "local_test"
+    )
     assert len(packet["brain_objects_query_smokes"]) == len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
     assert all(
         "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])
@@ -1911,6 +1958,8 @@ def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys)
     )
     report = build_source_to_candidate_runtime_readiness_report(live_evidence=packet)
     assert "live.brain_objects_query.route_smokes" not in report["failed_claims"]
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["live.source_to_candidate.review_loop"]["status"] == "validated"
 
 
 def test_neuron_knowledge_runtime_readiness_cli_normalizes_shadow_evidence_file(tmp_path, capsys):

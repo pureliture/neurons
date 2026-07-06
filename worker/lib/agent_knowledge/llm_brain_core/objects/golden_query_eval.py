@@ -973,6 +973,26 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         route_runner=_p8_branch_local_runtime_route_smoke,
     )
     collector = collector_packet.get("collector") if isinstance(collector_packet.get("collector"), Mapping) else {}
+    collector_review_loop = (
+        collector_packet.get("source_to_candidate_review_loop")
+        if isinstance(collector_packet.get("source_to_candidate_review_loop"), Mapping)
+        else {}
+    )
+    collector_review_graph = (
+        collector_review_loop.get("source_to_candidate_graph")
+        if isinstance(collector_review_loop.get("source_to_candidate_graph"), Mapping)
+        else {}
+    )
+    collector_review_edit = (
+        collector_review_loop.get("candidate_review_edit")
+        if isinstance(collector_review_loop.get("candidate_review_edit"), Mapping)
+        else {}
+    )
+    collector_review_decision = (
+        collector_review_loop.get("approval_board_decision")
+        if isinstance(collector_review_loop.get("approval_board_decision"), Mapping)
+        else {}
+    )
     return {
         "phase": "P8",
         "schema_version": str(report.get("schema_version") or ""),
@@ -1048,6 +1068,19 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
             collector_packet.get("production_mutation_performed")
         ),
         "runtime_evidence_collector_readiness_claim": str(collector.get("readiness_claim") or ""),
+        "runtime_evidence_collector_review_loop_schema": str(collector_review_loop.get("schema_version") or ""),
+        "runtime_evidence_collector_review_loop_candidate_count": int(
+            collector_review_graph.get("candidate_count") or 0
+        ),
+        "runtime_evidence_collector_review_loop_edited_count": int(
+            collector_review_edit.get("edited_candidate_count") or 0
+        ),
+        "runtime_evidence_collector_review_loop_decision_count": int(
+            collector_review_decision.get("decision_count") or 0
+        ),
+        "runtime_evidence_collector_review_loop_authority_scope": str(
+            collector_review_decision.get("authority_write_scope") or ""
+        ),
         "gaps": list(preview.get("gaps") or []),
         "production_mutation_performed": bool(report.get("production_mutation_performed")),
     }

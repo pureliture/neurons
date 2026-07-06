@@ -423,6 +423,14 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
         evidence["P8"]["runtime_evidence_collector_readiness_claim"]
         == "collector_packet_not_live_evidence"
     )
+    assert (
+        evidence["P8"]["runtime_evidence_collector_review_loop_schema"]
+        == "source_to_candidate_review_loop_evidence.v1"
+    )
+    assert evidence["P8"]["runtime_evidence_collector_review_loop_candidate_count"] >= 1
+    assert evidence["P8"]["runtime_evidence_collector_review_loop_edited_count"] >= 1
+    assert evidence["P8"]["runtime_evidence_collector_review_loop_decision_count"] >= 1
+    assert evidence["P8"]["runtime_evidence_collector_review_loop_authority_scope"] == "local_test"
     assert evidence["P9"]["schema_version"] == "agent_context_product_pack.v1"
     assert evidence["P9"]["section_counts"]["style_preference"] >= 1
     assert evidence["P9"]["section_counts"]["active_work"] >= 1
@@ -553,6 +561,11 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "runtime_evidence_collector_network_used": False,
                 "runtime_evidence_collector_production_mutation_performed": False,
                 "runtime_evidence_collector_readiness_claim": "collector_packet_not_live_evidence",
+                "runtime_evidence_collector_review_loop_schema": "source_to_candidate_review_loop_evidence.v1",
+                "runtime_evidence_collector_review_loop_candidate_count": 2,
+                "runtime_evidence_collector_review_loop_edited_count": 1,
+                "runtime_evidence_collector_review_loop_decision_count": 1,
+                "runtime_evidence_collector_review_loop_authority_scope": "local_test",
                 "production_mutation_performed": False,
             },
             {

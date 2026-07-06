@@ -713,6 +713,13 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_
     assert packet["collector"]["readiness_claim"] == "collector_packet_not_live_evidence"
     assert packet["evidence_provenance"]["collection_mode"] == "local_test_replay"
     assert packet["evidence_provenance"]["network_used"] is False
+    assert packet["source_to_candidate_review_loop"]["schema_version"] == "source_to_candidate_review_loop_evidence.v1"
+    assert packet["source_to_candidate_review_loop"]["source_to_candidate_graph"]["target_scope"] == "local_test"
+    assert packet["source_to_candidate_review_loop"]["candidate_review_edit"]["mutation_mode"] == "no_mutation"
+    assert (
+        packet["source_to_candidate_review_loop"]["approval_board_decision"]["authority_write_scope"]
+        == "local_test"
+    )
     assert len(packet["brain_objects_query_smokes"]) == 4
     assert all(
         "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])
