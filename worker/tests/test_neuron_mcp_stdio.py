@@ -600,6 +600,78 @@ def test_mcp_object_decision_commit_is_restricted_denied_by_default(tmp_path: Pa
     assert result["authoritative_memory_changed"] is False
 
 
+def test_mcp_object_decision_commit_local_test_updates_authority_state_with_audit(tmp_path: Path):
+    service = _service(tmp_path)
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 104,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": "ko:RepoDocument:current",
+                    "reason": "Promote reviewed docs SoT.",
+                    "evidence_refs": ["ev:source_hash:current"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 105,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "target_object_id": proposal["target_object_id"],
+                    "decision_type": "accept_current",
+                    "previous_authority_lane": "candidate",
+                    "new_authority_lane": "accepted_current",
+                    "evidence_refs": ["ev:source_hash:current"],
+                    "decision_reason": "Reviewed local fixture evidence.",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:local-current",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert decision["schema_version"] == "authority_decision.v1"
+    assert decision["proposal_id"] == proposal["proposal_id"]
+    assert decision["target_object_id"] == proposal["target_object_id"]
+    assert decision["previous_authority_lane"] == "candidate"
+    assert decision["new_authority_lane"] == "accepted_current"
+    assert decision["authority_write_performed"] is True
+    assert decision["authoritative_memory_changed"] is True
+    assert decision["cache_invalidated"] is True
+    assert decision["approved_by_hash"].startswith("sha256:")
+    assert decision["approved_by"] == "redacted"
+    assert decision["decision_reason"] == "Reviewed local fixture evidence."
+
+    state = service.ledger.get_object_authority_state(proposal["target_object_id"])
+    assert state["authority_lane"] == "accepted_current"
+    assert state["decision_id"] == "decision:local-current"
+    assert state["proposal_id"] == proposal["proposal_id"]
+    assert state["decision_reason"] == "Reviewed local fixture evidence."
+    decisions = service.ledger.list_object_authority_decisions(target_object_id=proposal["target_object_id"])
+    assert decisions[0]["decision_id"] == "decision:local-current"
+    assert decisions[0]["approved_by_hash"] == decision["approved_by_hash"]
+    queued = service.object_review_proposals(project=PROJECT)
+    assert queued["items"][0]["status"] == "accepted"
+
+
 def test_brain_query_semantic_recall_type_error_is_audited(tmp_path: Path, monkeypatch):
     service = _service(tmp_path)
     service.native_memory_id = "mem_native"

@@ -10,7 +10,7 @@ from .knowledge_search_service import KnowledgeSearchService
 from .llm_brain_core.context import project_from_repository
 from .llm_brain_core.context_builder import normalize_context_consumer
 from .llm_brain_core.models import EvidenceRequest
-from .llm_brain_core.objects.knowledge_objects import ReviewProposal, denied_payload
+from .llm_brain_core.objects.knowledge_objects import AuthorityDecision, ReviewProposal, denied_payload
 from .llm_brain_core.objects.reference_corpus import build_corpus_ingest_plan
 from .mcp_tools import (
     BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
@@ -45,6 +45,7 @@ from .mcp_tools import (
     list_tools,
     tool_contract_registry,
 )
+from .public_safe_util import public_safe_text, short_hash
 from .session_memory.brain_steward import StewardPermissionError
 
 _STEWARD_TOOL_NAMES = frozenset(
@@ -421,8 +422,25 @@ def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict,
 
 
 def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
-    _ = (arguments, service)
-    return _tool_result(denied_payload(tool_name, "restricted_tool_requires_human_gate"))
+    ledger_scope = str(arguments.get("ledger_scope") or "production")
+    if ledger_scope != "local_test":
+        return _tool_result(denied_payload(tool_name, "restricted_tool_requires_human_gate"))
+    approved_by = _require_non_empty_string(arguments, "approved_by", tool_name=tool_name)
+    decision = AuthorityDecision.from_parts(
+        decision_type=_require_non_empty_string(arguments, "decision_type", tool_name=tool_name),
+        target_object_id=_require_non_empty_string(arguments, "target_object_id", tool_name=tool_name),
+        previous_authority_lane=_require_non_empty_string(arguments, "previous_authority_lane", tool_name=tool_name),
+        new_authority_lane=_require_non_empty_string(arguments, "new_authority_lane", tool_name=tool_name),
+        approved_by="redacted",
+        evidence_refs=[str(item) for item in arguments.get("evidence_refs") or []],
+    ).to_dict(authority_write_performed=True, cache_invalidated=True)
+    decision["decision_id"] = _require_non_empty_string(arguments, "decision_id", tool_name=tool_name)
+    decision["proposal_id"] = _require_non_empty_string(arguments, "proposal_id", tool_name=tool_name)
+    decision["project"] = _project_arg(arguments)
+    decision["decision_reason"] = public_safe_text(str(arguments.get("decision_reason") or ""), max_chars=512)
+    decision["approved_by_hash"] = "sha256:" + short_hash(approved_by, length=24)
+    result = service.commit_object_authority_decision(decision)
+    return _tool_result(result)
 
 
 def _dispatch_brain_review_proposals_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
