@@ -342,6 +342,11 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
                 {"tool": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME},
             ],
         },
+        "brain_objects_query_smokes": [
+            _brain_objects_query_smoke("authority_archive_separation"),
+            _brain_objects_query_smoke("code_style_preference"),
+            _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
+        ],
         "production_denials": {
             BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
                 "status": "denied",
@@ -381,6 +386,22 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
     assert report["status"] == "PASS"
     assert report["production_mutation_performed"] is False
     assert report["network_used"] is False
+
+
+def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None) -> dict:
+    return {
+        "schema_version": "brain_objects_query.v1",
+        "route": route,
+        "production_mutation_performed": False,
+        "object_pack": {
+            "schema_version": "object_pack.v1",
+            "route": route,
+            "objects": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}],
+            "lanes": {"candidate": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}]},
+            "recommended_actions": [{"object_id": f"ko:test:{route}", "action": "review"}],
+            "gaps": list(gaps or []),
+        },
+    }
 
 
 def test_mcp_source_to_candidate_runtime_readiness_without_evidence_preserves_live_gaps(tmp_path: Path):
