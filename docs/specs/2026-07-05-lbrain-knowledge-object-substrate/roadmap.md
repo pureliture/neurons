@@ -14,6 +14,7 @@ Current state:
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, production-denial evidence는 존재하지만, real private Palantir manifest ingest 및 production ingest approval은 여전히 gap입니다.
 - P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / `local_validated`; local/test reference corpus extraction preview는 deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, blocked-extraction gaps를 생성합니다. repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, broader evaluator suite previews에는 local/test evaluator evidence가 있지만, live graph/Qdrant projection join은 아직 증명되지 않았습니다.
 - P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / `local_validated`; local/test decision commit은 authority state/audit history를 기록하고, object queries는 local/test stale, superseded, retired, archive-only, rejected states를 surface하며, object explain은 local/test decision history를 반환합니다. production denial은 read-only promotion plan을 반환하고 authority mutation은 계속 denied 상태입니다.
+- P5 Continuous Golden Query Quality Gates: `in_progress`; phase coverage report는 P1-P10 golden query families를 나열하고 release quality gate를 명시적으로 `not_green` 상태로 유지합니다.
 - Product activation: 완료되지 않았습니다; configured agent read path refresh가 여전히 필요합니다.
 - UI/object browser: product activation prerequisite는 아니지만, 이후 product surface로 열어 둡니다.
 
@@ -413,7 +414,7 @@ Remaining gaps:
 
 ### P5. Continuous Golden Query Quality Gates
 
-State: planned; continuous from P1 onward.
+State: `in_progress`; continuous from P1 onward.
 
 Purpose:
 
@@ -449,6 +450,43 @@ Gate evidence:
 - runtime claims require runtime evidence
 - query routing does not fall back to generic safety/current cards for domain-specific questions
 - failed queries are reported as product gaps, not hidden as successful tool calls
+
+Current local/test evidence:
+
+- `golden-query-eval --phase-coverage` returns `knowledge_object_phase_golden_query_coverage.v1`
+- phase coverage report lists P1-P10 golden query families, required quality axes, evaluator owner, result status, and explicit gaps
+- current report status is `PASS_WITH_GAPS` and `release_quality_gate=not_green`; it does not claim production-quality answers
+- `evaluate_object_pack_response(..., required_axes=...)` can now enforce the full object, edge, evidence, freshness, gap, and recommended-action axis set without changing legacy evaluator callers
+- strict evaluator fails empty authority lanes unless the gap list explicitly states the empty lane
+- strict evaluator fails deployment/runtime truth claims unless runtime evidence or an explicit runtime evidence gap is present
+- P1-P4 are represented as PASS_WITH_GAPS slices with their production/live gaps preserved
+- P6-P10 are represented as planned slices with `phase_slice_not_implemented` gaps
+- focused evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
+- focused result: `1 passed, 1 warning`
+- strict-axis evaluator evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_eval_strict_axes_require_edge_freshness_and_gap_fields`
+- strict-axis evaluator result: `1 passed, 1 warning`
+- empty-lane disclosure evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_eval_strict_axes_require_empty_authority_lane_disclosure`
+- empty-lane disclosure result: `1 passed, 1 warning`
+- runtime evidence gate evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_eval_strict_axes_require_runtime_evidence_for_runtime_claims`
+- runtime evidence gate result: `1 passed, 1 warning`
+- CLI evidence: `cd worker && uv run pytest -q tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_phase_coverage`
+- CLI result: `1 passed, 1 warning`
+- adjacent regression evidence: `cd worker && uv run pytest -q tests/test_neuron_cli.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
+- adjacent regression result: `33 passed, 1 warning`
+- strict evaluator adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_neuron_cli.py tests/test_llm_brain_core_objects_subpackage.py`
+- strict evaluator adjacent regression result: `49 passed, 1 warning`
+- CLI smoke: `cd worker && uv run neuron-knowledge golden-query-eval --phase-coverage`
+- CLI smoke result: `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`
+- worker regression evidence: `cd worker && uv run pytest -q`
+- worker regression result: `1540 passed, 9 skipped, 1 warning`
+- root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
+- root regression result: `BUILD SUCCESSFUL`
+
+Remaining gaps:
+
+- P5 is not complete; this slice adds coverage accounting, not production-quality golden answer generation
+- future P6-P10 phase slices are still planned and intentionally reported as gaps
+- release quality remains `not_green` until data, processing, authority, runtime, preference, and context lanes can support production-quality answers
 
 ### P6. Session, Device, Project, And Work-Unit 360
 
