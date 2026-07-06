@@ -476,16 +476,17 @@ def evaluate_product_evidence_summary(evidence_summary: list[Mapping[str, Any]])
     hard_failures = [
         f"{check['phase']}:product_evidence_failed"
         for check in checks
-        if check["result"] != "PASS" and "product_evidence_missing" not in check["failures"]
+        if check["result"] == "FAIL" and "product_evidence_missing" not in check["failures"]
     ]
     hard_failures.extend(
         f"{check['phase']}:product_evidence_missing"
         for check in checks
         if "product_evidence_missing" in check["failures"]
     )
+    has_gaps = any(check.get("gaps") for check in checks)
     result = {
         "schema_version": "lbrain_product_evidence_summary_eval.v1",
-        "status": "FAIL" if hard_failures else "PASS",
+        "status": "FAIL" if hard_failures else ("PASS_WITH_GAPS" if has_gaps else "PASS"),
         "checks": checks,
         "hard_failures": hard_failures,
         "production_mutation_performed": any(
@@ -572,6 +573,7 @@ def _product_evidence_summary() -> list[dict[str, Any]]:
 
 def _product_evidence_check(phase: str, evidence: Mapping[str, Any]) -> dict[str, Any]:
     failures: list[str] = []
+    gaps: list[str] = []
     if not evidence:
         failures.append("product_evidence_missing")
     elif bool(evidence.get("production_mutation_performed")):
@@ -582,13 +584,15 @@ def _product_evidence_check(phase: str, evidence: Mapping[str, Any]) -> dict[str
         failures.extend(_p7_evidence_failures(evidence))
     elif phase == "P8" and evidence:
         failures.extend(_p8_evidence_failures(evidence))
+        gaps.extend(_p8_evidence_gaps(evidence))
     elif phase == "P9" and evidence:
         failures.extend(_p9_evidence_failures(evidence))
     return {
         "phase": phase,
-        "result": "FAIL" if failures else "PASS",
+        "result": "FAIL" if failures else ("PASS_WITH_GAPS" if gaps else "PASS"),
         "schema_version": str(evidence.get("schema_version") or ""),
         "failures": failures,
+        "gaps": _dedupe(gaps),
     }
 
 
@@ -638,6 +642,15 @@ def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     if bool(evidence.get("production_mutation_performed")):
         failures.append("p8_production_mutation_performed")
     return failures
+
+
+def _p8_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    gaps: list[str] = []
+    if int(evidence.get("runtime_unverified_count") or 0) > 0:
+        gaps.append("p8_runtime_evidence_unverified")
+    if int(evidence.get("runtime_verified_count") or 0) < 1:
+        gaps.append("p8_runtime_verified_evidence_missing")
+    return gaps
 
 
 def _p9_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:

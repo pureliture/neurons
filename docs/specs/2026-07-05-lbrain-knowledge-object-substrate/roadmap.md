@@ -560,17 +560,17 @@ Current local/test evidence:
 - activation progress `product_evidence_summary` now includes P6 session/project/work-unit rollup evidence, P7 artifact preference memory evidence, P8 runtime authority evidence, and P9 agent context product evidence as sanitized local previews
 - P6 evidence summary includes `object_extraction_session_project_rollup_preview.v1`, `object_count=8`, `edge_count=16`, `evidence_count=1`, and `session_project_handoff_pack.v1`
 - P7 evidence summary includes `object_extraction_preference_style_preview.v1`, accepted artifact preference pack status `pass`, and source evidence refs without raw body
-- P8 evidence summary keeps merge/deploy/runtime separated with `runtime_unverified_count=1`, production promotion `permission=allowed`, `permission_reason=approved_scope_present`, and `authority_write_performed=false`
-- activation progress `product_evidence_checks` returns P6/P7/P8/P9 `result=PASS` and fails closed when required phase evidence is missing or mutation is claimed without evidence
+- P8 evidence summary keeps merge/deploy/runtime separated with `runtime_unverified_count=1`, `runtime_verified_count=0`, production promotion `permission=allowed`, `permission_reason=approved_scope_present`, and `authority_write_performed=false`
+- activation progress `product_evidence_checks` returns P6/P7/P9 `result=PASS`, P8 `result=PASS_WITH_GAPS` with `p8_runtime_evidence_unverified` and `p8_runtime_verified_evidence_missing`, and fails closed when required phase evidence is missing or mutation is claimed without evidence
 - P9 evidence summary includes `agent_context_product_pack.v1`, Codex tool hints for `brain_objects_query` plus object-native review/readiness tools, style/preference section evidence, active work section evidence, and `mutation_allowed=false`
 - `candidate_graph_review` packs state empty authority lanes explicitly so P5 strict axis checks do not hide candidate-vs-authority separation
 - P6-P9 remain represented with local/test evidence plus production/live gaps, and P10 remains planned
-- activation progress focused evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green tests/test_golden_query_eval.py::test_source_to_authority_quality_gate_covers_review_approval_and_read_path_without_production_mutation tests/test_golden_query_eval.py::test_product_activation_progress_keeps_p2_to_p9_scope_visible tests/test_golden_query_eval.py::test_product_evidence_summary_fails_closed_when_required_phase_evidence_is_missing tests/test_golden_query_eval.py::test_product_evidence_summary_fails_when_p9_active_work_is_missing`
-- activation progress focused result: `5 passed, 1 warning`
+- activation progress focused evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green tests/test_golden_query_eval.py::test_source_to_authority_quality_gate_covers_review_approval_and_read_path_without_production_mutation tests/test_golden_query_eval.py::test_product_activation_progress_keeps_p2_to_p9_scope_visible tests/test_golden_query_eval.py::test_product_evidence_summary_fails_closed_when_required_phase_evidence_is_missing tests/test_golden_query_eval.py::test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass tests/test_golden_query_eval.py::test_product_evidence_summary_fails_when_p9_active_work_is_missing`
+- activation progress focused result: `6 passed, 1 warning`
 - activation progress adjacent evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py tests/test_neuron_cli.py tests/test_extraction_pipeline.py tests/test_context_pack_builder.py`
-- activation progress adjacent result: `84 passed, 1 warning`
+- activation progress adjacent result: `86 passed, 1 warning`
 - activation progress CLI smoke: `cd worker && uv run neuron-knowledge golden-query-eval --activation-progress`
-- activation progress CLI smoke result: `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`, `minimum_review_loop_checkpoint.status=PASS_WITH_GAPS`, `next_phase=P5`, `goal_complete=false`, `production_ready=false`, `product_evidence_status=PASS`, `production_approval_gate=preapproved`, `production_mutation_execution=not_performed_by_local_gate`, `product_evidence_summary phases=P6/P7/P8/P9`, P9 `section_counts.active_work=1`, `production_mutation_performed=false`
+- activation progress CLI smoke result: `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`, `minimum_review_loop_checkpoint.status=PASS_WITH_GAPS`, `next_phase=P5`, `goal_complete=false`, `production_ready=false`, `product_evidence_status=PASS_WITH_GAPS`, `production_approval_gate=preapproved`, `production_mutation_execution=not_performed_by_local_gate`, `product_evidence_summary phases=P6/P7/P8/P9`, P8 `result=PASS_WITH_GAPS`, P9 `section_counts.active_work=1`, `production_mutation_performed=false`
 - source-to-authority gate focused evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_source_to_authority_quality_gate_covers_review_approval_and_read_path_without_production_mutation`
 - source-to-authority gate focused result: `1 passed, 1 warning`
 - source-to-authority CLI evidence: `cd worker && uv run pytest -q tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_source_to_authority_gate`
@@ -603,7 +603,7 @@ Current local/test evidence:
 - CLI smoke: `cd worker && uv run neuron-knowledge golden-query-eval --phase-coverage`
 - CLI smoke result: `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1607 passed, 9 skipped, 1 warning`
+- worker regression result: `1608 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
