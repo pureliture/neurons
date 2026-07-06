@@ -594,6 +594,61 @@ def test_session_project_rollup_preview_separates_same_device_and_all_devices():
     assert all_devices["evaluator_report"]["passes"] is True
 
 
+def test_session_project_rollup_preview_same_device_requires_requesting_device():
+    result = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "sha256:session-alpha",
+                "device_id_hash": "sha256:device-one",
+                "summary": "This session must not leak into an unscoped same-device view.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["commit:p6a"],
+            },
+            {
+                "session_id_hash": "sha256:session-beta",
+                "device_id_hash": "sha256:device-two",
+                "summary": "This second device must stay hidden without a requester hash.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["commit:p6b"],
+            },
+        ],
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+        scope="same_device",
+    )
+
+    assert result["status"] == "pass_with_gaps"
+    assert result["visible_session_count"] == 0
+    assert result["gaps"] == ["requesting_device_required", "visible_sessions_empty"]
+    assert all(obj["object_type"] != "Session" for obj in result["objects"])
+    assert result["handoff_pack"]["visible_session_count"] == 0
+    assert result["evaluator_report"]["passes"] is False
+
+
+def test_session_project_rollup_preview_reports_gap_without_session_evidence():
+    result = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "sha256:session-alpha",
+                "device_id_hash": "sha256:device-one",
+                "summary": "Metadata exists but evidence is missing.",
+                "work_unit_id": "work:p6",
+            },
+        ],
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+    )
+
+    assert result["status"] == "pass_with_gaps"
+    assert result["visible_session_count"] == 1
+    assert result["evidence_count"] == 0
+    assert result["gaps"] == ["session_evidence_missing"]
+    assert result["evaluator_report"]["passes"] is False
+    assert result["evaluator_report"]["failures"] == ["session_evidence_missing"]
+
+
 def test_session_project_rollup_preview_links_specs_prs_and_commits_bidirectionally():
     result = run_session_project_rollup_preview(
         sessions=[
@@ -773,6 +828,36 @@ def test_pr_commit_extraction_preview_reports_gap_for_missing_test_refs():
     assert result["pack_preview"]["runtime_unverified_count"] == 0
     assert result["evaluator_report"]["passes"] is False
     assert result["evaluator_report"]["failures"] == ["commit_test_ref_missing"]
+
+
+def test_pr_commit_extraction_preview_normalizes_test_run_lookup_ids():
+    result = run_pr_commit_extraction_preview(
+        pull_request={
+            "pr_id": "pr:normalized",
+            "title": "Normalized test evidence PR",
+            "state": "open",
+        },
+        commits=[
+            {
+                "sha": "def456",
+                "title": "Add verified change",
+                "test_refs": ["test:unit"],
+            },
+        ],
+        test_runs=[
+            {
+                "test_id": " test:unit\n",
+                "summary": "Unit test passed.",
+                "status": "pass",
+            },
+        ],
+        repository="neurons",
+    )
+
+    assert result["status"] == "pass"
+    assert result["edge_count"] == 2
+    assert result["gaps"] == []
+    assert result["pack_preview"]["missing_test_ref_count"] == 0
 
 
 def test_graph_search_projection_join_preview_joins_without_promoting_authority():

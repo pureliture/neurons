@@ -720,13 +720,15 @@ def run_session_project_rollup_preview(
     safe_project = public_safe_text(project or repository, max_chars=120)
     requested_device = public_safe_text(requesting_device_id_hash, max_chars=180)
     safe_scope = scope if scope in {"all_devices", "same_device"} else "all_devices"
-    visible_sessions = [
-        session
-        for session in sessions
-        if safe_scope == "all_devices"
-        or not requested_device
-        or public_safe_text(str(session.get("device_id_hash") or ""), max_chars=180) == requested_device
-    ]
+    if safe_scope == "same_device":
+        visible_sessions = [
+            session
+            for session in sessions
+            if requested_device
+            and public_safe_text(str(session.get("device_id_hash") or ""), max_chars=180) == requested_device
+        ]
+    else:
+        visible_sessions = list(sessions)
     repository_object = _rollup_object(
         object_type="Repository",
         natural_key=safe_repository,
@@ -888,7 +890,7 @@ def run_pr_commit_extraction_preview(
     commit_objects = [_stable_object(_commit_object(item, repository=repository).to_dict()) for item in commits]
     test_objects = [_stable_object(_test_run_object(item, repository=repository).to_dict()) for item in test_runs]
     test_by_id = {
-        str(item.get("test_id") or item.get("id") or item.get("ref") or ""): obj
+        public_safe_text(str(item.get("test_id") or item.get("id") or item.get("ref") or ""), max_chars=160): obj
         for item, obj in zip(test_runs, test_objects, strict=False)
     }
     edges = [
@@ -1595,10 +1597,11 @@ def _rollup_object(
     summary: str,
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:
+    resolved_key = natural_key or object_type
     return _stable_object(
         KnowledgeObjectEnvelope.from_parts(
             object_type=object_type,
-            natural_key=natural_key or object_type,
+            natural_key=resolved_key,
             scope=scope,
             title=title or object_type,
             summary=summary,
@@ -1606,7 +1609,7 @@ def _rollup_object(
             authority_lane="candidate",
             verification_state="source_hash_verified",
             review_state="needs_review",
-            content_hash=hash_payload({"object_type": object_type, "natural_key": natural_key, "scope": dict(scope)}),
+            content_hash=hash_payload({"object_type": object_type, "natural_key": resolved_key, "scope": dict(scope)}),
             evidence_refs=[],
             confidence={"score": 0.6, "basis": "session_rollup_metadata"},
             recommended_action="review",
@@ -1694,8 +1697,8 @@ def _session_project_rollup_edges(
             {"repository": repository_object["title"], "branch": branch_object["title"]},
         )
     ]
-    devices_by_id = {str(obj.get("payload", {}).get("device_id_hash") or ""): obj for obj in device_objects}
-    work_units_by_id = {str(obj.get("payload", {}).get("work_unit_id") or ""): obj for obj in work_unit_objects}
+    devices_by_id = {str((obj.get("payload") or {}).get("device_id_hash") or ""): obj for obj in device_objects}
+    work_units_by_id = {str((obj.get("payload") or {}).get("work_unit_id") or ""): obj for obj in work_unit_objects}
     for session, session_obj in zip(visible_sessions, session_objects, strict=False):
         evidence_refs = [str(item) for item in session_obj.get("evidence_refs") or []]
         device_id = public_safe_text(str(session.get("device_id_hash") or "device:unknown"), max_chars=180)
@@ -1806,6 +1809,8 @@ def _session_project_rollup_gaps(
         gaps.append("requesting_device_required")
     if sessions and not visible_sessions:
         gaps.append("visible_sessions_empty")
+    if visible_sessions and not any(_session_evidence_ids(session) for session in visible_sessions):
+        gaps.append("session_evidence_missing")
     if any(_session_has_raw_body(session) for session in sessions):
         gaps.append("raw_session_body_ignored")
     return gaps
