@@ -450,6 +450,7 @@ def list_tools() -> list[dict]:
                     "live_evidence": {"type": "object", "default": {}},
                     "expected_commit": {"type": "string"},
                     "evidence_collection_plan": {"type": "boolean", "default": False},
+                    "evidence_packet_template": {"type": "boolean", "default": False},
                     "repository": {"type": "string", "default": ""},
                     "branch": {"type": "string", "default": ""},
                     "consumer": {"type": "string", "default": "codex"},

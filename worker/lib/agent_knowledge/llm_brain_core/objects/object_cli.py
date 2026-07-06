@@ -23,6 +23,7 @@ from .object_packs import apply_approval_board_decisions, apply_candidate_review
 from .reference_corpus import build_corpus_ingest_plan, default_corpus_policy_status, reference_corpus_objects_from_manifest
 from .runtime_readiness import (
     build_source_to_candidate_runtime_evidence_collection_plan,
+    build_source_to_candidate_runtime_evidence_packet_template,
     build_source_to_candidate_runtime_readiness_report,
 )
 
@@ -356,6 +357,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     parser.add_argument("--live-evidence-file", default="")
     parser.add_argument("--expected-commit", default="")
     parser.add_argument("--evidence-collection-plan", action="store_true")
+    parser.add_argument("--evidence-packet-template", action="store_true")
     parser.add_argument("--repository", default="")
     parser.add_argument("--branch", default="")
     parser.add_argument("--consumer", default="codex")
@@ -363,6 +365,16 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     if args.evidence_collection_plan:
         _print_json(
             build_source_to_candidate_runtime_evidence_collection_plan(
+                expected_commit=args.expected_commit,
+                repository=args.repository,
+                branch=args.branch,
+                consumer=args.consumer,
+            )
+        )
+        return 0
+    if args.evidence_packet_template:
+        _print_json(
+            build_source_to_candidate_runtime_evidence_packet_template(
                 expected_commit=args.expected_commit,
                 repository=args.repository,
                 branch=args.branch,

@@ -147,6 +147,119 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
     return plan
 
 
+def build_source_to_candidate_runtime_evidence_packet_template(
+    *,
+    expected_commit: str = "",
+    repository: str = "",
+    branch: str = "",
+    consumer: str = "codex",
+) -> dict[str, Any]:
+    collection_plan = build_source_to_candidate_runtime_evidence_collection_plan(
+        expected_commit=expected_commit,
+        repository=repository,
+        branch=branch,
+        consumer=consumer,
+    )
+    registration = collection_plan.get("shadow_collection_registration")
+    registration = registration if isinstance(registration, Mapping) else {}
+    template = {
+        "schema_version": "source_to_candidate_runtime_evidence_packet_template.v1",
+        "status": "template_ready",
+        "output_schema": "source_to_candidate_runtime_evidence.v1",
+        "collection_plan_schema": str(collection_plan.get("schema_version") or ""),
+        "shadow_collection_registration_id": public_safe_text(
+            str(registration.get("registration_id") or ""),
+            max_chars=120,
+        ),
+        "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
+        "repository": public_safe_text(str(repository or ""), max_chars=120),
+        "branch": public_safe_text(str(branch or ""), max_chars=120),
+        "consumer": public_safe_text(str(consumer or "codex"), max_chars=80),
+        "collection_mode": "post_deploy_read_only_smoke",
+        "network_used": False,
+        "mutation_allowed": False,
+        "production_mutation_performed": False,
+        "required_tools": list(REQUIRED_RUNTIME_TOOL_NAMES),
+        "required_routes": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
+        "required_packet_fields": [
+            "schema_version",
+            "tool_names",
+            "agent_context_product",
+            "brain_objects_query_smokes",
+            "deployed_identity",
+            "production_denials",
+            "tool_schemas",
+            "production_authority_gate",
+            "evidence_provenance",
+        ],
+        "packet_field_templates": _runtime_evidence_packet_field_templates(),
+        "forbidden_outputs": list(collection_plan.get("forbidden_outputs") or []),
+        "readiness_claim": "template_only_not_runtime_evidence",
+    }
+    ensure_public_safe(template, "SourceToCandidateRuntimeEvidencePacketTemplate")
+    return template
+
+
+def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
+    return {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "tool_names": {
+            "required_values": list(REQUIRED_RUNTIME_TOOL_NAMES),
+            "source": "configured_deployed_mcp_tools_list",
+        },
+        "agent_context_product": {
+            "schema_version": REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA,
+            "required_sections": list(REQUIRED_AGENT_CONTEXT_SECTIONS),
+            "surface_policy": {"mutation_allowed": False},
+            "tool_hints_required": list(REQUIRED_RUNTIME_TOOL_NAMES),
+        },
+        "brain_objects_query_smokes": [
+            {
+                "schema_version": "brain_objects_query.v1",
+                "route": route,
+                "required_object_pack_schema": "object_pack.v1",
+                "forbidden_gap": "object_pack_route_not_implemented",
+                "production_mutation_performed": False,
+            }
+            for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+        ],
+        "deployed_identity": {
+            "contains_expected_commit": "collector_sets_boolean",
+            "identity_source": "redacted_artifact_identity_summary",
+        },
+        "production_denials": {
+            tool_name: {
+                "expected_result": "denied_no_mutation",
+                "production_mutation_performed": False,
+            }
+            for _, tool_name in PRODUCTION_DENIAL_CLAIMS
+        },
+        "tool_schemas": {
+            tool_name: {
+                "must_include_production_gate": True,
+                "production_mutation_performed": False,
+            }
+            for tool_name in OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS
+        },
+        "production_authority_gate": {
+            "runtime_flag": OBJECT_AUTHORITY_PRODUCTION_RUNTIME_FLAG,
+            "default_enabled": False,
+            "per_call_gate_required": True,
+            "production_mutation_performed": False,
+        },
+        "evidence_provenance": {
+            "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
+            "collection_mode": "post_deploy_read_only_smoke",
+            "network_used": "collector_sets_boolean",
+            "mutation_scope": "none",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+
+
 def _shadow_brain_objects_query_route_smoke_request() -> dict[str, Any]:
     return {
         "schema_version": "source_to_candidate_runtime_shadow_collection_request.v1",

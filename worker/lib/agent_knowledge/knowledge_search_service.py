@@ -14,6 +14,7 @@ from .llm_brain_core.objects.extraction_pipeline import run_source_to_candidate_
 from .llm_brain_core.objects.object_packs import apply_approval_board_decisions, apply_candidate_review_edits
 from .llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_evidence_collection_plan,
+    build_source_to_candidate_runtime_evidence_packet_template,
     build_source_to_candidate_runtime_readiness_report,
 )
 from .memory_read_pipeline import AuthorizedMemoryReader, MemoryReadPipeline, MemorySearchQuery
@@ -269,12 +270,20 @@ class KnowledgeSearchService:
         live_evidence: Mapping[str, Any] | None = None,
         expected_commit: str = "",
         evidence_collection_plan: bool = False,
+        evidence_packet_template: bool = False,
         repository: str = "",
         branch: str = "",
         consumer: str = "codex",
     ) -> dict[str, Any]:
         if evidence_collection_plan:
             return build_source_to_candidate_runtime_evidence_collection_plan(
+                expected_commit=expected_commit,
+                repository=repository,
+                branch=branch,
+                consumer=consumer,
+            )
+        if evidence_packet_template:
+            return build_source_to_candidate_runtime_evidence_packet_template(
                 expected_commit=expected_commit,
                 repository=repository,
                 branch=branch,
