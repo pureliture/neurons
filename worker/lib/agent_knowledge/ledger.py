@@ -46,6 +46,18 @@ def _reference_corpus_default_policy_status() -> dict:
     }
 
 
+def _object_proposal_status_for_decision(decision_type: str, new_authority_lane: str) -> str:
+    if decision_type == "reject_candidate" or new_authority_lane == "rejected":
+        return "rejected"
+    if decision_type == "commit_stale":
+        return "stale"
+    if decision_type == "commit_supersession":
+        return "superseded"
+    if decision_type == "retire":
+        return "retired"
+    return "accepted"
+
+
 def _introspection_query(
     connection: sqlite3.Connection,
     table: str,
@@ -1400,6 +1412,31 @@ class Ledger(
                 );
                 CREATE INDEX IF NOT EXISTS idx_object_review_proposals_project_status
                     ON object_review_proposals(project, status, updated_at);
+                CREATE TABLE IF NOT EXISTS object_authority_decisions (
+                    decision_id TEXT PRIMARY KEY,
+                    project TEXT NOT NULL DEFAULT '',
+                    proposal_id TEXT NOT NULL,
+                    target_object_id TEXT NOT NULL,
+                    decision_type TEXT NOT NULL,
+                    previous_authority_lane TEXT NOT NULL,
+                    new_authority_lane TEXT NOT NULL,
+                    decision_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_object_authority_decisions_target_created
+                    ON object_authority_decisions(target_object_id, created_at);
+                CREATE TABLE IF NOT EXISTS object_authority_states (
+                    target_object_id TEXT PRIMARY KEY,
+                    project TEXT NOT NULL DEFAULT '',
+                    authority_lane TEXT NOT NULL,
+                    decision_id TEXT NOT NULL,
+                    proposal_id TEXT NOT NULL,
+                    decision_reason TEXT NOT NULL DEFAULT '',
+                    state_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_object_authority_states_project_lane
+                    ON object_authority_states(project, authority_lane, updated_at);
                 CREATE TABLE IF NOT EXISTS reference_corpus_bundles (
                     corpus_id TEXT PRIMARY KEY,
                     project TEXT NOT NULL DEFAULT '',
@@ -1530,6 +1567,8 @@ class Ledger(
                 VALUES ('agent_knowledge_graph_projection_state.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
                 VALUES ('agent_knowledge_object_review_proposals.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES ('agent_knowledge_object_authority_decisions.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
                 VALUES ('agent_knowledge_reference_corpus_bundles.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
@@ -2511,6 +2550,203 @@ class Ledger(
                     (bounded,),
                 ).fetchall()
         return [json.loads(row["proposal_json"]) for row in rows]
+
+    def commit_object_authority_decision(self, decision: dict) -> dict:
+        if self.read_only:
+            raise sqlite3.OperationalError("read-only ledger는 object authority decision write를 허용하지 않습니다")
+        ensure_public_safe(decision, "object_authority_decision")
+        decision_id = str(decision.get("decision_id") or "")
+        proposal_id = str(decision.get("proposal_id") or "")
+        target_object_id = str(decision.get("target_object_id") or "")
+        decision_type = str(decision.get("decision_type") or "")
+        previous_lane = str(decision.get("previous_authority_lane") or "")
+        new_lane = str(decision.get("new_authority_lane") or "")
+        if not all((decision_id, proposal_id, target_object_id, decision_type, previous_lane, new_lane)):
+            raise ValueError(
+                "object authority decision requires decision_id, proposal_id, target_object_id, "
+                "decision_type, previous_authority_lane and new_authority_lane"
+            )
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        project = public_safe_text(str(decision.get("project") or ""), max_chars=120)
+        decision_payload = dict(decision)
+        decision_payload["project"] = project
+        decision_payload.setdefault("created_at", now)
+        decision_payload["authority_write_performed"] = True
+        decision_payload["authoritative_memory_changed"] = True
+        decision_payload["cache_invalidated"] = True
+        state = {
+            "schema_version": "object_authority_state.v1",
+            "project": project,
+            "target_object_id": target_object_id,
+            "authority_lane": new_lane,
+            "decision_id": decision_id,
+            "proposal_id": proposal_id,
+            "decision_type": decision_type,
+            "previous_authority_lane": previous_lane,
+            "decision_reason": public_safe_text(str(decision.get("decision_reason") or ""), max_chars=512),
+            "evidence_refs": list(decision.get("evidence_refs") or []),
+            "approved_by_hash": str(decision.get("approved_by_hash") or ""),
+            "updated_at": now,
+        }
+        ensure_public_safe(state, "object_authority_state")
+        decision_json = json.dumps(decision_payload, ensure_ascii=False, sort_keys=True)
+        state_json = json.dumps(state, ensure_ascii=False, sort_keys=True)
+        proposal_status = _object_proposal_status_for_decision(decision_type, new_lane)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT proposal_json FROM object_review_proposals WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("object authority decision requires an existing review proposal")
+            proposal = json.loads(row["proposal_json"])
+            if str(proposal.get("target_object_id") or "") != target_object_id:
+                raise ValueError("object authority decision target must match the review proposal target")
+            connection.execute(
+                """
+                INSERT INTO object_authority_decisions (
+                    decision_id, project, proposal_id, target_object_id, decision_type,
+                    previous_authority_lane, new_authority_lane, decision_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(decision_id) DO UPDATE SET
+                    project=excluded.project,
+                    proposal_id=excluded.proposal_id,
+                    target_object_id=excluded.target_object_id,
+                    decision_type=excluded.decision_type,
+                    previous_authority_lane=excluded.previous_authority_lane,
+                    new_authority_lane=excluded.new_authority_lane,
+                    decision_json=excluded.decision_json
+                """,
+                (
+                    decision_id,
+                    project,
+                    proposal_id,
+                    target_object_id,
+                    decision_type,
+                    previous_lane,
+                    new_lane,
+                    decision_json,
+                    now,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO object_authority_states (
+                    target_object_id, project, authority_lane, decision_id, proposal_id,
+                    decision_reason, state_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(target_object_id) DO UPDATE SET
+                    project=excluded.project,
+                    authority_lane=excluded.authority_lane,
+                    decision_id=excluded.decision_id,
+                    proposal_id=excluded.proposal_id,
+                    decision_reason=excluded.decision_reason,
+                    state_json=excluded.state_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    target_object_id,
+                    project,
+                    new_lane,
+                    decision_id,
+                    proposal_id,
+                    state["decision_reason"],
+                    state_json,
+                    now,
+                ),
+            )
+            proposal["status"] = proposal_status
+            proposal["decision_id"] = decision_id
+            proposal["authority_write_performed"] = False
+            proposal["authoritative_memory_changed"] = False
+            proposal_json = json.dumps(proposal, ensure_ascii=False, sort_keys=True)
+            connection.execute(
+                """
+                UPDATE object_review_proposals
+                SET status = ?, proposal_json = ?, updated_at = ?
+                WHERE proposal_id = ?
+                """,
+                (proposal_status, proposal_json, now, proposal_id),
+            )
+            readback = connection.execute(
+                "SELECT decision_json FROM object_authority_decisions WHERE decision_id = ?",
+                (decision_id,),
+            ).fetchone()
+        if readback is None:
+            raise ValueError(f"Failed to read back object authority decision: {decision_id}")
+        return json.loads(readback["decision_json"])
+
+    def get_object_authority_state(self, target_object_id: str) -> dict:
+        target = str(target_object_id or "")
+        if not target:
+            return {}
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT state_json FROM object_authority_states WHERE target_object_id = ?",
+                (target,),
+            ).fetchone()
+        return json.loads(row["state_json"]) if row is not None else {}
+
+    def get_object_authority_states(self, target_object_ids: list[str]) -> dict[str, dict]:
+        targets = [str(target_id or "") for target_id in target_object_ids if target_id]
+        if not targets:
+            return {}
+        placeholders = ", ".join("?" for _ in targets)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT target_object_id, state_json
+                FROM object_authority_states
+                WHERE target_object_id IN ({placeholders})
+                """,
+                targets,
+            ).fetchall()
+        return {str(row["target_object_id"]): json.loads(row["state_json"]) for row in rows}
+
+    def list_object_authority_decisions(
+        self,
+        *,
+        target_object_id: str = "",
+        project: str = "",
+        limit: int = 20,
+    ) -> list[dict]:
+        bounded = max(1, min(int(limit or 20), 100))
+        target = str(target_object_id or "")
+        project_name = public_safe_text(project, max_chars=120)
+        with self._connect() as connection:
+            if target:
+                rows = connection.execute(
+                    """
+                    SELECT decision_json
+                    FROM object_authority_decisions
+                    WHERE target_object_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (target, bounded),
+                ).fetchall()
+            elif project_name:
+                rows = connection.execute(
+                    """
+                    SELECT decision_json
+                    FROM object_authority_decisions
+                    WHERE project = ? OR project = ''
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (project_name, bounded),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT decision_json
+                    FROM object_authority_decisions
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
+        return [json.loads(row["decision_json"]) for row in rows]
 
     def upsert_reference_corpus_bundle(self, bundle: dict, *, project: str = "") -> dict:
         if self.read_only:

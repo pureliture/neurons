@@ -13,6 +13,7 @@ Current state:
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP는 object-native tools를 노출하고, 최신 configured-endpoint smoke는 production write에 대해 denied/no-mutation으로 통과하지만, 현재 Codex session의 `mcp__lbrain` namespace는 아직 이를 노출하지 않으며 live MCP image가 #73/current-main source refactor를 포함하는지는 증명되지 않았습니다.
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, production-denial evidence는 존재하지만, real private Palantir manifest ingest 및 production ingest approval은 여전히 gap입니다.
 - P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / `local_validated`; local/test reference corpus extraction preview는 deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, blocked-extraction gaps를 생성합니다. repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, broader evaluator suite previews에는 local/test evaluator evidence가 있지만, live graph/Qdrant projection join은 아직 증명되지 않았습니다.
+- P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / `local_validated`; local/test decision commit은 authority state/audit history를 기록하고, object queries는 local/test stale, superseded, retired, archive-only, rejected states를 surface하며, object explain은 local/test decision history를 반환합니다. production denial은 read-only promotion plan을 반환하고 authority mutation은 계속 denied 상태입니다.
 - Product activation: 완료되지 않았습니다; configured agent read path refresh가 여전히 필요합니다.
 - UI/object browser: product activation prerequisite는 아니지만, 이후 product surface로 열어 둡니다.
 
@@ -339,7 +340,7 @@ Remaining gaps:
 
 ### P4. Review Queue And Authority Promotion
 
-State: planned.
+State: `PASS_WITH_GAPS` / local_validated.
 
 Purpose:
 
@@ -366,6 +367,49 @@ Gate evidence:
 - rollback or supersession can reverse or demote an accepted/current decision without deleting audit history
 - audit trail cites proposal id, evidence refs, approver identity hash, before/after lanes, and decision reason
 - stale/superseded/retired state is visible in object queries
+
+Current local/test evidence:
+
+- object-native proposal creation writes only to the local/test review queue and reports `proposal_write_performed=true`, `authority_write_performed=false`, and `authoritative_memory_changed=false`
+- `brain_review_proposals` can read local/test proposal metadata after write without exposing raw/private evidence
+- default and production-scope `brain_object_decision_commit` remains denied/no-mutation
+- `brain_object_decision_commit` with explicit `ledger_scope=local_test` writes an `AuthorityDecision`, updates local/test object authority state, marks the proposal accepted, invalidates the authority cache, and returns read-after-write evidence
+- local/test authority decision audit records proposal id, evidence refs, approver identity hash, previous authority lane, new authority lane, and decision reason
+- `brain_objects_query` overlays local/test object authority state onto returned objects and lane indexes after a decision commit
+- local/test object queries now surface stale, superseded, retired, archive-only, and rejected states without deleting audit history or mutating production
+- `brain_object_explain` returns local/test authority state plus decision history for object ids with committed decisions, while still reporting that the object body comes from ledger state only when no object store is configured
+- production-scope `brain_object_decision_commit` remains denied/no-mutation and returns `object_authority_promotion_plan.v1` with allowed object class, decision types, reviewer role, required gate evidence, rollback path, blast radius, and no-mutation report
+- ledger boundary manifest assigns `object_review_proposals`, `object_authority_decisions`, and `object_authority_states` to the native-memory/object area
+- object explain history evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_brain_object_explain_includes_local_authority_decision_history`
+- object explain history result: `1 passed, 1 warning`
+- production-denial plan evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_is_restricted_denied_by_default`
+- production-denial plan result: `1 passed, 1 warning`
+- focused evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_local_test_updates_authority_state_with_audit`
+- focused result: `1 passed, 1 warning`
+- object-query visibility evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_overlays_local_authority_state`
+- object-query visibility result: `5 passed, 1 warning`
+- MCP regression evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py`
+- MCP regression result: `69 passed, 1 warning`
+- object/model/boundary regression evidence: `cd worker && uv run pytest -q tests/test_object_packs.py tests/test_knowledge_objects.py tests/test_ledger_area_boundaries.py`
+- object/model/boundary regression result: `23 passed, 1 warning`
+- ledger boundary evidence: `cd worker && uv run pytest -q tests/test_ledger_area_boundaries.py`
+- ledger boundary result: `10 passed`
+- worker regression evidence: `cd worker && uv run pytest -q`
+- worker regression result: `1535 passed, 9 skipped, 1 warning`
+- root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
+- root regression result: `BUILD SUCCESSFUL`
+
+PASS_WITH_GAPS rationale:
+
+- Local/test P4 gate evidence is present for proposal creation, review queue listing, default production denial/no-mutation, local/test authority decision commit, audit state, stale/superseded/retired/archive/rejected object-query visibility, and object decision history explainability.
+- Production authority promotion remains intentionally closed without a human approval gate and scoped live pilot evidence.
+- The current production plan is a read-only denied response that documents the required reviewer role, allowed classes/actions, rollback path, gate evidence, and blast radius. It is not a production approval record and did not mutate production authority.
+
+Remaining gaps:
+
+- approved production authority promotion remains closed and unproven; the current production plan is read-only denial metadata, not an approval record or production pilot
+- production rollback/supersession/demotion flows are not yet implemented beyond the local/test stored before/after lane audit shape and object-query state overlay
+- production proposal/decision write remains denied and no production ledger/corpus mutation has been performed
 
 ### P5. Continuous Golden Query Quality Gates
 

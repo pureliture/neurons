@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import sqlite3
+from collections.abc import Mapping
+from typing import Any
 
 from .ledger import Ledger
 from .llm_brain_core.document_bridge import RetiredIndexBridgeDocumentBridge
@@ -89,6 +91,7 @@ class KnowledgeSearchService:
         mirror_search=None,
         allow_restricted_steward: bool = False,
         allow_steward_auto_accept: bool = False,
+        allow_local_test_object_authority_writes: bool = False,
     ):
         self.ledger = ledger
         self.retired_index_bridge = retired_index_bridge
@@ -101,6 +104,7 @@ class KnowledgeSearchService:
         # human/manual gate 또는 명시적 test-only path 에서만 연다.
         self.allow_restricted_steward = bool(allow_restricted_steward)
         self.allow_steward_auto_accept = bool(allow_steward_auto_accept)
+        self.allow_local_test_object_authority_writes = bool(allow_local_test_object_authority_writes)
         # M8 read cutover: a Qdrant-backed (query, brain_id) -> list[dict] callable
         # that fills brain.query's archive/evidence lanes from the Qdrant searchable
         # mirror. When set it REPLACES the RetiredIndexBridge archive search (which is off in the
@@ -137,6 +141,13 @@ class KnowledgeSearchService:
         ensure_public_safe(stored, "object_review_proposal")
         return self.ledger.upsert_object_review_proposal(stored)
 
+    def commit_object_authority_decision(self, decision: dict) -> dict:
+        stored = dict(decision)
+        ensure_public_safe(stored, "object_authority_decision")
+        committed = self.ledger.commit_object_authority_decision(stored)
+        self.invalidate_brain_card_cache()
+        return committed
+
     def object_review_proposals(self, *, project: str = "", limit: int = 20) -> dict:
         bounded = max(1, min(int(limit or 20), 100))
         project_name = public_safe_text(project, max_chars=120)
@@ -150,6 +161,103 @@ class KnowledgeSearchService:
         }
         ensure_public_safe(response, "object_review_proposals")
         return response
+
+    def brain_objects_query(
+        self,
+        *,
+        repository: str,
+        branch: str,
+        query: str,
+        current_files: list[str],
+        project: str | None = None,
+        object_types: list[str] | None = None,
+        route: str = "",
+        limit: int = 20,
+        response_mode: str = "full",
+        consumer: str = "unspecified",
+    ) -> dict[str, Any]:
+        result = self.core_brain(project=project or "").brain_objects_query(
+            repository=repository,
+            branch=branch,
+            query=query,
+            current_files=current_files,
+            project=project or None,
+            object_types=object_types or [],
+            route=route,
+            limit=limit,
+            response_mode=response_mode,
+            consumer=consumer,
+        )
+        return self._overlay_object_authority_states(result)
+
+    def _overlay_object_authority_states(self, result: Mapping[str, Any]) -> dict[str, Any]:
+        response = copy.deepcopy(dict(result))
+        object_pack = response.get("object_pack")
+        if not isinstance(object_pack, dict):
+            return response
+        objects = [dict(obj) for obj in object_pack.get("objects", []) if isinstance(obj, Mapping)]
+        object_ids = [str(obj.get("object_id") or "") for obj in objects if obj.get("object_id")]
+        states = self.ledger.get_object_authority_states(object_ids) if object_ids else {}
+        overlay_count = 0
+        for obj in objects:
+            object_id = str(obj.get("object_id") or "")
+            state = states.get(object_id)
+            if not state:
+                continue
+            _apply_object_authority_state(obj, state)
+            overlay_count += 1
+        object_pack["objects"] = objects
+        if overlay_count:
+            object_pack["lanes"] = _rebuild_object_lanes(object_pack, objects)
+            object_pack["recommended_actions"] = [
+                {"object_id": obj["object_id"], "action": obj["recommended_action"]}
+                for obj in objects
+                if obj.get("object_id") and obj.get("recommended_action")
+            ]
+        audit = dict(object_pack.get("audit") or {})
+        audit["authority_state_overlay_count"] = overlay_count
+        object_pack["audit"] = audit
+        ensure_public_safe(response, "brain_objects_query_authority_overlay")
+        return response
+
+    def brain_object_explain(
+        self,
+        *,
+        object_id: str,
+        include_edges: bool = True,
+        include_evidence: bool = True,
+        response_mode: str = "full",
+    ) -> dict[str, Any]:
+        safe_object_id = public_safe_text(object_id, max_chars=180)
+        result = self.core_brain().brain_object_explain(
+            object_id=safe_object_id,
+            include_edges=include_edges,
+            include_evidence=include_evidence,
+            response_mode=response_mode,
+        )
+        state = self.ledger.get_object_authority_state(safe_object_id)
+        history = self.ledger.list_object_authority_decisions(target_object_id=safe_object_id, limit=20)
+        result["decision_history"] = [dict(item) for item in history]
+        if state:
+            obj = dict(result.get("object") or {})
+            obj.setdefault("object_id", safe_object_id)
+            obj.setdefault("object_type", _object_type_from_object_id(safe_object_id))
+            obj.setdefault("title", safe_object_id)
+            obj.setdefault("summary", "Object authority state from ledger decision history.")
+            obj.setdefault("lifecycle_status", "observed")
+            obj.setdefault("authority_lane", str(state.get("previous_authority_lane") or "candidate"))
+            obj.setdefault("verification_state", "unverified")
+            obj.setdefault("review_state", "needs_review")
+            obj.setdefault("recommended_action", "review")
+            _apply_object_authority_state(obj, state)
+            result["object"] = obj
+            result["authority_state"] = _object_authority_state_view(state)
+            gaps = [str(item) for item in result.get("gaps", []) if item]
+            if "authority_state_from_ledger_only" not in gaps:
+                gaps.append("authority_state_from_ledger_only")
+            result["gaps"] = gaps
+        ensure_public_safe(result, "brain_object_explain_authority_overlay")
+        return result
 
     def core_brain(self, *, project: str = ""):
         return build_runtime_brain_service(
@@ -295,3 +403,96 @@ class KnowledgeSearchService:
 
 def _knowledge_search_public_limit(limit: int) -> int:
     return max(1, min(10, int(limit)))
+
+
+def _apply_object_authority_state(obj: dict[str, Any], state: Mapping[str, Any]) -> None:
+    lane = public_safe_text(str(state.get("authority_lane") or obj.get("authority_lane") or ""), max_chars=80)
+    decision_type = public_safe_text(str(state.get("decision_type") or ""), max_chars=120)
+    obj["authority_lane"] = lane
+    obj["lifecycle_status"] = _lifecycle_status_for_authority_state(lane, decision_type, obj)
+    obj["review_state"] = _review_state_for_authority_state(lane, obj)
+    obj["recommended_action"] = _recommended_action_for_authority_state(lane, decision_type, obj)
+    obj["authority_state"] = _object_authority_state_view(state)
+
+
+def _object_authority_state_view(state: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "schema_version": str(state.get("schema_version") or "object_authority_state.v1"),
+        "source": "ledger_object_authority_state",
+        "decision_id": public_safe_text(str(state.get("decision_id") or ""), max_chars=180),
+        "proposal_id": public_safe_text(str(state.get("proposal_id") or ""), max_chars=180),
+        "decision_type": public_safe_text(str(state.get("decision_type") or ""), max_chars=120),
+        "previous_authority_lane": public_safe_text(str(state.get("previous_authority_lane") or ""), max_chars=80),
+        "authority_lane": public_safe_text(str(state.get("authority_lane") or ""), max_chars=80),
+        "updated_at": public_safe_text(str(state.get("updated_at") or ""), max_chars=80),
+    }
+
+
+def _lifecycle_status_for_authority_state(lane: str, decision_type: str, obj: Mapping[str, Any]) -> str:
+    if lane == "accepted_current":
+        return "current"
+    if lane == "accepted_non_current":
+        if "supersed" in decision_type or "supersess" in decision_type:
+            return "superseded"
+        if "retir" in decision_type:
+            return "retired"
+        return "stale"
+    if lane == "archive_only":
+        return "archived"
+    if lane == "rejected":
+        return "rejected"
+    if lane == "proposal_only":
+        return "proposed"
+    return public_safe_text(str(obj.get("lifecycle_status") or "observed"), max_chars=80)
+
+
+def _review_state_for_authority_state(lane: str, obj: Mapping[str, Any]) -> str:
+    if lane in {"accepted_current", "accepted_non_current", "archive_only"}:
+        return "accepted"
+    if lane == "rejected":
+        return "rejected"
+    if lane in {"candidate", "proposal_only"}:
+        return "needs_review"
+    return public_safe_text(str(obj.get("review_state") or "not_required"), max_chars=80)
+
+
+def _recommended_action_for_authority_state(lane: str, decision_type: str, obj: Mapping[str, Any]) -> str:
+    if lane == "accepted_current":
+        return "keep"
+    if lane == "accepted_non_current":
+        if "supersed" in decision_type or "supersess" in decision_type:
+            return "supersede"
+        if "retir" in decision_type:
+            return "retire"
+        return "archive"
+    if lane == "archive_only":
+        return "archive"
+    if lane == "rejected":
+        return "retire"
+    return public_safe_text(str(obj.get("recommended_action") or "review"), max_chars=80)
+
+
+def _rebuild_object_lanes(object_pack: Mapping[str, Any], objects: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    existing_lanes = object_pack.get("lanes") if isinstance(object_pack.get("lanes"), Mapping) else {}
+    lanes: dict[str, list[dict[str, Any]]] = {str(lane): [] for lane in existing_lanes}
+    for lane in (
+        "accepted_current",
+        "accepted_non_current",
+        "reference_only",
+        "proposal_only",
+        "archive_only",
+        "derived_projection",
+        "rejected",
+    ):
+        lanes.setdefault(lane, [])
+    for obj in objects:
+        lane = str(obj.get("authority_lane") or "reference_only")
+        lanes.setdefault(lane, []).append(obj)
+    return lanes
+
+
+def _object_type_from_object_id(object_id: str) -> str:
+    parts = str(object_id or "").split(":")
+    if len(parts) >= 3 and parts[0] == "ko" and parts[1]:
+        return public_safe_text(parts[1], max_chars=80)
+    return "KnowledgeObject"

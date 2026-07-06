@@ -452,8 +452,8 @@ def memory_card_to_knowledge_object(card: Mapping[str, Any]) -> KnowledgeObjectE
     )
 
 
-def denied_payload(tool_name: str, reason: str) -> dict[str, Any]:
-    return {
+def denied_payload(tool_name: str, reason: str, *, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    payload = {
         "schema_version": "object_substrate_denied.v1",
         "tool": tool_name,
         "permission": "denied",
@@ -462,3 +462,7 @@ def denied_payload(tool_name: str, reason: str) -> dict[str, Any]:
         "authority_write_performed": False,
         "authoritative_memory_changed": False,
     }
+    if extra:
+        payload.update(dict(extra))
+    ensure_public_safe(payload, "ObjectSubstrateDeniedPayload")
+    return payload
