@@ -229,6 +229,7 @@ def run_source_to_candidate_graph_activation_preview(
     corpus_status: Mapping[str, Any],
     project: str,
     consumer: str = "codex",
+    runtime_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     candidate_objects, candidate_edges, evidence = _candidate_graph_from_corpus_status(
         corpus_status=corpus_status,
@@ -258,6 +259,7 @@ def run_source_to_candidate_graph_activation_preview(
         corpus_status=corpus_status,
         pack=pack,
         source_to_candidate_pass=source_to_candidate_pass,
+        runtime_evidence=runtime_evidence,
     )
     result = {
         "schema_version": "source_to_candidate_graph_activation.v1",
@@ -1797,19 +1799,41 @@ def _source_to_candidate_activation_gaps(
     corpus_status: Mapping[str, Any],
     pack: Mapping[str, Any],
     source_to_candidate_pass: bool,
+    runtime_evidence: Mapping[str, Any] | None = None,
 ) -> list[str]:
     gaps = [public_safe_text(str(gap), max_chars=180) for gap in corpus_status.get("gaps") or [] if gap]
     gaps.extend(public_safe_text(str(gap), max_chars=180) for gap in pack.get("gaps") or [] if gap)
     if not source_to_candidate_pass:
         gaps.append("source_to_candidate_graph_not_ready")
+    runtime = runtime_evidence if isinstance(runtime_evidence, Mapping) else {}
+    if not _projection_join_runtime_evidence_valid(runtime):
+        gaps.append("live_projection_join_unproven")
     gaps.extend(
         [
-            "live_projection_join_unproven",
             "approval_board_runtime_integration_unproven",
             "production_authority_write_denied",
         ]
     )
     return sorted(set(gaps))
+
+
+def _projection_join_runtime_evidence_valid(runtime_evidence: Mapping[str, Any]) -> bool:
+    evidence = runtime_evidence.get("projection_join")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    return (
+        evidence.get("schema_version") == "object_extraction_projection_join_preview.v1"
+        and evidence.get("evidence_class") == "runtime_projection_join"
+        and evidence.get("status") == "pass"
+        and _safe_int(evidence.get("edge_count")) > 0
+        and evidence.get("production_mutation_performed") is False
+    )
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _stable_object(obj: Mapping[str, Any]) -> dict[str, Any]:
