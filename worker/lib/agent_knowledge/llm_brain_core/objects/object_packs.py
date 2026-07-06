@@ -6,6 +6,9 @@ from .._util import ensure_public_safe, hash_payload, public_safe_text
 from .knowledge_objects import EvidenceRef, KnowledgeObjectEnvelope
 
 
+NON_CURRENT_AUTHORITY = frozenset({"stale", "superseded", "archive_candidate"})
+
+
 ROUTE_SPECS: dict[str, dict[str, Any]] = {
     "documentation_cleanup": {
         "required_object_types": ["RepoDocument"],
@@ -275,6 +278,22 @@ def _simple_pack(route: str, titles: list[str], object_type: str) -> dict[str, A
     return pack
 
 
+def _reference_document_pack_from_documentation(documentation_pack: Mapping[str, Any]) -> dict[str, Any]:
+    pack = _empty_pack("reference_corpus_research")
+    source_objects = documentation_pack.get("objects") if isinstance(documentation_pack.get("objects"), (list, tuple)) else []
+    for obj in source_objects:
+        if not isinstance(obj, Mapping) or obj.get("authority_lane") != "reference_only":
+            continue
+        ref_obj = dict(obj)
+        pack["objects"].append(ref_obj)
+        pack["lanes"]["reference_only"].append(ref_obj)
+    pack["confidence"] = {
+        "score": 0.6 if pack["objects"] else 0.0,
+        "basis": "reference_only_document_authority_objects",
+    }
+    return pack
+
+
 def build_agent_context_object_packs(
     *,
     documents: list[Mapping[str, Any]],
@@ -284,11 +303,16 @@ def build_agent_context_object_packs(
     required_verification: list[str],
     guardrails: list[str],
 ) -> dict[str, dict[str, Any]]:
-    preference_titles = [str(item.get("rule") or item.get("title") or "") for item in preferences if item]
+    documentation_pack = build_documentation_cleanup_pack(documents=documents)
+    preference_titles = [
+        str(item.get("rule") or item.get("title") or "")
+        for item in preferences
+        if item and str(item.get("currentness") or "") not in NON_CURRENT_AUTHORITY
+    ]
     style_titles = [str(item.get("claim") or "") for item in style_profile.get("claims") or []]
     packs = {
-        "documentation_cleanup": build_documentation_cleanup_pack(documents=documents),
-        "reference_corpus": _simple_pack("reference_corpus_research", [], "ReferenceDocument"),
+        "documentation_cleanup": documentation_pack,
+        "reference_corpus": _reference_document_pack_from_documentation(documentation_pack),
         "preferences": _simple_pack("code_style_preference", preference_titles, "ArtifactPreference"),
         "style": _simple_pack("code_style_preference", style_titles, "StyleRule"),
         "current_work": _simple_pack("temporal_work_recall", list(current_work), "WorkUnit"),
