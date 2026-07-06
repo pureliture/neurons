@@ -90,6 +90,7 @@ def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
         "corpus-status",
         "corpus-ingest-plan",
         "corpus-ingest",
+        "source-to-candidate-graph",
         "golden-query-eval",
         "okf-export",
         "brain-regression-gate",
@@ -388,6 +389,125 @@ def test_neuron_knowledge_corpus_ingest_and_status_use_configured_local_test_led
     assert status["source_count"] == 2
     assert status["storage_modes"] == {"managed_snapshot": 2}
     assert status["gaps"] == []
+
+
+def test_neuron_knowledge_source_to_candidate_graph_uses_configured_local_test_store(
+    tmp_path,
+    capsys,
+):
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "ledger.sqlite"
+    manifest.write_text(json.dumps(_reference_manifest()), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "corpus-ingest",
+                "--project",
+                "neurons",
+                "--target",
+                "local_test",
+                "--ledger",
+                str(ledger),
+                "--manifest-file",
+                str(manifest),
+                "--storage-mode",
+                "managed_snapshot",
+            ]
+        )
+        == 0
+    )
+    ingest = json.loads(capsys.readouterr().out)
+
+    rc = main(
+        [
+            "source-to-candidate-graph",
+            "--project",
+            "neurons",
+            "--target",
+            "local_test",
+            "--ledger",
+            str(ledger),
+            "--corpus-id",
+            ingest["corpus_id"],
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["schema_version"] == "source_to_candidate_graph_activation.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["production_mutation_performed"] is False
+    assert report["ledger_mutation_performed"] is False
+    assert report["input_store"]["corpus_id"] == ingest["corpus_id"]
+    assert report["candidate_graph_review_pack"]["route"] == "candidate_graph_review"
+    assert report["candidate_graph_review_pack"]["production_mutation_performed"] is False
+    assert report["candidate_graph_review_pack"]["authority_write_performed"] is False
+    assert report["candidate_graph_review_pack"]["minimal_edit_surface"]["supported"] is True
+    assert report["candidate_graph_review_pack"]["lanes"]["candidate"]
+    assert report["candidate_graph_review_pack"]["lanes"]["accepted_current"] == []
+    assert report["candidate_graph_review_pack"]["raw_body_return_capability"] == "denied"
+    assert report["quality_gate"]["source_to_candidate_graph"] == "PASS"
+    assert "live_projection_join_unproven" in report["gaps"]
+    assert all(
+        item["raw_return_capability"] == "denied"
+        for item in report["candidate_graph_review_pack"]["evidence"]
+    )
+
+
+def test_neuron_knowledge_source_to_candidate_graph_denies_production_without_mutation(
+    tmp_path,
+    capsys,
+):
+    ledger = tmp_path / "ledger.sqlite"
+
+    rc = main(
+        [
+            "source-to-candidate-graph",
+            "--project",
+            "neurons",
+            "--target",
+            "production",
+            "--ledger",
+            str(ledger),
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["schema_version"] == "object_substrate_cli_denied.v1"
+    assert report["status"] == "denied"
+    assert report["mutation_performed"] is False
+    assert report["production_mutation_performed"] is False
+    assert ledger.exists() is False
+
+
+def test_neuron_knowledge_source_to_candidate_graph_does_not_create_missing_local_store(
+    tmp_path,
+    capsys,
+):
+    ledger = tmp_path / "missing-ledger.sqlite"
+
+    rc = main(
+        [
+            "source-to-candidate-graph",
+            "--project",
+            "neurons",
+            "--target",
+            "local_test",
+            "--ledger",
+            str(ledger),
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["schema_version"] == "source_to_candidate_graph_activation.v1"
+    assert report["status"] == "FAIL"
+    assert report["production_mutation_performed"] is False
+    assert report["ledger_mutation_performed"] is False
+    assert "reference_corpus_store_missing" in report["gaps"]
+    assert ledger.exists() is False
 
 
 def test_neuron_knowledge_golden_query_eval_baseline(capsys):
