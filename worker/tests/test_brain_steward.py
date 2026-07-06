@@ -376,6 +376,33 @@ def test_mcp_cli_review_commit_flag_enables_only_review_commit(tmp_path, monkeyp
     assert service.allow_steward_auto_accept is False
 
 
+def test_mcp_cli_object_authority_production_write_flag_requires_explicit_runtime_opt_in(tmp_path, monkeypatch):
+    from agent_knowledge import cli as cli_module
+
+    ledger = _ledger(tmp_path)
+    parser = argparse.ArgumentParser()
+    cli_module._add_recall_service_arguments(parser)
+
+    default_args = parser.parse_args(["--ledger", str(ledger.path)])
+    enabled_args = parser.parse_args([
+        "--ledger",
+        str(ledger.path),
+        "--allow-object-authority-production-writes",
+    ])
+    monkeypatch.setattr(cli_module, "build_index_client", lambda: DisabledRetiredIndexBridgeClient())
+    monkeypatch.setattr(cli_module, "build_graph_adapter_from_env", lambda **_: None)
+
+    default_service = cli_module._build_recall_service(default_args)
+    enabled_service = cli_module._build_recall_service(enabled_args)
+
+    assert default_service.ledger.read_only is True
+    assert default_service.allow_production_object_authority_writes is False
+    assert enabled_service.ledger.read_only is False
+    assert enabled_service.allow_production_object_authority_writes is True
+    assert enabled_service.allow_restricted_steward is False
+    assert enabled_service.allow_steward_auto_accept is False
+
+
 def test_restricted_tools_blocked_by_default_service(tmp_path):
     service = _service(tmp_path)  # allow_restricted_steward 기본값 False
     created = _text(

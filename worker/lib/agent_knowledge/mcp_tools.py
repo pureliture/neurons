@@ -124,6 +124,23 @@ _STEWARD_PROPOSER_PROPERTY = {
         "default": "unspecified",
     },
 }
+_PRODUCTION_GATE_PROPERTY = {
+    "production_gate": {
+        "type": "object",
+        "properties": {
+            "approved": {"type": "boolean"},
+            "approval_ref": {"type": "string"},
+            "scope": {"type": "string", "enum": ["single_project_single_object"]},
+            "project": {"type": "string"},
+            "max_objects": {"type": "integer", "minimum": 1, "maximum": 1},
+            "configured_deployed_mcp_identity_matches_source": {"type": "boolean"},
+            "read_after_write_smoke_plan": {"type": "boolean"},
+            "rollback_or_supersession_plan": {"type": "boolean"},
+            "no_raw_private_evidence": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    }
+}
 
 
 def list_tools() -> list[dict]:
@@ -441,6 +458,8 @@ def list_tools() -> list[dict]:
                     "reason": {"type": "string"},
                     "evidence_refs": {"type": "array", "items": {"type": "string"}, "default": []},
                     "ledger_scope": {"type": "string", "enum": ["local_test", "production"], "default": "production"},
+                    "project": {"type": "string"},
+                    **_PRODUCTION_GATE_PROPERTY,
                     **_STEWARD_PROPOSER_PROPERTY,
                 },
                 "required": ["proposal_type", "target_object_id", "reason"],
@@ -491,6 +510,7 @@ def list_tools() -> list[dict]:
                     "decision_id": {"type": "string"},
                     "ledger_scope": {"type": "string", "enum": ["local_test", "production"], "default": "production"},
                     "project": {"type": "string"},
+                    **_PRODUCTION_GATE_PROPERTY,
                 },
                 "required": [
                     "proposal_id",

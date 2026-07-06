@@ -59,7 +59,7 @@ Final status:
    - verify live/readiness `brain_objects_query` route smokes include `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth`
    - verify live/readiness agent context product includes non-empty `style_preference`, `active_work`, and `required_verification` sections with mutation disabled
    - verify live/readiness production safety claims for `brain_source_to_candidate_graph`, `brain_approval_board_decide`, `brain_object_proposal_create`, and `brain_object_decision_commit`
-   - expected: local/test proposal writes to local/test ledger; production/restricted decision denies
+   - expected: local/test proposal writes to local/test ledger; production/restricted decision은 기본 deny이며, branch-local production-scope write는 runtime flag `--allow-object-authority-production-writes`와 read-after-write/rollback-supersession evidence를 포함한 per-call `production_gate`가 모두 있어야만 허용된다
 
 5. LBrain read-path gates
    - use available LBrain MCP read tools if configured
