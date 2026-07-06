@@ -299,6 +299,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 - Current Codex session's `mcp__lbrain` read path can call `brain_objects_query`, but branch-local source/review/readiness tools must be deployed/reloaded before P3/P4/P9 runtime-readiness claims can be runtime-verified.
 - P1/P6/P7/P8/P9 remain `PASS_WITH_GAPS` until live `brain_objects_query` route smokes return implemented object packs for authority/archive, style/preference, temporal work recall, and deployment/runtime truth, and until P7 HTML/visualization preference route evidence is intentionally promoted into live smoke requirements.
+- P8 shadow collection registration artifact is branch-local request metadata only. It records the external post-deploy runner handoff shape and remains `registration_only_not_runtime_evidence`; until a sanitized evidence packet is collected, route smokes remain run-pending gaps.
 - P8 bounded production authority execution has branch-local/sanitized packet validation, but it remains a gap for production readiness until a deployed/live execution packet with postcheck and rollback/supersession evidence is attached.
 - Post-deploy runtime readiness evidence must include sanitized provenance. Missing provenance is a validation failure for injected evidence packets, and missing live evidence remains `PASS_WITH_GAPS`.
 - Live MCP image identity must move to a source revision containing PR #95 before claiming this branch's source-to-candidate activation is deployed in MCP.

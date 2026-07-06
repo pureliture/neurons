@@ -340,6 +340,8 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert "p8_runtime_evidence_collection_plan_not_live_evidence" in checks["P8"]["gaps"]
     assert "p8_shadow_route_smoke_collection_pending" in checks["P8"]["gaps"]
     assert "p8_shadow_route_smoke_collection_pending:deployment_runtime_truth" in checks["P8"]["gaps"]
+    assert "p8_shadow_collection_run_pending" in checks["P8"]["gaps"]
+    assert "p8_shadow_collection_run_pending:deployment_runtime_truth" in checks["P8"]["gaps"]
     assert checks["P9"]["result"] == "PASS"
     evidence = {item["phase"]: item for item in report["product_evidence_summary"]}
     assert set(evidence) == {"P6", "P7", "P8", "P9"}
@@ -374,6 +376,22 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert evidence["P8"]["shadow_route_smoke_mutation_allowed"] is False
     assert evidence["P8"]["shadow_route_smoke_production_mutation_performed"] is False
     assert evidence["P8"]["shadow_route_smoke_readiness_claim"] == "request_only_not_live_evidence"
+    assert (
+        evidence["P8"]["shadow_collection_registration_schema"]
+        == "source_to_candidate_runtime_shadow_collection_registration.v1"
+    )
+    assert evidence["P8"]["shadow_collection_registration_status"] == "registration_ready"
+    assert evidence["P8"]["shadow_collection_registration_run_status"] == "not_run"
+    assert evidence["P8"]["shadow_collection_registration_request_count"] == 1
+    assert evidence["P8"]["shadow_collection_registration_route_count"] == 4
+    assert "deployment_runtime_truth" in evidence["P8"]["shadow_collection_registration_routes"]
+    assert evidence["P8"]["shadow_collection_registration_network_used"] is False
+    assert evidence["P8"]["shadow_collection_registration_mutation_allowed"] is False
+    assert evidence["P8"]["shadow_collection_registration_production_mutation_performed"] is False
+    assert (
+        evidence["P8"]["shadow_collection_registration_readiness_claim"]
+        == "registration_only_not_runtime_evidence"
+    )
     assert evidence["P9"]["schema_version"] == "agent_context_product_pack.v1"
     assert evidence["P9"]["section_counts"]["style_preference"] >= 1
     assert evidence["P9"]["section_counts"]["active_work"] >= 1
@@ -468,6 +486,21 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "shadow_route_smoke_mutation_allowed": False,
                 "shadow_route_smoke_production_mutation_performed": False,
                 "shadow_route_smoke_readiness_claim": "request_only_not_live_evidence",
+                "shadow_collection_registration_schema": "source_to_candidate_runtime_shadow_collection_registration.v1",
+                "shadow_collection_registration_status": "registration_ready",
+                "shadow_collection_registration_run_status": "not_run",
+                "shadow_collection_registration_request_count": 1,
+                "shadow_collection_registration_route_count": 4,
+                "shadow_collection_registration_routes": [
+                    "authority_archive_separation",
+                    "code_style_preference",
+                    "temporal_work_recall",
+                    "deployment_runtime_truth",
+                ],
+                "shadow_collection_registration_network_used": False,
+                "shadow_collection_registration_mutation_allowed": False,
+                "shadow_collection_registration_production_mutation_performed": False,
+                "shadow_collection_registration_readiness_claim": "registration_only_not_runtime_evidence",
                 "production_mutation_performed": False,
             },
             {
@@ -495,6 +528,11 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
         "p8_shadow_route_smoke_collection_pending:code_style_preference",
         "p8_shadow_route_smoke_collection_pending:temporal_work_recall",
         "p8_shadow_route_smoke_collection_pending:deployment_runtime_truth",
+        "p8_shadow_collection_run_pending",
+        "p8_shadow_collection_run_pending:authority_archive_separation",
+        "p8_shadow_collection_run_pending:code_style_preference",
+        "p8_shadow_collection_run_pending:temporal_work_recall",
+        "p8_shadow_collection_run_pending:deployment_runtime_truth",
     ]
 
 
@@ -546,6 +584,16 @@ def test_product_evidence_summary_fails_when_p8_collection_plan_is_missing_or_mu
                 "shadow_route_smoke_mutation_allowed": True,
                 "shadow_route_smoke_production_mutation_performed": True,
                 "shadow_route_smoke_readiness_claim": "runtime_verified",
+                "shadow_collection_registration_schema": "source_to_candidate_runtime_shadow_collection_registration.v1",
+                "shadow_collection_registration_status": "completed",
+                "shadow_collection_registration_run_status": "completed",
+                "shadow_collection_registration_request_count": 0,
+                "shadow_collection_registration_route_count": 0,
+                "shadow_collection_registration_routes": [],
+                "shadow_collection_registration_network_used": True,
+                "shadow_collection_registration_mutation_allowed": True,
+                "shadow_collection_registration_production_mutation_performed": True,
+                "shadow_collection_registration_readiness_claim": "runtime_verified",
                 "production_mutation_performed": False,
             },
             {
@@ -570,6 +618,14 @@ def test_product_evidence_summary_fails_when_p8_collection_plan_is_missing_or_mu
     assert "p8_shadow_route_smoke_mutation_allowed" in checks["P8"]["failures"]
     assert "p8_shadow_route_smoke_mutated_production" in checks["P8"]["failures"]
     assert "p8_shadow_route_smoke_claims_live_evidence" in checks["P8"]["failures"]
+    assert "p8_shadow_collection_registration_not_ready" in checks["P8"]["failures"]
+    assert "p8_shadow_collection_registration_claims_run" in checks["P8"]["failures"]
+    assert "p8_shadow_collection_registration_requests_missing" in checks["P8"]["failures"]
+    assert "p8_shadow_collection_registration_routes_missing" in checks["P8"]["failures"]
+    assert "p8_shadow_collection_registration_used_network" in checks["P8"]["failures"]
+    assert "p8_shadow_collection_registration_mutation_allowed" in checks["P8"]["failures"]
+    assert "p8_shadow_collection_registration_mutated_production" in checks["P8"]["failures"]
+    assert "p8_shadow_collection_registration_claims_live_evidence" in checks["P8"]["failures"]
 
 
 def test_product_evidence_summary_fails_when_p9_active_work_is_missing():

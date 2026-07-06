@@ -230,6 +230,28 @@ def test_runtime_readiness_evidence_collection_plan_is_public_safe_and_read_only
     assert plan["collection_mode"] == "post_deploy_read_only_smoke"
     assert plan["required_tools"] == list(REQUIRED_RUNTIME_TOOL_NAMES)
     assert plan["required_routes"] == list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    assert plan["shadow_collection_registration"] == {
+        "schema_version": "source_to_candidate_runtime_shadow_collection_registration.v1",
+        "registration_id": "shadow_route_smoke_post_deploy_registration",
+        "status": "registration_ready",
+        "registration_scope": "branch_local_request_artifact",
+        "target": "external_post_deploy_runner",
+        "collection_mode": "post_deploy_read_only_smoke",
+        "request_ids": ["shadow_brain_objects_query_route_smoke"],
+        "routes": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
+        "output_schema": "source_to_candidate_runtime_evidence.v1",
+        "evidence_provenance_schema": EVIDENCE_PROVENANCE_SCHEMA,
+        "network_used": False,
+        "mutation_allowed": False,
+        "production_mutation_performed": False,
+        "readiness_claim": "registration_only_not_runtime_evidence",
+        "run_status": "not_run",
+        "expected_gap_if_not_run": "shadow_collection_run_pending",
+        "expected_gaps_if_not_run": [
+            f"shadow_collection_run_pending:{route}"
+            for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+        ],
+    }
     assert plan["shadow_collection_requests"] == [
         {
             "schema_version": "source_to_candidate_runtime_shadow_collection_request.v1",
@@ -977,3 +999,12 @@ def test_neuron_knowledge_runtime_readiness_cli_outputs_evidence_collection_plan
     assert plan["network_used"] is False
     assert plan["production_mutation_performed"] is False
     assert plan["mutation_allowed"] is False
+    registration = plan["shadow_collection_registration"]
+    assert registration["schema_version"] == "source_to_candidate_runtime_shadow_collection_registration.v1"
+    assert registration["status"] == "registration_ready"
+    assert registration["run_status"] == "not_run"
+    assert registration["request_ids"] == ["shadow_brain_objects_query_route_smoke"]
+    assert registration["network_used"] is False
+    assert registration["mutation_allowed"] is False
+    assert registration["production_mutation_performed"] is False
+    assert registration["readiness_claim"] == "registration_only_not_runtime_evidence"

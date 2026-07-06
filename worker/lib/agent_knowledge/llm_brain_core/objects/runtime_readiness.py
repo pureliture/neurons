@@ -116,6 +116,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
             "raw_external_ids_returned": False,
         },
         "collection_steps": _runtime_evidence_collection_steps(),
+        "shadow_collection_registration": _shadow_collection_registration(),
         "shadow_collection_requests": [_shadow_brain_objects_query_route_smoke_request()],
         "forbidden_outputs": [
             "raw_private_transcript",
@@ -169,6 +170,31 @@ def _shadow_brain_objects_query_route_smoke_request() -> dict[str, Any]:
         "mutation_allowed": False,
         "production_mutation_performed": False,
         "readiness_claim": "request_only_not_live_evidence",
+    }
+
+
+def _shadow_collection_registration() -> dict[str, Any]:
+    return {
+        "schema_version": "source_to_candidate_runtime_shadow_collection_registration.v1",
+        "registration_id": "shadow_route_smoke_post_deploy_registration",
+        "status": "registration_ready",
+        "registration_scope": "branch_local_request_artifact",
+        "target": "external_post_deploy_runner",
+        "collection_mode": "post_deploy_read_only_smoke",
+        "request_ids": ["shadow_brain_objects_query_route_smoke"],
+        "routes": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
+        "output_schema": "source_to_candidate_runtime_evidence.v1",
+        "evidence_provenance_schema": EVIDENCE_PROVENANCE_SCHEMA,
+        "network_used": False,
+        "mutation_allowed": False,
+        "production_mutation_performed": False,
+        "readiness_claim": "registration_only_not_runtime_evidence",
+        "run_status": "not_run",
+        "expected_gap_if_not_run": "shadow_collection_run_pending",
+        "expected_gaps_if_not_run": [
+            f"shadow_collection_run_pending:{route}"
+            for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+        ],
     }
 
 
