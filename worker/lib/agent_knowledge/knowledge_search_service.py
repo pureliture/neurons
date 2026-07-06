@@ -10,6 +10,8 @@ from .llm_brain_core.document_bridge import RetiredIndexBridgeDocumentBridge
 from .llm_brain_core.graph import GraphMemoryAdapter
 from .llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
 from .llm_brain_core.runtime import build_runtime_brain_service
+from .llm_brain_core.objects.extraction_pipeline import run_source_to_candidate_graph_activation_preview
+from .llm_brain_core.objects.object_packs import apply_approval_board_decisions, apply_candidate_review_edits
 from .memory_read_pipeline import AuthorizedMemoryReader, MemoryReadPipeline, MemorySearchQuery
 from .index_client import RetiredIndexBridgeHttpClient
 from .public_safe_util import ensure_public_safe, public_safe_text
@@ -189,6 +191,67 @@ class KnowledgeSearchService:
             consumer=consumer,
         )
         return self._overlay_object_authority_states(result)
+
+    def brain_source_to_candidate_graph(
+        self,
+        *,
+        project: str,
+        corpus_id: str = "",
+        target: str = "production",
+        consumer: str = "unspecified",
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        safe_target = public_safe_text(str(target or "production"), max_chars=80)
+        if safe_target != "local_test":
+            result = {
+                "schema_version": "object_substrate_cli_denied.v1",
+                "status": "denied",
+                "reason": "production_source_to_candidate_graph_requires_later_validation_goal",
+                "mutation_performed": False,
+                "production_mutation_performed": False,
+                "ledger_mutation_performed": False,
+                "network_used": False,
+            }
+            ensure_public_safe(result, "brain_source_to_candidate_graph_denied")
+            return result
+        status = self.ledger.reference_corpus_status(
+            project=public_safe_text(project, max_chars=120),
+            corpus_id=public_safe_text(corpus_id, max_chars=180),
+            limit=limit,
+        )
+        return run_source_to_candidate_graph_activation_preview(
+            corpus_status=status,
+            project=project,
+            consumer=consumer,
+        )
+
+    def brain_candidate_review_edit(
+        self,
+        *,
+        pack: Mapping[str, Any],
+        edits: list[Mapping[str, Any]],
+        reviewer_id: str = "unspecified",
+    ) -> dict[str, Any]:
+        return apply_candidate_review_edits(
+            pack,
+            edits=edits,
+            reviewer={"id": reviewer_id},
+        )
+
+    def brain_approval_board_decide(
+        self,
+        *,
+        pack: Mapping[str, Any],
+        decisions: list[Mapping[str, Any]],
+        target: str = "production",
+        reviewer_id: str = "unspecified",
+    ) -> dict[str, Any]:
+        return apply_approval_board_decisions(
+            pack,
+            decisions=decisions,
+            reviewer={"id": reviewer_id},
+            ledger_scope=target,
+        )
 
     def _overlay_object_authority_states(self, result: Mapping[str, Any]) -> dict[str, Any]:
         response = copy.deepcopy(dict(result))

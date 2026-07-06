@@ -12,14 +12,14 @@ Current state:
 - Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates와 latest-main deployed HTTP MCP runtime/configured endpoint smoke는 통과했지만, 현재 Codex session tool registry에는 object-native tools가 아직 없고 production authority write gate는 계속 denied 상태입니다.
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP는 latest main 기반 image로 object-native tools를 노출하고, read-only query 및 production write denied/no-mutation smoke를 통과했습니다. 현재 Codex session의 `mcp__lbrain` namespace가 아직 object-native tools를 직접 노출하지 않는 gap은 남아 있습니다.
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, production-denial evidence는 존재하지만, real private Palantir manifest ingest 및 production ingest approval은 여전히 gap입니다.
-- P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / `local_validated`; local/test reference corpus extraction preview는 deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, blocked-extraction gaps를 생성합니다. local_test `source-to-candidate-graph` CLI는 configured reference corpus store를 candidate graph review pack으로 연결합니다. candidate graph review pack은 candidate objects/edges/evidence/confidence/edit actions를 surface하고 reviewer edit fixture는 authority mutation 없이 candidate state만 바꿉니다. deployed/runtime source-to-candidate wiring 및 live graph/Qdrant projection join은 아직 증명되지 않았습니다.
-- P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / `local_validated`; local/test decision commit은 authority state/audit history를 기록하고, object queries는 local/test stale, superseded, retired, archive-only, rejected states를 surface하며, object explain은 local/test decision history를 반환합니다. `candidate-review-edit` 및 `approval-board-decide` CLI가 candidate edit에서 local_test approval-board preview까지 연결하지만, production denial은 유지되고 production authority mutation은 계속 denied 상태입니다.
-- P5 Continuous Golden Query Quality Gates: `PASS_WITH_GAPS` / `in_progress`; phase coverage report는 P1-P10 golden query families를 나열하고, source-to-authority quality gate는 source_to_candidate_graph, candidate_review_edit, approval_board_local_test, authority_read_after_write, production_decision_denial path를 검증하며, local_test store-to-candidate and review/approval CLI proofs가 추가되었습니다. release quality gate는 명시적으로 `not_green` 상태로 유지합니다.
+- P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / `local_validated`; local/test reference corpus extraction preview는 deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, blocked-extraction gaps를 생성합니다. local_test `source-to-candidate-graph` CLI 및 `brain_source_to_candidate_graph` MCP tool은 configured reference corpus store를 candidate graph review pack으로 연결합니다. candidate graph review pack은 candidate objects/edges/evidence/confidence/edit actions를 surface하고 reviewer edit fixture는 authority mutation 없이 candidate state만 바꿉니다. deployed/runtime source-to-candidate wiring 및 live graph/Qdrant projection join은 아직 증명되지 않았습니다.
+- P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / `local_validated`; local/test decision commit은 authority state/audit history를 기록하고, object queries는 local/test stale, superseded, retired, archive-only, rejected states를 surface하며, object explain은 local/test decision history를 반환합니다. `candidate-review-edit` / `approval-board-decide` CLI 및 `brain_candidate_review_edit` / `brain_approval_board_decide` MCP tools가 candidate edit에서 local_test approval-board preview까지 연결하지만, production denial은 유지되고 production authority mutation은 계속 denied 상태입니다.
+- P5 Continuous Golden Query Quality Gates: `PASS_WITH_GAPS` / `in_progress`; phase coverage report는 P1-P10 golden query families를 나열하고, source-to-authority quality gate는 source_to_candidate_graph, candidate_review_edit, approval_board_local_test, authority_read_after_write, production_decision_denial path를 검증하며, local_test store-to-candidate and review/approval CLI/MCP proofs가 추가되었습니다. release quality gate는 명시적으로 `not_green` 상태로 유지합니다.
 - P6 Session, Device, Project, And Work-Unit 360: `PASS_WITH_GAPS` / `local_validated`; local/test session project rollup preview는 Device/Session/Repository/Branch/WorkUnit/Spec/PullRequest/Commit objects를 생성하고, same-device와 all-device fixture rollup을 분리하며, safe handoff pack과 resume context를 반환합니다. live multi-device runtime evidence는 아직 증명되지 않았습니다.
 - P7 Preference, Style, And Artifact Memory: `PASS_WITH_GAPS` / `local_validated`; local/test artifact preference pack은 accepted/proposal lanes, profile objects, no-UI HTML artifact check를 검증하지만, live agent context pack 및 production authority promotion은 아직 gap입니다.
 - P8 Runtime Truth, Security, And Deployment Authority: `PASS_WITH_GAPS` / `local_validated`; local/test runtime authority policy, artifact identity join, private authority redaction, and denial/no-mutation checks pass, but broader production runtime authority and permission audit remain gaps.
 - P9 Agent Context Productization: `PASS_WITH_GAPS` / `local_validated`; local/test consumer compact packs, degraded/stale disclosure, reference object lane, surface policy, and proposal-safe action hints pass, but production startup/read path and runtime enforcement remain gaps.
-- Product activation: 완료되지 않았습니다; local_test store-to-candidate graph wiring 및 review/approval CLI proof는 추가되었지만 configured agent read path refresh, deployed/runtime source-to-candidate extraction wiring, deployed review surface hardening, and approval-board promotion runtime integration이 여전히 필요합니다.
+- Product activation: 완료되지 않았습니다; local_test store-to-candidate graph wiring 및 review/approval CLI/MCP proof는 추가되었지만 configured deployed agent read path refresh, deployed/runtime source-to-candidate extraction wiring, deployed review surface hardening, and approval-board promotion runtime integration이 여전히 필요합니다.
 - UI/object browser: full UI는 product activation prerequisite가 아니지만, minimal candidate object/edge/evidence edit surface는 P3/P4 product workflow의 prerequisite입니다.
 
 Roadmap lock state:
@@ -358,6 +358,7 @@ Current local/test evidence:
 - graph/search projection join preview maps derived graph/search hits into `ProjectionHit` objects and `projection_join` edges
 - graph/search projection join preview keeps projection objects and edges in `derived_projection`, reports unknown join targets as gaps, and rejects projection-as-authority strategy
 - local_test `source-to-candidate-graph` CLI reads the configured reference corpus store and returns a `candidate_graph_review` pack without ledger, production, or authority mutation
+- `brain_source_to_candidate_graph` MCP tool exposes the same local_test store-to-candidate graph preview and keeps production target denied/no-mutation
 - production `source-to-candidate-graph` target is denied/no-mutation before ledger access
 - candidate graph review pack exposes candidate objects, edges, evidence refs, confidence, allowed reviewer actions, and minimal editable object fields
 - candidate reviewer edit fixture changes candidate object fields, edge type, and evidence summary; rejects direct `authority_lane` edits; preserves the original extraction hash; and keeps `authority_write_performed=false`
@@ -367,6 +368,8 @@ Current local/test evidence:
 - candidate review focused result: `11 passed, 1 warning`
 - store-to-candidate CLI focused evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_extractor_registry_reports_implemented_and_gap_extractors tests/test_neuron_cli.py::test_neuron_knowledge_help_lists_server_owned_commands tests/test_neuron_cli.py::test_neuron_knowledge_source_to_candidate_graph_uses_configured_local_test_store tests/test_neuron_cli.py::test_neuron_knowledge_source_to_candidate_graph_denies_production_without_mutation tests/test_neuron_cli.py::test_neuron_knowledge_source_to_candidate_graph_does_not_create_missing_local_store`
 - store-to-candidate CLI focused result: `5 passed, 1 warning`
+- store-to-candidate MCP focused evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_tool_list_exposes_object_substrate_tools tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_graph_and_review_approval_preview_roundtrip tests/test_neuron_mcp_stdio.py::test_mcp_approval_board_preview_denies_production_without_mutation`
+- store-to-candidate MCP focused result: `3 passed, 1 warning`
 - store-to-candidate CLI smoke: local_test configured store returns `status=PASS_WITH_GAPS`, `candidate_graph_review`, `candidate_count=3`, `accepted_count=0`, and all quality gate checks `PASS`
 - store-to-candidate production-denial smoke: production target returns `status=denied`, `mutation_performed=false`, `production_mutation_performed=false`, `network_used=false`, and does not create the requested ledger path
 - candidate review adjacent evidence: `cd worker && uv run pytest -q tests/test_object_packs.py tests/test_extraction_pipeline.py tests/test_llm_brain_core_objects_subpackage.py`
@@ -374,9 +377,9 @@ Current local/test evidence:
 - focused evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py`
 - focused result: `19 passed, 1 warning`
 - adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_object_packs.py tests/test_reference_corpus.py tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py tests/test_preference_authority_model.py tests/test_repo_style_profile.py tests/test_llm_brain_core_package_depth.py tests/test_llm_brain_core_objects_subpackage.py tests/test_llm_brain_core_layering.py`
-- adjacent regression result: `178 passed, 1 warning`
+- adjacent regression result: `180 passed, 1 warning`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1575 passed, 9 skipped, 1 warning`
+- worker regression result: `1577 passed, 9 skipped, 1 warning`
 
 PASS_WITH_GAPS rationale:
 
@@ -445,8 +448,11 @@ Current local/test evidence:
 - production-scope approval-board decision preview is denied with `production_approval_gate_required` and returns a no-mutation promotion plan
 - `candidate-review-edit` CLI applies reviewer JSON edits to candidate packs without authority or production mutation
 - `approval-board-decide` CLI connects edited candidate packs to local_test approval-board decisions and keeps production target denied/no-mutation
+- `brain_candidate_review_edit` and `brain_approval_board_decide` MCP tools expose the same preview flow for agent surfaces and keep production approval denied/no-mutation
 - review/approval CLI focused evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_extractor_registry_reports_implemented_and_gap_extractors tests/test_neuron_cli.py::test_neuron_knowledge_help_lists_server_owned_commands tests/test_neuron_cli.py::test_neuron_knowledge_source_to_candidate_graph_uses_configured_local_test_store tests/test_neuron_cli.py::test_neuron_knowledge_source_to_candidate_graph_denies_production_without_mutation tests/test_neuron_cli.py::test_neuron_knowledge_source_to_candidate_graph_does_not_create_missing_local_store tests/test_neuron_cli.py::test_neuron_knowledge_candidate_review_and_approval_board_cli_chain_local_test tests/test_neuron_cli.py::test_neuron_knowledge_approval_board_cli_denies_production_without_mutation`
 - review/approval CLI focused result: `7 passed, 1 warning`
+- review/approval MCP focused evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_tool_list_exposes_object_substrate_tools tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_graph_and_review_approval_preview_roundtrip tests/test_neuron_mcp_stdio.py::test_mcp_approval_board_preview_denies_production_without_mutation`
+- review/approval MCP focused result: `3 passed, 1 warning`
 - candidate review focused evidence: `cd worker && uv run pytest -q tests/test_object_packs.py`
 - candidate review focused result: `11 passed, 1 warning`
 - object explain history evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_brain_object_explain_includes_local_authority_decision_history`
@@ -458,13 +464,13 @@ Current local/test evidence:
 - object-query visibility evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_overlays_local_authority_state`
 - object-query visibility result: `5 passed, 1 warning`
 - MCP regression evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py`
-- MCP regression result: `69 passed, 1 warning`
+- MCP regression result: `73 passed, 1 warning`
 - object/model/boundary regression evidence: `cd worker && uv run pytest -q tests/test_object_packs.py tests/test_knowledge_objects.py tests/test_ledger_area_boundaries.py`
 - object/model/boundary regression result: `23 passed, 1 warning`
 - ledger boundary evidence: `cd worker && uv run pytest -q tests/test_ledger_area_boundaries.py`
 - ledger boundary result: `10 passed`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1575 passed, 9 skipped, 1 warning`
+- worker regression result: `1577 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
@@ -529,7 +535,7 @@ Current local/test evidence:
 - strict evaluator fails deployment/runtime truth claims unless runtime evidence or an explicit runtime evidence gap is present
 - P1-P4 are represented as PASS_WITH_GAPS slices with their production/live gaps preserved
 - source-to-authority quality gate covers source-to-candidate graph, candidate review edit, local_test approval-board promotion, authority read-after-write, and production decision denial paths
-- local_test store-to-candidate CLI proof covers configured reference corpus store read, candidate graph review pack creation, and production target denied/no-mutation
+- local_test store-to-candidate CLI/MCP proof covers configured reference corpus store read, candidate graph review pack creation, and production target denied/no-mutation
 - `candidate_graph_review` packs state empty authority lanes explicitly so P5 strict axis checks do not hide candidate-vs-authority separation
 - P6-P9 remain represented with local/test evidence plus production/live gaps, and P10 remains planned
 - source-to-authority gate focused evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_source_to_authority_quality_gate_covers_review_approval_and_read_path_without_production_mutation`
@@ -552,10 +558,12 @@ Current local/test evidence:
 - adjacent regression result: `55 passed, 1 warning`
 - broader adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_golden_query_eval.py tests/test_neuron_cli.py tests/test_object_packs.py tests/test_llm_brain_core_objects_subpackage.py`
 - broader adjacent regression result: `89 passed, 1 warning`
+- object/CLI/MCP adjacent evidence: `cd worker && uv run pytest -q tests/test_neuron_cli.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py tests/test_object_packs.py tests/test_neuron_mcp_stdio.py`
+- object/CLI/MCP adjacent result: `128 passed, 1 warning`
 - CLI smoke: `cd worker && uv run neuron-knowledge golden-query-eval --phase-coverage`
 - CLI smoke result: `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1575 passed, 9 skipped, 1 warning`
+- worker regression result: `1577 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
@@ -608,7 +616,7 @@ Current local/test evidence:
 - adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
 - adjacent regression result: `46 passed, 1 warning`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1575 passed, 9 skipped, 1 warning`
+- worker regression result: `1577 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
@@ -873,8 +881,8 @@ Current accounting:
 | P0 Local Object Substrate Foundation | `complete` | complete for local/test scope |
 | P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; latest-main deployed/configured endpoint validated, current Codex session tool registry gap remains |
 | P2 Living Reference Corpus Store | `local_validated` | `PASS_WITH_GAPS`; local/test store and status gates pass, real private manifest ingest and production approval remain gaps |
-| P3 Processing And Object Extraction Pipeline | `local_validated` | `PASS_WITH_GAPS`; local/test extraction previews, store-to-candidate CLI wiring, and candidate review/edit pack pass, but deployed/runtime source-to-candidate wiring and live projection join remain gaps |
-| P4 Review Queue And Authority Promotion | `local_validated` | `PASS_WITH_GAPS`; local/test authority state, audit gates, review/approval CLI chain, approval-board preview, local_test promotion preview, and reviewer edit no-mutation proof pass; production authority mutation remains denied |
+| P3 Processing And Object Extraction Pipeline | `local_validated` | `PASS_WITH_GAPS`; local/test extraction previews, store-to-candidate CLI/MCP wiring, and candidate review/edit pack pass, but deployed/runtime source-to-candidate wiring and live projection join remain gaps |
+| P4 Review Queue And Authority Promotion | `local_validated` | `PASS_WITH_GAPS`; local/test authority state, audit gates, review/approval CLI/MCP chain, approval-board preview, local_test promotion preview, and reviewer edit no-mutation proof pass; production authority mutation remains denied |
 | P5 Continuous Golden Query Quality Gates | `in_progress` | `PASS_WITH_GAPS`; phase coverage and source-to-authority path gate exist, release quality gate remains `not_green` |
 | P6 Session, Device, Project, And Work-Unit 360 | `local_validated` | `PASS_WITH_GAPS`; local/test rollup and handoff gates pass, live multi-device runtime evidence remains a gap |
 | P7 Preference, Style, And Artifact Memory | `local_validated` | `PASS_WITH_GAPS`; local/test artifact preference pack lanes and no-UI HTML artifact check pass, live agent context pack and production authority promotion remain gaps |

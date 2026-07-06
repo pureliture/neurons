@@ -15,6 +15,9 @@ from .llm_brain_core.objects.reference_corpus import build_corpus_ingest_plan
 from .mcp_tools import (
     BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
     BRAIN_CORPUS_STATUS_TOOL_NAME,
+    BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+    BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+    BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
     BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
     BRAIN_DRIFT_EXPLAIN_TOOL_NAME,
     BRAIN_EVIDENCE_GET_TOOL_NAME,
@@ -196,6 +199,9 @@ def _tool_dispatch_registry() -> dict[str, ToolDispatch]:
         (BRAIN_OBJECT_EXPLAIN_TOOL_NAME, _dispatch_brain_object_explain_tool),
         (BRAIN_CORPUS_STATUS_TOOL_NAME, _dispatch_brain_corpus_status_tool),
         (BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME, _dispatch_brain_corpus_ingest_plan_tool),
+        (BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME, _dispatch_brain_source_to_candidate_graph_tool),
+        (BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME, _dispatch_brain_candidate_review_edit_tool),
+        (BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME, _dispatch_brain_approval_board_decide_tool),
         (BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME, _dispatch_brain_object_proposal_create_tool),
         (BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME, _dispatch_brain_object_decision_commit_tool),
         (BRAIN_REVIEW_PROPOSALS_TOOL_NAME, _dispatch_brain_review_proposals_tool),
@@ -393,6 +399,60 @@ def _dispatch_brain_corpus_ingest_plan_tool(tool_name: str, arguments: dict, ser
             if isinstance(expected_source_type_counts, dict)
             else None
         ),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_source_to_candidate_graph_tool(
+    tool_name: str,
+    arguments: dict,
+    service: KnowledgeSearchService,
+) -> dict:
+    result = service.brain_source_to_candidate_graph(
+        project=_require_non_empty_string(arguments, "project", tool_name=tool_name),
+        corpus_id=str(arguments.get("corpus_id") or ""),
+        target=str(arguments.get("target") or "production"),
+        consumer=_consumer(arguments),
+        limit=_bounded_limit(arguments.get("limit"), default=20, maximum=100),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_candidate_review_edit_tool(
+    tool_name: str,
+    arguments: dict,
+    service: KnowledgeSearchService,
+) -> dict:
+    pack = arguments.get("pack")
+    if not isinstance(pack, dict):
+        raise ValueError(f"{tool_name} requires pack object")
+    edits = arguments.get("edits")
+    if not isinstance(edits, list):
+        raise ValueError(f"{tool_name} requires edits array")
+    result = service.brain_candidate_review_edit(
+        pack=pack,
+        edits=[dict(item) for item in edits if isinstance(item, Mapping)],
+        reviewer_id=str(arguments.get("reviewer_id") or "unspecified"),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_approval_board_decide_tool(
+    tool_name: str,
+    arguments: dict,
+    service: KnowledgeSearchService,
+) -> dict:
+    pack = arguments.get("pack")
+    if not isinstance(pack, dict):
+        raise ValueError(f"{tool_name} requires pack object")
+    decisions = arguments.get("decisions")
+    if not isinstance(decisions, list):
+        raise ValueError(f"{tool_name} requires decisions array")
+    result = service.brain_approval_board_decide(
+        pack=pack,
+        decisions=[dict(item) for item in decisions if isinstance(item, Mapping)],
+        target=str(arguments.get("target") or "production"),
+        reviewer_id=str(arguments.get("reviewer_id") or "unspecified"),
     )
     return _tool_result(result)
 

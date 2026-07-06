@@ -23,6 +23,9 @@ from agent_knowledge.mcp_server import (
     BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
     BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
     BRAIN_OBJECTS_QUERY_TOOL_NAME,
+    BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+    BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+    BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
     BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
     BRAIN_CORPUS_STATUS_TOOL_NAME,
     BRAIN_REVIEW_PROPOSALS_TOOL_NAME,
@@ -276,6 +279,9 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
         BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
         BRAIN_CORPUS_STATUS_TOOL_NAME,
         BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
+        BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+        BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+        BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
         BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
         BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
         BRAIN_REVIEW_PROPOSALS_TOOL_NAME,
@@ -300,6 +306,149 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
     assert "expected_source_url_count" in corpus_plan_properties
     assert "expected_manual_text_without_url_count" in corpus_plan_properties
     assert "expected_source_type_counts" in corpus_plan_properties
+    assert tools[BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME]["inputSchema"]["properties"]["target"]["enum"] == [
+        "local_test",
+        "production",
+    ]
+    assert tools[BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME]["inputSchema"]["properties"]["target"]["enum"] == [
+        "local_test",
+        "production",
+    ]
+
+
+def test_mcp_source_to_candidate_graph_and_review_approval_preview_roundtrip(tmp_path: Path):
+    service = _service(tmp_path)
+    bundle = reference_corpus_objects_from_manifest(
+        _reference_manifest(),
+        project=PROJECT,
+        storage_mode="managed_snapshot",
+    )
+    ingest = service.ledger.upsert_reference_corpus_bundle(bundle, project=PROJECT)
+
+    graph_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 121,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+                "arguments": {
+                    "project": PROJECT,
+                    "target": "local_test",
+                    "corpus_id": ingest["corpus_id"],
+                    "consumer": "codex",
+                },
+            },
+        },
+        service,
+    )
+
+    graph = graph_response["result"]["structuredContent"]
+    assert graph["schema_version"] == "source_to_candidate_graph_activation.v1"
+    assert graph["status"] == "PASS_WITH_GAPS"
+    assert graph["production_mutation_performed"] is False
+    assert graph["ledger_mutation_performed"] is False
+    assert graph["candidate_graph_review_pack"]["route"] == "candidate_graph_review"
+    assert graph["candidate_graph_review_pack"]["lanes"]["candidate"]
+    candidate_id = graph["candidate_graph_review_pack"]["lanes"]["candidate"][0]["object_id"]
+
+    edit_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 122,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+                "arguments": {
+                    "pack": graph["candidate_graph_review_pack"],
+                    "edits": [
+                        {
+                            "action": "update_object",
+                            "object_id": candidate_id,
+                            "fields": {
+                                "summary": "Reviewer clarified candidate from MCP preview.",
+                                "recommended_action": "promote",
+                            },
+                        }
+                    ],
+                    "reviewer_id": "reviewer-local",
+                },
+            },
+        },
+        service,
+    )
+    edit_result = edit_response["result"]["structuredContent"]
+    assert edit_result["schema_version"] == "candidate_review_edit_result.v1"
+    assert edit_result["candidate_state_changed"] is True
+    assert edit_result["authority_write_performed"] is False
+    assert edit_result["production_mutation_performed"] is False
+
+    decision_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 123,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "local_test",
+                    "pack": edit_result["updated_pack"],
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": candidate_id,
+                            "reason": "MCP local test approval preview.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "reviewer_id": "reviewer-local",
+                },
+            },
+        },
+        service,
+    )
+    decision_result = decision_response["result"]["structuredContent"]
+    assert decision_result["schema_version"] == "approval_board_decision_result.v1"
+    assert decision_result["permission"] == "allowed"
+    assert decision_result["authority_write_scope"] == "local_test"
+    assert decision_result["production_mutation_performed"] is False
+    assert decision_result["updated_pack"]["lanes"]["accepted_current"][0]["object_id"] == candidate_id
+
+
+def test_mcp_approval_board_preview_denies_production_without_mutation(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 124,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": {
+                        "schema_version": "object_pack.v1",
+                        "route": "candidate_graph_review",
+                        "candidate_graph_hash": "sha256:" + "6" * 64,
+                        "objects": [],
+                        "edges": [],
+                        "evidence": [],
+                    },
+                    "decisions": [{"action": "promote", "object_id": "ko:ReferenceDocument:test"}],
+                    "reviewer_id": "reviewer-local",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["schema_version"] == "approval_board_decision_result.v1"
+    assert result["permission"] == "denied"
+    assert result["production_mutation_performed"] is False
+    assert result["authority_write_performed"] is False
+    assert result["promotion_plan"]["production_mutation_performed"] is False
 
 
 def test_project_deriving_brain_tool_schemas_allow_repository():

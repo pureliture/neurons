@@ -16,6 +16,9 @@ BRAIN_OBJECTS_QUERY_TOOL_NAME = "brain_objects_query"
 BRAIN_OBJECT_EXPLAIN_TOOL_NAME = "brain_object_explain"
 BRAIN_CORPUS_STATUS_TOOL_NAME = "brain_corpus_status"
 BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME = "brain_corpus_ingest_plan"
+BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME = "brain_source_to_candidate_graph"
+BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME = "brain_candidate_review_edit"
+BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME = "brain_approval_board_decide"
 BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME = "brain_object_proposal_create"
 BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME = "brain_object_decision_commit"
 BRAIN_REVIEW_PROPOSALS_TOOL_NAME = "brain_review_proposals"
@@ -72,6 +75,9 @@ _DISPATCH_OWNER_BY_TOOL_NAME = {
     BRAIN_OBJECT_EXPLAIN_TOOL_NAME: "jsonrpc_brain",
     BRAIN_CORPUS_STATUS_TOOL_NAME: "jsonrpc_brain",
     BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME: "jsonrpc_brain",
     BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: "jsonrpc_brain",
     BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: "jsonrpc_brain",
     BRAIN_REVIEW_PROPOSALS_TOOL_NAME: "jsonrpc_brain",
@@ -354,6 +360,55 @@ def list_tools() -> list[dict]:
                     },
                 },
                 "required": ["storage_mode", "project"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+            "description": "configured reference corpus store를 candidate graph review pack으로 변환한다. production target은 no-mutation으로 거부된다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string"},
+                    "corpus_id": {"type": "string"},
+                    "target": {"type": "string", "enum": ["local_test", "production"], "default": "production"},
+                    "consumer": {
+                        "type": "string",
+                        "enum": ["unspecified", "codex", "claude-code", "gemini", "hermes"],
+                        "default": "unspecified",
+                    },
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                },
+                "required": ["project"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+            "description": "candidate_graph_review pack에 reviewer edits를 적용한다. accepted/current authority나 production state는 변경하지 않는다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pack": {"type": "object"},
+                    "edits": {"type": "array", "items": {"type": "object"}, "default": []},
+                    "reviewer_id": {"type": "string", "default": "unspecified"},
+                },
+                "required": ["pack", "edits"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+            "description": "candidate_graph_review pack에 approval-board decisions preview를 적용한다. production target은 no-mutation으로 거부된다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pack": {"type": "object"},
+                    "decisions": {"type": "array", "items": {"type": "object"}, "default": []},
+                    "target": {"type": "string", "enum": ["local_test", "production"], "default": "production"},
+                    "reviewer_id": {"type": "string", "default": "unspecified"},
+                },
+                "required": ["pack", "decisions"],
                 "additionalProperties": False,
             },
         },
