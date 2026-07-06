@@ -50,6 +50,7 @@ AGENT_CONTEXT_PROPERTY_OMISSIONS = [
     "secret",
 ]
 OBJECT_NATIVE_REVIEW_TOOL_NAMES = {
+    "objects_query": "brain_objects_query",
     "source_to_candidate_graph": "brain_source_to_candidate_graph",
     "candidate_review_edit": "brain_candidate_review_edit",
     "approval_board_decide": "brain_approval_board_decide",
@@ -381,6 +382,17 @@ def object_native_review_tool_hints(missing_evidence: list[str]) -> list[dict[st
     runtime_blockers = list(missing_evidence)
     promotion_blockers = ["approved_scope_required", *runtime_blockers]
     return [
+        {
+            "tool": OBJECT_NATIVE_REVIEW_TOOL_NAMES["objects_query"],
+            "purpose": "read_object_pack",
+            "suggest_allowed": True,
+            "execute_allowed": False,
+            "local_test_preview_allowed": True,
+            "production_mutation_allowed": False,
+            "blocked_by": [],
+            "safe_targets": ["read_only_object_pack"],
+            "blocked_targets": ["authority_write", "production_mutation"],
+        },
         {
             "tool": OBJECT_NATIVE_REVIEW_TOOL_NAMES["source_to_candidate_graph"],
             "purpose": "source_to_candidate_graph_preview",

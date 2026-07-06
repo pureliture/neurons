@@ -227,11 +227,16 @@ def test_builder_adds_consumer_specific_compact_agent_context_pack_with_safe_act
         ]
         tool_hints = {item["tool"]: item for item in product["tool_hints"]}
         assert set(tool_hints) == {
+            "brain_objects_query",
             "brain_source_to_candidate_graph",
             "brain_candidate_review_edit",
             "brain_approval_board_decide",
             "brain_source_to_candidate_runtime_readiness",
         }
+        assert tool_hints["brain_objects_query"]["suggest_allowed"] is True
+        assert tool_hints["brain_objects_query"]["execute_allowed"] is False
+        assert tool_hints["brain_objects_query"]["production_mutation_allowed"] is False
+        assert tool_hints["brain_objects_query"]["safe_targets"] == ["read_only_object_pack"]
         assert tool_hints["brain_source_to_candidate_graph"]["suggest_allowed"] is True
         assert tool_hints["brain_source_to_candidate_graph"]["execute_allowed"] is False
         assert tool_hints["brain_source_to_candidate_graph"]["production_mutation_allowed"] is False

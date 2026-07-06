@@ -326,6 +326,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
     evidence = {
         "schema_version": "source_to_candidate_runtime_evidence.v1",
         "tool_names": [
+            BRAIN_OBJECTS_QUERY_TOOL_NAME,
             BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
             BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
             BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
@@ -334,6 +335,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
         "agent_context_product": {
             "schema_version": "agent_context_product_pack.v1",
             "tool_hints": [
+                {"tool": BRAIN_OBJECTS_QUERY_TOOL_NAME},
                 {"tool": BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME},
                 {"tool": BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME},
                 {"tool": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME},
@@ -631,6 +633,96 @@ def test_mcp_brain_objects_query_applies_object_type_filter_and_response_mode(tm
     assert result["response_mode"] == "compact"
     assert result["object_pack"]["audit"]["object_type_filter"] == ["ReferenceDocument"]
     assert result["object_pack"]["objects"] == []
+
+
+def test_mcp_brain_objects_query_default_route_returns_agent_context_objects(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "LBrain source-to-candidate-graph product activation roadmap P5 P6 P7 P8 P9 current gaps",
+                    "current_files": ["docs/specs/roadmap.md"],
+                    "consumer": "codex",
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    assert result["route"] == "authority_archive_separation"
+    assert pack["objects"]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert pack["recommended_actions"]
+    assert {obj["object_type"] for obj in pack["objects"]} >= {"ArtifactPreference", "Test", "ToolHandoffContext"}
+    assert pack["audit"]["object_pack_route_source"] == "context_authority_object_packs"
+    assert pack["response_mode"] == "compact"
+
+
+def test_mcp_brain_objects_query_style_route_uses_preference_objects(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "내 code style과 preference를 보여줘",
+                    "current_files": ["worker/tests/test_neuron_mcp_stdio.py"],
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    assert result["route"] == "code_style_preference"
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert any(obj["object_type"] == "ArtifactPreference" for obj in pack["objects"])
+
+
+def test_mcp_brain_objects_query_deploy_route_returns_runtime_gap_pack(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "이 PR merge됐어? 배포도 됐어?",
+                    "current_files": [],
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    assert result["route"] == "deployment_runtime_truth"
+    assert any(obj["object_type"] == "PullRequest" for obj in pack["objects"])
+    assert "runtime_evidence_unverified" in pack["gaps"]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
 
 
 def test_mcp_object_proposal_create_local_test_and_production_denial(tmp_path: Path):

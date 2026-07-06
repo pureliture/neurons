@@ -10,7 +10,7 @@ P1 live production activation follow-up는 deployed HTTP MCP runtime 및 user-le
 
 PR #73 및 ops deploy-button merge 이후 최신 recheck 결과는 `PASS_WITH_GAPS`로 유지됩니다: configured endpoint는 여전히 object-native tools를 노출하고 production proposal/decision mutation을 deny하지만, 이 Codex session은 여전히 stale `mcp__lbrain` callable registry를 가지고 있으며 current-main MCP image identity는 증명되지 않은 상태입니다.
 
-PR #95 source-to-candidate activation continuation은 local/test product surface를 확장했으며, post-deploy sanitized evidence packet을 평가하는 `source-to-candidate-runtime-readiness` CLI와 `brain_source_to_candidate_runtime_readiness` MCP tool을 추가했습니다. 현재 branch-local smoke는 `PASS_WITH_GAPS`입니다: local product surface는 validated지만 live MCP review/readiness tools, live agent context `tool_hints`, deployed identity, and live production denial smokes는 evidence packet이 없어 `not_validated`로 남습니다. 이 command/tool은 network나 production mutation을 수행하지 않습니다.
+PR #95 source-to-candidate activation continuation은 local/test product surface를 확장했으며, post-deploy sanitized evidence packet을 평가하는 `source-to-candidate-runtime-readiness` CLI와 `brain_source_to_candidate_runtime_readiness` MCP tool을 추가했습니다. 현재 branch-local smoke는 `PASS_WITH_GAPS`입니다: local product surface는 validated지만 live MCP read/review/readiness tools, live agent context `tool_hints`, deployed identity, and live production denial smokes는 evidence packet이 없어 `not_validated`로 남습니다. 이 command/tool은 network나 production mutation을 수행하지 않습니다.
 
 ## Validated
 
@@ -18,7 +18,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 - status: `validated`
 - evidence: `cd worker && uv run pytest -q`
-- result: `1586 passed, 9 skipped, 1 warning`
+- result: `1589 passed, 9 skipped, 1 warning`
 - note: covers object model, reference corpus, object packs, MCP stdio, CLI, context authority, ledger area boundary, and existing worker regression surface.
 
 ### local.root.gradle
@@ -82,7 +82,14 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - status: `validated`
 - evidence: `uv run neuron-knowledge source-to-candidate-runtime-readiness --expected-commit 7218cb2`
 - result: returned `source_to_candidate_runtime_readiness.v1`, `status=PASS_WITH_GAPS`, `live_evidence_provided=false`, `production_mutation_performed=false`, `network_used=false`
-- interpretation: this validates the report surface and local product-surface claim only. It does not prove deployed/runtime source-to-candidate activation.
+- interpretation: this validates the report surface and local product-surface claim only. The local claim now includes `brain_objects_query` plus source-to-candidate/review/approval/readiness tools. It does not prove deployed/runtime source-to-candidate activation.
+
+### local.mcp.brain-objects-query-routes
+
+- status: `validated`
+- evidence: focused MCP stdio tests for `brain_objects_query`
+- result: broad authority/archive queries return context-authority object packs, style queries return preference/style object packs, and merge/deploy queries return runtime truth gap packs without `object_pack_route_not_implemented`.
+- interpretation: this validates the branch-local read path routing only. It does not prove the deployed MCP runtime has this branch image.
 
 ### local.mcp.source-to-candidate-runtime-readiness-tool
 
@@ -181,7 +188,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - status: `not_validated`
 - reason: `live_evidence_packet_not_supplied`
 - evidence:
-  - local readiness report expects `brain_source_to_candidate_graph`, `brain_candidate_review_edit`, `brain_approval_board_decide`, and `brain_source_to_candidate_runtime_readiness` in deployed MCP `tools/list`.
+  - local readiness report expects `brain_objects_query`, `brain_source_to_candidate_graph`, `brain_candidate_review_edit`, `brain_approval_board_decide`, and `brain_source_to_candidate_runtime_readiness` in deployed MCP `tools/list`.
   - current branch-local smoke did not contact live MCP and therefore reports `live_mcp_review_tools_unverified`.
 
 ### live.production.agent-context-tool-hints
@@ -189,7 +196,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - status: `not_validated`
 - reason: `live_evidence_packet_not_supplied`
 - evidence:
-  - local readiness report expects live `agent_context_product_pack.v1` to include object-native review `tool_hints`.
+  - local readiness report expects live `agent_context_product_pack.v1` to include object-native read/review `tool_hints`.
   - current branch-local smoke did not read deployed agent startup/context output and therefore reports `live_agent_context_tool_hints_unverified`.
 
 ### live.production.source-to-candidate-denial-smokes
