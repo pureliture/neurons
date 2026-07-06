@@ -1,6 +1,7 @@
 from agent_knowledge.llm_brain_core.objects.extraction_pipeline import (
     build_extractor_registry_report,
     run_documentation_cleanup_strategy_comparison,
+    run_extraction_evaluator_suite_preview,
     run_graph_search_projection_join_preview,
     run_preference_style_extraction_preview,
     run_pr_commit_extraction_preview,
@@ -725,3 +726,88 @@ def test_graph_search_projection_join_preview_reports_gap_for_unknown_object_tar
     assert result["pack_preview"]["missing_target_count"] == 1
     assert result["evaluator_report"]["passes"] is False
     assert result["evaluator_report"]["failures"] == ["projection_join_target_missing"]
+
+
+def test_extraction_evaluator_suite_preview_covers_golden_variance_strategy_and_model_gates():
+    reference_first = run_reference_corpus_extraction_preview(
+        _manifest(),
+        project="neurons",
+        storage_mode="managed_snapshot",
+    )
+    reference_second = run_reference_corpus_extraction_preview(
+        _manifest(),
+        project="neurons",
+        storage_mode="managed_snapshot",
+    )
+    repo_docs = run_repo_document_extraction_preview(
+        documents=[
+            {
+                "path": "README.md",
+                "status": "source_of_truth",
+                "reason": "approved_repo_entrypoint",
+                "confidence": 0.9,
+                "evidence_refs": ["inventory:README.md"],
+            },
+            {
+                "path": "docs/legacy.md",
+                "status": "superseded",
+                "reason": "new roadmap supersedes legacy note",
+                "confidence": 0.7,
+                "evidence_refs": ["inventory:docs/legacy.md"],
+                "superseded_by": "README.md",
+            },
+        ],
+        repository="neurons",
+        consumer="codex",
+    )
+
+    result = run_extraction_evaluator_suite_preview(
+        evaluation_reports=[reference_first, repo_docs],
+        variance_samples=[reference_first, reference_second],
+        suite_name="p3-local-test",
+    )
+
+    assert result["schema_version"] == "object_extraction_evaluator_suite.v1"
+    assert result["status"] == "pass"
+    assert result["production_mutation_performed"] is False
+    assert result["suite_name"] == "p3-local-test"
+    assert result["coverage"] == {
+        "deterministic_fixture_checks": "pass",
+        "golden_query_checks": "pass",
+        "strategy_comparison_checks": "pass",
+        "variance_checks": "pass",
+        "model_prompt_comparison": "not_applicable_no_llm",
+    }
+    assert result["golden_query"]["checked_count"] == 2
+    assert result["golden_query"]["passes"] is True
+    assert result["variance"]["sample_count"] == 2
+    assert result["variance"]["unique_output_hash_count"] == 1
+    assert result["variance"]["passes"] is True
+    assert result["model_prompt_comparison"]["status"] == "not_applicable_no_llm"
+    assert result["model_prompt_comparison"]["model_call_count"] == 0
+    assert result["strategy_comparison"]["checked_count"] == 2
+    assert result["failures"] == []
+    assert result["gaps"] == []
+
+
+def test_extraction_evaluator_suite_preview_reports_variance_gap():
+    reference = run_reference_corpus_extraction_preview(
+        _manifest(),
+        project="neurons",
+        storage_mode="managed_snapshot",
+    )
+    variant = dict(reference)
+    variant["object_count"] = reference["object_count"] + 1
+
+    result = run_extraction_evaluator_suite_preview(
+        evaluation_reports=[reference],
+        variance_samples=[reference, variant],
+        suite_name="p3-variance-gap",
+    )
+
+    assert result["status"] == "pass_with_gaps"
+    assert result["coverage"]["variance_checks"] == "fail"
+    assert result["variance"]["unique_output_hash_count"] == 2
+    assert result["variance"]["passes"] is False
+    assert result["failures"] == ["variance_detected"]
+    assert result["gaps"] == ["variance_detected"]
