@@ -106,6 +106,37 @@ def test_eval_strict_axes_require_empty_authority_lane_disclosure():
     assert passing["passes"] is True
 
 
+def test_eval_strict_axes_require_runtime_evidence_for_runtime_claims():
+    base_response = {
+        "route": "deployment_runtime_truth",
+        "lanes": {"candidate": [{"object_id": "ko:RuntimeTruth:deploy"}]},
+        "edges": [{"edge_id": "ke:validated_by:deploy", "edge_type": "validated_by"}],
+        "evidence": [{"evidence_id": "ev:pr-merge", "verification_state": "source_hash_verified"}],
+        "gaps": [],
+        "recommended_actions": [{"object_id": "ko:RuntimeTruth:deploy", "action": "verify_runtime"}],
+    }
+    failing = evaluate_object_pack_response(
+        GOLDEN_QUERIES[4],
+        {**base_response, "verification": {"runtime_verified": [], "runtime_unverified": []}},
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+    passing = evaluate_object_pack_response(
+        GOLDEN_QUERIES[4],
+        {
+            **base_response,
+            "verification": {
+                "runtime_verified": [],
+                "runtime_unverified": [{"reason": "runtime_evidence_unverified"}],
+            },
+        },
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+
+    assert failing["passes"] is False
+    assert "runtime_evidence_missing" in failing["failures"]
+    assert passing["passes"] is True
+
+
 def test_phase_golden_query_coverage_reports_pass_with_gaps_not_green():
     report = build_phase_golden_query_coverage_report()
 
