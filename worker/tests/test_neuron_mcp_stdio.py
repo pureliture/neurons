@@ -49,6 +49,7 @@ from agent_knowledge import mcp_tools
 from agent_knowledge.mcp_tools import tool_contract_registry, tool_registry, tool_names
 from agent_knowledge.session_memory.memory_card import build_memory_candidate
 from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
+from agent_knowledge.llm_brain_core.context import BrainReadService
 from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
 from agent_knowledge.llm_brain_core.ledger_adapter import LedgerSourceRefCatalog
 from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
@@ -131,6 +132,51 @@ def _accepted_task_card(memory_id: str, *, next_action: str, project: str = PROJ
             "blocker": "",
             "owner_hint": project,
             "status": "open",
+        },
+    }
+
+
+def _accepted_preference_card(
+    memory_id: str,
+    *,
+    preference: str,
+    applies_to: str,
+    project: str = PROJECT,
+) -> dict:
+    return {
+        "memory_id": memory_id,
+        "brain_id": f"/project/{project}",
+        "card_type": "preference",
+        "scope": "project",
+        "project": project,
+        "provider": "codex",
+        "title": preference,
+        "summary": preference,
+        "render_text": preference,
+        "lifecycle_state": "accepted",
+        "judgment_state": "none",
+        "status": "accepted",
+        "approval_state": "approved",
+        "governance_tier": "medium",
+        "freshness": "current",
+        "currentness": "current",
+        "confidence": 0.93,
+        "confidence_basis": "accepted preference fixture",
+        "source_refs": [{"source_ref_id": "src_neuron_mcp", "content_hash": _h(memory_id)}],
+        "evidence_refs": [],
+        "evidence_hashes": [_h(memory_id)],
+        "derived_from": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflicts": [],
+        "active_until": "",
+        "updated_at": "2026-07-06T00:00:00Z",
+        "typed_payload": {
+            "preference": preference,
+            "applies_to": applies_to,
+            "explicitness": "explicit",
+            "repeated_count": 1,
+            "confirmation_status": "confirmed",
         },
     }
 
@@ -893,6 +939,202 @@ def test_mcp_brain_objects_query_style_route_uses_preference_objects(tmp_path: P
     assert result["route"] == "code_style_preference"
     assert "object_pack_route_not_implemented" not in pack["gaps"]
     assert any(obj["object_type"] == "ArtifactPreference" for obj in pack["objects"])
+
+
+def test_mcp_brain_objects_query_html_visualization_route_uses_artifact_preferences(tmp_path: Path):
+    service = _service(tmp_path)
+    service.ledger.upsert_llm_brain_memory_card(
+        _accepted_preference_card(
+            "mem_html_review_preference",
+            preference="HTML review artifacts should be information dense.",
+            applies_to="html review artifact",
+        )
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "내가 선호하는 HTML review artifact 기준으로 이 산출물을 평가해줘.",
+                    "current_files": [],
+                    "consumer": "codex",
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    assert result["route"] == "html_visualization_preference"
+    assert pack["route"] == "html_visualization_preference"
+    assert any(obj["object_type"] == "ArtifactPreference" for obj in pack["objects"])
+    assert any("HTML review artifacts should be information dense." in obj["title"] for obj in pack["objects"])
+    assert "accepted_html_preference_missing" not in pack["gaps"]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert pack["route_trace"]["selected_source_lanes"] == ["reference_only"]
+    assert pack["route_trace"]["stop_reason"] == "returned_object_pack"
+
+
+def test_mcp_brain_objects_query_html_visualization_route_can_be_explicit(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "route": "html_visualization_preference",
+                    "query": "문서 정리 질문이어도 명시 route가 우선이어야 한다",
+                    "current_files": [],
+                    "consumer": "codex",
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    assert result["route"] == "html_visualization_preference"
+    assert pack["route_trace"]["route_source"] == "explicit"
+    assert pack["route_trace"]["missing_evidence"] == [
+        "accepted_html_preference_missing",
+        "visualization_preference_missing",
+    ]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+
+
+def test_mcp_brain_objects_query_html_visualization_route_filters_unrelated_preferences(tmp_path: Path):
+    service = _service(tmp_path)
+    service.ledger.upsert_llm_brain_memory_card(
+        _accepted_preference_card(
+            "mem_html_review_preference",
+            preference="HTML review artifacts should be information dense.",
+            applies_to="html review artifact",
+        )
+    )
+    service.ledger.upsert_llm_brain_memory_card(
+        _accepted_preference_card(
+            "mem_commit_preference",
+            preference="Commit messages should be concise.",
+            applies_to="commit message",
+        )
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "내가 선호하는 HTML review artifact 기준으로 이 산출물을 평가해줘.",
+                    "current_files": [],
+                    "consumer": "codex",
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    titles = [obj["title"] for obj in result["object_pack"]["objects"]]
+    assert result["route"] == "html_visualization_preference"
+    assert any("HTML review artifacts should be information dense." in title for title in titles)
+    assert all("Commit messages should be concise." not in title for title in titles)
+
+
+def test_mcp_html_preference_memory_card_rejects_private_preference_text_before_route(tmp_path: Path):
+    service = _service(tmp_path)
+
+    with pytest.raises(ValueError, match="forbidden private/source content") as excinfo:
+        service.ledger.upsert_llm_brain_memory_card(
+            _accepted_preference_card(
+                "mem_html_private_preference",
+                preference="HTML artifact note at /Users/example/private with API_KEY=secret",
+                applies_to="html review artifact",
+            )
+        )
+
+    assert "/Users/example" not in str(excinfo.value)
+    assert "API_KEY=secret" not in str(excinfo.value)
+
+
+def test_brain_objects_query_html_visualization_route_rejects_private_pack_text():
+    service = BrainReadService()
+    raw_text = "HTML artifact note at /Users/example/private with API_KEY=secret"
+    obj = {
+        "object_id": "ko:test:html-private",
+        "object_type": "ArtifactPreference",
+        "title": raw_text,
+        "summary": raw_text,
+        "authority_lane": "reference_only",
+        "payload": {"applies_to": "html review artifact"},
+    }
+
+    class _ResolvedContext:
+        def to_dict(self) -> dict:
+            return {
+                "authority": {
+                    "object_packs": {
+                        "preferences": {
+                            "schema_version": "object_pack.v1",
+                            "route": "code_style_preference",
+                            "objects": [obj],
+                            "edges": [],
+                            "evidence": [],
+                            "lanes": {"reference_only": [obj]},
+                            "verification": {},
+                            "gaps": [],
+                            "recommended_actions": [{"object_id": obj["object_id"], "action": "review"}],
+                        },
+                        "style": {
+                            "schema_version": "object_pack.v1",
+                            "route": "code_style_preference",
+                            "objects": [],
+                            "edges": [],
+                            "evidence": [],
+                            "lanes": {},
+                            "verification": {},
+                            "gaps": [],
+                            "recommended_actions": [],
+                        },
+                    }
+                },
+                "audit": {"request_hash": "sha256:" + "1" * 64},
+            }
+
+    service.brain_context_resolve = lambda **_: _ResolvedContext()  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match="private or raw") as excinfo:
+        service.brain_objects_query(
+            repository=FIXTURE_REPOSITORY,
+            branch=FIXTURE_BRANCH,
+            route="html_visualization_preference",
+            query="내가 선호하는 HTML review artifact 기준으로 이 산출물을 평가해줘.",
+            current_files=[],
+            consumer="codex",
+            response_mode="compact",
+        )
+
+    assert "/Users/example" not in str(excinfo.value)
+    assert "API_KEY=secret" not in str(excinfo.value)
 
 
 def test_mcp_brain_objects_query_deploy_route_returns_runtime_gap_pack(tmp_path: Path):

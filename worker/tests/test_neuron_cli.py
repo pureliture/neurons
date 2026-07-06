@@ -186,6 +186,38 @@ def test_neuron_knowledge_object_query_accepts_explicit_route(capsys):
     assert "object_pack_route_not_implemented" not in report["object_pack"]["gaps"]
 
 
+def test_neuron_knowledge_object_query_accepts_explicit_html_visualization_route(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--route",
+            "html_visualization_preference",
+            "--query",
+            "문서 정리 질문이어도 명시 route가 우선이어야 한다",
+            "--consumer",
+            "codex",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    pack = report["object_pack"]
+    assert rc == 0
+    assert report["route"] == "html_visualization_preference"
+    assert pack["route"] == "html_visualization_preference"
+    assert pack["route_trace"]["route_source"] == "explicit"
+    assert pack["route_trace"]["missing_evidence"] == [
+        "accepted_html_preference_missing",
+        "visualization_preference_missing",
+    ]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+
+
 def test_neuron_knowledge_object_query_infers_temporal_route(capsys):
     rc = main(
         [
@@ -268,6 +300,64 @@ def test_neuron_knowledge_object_query_infers_code_change_impact_route(capsys):
         "live_runtime_impact_unverified",
         "source_freshness_unverified",
     ]
+
+
+def test_neuron_knowledge_object_query_infers_html_visualization_preference_route(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--query",
+            "내가 선호하는 HTML review artifact 기준으로 이 산출물을 평가해줘.",
+            "--consumer",
+            "codex",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    pack = report["object_pack"]
+    assert rc == 0
+    assert report["route"] == "html_visualization_preference"
+    assert pack["route"] == "html_visualization_preference"
+    assert "accepted_html_preference_missing" in pack["gaps"]
+    assert "visualization_preference_missing" in pack["gaps"]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert pack["route_trace"]["route"] == "html_visualization_preference"
+    assert pack["route_trace"]["stop_reason"] == "missing_evidence_gap_returned"
+    assert pack["route_trace"]["missing_evidence"] == [
+        "accepted_html_preference_missing",
+        "visualization_preference_missing",
+    ]
+
+
+def test_neuron_knowledge_object_query_does_not_infer_html_route_for_generic_artifact_review(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--query",
+            "이 산출물을 평가해줘.",
+            "--consumer",
+            "codex",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["route"] == "authority_archive_separation"
+    assert report["object_pack"]["route"] == "authority_archive_separation"
+    assert report["object_pack"]["route_trace"]["route"] == "authority_archive_separation"
+    assert "accepted_html_preference_missing" not in report["object_pack"]["gaps"]
 
 
 def test_neuron_knowledge_delegates_memory_regeneration_help(capsys):

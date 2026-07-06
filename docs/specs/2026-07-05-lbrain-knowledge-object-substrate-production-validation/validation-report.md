@@ -14,6 +14,8 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 이번 continuation은 FR8 `code_change_impact` branch-local route를 추가했습니다. 해당 route는 "이 파일 바꾸면 어떤 테스트/런타임 영향 있어?"류 질문을 `RepoFile`, `VerificationCommand`, `RuntimeSurface`, `McpTool` object pack과 `validated_by`, `requires_live_evidence`, `exposes_tool` edges로 반환하고, `live_runtime_impact_unverified`, `source_freshness_unverified`, `production_mutation_forbidden` gaps를 유지합니다. 이는 local/branch evidence이며, deployed MCP image나 live runtime route proof로 승격하지 않았습니다.
 
+이번 continuation은 P7 `html_visualization_preference` branch-local route도 추가했습니다. 해당 route는 HTML review artifact 기준/선호 질문을 accepted artifact preference object pack으로 라우팅하고, accepted preference가 없으면 `accepted_html_preference_missing` 및 `visualization_preference_missing` gaps를 반환합니다. Explicit route, generic artifact negative routing, unrelated preference filtering, write-time private preference rejection, and route-pack public-safe rejection은 local tests로 검증되었습니다. 이는 P7 read-path evidence이며, P10 object browser/UI launch evidence나 deployed MCP route proof가 아닙니다.
+
 이번 continuation은 FR6 route trace도 branch-local object-query 응답에 추가했습니다. 반환된 object pack은 `object_query_route_trace.v1`로 `route`, `route_source`, 실제 non-empty `selected_source_lanes`, route `confidence`, `stop_reason`, and gap-derived `missing_evidence`를 노출합니다. 이는 query-routing 설명성 evidence이며, live route proof가 아닙니다.
 
 ## Validated
@@ -22,7 +24,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 - status: `validated`
 - evidence: `cd worker && uv run pytest -q`
-- result: `1621 passed, 9 skipped, 1 warning`
+- result: `1629 passed, 9 skipped, 1 warning`
 - note: covers object model, reference corpus, object packs, MCP stdio, CLI, context authority, ledger area boundary, and existing worker regression surface.
 
 ### local.root.gradle
@@ -53,11 +55,13 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 - status: `validated`
 - evidence: `uv run pytest -q tests/test_neuron_cli.py`
-- result: CLI route tests pass for default `authority_archive_separation`, explicit `code_style_preference`, inferred `temporal_work_recall`, inferred `code_change_impact`, and inferred `deployment_runtime_truth`.
+- result: CLI route tests pass for default `authority_archive_separation`, explicit `code_style_preference`, explicit/inferred `html_visualization_preference`, generic artifact negative routing, inferred `temporal_work_recall`, inferred `code_change_impact`, and inferred `deployment_runtime_truth`.
 - evidence: `uv run neuron-knowledge object-query --repository pureliture/neurons --branch codex/knowledge-object-review-flow-roadmap --route deployment_runtime_truth --query '이 PR merge됐어? 배포도 됐어?' --response-mode compact --consumer codex`
 - result: returned `brain_objects_query.v1` with `object_pack.v1`, `route=deployment_runtime_truth`, `runtime_evidence_unverified`, and no `object_pack_route_not_implemented`.
 - evidence: `uv run neuron-knowledge object-query --repository pureliture/neurons --branch codex/knowledge-object-review-flow-roadmap --query '이 파일 바꾸면 어떤 테스트/런타임 영향 있어?' --current-file worker/lib/agent_knowledge/llm_brain_core/objects/runtime_readiness.py --response-mode compact --consumer codex`
 - result: returned `brain_objects_query.v1` with `object_pack.v1`, `route=code_change_impact`, object types `RepoFile`, `VerificationCommand`, `RuntimeSurface`, `McpTool`, gaps `live_runtime_impact_unverified`, `source_freshness_unverified`, `production_mutation_forbidden`, and route trace `selected_source_lanes=[candidate, reference_only]`, `stop_reason=missing_evidence_gap_returned`.
+- evidence: `uv run neuron-knowledge object-query --repository pureliture/neurons --branch codex/knowledge-object-review-flow-roadmap --query '내가 선호하는 HTML review artifact 기준으로 이 산출물을 평가해줘.' --response-mode compact --consumer codex`
+- result: returned `brain_objects_query.v1` with `object_pack.v1`, `route=html_visualization_preference`, gaps `accepted_html_preference_missing` and `visualization_preference_missing`, route trace `stop_reason=missing_evidence_gap_returned`, and no `object_pack_route_not_implemented`.
 - interpretation: this is branch-local CLI parity with the MCP read-side route contract. It is read-only, does not use network, does not mutate production ledger/corpus/runtime, and does not prove that the deployed MCP image has the same route implementation.
 
 ### local.cli.okf-export
@@ -91,14 +95,21 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - status: `validated`
 - evidence: `uv run neuron-knowledge source-to-candidate-runtime-readiness --expected-commit 789b95cd2c248ee89394dcb20917a8e13d89db89`
 - result: returned `source_to_candidate_runtime_readiness.v1`, `status=PASS_WITH_GAPS`, `live_evidence_provided=false`, `production_mutation_performed=false`, `network_used=false`
-- interpretation: this validates the report surface and local product-surface claim only. The local claim now includes `brain_objects_query` plus source-to-candidate/review/approval/readiness tools, and live evidence must now include `brain_objects_query` route smokes for authority/archive, style/preference, temporal work recall, and deploy/runtime queries. It also requires live agent context product evidence to include the `agent_context_product_pack.v1` schema, allowed consumer, degraded-gap disclosure, `missing_evidence_before_promotion`, mutation-disabled policy, and safe `sanitized_evidence_packet` runtime-readiness target. Missing live evidence is now decomposed into actionable gap ids such as `live_mcp_tool_missing:<tool>`, `live_agent_context_tool_hint_missing:<tool>`, `live_agent_context_section_missing:<section>`, and `live_brain_objects_query_route_missing:<route>`. It does not prove deployed/runtime source-to-candidate activation.
+- interpretation: this validates the report surface and local product-surface claim only. The local claim now includes `brain_objects_query` plus source-to-candidate/review/approval/readiness tools, and live evidence must now include `brain_objects_query` route smokes for authority/archive, style/preference, temporal work recall, and deploy/runtime queries. `html_visualization_preference` remains branch-local P7 route evidence and is not promoted into the required live route-smoke set in this slice. It also requires live agent context product evidence to include the `agent_context_product_pack.v1` schema, allowed consumer, degraded-gap disclosure, `missing_evidence_before_promotion`, mutation-disabled policy, and safe `sanitized_evidence_packet` runtime-readiness target. Missing live evidence is now decomposed into actionable gap ids such as `live_mcp_tool_missing:<tool>`, `live_agent_context_tool_hint_missing:<tool>`, `live_agent_context_section_missing:<section>`, and `live_brain_objects_query_route_missing:<route>`. It does not prove deployed/runtime source-to-candidate activation.
 
 ### local.mcp.brain-objects-query-routes
 
 - status: `validated`
 - evidence: focused MCP stdio tests for `brain_objects_query`
-- result: broad authority/archive queries return context-authority object packs, style queries return preference/style object packs, temporal work recall queries return current-work packs, code-change-impact queries return file/test/runtime-surface impact packs, and merge/deploy queries return runtime truth gap packs without `object_pack_route_not_implemented`; returned packs include FR6 route traces for source lanes, confidence, stop reason, and missing evidence.
+- result: broad authority/archive queries return context-authority object packs, style queries return preference/style object packs, HTML/visualization preference queries return accepted artifact preference packs or explicit missing-evidence gaps, temporal work recall queries return current-work packs, code-change-impact queries return file/test/runtime-surface impact packs, and merge/deploy queries return runtime truth gap packs without `object_pack_route_not_implemented`; returned packs include FR6 route traces for source lanes, confidence, stop reason, and missing evidence.
 - interpretation: this validates the branch-local MCP read path routing only. Together with `local.cli.object-query`, local CLI and branch-local MCP now share route-aware behavior, but this still does not prove the deployed MCP runtime has this branch image.
+
+### local.mcp.p7-html-visualization-preference-route
+
+- status: `validated`
+- evidence: `uv run pytest -q tests/test_neuron_cli.py::test_neuron_knowledge_object_query_accepts_explicit_html_visualization_route tests/test_neuron_cli.py::test_neuron_knowledge_object_query_infers_html_visualization_preference_route tests/test_neuron_cli.py::test_neuron_knowledge_object_query_does_not_infer_html_route_for_generic_artifact_review tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_html_visualization_route_uses_artifact_preferences tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_html_visualization_route_can_be_explicit tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_html_visualization_route_filters_unrelated_preferences tests/test_neuron_mcp_stdio.py::test_mcp_html_preference_memory_card_rejects_private_preference_text_before_route tests/test_neuron_mcp_stdio.py::test_brain_objects_query_html_visualization_route_rejects_private_pack_text`
+- result: `8 passed, 1 warning`
+- interpretation: this is branch-local P7 read-path evidence. It proves explicit/inferred route behavior, negative routing for generic artifact review, unrelated-preference filtering, and public-safe fail-closed behavior for private preference text. It does not prove live deployed route availability and does not start P10 UI/object browser work.
 
 ### local.golden-query.fr8-code-change-impact
 
@@ -235,6 +246,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - evidence:
   - local readiness report expects read-only live `brain_objects_query` smoke for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth`.
   - `code_change_impact` is validated only as branch-local FR8 route evidence in this slice and is not yet promoted into the required live route-smoke set.
+  - `html_visualization_preference` is validated only as branch-local P7 route evidence in this slice and is not yet promoted into the required live route-smoke set.
   - current branch-local smoke did not contact live MCP and therefore reports `live_brain_objects_query_route_smokes_unverified`.
 
 ### live.production.source-to-candidate-denial-smokes
@@ -259,7 +271,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 ## Gaps
 
 - Current Codex session's `mcp__lbrain` read path can call `brain_objects_query`, but branch-local source/review/readiness tools must be deployed/reloaded before P3/P4/P9 runtime-readiness claims can be runtime-verified.
-- P1/P6/P8/P9 remain `PASS_WITH_GAPS` until live `brain_objects_query` route smokes return implemented object packs for authority/archive, style/preference, temporal work recall, and deployment/runtime truth.
+- P1/P6/P7/P8/P9 remain `PASS_WITH_GAPS` until live `brain_objects_query` route smokes return implemented object packs for authority/archive, style/preference, temporal work recall, and deployment/runtime truth, and until P7 HTML/visualization preference route evidence is intentionally promoted into live smoke requirements.
 - Live MCP image identity must move to a source revision containing PR #95 before claiming this branch's source-to-candidate activation is deployed in MCP.
 - Direct live Kubernetes/Argo status access must be available, or equivalent redacted live evidence must be supplied, before desired-state GitOps evidence is described as live rollout evidence.
 - Reference corpus store remains not configured; local CLI correctly reports planned/no mutation rather than pretending ingest completed.
@@ -275,4 +287,4 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 ## Conclusion
 
-Implementation은 local 및 contract scope에서 검증되었고 safety gates는 fail-closed로 동작합니다. 결과는 `PASS_WITH_GAPS`로 유지됩니다. 현재 Codex session의 `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 필요한 runtime truth route가 아직 구현된 live object pack을 반환하지 않고, branch-local source/review/readiness tools 및 PR #95 image identity가 live runtime에서 증명되지 않았기 때문입니다.
+Implementation은 local 및 contract scope에서 검증되었고 safety gates는 fail-closed로 동작합니다. 결과는 `PASS_WITH_GAPS`로 유지됩니다. 현재 Codex session의 `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 필요한 runtime truth route가 아직 구현된 live object pack을 반환하지 않고, branch-local source/review/readiness tools, P7 HTML/visualization route, 및 PR #95 image identity가 live runtime에서 증명되지 않았기 때문입니다.

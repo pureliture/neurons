@@ -191,6 +191,12 @@ class BrainReadService:
                 route=selected_route,
                 consumer=consumer,
             )
+        elif selected_route == "html_visualization_preference":
+            object_pack = _html_visualization_preference_object_pack(
+                pack,
+                route=selected_route,
+                consumer=consumer,
+            )
         elif selected_route == "code_style_preference":
             object_pack = _context_authority_object_pack(
                 pack,
@@ -554,6 +560,8 @@ def _route_for_query(query: str) -> str:
     text = str(query or "").lower()
     if _is_code_change_impact_query(text):
         return "code_change_impact"
+    if _is_html_visualization_preference_query(text):
+        return "html_visualization_preference"
     if any(
         token in text
         for token in (
@@ -594,6 +602,18 @@ def _is_code_change_impact_query(text: str) -> bool:
         and any(token in text for token in change_terms)
         and any(token in text for token in impact_terms)
     )
+
+
+def _is_html_visualization_preference_query(text: str) -> bool:
+    visual_medium_terms = (
+        "html",
+        "visualization",
+        "visualisation",
+        "visual",
+        "시각화",
+    )
+    preference_terms = ("preference", "선호", "review", "리뷰", "기준", "평가")
+    return any(term in text for term in visual_medium_terms) and any(term in text for term in preference_terms)
 
 
 def _authority_documents(pack: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -640,6 +660,87 @@ def _context_authority_object_pack(
     }
     ensure_public_safe(merged, "ContextAuthorityObjectPack")
     return merged
+
+
+def _html_visualization_preference_object_pack(
+    pack: Mapping[str, Any],
+    *,
+    route: str,
+    consumer: str,
+) -> dict[str, Any]:
+    merged = _context_authority_object_pack(
+        pack,
+        route=route,
+        pack_names=("preferences", "style"),
+        consumer=consumer,
+    )
+    relevant_ids = {
+        str(obj.get("object_id") or "")
+        for obj in merged.get("objects", [])
+        if isinstance(obj, Mapping) and _is_html_visualization_preference_object(obj)
+    }
+    merged["objects"] = [
+        dict(obj)
+        for obj in merged.get("objects", [])
+        if isinstance(obj, Mapping) and str(obj.get("object_id") or "") in relevant_ids
+    ]
+    lanes = merged.get("lanes") if isinstance(merged.get("lanes"), Mapping) else {}
+    merged["lanes"] = {
+        str(lane): [
+            dict(obj)
+            for obj in lane_objects
+            if isinstance(obj, Mapping) and str(obj.get("object_id") or "") in relevant_ids
+        ]
+        for lane, lane_objects in lanes.items()
+        if isinstance(lane_objects, list)
+    }
+    merged["recommended_actions"] = [
+        dict(action)
+        for action in merged.get("recommended_actions", [])
+        if isinstance(action, Mapping) and str(action.get("object_id") or "") in relevant_ids
+    ]
+    merged["audit"] = {
+        **dict(merged.get("audit") or {}),
+        "object_pack_route_source": "html_visualization_preference_pack",
+    }
+    if not relevant_ids:
+        merged["gaps"] = [
+            gap
+            for gap in merged.get("gaps", [])
+            if str(gap or "") != "context_authority_object_pack_empty"
+        ]
+        for gap in ("accepted_html_preference_missing", "visualization_preference_missing"):
+            if gap not in merged["gaps"]:
+                merged["gaps"].append(gap)
+    merged["confidence"] = {
+        "score": 0.74 if relevant_ids else 0.0,
+        "basis": "html_visualization_preference_route",
+    }
+    ensure_public_safe(merged, "HtmlVisualizationPreferenceObjectPack")
+    return merged
+
+
+def _is_html_visualization_preference_object(obj: Mapping[str, Any]) -> bool:
+    payload = obj.get("payload") if isinstance(obj.get("payload"), Mapping) else {}
+    text = " ".join(
+        [
+            str(obj.get("title") or ""),
+            str(obj.get("summary") or ""),
+            str(payload.get("scope") or ""),
+            str(payload.get("applies_to") or ""),
+        ]
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "html",
+            "review artifact",
+            "visualization",
+            "visualisation",
+            "visual artifact",
+            "시각화",
+        )
+    )
 
 
 def _empty_read_object_pack(*, route: str, consumer: str) -> dict[str, Any]:
