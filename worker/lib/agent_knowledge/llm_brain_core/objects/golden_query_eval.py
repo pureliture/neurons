@@ -1076,7 +1076,7 @@ def _empty_lane_is_stated(lane: str, gaps: list[Any]) -> bool:
 def _is_runtime_claim(query: str, response: Mapping[str, Any]) -> bool:
     route = str(response.get("route") or "").lower()
     text = f"{route} {query}".lower()
-    return any(marker in text for marker in ("runtime", "deploy", "deployment", "배포", "live"))
+    return any(marker in text for marker in ("runtime", "런타임", "deploy", "deployment", "배포", "live"))
 
 
 def _source_to_authority_fixture_pack() -> dict[str, Any]:

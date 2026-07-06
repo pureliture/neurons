@@ -3,6 +3,7 @@ from agent_knowledge.llm_brain_core.object_packs import (
     apply_candidate_review_edits,
     build_agent_context_object_packs,
     build_candidate_graph_review_pack,
+    build_code_change_impact_pack,
     build_documentation_cleanup_pack,
     build_runtime_truth_pack,
     route_spec_for,
@@ -675,6 +676,30 @@ def test_route_spec_is_declarative():
     assert "remove_edge" in review_spec["supported_edit_actions"]
     assert "reviewer_edit_does_not_mutate_authority" in review_spec["eval_assertions"]
     assert "approval_board_decision_promotes_authority" in review_spec["eval_assertions"]
+
+    impact_spec = route_spec_for("code_change_impact")
+    assert impact_spec["required_object_types"] == ["RepoFile", "VerificationCommand"]
+    assert "RuntimeSurface" in impact_spec["optional_object_types"]
+    assert "local_test_success_does_not_imply_runtime_ready" in impact_spec["eval_assertions"]
+
+
+def test_code_change_impact_pack_links_file_to_tests_and_runtime_surface():
+    pack = build_code_change_impact_pack(
+        current_files=["worker/lib/agent_knowledge/llm_brain_core/objects/runtime_readiness.py"],
+        consumer="codex",
+    )
+
+    object_types = {obj["object_type"] for obj in pack["objects"]}
+    edge_types = {edge["edge_type"] for edge in pack["edges"]}
+
+    assert pack["route"] == "code_change_impact"
+    assert {"RepoFile", "VerificationCommand", "RuntimeSurface"} <= object_types
+    assert {"validated_by", "requires_live_evidence"} <= edge_types
+    assert any(action["action"] == "run_tests" for action in pack["recommended_actions"])
+    assert any(action["action"] == "verify_runtime" for action in pack["recommended_actions"])
+    assert "live_runtime_impact_unverified" in pack["gaps"]
+    assert "production_mutation_forbidden" in pack["gaps"]
+    assert pack["audit"]["consumer"] == "codex"
 
 
 def test_agent_context_object_packs_include_fr11_sections():

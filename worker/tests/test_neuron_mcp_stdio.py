@@ -919,6 +919,42 @@ def test_mcp_brain_objects_query_deploy_route_returns_runtime_gap_pack(tmp_path:
     assert "object_pack_route_not_implemented" not in pack["gaps"]
 
 
+def test_mcp_brain_objects_query_code_change_impact_route_returns_impact_pack(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "이 파일 바꾸면 어떤 테스트/런타임 영향 있어?",
+                    "current_files": [
+                        "worker/lib/agent_knowledge/llm_brain_core/objects/runtime_readiness.py"
+                    ],
+                    "consumer": "codex",
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    object_types = {obj["object_type"] for obj in pack["objects"]}
+    assert result["route"] == "code_change_impact"
+    assert {"RepoFile", "VerificationCommand", "RuntimeSurface"} <= object_types
+    assert any(edge["edge_type"] == "validated_by" for edge in pack["edges"])
+    assert any(edge["edge_type"] == "requires_live_evidence" for edge in pack["edges"])
+    assert "live_runtime_impact_unverified" in pack["gaps"]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert pack["response_mode"] == "compact"
+
+
 def test_mcp_object_proposal_create_local_test_and_production_denial(tmp_path: Path):
     service = _service(tmp_path)
     local = handle_jsonrpc_message(

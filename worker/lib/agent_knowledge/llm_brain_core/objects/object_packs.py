@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Mapping
 
-from .._util import ensure_public_safe, hash_payload, public_safe_text
+from .._util import ensure_public_safe, hash_payload, public_safe_text, short_hash
 from .knowledge_objects import AuthorityDecision, EvidenceRef, KnowledgeEdge, KnowledgeObjectEnvelope
 
 
@@ -110,6 +110,25 @@ ROUTE_SPECS: dict[str, dict[str, Any]] = {
         "redaction_mode": "object_safe",
         "recommended_action_vocabulary": ["verify_runtime", "request_evidence"],
         "eval_assertions": ["merge_does_not_imply_deploy"],
+    },
+    "code_change_impact": {
+        "required_object_types": ["RepoFile", "VerificationCommand"],
+        "optional_object_types": ["RuntimeSurface", "McpTool", "Test"],
+        "allowed_authority_lanes": ["reference_only", "candidate", "proposal_only"],
+        "verification_policy": "local_tests_and_live_runtime_separated",
+        "evidence_policy": "require_current_file_or_gap",
+        "redaction_mode": "object_safe",
+        "recommended_action_vocabulary": [
+            "inspect_change",
+            "run_tests",
+            "verify_runtime",
+            "request_evidence",
+        ],
+        "eval_assertions": [
+            "source_file_maps_to_verification_commands",
+            "source_file_maps_to_runtime_surface_when_applicable",
+            "local_test_success_does_not_imply_runtime_ready",
+        ],
     },
     "candidate_graph_review": {
         "required_object_types": ["KnowledgeObjectEnvelope"],
@@ -333,6 +352,241 @@ def build_runtime_truth_pack(
         pack["recommended_actions"].append({"action": "verify_runtime", "object_id": ""})
     ensure_public_safe(pack, "RuntimeTruthPack")
     return pack
+
+
+def build_code_change_impact_pack(
+    *,
+    current_files: list[str],
+    route: str = "code_change_impact",
+    consumer: str = "unspecified",
+) -> dict[str, Any]:
+    pack = _empty_pack(route)
+    safe_files = [_safe_repo_path_ref(path) for path in current_files if str(path or "").strip()]
+    safe_files = [path for path in safe_files if path]
+    pack["audit"] = {
+        "request_hash": hash_payload([route, safe_files]),
+        "consumer": public_safe_text(consumer, max_chars=80),
+        "object_pack_route_source": "code_change_impact_pack",
+    }
+    if not safe_files:
+        pack["gaps"].append("current_files_missing")
+
+    repo_objects = [_repo_file_object(path, pack=pack) for path in safe_files]
+    verification_objects = [_verification_command_object(command, pack=pack) for command in _impact_verification_commands(safe_files)]
+    runtime_surface = _runtime_surface_object(pack=pack)
+    mcp_tool = _mcp_tool_object(pack=pack)
+
+    pack["objects"].extend(repo_objects)
+    pack["objects"].extend(verification_objects)
+    pack["objects"].append(runtime_surface)
+    pack["objects"].append(mcp_tool)
+
+    for repo_obj in repo_objects:
+        for command_obj in verification_objects:
+            pack["edges"].append(
+                KnowledgeEdge.from_parts(
+                    edge_type="validated_by",
+                    from_object_id=repo_obj["object_id"],
+                    to_object_id=command_obj["object_id"],
+                    evidence_refs=sorted(set(repo_obj.get("evidence_refs", []) + command_obj.get("evidence_refs", []))),
+                    lifecycle_status="observed",
+                    authority_lane="reference_only",
+                    verification_state="unverified",
+                    confidence={"score": 0.74, "basis": "route_spec_verification_mapping"},
+                    payload={"mutation_performed": False},
+                ).to_dict()
+            )
+        pack["edges"].append(
+            KnowledgeEdge.from_parts(
+                edge_type="requires_live_evidence",
+                from_object_id=repo_obj["object_id"],
+                to_object_id=runtime_surface["object_id"],
+                evidence_refs=list(repo_obj.get("evidence_refs", [])),
+                lifecycle_status="observed",
+                authority_lane="candidate",
+                verification_state="runtime_unverified",
+                confidence={"score": 0.68, "basis": "runtime_read_path_may_be_impacted"},
+                payload={"deployed_runtime_claim": False, "mutation_performed": False},
+            ).to_dict()
+        )
+    pack["edges"].append(
+        KnowledgeEdge.from_parts(
+            edge_type="exposes_tool",
+            from_object_id=runtime_surface["object_id"],
+            to_object_id=mcp_tool["object_id"],
+            evidence_refs=list(runtime_surface.get("evidence_refs", [])),
+            lifecycle_status="observed",
+            authority_lane="candidate",
+            verification_state="runtime_unverified",
+            confidence={"score": 0.7, "basis": "object_native_read_path_contract"},
+            payload={"deployed_runtime_claim": False, "mutation_performed": False},
+        ).to_dict()
+    )
+
+    _rebuild_lanes(pack)
+    _rebuild_verification(pack)
+    _refresh_empty_lane_gaps(pack)
+    pack["freshness_gaps"] = ["source_freshness_unverified"]
+    pack["verification"]["freshness_gaps"] = [{"reason": "source_freshness_unverified"}]
+    pack["verification"]["runtime_unverified"].append(
+        {
+            "reason": "live_runtime_impact_unverified",
+            "surface_ref": runtime_surface["object_id"],
+            "protected_values_returned": False,
+        }
+    )
+    for obj in repo_objects:
+        pack["recommended_actions"].append({"object_id": obj["object_id"], "action": "inspect_change"})
+    for obj in verification_objects:
+        pack["recommended_actions"].append({"object_id": obj["object_id"], "action": "run_tests"})
+    pack["recommended_actions"].append({"object_id": runtime_surface["object_id"], "action": "verify_runtime"})
+    pack["gaps"].append("live_runtime_impact_unverified")
+    pack["gaps"].append("production_mutation_forbidden")
+    pack["gaps"].append("source_freshness_unverified")
+    pack["confidence"] = {
+        "score": 0.72 if repo_objects else 0.42,
+        "basis": "deterministic_code_change_impact_route",
+    }
+    ensure_public_safe(pack, "CodeChangeImpactPack")
+    return pack
+
+
+def _safe_repo_path_ref(path: str) -> str:
+    raw = " ".join(str(path or "").strip().split())
+    if not raw:
+        return ""
+    if raw.startswith(("/", "~")) or raw.startswith("\\\\") or ":/" in raw or ":\\" in raw:
+        return f"repo_path:{short_hash(raw)}"
+    return public_safe_text(raw, max_chars=240)
+
+
+def _impact_verification_commands(current_files: list[str]) -> list[str]:
+    commands = ["cd worker && uv run pytest -q"]
+    if any(path.startswith("worker/lib/agent_knowledge/llm_brain_core/") for path in current_files):
+        commands.insert(
+            0,
+            "cd worker && uv run pytest -q tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py tests/test_object_packs.py",
+        )
+    return commands
+
+
+def _repo_file_object(path: str, *, pack: dict[str, Any]) -> dict[str, Any]:
+    evidence = EvidenceRef.from_parts(
+        evidence_type="current_file_locator",
+        authority_lane="reference_only",
+        verification_state="unverified",
+        locator={"kind": "relative_repo_path", "value": path},
+        content_hash=hash_payload({"path": path, "kind": "current_file_locator"}),
+        summary=f"Current file locator for {path}.",
+        producer={"tool": "brain_objects_query", "route": "code_change_impact"},
+    )
+    pack["evidence"].append(evidence.to_view())
+    return KnowledgeObjectEnvelope.from_parts(
+        object_type="RepoFile",
+        natural_key=path,
+        scope={"project": "neurons"},
+        title=path,
+        summary="Current file selected for code-change impact analysis.",
+        lifecycle_status="observed",
+        authority_lane="reference_only",
+        verification_state="unverified",
+        review_state="not_required",
+        content_hash=hash_payload({"object_type": "RepoFile", "path": path}),
+        evidence_refs=[evidence.evidence_id],
+        confidence={"score": 0.76, "basis": "current_files_argument"},
+        recommended_action="inspect_change",
+        payload={"path_ref": path, "mutation_performed": False},
+    ).to_dict()
+
+
+def _verification_command_object(command: str, *, pack: dict[str, Any]) -> dict[str, Any]:
+    safe_command = public_safe_text(command, max_chars=240)
+    evidence = EvidenceRef.from_parts(
+        evidence_type="verification_command_contract",
+        authority_lane="reference_only",
+        verification_state="unverified",
+        locator={"kind": "command_ref", "value": safe_command},
+        content_hash=hash_payload({"command": safe_command, "route": "code_change_impact"}),
+        summary=f"Verification command candidate: {safe_command}.",
+        producer={"tool": "brain_objects_query", "route": "code_change_impact"},
+    )
+    pack["evidence"].append(evidence.to_view())
+    return KnowledgeObjectEnvelope.from_parts(
+        object_type="VerificationCommand",
+        natural_key=safe_command,
+        scope={"project": "neurons"},
+        title=safe_command,
+        summary="Local verification command candidate; success is not production readiness.",
+        lifecycle_status="observed",
+        authority_lane="reference_only",
+        verification_state="unverified",
+        review_state="not_required",
+        content_hash=hash_payload({"object_type": "VerificationCommand", "command": safe_command}),
+        evidence_refs=[evidence.evidence_id],
+        confidence={"score": 0.74, "basis": "repo_test_policy"},
+        recommended_action="run_tests",
+        payload={"command_ref": safe_command, "production_readiness_claim": False},
+    ).to_dict()
+
+
+def _runtime_surface_object(*, pack: dict[str, Any]) -> dict[str, Any]:
+    evidence = EvidenceRef.from_parts(
+        evidence_type="runtime_surface_contract",
+        authority_lane="reference_only",
+        verification_state="runtime_unverified",
+        locator={"kind": "runtime_surface_ref", "value": "lbrain_mcp_read_path"},
+        content_hash=hash_payload({"surface": "lbrain_mcp_read_path", "route": "code_change_impact"}),
+        summary="Runtime read-path impact requires live deployed evidence.",
+        producer={"tool": "brain_objects_query", "route": "code_change_impact"},
+        gaps=["live_runtime_impact_unverified"],
+    )
+    pack["evidence"].append(evidence.to_view())
+    return KnowledgeObjectEnvelope.from_parts(
+        object_type="RuntimeSurface",
+        natural_key="lbrain_mcp_read_path",
+        scope={"project": "neurons"},
+        title="LBrain MCP read path",
+        summary="Deployed read path that must be checked separately from local tests.",
+        lifecycle_status="observed",
+        authority_lane="candidate",
+        verification_state="runtime_unverified",
+        review_state="needs_review",
+        content_hash=hash_payload({"object_type": "RuntimeSurface", "surface": "lbrain_mcp_read_path"}),
+        evidence_refs=[evidence.evidence_id],
+        confidence={"score": 0.68, "basis": "runtime_surface_contract"},
+        recommended_action="verify_runtime",
+        payload={"deployed_runtime_claim": False, "mutation_performed": False},
+    ).to_dict()
+
+
+def _mcp_tool_object(*, pack: dict[str, Any]) -> dict[str, Any]:
+    evidence = EvidenceRef.from_parts(
+        evidence_type="mcp_tool_contract",
+        authority_lane="reference_only",
+        verification_state="runtime_unverified",
+        locator={"kind": "mcp_tool_ref", "value": "brain_objects_query"},
+        content_hash=hash_payload({"tool": "brain_objects_query", "route": "code_change_impact"}),
+        summary="Object-native query tool route requires live MCP smoke before runtime readiness claim.",
+        producer={"tool": "brain_objects_query", "route": "code_change_impact"},
+        gaps=["live_runtime_impact_unverified"],
+    )
+    pack["evidence"].append(evidence.to_view())
+    return KnowledgeObjectEnvelope.from_parts(
+        object_type="McpTool",
+        natural_key="brain_objects_query",
+        scope={"project": "neurons"},
+        title="brain_objects_query",
+        summary="Object-native read tool that should expose the code-change-impact route after deployment.",
+        lifecycle_status="observed",
+        authority_lane="candidate",
+        verification_state="runtime_unverified",
+        review_state="needs_review",
+        content_hash=hash_payload({"object_type": "McpTool", "tool": "brain_objects_query"}),
+        evidence_refs=[evidence.evidence_id],
+        confidence={"score": 0.7, "basis": "object_native_read_path_contract"},
+        recommended_action="verify_runtime",
+        payload={"deployed_runtime_claim": False, "mutation_performed": False},
+    ).to_dict()
 
 
 def build_candidate_graph_review_pack(

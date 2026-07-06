@@ -17,7 +17,11 @@ from .context_builder import (
 from .document_bridge import DisabledDocumentBridge, DocumentBridge
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
 from .models import EvidenceRequest
-from .objects.object_packs import build_documentation_cleanup_pack, build_runtime_truth_pack
+from .objects.object_packs import (
+    build_code_change_impact_pack,
+    build_documentation_cleanup_pack,
+    build_runtime_truth_pack,
+)
 from .objects.reference_corpus import default_corpus_policy_status
 from .source_ref import SourceRefResolver
 
@@ -180,6 +184,12 @@ class BrainReadService:
                 "consumer": consumer,
                 "object_pack_route_source": "runtime_truth_pack",
             }
+        elif selected_route == "code_change_impact":
+            object_pack = build_code_change_impact_pack(
+                current_files=current_files,
+                route=selected_route,
+                consumer=consumer,
+            )
         elif selected_route == "code_style_preference":
             object_pack = _context_authority_object_pack(
                 pack,
@@ -540,6 +550,8 @@ _project_from_repository = project_from_repository
 
 def _route_for_query(query: str) -> str:
     text = str(query or "").lower()
+    if _is_code_change_impact_query(text):
+        return "code_change_impact"
     if any(
         token in text
         for token in (
@@ -567,6 +579,19 @@ def _route_for_query(query: str) -> str:
     if "style" in text or "스타일" in text or "preference" in text or "선호" in text:
         return "code_style_preference"
     return "authority_archive_separation"
+
+
+def _is_code_change_impact_query(text: str) -> bool:
+    if "code change impact" in text:
+        return True
+    file_terms = ("파일", "file", "current file", "current_files", "repo path", "source path")
+    change_terms = ("바꾸", "변경", "수정", "고치", "change", "edit", "touch", "modify")
+    impact_terms = ("영향", "impact", "테스트", "test", "런타임", "runtime", "검증", "verify")
+    return (
+        any(token in text for token in file_terms)
+        and any(token in text for token in change_terms)
+        and any(token in text for token in impact_terms)
+    )
 
 
 def _authority_documents(pack: Mapping[str, Any]) -> list[dict[str, Any]]:

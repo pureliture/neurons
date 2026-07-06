@@ -5,6 +5,7 @@ import json
 from agent_knowledge.cli import main
 from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
+    REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
     REQUIRED_RUNTIME_TOOL_NAMES,
     build_source_to_candidate_runtime_readiness_report,
 )
@@ -166,6 +167,10 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.production.object_proposal_denial"]["status"] == "denied_as_expected"
     assert claims["live.production.object_decision_denial"]["status"] == "denied_as_expected"
     assert claims["live.production.object_authority_gate_policy"]["status"] == "validated"
+
+
+def test_runtime_readiness_keeps_fr8_route_out_of_required_live_smokes_until_deployed():
+    assert "code_change_impact" not in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
 
 
 def test_runtime_readiness_fails_when_agent_context_tool_hint_allows_execution_or_mutation():
