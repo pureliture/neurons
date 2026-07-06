@@ -630,6 +630,18 @@ def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     failures: list[str] = []
     if evidence.get("schema_version") != "object_extraction_runtime_truth_preview.v1":
         failures.append("p8_schema_mismatch")
+    if evidence.get("runtime_evidence_collection_plan_schema") != "source_to_candidate_runtime_evidence_collection_plan.v1":
+        failures.append("p8_runtime_evidence_collection_plan_missing")
+    if evidence.get("runtime_evidence_collection_plan_status") != "ready":
+        failures.append("p8_runtime_evidence_collection_plan_not_ready")
+    if bool(evidence.get("runtime_evidence_collection_plan_network_used")):
+        failures.append("p8_runtime_evidence_collection_plan_used_network")
+    if bool(evidence.get("runtime_evidence_collection_plan_mutation_allowed")):
+        failures.append("p8_runtime_evidence_collection_plan_mutation_allowed")
+    if bool(evidence.get("runtime_evidence_collection_plan_production_mutation_performed")):
+        failures.append("p8_runtime_evidence_collection_plan_mutated_production")
+    if evidence.get("runtime_evidence_collection_plan_readiness_claim") != "plan_only_not_runtime_evidence":
+        failures.append("p8_runtime_evidence_collection_plan_claims_live_evidence")
     runtime_evidence_count = int(evidence.get("runtime_verified_count") or 0) + int(
         evidence.get("runtime_unverified_count") or 0
     )
@@ -650,6 +662,8 @@ def _p8_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
         gaps.append("p8_runtime_evidence_unverified")
     if int(evidence.get("runtime_verified_count") or 0) < 1:
         gaps.append("p8_runtime_verified_evidence_missing")
+    if evidence.get("runtime_evidence_collection_plan_readiness_claim") == "plan_only_not_runtime_evidence":
+        gaps.append("p8_runtime_evidence_collection_plan_not_live_evidence")
     return gaps
 
 
@@ -769,19 +783,21 @@ def _p7_preference_artifact_evidence() -> dict[str, Any]:
 
 def _p8_runtime_authority_evidence() -> dict[str, Any]:
     from .extraction_pipeline import run_runtime_truth_extraction_preview
+    from .runtime_readiness import build_source_to_candidate_runtime_evidence_collection_plan
 
+    expected_commit = "e3f6296"
     report = run_runtime_truth_extraction_preview(
-        pull_request={"id": "pr:95", "merged": False, "head_sha": "e3f6296"},
+        pull_request={"id": "pr:95", "merged": False, "head_sha": expected_commit},
         deployment={
             "target": "production",
             "artifact_digest": "sha256:" + "a" * 64,
-            "deployed_source_commit": "e3f6296",
+            "deployed_source_commit": expected_commit,
             "private_authority_ref": "redacted-private-authority",
         },
         live_evidence=None,
         ci_statuses=[
-            {"name": "worker pytest", "conclusion": "SUCCESS", "commit_sha": "e3f6296"},
-            {"name": "gradle-test", "conclusion": "SUCCESS", "commit_sha": "e3f6296"},
+            {"name": "worker pytest", "conclusion": "SUCCESS", "commit_sha": expected_commit},
+            {"name": "gradle-test", "conclusion": "SUCCESS", "commit_sha": expected_commit},
         ],
         runtime_surface={
             "surface_ref": "lbrain-mcp-read-path",
@@ -795,6 +811,12 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
     preview = report.get("pack_preview") if isinstance(report.get("pack_preview"), Mapping) else {}
     identity = report.get("deployed_artifact_identity") if isinstance(report.get("deployed_artifact_identity"), Mapping) else {}
     permission = report.get("permission_check") if isinstance(report.get("permission_check"), Mapping) else {}
+    collection_plan = build_source_to_candidate_runtime_evidence_collection_plan(
+        expected_commit=expected_commit,
+        repository="pureliture/neurons",
+        branch="codex/knowledge-object-review-flow-roadmap",
+        consumer="codex",
+    )
     return {
         "phase": "P8",
         "schema_version": str(report.get("schema_version") or ""),
@@ -808,6 +830,15 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         "permission": str(permission.get("permission") or ""),
         "permission_reason": str(permission.get("reason") or ""),
         "authority_write_performed": bool(permission.get("authority_write_performed")),
+        "runtime_evidence_collection_plan_schema": str(collection_plan.get("schema_version") or ""),
+        "runtime_evidence_collection_plan_status": str(collection_plan.get("status") or ""),
+        "runtime_evidence_collection_plan_required_step_count": len(collection_plan.get("required_steps") or []),
+        "runtime_evidence_collection_plan_network_used": bool(collection_plan.get("network_used")),
+        "runtime_evidence_collection_plan_mutation_allowed": bool(collection_plan.get("mutation_allowed")),
+        "runtime_evidence_collection_plan_production_mutation_performed": bool(
+            collection_plan.get("production_mutation_performed")
+        ),
+        "runtime_evidence_collection_plan_readiness_claim": str(collection_plan.get("readiness_claim") or ""),
         "gaps": list(preview.get("gaps") or []),
         "production_mutation_performed": bool(report.get("production_mutation_performed")),
     }
