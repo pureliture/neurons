@@ -454,6 +454,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
         "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
         "preference_artifact_memory": _preference_artifact_memory_evidence(),
         "permission_sensitive_audit": _permission_sensitive_audit_evidence(),
+        "agent_context_startup_runtime": _agent_context_startup_runtime_evidence(),
         "production_denials": {
             BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
                 "status": "denied",
@@ -615,6 +616,11 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_templ
     assert (
         template["packet_field_templates"]["permission_sensitive_audit"]["schema_version"]
         == "permission_sensitive_runtime_audit_evidence.v1"
+    )
+    assert "agent_context_startup_runtime" in template["required_packet_fields"]
+    assert (
+        template["packet_field_templates"]["agent_context_startup_runtime"]["schema_version"]
+        == "agent_context_startup_runtime_evidence.v1"
     )
     assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == 4
 
@@ -797,6 +803,7 @@ def _runtime_readiness_complete_evidence(
         "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
         "preference_artifact_memory": _preference_artifact_memory_evidence(),
         "permission_sensitive_audit": _permission_sensitive_audit_evidence(),
+        "agent_context_startup_runtime": _agent_context_startup_runtime_evidence(),
         "production_denials": {
             BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
                 "status": "denied",
@@ -1054,6 +1061,50 @@ def _permission_sensitive_audit_evidence() -> dict:
             "status": "recorded",
             "event_count": 2,
             "production_mutation_performed": False,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+
+
+def _agent_context_startup_runtime_evidence() -> dict:
+    return {
+        "schema_version": "agent_context_startup_runtime_evidence.v1",
+        "startup_context": {
+            "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
+            "loaded_on_startup": True,
+            "section_counts": {
+                "style_preference": 1,
+                "active_work": 1,
+                "required_verification": 1,
+            },
+            "surface_policy": {"mutation_allowed": False},
+            "degraded_gap_disclosure_present": True,
+            "missing_evidence_before_promotion_present": True,
+        },
+        "read_path_smoke": {
+            "tool": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+            "read_only": True,
+            "routes_checked": [
+                "authority_archive_separation",
+                "code_style_preference",
+                "temporal_work_recall",
+                "deployment_runtime_truth",
+            ],
+            "production_mutation_performed": False,
+        },
+        "runtime_enforcement": {
+            "direct_execution_allowed": False,
+            "production_mutation_allowed": False,
+            "raw_private_context_blocked": True,
+            "approval_scope_blocker_enforced": True,
+            "stale_or_degraded_disclosure_present": True,
         },
         "postcheck": {
             "status": "validated",
