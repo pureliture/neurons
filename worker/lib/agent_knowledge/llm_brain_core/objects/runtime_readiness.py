@@ -42,6 +42,22 @@ OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS = (
 OBJECT_AUTHORITY_PRODUCTION_RUNTIME_FLAG = "--allow-object-authority-production-writes"
 PERMISSION_SENSITIVE_AGENT_CONTEXT_TOOLS = ("brain_approval_board_decide",)
 RUNTIME_READINESS_AGENT_CONTEXT_TOOL = "brain_source_to_candidate_runtime_readiness"
+EVIDENCE_PROVENANCE_SCHEMA = "source_to_candidate_runtime_evidence_provenance.v1"
+ALLOWED_EVIDENCE_COLLECTION_MODES = {
+    "configured_mcp_read_path",
+    "live_runtime_probe",
+    "local_test_replay",
+    "post_deploy_read_only_smoke",
+    "redacted_operator_packet",
+    "sanitized_file",
+}
+LIVE_EVIDENCE_COLLECTION_MODES = {
+    "configured_mcp_read_path",
+    "live_runtime_probe",
+    "post_deploy_read_only_smoke",
+    "redacted_operator_packet",
+}
+ALLOWED_EVIDENCE_MUTATION_SCOPES = {"none", "bounded_production_authority_execution"}
 
 
 def build_source_to_candidate_runtime_readiness_report(
@@ -53,6 +69,7 @@ def build_source_to_candidate_runtime_readiness_report(
     local_gate = build_source_to_authority_quality_gate_report()
     claims = [
         _local_product_surface_claim(local_gate),
+        _live_evidence_provenance_claim(evidence),
         _live_tools_claim(evidence),
         _live_agent_context_tool_hints_claim(evidence),
         _live_agent_context_product_sections_claim(evidence),
@@ -72,6 +89,9 @@ def build_source_to_candidate_runtime_readiness_report(
         if isinstance(gap, str) and gap
     )
     failed = [claim["claim_id"] for claim in claims if claim["status"] == "failed"]
+    provenance_claim = next(
+        claim for claim in claims if claim["claim_id"] == "live.evidence.provenance"
+    )
     report = {
         "schema_version": "source_to_candidate_runtime_readiness.v1",
         "status": "FAIL" if failed else ("PASS_WITH_GAPS" if gaps else "PASS"),
@@ -82,6 +102,8 @@ def build_source_to_candidate_runtime_readiness_report(
         "live_evidence_provided": bool(evidence),
         "production_mutation_performed": any(_claim_reports_mutation(claim) for claim in claims),
         "network_used": False,
+        "evidence_collection_network_used": provenance_claim.get("network_used_for_evidence") is True,
+        "evidence_provenance": _report_evidence_provenance(provenance_claim),
         "local_gate_status": local_gate["status"],
         "release_quality_gate": "not_green" if gaps else "green",
     }
@@ -105,6 +127,115 @@ def _local_product_surface_claim(local_gate: Mapping[str, Any]) -> dict[str, Any
         "covered_tools": list(REQUIRED_RUNTIME_TOOL_NAMES),
         "gaps": ["local_product_surface_checks_failed"] if failed else [],
         "failed_checks": failed,
+    }
+
+
+def _live_evidence_provenance_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    if not evidence:
+        return {
+            "claim_id": "live.evidence.provenance",
+            "evidence_class": "runtime_evidence_provenance",
+            "status": "not_validated",
+            "schema_version": "",
+            "collection_mode": "missing",
+            "is_live": False,
+            "network_used_for_evidence": False,
+            "mutation_scope": "none",
+            "redaction_check": "missing",
+            "gaps": ["live_evidence_provenance_unverified"],
+        }
+    provenance = evidence.get("evidence_provenance")
+    provenance = provenance if isinstance(provenance, Mapping) else {}
+    if not provenance:
+        return {
+            "claim_id": "live.evidence.provenance",
+            "evidence_class": "runtime_evidence_provenance",
+            "status": "failed",
+            "schema_version": "",
+            "collection_mode": "missing",
+            "is_live": False,
+            "network_used_for_evidence": False,
+            "mutation_scope": "unknown",
+            "redaction_check": "missing",
+            "gaps": ["live_evidence_provenance_missing"],
+        }
+    collection_mode = public_safe_text(str(provenance.get("collection_mode") or ""), max_chars=80)
+    mutation_scope = public_safe_text(str(provenance.get("mutation_scope") or ""), max_chars=80)
+    failures = _evidence_provenance_failures(
+        provenance=provenance,
+        collection_mode=collection_mode,
+        mutation_scope=mutation_scope,
+        execution_reports_mutation=_evidence_execution_reports_mutation(evidence),
+    )
+    redaction_check = "forbidden_fields_present" if any(
+        gap
+        in failures
+        for gap in (
+            "live_evidence_provenance_raw_private_evidence_returned",
+            "live_evidence_provenance_secret_returned",
+            "live_evidence_provenance_host_topology_returned",
+            "live_evidence_provenance_raw_external_ids_returned",
+        )
+    ) else "redacted_only"
+    return {
+        "claim_id": "live.evidence.provenance",
+        "evidence_class": "runtime_evidence_provenance",
+        "status": "failed" if failures else "validated",
+        "schema_version": public_safe_text(str(provenance.get("schema_version") or ""), max_chars=80),
+        "collection_mode": collection_mode,
+        "source": collection_mode,
+        "is_live": collection_mode in LIVE_EVIDENCE_COLLECTION_MODES,
+        "network_used_for_evidence": provenance.get("network_used") is True,
+        "mutation_scope": mutation_scope,
+        "redaction_check": redaction_check,
+        "gaps": failures,
+    }
+
+
+def _evidence_provenance_failures(
+    *,
+    provenance: Mapping[str, Any],
+    collection_mode: str,
+    mutation_scope: str,
+    execution_reports_mutation: bool,
+) -> list[str]:
+    failures: list[str] = []
+    if provenance.get("schema_version") != EVIDENCE_PROVENANCE_SCHEMA:
+        failures.append("live_evidence_provenance_schema_mismatch")
+    if collection_mode not in ALLOWED_EVIDENCE_COLLECTION_MODES:
+        failures.append("live_evidence_provenance_source_unknown")
+    if mutation_scope not in ALLOWED_EVIDENCE_MUTATION_SCOPES:
+        failures.append("live_evidence_provenance_mutation_scope_unknown")
+    if execution_reports_mutation and mutation_scope != "bounded_production_authority_execution":
+        failures.append("live_evidence_provenance_mutation_scope_mismatch")
+    if not execution_reports_mutation and mutation_scope != "none":
+        failures.append("live_evidence_provenance_unexpected_mutation_scope")
+    if provenance.get("raw_private_evidence_returned") is not False:
+        failures.append("live_evidence_provenance_raw_private_evidence_returned")
+    if provenance.get("secret_returned") is not False:
+        failures.append("live_evidence_provenance_secret_returned")
+    if provenance.get("host_topology_returned") is not False:
+        failures.append("live_evidence_provenance_host_topology_returned")
+    if provenance.get("raw_external_ids_returned") is not False:
+        failures.append("live_evidence_provenance_raw_external_ids_returned")
+    return _dedupe(failures)
+
+
+def _evidence_execution_reports_mutation(evidence: Mapping[str, Any]) -> bool:
+    execution = evidence.get("production_authority_execution")
+    execution = execution if isinstance(execution, Mapping) else {}
+    proposal = execution.get("proposal") if isinstance(execution.get("proposal"), Mapping) else {}
+    decision = execution.get("decision") if isinstance(execution.get("decision"), Mapping) else {}
+    return _bounded_execution_reports_mutation(proposal, decision)
+
+
+def _report_evidence_provenance(claim: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "source": public_safe_text(str(claim.get("source") or claim.get("collection_mode") or ""), max_chars=80),
+        "is_live": claim.get("is_live") is True,
+        "network_used_for_evidence": claim.get("network_used_for_evidence") is True,
+        "mutation_scope": public_safe_text(str(claim.get("mutation_scope") or ""), max_chars=80),
+        "redaction_check": public_safe_text(str(claim.get("redaction_check") or ""), max_chars=80),
     }
 
 

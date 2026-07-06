@@ -481,6 +481,11 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
             "contains_expected_commit": True,
             "identity_source": "redacted_live_runtime_evidence",
         },
+        "evidence_provenance": _runtime_evidence_provenance(
+            collection_mode="post_deploy_read_only_smoke",
+            mutation_scope="none",
+            network_used=True,
+        ),
     }
 
     response = handle_jsonrpc_message(
@@ -504,6 +509,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
     assert report["status"] == "PASS_WITH_GAPS"
     assert report["production_mutation_performed"] is False
     assert report["network_used"] is False
+    assert report["evidence_collection_network_used"] is True
     assert "bounded_production_authority_execution_unverified" in report["gaps"]
 
 
@@ -520,6 +526,25 @@ def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None) -> 
             "recommended_actions": [{"object_id": f"ko:test:{route}", "action": "review"}],
             "gaps": list(gaps or []),
         },
+    }
+
+
+def _runtime_evidence_provenance(
+    *,
+    collection_mode: str,
+    mutation_scope: str,
+    network_used: bool,
+) -> dict:
+    return {
+        "schema_version": "source_to_candidate_runtime_evidence_provenance.v1",
+        "collection_mode": collection_mode,
+        "collector": "redacted_operator_or_agent",
+        "network_used": network_used,
+        "mutation_scope": mutation_scope,
+        "raw_private_evidence_returned": False,
+        "secret_returned": False,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": False,
     }
 
 
@@ -594,6 +619,13 @@ def _runtime_readiness_complete_evidence(
             "contains_expected_commit": True,
             "identity_source": "redacted_live_runtime_evidence",
         },
+        "evidence_provenance": _runtime_evidence_provenance(
+            collection_mode="local_test_replay",
+            mutation_scope="bounded_production_authority_execution"
+            if production_authority_execution is not None
+            else "none",
+            network_used=False,
+        ),
     }
     if production_authority_execution is not None:
         evidence["production_authority_execution"] = production_authority_execution
