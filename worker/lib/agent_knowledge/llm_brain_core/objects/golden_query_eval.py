@@ -507,6 +507,7 @@ def _object_native_product_surface_checks() -> list[dict[str, Any]]:
     from agent_knowledge.mcp_tools import (
         BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
         BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+        BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
         BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
         tool_registry,
     )
@@ -558,6 +559,20 @@ def _object_native_product_surface_checks() -> list[dict[str, Any]]:
             "production_target_denied": True,
             "production_mutation_performed": False,
         },
+        {
+            "id": "mcp_source_to_candidate_runtime_readiness_tool",
+            "surface": "mcp",
+            "tool": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+            "result": _pass_fail(
+                _tool_has_properties(
+                    registry,
+                    BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                    ("live_evidence", "expected_commit"),
+                )
+            ),
+            "network_used": False,
+            "production_mutation_performed": False,
+        },
     ]
 
 
@@ -578,6 +593,15 @@ def _tool_requires_fields(registry: Mapping[str, Any], tool_name: str, expected:
     schema = tool.get("inputSchema")
     required = schema.get("required") if isinstance(schema, Mapping) else []
     return all(field in required for field in expected)
+
+
+def _tool_has_properties(registry: Mapping[str, Any], tool_name: str, expected: tuple[str, ...]) -> bool:
+    tool = registry.get(tool_name)
+    if not isinstance(tool, Mapping):
+        return False
+    schema = tool.get("inputSchema")
+    properties = schema.get("properties") if isinstance(schema, Mapping) else {}
+    return isinstance(properties, Mapping) and all(field in properties for field in expected)
 
 
 def _pass_fail(condition: bool) -> str:

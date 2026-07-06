@@ -53,6 +53,7 @@ OBJECT_NATIVE_REVIEW_TOOL_NAMES = {
     "source_to_candidate_graph": "brain_source_to_candidate_graph",
     "candidate_review_edit": "brain_candidate_review_edit",
     "approval_board_decide": "brain_approval_board_decide",
+    "runtime_readiness": "brain_source_to_candidate_runtime_readiness",
 }
 
 
@@ -412,6 +413,17 @@ def object_native_review_tool_hints(missing_evidence: list[str]) -> list[dict[st
             "blocked_by": promotion_blockers,
             "safe_targets": ["local_test"],
             "blocked_targets": ["production"],
+        },
+        {
+            "tool": OBJECT_NATIVE_REVIEW_TOOL_NAMES["runtime_readiness"],
+            "purpose": "source_to_candidate_runtime_readiness",
+            "suggest_allowed": True,
+            "execute_allowed": False,
+            "local_test_preview_allowed": True,
+            "production_mutation_allowed": False,
+            "blocked_by": runtime_blockers,
+            "safe_targets": ["sanitized_evidence_packet"],
+            "blocked_targets": ["raw_private_runtime_evidence", "production_mutation"],
         },
     ]
 

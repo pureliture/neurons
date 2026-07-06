@@ -230,6 +230,7 @@ def test_builder_adds_consumer_specific_compact_agent_context_pack_with_safe_act
             "brain_source_to_candidate_graph",
             "brain_candidate_review_edit",
             "brain_approval_board_decide",
+            "brain_source_to_candidate_runtime_readiness",
         }
         assert tool_hints["brain_source_to_candidate_graph"]["suggest_allowed"] is True
         assert tool_hints["brain_source_to_candidate_graph"]["execute_allowed"] is False
@@ -242,6 +243,11 @@ def test_builder_adds_consumer_specific_compact_agent_context_pack_with_safe_act
             "runtime_evidence_unverified",
         ]
         assert tool_hints["brain_approval_board_decide"]["production_mutation_allowed"] is False
+        readiness_hint = tool_hints["brain_source_to_candidate_runtime_readiness"]
+        assert readiness_hint["execute_allowed"] is False
+        assert readiness_hint["production_mutation_allowed"] is False
+        assert readiness_hint["safe_targets"] == ["sanitized_evidence_packet"]
+        assert "raw_private_runtime_evidence" in readiness_hint["blocked_targets"]
 
 
 def test_builder_filters_stale_preference_from_compact_style_guidance():

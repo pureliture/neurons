@@ -18,6 +18,7 @@ from .mcp_tools import (
     BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
     BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
     BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+    BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
     BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
     BRAIN_DRIFT_EXPLAIN_TOOL_NAME,
     BRAIN_EVIDENCE_GET_TOOL_NAME,
@@ -202,6 +203,10 @@ def _tool_dispatch_registry() -> dict[str, ToolDispatch]:
         (BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME, _dispatch_brain_source_to_candidate_graph_tool),
         (BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME, _dispatch_brain_candidate_review_edit_tool),
         (BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME, _dispatch_brain_approval_board_decide_tool),
+        (
+            BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+            _dispatch_brain_source_to_candidate_runtime_readiness_tool,
+        ),
         (BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME, _dispatch_brain_object_proposal_create_tool),
         (BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME, _dispatch_brain_object_decision_commit_tool),
         (BRAIN_REVIEW_PROPOSALS_TOOL_NAME, _dispatch_brain_review_proposals_tool),
@@ -453,6 +458,20 @@ def _dispatch_brain_approval_board_decide_tool(
         decisions=[dict(item) for item in decisions if isinstance(item, Mapping)],
         target=str(arguments.get("target") or "production"),
         reviewer_id=str(arguments.get("reviewer_id") or "unspecified"),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_source_to_candidate_runtime_readiness_tool(
+    tool_name: str,
+    arguments: dict,
+    service: KnowledgeSearchService,
+) -> dict:
+    _ = tool_name
+    live_evidence = arguments.get("live_evidence")
+    result = service.brain_source_to_candidate_runtime_readiness(
+        live_evidence=live_evidence if isinstance(live_evidence, Mapping) else None,
+        expected_commit=str(arguments.get("expected_commit") or ""),
     )
     return _tool_result(result)
 

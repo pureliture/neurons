@@ -224,6 +224,7 @@ def test_source_to_authority_quality_gate_covers_review_approval_and_read_path_w
         "mcp_source_to_candidate_graph_tool",
         "mcp_candidate_review_edit_tool",
         "mcp_approval_board_decide_tool",
+        "mcp_source_to_candidate_runtime_readiness_tool",
     }
     assert surface_checks["mcp_source_to_candidate_graph_tool"]["result"] == "PASS"
     assert surface_checks["mcp_source_to_candidate_graph_tool"]["tool"] == "brain_source_to_candidate_graph"
@@ -232,4 +233,7 @@ def test_source_to_authority_quality_gate_covers_review_approval_and_read_path_w
     assert surface_checks["mcp_candidate_review_edit_tool"]["authority_write_performed"] is False
     assert surface_checks["mcp_approval_board_decide_tool"]["result"] == "PASS"
     assert surface_checks["mcp_approval_board_decide_tool"]["production_target_denied"] is True
+    assert surface_checks["mcp_source_to_candidate_runtime_readiness_tool"]["result"] == "PASS"
+    assert surface_checks["mcp_source_to_candidate_runtime_readiness_tool"]["network_used"] is False
+    assert surface_checks["mcp_source_to_candidate_runtime_readiness_tool"]["production_mutation_performed"] is False
     assert "production_authority_gate_not_approved" in report["gaps"]

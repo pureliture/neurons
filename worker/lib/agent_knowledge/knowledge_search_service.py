@@ -12,6 +12,7 @@ from .llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore, Led
 from .llm_brain_core.runtime import build_runtime_brain_service
 from .llm_brain_core.objects.extraction_pipeline import run_source_to_candidate_graph_activation_preview
 from .llm_brain_core.objects.object_packs import apply_approval_board_decisions, apply_candidate_review_edits
+from .llm_brain_core.objects.runtime_readiness import build_source_to_candidate_runtime_readiness_report
 from .memory_read_pipeline import AuthorizedMemoryReader, MemoryReadPipeline, MemorySearchQuery
 from .index_client import RetiredIndexBridgeHttpClient
 from .public_safe_util import ensure_public_safe, public_safe_text
@@ -251,6 +252,17 @@ class KnowledgeSearchService:
             decisions=decisions,
             reviewer={"id": reviewer_id},
             ledger_scope=target,
+        )
+
+    def brain_source_to_candidate_runtime_readiness(
+        self,
+        *,
+        live_evidence: Mapping[str, Any] | None = None,
+        expected_commit: str = "",
+    ) -> dict[str, Any]:
+        return build_source_to_candidate_runtime_readiness_report(
+            live_evidence=live_evidence,
+            expected_commit=expected_commit,
         )
 
     def _overlay_object_authority_states(self, result: Mapping[str, Any]) -> dict[str, Any]:
