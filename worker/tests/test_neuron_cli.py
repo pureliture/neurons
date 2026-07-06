@@ -712,6 +712,18 @@ def test_neuron_knowledge_golden_query_eval_source_to_authority_gate(capsys):
     assert report["production_mutation_performed"] is False
 
 
+def test_neuron_knowledge_golden_query_eval_activation_progress(capsys):
+    assert main(["golden-query-eval", "--activation-progress"]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == "lbrain_product_activation_progress.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["scope_phases"] == ["P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9"]
+    assert report["next_phase"] == "P5"
+    assert report["release_quality_gate"] == "not_green"
+    assert report["production_mutation_performed"] is False
+
+
 def test_neuron_knowledge_memory_regeneration_live_args_fail_closed(tmp_path, capsys):
     rc = main(
         [

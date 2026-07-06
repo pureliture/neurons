@@ -18,7 +18,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 - status: `validated`
 - evidence: `cd worker && uv run pytest -q`
-- result: `1406 passed, 9 skipped, 1 warning`
+- result: `1585 passed, 9 skipped, 1 warning`
 - note: covers object model, reference corpus, object packs, MCP stdio, CLI, context authority, ledger area boundary, and existing worker regression surface.
 
 ### local.root.gradle
@@ -69,6 +69,13 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - evidence: `uv run neuron-knowledge golden-query-eval --baseline`
 - result: returned `knowledge_object_golden_query_eval.v1`, `status=baseline_red`.
 - interpretation: baseline-red is expected for the legacy/current response shape and is the regression target for future production-quality answers.
+
+### local.product-activation-progress-gate
+
+- status: `validated`
+- evidence: `uv run neuron-knowledge golden-query-eval --activation-progress`
+- result: returned `lbrain_product_activation_progress.v1`, `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`, `minimum_review_loop_checkpoint.status=PASS_WITH_GAPS`, `next_phase=P5`, `goal_complete=false`, `production_ready=false`, `production_mutation_performed=false`.
+- interpretation: this is a local P5 progress gate that keeps P2-P9 scope and gaps visible. It does not prove production readiness or deployed/runtime activation.
 
 ### local.source-to-candidate-runtime-readiness-surface
 

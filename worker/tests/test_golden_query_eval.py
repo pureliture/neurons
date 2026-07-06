@@ -2,6 +2,7 @@ from agent_knowledge.llm_brain_core.golden_query_eval import (
     GOLDEN_QUERIES,
     REQUIRED_QUALITY_AXES,
     build_baseline_golden_query_report,
+    build_product_activation_progress_report,
     build_phase_golden_query_coverage_report,
     build_source_to_authority_quality_gate_report,
     evaluate_object_pack_response,
@@ -237,3 +238,28 @@ def test_source_to_authority_quality_gate_covers_review_approval_and_read_path_w
     assert surface_checks["mcp_source_to_candidate_runtime_readiness_tool"]["network_used"] is False
     assert surface_checks["mcp_source_to_candidate_runtime_readiness_tool"]["production_mutation_performed"] is False
     assert "production_authority_gate_not_approved" in report["gaps"]
+
+
+def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
+    report = build_product_activation_progress_report()
+
+    assert report["schema_version"] == "lbrain_product_activation_progress.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["goal_complete"] is False
+    assert report["production_ready"] is False
+    assert report["release_quality_gate"] == "not_green"
+    assert report["production_mutation_performed"] is False
+    assert report["scope_phases"] == ["P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9"]
+    assert report["minimum_review_loop_checkpoint"]["phases"] == ["P2", "P3", "P4"]
+    assert report["minimum_review_loop_checkpoint"]["status"] == "PASS_WITH_GAPS"
+    assert report["next_phase"] == "P5"
+    assert set(report["remaining_phases"]) >= {"P5", "P6", "P7", "P8", "P9"}
+    assert report["hard_failures"] == []
+    assert "production_quality_not_green" in report["goal_completion_blockers"]
+    assert "live_runtime_read_path_unverified" in report["goal_completion_blockers"]
+
+    phase_progress = {item["phase"]: item for item in report["phase_progress"]}
+    assert phase_progress["P4"]["quality_result"] == "PASS_WITH_GAPS"
+    assert phase_progress["P5"]["state"] == "in_progress"
+    assert phase_progress["P6"]["state"] == "local_validated"
+    assert phase_progress["P9"]["state"] == "local_validated"
