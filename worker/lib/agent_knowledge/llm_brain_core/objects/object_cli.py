@@ -19,6 +19,7 @@ from .extraction_pipeline import run_source_to_candidate_graph_activation_previe
 from .okf_export import build_okf_bundle
 from .object_packs import apply_approval_board_decisions, apply_candidate_review_edits, build_documentation_cleanup_pack
 from .reference_corpus import build_corpus_ingest_plan, default_corpus_policy_status, reference_corpus_objects_from_manifest
+from .runtime_readiness import build_source_to_candidate_runtime_readiness_report
 
 REFERENCE_CORPUS_LEDGER_ENV = "NEURON_REFERENCE_CORPUS_LEDGER"
 
@@ -318,6 +319,24 @@ def golden_query_eval_main(argv: list[str] | None = None) -> int:
         return 0
     _print_json(build_baseline_golden_query_report())
     return 0
+
+
+def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="neuron-knowledge source-to-candidate-runtime-readiness")
+    parser.add_argument("--live-evidence-file", default="")
+    parser.add_argument("--expected-commit", default="")
+    args = parser.parse_args(argv)
+    live_evidence = (
+        _load_json_mapping(args.live_evidence_file, label="live evidence")
+        if args.live_evidence_file
+        else None
+    )
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=live_evidence,
+        expected_commit=args.expected_commit,
+    )
+    _print_json(report)
+    return 1 if report["status"] == "FAIL" else 0
 
 
 def okf_export_main(argv: list[str] | None = None) -> int:

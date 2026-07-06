@@ -82,6 +82,7 @@ OBJECT_SUBPACKAGE_MODULES = frozenset({
     "object_packs",
     "okf_export",
     "reference_corpus",
+    "runtime_readiness",
 })
 
 

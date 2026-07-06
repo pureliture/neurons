@@ -94,6 +94,7 @@ def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
         "candidate-review-edit",
         "approval-board-decide",
         "golden-query-eval",
+        "source-to-candidate-runtime-readiness",
         "okf-export",
         "brain-regression-gate",
         "couchdb-migration-flow",

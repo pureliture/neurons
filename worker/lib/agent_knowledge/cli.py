@@ -103,6 +103,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "candidate-review-edit": llm_brain_object_cli.candidate_review_edit_main,
     "approval-board-decide": llm_brain_object_cli.approval_board_decide_main,
     "golden-query-eval": llm_brain_object_cli.golden_query_eval_main,
+    "source-to-candidate-runtime-readiness": llm_brain_object_cli.source_to_candidate_runtime_readiness_main,
     "okf-export": llm_brain_object_cli.okf_export_main,
     "brain-regression-gate": llm_brain_regression_gate_cli.main,
     "brain-export": llm_brain_portable_cli.export_main,
