@@ -452,6 +452,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
         ],
         "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
         "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
+        "preference_artifact_memory": _preference_artifact_memory_evidence(),
         "production_denials": {
             BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
                 "status": "denied",
@@ -603,6 +604,11 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_templ
     assert (
         template["packet_field_templates"]["session_project_rollup_runtime"]["schema_version"]
         == "session_project_rollup_runtime_evidence.v1"
+    )
+    assert "preference_artifact_memory" in template["required_packet_fields"]
+    assert (
+        template["packet_field_templates"]["preference_artifact_memory"]["schema_version"]
+        == "preference_artifact_memory_runtime_evidence.v1"
     )
     assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == 4
 
@@ -783,6 +789,7 @@ def _runtime_readiness_complete_evidence(
         ],
         "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
         "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
+        "preference_artifact_memory": _preference_artifact_memory_evidence(),
         "production_denials": {
             BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
                 "status": "denied",
@@ -934,6 +941,75 @@ def _session_project_rollup_runtime_evidence() -> dict:
             "object_pack_schema": "object_pack.v1",
             "object_types": ["WorkUnit"],
             "object_count": 1,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+
+
+def _preference_artifact_memory_evidence() -> dict:
+    accepted_object = {
+        "object_id": "ko:ArtifactPreference:html-review-density",
+        "object_type": "ArtifactPreference",
+        "authority_lane": "accepted_current",
+    }
+    proposal_object = {
+        "object_id": "ko:ArtifactPreference:visualization-proposal",
+        "object_type": "ArtifactPreference",
+        "authority_lane": "proposal_only",
+    }
+    return {
+        "schema_version": "preference_artifact_memory_runtime_evidence.v1",
+        "preference_object_pack": {
+            "schema_version": "object_pack.v1",
+            "route": "code_style_preference",
+            "accepted_preference_count": 1,
+            "proposal_preference_count": 1,
+            "objects": [accepted_object, proposal_object],
+            "lanes": {
+                "accepted_current": [accepted_object],
+                "proposal_only": [proposal_object],
+            },
+            "recommended_actions": [
+                {"object_id": accepted_object["object_id"], "action": "apply_preference"},
+                {"object_id": proposal_object["object_id"], "action": "review_inferred_preference"},
+            ],
+            "gaps": [],
+            "production_mutation_performed": False,
+        },
+        "html_visualization_route_smoke": {
+            "schema_version": "brain_objects_query.v1",
+            "route": "html_visualization_preference",
+            "production_mutation_performed": False,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": "html_visualization_preference",
+                "objects": [accepted_object],
+                "lanes": {"accepted_current": [accepted_object]},
+                "recommended_actions": [
+                    {"object_id": accepted_object["object_id"], "action": "apply_preference"}
+                ],
+                "gaps": [],
+            },
+        },
+        "agent_context_preference_section": {
+            "schema_version": "agent_context_product_pack.v1",
+            "section": "style_preference",
+            "object_count": 1,
+            "accepted_preference_count": 1,
+            "surface_policy": {"mutation_allowed": False},
+        },
+        "artifact_review_check": {
+            "schema_version": "artifact_review_preference_check.v1",
+            "status": "pass",
+            "ui_required": False,
+            "raw_artifact_body_returned": False,
+            "assertions": ["accepted_html_preference_available"],
         },
         "postcheck": {
             "status": "validated",
