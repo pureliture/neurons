@@ -411,6 +411,16 @@ def list_tools() -> list[dict]:
                     "pack": {"type": "object"},
                     "edits": {"type": "array", "items": {"type": "object"}, "default": []},
                     "reviewer_id": {"type": "string", "default": "unspecified"},
+                    "target": {
+                        "type": "string",
+                        "enum": ["local_test", "production"],
+                        "default": "local_test",
+                    },
+                    "mutation_mode": {
+                        "type": "string",
+                        "enum": ["no_mutation"],
+                        "default": "no_mutation",
+                    },
                 },
                 "required": ["pack", "edits"],
                 "additionalProperties": False,

@@ -52,6 +52,7 @@ from agent_knowledge.session_memory.memory_miner import build_memory_card_candid
 from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
 from agent_knowledge.llm_brain_core.ledger_adapter import LedgerSourceRefCatalog
 from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
+from agent_knowledge.llm_brain_core.knowledge_objects import EvidenceRef, KnowledgeEdge
 from agent_knowledge.llm_brain_core.models import CONTEXT_PACK_SCHEMA_VERSION, OntologyEpisode
 from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
 from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
@@ -530,6 +531,25 @@ def test_mcp_source_to_candidate_graph_and_review_approval_preview_roundtrip(tmp
     assert graph["candidate_graph_review_pack"]["route"] == "candidate_graph_review"
     assert graph["candidate_graph_review_pack"]["lanes"]["candidate"]
     candidate_id = graph["candidate_graph_review_pack"]["lanes"]["candidate"][0]["object_id"]
+    original_edge_id = graph["candidate_graph_review_pack"]["edges"][0]["edge_id"]
+    original_evidence_id = graph["candidate_graph_review_pack"]["evidence"][0]["evidence_id"]
+    added_evidence = EvidenceRef.from_parts(
+        evidence_type="source_hash",
+        authority_lane="reference_only",
+        verification_state="source_hash_verified",
+        locator={"kind": "relative_repo_path", "value": "docs/mcp-review-evidence.md"},
+        content_hash="sha256:" + "9" * 64,
+        summary="Reviewer attached MCP transport evidence.",
+    )
+    added_edge = KnowledgeEdge.from_parts(
+        edge_type="review_supports",
+        from_object_id=candidate_id,
+        to_object_id=candidate_id,
+        evidence_refs=[added_evidence.evidence_id],
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="unverified",
+    )
 
     edit_response = handle_jsonrpc_message(
         {
@@ -540,6 +560,8 @@ def test_mcp_source_to_candidate_graph_and_review_approval_preview_roundtrip(tmp
                 "name": BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
                 "arguments": {
                     "pack": graph["candidate_graph_review_pack"],
+                    "target": "production",
+                    "mutation_mode": "no_mutation",
                     "edits": [
                         {
                             "action": "update_object",
@@ -548,7 +570,28 @@ def test_mcp_source_to_candidate_graph_and_review_approval_preview_roundtrip(tmp
                                 "summary": "Reviewer clarified candidate from MCP preview.",
                                 "recommended_action": "promote",
                             },
-                        }
+                        },
+                        {
+                            "action": "add_evidence",
+                            "attach_to_object_id": candidate_id,
+                            "fields": {
+                                "evidence_type": "source_hash",
+                                "locator": {"kind": "relative_repo_path", "value": "docs/mcp-review-evidence.md"},
+                                "content_hash": "sha256:" + "9" * 64,
+                                "summary": "Reviewer attached MCP transport evidence.",
+                            },
+                        },
+                        {
+                            "action": "add_edge",
+                            "fields": {
+                                "edge_type": "review_supports",
+                                "from_object_id": candidate_id,
+                                "to_object_id": candidate_id,
+                                "evidence_refs": [added_evidence.evidence_id],
+                            },
+                        },
+                        {"action": "remove_edge", "edge_id": original_edge_id},
+                        {"action": "remove_evidence", "evidence_id": original_evidence_id},
                     ],
                     "reviewer_id": "reviewer-local",
                 },
@@ -558,9 +601,28 @@ def test_mcp_source_to_candidate_graph_and_review_approval_preview_roundtrip(tmp
     )
     edit_result = edit_response["result"]["structuredContent"]
     assert edit_result["schema_version"] == "candidate_review_edit_result.v1"
+    assert edit_result["permission"] == "allowed"
+    assert edit_result["target_scope"] == "production"
+    assert edit_result["mutation_mode"] == "no_mutation"
     assert edit_result["candidate_state_changed"] is True
     assert edit_result["authority_write_performed"] is False
     assert edit_result["production_mutation_performed"] is False
+    assert edit_result["rejected_edits"] == []
+    assert [item["action"] for item in edit_result["accepted_edits"]] == [
+        "update_object",
+        "add_evidence",
+        "add_edge",
+        "remove_edge",
+        "remove_evidence",
+    ]
+    assert added_evidence.evidence_id in {
+        item["evidence_id"] for item in edit_result["updated_pack"]["evidence"]
+    }
+    assert original_evidence_id not in {
+        item["evidence_id"] for item in edit_result["updated_pack"]["evidence"]
+    }
+    assert added_edge.edge_id in {item["edge_id"] for item in edit_result["updated_pack"]["edges"]}
+    assert original_edge_id not in {item["edge_id"] for item in edit_result["updated_pack"]["edges"]}
 
     decision_response = handle_jsonrpc_message(
         {

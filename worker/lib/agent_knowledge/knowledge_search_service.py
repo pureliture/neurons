@@ -234,11 +234,15 @@ class KnowledgeSearchService:
         pack: Mapping[str, Any],
         edits: list[Mapping[str, Any]],
         reviewer_id: str = "unspecified",
+        target: str = "local_test",
+        mutation_mode: str = "no_mutation",
     ) -> dict[str, Any]:
         return apply_candidate_review_edits(
             pack,
             edits=edits,
             reviewer={"id": reviewer_id},
+            target_scope=target,
+            mutation_mode=mutation_mode,
         )
 
     def brain_approval_board_decide(

@@ -154,6 +154,15 @@ def test_candidate_graph_review_pack_exposes_editable_review_surface_without_aut
         "hold",
         "request_more_evidence",
     ]
+    assert pack["minimal_edit_surface"]["supported_edit_actions"] == [
+        "update_object",
+        "update_edge",
+        "update_evidence",
+        "add_edge",
+        "remove_edge",
+        "add_evidence",
+        "remove_evidence",
+    ]
     assert pack["approval_board"][0]["evidence_refs"] == [evidence.evidence_id]
     assert pack["candidate_graph_hash"].startswith("sha256:")
     assert "accepted_current objects empty" in pack["gaps"]
@@ -275,6 +284,260 @@ def test_candidate_review_edits_change_candidate_state_without_promoting_authori
     assert updated_evidence["summary"] == "Human corrected evidence summary."
     assert updated_evidence["authority_lane"] == "reference_only"
     assert result["updated_pack"]["candidate_graph_hash"] != pack["candidate_graph_hash"]
+
+
+def test_candidate_review_edits_add_and_remove_edges_and_evidence_without_authority_write():
+    original_evidence = EvidenceRef.from_parts(
+        evidence_type="source_hash",
+        authority_lane="reference_only",
+        verification_state="source_hash_verified",
+        locator={"kind": "relative_repo_path", "value": "docs/source.md"},
+        content_hash="sha256:" + "7" * 64,
+        summary="Original source material hash.",
+    )
+    added_evidence = EvidenceRef.from_parts(
+        evidence_type="source_hash",
+        authority_lane="reference_only",
+        verification_state="source_hash_verified",
+        locator={"kind": "relative_repo_path", "value": "docs/reviewed-source.md"},
+        content_hash="sha256:" + "8" * 64,
+        summary="Reviewer attached replacement evidence.",
+    )
+    obj = KnowledgeObjectEnvelope.from_parts(
+        object_type="RepoDocument",
+        natural_key="docs/source.md",
+        scope={"project": "neurons"},
+        title="Draft source doc",
+        summary="AI extracted document claim.",
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="unverified",
+        review_state="needs_review",
+        content_hash="sha256:" + "9" * 64,
+        evidence_refs=[original_evidence.evidence_id],
+        recommended_action="review",
+        payload={"path_ref": "docs/source.md"},
+    ).to_dict()
+    original_edge = KnowledgeEdge.from_parts(
+        edge_type="requires_evidence",
+        from_object_id=obj["object_id"],
+        to_object_id=obj["object_id"],
+        evidence_refs=[original_evidence.evidence_id],
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="unverified",
+    ).to_dict()
+    pack = build_candidate_graph_review_pack(
+        objects=[obj],
+        edges=[original_edge],
+        evidence=[original_evidence.to_view()],
+        extractor="fixture_ai_extractor",
+    )
+
+    result = apply_candidate_review_edits(
+        pack,
+        edits=[
+            {
+                "action": "add_evidence",
+                "attach_to_object_id": obj["object_id"],
+                "fields": {
+                    "evidence_type": "source_hash",
+                    "locator": {"kind": "relative_repo_path", "value": "docs/reviewed-source.md"},
+                    "content_hash": "sha256:" + "8" * 64,
+                    "summary": "Reviewer attached replacement evidence.",
+                },
+            },
+            {
+                "action": "add_edge",
+                "fields": {
+                    "edge_type": "supports",
+                    "from_object_id": obj["object_id"],
+                    "to_object_id": obj["object_id"],
+                    "evidence_refs": [added_evidence.evidence_id],
+                },
+            },
+            {"action": "remove_edge", "edge_id": original_edge["edge_id"]},
+            {"action": "remove_evidence", "evidence_id": original_evidence.evidence_id},
+        ],
+        reviewer={"id": "human-reviewer"},
+    )
+
+    updated_pack = result["updated_pack"]
+    updated_obj = updated_pack["objects"][0]
+    assert result["permission"] == "allowed"
+    assert result["reason"] == "candidate_review_edit_no_mutation_preview"
+    assert result["target_scope"] == "local_test"
+    assert result["mutation_mode"] == "no_mutation"
+    assert result["candidate_state_changed"] is True
+    assert result["authority_write_performed"] is False
+    assert result["authoritative_memory_changed"] is False
+    assert result["production_mutation_performed"] is False
+    assert result["rejected_edits"] == []
+    assert [item["action"] for item in result["accepted_edits"]] == [
+        "add_evidence",
+        "add_edge",
+        "remove_edge",
+        "remove_evidence",
+    ]
+    assert [item["evidence_id"] for item in updated_pack["evidence"]] == [added_evidence.evidence_id]
+    assert updated_obj["evidence_refs"] == [added_evidence.evidence_id]
+    assert len(updated_pack["edges"]) == 1
+    assert updated_pack["edges"][0]["edge_type"] == "supports"
+    assert updated_pack["edges"][0]["evidence_refs"] == [added_evidence.evidence_id]
+    assert updated_obj["edge_refs"] == [updated_pack["edges"][0]["edge_id"]]
+    assert updated_pack["approval_board"][0]["evidence_refs"] == [added_evidence.evidence_id]
+    assert updated_pack["candidate_graph_hash"] != pack["candidate_graph_hash"]
+
+
+def test_candidate_review_edits_reject_non_candidate_authority_lanes():
+    evidence = EvidenceRef.from_parts(
+        evidence_type="source_hash",
+        authority_lane="reference_only",
+        verification_state="source_hash_verified",
+        locator={"kind": "relative_repo_path", "value": "docs/source.md"},
+        content_hash="sha256:" + "a" * 64,
+        summary="Accepted source material hash.",
+    )
+    accepted_obj = KnowledgeObjectEnvelope.from_parts(
+        object_type="RepoDocument",
+        natural_key="docs/source.md",
+        scope={"project": "neurons"},
+        title="Accepted source doc",
+        summary="Current accepted claim.",
+        lifecycle_status="current",
+        authority_lane="accepted_current",
+        verification_state="source_hash_verified",
+        review_state="accepted",
+        content_hash="sha256:" + "b" * 64,
+        evidence_refs=[evidence.evidence_id],
+        recommended_action="keep",
+        payload={"path_ref": "docs/source.md"},
+    ).to_dict()
+    reference_edge = KnowledgeEdge.from_parts(
+        edge_type="references",
+        from_object_id=accepted_obj["object_id"],
+        to_object_id=accepted_obj["object_id"],
+        evidence_refs=[evidence.evidence_id],
+        lifecycle_status="observed",
+        authority_lane="reference_only",
+        verification_state="unverified",
+    ).to_dict()
+    pack = build_candidate_graph_review_pack(
+        objects=[accepted_obj],
+        edges=[reference_edge],
+        evidence=[evidence.to_view()],
+        extractor="fixture_ai_extractor",
+    )
+
+    result = apply_candidate_review_edits(
+        pack,
+        edits=[
+            {
+                "action": "update_object",
+                "object_id": accepted_obj["object_id"],
+                "fields": {"summary": "Should not change accepted authority."},
+            },
+            {
+                "action": "add_edge",
+                "fields": {
+                    "edge_type": "supports",
+                    "from_object_id": accepted_obj["object_id"],
+                    "to_object_id": accepted_obj["object_id"],
+                    "evidence_refs": [evidence.evidence_id],
+                },
+            },
+            {
+                "action": "update_edge",
+                "edge_id": reference_edge["edge_id"],
+                "fields": {"edge_type": "supersedes"},
+            },
+            {
+                "action": "update_evidence",
+                "evidence_id": evidence.evidence_id,
+                "fields": {"summary": "Should not change accepted evidence usage."},
+            },
+            {"action": "remove_evidence", "evidence_id": evidence.evidence_id},
+        ],
+        reviewer={"id": "human-reviewer"},
+    )
+
+    assert result["candidate_state_changed"] is False
+    assert result["permission"] == "allowed"
+    assert result["authority_write_performed"] is False
+    assert result["authoritative_memory_changed"] is False
+    assert result["production_mutation_performed"] is False
+    assert result["updated_pack"]["objects"][0]["summary"] == "Current accepted claim."
+    assert result["updated_pack"]["edges"][0]["edge_type"] == "references"
+    assert result["updated_pack"]["evidence"][0]["summary"] == "Accepted source material hash."
+    assert [item["reason"] for item in result["rejected_edits"]] == [
+        "candidate_review_edit_requires_candidate_lane",
+        "candidate_review_edit_requires_candidate_lane",
+        "candidate_review_edit_requires_candidate_lane",
+        "candidate_evidence_used_by_non_candidate_authority",
+        "candidate_evidence_used_by_non_candidate_authority",
+    ]
+
+
+def test_candidate_review_edits_deny_mutation_mode_before_editing_candidate_pack():
+    evidence = EvidenceRef.from_parts(
+        evidence_type="source_hash",
+        authority_lane="reference_only",
+        verification_state="source_hash_verified",
+        locator={"kind": "relative_repo_path", "value": "docs/source.md"},
+        content_hash="sha256:" + "c" * 64,
+        summary="Source material hash.",
+    )
+    obj = KnowledgeObjectEnvelope.from_parts(
+        object_type="RepoDocument",
+        natural_key="docs/source.md",
+        scope={"project": "neurons"},
+        title="Draft source doc",
+        summary="AI extracted document claim.",
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="unverified",
+        review_state="needs_review",
+        content_hash="sha256:" + "d" * 64,
+        evidence_refs=[evidence.evidence_id],
+        recommended_action="review",
+        payload={"path_ref": "docs/source.md"},
+    ).to_dict()
+    pack = build_candidate_graph_review_pack(
+        objects=[obj],
+        edges=[],
+        evidence=[evidence.to_view()],
+        extractor="fixture_ai_extractor",
+    )
+
+    result = apply_candidate_review_edits(
+        pack,
+        edits=[
+            {
+                "action": "update_object",
+                "object_id": obj["object_id"],
+                "fields": {"summary": "Should not be applied."},
+            }
+        ],
+        reviewer={"id": "human-reviewer"},
+        target_scope="production",
+        mutation_mode="write",
+    )
+
+    assert result["permission"] == "denied"
+    assert result["reason"] == "candidate_review_edit_mutation_mode_not_supported"
+    assert result["target_scope"] == "production"
+    assert result["mutation_mode"] == "write"
+    assert result["candidate_state_changed"] is False
+    assert result["authority_write_performed"] is False
+    assert result["authoritative_memory_changed"] is False
+    assert result["production_mutation_performed"] is False
+    assert result["updated_pack"]["objects"][0]["summary"] == "AI extracted document claim."
+    assert result["rejected_edits"] == [
+        {
+            "action": "update_object",
+            "reason": "candidate_review_edit_mutation_mode_not_supported",
+        }
+    ]
 
 
 def test_approval_board_promotes_candidate_in_local_test_without_production_mutation():
@@ -408,6 +671,8 @@ def test_route_spec_is_declarative():
     assert "candidate" in review_spec["allowed_authority_lanes"]
     assert "edge_type" in review_spec["editable_edge_fields"]
     assert "summary" in review_spec["editable_evidence_fields"]
+    assert "add_evidence" in review_spec["supported_edit_actions"]
+    assert "remove_edge" in review_spec["supported_edit_actions"]
     assert "reviewer_edit_does_not_mutate_authority" in review_spec["eval_assertions"]
     assert "approval_board_decision_promotes_authority" in review_spec["eval_assertions"]
 

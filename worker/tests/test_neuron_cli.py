@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from agent_knowledge.cli import BOUNDARY, COMMAND_HANDLERS, main
+from agent_knowledge.llm_brain_core.knowledge_objects import EvidenceRef, KnowledgeEdge
 
 
 def _reference_manifest() -> dict:
@@ -558,8 +559,28 @@ def test_neuron_knowledge_candidate_review_and_approval_board_cli_chain_local_te
     )
     graph = json.loads(capsys.readouterr().out)
     pack_file = tmp_path / "candidate-pack.json"
-    pack_file.write_text(json.dumps(graph["candidate_graph_review_pack"]), encoding="utf-8")
-    candidate_id = graph["candidate_graph_review_pack"]["lanes"]["candidate"][0]["object_id"]
+    candidate_pack = graph["candidate_graph_review_pack"]
+    pack_file.write_text(json.dumps(candidate_pack), encoding="utf-8")
+    candidate_id = candidate_pack["lanes"]["candidate"][0]["object_id"]
+    original_edge_id = candidate_pack["edges"][0]["edge_id"]
+    original_evidence_id = candidate_pack["evidence"][0]["evidence_id"]
+    added_evidence = EvidenceRef.from_parts(
+        evidence_type="source_hash",
+        authority_lane="reference_only",
+        verification_state="source_hash_verified",
+        locator={"kind": "relative_repo_path", "value": "docs/review-evidence.md"},
+        content_hash="sha256:" + "8" * 64,
+        summary="Reviewer attached CLI transport evidence.",
+    )
+    added_edge = KnowledgeEdge.from_parts(
+        edge_type="review_supports",
+        from_object_id=candidate_id,
+        to_object_id=candidate_id,
+        evidence_refs=[added_evidence.evidence_id],
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="unverified",
+    )
     edits_file = tmp_path / "candidate-edits.json"
     edits_file.write_text(
         json.dumps(
@@ -571,7 +592,28 @@ def test_neuron_knowledge_candidate_review_and_approval_board_cli_chain_local_te
                         "summary": "Reviewer clarified this candidate before local approval.",
                         "recommended_action": "promote",
                     },
-                }
+                },
+                {
+                    "action": "add_evidence",
+                    "attach_to_object_id": candidate_id,
+                    "fields": {
+                        "evidence_type": "source_hash",
+                        "locator": {"kind": "relative_repo_path", "value": "docs/review-evidence.md"},
+                        "content_hash": "sha256:" + "8" * 64,
+                        "summary": "Reviewer attached CLI transport evidence.",
+                    },
+                },
+                {
+                    "action": "add_edge",
+                    "fields": {
+                        "edge_type": "review_supports",
+                        "from_object_id": candidate_id,
+                        "to_object_id": candidate_id,
+                        "evidence_refs": [added_evidence.evidence_id],
+                    },
+                },
+                {"action": "remove_edge", "edge_id": original_edge_id},
+                {"action": "remove_evidence", "evidence_id": original_evidence_id},
             ]
         ),
         encoding="utf-8",
@@ -581,6 +623,10 @@ def test_neuron_knowledge_candidate_review_and_approval_board_cli_chain_local_te
         main(
             [
                 "candidate-review-edit",
+                "--target",
+                "production",
+                "--mutation-mode",
+                "no_mutation",
                 "--pack-file",
                 str(pack_file),
                 "--edits-file",
@@ -593,10 +639,29 @@ def test_neuron_knowledge_candidate_review_and_approval_board_cli_chain_local_te
     )
     edit_result = json.loads(capsys.readouterr().out)
     assert edit_result["schema_version"] == "candidate_review_edit_result.v1"
+    assert edit_result["permission"] == "allowed"
+    assert edit_result["target_scope"] == "production"
+    assert edit_result["mutation_mode"] == "no_mutation"
     assert edit_result["candidate_state_changed"] is True
     assert edit_result["authority_write_performed"] is False
     assert edit_result["production_mutation_performed"] is False
     assert edit_result["updated_pack"]["lanes"]["accepted_current"] == []
+    assert edit_result["rejected_edits"] == []
+    assert [item["action"] for item in edit_result["accepted_edits"]] == [
+        "update_object",
+        "add_evidence",
+        "add_edge",
+        "remove_edge",
+        "remove_evidence",
+    ]
+    assert added_evidence.evidence_id in {
+        item["evidence_id"] for item in edit_result["updated_pack"]["evidence"]
+    }
+    assert original_evidence_id not in {
+        item["evidence_id"] for item in edit_result["updated_pack"]["evidence"]
+    }
+    assert added_edge.edge_id in {item["edge_id"] for item in edit_result["updated_pack"]["edges"]}
+    assert original_edge_id not in {item["edge_id"] for item in edit_result["updated_pack"]["edges"]}
     edited_pack_file = tmp_path / "edited-candidate-pack.json"
     edited_pack_file.write_text(json.dumps(edit_result["updated_pack"]), encoding="utf-8")
     decisions_file = tmp_path / "approval-decisions.json"
