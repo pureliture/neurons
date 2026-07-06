@@ -386,6 +386,71 @@ def test_runtime_readiness_requires_temporal_work_recall_live_smoke():
     assert "live_brain_objects_query_route_smokes_unverified" in report["gaps"]
 
 
+def test_runtime_readiness_breaks_partial_live_evidence_into_actionable_gap_ids():
+    evidence = _sanitized_live_evidence(
+        tool_names=[
+            "brain_objects_query",
+            "brain_source_to_candidate_graph",
+            "brain_approval_board_decide",
+        ],
+        agent_context_product={
+            "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
+            "tool_hints": [
+                hint
+                for hint in _safe_tool_hints()
+                if hint["tool"] not in {"brain_candidate_review_edit", "brain_source_to_candidate_runtime_readiness"}
+            ],
+            "degraded_mode": {"active": True, "gaps": ["runtime_evidence_unverified"]},
+            "missing_evidence_before_promotion": ["runtime_evidence_unverified"],
+            "surface_policy": {"mutation_allowed": False},
+            "sections": {
+                "style_preference": {"object_count": 1},
+                "active_work": {"object_count": 0},
+                "required_verification": {"object_count": 1},
+            },
+        },
+        brain_objects_query_smokes=[
+            _brain_objects_query_smoke("authority_archive_separation"),
+            _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
+        ],
+        production_denials={
+            "brain_source_to_candidate_graph": {
+                "status": "denied",
+                "production_mutation_performed": False,
+                "mutation_performed": False,
+            },
+            "brain_approval_board_decide": {
+                "permission": "denied",
+                "production_mutation_performed": False,
+                "authority_write_performed": False,
+            },
+        },
+        deployed_identity={
+            "contains_expected_commit": False,
+            "identity_source": "redacted_live_runtime_evidence",
+        },
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit="d8113d2",
+    )
+
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert "live_mcp_tool_missing:brain_candidate_review_edit" in report["gaps"]
+    assert "live_mcp_tool_missing:brain_source_to_candidate_runtime_readiness" in report["gaps"]
+    assert "live_agent_context_tool_hint_missing:brain_candidate_review_edit" in report["gaps"]
+    assert "live_agent_context_tool_hint_missing:brain_source_to_candidate_runtime_readiness" in report["gaps"]
+    assert "live_agent_context_section_missing:active_work" in report["gaps"]
+    assert "live_brain_objects_query_route_missing:code_style_preference" in report["gaps"]
+    assert "live_brain_objects_query_route_missing:temporal_work_recall" in report["gaps"]
+    assert "live_deployed_identity_expected_commit_unverified" in report["gaps"]
+    assert "brain_object_proposal_create_production_denial_unverified" in report["gaps"]
+    assert "brain_object_decision_commit_production_denial_unverified" in report["gaps"]
+    assert report["production_mutation_performed"] is False
+
+
 def test_runtime_readiness_requires_live_agent_context_product_sections():
     evidence = _sanitized_live_evidence(
         agent_context_product={
