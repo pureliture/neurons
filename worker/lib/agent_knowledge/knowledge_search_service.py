@@ -137,6 +137,13 @@ class KnowledgeSearchService:
         ensure_public_safe(stored, "object_review_proposal")
         return self.ledger.upsert_object_review_proposal(stored)
 
+    def commit_object_authority_decision(self, decision: dict) -> dict:
+        stored = dict(decision)
+        ensure_public_safe(stored, "object_authority_decision")
+        committed = self.ledger.commit_object_authority_decision(stored)
+        self.invalidate_brain_card_cache()
+        return committed
+
     def object_review_proposals(self, *, project: str = "", limit: int = 20) -> dict:
         bounded = max(1, min(int(limit or 20), 100))
         project_name = public_safe_text(project, max_chars=120)

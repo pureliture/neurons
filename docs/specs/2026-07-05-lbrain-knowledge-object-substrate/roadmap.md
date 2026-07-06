@@ -13,6 +13,7 @@ Current state:
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, latest configured-endpoint smoke still passes with denied/no-mutation production writes, but the current Codex session's `mcp__lbrain` namespace still does not expose them and the live MCP image is not proven to include the #73/current-main source refactor.
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, and production-denial evidence exist, but real private Palantir manifest ingest and production ingest approval remain gaps.
 - P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / local_validated; local/test reference corpus extraction preview creates deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, and blocked-extraction gaps; repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, and broader evaluator suite previews have local/test evaluator evidence; live graph/Qdrant projection join remains unproven.
+- P4 Review Queue And Authority Promotion: `in_progress`; local/test decision commit now records authority state and audit history, while production authority mutation remains denied.
 - Product activation: not complete; configured agent read path refresh remains required.
 - UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
 
@@ -339,7 +340,7 @@ Remaining gaps:
 
 ### P4. Review Queue And Authority Promotion
 
-State: planned.
+State: `in_progress`.
 
 Purpose:
 
@@ -366,6 +367,29 @@ Gate evidence:
 - rollback or supersession can reverse or demote an accepted/current decision without deleting audit history
 - audit trail cites proposal id, evidence refs, approver identity hash, before/after lanes, and decision reason
 - stale/superseded/retired state is visible in object queries
+
+Current local/test evidence:
+
+- object-native proposal creation writes only to the local/test review queue and reports `proposal_write_performed=true`, `authority_write_performed=false`, and `authoritative_memory_changed=false`
+- `brain_review_proposals` can read local/test proposal metadata after write without exposing raw/private evidence
+- default and production-scope `brain_object_decision_commit` remains denied/no-mutation
+- `brain_object_decision_commit` with explicit `ledger_scope=local_test` writes an `AuthorityDecision`, updates local/test object authority state, marks the proposal accepted, invalidates the authority cache, and returns read-after-write evidence
+- local/test authority decision audit records proposal id, evidence refs, approver identity hash, previous authority lane, new authority lane, and decision reason
+- ledger boundary manifest assigns `object_review_proposals`, `object_authority_decisions`, and `object_authority_states` to the native-memory/object area
+- focused evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_local_test_updates_authority_state_with_audit`
+- focused result: `1 passed, 1 warning`
+- MCP regression evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py`
+- MCP regression result: `63 passed, 1 warning`
+- ledger boundary evidence: `cd worker && uv run pytest -q tests/test_ledger_area_boundaries.py`
+- ledger boundary result: `10 passed`
+
+Remaining gaps:
+
+- P4 is not complete; this slice covers local/test authority decision state and audit only
+- approved production authority promotion remains closed and unproven
+- rollback/supersession/demotion flows are not yet implemented beyond the stored before/after lane audit shape
+- stale/superseded/retired authority state is not yet surfaced through object queries
+- production proposal/decision write remains denied and no production ledger/corpus mutation has been performed
 
 ### P5. Continuous Golden Query Quality Gates
 
