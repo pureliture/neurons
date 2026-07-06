@@ -11,6 +11,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_evidence_collection_plan,
     build_source_to_candidate_runtime_evidence_packet_template,
     build_source_to_candidate_runtime_readiness_report,
+    build_source_to_candidate_runtime_shadow_readiness_report,
     build_source_to_candidate_runtime_shadow_evidence_packet,
 )
 
@@ -442,6 +443,24 @@ def test_runtime_readiness_shadow_evidence_normalized_packet_evaluates_current_s
 
     assert report["status"] == "PASS_WITH_GAPS"
     assert report["failed_claims"] == []
+    assert report["production_mutation_performed"] is False
+    assert report["network_used"] is False
+    assert report["evidence_collection_network_used"] is True
+    for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES:
+        assert f"brain_objects_query_route_unimplemented:{route}" in report["gaps"]
+        assert f"shadow_route_smoke_not_implemented:{route}" in report["gaps"]
+
+
+def test_runtime_readiness_shadow_evidence_report_normalizes_and_evaluates_without_mutation():
+    report = build_source_to_candidate_runtime_shadow_readiness_report(
+        captured_evidence=_current_session_shadow_evidence_capture(),
+        expected_commit="c264b46",
+    )
+
+    assert report["schema_version"] == "source_to_candidate_runtime_readiness.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["failed_claims"] == []
+    assert report["live_evidence_provided"] is True
     assert report["production_mutation_performed"] is False
     assert report["network_used"] is False
     assert report["evidence_collection_network_used"] is True
@@ -1225,3 +1244,34 @@ def test_neuron_knowledge_runtime_readiness_cli_normalizes_shadow_evidence_file(
     assert packet["evidence_provenance"]["schema_version"] == EVIDENCE_PROVENANCE_SCHEMA
     assert packet["evidence_provenance"]["network_used"] is True
     assert len(packet["brain_objects_query_smokes"]) == len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+
+
+def test_neuron_knowledge_runtime_readiness_cli_evaluates_shadow_evidence_file(tmp_path, capsys):
+    capture_file = tmp_path / "shadow-evidence-capture.json"
+    capture_file.write_text(
+        json.dumps(_current_session_shadow_evidence_capture()),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "source-to-candidate-runtime-readiness",
+                "--shadow-evidence-file",
+                str(capture_file),
+                "--expected-commit",
+                "c264b46",
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == "source_to_candidate_runtime_readiness.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["failed_claims"] == []
+    assert report["live_evidence_provided"] is True
+    assert report["production_mutation_performed"] is False
+    assert report["evidence_collection_network_used"] is True
+    for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES:
+        assert f"shadow_route_smoke_not_implemented:{route}" in report["gaps"]

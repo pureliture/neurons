@@ -472,10 +472,14 @@ def _dispatch_brain_source_to_candidate_runtime_readiness_tool(
     _ = tool_name
     live_evidence = arguments.get("live_evidence")
     normalize_shadow_evidence = arguments.get("normalize_shadow_evidence")
+    shadow_evidence = arguments.get("shadow_evidence")
     result = service.brain_source_to_candidate_runtime_readiness(
         live_evidence=live_evidence if isinstance(live_evidence, Mapping) else None,
         normalize_shadow_evidence=normalize_shadow_evidence
         if isinstance(normalize_shadow_evidence, Mapping)
+        else None,
+        shadow_evidence=shadow_evidence
+        if isinstance(shadow_evidence, Mapping)
         else None,
         expected_commit=str(arguments.get("expected_commit") or ""),
         evidence_collection_plan=arguments.get("evidence_collection_plan") is True,

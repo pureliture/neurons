@@ -452,6 +452,7 @@ def list_tools() -> list[dict]:
                     "evidence_collection_plan": {"type": "boolean", "default": False},
                     "evidence_packet_template": {"type": "boolean", "default": False},
                     "normalize_shadow_evidence": {"type": "object", "default": {}},
+                    "shadow_evidence": {"type": "object", "default": {}},
                     "repository": {"type": "string", "default": ""},
                     "branch": {"type": "string", "default": ""},
                     "consumer": {"type": "string", "default": "codex"},

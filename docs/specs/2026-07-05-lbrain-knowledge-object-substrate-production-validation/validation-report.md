@@ -306,6 +306,7 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
   - all four route smokes returned `object_pack_route_not_implemented`.
   - a sanitized `source_to_candidate_runtime_evidence.v1` packet was evaluated locally with expected branch commit identity left unproven.
   - branch-local normalizer `build_source_to_candidate_runtime_shadow_evidence_packet` and CLI/MCP surfaces can now turn that sanitized shadow capture shape into reusable `source_to_candidate_runtime_evidence.v1` packet input without network calls or mutation.
+  - branch-local evaluator `build_source_to_candidate_runtime_shadow_readiness_report`, CLI `--shadow-evidence-file`, and MCP `shadow_evidence` can now normalize and evaluate the same sanitized capture in one read-only step.
 - result:
   - `failed_claims=[]`
   - `gap_count=31`
@@ -315,13 +316,13 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
   - evaluator `network_used=false`
   - evidence-side `evidence_collection_network_used=true`
   - evidence provenance redaction check is `redacted_only`
-- interpretation: this normalized packet proves the current configured read path is still behind the branch-local route/tool contract. It does not prove #95 is deployed, and it does not mutate production ledger, corpus, graph, or runtime state.
+- interpretation: this normalized packet/report proves the current configured read path is still behind the branch-local route/tool contract. It does not prove #95 is deployed, and it does not mutate production ledger, corpus, graph, or runtime state.
 
 ## Gaps
 
 - Current Codex session's `mcp__lbrain` read path can call `brain_objects_query`, but branch-local source/review/readiness tools must be deployed/reloaded before P3/P4/P9 runtime-readiness claims can be runtime-verified.
 - P1/P6/P7/P8/P9 remain `PASS_WITH_GAPS` until live `brain_objects_query` route smokes return implemented object packs for authority/archive, style/preference, temporal work recall, and deployment/runtime truth, and until P7 HTML/visualization preference route evidence is intentionally promoted into live smoke requirements.
-- P8 evidence packet template is branch-local handoff metadata only. It remains `template_only_not_runtime_evidence`; the latest current-session packet populated from the configured read path validates the gap state, and the branch-local normalizer makes that packet shape reusable, but it is not a passing deployed-readiness packet.
+- P8 evidence packet template is branch-local handoff metadata only. It remains `template_only_not_runtime_evidence`; the latest current-session packet populated from the configured read path validates the gap state, and the branch-local normalizer/evaluator makes that packet shape reusable, but it is not a passing deployed-readiness packet.
 - P8 shadow collection registration artifact is branch-local request metadata only. It records the external post-deploy runner handoff shape and remains `registration_only_not_runtime_evidence`; until a deployed post-rollout runner collects a passing sanitized evidence packet, route smokes remain run-pending gaps.
 - P8 bounded production authority execution has branch-local/sanitized packet validation, but it remains a gap for production readiness until a deployed/live execution packet with postcheck and rollback/supersession evidence is attached.
 - Post-deploy runtime readiness evidence must include sanitized provenance. Missing provenance is a validation failure for injected evidence packets, and missing live evidence remains `PASS_WITH_GAPS`.
