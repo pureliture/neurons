@@ -807,6 +807,7 @@ Delivery integration status:
 - No PR currently exists for the `codex/p1` through `codex/p10` continuation branches.
 - PR creation remains a delivery gap because the repository PR workflow requires a linked issue or explicit approval before GitHub mutation.
 - This gap does not convert local/test evidence into production readiness and does not close P1 live read-path gaps.
+- PR-ready titles, body previews, stack bases, and creation commands are captured in `pr-delivery-package.md`.
 
 PR-ready branch stack:
 
