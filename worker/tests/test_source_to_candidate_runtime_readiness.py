@@ -230,6 +230,31 @@ def test_runtime_readiness_evidence_collection_plan_is_public_safe_and_read_only
     assert plan["collection_mode"] == "post_deploy_read_only_smoke"
     assert plan["required_tools"] == list(REQUIRED_RUNTIME_TOOL_NAMES)
     assert plan["required_routes"] == list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    assert plan["shadow_collection_requests"] == [
+        {
+            "schema_version": "source_to_candidate_runtime_shadow_collection_request.v1",
+            "request_id": "shadow_brain_objects_query_route_smoke",
+            "status": "requested",
+            "trigger": "post_deploy_route_smoke",
+            "target": "configured_deployed_mcp_read_path",
+            "routes": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
+            "required_evidence_fields": [
+                "brain_objects_query_smokes",
+                "deployed_identity",
+                "evidence_provenance",
+            ],
+            "forbidden_gap": "object_pack_route_not_implemented",
+            "expected_gap_if_not_collected": "shadow_route_smoke_collection_pending",
+            "expected_gaps_if_not_collected": [
+                f"shadow_route_smoke_collection_pending:{route}"
+                for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+            ],
+            "network_used": False,
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+            "readiness_claim": "request_only_not_live_evidence",
+        }
+    ]
     assert plan["required_production_denials"] == [
         "brain_source_to_candidate_graph",
         "brain_approval_board_decide",

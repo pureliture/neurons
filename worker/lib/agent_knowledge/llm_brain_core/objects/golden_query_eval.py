@@ -642,6 +642,20 @@ def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
         failures.append("p8_runtime_evidence_collection_plan_mutated_production")
     if evidence.get("runtime_evidence_collection_plan_readiness_claim") != "plan_only_not_runtime_evidence":
         failures.append("p8_runtime_evidence_collection_plan_claims_live_evidence")
+    if evidence.get("shadow_route_smoke_request_schema") != "source_to_candidate_runtime_shadow_collection_request.v1":
+        failures.append("p8_shadow_route_smoke_request_missing")
+    if evidence.get("shadow_route_smoke_request_status") != "requested":
+        failures.append("p8_shadow_route_smoke_not_requested")
+    if int(evidence.get("shadow_route_smoke_route_count") or 0) < 1:
+        failures.append("p8_shadow_route_smoke_routes_missing")
+    if bool(evidence.get("shadow_route_smoke_network_used")):
+        failures.append("p8_shadow_route_smoke_used_network")
+    if bool(evidence.get("shadow_route_smoke_mutation_allowed")):
+        failures.append("p8_shadow_route_smoke_mutation_allowed")
+    if bool(evidence.get("shadow_route_smoke_production_mutation_performed")):
+        failures.append("p8_shadow_route_smoke_mutated_production")
+    if evidence.get("shadow_route_smoke_readiness_claim") != "request_only_not_live_evidence":
+        failures.append("p8_shadow_route_smoke_claims_live_evidence")
     runtime_evidence_count = int(evidence.get("runtime_verified_count") or 0) + int(
         evidence.get("runtime_unverified_count") or 0
     )
@@ -664,6 +678,13 @@ def _p8_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
         gaps.append("p8_runtime_verified_evidence_missing")
     if evidence.get("runtime_evidence_collection_plan_readiness_claim") == "plan_only_not_runtime_evidence":
         gaps.append("p8_runtime_evidence_collection_plan_not_live_evidence")
+    if evidence.get("shadow_route_smoke_readiness_claim") == "request_only_not_live_evidence":
+        gaps.append("p8_shadow_route_smoke_collection_pending")
+        gaps.extend(
+            f"p8_shadow_route_smoke_collection_pending:{route}"
+            for route in evidence.get("shadow_route_smoke_pending_routes", [])
+            if isinstance(route, str) and route
+        )
     return gaps
 
 
@@ -817,6 +838,12 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         branch="codex/knowledge-object-review-flow-roadmap",
         consumer="codex",
     )
+    shadow_requests = [
+        item
+        for item in collection_plan.get("shadow_collection_requests", [])
+        if isinstance(item, Mapping) and item.get("request_id") == "shadow_brain_objects_query_route_smoke"
+    ]
+    shadow_request = shadow_requests[0] if shadow_requests else {}
     return {
         "phase": "P8",
         "schema_version": str(report.get("schema_version") or ""),
@@ -839,6 +866,18 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
             collection_plan.get("production_mutation_performed")
         ),
         "runtime_evidence_collection_plan_readiness_claim": str(collection_plan.get("readiness_claim") or ""),
+        "shadow_route_smoke_request_schema": str(shadow_request.get("schema_version") or ""),
+        "shadow_route_smoke_request_status": str(shadow_request.get("status") or ""),
+        "shadow_route_smoke_route_count": len(shadow_request.get("routes") or []),
+        "shadow_route_smoke_pending_routes": [
+            str(route) for route in shadow_request.get("routes", []) if isinstance(route, str) and route
+        ],
+        "shadow_route_smoke_network_used": bool(shadow_request.get("network_used")),
+        "shadow_route_smoke_mutation_allowed": bool(shadow_request.get("mutation_allowed")),
+        "shadow_route_smoke_production_mutation_performed": bool(
+            shadow_request.get("production_mutation_performed")
+        ),
+        "shadow_route_smoke_readiness_claim": str(shadow_request.get("readiness_claim") or ""),
         "gaps": list(preview.get("gaps") or []),
         "production_mutation_performed": bool(report.get("production_mutation_performed")),
     }
