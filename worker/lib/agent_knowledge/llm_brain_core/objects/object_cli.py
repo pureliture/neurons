@@ -20,7 +20,12 @@ from .golden_query_eval import (
 from .extraction_pipeline import run_source_to_candidate_graph_activation_preview
 from .okf_export import build_okf_bundle
 from .object_packs import apply_approval_board_decisions, apply_candidate_review_edits, build_documentation_cleanup_pack
-from .reference_corpus import build_corpus_ingest_plan, default_corpus_policy_status, reference_corpus_objects_from_manifest
+from .reference_corpus import (
+    build_corpus_ingest_plan,
+    build_reference_corpus_production_ingest_readiness_report,
+    default_corpus_policy_status,
+    reference_corpus_objects_from_manifest,
+)
 from .runtime_readiness import (
     build_source_to_candidate_runtime_evidence_collection_plan,
     build_source_to_candidate_runtime_evidence_packet_template,
@@ -240,6 +245,25 @@ def corpus_ingest_main(argv: list[str] | None = None) -> int:
         }
     )
     return 0
+
+
+def corpus_ingest_readiness_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="neuron-knowledge corpus-ingest-readiness")
+    parser.add_argument("--evidence-file", default="")
+    parser.add_argument("--expected-manifest-hash", default="")
+    parser.add_argument("--expected-corpus-id", default="")
+    parser.add_argument("--expected-source-count", type=_non_negative_int, default=None)
+    args = parser.parse_args(argv)
+    report = build_reference_corpus_production_ingest_readiness_report(
+        live_evidence=_load_json_mapping(args.evidence_file, label="production corpus ingest evidence")
+        if args.evidence_file
+        else None,
+        expected_manifest_hash=args.expected_manifest_hash,
+        expected_source_count=args.expected_source_count,
+        expected_corpus_id=args.expected_corpus_id,
+    )
+    _print_json(report)
+    return 1 if report["status"] == "FAIL" else 0
 
 
 def source_to_candidate_graph_main(argv: list[str] | None = None) -> int:

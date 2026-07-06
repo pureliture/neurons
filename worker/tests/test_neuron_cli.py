@@ -412,6 +412,87 @@ def test_neuron_knowledge_corpus_ingest_production_denied_even_with_configured_l
     assert ledger.exists() is False
 
 
+def test_neuron_knowledge_corpus_ingest_readiness_accepts_bounded_evidence_file(tmp_path, capsys):
+    evidence_file = tmp_path / "production-corpus-ingest-evidence.json"
+    evidence_file.write_text(
+        json.dumps(
+            {
+                "schema_version": "reference_corpus_production_ingest_evidence.v1",
+                "approval": {
+                    "approved": True,
+                    "approval_ref_hash": "sha256:" + "b" * 64,
+                    "scope": "single_project_single_corpus",
+                    "project": "neurons",
+                    "max_corpora": 1,
+                    "no_raw_body_returned": True,
+                },
+                "corpus": {
+                    "corpus_id": "rc:palantir-ontology",
+                    "manifest_hash": "sha256:" + "a" * 64,
+                    "source_count": 65,
+                    "storage_mode": "managed_snapshot",
+                    "authority_lane": "reference_only",
+                    "raw_body_policy": "no_raw_return_by_default",
+                },
+                "ingest": {
+                    "target": "production_corpus_store",
+                    "ledger_scope": "production",
+                    "corpus_write_performed": True,
+                    "production_mutation_performed": True,
+                    "authority_write_performed": False,
+                },
+                "read_after_write": {
+                    "status": "validated",
+                    "corpus_id": "rc:palantir-ontology",
+                    "manifest_hash": "sha256:" + "a" * 64,
+                    "source_count": 65,
+                },
+                "rollback_or_deletion": {
+                    "status": "planned",
+                    "path": ["delete_snapshot_keep_metadata"],
+                },
+                "postcheck": {
+                    "status": "validated",
+                    "raw_body_returned": False,
+                    "secret_returned": False,
+                    "host_topology_returned": False,
+                    "raw_external_ids_returned": False,
+                },
+                "evidence_provenance": {
+                    "schema_version": "reference_corpus_production_ingest_evidence_provenance.v1",
+                    "collection_mode": "post_deploy_bounded_production_ingest",
+                    "network_used": True,
+                    "mutation_scope": "bounded_production_corpus_ingest",
+                    "raw_private_evidence_returned": False,
+                    "secret_returned": False,
+                    "host_topology_returned": False,
+                    "raw_external_ids_returned": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "corpus-ingest-readiness",
+            "--evidence-file",
+            str(evidence_file),
+            "--expected-manifest-hash",
+            "sha256:" + "a" * 64,
+            "--expected-source-count",
+            "65",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["schema_version"] == "reference_corpus_production_ingest_readiness.v1"
+    assert report["status"] == "PASS"
+    assert report["production_mutation_performed"] is True
+    assert report["evidence_collection_network_used"] is True
+
+
 def test_neuron_knowledge_corpus_status_reports_storage_policy(capsys):
     rc = main(["corpus-status", "--project", "neurons"])
 

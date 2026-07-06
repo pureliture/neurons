@@ -1,5 +1,6 @@
 from agent_knowledge.llm_brain_core.reference_corpus import (
     build_corpus_ingest_plan,
+    build_reference_corpus_production_ingest_readiness_report,
     reference_corpus_objects_from_manifest,
 )
 from agent_knowledge.ledger import Ledger
@@ -54,6 +55,66 @@ def _palantir_full_count_manifest():
             source["source_url"] = f"https://example.test/palantir/ontology/{idx:03d}"
         sources.append(source)
     return {"corpus_name": "palantir-ontology", "sources": sources}
+
+
+def _bounded_production_corpus_ingest_evidence(**overrides):
+    manifest_hash = "sha256:" + "a" * 64
+    corpus_id = "rc:palantir-ontology"
+    evidence = {
+        "schema_version": "reference_corpus_production_ingest_evidence.v1",
+        "approval": {
+            "approved": True,
+            "approval_ref_hash": "sha256:" + "b" * 64,
+            "scope": "single_project_single_corpus",
+            "project": "neurons",
+            "max_corpora": 1,
+            "no_raw_body_returned": True,
+        },
+        "corpus": {
+            "corpus_id": corpus_id,
+            "manifest_hash": manifest_hash,
+            "source_count": 65,
+            "storage_mode": "managed_snapshot",
+            "authority_lane": "reference_only",
+            "raw_body_policy": "no_raw_return_by_default",
+        },
+        "ingest": {
+            "target": "production_corpus_store",
+            "ledger_scope": "production",
+            "corpus_write_performed": True,
+            "production_mutation_performed": True,
+            "authority_write_performed": False,
+        },
+        "read_after_write": {
+            "status": "validated",
+            "corpus_id": corpus_id,
+            "manifest_hash": manifest_hash,
+            "source_count": 65,
+        },
+        "rollback_or_deletion": {
+            "status": "planned",
+            "path": ["delete_snapshot_keep_metadata"],
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_body_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "evidence_provenance": {
+            "schema_version": "reference_corpus_production_ingest_evidence_provenance.v1",
+            "collection_mode": "post_deploy_bounded_production_ingest",
+            "network_used": True,
+            "mutation_scope": "bounded_production_corpus_ingest",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+    evidence.update(overrides)
+    return evidence
 
 
 def test_corpus_ingest_plan_reports_storage_policy_and_missing_url_gap():
@@ -146,6 +207,69 @@ def test_palantir_full_count_manifest_gate_is_metadata_only():
     assert plan["source_type_counts"] == {"PDF": 6, "TEXT": 26, "WEB_PAGE": 33}
     assert plan["manifest_hash"].startswith("sha256:")
     assert plan["writes_planned"] is False
+
+
+def test_reference_corpus_production_ingest_readiness_without_evidence_preserves_gap():
+    report = build_reference_corpus_production_ingest_readiness_report(
+        expected_manifest_hash="sha256:" + "a" * 64,
+        expected_source_count=65,
+    )
+
+    assert report["schema_version"] == "reference_corpus_production_ingest_readiness.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["failed_claims"] == []
+    assert report["production_mutation_performed"] is False
+    assert report["network_used"] is False
+    assert "production_corpus_ingest_evidence_unverified" in report["gaps"]
+
+
+def test_reference_corpus_production_ingest_readiness_accepts_bounded_evidence_packet():
+    report = build_reference_corpus_production_ingest_readiness_report(
+        live_evidence=_bounded_production_corpus_ingest_evidence(),
+        expected_manifest_hash="sha256:" + "a" * 64,
+        expected_source_count=65,
+    )
+
+    assert report["status"] == "PASS"
+    assert report["failed_claims"] == []
+    assert report["production_mutation_performed"] is True
+    assert report["network_used"] is False
+    assert report["evidence_collection_network_used"] is True
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["production.corpus_ingest.approval"]["status"] == "validated"
+    assert claims["production.corpus_ingest.execution"]["status"] == "validated"
+    assert claims["production.corpus_ingest.read_after_write"]["status"] == "validated"
+
+
+def test_reference_corpus_production_ingest_readiness_fails_on_raw_body_or_authority_write():
+    evidence = _bounded_production_corpus_ingest_evidence(
+        ingest={
+            "target": "production_corpus_store",
+            "ledger_scope": "production",
+            "corpus_write_performed": True,
+            "production_mutation_performed": True,
+            "authority_write_performed": True,
+        },
+        postcheck={
+            "status": "validated",
+            "raw_body_returned": True,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    )
+
+    report = build_reference_corpus_production_ingest_readiness_report(
+        live_evidence=evidence,
+        expected_manifest_hash="sha256:" + "a" * 64,
+        expected_source_count=65,
+    )
+
+    assert report["status"] == "FAIL"
+    assert "production.corpus_ingest.execution" in report["failed_claims"]
+    assert "production.corpus_ingest.postcheck" in report["failed_claims"]
+    assert "production_corpus_ingest_changed_authority" in report["gaps"]
+    assert "production_corpus_ingest_raw_body_returned" in report["gaps"]
 
 
 def test_corpus_ingest_plan_expected_count_gate_passes_without_writes():
