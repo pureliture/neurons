@@ -819,6 +819,11 @@ def test_mcp_brain_objects_query_default_route_returns_agent_context_objects(tmp
     assert pack["recommended_actions"]
     assert {obj["object_type"] for obj in pack["objects"]} >= {"ArtifactPreference", "Test", "ToolHandoffContext"}
     assert pack["audit"]["object_pack_route_source"] == "context_authority_object_packs"
+    assert pack["route_trace"]["route"] == "authority_archive_separation"
+    assert "reference_only" in pack["route_trace"]["selected_source_lanes"]
+    assert pack["route_trace"]["route_source"] == "inferred"
+    assert pack["route_trace"]["stop_reason"] == "returned_object_pack"
+    assert isinstance(pack["route_trace"]["missing_evidence"], list)
     assert pack["response_mode"] == "compact"
 
 
@@ -952,6 +957,18 @@ def test_mcp_brain_objects_query_code_change_impact_route_returns_impact_pack(tm
     assert any(edge["edge_type"] == "requires_live_evidence" for edge in pack["edges"])
     assert "live_runtime_impact_unverified" in pack["gaps"]
     assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert pack["route_trace"] == {
+        "schema_version": "object_query_route_trace.v1",
+        "route": "code_change_impact",
+        "route_source": "inferred",
+        "selected_source_lanes": ["candidate", "reference_only"],
+        "confidence": pack["confidence"],
+        "stop_reason": "missing_evidence_gap_returned",
+        "missing_evidence": [
+            "live_runtime_impact_unverified",
+            "source_freshness_unverified",
+        ],
+    }
     assert pack["response_mode"] == "compact"
 
 

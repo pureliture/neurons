@@ -158,6 +158,7 @@ class BrainReadService:
     ) -> dict[str, Any]:
         project_name = project or project_from_repository(repository)
         selected_route = route or _route_for_query(query)
+        route_source = "explicit" if route else "inferred"
         pack = self.brain_context_resolve(
             repository=repository,
             branch=branch,
@@ -227,6 +228,7 @@ class BrainReadService:
                 object_pack,
                 object_types=[str(item) for item in object_types or []],
                 response_mode=response_mode,
+                route_source=route_source,
             ),
         }
         ensure_public_safe(result, "brain_objects_query")
@@ -731,6 +733,7 @@ def _object_pack_view(
     *,
     object_types: list[str],
     response_mode: str,
+    route_source: str,
 ) -> dict[str, Any]:
     view = dict(pack)
     wanted = {item for item in object_types if item}
@@ -770,7 +773,59 @@ def _object_pack_view(
             if isinstance(lane_objects, list)
         }
     view["response_mode"] = mode
+    view["route_trace"] = _route_trace_for_view(view, route_source=route_source)
     return view
+
+
+def _route_trace_for_view(view: Mapping[str, Any], *, route_source: str) -> dict[str, Any]:
+    missing_evidence = _missing_evidence_gaps(view.get("gaps"))
+    trace = {
+        "schema_version": "object_query_route_trace.v1",
+        "route": public_safe_text(str(view.get("route") or ""), max_chars=120),
+        "route_source": "explicit" if route_source == "explicit" else "inferred",
+        "selected_source_lanes": _selected_source_lanes(view.get("lanes")),
+        "confidence": dict(view.get("confidence") or {}),
+        "stop_reason": _route_stop_reason(view, missing_evidence=missing_evidence),
+        "missing_evidence": missing_evidence,
+    }
+    ensure_public_safe(trace, "ObjectQueryRouteTrace")
+    return trace
+
+
+def _selected_source_lanes(lanes: Any) -> list[str]:
+    if not isinstance(lanes, Mapping):
+        return []
+    selected = [
+        public_safe_text(str(lane), max_chars=80)
+        for lane, lane_objects in lanes.items()
+        if isinstance(lane_objects, list) and lane_objects
+    ]
+    return sorted(lane for lane in selected if lane)
+
+
+def _missing_evidence_gaps(gaps: Any) -> list[str]:
+    if not isinstance(gaps, list):
+        return []
+    markers = ("evidence", "unverified", "freshness", "missing")
+    missing: list[str] = []
+    for gap in gaps:
+        text = public_safe_text(str(gap or ""), max_chars=180)
+        if text and any(marker in text for marker in markers) and text not in missing:
+            missing.append(text)
+    return missing
+
+
+def _route_stop_reason(view: Mapping[str, Any], *, missing_evidence: list[str]) -> str:
+    if missing_evidence:
+        return "missing_evidence_gap_returned"
+    objects = view.get("objects") if isinstance(view.get("objects"), list) else []
+    actions = view.get("recommended_actions") if isinstance(view.get("recommended_actions"), list) else []
+    gaps = view.get("gaps") if isinstance(view.get("gaps"), list) else []
+    if objects or actions:
+        return "returned_object_pack"
+    if gaps:
+        return "gap_only_response"
+    return "empty_object_pack"
 
 
 def _compact_object(obj: Mapping[str, Any]) -> dict[str, Any]:
