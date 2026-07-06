@@ -19,6 +19,7 @@ BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME = "brain_corpus_ingest_plan"
 BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME = "brain_source_to_candidate_graph"
 BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME = "brain_candidate_review_edit"
 BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME = "brain_approval_board_decide"
+BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME = "brain_source_to_candidate_runtime_readiness"
 BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME = "brain_object_proposal_create"
 BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME = "brain_object_decision_commit"
 BRAIN_REVIEW_PROPOSALS_TOOL_NAME = "brain_review_proposals"
@@ -78,6 +79,7 @@ _DISPATCH_OWNER_BY_TOOL_NAME = {
     BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: "jsonrpc_brain",
     BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME: "jsonrpc_brain",
     BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME: "jsonrpc_brain",
     BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: "jsonrpc_brain",
     BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: "jsonrpc_brain",
     BRAIN_REVIEW_PROPOSALS_TOOL_NAME: "jsonrpc_brain",
@@ -409,6 +411,18 @@ def list_tools() -> list[dict]:
                     "reviewer_id": {"type": "string", "default": "unspecified"},
                 },
                 "required": ["pack", "decisions"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+            "description": "sanitized post-deploy evidence packet으로 source-to-candidate runtime readiness를 read-only 판정한다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "live_evidence": {"type": "object", "default": {}},
+                    "expected_commit": {"type": "string"},
+                },
                 "additionalProperties": False,
             },
         },

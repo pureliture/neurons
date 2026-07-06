@@ -11,6 +11,10 @@ REQUIRED_REVIEW_TOOL_NAMES = (
     "brain_candidate_review_edit",
     "brain_approval_board_decide",
 )
+REQUIRED_RUNTIME_TOOL_NAMES = (
+    *REQUIRED_REVIEW_TOOL_NAMES,
+    "brain_source_to_candidate_runtime_readiness",
+)
 
 
 def build_source_to_candidate_runtime_readiness_report(
@@ -73,7 +77,7 @@ def _local_product_surface_claim(local_gate: Mapping[str, Any]) -> dict[str, Any
         "evidence_class": "local_test",
         "status": "failed" if failed else "validated",
         "result": "FAIL" if failed else "PASS",
-        "covered_tools": list(REQUIRED_REVIEW_TOOL_NAMES),
+        "covered_tools": list(REQUIRED_RUNTIME_TOOL_NAMES),
         "gaps": ["local_product_surface_checks_failed"] if failed else [],
         "failed_checks": failed,
     }
@@ -81,12 +85,12 @@ def _local_product_surface_claim(local_gate: Mapping[str, Any]) -> dict[str, Any
 
 def _live_tools_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
     tool_names = set(_string_list(evidence.get("tool_names")))
-    missing = [name for name in REQUIRED_REVIEW_TOOL_NAMES if name not in tool_names]
+    missing = [name for name in REQUIRED_RUNTIME_TOOL_NAMES if name not in tool_names]
     return {
         "claim_id": "live.mcp.review_tools_loaded",
         "evidence_class": "runtime_read_path",
         "status": "not_validated" if missing else "validated",
-        "required_tools": list(REQUIRED_REVIEW_TOOL_NAMES),
+        "required_tools": list(REQUIRED_RUNTIME_TOOL_NAMES),
         "missing_tools": missing,
         "gaps": ["live_mcp_review_tools_unverified"] if missing else [],
     }
@@ -95,12 +99,12 @@ def _live_tools_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
 def _live_agent_context_tool_hints_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
     tool_hints = _agent_context_tool_hints(evidence)
     hinted_tools = {str(item.get("tool") or "") for item in tool_hints if isinstance(item, Mapping)}
-    missing = [name for name in REQUIRED_REVIEW_TOOL_NAMES if name not in hinted_tools]
+    missing = [name for name in REQUIRED_RUNTIME_TOOL_NAMES if name not in hinted_tools]
     return {
         "claim_id": "live.agent_context.tool_hints",
         "evidence_class": "runtime_read_path",
         "status": "not_validated" if missing else "validated",
-        "required_tools": list(REQUIRED_REVIEW_TOOL_NAMES),
+        "required_tools": list(REQUIRED_RUNTIME_TOOL_NAMES),
         "missing_tools": missing,
         "gaps": ["live_agent_context_tool_hints_unverified"] if missing else [],
     }

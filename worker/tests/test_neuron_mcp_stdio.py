@@ -26,6 +26,7 @@ from agent_knowledge.mcp_server import (
     BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
     BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
     BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+    BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
     BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
     BRAIN_CORPUS_STATUS_TOOL_NAME,
     BRAIN_REVIEW_PROPOSALS_TOOL_NAME,
@@ -282,6 +283,7 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
         BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
         BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
         BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+        BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
         BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
         BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
         BRAIN_REVIEW_PROPOSALS_TOOL_NAME,
@@ -314,6 +316,92 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
         "local_test",
         "production",
     ]
+    readiness_schema = tools[BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME]["inputSchema"]
+    assert readiness_schema["properties"]["live_evidence"]["type"] == "object"
+    assert readiness_schema["properties"]["expected_commit"]["type"] == "string"
+
+
+def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_without_mutation(tmp_path: Path):
+    service = _service(tmp_path)
+    evidence = {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "tool_names": [
+            BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+            BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+            BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+            BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+        ],
+        "agent_context_product": {
+            "schema_version": "agent_context_product_pack.v1",
+            "tool_hints": [
+                {"tool": BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME},
+                {"tool": BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME},
+                {"tool": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME},
+                {"tool": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME},
+            ],
+        },
+        "production_denials": {
+            BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
+                "status": "denied",
+                "production_mutation_performed": False,
+                "mutation_performed": False,
+            },
+            BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME: {
+                "permission": "denied",
+                "production_mutation_performed": False,
+                "authority_write_performed": False,
+            },
+        },
+        "deployed_identity": {
+            "contains_expected_commit": True,
+            "identity_source": "redacted_live_runtime_evidence",
+        },
+    }
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 120,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "live_evidence": evidence,
+                    "expected_commit": "d38bcfa",
+                },
+            },
+        },
+        service,
+    )
+
+    report = response["result"]["structuredContent"]
+    assert report["schema_version"] == "source_to_candidate_runtime_readiness.v1"
+    assert report["status"] == "PASS"
+    assert report["production_mutation_performed"] is False
+    assert report["network_used"] is False
+
+
+def test_mcp_source_to_candidate_runtime_readiness_without_evidence_preserves_live_gaps(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 120,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {"expected_commit": "d38bcfa"},
+            },
+        },
+        service,
+    )
+
+    report = response["result"]["structuredContent"]
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["live_evidence_provided"] is False
+    assert report["production_mutation_performed"] is False
+    assert "live_mcp_review_tools_unverified" in report["gaps"]
 
 
 def test_mcp_source_to_candidate_graph_and_review_approval_preview_roundtrip(tmp_path: Path):

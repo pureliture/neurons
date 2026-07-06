@@ -4,7 +4,7 @@ import json
 
 from agent_knowledge.cli import main
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
-    REQUIRED_REVIEW_TOOL_NAMES,
+    REQUIRED_RUNTIME_TOOL_NAMES,
     build_source_to_candidate_runtime_readiness_report,
 )
 
@@ -12,10 +12,10 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
 def _sanitized_live_evidence(**overrides):
     evidence = {
         "schema_version": "source_to_candidate_runtime_evidence.v1",
-        "tool_names": list(REQUIRED_REVIEW_TOOL_NAMES),
+        "tool_names": list(REQUIRED_RUNTIME_TOOL_NAMES),
         "agent_context_product": {
             "schema_version": "agent_context_product_pack.v1",
-            "tool_hints": [{"tool": name} for name in REQUIRED_REVIEW_TOOL_NAMES],
+            "tool_hints": [{"tool": name} for name in REQUIRED_RUNTIME_TOOL_NAMES],
         },
         "production_denials": {
             "brain_source_to_candidate_graph": {
