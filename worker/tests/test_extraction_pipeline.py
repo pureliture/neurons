@@ -630,6 +630,36 @@ def test_pr_commit_extraction_preview_reports_gap_for_missing_test_refs():
     assert result["evaluator_report"]["failures"] == ["commit_test_ref_missing"]
 
 
+def test_pr_commit_extraction_preview_normalizes_test_run_lookup_ids():
+    result = run_pr_commit_extraction_preview(
+        pull_request={
+            "pr_id": "pr:normalized",
+            "title": "Normalized test evidence PR",
+            "state": "open",
+        },
+        commits=[
+            {
+                "sha": "def456",
+                "title": "Add verified change",
+                "test_refs": ["test:unit"],
+            },
+        ],
+        test_runs=[
+            {
+                "test_id": " test:unit\n",
+                "summary": "Unit test passed.",
+                "status": "pass",
+            },
+        ],
+        repository="neurons",
+    )
+
+    assert result["status"] == "pass"
+    assert result["edge_count"] == 2
+    assert result["gaps"] == []
+    assert result["pack_preview"]["missing_test_ref_count"] == 0
+
+
 def test_graph_search_projection_join_preview_joins_without_promoting_authority():
     base = run_pr_commit_extraction_preview(
         pull_request={
