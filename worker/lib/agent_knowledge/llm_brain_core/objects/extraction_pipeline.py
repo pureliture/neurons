@@ -2536,6 +2536,14 @@ def _session_project_handoff_pack(
         "object_refs": object_refs,
         "edge_type_counts": dict(sorted(edge_type_counts.items())),
         "gaps": list(gaps),
+        "resume_context": _session_project_resume_context(
+            repository=repository,
+            branch=branch,
+            project=project,
+            scope=scope,
+            object_refs=object_refs,
+            gaps=gaps,
+        ),
         "recommended_next_actions": [
             "verify_live_multi_device_rollup",
             "review_missing_phase_gaps",
@@ -2545,6 +2553,46 @@ def _session_project_handoff_pack(
     }
     ensure_public_safe(pack, "SessionProjectHandoffPack")
     return pack
+
+
+def _session_project_resume_context(
+    *,
+    repository: str,
+    branch: str,
+    project: str,
+    scope: str,
+    object_refs: Mapping[str, list[dict[str, str]]],
+    gaps: list[str],
+) -> dict[str, Any]:
+    local_test_gaps = [public_safe_text(str(item), max_chars=180) for item in gaps]
+    live_gaps = ["live_multi_device_rollup_unproven"]
+    context = {
+        "schema_version": "session_project_resume_context.v1",
+        "repository": repository,
+        "active_branch": branch,
+        "project": project,
+        "scope": scope,
+        "latest_session": _latest_object_ref(object_refs, "Session"),
+        "work_unit_refs": list(object_refs.get("WorkUnit") or []),
+        "linked_refs": {
+            "Spec": list(object_refs.get("Spec") or []),
+            "PullRequest": list(object_refs.get("PullRequest") or []),
+            "Commit": list(object_refs.get("Commit") or []),
+        },
+        "local_test_gaps": local_test_gaps,
+        "live_gaps": live_gaps,
+        "production_mutation_performed": False,
+        "raw_return_capability": "denied",
+    }
+    ensure_public_safe(context, "SessionProjectResumeContext")
+    return context
+
+
+def _latest_object_ref(object_refs: Mapping[str, list[dict[str, str]]], object_type: str) -> dict[str, str]:
+    refs = object_refs.get(object_type) or []
+    if not refs:
+        return {}
+    return dict(refs[-1])
 
 
 def _session_detail_gaps(

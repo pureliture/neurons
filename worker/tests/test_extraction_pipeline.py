@@ -1092,6 +1092,17 @@ def test_session_project_rollup_preview_builds_safe_handoff_pack():
     assert handoff["object_refs"]["Session"]
     assert handoff["object_refs"]["WorkUnit"]
     assert handoff["object_refs"]["PullRequest"]
+    resume = handoff["resume_context"]
+    assert resume["schema_version"] == "session_project_resume_context.v1"
+    assert resume["active_branch"] == "codex/p6"
+    assert resume["latest_session"]["object_id"] == handoff["object_refs"]["Session"][0]["object_id"]
+    assert resume["work_unit_refs"] == handoff["object_refs"]["WorkUnit"]
+    assert resume["linked_refs"]["Spec"] == handoff["object_refs"]["Spec"]
+    assert resume["linked_refs"]["PullRequest"] == handoff["object_refs"]["PullRequest"]
+    assert resume["linked_refs"]["Commit"] == handoff["object_refs"]["Commit"]
+    assert "raw_session_body_ignored" in resume["local_test_gaps"]
+    assert resume["live_gaps"] == ["live_multi_device_rollup_unproven"]
+    assert resume["production_mutation_performed"] is False
     assert "raw_session_body_ignored" in handoff["gaps"]
     assert "verify_live_multi_device_rollup" in handoff["recommended_next_actions"]
     assert "SOURCE_BODY_SENTINEL" not in str(handoff)
