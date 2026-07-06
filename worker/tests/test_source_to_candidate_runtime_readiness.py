@@ -9,6 +9,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
     REQUIRED_RUNTIME_TOOL_NAMES,
     build_source_to_candidate_runtime_evidence_collection_plan,
+    build_source_to_candidate_runtime_evidence_packet_template,
     build_source_to_candidate_runtime_readiness_report,
 )
 
@@ -294,6 +295,66 @@ def test_runtime_readiness_evidence_collection_plan_is_public_safe_and_read_only
     assert "host_topology" in plan["forbidden_outputs"]
     assert "raw_dataset_id" in plan["forbidden_outputs"]
     assert "raw_document_id" in plan["forbidden_outputs"]
+
+
+def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_evidence():
+    template = build_source_to_candidate_runtime_evidence_packet_template(
+        expected_commit="7218cb2",
+        repository="pureliture/neurons",
+        branch="main",
+        consumer="codex",
+    )
+
+    assert template["schema_version"] == "source_to_candidate_runtime_evidence_packet_template.v1"
+    assert template["status"] == "template_ready"
+    assert template["output_schema"] == "source_to_candidate_runtime_evidence.v1"
+    assert template["expected_commit"] == "7218cb2"
+    assert template["repository"] == "pureliture/neurons"
+    assert template["branch"] == "main"
+    assert template["consumer"] == "codex"
+    assert template["network_used"] is False
+    assert template["mutation_allowed"] is False
+    assert template["production_mutation_performed"] is False
+    assert template["readiness_claim"] == "template_only_not_runtime_evidence"
+    assert template["collection_mode"] == "post_deploy_read_only_smoke"
+    assert template["collection_plan_schema"] == "source_to_candidate_runtime_evidence_collection_plan.v1"
+    assert template["shadow_collection_registration_id"] == "shadow_route_smoke_post_deploy_registration"
+    assert template["required_tools"] == list(REQUIRED_RUNTIME_TOOL_NAMES)
+    assert template["required_routes"] == list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    assert template["required_packet_fields"] == [
+        "schema_version",
+        "tool_names",
+        "agent_context_product",
+        "brain_objects_query_smokes",
+        "deployed_identity",
+        "production_denials",
+        "tool_schemas",
+        "production_authority_gate",
+        "evidence_provenance",
+    ]
+    assert template["packet_field_templates"]["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert template["packet_field_templates"]["evidence_provenance"]["schema_version"] == EVIDENCE_PROVENANCE_SCHEMA
+    assert template["packet_field_templates"]["evidence_provenance"]["mutation_scope"] == "none"
+    assert template["packet_field_templates"]["evidence_provenance"]["network_used"] == "collector_sets_boolean"
+    assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == len(
+        REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+    )
+    assert {
+        item["route"] for item in template["packet_field_templates"]["brain_objects_query_smokes"]
+    } == set(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    assert all(
+        item["forbidden_gap"] == "object_pack_route_not_implemented"
+        for item in template["packet_field_templates"]["brain_objects_query_smokes"]
+    )
+    assert all(
+        item["production_mutation_performed"] is False
+        for item in template["packet_field_templates"]["brain_objects_query_smokes"]
+    )
+    assert "raw_private_transcript" in template["forbidden_outputs"]
+    assert "secret_value" in template["forbidden_outputs"]
+    assert "host_topology" in template["forbidden_outputs"]
+    assert "raw_dataset_id" in template["forbidden_outputs"]
+    assert "raw_document_id" in template["forbidden_outputs"]
 
 
 def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation():
@@ -1008,3 +1069,40 @@ def test_neuron_knowledge_runtime_readiness_cli_outputs_evidence_collection_plan
     assert registration["mutation_allowed"] is False
     assert registration["production_mutation_performed"] is False
     assert registration["readiness_claim"] == "registration_only_not_runtime_evidence"
+
+
+def test_neuron_knowledge_runtime_readiness_cli_outputs_evidence_packet_template(capsys):
+    assert (
+        main(
+            [
+                "source-to-candidate-runtime-readiness",
+                "--evidence-packet-template",
+                "--expected-commit",
+                "7218cb2",
+                "--repository",
+                "pureliture/neurons",
+                "--branch",
+                "main",
+                "--consumer",
+                "codex",
+            ]
+        )
+        == 0
+    )
+
+    template = json.loads(capsys.readouterr().out)
+    assert template["schema_version"] == "source_to_candidate_runtime_evidence_packet_template.v1"
+    assert template["status"] == "template_ready"
+    assert template["output_schema"] == "source_to_candidate_runtime_evidence.v1"
+    assert template["expected_commit"] == "7218cb2"
+    assert template["repository"] == "pureliture/neurons"
+    assert template["branch"] == "main"
+    assert template["consumer"] == "codex"
+    assert template["network_used"] is False
+    assert template["mutation_allowed"] is False
+    assert template["production_mutation_performed"] is False
+    assert template["readiness_claim"] == "template_only_not_runtime_evidence"
+    assert template["packet_field_templates"]["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == len(
+        REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+    )

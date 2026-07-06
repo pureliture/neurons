@@ -411,6 +411,7 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
     assert readiness_schema["properties"]["live_evidence"]["type"] == "object"
     assert readiness_schema["properties"]["expected_commit"]["type"] == "string"
     assert readiness_schema["properties"]["evidence_collection_plan"]["type"] == "boolean"
+    assert readiness_schema["properties"]["evidence_packet_template"]["type"] == "boolean"
     assert readiness_schema["properties"]["repository"]["type"] == "string"
     assert readiness_schema["properties"]["branch"]["type"] == "string"
     assert readiness_schema["properties"]["consumer"]["type"] == "string"
@@ -554,6 +555,44 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_p
     assert registration["run_status"] == "not_run"
     assert registration["request_ids"] == ["shadow_brain_objects_query_route_smoke"]
     assert registration["readiness_claim"] == "registration_only_not_runtime_evidence"
+
+
+def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_template(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 121,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "evidence_packet_template": True,
+                    "expected_commit": "d38bcfa",
+                    "repository": "pureliture/neurons",
+                    "branch": "main",
+                    "consumer": "codex",
+                },
+            },
+        },
+        service,
+    )
+
+    template = response["result"]["structuredContent"]
+    assert template["schema_version"] == "source_to_candidate_runtime_evidence_packet_template.v1"
+    assert template["status"] == "template_ready"
+    assert template["output_schema"] == "source_to_candidate_runtime_evidence.v1"
+    assert template["expected_commit"] == "d38bcfa"
+    assert template["repository"] == "pureliture/neurons"
+    assert template["branch"] == "main"
+    assert template["consumer"] == "codex"
+    assert template["network_used"] is False
+    assert template["mutation_allowed"] is False
+    assert template["production_mutation_performed"] is False
+    assert template["readiness_claim"] == "template_only_not_runtime_evidence"
+    assert template["packet_field_templates"]["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == 4
 
 
 def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None) -> dict:
