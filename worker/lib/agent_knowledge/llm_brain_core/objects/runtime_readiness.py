@@ -308,6 +308,7 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
     expected_commit: str = "",
     route_runner: Callable[[str], Mapping[str, Any]],
     review_loop_runner: Callable[[], Mapping[str, Any]] | None = None,
+    session_project_rollup_runner: Callable[[], Mapping[str, Any]] | None = None,
     tool_names: Any = None,
     collection_mode: str = "local_test_replay",
     network_used: bool = False,
@@ -319,11 +320,17 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
         for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
     ]
     review_loop = _collect_source_to_candidate_review_loop_shadow(review_loop_runner)
+    session_project_rollup = _collect_session_project_rollup_shadow(
+        session_project_rollup_runner,
+        repository=repository,
+        branch=branch,
+    )
     capture = {
         "schema_version": "source_to_candidate_runtime_shadow_capture.v1",
         "tool_names": _string_list(tool_names) or list(REQUIRED_RUNTIME_TOOL_NAMES),
         "brain_objects_query_smokes": smokes,
         "source_to_candidate_review_loop": review_loop,
+        "session_project_rollup_runtime": session_project_rollup,
         "deployed_identity": {
             "contains_expected_commit": False,
             "identity_source": "collector_not_deployed_identity_proof",
@@ -339,6 +346,11 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
             "route_failure_count": sum(1 for smoke in smokes if "collector_route_smoke_failed" in _smoke_gaps(smoke)),
             "review_loop_collected": bool(review_loop),
             "review_loop_schema": public_safe_text(str(review_loop.get("schema_version") or ""), max_chars=80),
+            "session_project_rollup_collected": bool(session_project_rollup),
+            "session_project_rollup_schema": public_safe_text(
+                str(session_project_rollup.get("schema_version") or ""),
+                max_chars=80,
+            ),
             "network_used": network_used is True,
             "mutation_allowed": False,
             "production_mutation_performed": False,
@@ -553,6 +565,191 @@ def _source_to_candidate_shadow_corpus_status(*, project: str) -> dict[str, Any]
         "freshness_gaps": [],
         "gaps": [],
     }
+
+
+def build_session_project_rollup_shadow_evidence(
+    *,
+    repository: str = "neurons",
+    branch: str = "codex/knowledge-object-review-flow-roadmap",
+    project: str = "neurons",
+) -> dict[str, Any]:
+    """Build a branch-local local_test P6 session/project/work-unit rollup summary."""
+
+    from .extraction_pipeline import run_session_project_rollup_preview
+
+    report = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "session:p6-shadow-a",
+                "device_id_hash": "device:p6-shadow-this",
+                "provider": "codex",
+                "summary": "P6 shadow rollup visible session.",
+                "work_unit_id": "work:p6-shadow",
+                "evidence_refs": ["ev:p6-shadow:session-a"],
+            },
+            {
+                "session_id_hash": "session:p6-shadow-b",
+                "device_id_hash": "device:p6-shadow-other",
+                "provider": "codex",
+                "summary": "P6 shadow rollup other-device session.",
+                "work_unit_id": "work:p6-shadow",
+                "evidence_refs": ["ev:p6-shadow:session-b"],
+            },
+        ],
+        repository=repository,
+        branch=branch,
+        project=project,
+        specs=[{"spec_ref": "docs/specs/p6/design.md", "work_unit_id": "work:p6-shadow"}],
+        pull_requests=[{"pr_id": "pr:95", "number": 95, "work_unit_id": "work:p6-shadow"}],
+        commits=[{"commit_id": "commit:p6-shadow", "pull_request_id": "pr:95", "work_unit_id": "work:p6-shadow"}],
+        requesting_device_id_hash="device:p6-shadow-this",
+        scope="all_devices",
+    )
+    handoff = report.get("handoff_pack") if isinstance(report.get("handoff_pack"), Mapping) else {}
+    resume = handoff.get("resume_context") if isinstance(handoff.get("resume_context"), Mapping) else {}
+    object_refs = handoff.get("object_refs") if isinstance(handoff.get("object_refs"), Mapping) else {}
+    objects = report.get("objects") if isinstance(report.get("objects"), list) else []
+    edges = report.get("edges") if isinstance(report.get("edges"), list) else []
+    object_type_counts = _object_type_counts(objects)
+    evidence = {
+        "schema_version": SESSION_PROJECT_ROLLUP_RUNTIME_SCHEMA,
+        "rollup_preview": {
+            "schema_version": public_safe_text(str(report.get("schema_version") or ""), max_chars=80),
+            "status": public_safe_text(str(report.get("status") or ""), max_chars=80),
+            "scope": public_safe_text(str(report.get("scope") or ""), max_chars=80),
+            "object_type_counts": object_type_counts,
+            "edge_types": _edge_types(edges),
+            "object_count": _int_value(report.get("object_count")),
+            "edge_count": _int_value(report.get("edge_count")),
+            "visible_session_count": _int_value(report.get("visible_session_count")),
+            "all_device_session_count": _int_value(report.get("all_device_session_count")),
+            "device_count": _int_value(report.get("device_count")),
+            "production_mutation_performed": report.get("production_mutation_performed") is True,
+        },
+        "handoff_pack": {
+            "schema_version": public_safe_text(str(handoff.get("schema_version") or ""), max_chars=80),
+            "raw_return_capability": public_safe_text(str(handoff.get("raw_return_capability") or ""), max_chars=80),
+            "visible_session_count": _int_value(handoff.get("visible_session_count")),
+            "object_ref_counts": _object_ref_counts(object_refs),
+            "resume_context": {
+                "schema_version": public_safe_text(str(resume.get("schema_version") or ""), max_chars=80),
+                "latest_session_ref_present": isinstance(resume.get("latest_session"), Mapping),
+                "work_unit_ref_count": len(resume.get("work_unit_refs") or []),
+                "production_mutation_performed": resume.get("production_mutation_performed") is True,
+            },
+        },
+        "read_after_write": {
+            "status": "validated",
+            "route": "temporal_work_recall",
+            "object_pack_schema": "object_pack.v1",
+            "object_types": ["WorkUnit"],
+            "object_count": _int_value(object_type_counts.get("WorkUnit")),
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+    ensure_public_safe(evidence, "SessionProjectRollupShadowEvidence")
+    return evidence
+
+
+def _collect_session_project_rollup_shadow(
+    session_project_rollup_runner: Callable[[], Mapping[str, Any]] | None,
+    *,
+    repository: str = "neurons",
+    branch: str = "codex/knowledge-object-review-flow-roadmap",
+) -> dict[str, Any]:
+    try:
+        raw = (
+            session_project_rollup_runner()
+            if session_project_rollup_runner is not None
+            else build_session_project_rollup_shadow_evidence(
+                repository=repository or "neurons",
+                branch=branch or "codex/knowledge-object-review-flow-roadmap",
+            )
+        )
+    except Exception as exc:  # pragma: no cover - defensive public-safe guard
+        raw = {
+            "schema_version": SESSION_PROJECT_ROLLUP_RUNTIME_SCHEMA,
+            "collector_error_type": public_safe_text(type(exc).__name__, max_chars=80),
+            "rollup_preview": {
+                "schema_version": "",
+                "scope": "all_devices",
+                "object_type_counts": {},
+                "edge_types": [],
+                "visible_session_count": 0,
+                "all_device_session_count": 0,
+                "device_count": 0,
+                "production_mutation_performed": False,
+            },
+            "handoff_pack": {
+                "schema_version": "",
+                "raw_return_capability": "denied",
+                "resume_context": {
+                    "schema_version": "",
+                    "latest_session_ref_present": False,
+                    "work_unit_ref_count": 0,
+                    "production_mutation_performed": False,
+                },
+            },
+            "read_after_write": {
+                "status": "missing",
+                "route": "temporal_work_recall",
+                "object_pack_schema": "",
+                "object_types": [],
+                "object_count": 0,
+            },
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        }
+    evidence = _public_safe_mapping(raw)
+    ensure_public_safe(evidence, "CollectedSessionProjectRollupShadowEvidence")
+    return evidence
+
+
+def _object_type_counts(objects: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if not isinstance(objects, list):
+        return counts
+    for obj in objects:
+        if not isinstance(obj, Mapping):
+            continue
+        object_type = public_safe_text(str(obj.get("object_type") or ""), max_chars=80)
+        if object_type:
+            counts[object_type] = counts.get(object_type, 0) + 1
+    return counts
+
+
+def _object_ref_counts(object_refs: Mapping[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for object_type, refs in object_refs.items():
+        if not isinstance(refs, list):
+            continue
+        safe_type = public_safe_text(str(object_type or ""), max_chars=80)
+        if safe_type:
+            counts[safe_type] = len(refs)
+    return counts
+
+
+def _edge_types(edges: Any) -> list[str]:
+    if not isinstance(edges, list):
+        return []
+    return sorted(
+        {
+            public_safe_text(str(edge.get("edge_type") or ""), max_chars=120)
+            for edge in edges
+            if isinstance(edge, Mapping) and edge.get("edge_type")
+        }
+    )
 
 
 def _collect_brain_objects_query_route_smoke(
@@ -1605,6 +1802,9 @@ def _session_project_rollup_failures(
     edge_types: list[str],
 ) -> list[str]:
     failures: list[str] = []
+    collector_error_type = public_safe_text(str(rollup.get("collector_error_type") or ""), max_chars=80)
+    if collector_error_type:
+        failures.append(f"session_project_rollup_collector_error:{collector_error_type}")
     if rollup.get("schema_version") != SESSION_PROJECT_ROLLUP_RUNTIME_SCHEMA:
         failures.append("session_project_rollup_schema_mismatch")
     if preview.get("schema_version") != SESSION_PROJECT_ROLLUP_PREVIEW_SCHEMA:

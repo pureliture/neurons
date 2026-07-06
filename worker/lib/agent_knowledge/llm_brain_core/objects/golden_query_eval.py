@@ -993,6 +993,21 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         if isinstance(collector_review_loop.get("approval_board_decision"), Mapping)
         else {}
     )
+    collector_session_rollup = (
+        collector_packet.get("session_project_rollup_runtime")
+        if isinstance(collector_packet.get("session_project_rollup_runtime"), Mapping)
+        else {}
+    )
+    collector_session_preview = (
+        collector_session_rollup.get("rollup_preview")
+        if isinstance(collector_session_rollup.get("rollup_preview"), Mapping)
+        else {}
+    )
+    collector_session_read_after_write = (
+        collector_session_rollup.get("read_after_write")
+        if isinstance(collector_session_rollup.get("read_after_write"), Mapping)
+        else {}
+    )
     return {
         "phase": "P8",
         "schema_version": str(report.get("schema_version") or ""),
@@ -1080,6 +1095,16 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         ),
         "runtime_evidence_collector_review_loop_authority_scope": str(
             collector_review_decision.get("authority_write_scope") or ""
+        ),
+        "runtime_evidence_collector_session_rollup_schema": str(collector_session_rollup.get("schema_version") or ""),
+        "runtime_evidence_collector_session_rollup_device_count": int(
+            collector_session_preview.get("device_count") or 0
+        ),
+        "runtime_evidence_collector_session_rollup_visible_session_count": int(
+            collector_session_preview.get("visible_session_count") or 0
+        ),
+        "runtime_evidence_collector_session_rollup_read_after_write_status": str(
+            collector_session_read_after_write.get("status") or ""
         ),
         "gaps": list(preview.get("gaps") or []),
         "production_mutation_performed": bool(report.get("production_mutation_performed")),
