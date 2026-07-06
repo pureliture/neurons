@@ -543,7 +543,9 @@ Remaining gaps:
 
 ### P7. Preference, Style, And Artifact Memory
 
-State: planned.
+State: local_validated.
+
+Result: PASS_WITH_GAPS.
 
 Purpose:
 
@@ -566,6 +568,30 @@ Gate evidence:
 - accepted preference appears in agent context pack
 - old code inertia is not automatically promoted into style authority
 - HTML review artifact can be checked against accepted preference without requiring UI
+
+Local validation evidence:
+
+- artifact preference pack gate: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_preference_style_extraction_preview_builds_artifact_preference_pack_lanes`
+- artifact preference pack result: `1 passed, 1 warning`
+- HTML artifact review gate: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_preference_style_extraction_preview_checks_html_artifact_without_ui`
+- HTML artifact review result: `1 passed, 1 warning`
+- phase coverage gate: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
+- phase coverage result: `1 passed, 1 warning`
+
+Implemented local/test scope:
+
+- `ArtifactPreferencePack`, `PersonalCodeStyleProfile`, `RepoStyleProfile`, `HtmlReviewProfile`, and `VisualizationProfile` preview objects
+- accepted versus proposal lane separation for preferences and style claims
+- accepted preference context pack lane with public-safe evidence refs
+- inferred preference and legacy style inertia routed to review/proposal lane first
+- HTML review artifact summary/metrics preference check that does not require UI rendering and does not return artifact body
+- diff/artifact review suggestions for HTML, visualization, and repo style drift
+
+Remaining gaps:
+
+- accepted preference context pack is not live-proven in a deployed agent read path
+- production preference/style authority promotion remains closed until an approved write gate exists
+- HTML artifact check is local/test summary/metrics validation only, not a live product consumer workflow
 
 ### P8. Runtime Truth, Security, And Deployment Authority
 
@@ -698,17 +724,17 @@ Current accounting:
 | P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; deployed/configured endpoint validated, current Codex session tool registry gap remains |
 | P2 Living Reference Corpus Store | `local_validated` | `PASS_WITH_GAPS`; local/test store and status gates pass, real private manifest ingest and production approval remain gaps |
 | P3 Processing And Object Extraction Pipeline | `local_validated` | `PASS_WITH_GAPS`; local/test reference corpus extraction preview, repo-document extraction preview, documentation cleanup strategy comparison, runtime truth extraction preview, preference/style extraction preview, work-unit extraction preview, session-detail extraction preview, PR/commit detail extraction preview, graph/search projection join preview, and broader evaluator suite preview pass; live projection join remains a gap |
-| P4 Review Queue And Authority Promotion | `planned` | production authority write closed |
-| P5 Continuous Golden Query Quality Gates | `planned` | baseline red exists; runs across P1-P9 |
-| P6 Session, Device, Project, And Work-Unit 360 | `planned` | object types specified, productized/live flow missing |
-| P7 Preference, Style, And Artifact Memory | `planned` | local profile seeds exist, productized workflow incomplete |
+| P4 Review Queue And Authority Promotion | `local_validated` | `PASS_WITH_GAPS`; local/test decision commit, authority state overlay, explain history, and production denial plan pass; approved production pilot and authority write gate remain gaps |
+| P5 Continuous Golden Query Quality Gates | `in_progress` | `PASS_WITH_GAPS`; strict phase coverage and quality-axis evaluator exist, release gate remains not green while future phases continue |
+| P6 Session, Device, Project, And Work-Unit 360 | `local_validated` | `PASS_WITH_GAPS`; local/test session-device-project rollup and safe handoff pack pass, live multi-device/project rollup remains unproven |
+| P7 Preference, Style, And Artifact Memory | `local_validated` | `PASS_WITH_GAPS`; local/test artifact preference pack lanes and no-UI HTML artifact check pass, live agent context pack and production authority promotion remain gaps |
 | P8 Runtime Truth, Security, And Deployment Authority | `planned` | local pack exists, live evidence and governance workflow incomplete |
 | P9 Agent Context Productization | `planned` | local pack exists, production context and consumer policy not proven |
 | P10 UI And Object Browser Surface | `planned` | deferred, open, non-prerequisite |
 
 ## Next Design Targets
 
-Resolve the P2 delivery gate by linking the branch to an approved issue/PR, then continue P3 Processing And Object Extraction Pipeline from the first reference corpus extraction preview slice into repo documentation cleanup strategy comparison. The remaining P1 configured-agent read-path gap stays open until the current Codex `mcp__lbrain` namespace exposes object-native tools directly.
+Continue with P8 Runtime Truth, Security, And Deployment Authority. Keep P1 configured-agent namespace and current-main image identity gaps open until live evidence closes them, and keep production authority writes denied until an approved write gate exists.
 
 Recommended goal:
 

@@ -51,7 +51,15 @@ def build_extractor_registry_report() -> dict[str, Any]:
                 "version": "0.1",
                 "status": "implemented",
                 "input_object_types": ["MemoryCard"],
-                "output_object_types": ["ArtifactPreference", "StyleRule"],
+                "output_object_types": [
+                    "ArtifactPreference",
+                    "ArtifactPreferencePack",
+                    "HtmlReviewProfile",
+                    "PersonalCodeStyleProfile",
+                    "RepoStyleProfile",
+                    "StyleRule",
+                    "VisualizationProfile",
+                ],
                 "edge_types": ["supported_by_evidence"],
                 "strategy_scope": "style_preference_mapping",
                 "gaps": [],
@@ -439,7 +447,9 @@ def run_preference_style_extraction_preview(
     repository: str,
     current_request: str = "",
     current_files: list[str] | tuple[str, ...] = (),
+    artifact_review: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    card_by_id = _memory_cards_by_id(memory_cards)
     preference_rules = preference_rule_cards_from_memory_cards(
         [dict(card) for card in memory_cards],
         current_request=current_request,
@@ -457,13 +467,36 @@ def run_preference_style_extraction_preview(
         required_verification=[],
         guardrails=[],
     )
-    preference_objects = [_stable_object(obj) for obj in packs["preferences"]["objects"]]
-    style_objects = [_stable_object(obj) for obj in packs["style"]["objects"]]
+    preference_objects = [
+        _with_artifact_memory_authority(
+            _stable_object(obj),
+            item=rule,
+            source_card=card_by_id.get(str(rule.get("memory_id") or ""), {}),
+            item_kind="preference",
+        )
+        for obj, rule in zip(packs["preferences"]["objects"], preference_rules, strict=True)
+    ]
+    style_claims = list(style_profile.get("claims", []))
+    style_objects = [
+        _with_artifact_memory_authority(
+            _stable_object(obj),
+            item=claim,
+            source_card=card_by_id.get(str(claim.get("memory_id") or ""), {}),
+            item_kind="style",
+        )
+        for obj, claim in zip(packs["style"]["objects"], style_claims, strict=True)
+    ]
     objects = [*preference_objects, *style_objects]
     source_evidence_refs = _preference_style_evidence_refs(preference_rules, style_profile)
+    artifact_preference_pack = _artifact_preference_pack_preview(
+        repository=repository,
+        preference_objects=preference_objects,
+        style_objects=style_objects,
+        source_evidence_refs=source_evidence_refs,
+    )
     consumed_memory_ids = {
         str(item.get("memory_id") or "")
-        for item in [*preference_rules, *style_profile.get("claims", [])]
+        for item in [*preference_rules, *style_claims]
         if str(item.get("memory_id") or "")
     }
     ignored_input_count = sum(
@@ -483,6 +516,17 @@ def run_preference_style_extraction_preview(
         "ignored_input_count": ignored_input_count,
         "objects": objects,
         "source_evidence_refs": source_evidence_refs,
+        "artifact_preference_pack": artifact_preference_pack,
+        **(
+            {
+                "artifact_review_check": _artifact_review_preference_check(
+                    artifact_review=artifact_review,
+                    accepted_objects=artifact_preference_pack["lanes"]["accepted_current"],
+                )
+            }
+            if artifact_review is not None
+            else {}
+        ),
         "pack_preview": {
             "preferences": {
                 "route": packs["preferences"]["route"],
@@ -529,6 +573,342 @@ def run_preference_style_extraction_preview(
         },
     }
     ensure_public_safe(result, "PreferenceStyleExtractionPreview")
+    return result
+
+
+def _memory_cards_by_id(memory_cards: list[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
+    return {
+        str(card.get("memory_id") or ""): card
+        for card in memory_cards
+        if str(card.get("memory_id") or "")
+    }
+
+
+def _with_artifact_memory_authority(
+    obj: Mapping[str, Any],
+    *,
+    item: Mapping[str, Any],
+    source_card: Mapping[str, Any],
+    item_kind: str,
+) -> dict[str, Any]:
+    lane, review_state, lifecycle_status, verification_state, action = _artifact_authority_state(
+        item=item,
+        source_card=source_card,
+        item_kind=item_kind,
+    )
+    enriched = dict(obj)
+    enriched["authority_lane"] = lane
+    enriched["review_state"] = review_state
+    enriched["lifecycle_status"] = lifecycle_status
+    enriched["verification_state"] = verification_state
+    enriched["recommended_action"] = action
+    payload = dict(enriched.get("payload") or {})
+    payload.update(
+        {
+            "artifact_memory_kind": item_kind,
+            "source_memory_id": public_safe_text(str(item.get("memory_id") or ""), max_chars=180),
+            "raw_return_capability": "denied",
+        }
+    )
+    enriched["payload"] = payload
+    ensure_public_safe(enriched, "ArtifactMemoryAuthorityObject")
+    return enriched
+
+
+def _artifact_authority_state(
+    *,
+    item: Mapping[str, Any],
+    source_card: Mapping[str, Any],
+    item_kind: str,
+) -> tuple[str, str, str, str, str]:
+    payload = source_card.get("typed_payload") if isinstance(source_card.get("typed_payload"), Mapping) else {}
+    explicit_lane = str(source_card.get("authority_lane") or payload.get("authority_lane") or "")
+    explicit_review = str(source_card.get("review_state") or payload.get("review_state") or "")
+    currentness = str(source_card.get("currentness") or item.get("currentness") or "").casefold()
+    confidence = _safe_score(item.get("confidence") or source_card.get("confidence") or 0)
+    accepted = (
+        explicit_lane == "accepted_current"
+        or explicit_review == "accepted"
+        or payload.get("accepted") is True
+        or (item_kind == "preference" and currentness == "current" and confidence >= 0.85)
+    )
+    if accepted:
+        action = "apply_preference" if item_kind == "preference" else "follow_repo_style"
+        return "accepted_current", "accepted", "current", "unverified", action
+    action = "review_inferred_preference" if item_kind == "preference" else "review_style_drift"
+    return "proposal_only", "needs_review", "proposed", "unverified", action
+
+
+def _artifact_preference_pack_preview(
+    *,
+    repository: str,
+    preference_objects: list[Mapping[str, Any]],
+    style_objects: list[Mapping[str, Any]],
+    source_evidence_refs: list[str],
+) -> dict[str, Any]:
+    safe_repo = public_safe_text(repository, max_chars=180)
+    objects = [*preference_objects, *style_objects]
+    accepted = [dict(obj) for obj in objects if obj.get("authority_lane") == "accepted_current"]
+    proposals = [dict(obj) for obj in objects if obj.get("authority_lane") == "proposal_only"]
+    evidence = [_artifact_evidence_ref_view(ref) for ref in source_evidence_refs]
+    profile_objects = _artifact_profile_objects(
+        repository=safe_repo,
+        preference_objects=preference_objects,
+        style_objects=style_objects,
+        source_evidence_refs=source_evidence_refs,
+    )
+    pack_object = _artifact_profile_object(
+        object_type="ArtifactPreferencePack",
+        repository=safe_repo,
+        title="Artifact preference context pack",
+        summary="Public-safe accepted and proposed preference/style memory for agent context.",
+        source_objects=objects,
+        source_evidence_refs=source_evidence_refs,
+        recommended_action="apply_preference",
+        profile_scope="agent_context",
+    )
+    result = {
+        "schema_version": "artifact_preference_pack_preview.v1",
+        "object": pack_object,
+        "profile_objects": profile_objects,
+        "lanes": {
+            "accepted_current": accepted,
+            "proposal_only": proposals,
+        },
+        "evidence": evidence,
+        "recommended_actions": _artifact_preference_recommended_actions(accepted, proposals),
+        "drift_review_suggestions": _artifact_drift_review_suggestions(
+            preference_objects=preference_objects,
+            style_objects=style_objects,
+        ),
+        "raw_body_return_capability": "denied",
+        "gaps": [] if accepted else ["accepted_artifact_preference_empty"],
+    }
+    ensure_public_safe(result, "ArtifactPreferencePackPreview")
+    return result
+
+
+def _artifact_profile_objects(
+    *,
+    repository: str,
+    preference_objects: list[Mapping[str, Any]],
+    style_objects: list[Mapping[str, Any]],
+    source_evidence_refs: list[str],
+) -> list[dict[str, Any]]:
+    html_objects = [obj for obj in preference_objects if _text_mentions(obj, ("html", "review"))]
+    visualization_objects = [obj for obj in preference_objects if _text_mentions(obj, ("visualization", "visual"))]
+    return [
+        _artifact_profile_object(
+            object_type="PersonalCodeStyleProfile",
+            repository=repository,
+            title="Personal code style profile",
+            summary="User-level accepted and proposed coding preferences for agent context.",
+            source_objects=preference_objects,
+            source_evidence_refs=source_evidence_refs,
+            recommended_action="apply_preference",
+            profile_scope="personal_code_style",
+        ),
+        _artifact_profile_object(
+            object_type="RepoStyleProfile",
+            repository=repository,
+            title="Repo style profile",
+            summary="Repository style claims separated into accepted and proposal lanes.",
+            source_objects=style_objects,
+            source_evidence_refs=source_evidence_refs,
+            recommended_action="review_style_drift",
+            profile_scope="repo_style",
+        ),
+        _artifact_profile_object(
+            object_type="HtmlReviewProfile",
+            repository=repository,
+            title="HTML review profile",
+            summary="Accepted and proposed HTML review artifact preferences.",
+            source_objects=html_objects,
+            source_evidence_refs=source_evidence_refs,
+            recommended_action="apply_preference",
+            profile_scope="html_review",
+        ),
+        _artifact_profile_object(
+            object_type="VisualizationProfile",
+            repository=repository,
+            title="Visualization profile",
+            summary="Accepted and proposed visualization artifact preferences.",
+            source_objects=visualization_objects,
+            source_evidence_refs=source_evidence_refs,
+            recommended_action="review_inferred_preference",
+            profile_scope="visualization",
+        ),
+    ]
+
+
+def _artifact_profile_object(
+    *,
+    object_type: str,
+    repository: str,
+    title: str,
+    summary: str,
+    source_objects: list[Mapping[str, Any]],
+    source_evidence_refs: list[str],
+    recommended_action: str,
+    profile_scope: str,
+) -> dict[str, Any]:
+    accepted_count = sum(1 for obj in source_objects if obj.get("authority_lane") == "accepted_current")
+    proposal_count = sum(1 for obj in source_objects if obj.get("authority_lane") == "proposal_only")
+    obj = KnowledgeObjectEnvelope.from_parts(
+        object_type=object_type,
+        natural_key=f"{repository}:{profile_scope}",
+        scope={"project": "neurons", "repository": repository, "profile_scope": profile_scope},
+        title=title,
+        summary=summary,
+        lifecycle_status="current" if accepted_count else "observed",
+        authority_lane="derived_projection",
+        verification_state="not_applicable",
+        review_state="not_required",
+        content_hash=hash_payload(
+            {
+                "object_type": object_type,
+                "repository": repository,
+                "profile_scope": profile_scope,
+                "source_object_ids": [str(obj.get("object_id") or "") for obj in source_objects],
+                "source_evidence_refs": source_evidence_refs,
+            }
+        ),
+        evidence_refs=source_evidence_refs,
+        confidence={"score": 0.8 if source_objects else 0.0, "basis": "artifact_preference_pack_preview"},
+        recommended_action=recommended_action,
+        payload={
+            "accepted_current_count": accepted_count,
+            "proposal_only_count": proposal_count,
+            "raw_return_capability": "denied",
+        },
+    )
+    return _stable_object(obj.to_dict())
+
+
+def _artifact_evidence_ref_view(ref: str) -> dict[str, Any]:
+    safe_ref = public_safe_text(str(ref or ""), max_chars=180)
+    return {
+        "evidence_id": safe_ref,
+        "evidence_type": "preference_style_example",
+        "authority_lane": "reference_only",
+        "verification_state": "unverified",
+        "summary": "Public-safe preference/style evidence reference.",
+        "raw_return_capability": "denied",
+    }
+
+
+def _artifact_preference_recommended_actions(
+    accepted: list[Mapping[str, Any]],
+    proposals: list[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    actions: list[dict[str, str]] = []
+    if accepted:
+        actions.append({"action": "apply_preference", "lane": "accepted_current"})
+    if any(obj.get("object_type") == "ArtifactPreference" for obj in proposals):
+        actions.append({"action": "review_inferred_preference", "lane": "proposal_only"})
+    if any(obj.get("object_type") == "StyleRule" for obj in proposals):
+        actions.append({"action": "review_style_drift", "lane": "proposal_only"})
+    return actions
+
+
+def _artifact_drift_review_suggestions(
+    *,
+    preference_objects: list[Mapping[str, Any]],
+    style_objects: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    suggestions: list[dict[str, Any]] = []
+    if any(_text_mentions(obj, ("html", "review")) for obj in preference_objects):
+        suggestions.append(
+            {
+                "check": "html_review_preference_check",
+                "applies_to": "artifact",
+                "status": "available",
+                "raw_return_capability": "denied",
+            }
+        )
+    if any(_text_mentions(obj, ("visualization", "visual")) for obj in preference_objects):
+        suggestions.append(
+            {
+                "check": "visualization_preference_check",
+                "applies_to": "artifact",
+                "status": "available",
+                "raw_return_capability": "denied",
+            }
+        )
+    if style_objects:
+        suggestions.append(
+            {
+                "check": "repo_style_drift_check",
+                "applies_to": "diff",
+                "status": "available",
+                "raw_return_capability": "denied",
+            }
+        )
+    return suggestions
+
+
+def _text_mentions(obj: Mapping[str, Any], terms: tuple[str, ...]) -> bool:
+    text = " ".join(
+        [
+            str(obj.get("title") or ""),
+            str(obj.get("summary") or ""),
+            str((obj.get("payload") or {}).get("scope") or "") if isinstance(obj.get("payload"), Mapping) else "",
+        ]
+    ).casefold()
+    return any(term in text for term in terms)
+
+
+def _artifact_review_preference_check(
+    *,
+    artifact_review: Mapping[str, Any],
+    accepted_objects: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    artifact_type = public_safe_text(str(artifact_review.get("artifact_type") or ""), max_chars=80)
+    summary = public_safe_text(str(artifact_review.get("summary") or ""), max_chars=360)
+    metrics = artifact_review.get("text_metrics") if isinstance(artifact_review.get("text_metrics"), Mapping) else {}
+    safe_metrics = {
+        "finding_count": int(metrics.get("finding_count") or 0),
+        "evidence_ref_count": int(metrics.get("evidence_ref_count") or 0),
+        "word_count": int(metrics.get("word_count") or 0),
+    }
+    matched_titles = [
+        str(obj.get("title") or "")
+        for obj in accepted_objects
+        if obj.get("object_type") == "ArtifactPreference" and _text_mentions(obj, ("html", "review"))
+    ]
+    assertions: list[str] = []
+    failures: list[str] = []
+    if artifact_type == "html_review" and summary:
+        assertions.append("html_artifact_summary_available")
+    else:
+        failures.append("html_artifact_summary_missing")
+    if matched_titles:
+        assertions.append("accepted_html_preference_available")
+    else:
+        failures.append("accepted_html_preference_missing")
+    assertions.append("artifact_body_not_returned")
+    if safe_metrics["finding_count"] <= 0 or safe_metrics["evidence_ref_count"] <= 0:
+        failures.append("information_density_evidence_missing")
+    result = {
+        "schema_version": "artifact_review_preference_check.v1",
+        "status": "pass" if not failures else "pass_with_gaps",
+        "ui_required": False,
+        "artifact_type": artifact_type,
+        "artifact_summary": summary,
+        "artifact_metrics": safe_metrics,
+        "matched_preference_titles": matched_titles,
+        "assertions": assertions,
+        "failures": failures,
+        "raw_body_return_capability": "denied",
+        "artifact_fingerprint": hash_payload(
+            {
+                "artifact_type": artifact_type,
+                "summary": summary,
+                "metrics": safe_metrics,
+            }
+        ),
+    }
+    ensure_public_safe(result, "ArtifactReviewPreferenceCheck")
     return result
 
 
