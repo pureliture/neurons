@@ -77,6 +77,22 @@ def build_extractor_registry_report() -> dict[str, Any]:
                 "gaps": [],
             },
             {
+                "extractor": "session_project_rollup",
+                "version": "0.1",
+                "status": "implemented",
+                "input_object_types": ["Session"],
+                "output_object_types": ["Device", "Session", "Repository", "Branch", "WorkUnit"],
+                "edge_types": [
+                    "repository_has_branch",
+                    "session_on_device",
+                    "session_in_repository",
+                    "session_on_branch",
+                    "part_of_work_unit",
+                ],
+                "strategy_scope": "session_device_project_rollup_mapping",
+                "gaps": [],
+            },
+            {
                 "extractor": "pr_commit_detail",
                 "version": "0.1",
                 "status": "implemented",
@@ -681,6 +697,185 @@ def run_session_detail_extraction_preview(
         },
     }
     ensure_public_safe(result, "SessionDetailExtractionPreview")
+    return result
+
+
+def run_session_project_rollup_preview(
+    *,
+    sessions: list[Mapping[str, Any]],
+    repository: str,
+    branch: str = "",
+    project: str = "",
+    specs: list[Mapping[str, Any]] | None = None,
+    pull_requests: list[Mapping[str, Any]] | None = None,
+    commits: list[Mapping[str, Any]] | None = None,
+    requesting_device_id_hash: str = "",
+    scope: str = "all_devices",
+) -> dict[str, Any]:
+    spec_items = list(specs or [])
+    pr_items = list(pull_requests or [])
+    commit_items = list(commits or [])
+    safe_repository = public_safe_text(repository, max_chars=180)
+    safe_branch = public_safe_text(branch, max_chars=180)
+    safe_project = public_safe_text(project or repository, max_chars=120)
+    requested_device = public_safe_text(requesting_device_id_hash, max_chars=180)
+    safe_scope = scope if scope in {"all_devices", "same_device"} else "all_devices"
+    if safe_scope == "same_device":
+        visible_sessions = [
+            session
+            for session in sessions
+            if requested_device
+            and public_safe_text(str(session.get("device_id_hash") or ""), max_chars=180) == requested_device
+        ]
+    else:
+        visible_sessions = list(sessions)
+    repository_object = _rollup_object(
+        object_type="Repository",
+        natural_key=safe_repository,
+        scope={"project": safe_project},
+        title=safe_repository or "Repository",
+        summary="Repository scope for session rollup.",
+        payload={"repository": safe_repository, "project": safe_project},
+    )
+    branch_object = _rollup_object(
+        object_type="Branch",
+        natural_key=f"{safe_repository}:{safe_branch}",
+        scope={"project": safe_project, "repository": safe_repository},
+        title=safe_branch or "Branch",
+        summary="Branch scope for session rollup.",
+        payload={"repository": safe_repository, "branch": safe_branch},
+    )
+    session_objects = [_stable_object(_session_object(session, repository=safe_repository).to_dict()) for session in visible_sessions]
+    device_objects = [
+        _rollup_object(
+            object_type="Device",
+            natural_key=device_id,
+            scope={"project": safe_project},
+            title=device_id,
+            summary="Hashed device identity for session rollup.",
+            payload={"device_id_hash": device_id},
+        )
+        for device_id in sorted(_device_counts(sessions))
+    ]
+    work_unit_objects = [
+        _rollup_object(
+            object_type="WorkUnit",
+            natural_key=work_unit_id,
+            scope={"project": safe_project, "repository": safe_repository},
+            title=work_unit_id,
+            summary="Work unit referenced by session metadata.",
+            payload={"work_unit_id": work_unit_id},
+        )
+        for work_unit_id in sorted(
+            _work_unit_ids(visible_sessions)
+            | _work_unit_ids(spec_items)
+            | _work_unit_ids(pr_items)
+            | _work_unit_ids(commit_items)
+        )
+    ]
+    spec_objects = _linked_rollup_objects(
+        spec_items,
+        object_type="Spec",
+        id_keys=("spec_ref", "path", "spec_id"),
+        safe_project=safe_project,
+        safe_repository=safe_repository,
+    )
+    pr_objects = _linked_rollup_objects(
+        pr_items,
+        object_type="PullRequest",
+        id_keys=("pr_id", "pull_request_id", "number"),
+        safe_project=safe_project,
+        safe_repository=safe_repository,
+    )
+    commit_objects = _linked_rollup_objects(
+        commit_items,
+        object_type="Commit",
+        id_keys=("commit_id", "sha", "commit"),
+        safe_project=safe_project,
+        safe_repository=safe_repository,
+    )
+    objects = [
+        repository_object,
+        branch_object,
+        *device_objects,
+        *work_unit_objects,
+        *spec_objects,
+        *pr_objects,
+        *commit_objects,
+        *session_objects,
+    ]
+    evidence = _session_evidence_views(visible_sessions)
+    edges = _session_project_rollup_edges(
+        visible_sessions=visible_sessions,
+        session_objects=session_objects,
+        repository_object=repository_object,
+        branch_object=branch_object,
+        device_objects=device_objects,
+        work_unit_objects=work_unit_objects,
+        specs=spec_items,
+        spec_objects=spec_objects,
+        pull_requests=pr_items,
+        pull_request_objects=pr_objects,
+        commits=commit_items,
+        commit_objects=commit_objects,
+    )
+    gaps = _session_project_rollup_gaps(
+        sessions=sessions,
+        visible_sessions=visible_sessions,
+        scope=safe_scope,
+        requesting_device_id_hash=requested_device,
+    )
+    status = "pass" if visible_sessions and not gaps else "pass_with_gaps"
+    result = {
+        "schema_version": "object_extraction_session_project_rollup_preview.v1",
+        "status": status,
+        "repository": safe_repository,
+        "branch": safe_branch,
+        "project": safe_project,
+        "scope": safe_scope,
+        "requesting_device_id_hash": requested_device,
+        "selected_strategy": "session_device_project_rollup_v1",
+        "production_mutation_performed": False,
+        "objects": objects,
+        "edges": edges,
+        "evidence": evidence,
+        "object_count": len(objects),
+        "edge_count": len(edges),
+        "evidence_count": len(evidence),
+        "visible_session_count": len(visible_sessions),
+        "all_device_session_count": len(sessions),
+        "device_count": len(_device_counts(sessions)),
+        "per_device_counts": _device_counts(sessions),
+        "linked_spec_count": len(spec_objects),
+        "linked_pull_request_count": len(pr_objects),
+        "linked_commit_count": len(commit_objects),
+        "gaps": gaps,
+        "handoff_pack": _session_project_handoff_pack(
+            repository=safe_repository,
+            branch=safe_branch,
+            project=safe_project,
+            scope=safe_scope,
+            objects=objects,
+            edges=edges,
+            gaps=gaps,
+            visible_session_count=len(visible_sessions),
+            all_device_session_count=len(sessions),
+        ),
+        "evaluator_report": {
+            "schema_version": "object_extraction_evaluator_report.v1",
+            "golden_query_slice": "temporal repo recall",
+            "passes": status == "pass",
+            "failures": [] if status == "pass" else gaps or ["session_project_rollup_empty"],
+            "gaps": gaps,
+            "assertions": [
+                "same_device_and_all_device_views_are_distinct",
+                "device_session_project_branch_work_unit_edges_present",
+                "raw_host_path_and_transcript_not_returned",
+                "production_mutation_performed_false",
+            ],
+        },
+    }
+    ensure_public_safe(result, "SessionProjectRollupPreview")
     return result
 
 
@@ -1391,6 +1586,283 @@ def _session_edges(
             )
             edges.append(_stable_edge(edge.to_dict()))
     return edges
+
+
+def _rollup_object(
+    *,
+    object_type: str,
+    natural_key: str,
+    scope: Mapping[str, Any],
+    title: str,
+    summary: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    resolved_key = natural_key or object_type
+    return _stable_object(
+        KnowledgeObjectEnvelope.from_parts(
+            object_type=object_type,
+            natural_key=resolved_key,
+            scope=scope,
+            title=title or object_type,
+            summary=summary,
+            lifecycle_status="observed",
+            authority_lane="candidate",
+            verification_state="source_hash_verified",
+            review_state="needs_review",
+            content_hash=hash_payload({"object_type": object_type, "natural_key": resolved_key, "scope": dict(scope)}),
+            evidence_refs=[],
+            confidence={"score": 0.6, "basis": "session_rollup_metadata"},
+            recommended_action="review",
+            payload=dict(payload),
+        ).to_dict()
+    )
+
+
+def _device_counts(sessions: list[Mapping[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for session in sessions:
+        device_id = public_safe_text(str(session.get("device_id_hash") or "device:unknown"), max_chars=180)
+        counts[device_id] = counts.get(device_id, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _work_unit_ids(sessions: list[Mapping[str, Any]]) -> set[str]:
+    return {
+        public_safe_text(str(session.get("work_unit_id") or ""), max_chars=180)
+        for session in sessions
+        if str(session.get("work_unit_id") or "")
+    }
+
+
+def _linked_rollup_objects(
+    items: list[Mapping[str, Any]],
+    *,
+    object_type: str,
+    id_keys: tuple[str, ...],
+    safe_project: str,
+    safe_repository: str,
+) -> list[dict[str, Any]]:
+    objects: list[dict[str, Any]] = []
+    for item in items:
+        ref = _public_safe_first(item, id_keys, default=object_type)
+        objects.append(
+            _rollup_object(
+                object_type=object_type,
+                natural_key=ref,
+                scope={"project": safe_project, "repository": safe_repository},
+                title=ref,
+                summary=f"{object_type} referenced by session project rollup.",
+                payload={
+                    "ref": ref,
+                    "work_unit_id": public_safe_text(str(item.get("work_unit_id") or ""), max_chars=180),
+                    "pull_request_id": public_safe_text(
+                        str(item.get("pull_request_id") or item.get("pr_id") or ""),
+                        max_chars=180,
+                    ),
+                },
+            )
+        )
+    return objects
+
+
+def _public_safe_first(item: Mapping[str, Any], keys: tuple[str, ...], *, default: str = "") -> str:
+    for key in keys:
+        value = item.get(key)
+        if value not in (None, ""):
+            return public_safe_text(str(value), max_chars=180)
+    return public_safe_text(default, max_chars=180)
+
+
+def _session_project_rollup_edges(
+    *,
+    visible_sessions: list[Mapping[str, Any]],
+    session_objects: list[dict[str, Any]],
+    repository_object: dict[str, Any],
+    branch_object: dict[str, Any],
+    device_objects: list[dict[str, Any]],
+    work_unit_objects: list[dict[str, Any]],
+    specs: list[Mapping[str, Any]],
+    spec_objects: list[dict[str, Any]],
+    pull_requests: list[Mapping[str, Any]],
+    pull_request_objects: list[dict[str, Any]],
+    commits: list[Mapping[str, Any]],
+    commit_objects: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    edges: list[dict[str, Any]] = [
+        _rollup_edge(
+            "repository_has_branch",
+            repository_object["object_id"],
+            branch_object["object_id"],
+            [],
+            {"repository": repository_object["title"], "branch": branch_object["title"]},
+        )
+    ]
+    devices_by_id = {str((obj.get("payload") or {}).get("device_id_hash") or ""): obj for obj in device_objects}
+    work_units_by_id = {str((obj.get("payload") or {}).get("work_unit_id") or ""): obj for obj in work_unit_objects}
+    for session, session_obj in zip(visible_sessions, session_objects, strict=False):
+        evidence_refs = [str(item) for item in session_obj.get("evidence_refs") or []]
+        device_id = public_safe_text(str(session.get("device_id_hash") or "device:unknown"), max_chars=180)
+        device_obj = devices_by_id.get(device_id)
+        if device_obj is not None:
+            edges.append(_rollup_edge("session_on_device", session_obj["object_id"], device_obj["object_id"], evidence_refs, {"device_id_hash": device_id}))
+            edges.append(_rollup_edge("device_has_session", device_obj["object_id"], session_obj["object_id"], evidence_refs, {"device_id_hash": device_id}))
+        edges.append(_rollup_edge("session_in_repository", session_obj["object_id"], repository_object["object_id"], evidence_refs, {"repository": repository_object["title"]}))
+        edges.append(_rollup_edge("repository_has_session", repository_object["object_id"], session_obj["object_id"], evidence_refs, {"repository": repository_object["title"]}))
+        edges.append(_rollup_edge("session_on_branch", session_obj["object_id"], branch_object["object_id"], evidence_refs, {"branch": branch_object["title"]}))
+        edges.append(_rollup_edge("branch_has_session", branch_object["object_id"], session_obj["object_id"], evidence_refs, {"branch": branch_object["title"]}))
+        work_unit_id = public_safe_text(str(session.get("work_unit_id") or ""), max_chars=180)
+        work_unit_obj = work_units_by_id.get(work_unit_id)
+        if work_unit_obj is not None:
+            edges.append(_rollup_edge("part_of_work_unit", session_obj["object_id"], work_unit_obj["object_id"], evidence_refs, {"work_unit_id": work_unit_id}))
+            edges.append(_rollup_edge("work_unit_has_session", work_unit_obj["object_id"], session_obj["object_id"], evidence_refs, {"work_unit_id": work_unit_id}))
+    pull_requests_by_id = {
+        _public_safe_first(item, ("pr_id", "pull_request_id", "number"), default="PullRequest"): obj
+        for item, obj in zip(pull_requests, pull_request_objects, strict=False)
+    }
+    for spec, spec_obj in zip(specs, spec_objects, strict=False):
+        _append_work_unit_link_edges(
+            edges,
+            work_units_by_id=work_units_by_id,
+            item=spec,
+            item_obj=spec_obj,
+            forward_edge_type="work_unit_has_spec",
+            reverse_edge_type="spec_part_of_work_unit",
+        )
+    for pull_request, pr_obj in zip(pull_requests, pull_request_objects, strict=False):
+        _append_work_unit_link_edges(
+            edges,
+            work_units_by_id=work_units_by_id,
+            item=pull_request,
+            item_obj=pr_obj,
+            forward_edge_type="work_unit_has_pull_request",
+            reverse_edge_type="pull_request_part_of_work_unit",
+        )
+    for commit, commit_obj in zip(commits, commit_objects, strict=False):
+        _append_work_unit_link_edges(
+            edges,
+            work_units_by_id=work_units_by_id,
+            item=commit,
+            item_obj=commit_obj,
+            forward_edge_type="work_unit_has_commit",
+            reverse_edge_type="commit_part_of_work_unit",
+        )
+        pr_ref = _public_safe_first(commit, ("pull_request_id", "pr_id"), default="")
+        pr_obj = pull_requests_by_id.get(pr_ref)
+        if pr_obj is not None:
+            evidence_refs = [str(item) for item in commit.get("evidence_refs") or []]
+            edges.append(_rollup_edge("pull_request_includes_commit", pr_obj["object_id"], commit_obj["object_id"], evidence_refs, {"pull_request_id": pr_ref}))
+    return edges
+
+
+def _append_work_unit_link_edges(
+    edges: list[dict[str, Any]],
+    *,
+    work_units_by_id: dict[str, dict[str, Any]],
+    item: Mapping[str, Any],
+    item_obj: dict[str, Any],
+    forward_edge_type: str,
+    reverse_edge_type: str,
+) -> None:
+    work_unit_id = public_safe_text(str(item.get("work_unit_id") or ""), max_chars=180)
+    work_unit_obj = work_units_by_id.get(work_unit_id)
+    if work_unit_obj is None:
+        return
+    evidence_refs = [str(ref) for ref in item.get("evidence_refs") or []]
+    edges.append(_rollup_edge(forward_edge_type, work_unit_obj["object_id"], item_obj["object_id"], evidence_refs, {"work_unit_id": work_unit_id}))
+    edges.append(_rollup_edge(reverse_edge_type, item_obj["object_id"], work_unit_obj["object_id"], evidence_refs, {"work_unit_id": work_unit_id}))
+
+
+def _rollup_edge(
+    edge_type: str,
+    from_object_id: str,
+    to_object_id: str,
+    evidence_refs: list[str],
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    verification_state = "source_hash_verified" if evidence_refs else "unverified"
+    return _stable_edge(
+        KnowledgeEdge.from_parts(
+            edge_type=edge_type,
+            from_object_id=from_object_id,
+            to_object_id=to_object_id,
+            evidence_refs=evidence_refs,
+            lifecycle_status="observed",
+            authority_lane="candidate",
+            verification_state=verification_state,
+            confidence={"score": 0.62, "basis": "session_rollup_metadata"},
+            payload=payload,
+        ).to_dict()
+    )
+
+
+def _session_project_rollup_gaps(
+    *,
+    sessions: list[Mapping[str, Any]],
+    visible_sessions: list[Mapping[str, Any]],
+    scope: str,
+    requesting_device_id_hash: str,
+) -> list[str]:
+    gaps: list[str] = []
+    if not sessions:
+        gaps.append("session_objects_empty")
+    if scope == "same_device" and not requesting_device_id_hash:
+        gaps.append("requesting_device_required")
+    if sessions and not visible_sessions:
+        gaps.append("visible_sessions_empty")
+    if visible_sessions and not any(_session_evidence_ids(session) for session in visible_sessions):
+        gaps.append("session_evidence_missing")
+    if any(_session_has_raw_body(session) for session in sessions):
+        gaps.append("raw_session_body_ignored")
+    return gaps
+
+
+def _session_project_handoff_pack(
+    *,
+    repository: str,
+    branch: str,
+    project: str,
+    scope: str,
+    objects: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    gaps: list[str],
+    visible_session_count: int,
+    all_device_session_count: int,
+) -> dict[str, Any]:
+    object_refs: dict[str, list[dict[str, str]]] = {}
+    for obj in objects:
+        object_type = public_safe_text(str(obj.get("object_type") or "KnowledgeObject"), max_chars=80)
+        object_refs.setdefault(object_type, []).append(
+            {
+                "object_id": public_safe_text(str(obj.get("object_id") or ""), max_chars=180),
+                "title": public_safe_text(str(obj.get("title") or ""), max_chars=180),
+                "authority_lane": public_safe_text(str(obj.get("authority_lane") or ""), max_chars=80),
+                "recommended_action": public_safe_text(str(obj.get("recommended_action") or ""), max_chars=80),
+            }
+        )
+    edge_type_counts: dict[str, int] = {}
+    for edge in edges:
+        edge_type = public_safe_text(str(edge.get("edge_type") or ""), max_chars=120)
+        edge_type_counts[edge_type] = edge_type_counts.get(edge_type, 0) + 1
+    pack = {
+        "schema_version": "session_project_handoff_pack.v1",
+        "repository": repository,
+        "branch": branch,
+        "project": project,
+        "scope": scope,
+        "visible_session_count": visible_session_count,
+        "all_device_session_count": all_device_session_count,
+        "object_refs": object_refs,
+        "edge_type_counts": dict(sorted(edge_type_counts.items())),
+        "gaps": list(gaps),
+        "recommended_next_actions": [
+            "verify_live_multi_device_rollup",
+            "review_missing_phase_gaps",
+            "keep_raw_source_body_denied",
+        ],
+        "raw_return_capability": "denied",
+    }
+    ensure_public_safe(pack, "SessionProjectHandoffPack")
+    return pack
 
 
 def _session_detail_gaps(
