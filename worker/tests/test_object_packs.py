@@ -1,9 +1,12 @@
 from agent_knowledge.llm_brain_core.object_packs import (
+    apply_candidate_review_edits,
     build_agent_context_object_packs,
+    build_candidate_graph_review_pack,
     build_documentation_cleanup_pack,
     build_runtime_truth_pack,
     route_spec_for,
 )
+from agent_knowledge.llm_brain_core.knowledge_objects import EvidenceRef, KnowledgeEdge, KnowledgeObjectEnvelope
 
 
 def test_documentation_cleanup_pack_separates_lanes_and_actions():
@@ -93,12 +96,195 @@ def test_runtime_truth_pack_requires_typed_runtime_verified_evidence():
     assert typed["verification"]["runtime_verified"][0]["evidence_id"] == "ev:runtime:stable"
 
 
+def test_candidate_graph_review_pack_exposes_editable_review_surface_without_authority_write():
+    evidence = EvidenceRef.from_parts(
+        evidence_type="source_hash",
+        authority_lane="reference_only",
+        verification_state="source_hash_verified",
+        locator={"kind": "relative_repo_path", "value": "docs/source.md"},
+        content_hash="sha256:" + "1" * 64,
+        summary="Source material hash.",
+    )
+    obj = KnowledgeObjectEnvelope.from_parts(
+        object_type="RepoDocument",
+        natural_key="docs/source.md",
+        scope={"project": "neurons"},
+        title="Draft source doc",
+        summary="AI extracted document claim.",
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="source_hash_verified",
+        review_state="needs_review",
+        content_hash="sha256:" + "2" * 64,
+        evidence_refs=[evidence.evidence_id],
+        confidence={"score": 0.64, "basis": "ai_extraction"},
+        recommended_action="review",
+        payload={"path_ref": "docs/source.md"},
+    ).to_dict()
+    edge = KnowledgeEdge.from_parts(
+        edge_type="requires_evidence",
+        from_object_id=obj["object_id"],
+        to_object_id=obj["object_id"],
+        evidence_refs=[evidence.evidence_id],
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="unverified",
+    ).to_dict()
+
+    pack = build_candidate_graph_review_pack(
+        objects=[obj],
+        edges=[edge],
+        evidence=[evidence.to_view()],
+        extractor="fixture_ai_extractor",
+        reviewer_actions=["promote", "reject", "hold", "request_more_evidence"],
+    )
+
+    assert pack["route"] == "candidate_graph_review"
+    assert pack["production_mutation_performed"] is False
+    assert pack["authority_write_performed"] is False
+    assert pack["authoritative_memory_changed"] is False
+    assert pack["minimal_edit_surface"]["supported"] is True
+    assert pack["lanes"]["candidate"][0]["object_id"] == obj["object_id"]
+    assert pack["approval_board"][0]["object_id"] == obj["object_id"]
+    assert pack["approval_board"][0]["editable"] is True
+    assert pack["approval_board"][0]["allowed_actions"] == [
+        "promote",
+        "reject",
+        "hold",
+        "request_more_evidence",
+    ]
+    assert pack["approval_board"][0]["evidence_refs"] == [evidence.evidence_id]
+    assert pack["candidate_graph_hash"].startswith("sha256:")
+
+
+def test_candidate_review_edits_change_candidate_state_without_promoting_authority():
+    evidence = EvidenceRef.from_parts(
+        evidence_type="source_hash",
+        authority_lane="reference_only",
+        verification_state="source_hash_verified",
+        locator={"kind": "relative_repo_path", "value": "docs/source.md"},
+        content_hash="sha256:" + "4" * 64,
+        summary="Source material hash.",
+    )
+    obj = KnowledgeObjectEnvelope.from_parts(
+        object_type="RepoDocument",
+        natural_key="docs/source.md",
+        scope={"project": "neurons"},
+        title="Draft source doc",
+        summary="AI extracted document claim.",
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="unverified",
+        review_state="needs_review",
+        content_hash="sha256:" + "3" * 64,
+        evidence_refs=[evidence.evidence_id],
+        recommended_action="review",
+        payload={"path_ref": "docs/source.md"},
+    ).to_dict()
+    edge = KnowledgeEdge.from_parts(
+        edge_type="requires_evidence",
+        from_object_id=obj["object_id"],
+        to_object_id=obj["object_id"],
+        evidence_refs=[evidence.evidence_id],
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="unverified",
+    ).to_dict()
+    pack = build_candidate_graph_review_pack(
+        objects=[obj],
+        edges=[edge],
+        evidence=[evidence.to_view()],
+        extractor="fixture_ai_extractor",
+    )
+
+    result = apply_candidate_review_edits(
+        pack,
+        edits=[
+            {
+                "action": "update_object",
+                "object_id": obj["object_id"],
+                "fields": {
+                    "title": "Reviewed source doc",
+                    "summary": "Human corrected candidate claim.",
+                    "recommended_action": "request_more_evidence",
+                    "authority_lane": "accepted_current",
+                },
+            },
+            {
+                "action": "update_edge",
+                "edge_id": edge["edge_id"],
+                "fields": {
+                    "edge_type": "supersedes",
+                    "authority_lane": "accepted_current",
+                },
+            },
+            {
+                "action": "update_evidence",
+                "evidence_id": evidence.evidence_id,
+                "fields": {
+                    "summary": "Human corrected evidence summary.",
+                    "authority_lane": "accepted_current",
+                },
+            },
+        ],
+        reviewer={"id": "human-reviewer"},
+    )
+
+    updated = result["updated_pack"]["objects"][0]
+    updated_edge = result["updated_pack"]["edges"][0]
+    updated_evidence = result["updated_pack"]["evidence"][0]
+    assert result["schema_version"] == "candidate_review_edit_result.v1"
+    assert result["candidate_state_changed"] is True
+    assert result["authority_write_performed"] is False
+    assert result["authoritative_memory_changed"] is False
+    assert result["original_extraction_preserved"] is True
+    assert result["rejected_edits"] == [
+        {
+            "action": "update_object",
+            "object_id": obj["object_id"],
+            "field": "authority_lane",
+            "reason": "authority_field_requires_approval_board_decision",
+        },
+        {
+            "action": "update_edge",
+            "edge_id": edge["edge_id"],
+            "field": "authority_lane",
+            "reason": "authority_field_requires_approval_board_decision",
+        },
+        {
+            "action": "update_evidence",
+            "evidence_id": evidence.evidence_id,
+            "field": "authority_lane",
+            "reason": "authority_field_requires_approval_board_decision",
+        }
+    ]
+    assert updated["title"] == "Reviewed source doc"
+    assert updated["summary"] == "Human corrected candidate claim."
+    assert updated["recommended_action"] == "request_more_evidence"
+    assert updated["authority_lane"] == "candidate"
+    assert updated["review_state"] == "needs_review"
+    assert result["updated_pack"]["approval_board"][0]["title"] == "Reviewed source doc"
+    assert result["updated_pack"]["recommended_actions"] == [
+        {"object_id": obj["object_id"], "action": "request_more_evidence"}
+    ]
+    assert updated_edge["edge_type"] == "supersedes"
+    assert updated_edge["authority_lane"] == "candidate"
+    assert updated_edge["edge_id"] != edge["edge_id"]
+    assert updated_evidence["summary"] == "Human corrected evidence summary."
+    assert updated_evidence["authority_lane"] == "reference_only"
+    assert result["updated_pack"]["candidate_graph_hash"] != pack["candidate_graph_hash"]
+
+
 def test_route_spec_is_declarative():
     spec = route_spec_for("documentation_cleanup")
 
     assert spec["required_object_types"] == ["RepoDocument"]
     assert "accepted_current" in spec["allowed_authority_lanes"]
     assert "includes_recommended_action" in spec["eval_assertions"]
+
+    review_spec = route_spec_for("candidate_graph_review")
+    assert "candidate" in review_spec["allowed_authority_lanes"]
+    assert "reviewer_edit_does_not_mutate_authority" in review_spec["eval_assertions"]
 
 
 def test_agent_context_object_packs_include_fr11_sections():
