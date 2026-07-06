@@ -135,7 +135,18 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
                 "html_artifact_review_live_unproven",
             ],
         ),
-        _planned_phase("P8", "Runtime Truth, Security, And Deployment Authority", "pr merge and deploy truth", GOLDEN_QUERIES[4]),
+        _phase_coverage(
+            phase="P8",
+            title="Runtime Truth, Security, And Deployment Authority",
+            golden_query_family="pr merge and deploy truth",
+            query=GOLDEN_QUERIES[4],
+            result="in_progress",
+            evaluator="runtime authority policy local/test preview",
+            gaps=[
+                "live_runtime_rollout_identity_unproven",
+                "production_permission_audit_live_unproven",
+            ],
+        ),
         _planned_phase("P9", "Agent-Facing Action Surface", "code change impact analysis", GOLDEN_QUERIES[3]),
         _planned_phase("P10", "Product Application Surface", "HTML/visualization review preference", GOLDEN_QUERIES[9]),
     ]

@@ -17,6 +17,7 @@ Current state:
 - P5 Continuous Golden Query Quality Gates: `in_progress`; phase coverage report는 P1-P10 golden query families를 나열하고 release quality gate를 명시적으로 `not_green` 상태로 유지합니다.
 - P6 Session, Device, Project, And Work-Unit 360: `PASS_WITH_GAPS` / `local_validated`; local/test session project rollup preview는 Device/Session/Repository/Branch/WorkUnit/Spec/PullRequest/Commit objects를 생성하고, same-device와 all-device fixture rollup을 분리하며, safe handoff pack을 반환합니다. live multi-device runtime evidence는 아직 증명되지 않았습니다.
 - P7 Preference, Style, And Artifact Memory: `PASS_WITH_GAPS` / `local_validated`; local/test artifact preference pack은 accepted/proposal lanes, profile objects, no-UI HTML artifact check를 검증하지만, live agent context pack 및 production authority promotion은 아직 gap입니다.
+- P8 Runtime Truth, Security, And Deployment Authority: `PASS_WITH_GAPS` / `local_validated`; local/test runtime authority policy, artifact identity join, private authority redaction, and denial/no-mutation checks pass, but live rollout identity and production permission audit remain gaps.
 - Product activation: 완료되지 않았습니다; configured agent read path refresh가 여전히 필요합니다.
 - UI/object browser: product activation prerequisite는 아니지만, 이후 product surface로 열어 둡니다.
 
@@ -596,7 +597,9 @@ Remaining gaps:
 
 ### P8. Runtime Truth, Security, And Deployment Authority
 
-State: planned.
+State: local_validated.
+
+Result: PASS_WITH_GAPS.
 
 Purpose:
 
@@ -619,6 +622,32 @@ Gate evidence:
 - private deploy authority is referenced without leaking private values
 - permission denial is public-safe and does not leak protected object values
 - action permission test proves an agent cannot promote authority without approved scope
+
+Local validation evidence:
+
+- missing live evidence gate: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_runtime_truth_extraction_preview_keeps_merge_and_deploy_separate_without_live_evidence`
+- missing live evidence result: `1 passed, 1 warning`
+- live evidence object gate: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_runtime_truth_extraction_preview_creates_runtime_verified_object_only_with_live_evidence`
+- live evidence object result: `1 passed, 1 warning`
+- runtime authority policy gate: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_runtime_truth_extraction_preview_denies_authority_promotion_without_leaking_private_deploy_values`
+- runtime authority policy result: `1 passed, 1 warning`
+- phase coverage gate: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
+- phase coverage result: `1 passed, 1 warning`
+
+Implemented local/test scope:
+
+- `PullRequest`, `Commit`, `CIStatus`, `DeploymentTarget`, `RuntimeSurface`, `RuntimeTruth`, and `LiveEvidenceGap` preview objects
+- merge, CI, deployment target, artifact identity, and live runtime evidence are represented as separate evidence surfaces
+- missing live evidence returns `runtime_evidence_unverified` and does not create a runtime-verified truth object
+- deployment target identity joins artifact digest to source commit when provided, but remains runtime-unverified without live evidence
+- private deploy authority is represented by presence/digest fields only; protected connection values are not returned
+- runtime authority promotion without approved scope returns denied/no-mutation and records a public-safe audit event
+
+Remaining gaps:
+
+- no live rollout artifact identity proof is attached to this local/test branch
+- production permission-sensitive audit flow is not live-proven
+- production authority promotion remains denied until an approved runtime write gate exists
 
 ### P9. Agent Context Productization
 
@@ -729,13 +758,13 @@ Current accounting:
 | P5 Continuous Golden Query Quality Gates | `in_progress` | phase coverage exists and release quality gate remains `not_green` |
 | P6 Session, Device, Project, And Work-Unit 360 | `local_validated` | `PASS_WITH_GAPS`; local/test rollup and handoff gates pass, live multi-device runtime evidence remains a gap |
 | P7 Preference, Style, And Artifact Memory | `local_validated` | `PASS_WITH_GAPS`; local/test artifact preference pack lanes and no-UI HTML artifact check pass, live agent context pack and production authority promotion remain gaps |
-| P8 Runtime Truth, Security, And Deployment Authority | `planned` | local pack exists, live evidence and governance workflow incomplete |
+| P8 Runtime Truth, Security, And Deployment Authority | `local_validated` | `PASS_WITH_GAPS`; local/test runtime authority policy, artifact identity join, private authority redaction, and denial/no-mutation checks pass; live rollout identity and production permission audit remain gaps |
 | P9 Agent Context Productization | `planned` | local pack exists, production context and consumer policy not proven |
 | P10 UI And Object Browser Surface | `planned` | deferred, open, non-prerequisite |
 
 ## Next Design Targets
 
-Continue with P8 Runtime Truth, Security, And Deployment Authority. Keep P1 configured-agent namespace and current-main image identity gaps open until live evidence closes them, and keep production authority writes denied until an approved write gate exists.
+Continue with P9 Agent Context Productization. Keep P1 configured-agent namespace and current-main image identity gaps open until live evidence closes them, and keep production authority writes denied until an approved write gate exists.
 
 Recommended goal:
 

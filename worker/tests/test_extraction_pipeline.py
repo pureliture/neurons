@@ -56,7 +56,12 @@ def test_extractor_registry_reports_implemented_and_gap_extractors():
     assert by_name["repo_document_cleanup"]["gaps"] == []
     assert by_name["runtime_truth"]["status"] == "implemented"
     assert by_name["runtime_truth"]["output_object_types"] == [
+        "CIStatus",
+        "Commit",
+        "DeploymentTarget",
+        "LiveEvidenceGap",
         "PullRequest",
+        "RuntimeSurface",
         "RuntimeTruth",
     ]
     assert by_name["preference_style"]["status"] == "implemented"
@@ -324,6 +329,153 @@ def test_runtime_truth_extraction_preview_creates_runtime_verified_object_only_w
     }
     assert result["edges"][0]["edge_type"] == "validated_by"
     assert result["evaluator_report"]["passes"] is True
+
+
+def test_runtime_truth_extraction_preview_denies_authority_promotion_without_leaking_private_deploy_values():
+    result = run_runtime_truth_extraction_preview(
+        pull_request={"id": "pr:73", "merged": True, "head_sha": "abc123", "base_ref": "main"},
+        deployment={
+            "target": "production",
+            "private_authority_ref": "protected-deploy-authority",
+            "host": "protected-host-value",
+            "namespace": "protected-namespace",
+            "artifact_digest": "sha256:" + "a" * 64,
+            "deployed_source_commit": "abc123",
+        },
+        live_evidence=None,
+        ci_statuses=[
+            {
+                "name": "worker pytest",
+                "conclusion": "SUCCESS",
+                "commit_sha": "abc123",
+            }
+        ],
+        runtime_surface={
+            "surface_ref": "lbrain-mcp-read-path",
+            "surface_kind": "mcp_http",
+            "object_native_tools": True,
+        },
+        consumer="codex",
+        requested_action={"action": "promote_runtime_authority", "target": "production"},
+        actor={"agent": "codex", "role": "agent", "approved_scope": False},
+    )
+
+    rendered = str(result)
+    assert result["status"] == "pass_with_gaps"
+    assert "runtime_evidence_unverified" in result["pack_preview"]["gaps"]
+    assert result["runtime_truth_objects"] == []
+    object_types = [item["object_type"] for item in result["objects"]]
+    assert object_types == [
+        "PullRequest",
+        "Commit",
+        "CIStatus",
+        "DeploymentTarget",
+        "RuntimeSurface",
+        "LiveEvidenceGap",
+    ]
+    deployment_target = next(item for item in result["objects"] if item["object_type"] == "DeploymentTarget")
+    assert deployment_target["payload"] == {
+        "target_ref": "production",
+        "artifact_digest": "sha256:" + "a" * 64,
+        "deployed_source_commit": "abc123",
+        "source_commit_matches_pr_head": True,
+        "private_authority_ref_present": True,
+        "private_authority_ref_digest": deployment_target["payload"]["private_authority_ref_digest"],
+    }
+    assert result["deployed_artifact_identity"] == {
+        "target_ref": "production",
+        "artifact_digest": "sha256:" + "a" * 64,
+        "deployed_source_commit": "abc123",
+        "source_commit_matches_pr_head": True,
+        "verification_state": "runtime_unverified",
+    }
+    assert result["permission_check"] == {
+        "permission": "denied",
+        "action": "promote_runtime_authority",
+        "reason": "approved_scope_required",
+        "authority_write_performed": False,
+        "protected_values_returned": False,
+    }
+    assert result["audit_trail"][0]["event_type"] == "permission_sensitive_runtime_action"
+    assert result["audit_trail"][0]["authority_write_performed"] is False
+    assert "protected-deploy-authority" not in rendered
+    assert "protected-host-value" not in rendered
+    assert "protected-namespace" not in rendered
+
+
+def test_runtime_truth_extraction_preview_matches_deployed_source_against_commit_sha_fallback():
+    result = run_runtime_truth_extraction_preview(
+        pull_request={"id": "pr:84", "merged": True, "commit_sha": "fallback123"},
+        deployment={
+            "target": "production",
+            "artifact_digest": "sha256:" + "b" * 64,
+            "deployed_source_commit": "fallback123",
+        },
+        live_evidence=None,
+        consumer="codex",
+    )
+
+    assert result["deployed_artifact_identity"]["source_commit_matches_pr_head"] is True
+    deployment_target = next(item for item in result["objects"] if item["object_type"] == "DeploymentTarget")
+    assert deployment_target["payload"]["source_commit_matches_pr_head"] is True
+
+
+def test_runtime_truth_extraction_preview_ignores_non_mapping_ci_statuses():
+    result = run_runtime_truth_extraction_preview(
+        pull_request={"id": "pr:84", "merged": True, "head_sha": "abc123"},
+        deployment={"target": "production"},
+        live_evidence=None,
+        ci_statuses=[
+            None,
+            "not-a-status",
+            {
+                "name": "worker pytest",
+                "conclusion": "SUCCESS",
+                "commit_sha": "abc123",
+            },
+        ],
+        consumer="codex",
+    )
+
+    assert [item["object_type"] for item in result["objects"]].count("CIStatus") == 1
+
+
+def test_runtime_truth_extraction_preview_denies_unknown_runtime_action_without_approved_scope():
+    result = run_runtime_truth_extraction_preview(
+        pull_request={"id": "pr:84", "merged": True, "head_sha": "abc123"},
+        deployment={"target": "production"},
+        live_evidence=None,
+        consumer="codex",
+        requested_action={"action": "delete_runtime_authority", "target": "production"},
+        actor={"agent": "codex", "role": "agent", "approved_scope": False},
+    )
+
+    assert result["permission_check"] == {
+        "permission": "denied",
+        "action": "delete_runtime_authority",
+        "reason": "approved_scope_required",
+        "authority_write_performed": False,
+        "protected_values_returned": False,
+    }
+
+
+def test_runtime_truth_extraction_preview_allows_read_only_runtime_action_without_scope():
+    result = run_runtime_truth_extraction_preview(
+        pull_request={"id": "pr:84", "merged": True, "head_sha": "abc123"},
+        deployment={"target": "production"},
+        live_evidence=None,
+        consumer="codex",
+        requested_action={"action": "inspect_runtime_truth", "target": "production"},
+        actor={"agent": "codex", "role": "agent", "approved_scope": False},
+    )
+
+    assert result["permission_check"] == {
+        "permission": "allowed",
+        "action": "inspect_runtime_truth",
+        "reason": "action_not_restricted",
+        "authority_write_performed": False,
+        "protected_values_returned": False,
+    }
 
 
 def test_preference_style_extraction_preview_maps_memory_cards_without_raw_body():
