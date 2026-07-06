@@ -309,6 +309,7 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
     route_runner: Callable[[str], Mapping[str, Any]],
     review_loop_runner: Callable[[], Mapping[str, Any]] | None = None,
     session_project_rollup_runner: Callable[[], Mapping[str, Any]] | None = None,
+    preference_artifact_memory_runner: Callable[[], Mapping[str, Any]] | None = None,
     tool_names: Any = None,
     collection_mode: str = "local_test_replay",
     network_used: bool = False,
@@ -325,12 +326,17 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
         repository=repository,
         branch=branch,
     )
+    preference_artifact_memory = _collect_preference_artifact_memory_shadow(
+        preference_artifact_memory_runner,
+        repository=repository,
+    )
     capture = {
         "schema_version": "source_to_candidate_runtime_shadow_capture.v1",
         "tool_names": _string_list(tool_names) or list(REQUIRED_RUNTIME_TOOL_NAMES),
         "brain_objects_query_smokes": smokes,
         "source_to_candidate_review_loop": review_loop,
         "session_project_rollup_runtime": session_project_rollup,
+        "preference_artifact_memory": preference_artifact_memory,
         "deployed_identity": {
             "contains_expected_commit": False,
             "identity_source": "collector_not_deployed_identity_proof",
@@ -349,6 +355,11 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
             "session_project_rollup_collected": bool(session_project_rollup),
             "session_project_rollup_schema": public_safe_text(
                 str(session_project_rollup.get("schema_version") or ""),
+                max_chars=80,
+            ),
+            "preference_artifact_memory_collected": bool(preference_artifact_memory),
+            "preference_artifact_memory_schema": public_safe_text(
+                str(preference_artifact_memory.get("schema_version") or ""),
                 max_chars=80,
             ),
             "network_used": network_used is True,
@@ -750,6 +761,191 @@ def _edge_types(edges: Any) -> list[str]:
             if isinstance(edge, Mapping) and edge.get("edge_type")
         }
     )
+
+
+def build_preference_artifact_memory_shadow_evidence(
+    *,
+    repository: str = "neurons",
+) -> dict[str, Any]:
+    """Build a branch-local local_test P7 preference/artifact memory summary."""
+
+    from .extraction_pipeline import run_preference_style_extraction_preview
+
+    report = run_preference_style_extraction_preview(
+        memory_cards=[
+            {
+                "memory_id": "mem:p7-shadow-html-review-accepted",
+                "card_type": "preference",
+                "summary": "Accepted HTML artifact preference",
+                "confidence": 0.94,
+                "currentness": "current",
+                "review_state": "accepted",
+                "typed_payload": {
+                    "preference": "HTML review artifacts should be information dense.",
+                    "applies_to": "html review artifact",
+                    "reason": "Accepted local_test preference evidence.",
+                },
+                "source_refs": [{"source_ref_id": "ev:p7-shadow:html-review"}],
+            },
+            {
+                "memory_id": "mem:p7-shadow-visualization-proposal",
+                "card_type": "preference",
+                "summary": "Proposed visualization preference",
+                "confidence": 0.61,
+                "currentness": "inferred",
+                "typed_payload": {
+                    "preference": "Visualization artifacts should use motion only when it clarifies state.",
+                    "applies_to": "visualization artifact",
+                    "reason": "Observed local_test preference candidate requiring review.",
+                },
+                "source_refs": [{"source_ref_id": "ev:p7-shadow:visualization"}],
+            },
+        ],
+        repository=repository,
+        current_request="review HTML visualization artifact",
+        current_files=[],
+        artifact_review={
+            "artifact_type": "html_review",
+            "summary": "Dense review output with prioritized findings and evidence links.",
+            "text_metrics": {
+                "finding_count": 3,
+                "evidence_ref_count": 3,
+                "word_count": 640,
+            },
+            "body": "redacted-local-test-body-not-returned",
+        },
+    )
+    pack = report.get("artifact_preference_pack") if isinstance(report.get("artifact_preference_pack"), Mapping) else {}
+    lanes = pack.get("lanes") if isinstance(pack.get("lanes"), Mapping) else {}
+    accepted = [dict(item) for item in lanes.get("accepted_current", []) if isinstance(item, Mapping)]
+    proposals = [dict(item) for item in lanes.get("proposal_only", []) if isinstance(item, Mapping)]
+    preference_objects = [*accepted, *proposals]
+    recommended_actions = pack.get("recommended_actions") if isinstance(pack.get("recommended_actions"), list) else []
+    artifact_check = (
+        report.get("artifact_review_check") if isinstance(report.get("artifact_review_check"), Mapping) else {}
+    )
+    safe_artifact_check = _public_safe_mapping(artifact_check)
+    safe_artifact_check["schema_version"] = public_safe_text(
+        str(safe_artifact_check.get("schema_version") or ARTIFACT_REVIEW_PREFERENCE_CHECK_SCHEMA),
+        max_chars=80,
+    )
+    safe_artifact_check["raw_artifact_body_returned"] = False
+    evidence = {
+        "schema_version": PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA,
+        "preference_object_pack": {
+            "schema_version": "object_pack.v1",
+            "route": "code_style_preference",
+            "accepted_preference_count": len(accepted),
+            "proposal_preference_count": len(proposals),
+            "objects": preference_objects,
+            "lanes": {
+                "accepted_current": accepted,
+                "proposal_only": proposals,
+            },
+            "recommended_actions": recommended_actions,
+            "gaps": list(pack.get("gaps") or []),
+            "production_mutation_performed": False,
+        },
+        "html_visualization_route_smoke": {
+            "schema_version": "brain_objects_query.v1",
+            "route": "html_visualization_preference",
+            "production_mutation_performed": False,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": "html_visualization_preference",
+                "objects": accepted,
+                "lanes": {"accepted_current": accepted},
+                "recommended_actions": [
+                    {"object_id": str(obj.get("object_id") or ""), "action": "apply_preference"}
+                    for obj in accepted
+                    if str(obj.get("object_id") or "")
+                ],
+                "gaps": [] if accepted else ["accepted_html_preference_missing"],
+            },
+        },
+        "agent_context_preference_section": {
+            "schema_version": REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA,
+            "section": "style_preference",
+            "object_count": len(accepted),
+            "accepted_preference_count": len(accepted),
+            "surface_policy": {"mutation_allowed": False},
+        },
+        "artifact_review_check": safe_artifact_check,
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+    ensure_public_safe(evidence, "PreferenceArtifactMemoryShadowEvidence")
+    return evidence
+
+
+def _collect_preference_artifact_memory_shadow(
+    preference_artifact_memory_runner: Callable[[], Mapping[str, Any]] | None,
+    *,
+    repository: str = "neurons",
+) -> dict[str, Any]:
+    try:
+        raw = (
+            preference_artifact_memory_runner()
+            if preference_artifact_memory_runner is not None
+            else build_preference_artifact_memory_shadow_evidence(repository=repository or "neurons")
+        )
+    except Exception as exc:  # pragma: no cover - defensive public-safe guard
+        raw = {
+            "schema_version": PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA,
+            "collector_error_type": public_safe_text(type(exc).__name__, max_chars=80),
+            "preference_object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": "code_style_preference",
+                "accepted_preference_count": 0,
+                "proposal_preference_count": 0,
+                "objects": [],
+                "lanes": {"accepted_current": [], "proposal_only": []},
+                "recommended_actions": [],
+                "gaps": ["preference_artifact_collector_failed"],
+                "production_mutation_performed": False,
+            },
+            "html_visualization_route_smoke": {
+                "schema_version": "brain_objects_query.v1",
+                "route": "html_visualization_preference",
+                "production_mutation_performed": False,
+                "object_pack": {
+                    "schema_version": "object_pack.v1",
+                    "route": "html_visualization_preference",
+                    "objects": [],
+                    "lanes": {"accepted_current": []},
+                    "recommended_actions": [],
+                    "gaps": ["accepted_html_preference_missing"],
+                },
+            },
+            "agent_context_preference_section": {
+                "schema_version": REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA,
+                "section": "style_preference",
+                "object_count": 0,
+                "accepted_preference_count": 0,
+                "surface_policy": {"mutation_allowed": False},
+            },
+            "artifact_review_check": {
+                "schema_version": ARTIFACT_REVIEW_PREFERENCE_CHECK_SCHEMA,
+                "status": "failed",
+                "ui_required": False,
+                "raw_artifact_body_returned": False,
+            },
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        }
+    evidence = _public_safe_mapping(raw)
+    ensure_public_safe(evidence, "CollectedPreferenceArtifactMemoryShadowEvidence")
+    return evidence
 
 
 def _collect_brain_objects_query_route_smoke(
@@ -1953,6 +2149,9 @@ def _preference_artifact_memory_failures(
     postcheck: Mapping[str, Any],
 ) -> list[str]:
     failures: list[str] = []
+    collector_error_type = public_safe_text(str(preference.get("collector_error_type") or ""), max_chars=80)
+    if collector_error_type:
+        failures.append(f"preference_artifact_memory_collector_error:{collector_error_type}")
     if preference.get("schema_version") != PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA:
         failures.append("preference_artifact_memory_schema_mismatch")
     if pack.get("schema_version") != "object_pack.v1":
