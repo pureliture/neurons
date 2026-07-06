@@ -757,6 +757,8 @@ def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     )
     if runtime_evidence_count < 1:
         failures.append("p8_runtime_evidence_classification_missing")
+    if evidence.get("source_commit_matches_pr_head") is False:
+        failures.append("p8_source_commit_mismatch_with_pr_head")
     if evidence.get("permission") != "allowed" or evidence.get("permission_reason") != "approved_scope_present":
         failures.append("p8_preapproved_scope_missing")
     if bool(evidence.get("authority_write_performed")):
@@ -768,6 +770,9 @@ def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
 
 def _p8_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
     gaps: list[str] = []
+    source_commit_matches_pr_head = evidence.get("source_commit_matches_pr_head")
+    if source_commit_matches_pr_head is not True and source_commit_matches_pr_head is not False:
+        gaps.append("p8_source_commit_matches_pr_head_unverified")
     if int(evidence.get("runtime_unverified_count") or 0) > 0:
         gaps.append("p8_runtime_evidence_unverified")
     if int(evidence.get("runtime_verified_count") or 0) < 1:

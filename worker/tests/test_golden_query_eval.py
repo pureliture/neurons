@@ -359,6 +359,7 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert evidence["P7"]["artifact_preference_pack_status"] == "pass"
     assert evidence["P8"]["schema_version"] == "object_extraction_runtime_truth_preview.v1"
     assert evidence["P8"]["runtime_unverified_count"] == 1
+    assert evidence["P8"]["source_commit_matches_pr_head"] is True
     assert evidence["P8"]["permission"] == "allowed"
     assert evidence["P8"]["permission_reason"] == "approved_scope_present"
     assert evidence["P8"]["authority_write_performed"] is False
@@ -473,6 +474,40 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert phase_progress["P9"]["state"] == "local_validated"
 
 
+def test_product_evidence_summary_fails_when_p8_source_commit_mismatches_pr_head():
+    progress = build_product_activation_progress_report()
+    evidence = [
+        {**item, "source_commit_matches_pr_head": False}
+        if item.get("phase") == "P8"
+        else item
+        for item in progress["product_evidence_summary"]
+    ]
+
+    result = evaluate_product_evidence_summary(evidence)
+
+    checks = {item["phase"]: item for item in result["checks"]}
+    assert result["status"] == "FAIL"
+    assert "P8:product_evidence_failed" in result["hard_failures"]
+    assert "p8_source_commit_mismatch_with_pr_head" in checks["P8"]["failures"]
+
+
+def test_product_evidence_summary_marks_missing_p8_source_commit_identity_as_gap():
+    progress = build_product_activation_progress_report()
+    evidence = []
+    for item in progress["product_evidence_summary"]:
+        if item.get("phase") == "P8":
+            item = dict(item)
+            item.pop("source_commit_matches_pr_head")
+        evidence.append(item)
+
+    result = evaluate_product_evidence_summary(evidence)
+
+    checks = {item["phase"]: item for item in result["checks"]}
+    assert result["status"] == "PASS_WITH_GAPS"
+    assert "P8:product_evidence_failed" not in result["hard_failures"]
+    assert "p8_source_commit_matches_pr_head_unverified" in checks["P8"]["gaps"]
+
+
 def test_product_evidence_summary_fails_closed_when_required_phase_evidence_is_missing():
     result = evaluate_product_evidence_summary(
         [
@@ -539,6 +574,7 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "schema_version": "object_extraction_runtime_truth_preview.v1",
                 "runtime_verified_count": 0,
                 "runtime_unverified_count": 1,
+                "source_commit_matches_pr_head": True,
                 "permission": "allowed",
                 "permission_reason": "approved_scope_present",
                 "authority_write_performed": False,
