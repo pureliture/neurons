@@ -18,6 +18,7 @@ Current state:
 - P6 Session, Device, Project, And Work-Unit 360: `PASS_WITH_GAPS` / `local_validated`; local/test session project rollup preview는 Device/Session/Repository/Branch/WorkUnit/Spec/PullRequest/Commit objects를 생성하고, same-device와 all-device fixture rollup을 분리하며, safe handoff pack을 반환합니다. live multi-device runtime evidence는 아직 증명되지 않았습니다.
 - P7 Preference, Style, And Artifact Memory: `PASS_WITH_GAPS` / `local_validated`; local/test artifact preference pack은 accepted/proposal lanes, profile objects, no-UI HTML artifact check를 검증하지만, live agent context pack 및 production authority promotion은 아직 gap입니다.
 - P8 Runtime Truth, Security, And Deployment Authority: `PASS_WITH_GAPS` / `local_validated`; local/test runtime authority policy, artifact identity join, private authority redaction, and denial/no-mutation checks pass, but live rollout identity and production permission audit remain gaps.
+- P9 Agent Context Productization: `PASS_WITH_GAPS` / `local_validated`; local/test consumer compact packs, degraded/stale disclosure, reference object lane, surface policy, and proposal-safe action hints pass, but production startup/read path and runtime enforcement remain gaps.
 - Product activation: 완료되지 않았습니다; configured agent read path refresh가 여전히 필요합니다.
 - UI/object browser: product activation prerequisite는 아니지만, 이후 product surface로 열어 둡니다.
 
@@ -651,7 +652,9 @@ Remaining gaps:
 
 ### P9. Agent Context Productization
 
-State: planned.
+State: local_validated.
+
+Result: PASS_WITH_GAPS.
 
 Purpose:
 
@@ -673,6 +676,28 @@ Gate evidence:
 - stale/no-recent-source state is visible instead of hidden
 - consumer pack omits object properties and actions outside its allowed surface
 - pack tells the agent which missing evidence must be gathered before promotion
+
+Local validation evidence:
+
+- compact consumer pack gate: `cd worker && uv run pytest -q tests/test_context_pack_builder.py::test_builder_adds_consumer_specific_compact_agent_context_pack_with_safe_action_hints`
+- compact consumer pack result: `1 passed, 1 warning`
+- phase coverage gate: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
+- phase coverage result: `1 passed, 1 warning`
+
+Implemented local/test scope:
+
+- `agent_context_product_pack.v1` is attached to the context authority block for `codex`, `claude-code`, `gemini`, and `hermes`
+- compact sections cover current authority, reference objects, style/preference, active work, guardrails, and required verification
+- consumer surface policy is read-only, omits protected properties, and keeps mutation disabled
+- degraded mode exposes graph/runtime evidence gaps instead of hiding them
+- stale memory count is visible in freshness metadata
+- proposal-safe action hints distinguish `suggest_allowed` from `execute_allowed` and list missing evidence before promotion
+
+Remaining gaps:
+
+- production agent startup/read path has not live-proven these compact packs
+- consumer action surface policy is local/test only, not enforced by deployed runtime
+- production authority-changing actions remain denied until approved scope, audit, and rollback gates exist
 
 ### P10. UI And Object Browser Surface
 
@@ -759,31 +784,23 @@ Current accounting:
 | P6 Session, Device, Project, And Work-Unit 360 | `local_validated` | `PASS_WITH_GAPS`; local/test rollup and handoff gates pass, live multi-device runtime evidence remains a gap |
 | P7 Preference, Style, And Artifact Memory | `local_validated` | `PASS_WITH_GAPS`; local/test artifact preference pack lanes and no-UI HTML artifact check pass, live agent context pack and production authority promotion remain gaps |
 | P8 Runtime Truth, Security, And Deployment Authority | `local_validated` | `PASS_WITH_GAPS`; local/test runtime authority policy, artifact identity join, private authority redaction, and denial/no-mutation checks pass; live rollout identity and production permission audit remain gaps |
-| P9 Agent Context Productization | `planned` | local pack exists, production context and consumer policy not proven |
+| P9 Agent Context Productization | `local_validated` | `PASS_WITH_GAPS`; local/test consumer compact packs, degraded/stale disclosure, surface policy, and proposal-safe action hints pass; production startup/read path and runtime enforcement remain gaps |
 | P10 UI And Object Browser Surface | `planned` | deferred, open, non-prerequisite |
 
 ## Next Design Targets
 
-Continue with P9 Agent Context Productization. Keep P1 configured-agent namespace and current-main image identity gaps open until live evidence closes them, and keep production authority writes denied until an approved write gate exists.
+Decide whether to keep P10 UI And Object Browser Surface deferred or start a thin local inspection surface after object contracts stabilize. Keep P1 configured-agent namespace and current-main image identity gaps open until live evidence closes them, and keep production authority writes denied until an approved write gate exists.
 
 Recommended goal:
 
 ```text
-Start P3 Processing And Object Extraction Pipeline with deterministic local/test extraction fixtures, public-safe chunk preview, strategy comparison, and evaluator evidence, without production authority or corpus mutation.
+If P10 is started, build only a local/read-only object inspection surface over existing object packs; do not make UI a prerequisite for MCP/read-path activation, authority writes, or production rollout.
 ```
 
 Expected outputs:
 
-- P3 `requirements.md` or approved requirements section
-- P3 `design.md` or approved design section
-- deterministic fixture extraction smoke
-- public-safe chunk/object preview
-- extraction strategy comparison report
-- evaluator report tied to a golden query slice
-- read-only object query smoke
-- local/test artifact identity check against the exact branch commit
-- production extraction/proposal/decision denial smoke
-- phase-specific golden query slice result
-- explicit no-mutation report
-
-After P1, start P2 for the living reference corpus store.
+- explicit P10 start/defer decision
+- read-only local object browser or inspection report if started
+- no production mutation
+- no protected content, credentials, topology, or raw external ID output
+- clear PASS / PASS_WITH_GAPS / FAIL result with live gaps preserved

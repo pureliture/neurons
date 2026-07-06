@@ -187,3 +187,6 @@ def test_phase_golden_query_coverage_reports_pass_with_gaps_not_green():
     assert phases["P8"]["result"] == "in_progress"
     assert phases["P8"]["golden_query_family"] == "pr merge and deploy truth"
     assert "live_runtime_rollout_identity_unproven" in phases["P8"]["gaps"]
+    assert phases["P9"]["result"] == "in_progress"
+    assert phases["P9"]["golden_query_family"] == "agent context productization"
+    assert "production_consumer_context_pack_live_unproven" in phases["P9"]["gaps"]
