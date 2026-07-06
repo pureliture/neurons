@@ -33,6 +33,11 @@ PRODUCTION_DENIAL_CLAIMS = (
     ("live.production.object_proposal_denial", "brain_object_proposal_create"),
     ("live.production.object_decision_denial", "brain_object_decision_commit"),
 )
+OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS = (
+    "brain_object_proposal_create",
+    "brain_object_decision_commit",
+)
+OBJECT_AUTHORITY_PRODUCTION_RUNTIME_FLAG = "--allow-object-authority-production-writes"
 
 
 def build_source_to_candidate_runtime_readiness_report(
@@ -49,6 +54,7 @@ def build_source_to_candidate_runtime_readiness_report(
         _live_agent_context_product_sections_claim(evidence),
         _live_brain_objects_query_route_smokes_claim(evidence),
         _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
+        _live_object_authority_production_gate_policy_claim(evidence),
         *[
             _production_denial_claim(evidence, claim_id=claim_id, tool_name=tool_name)
             for claim_id, tool_name in PRODUCTION_DENIAL_CLAIMS
@@ -203,6 +209,98 @@ def _live_deployed_identity_claim(evidence: Mapping[str, Any], *, expected_commi
         "identity_source": public_safe_text(str(identity.get("identity_source") or ""), max_chars=160),
         "gaps": [gap] if gap else [],
     }
+
+
+def _live_object_authority_production_gate_policy_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    tool_schemas = evidence.get("tool_schemas")
+    tool_schemas = tool_schemas if isinstance(tool_schemas, Mapping) else {}
+    runtime_gate = evidence.get("production_authority_gate")
+    runtime_gate = runtime_gate if isinstance(runtime_gate, Mapping) else {}
+    missing_schemas = [
+        tool_name
+        for tool_name in OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS
+        if not _tool_schema_has_production_gate(tool_schemas.get(tool_name))
+    ]
+    has_runtime_policy = bool(runtime_gate)
+    base = {
+        "claim_id": "live.production.object_authority_gate_policy",
+        "evidence_class": "runtime_safety_gate",
+        "tools": list(OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS),
+        "missing_gate_schemas": missing_schemas,
+        "runtime_flag": public_safe_text(str(runtime_gate.get("runtime_flag") or ""), max_chars=120),
+        "default_enabled": bool(runtime_gate.get("default_enabled")),
+        "per_call_gate_required": runtime_gate.get("per_call_gate_required") is True,
+        "production_mutation_performed": runtime_gate.get("production_mutation_performed") is True,
+    }
+    missing_evidence = []
+    if missing_schemas:
+        missing_evidence.extend(f"{tool_name}_production_gate_schema_missing" for tool_name in missing_schemas)
+    if not has_runtime_policy:
+        missing_evidence.append("object_authority_production_runtime_policy_unverified")
+    runtime_failures = (
+        _object_authority_runtime_gate_policy_failures(runtime_gate) if has_runtime_policy else []
+    )
+    if not missing_schemas and has_runtime_policy:
+        if runtime_failures:
+            return {
+                **base,
+                "status": "failed",
+                "gaps": runtime_failures,
+            }
+        return {
+            **base,
+            "status": "validated",
+            "gaps": [],
+        }
+    if runtime_failures:
+        missing_evidence.extend(runtime_failures)
+    if tool_schemas or runtime_gate:
+        return {
+            **base,
+            "status": "failed",
+            "gaps": missing_evidence,
+        }
+    return {
+        **base,
+        "status": "not_validated",
+        "gaps": ["live_object_authority_gate_policy_unverified"],
+    }
+
+
+def _tool_schema_has_production_gate(schema: Any) -> bool:
+    if not isinstance(schema, Mapping):
+        return False
+    input_schema = schema.get("inputSchema") if isinstance(schema.get("inputSchema"), Mapping) else schema
+    properties = input_schema.get("properties") if isinstance(input_schema.get("properties"), Mapping) else {}
+    gate = properties.get("production_gate")
+    if not isinstance(gate, Mapping):
+        return False
+    gate_properties = gate.get("properties") if isinstance(gate.get("properties"), Mapping) else {}
+    required = {
+        "approved",
+        "approval_ref",
+        "scope",
+        "project",
+        "max_objects",
+        "configured_deployed_mcp_identity_matches_source",
+        "read_after_write_smoke_plan",
+        "rollback_or_supersession_plan",
+        "no_raw_private_evidence",
+    }
+    return required.issubset(set(str(key) for key in gate_properties))
+
+
+def _object_authority_runtime_gate_policy_failures(runtime_gate: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if str(runtime_gate.get("runtime_flag") or "") != OBJECT_AUTHORITY_PRODUCTION_RUNTIME_FLAG:
+        failures.append("object_authority_production_runtime_flag_unverified")
+    if runtime_gate.get("default_enabled") is True:
+        failures.append("object_authority_production_runtime_default_enabled")
+    if runtime_gate.get("per_call_gate_required") is not True:
+        failures.append("object_authority_production_per_call_gate_not_required")
+    if runtime_gate.get("production_mutation_performed") is True:
+        failures.append("unexpected_production_mutation")
+    return failures
 
 
 def _production_denial_claim(

@@ -58,6 +58,16 @@ def _sanitized_live_evidence(**overrides):
             "contains_expected_commit": True,
             "identity_source": "redacted_live_runtime_evidence",
         },
+        "tool_schemas": {
+            "brain_object_proposal_create": _object_authority_tool_schema(),
+            "brain_object_decision_commit": _object_authority_tool_schema(),
+        },
+        "production_authority_gate": {
+            "runtime_flag": "--allow-object-authority-production-writes",
+            "default_enabled": False,
+            "per_call_gate_required": True,
+            "production_mutation_performed": False,
+        },
     }
     evidence.update(overrides)
     return evidence
@@ -79,6 +89,31 @@ def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None):
     }
 
 
+def _object_authority_tool_schema():
+    return {
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ledger_scope": {"type": "string", "enum": ["local_test", "production"]},
+                "production_gate": {
+                    "type": "object",
+                    "properties": {
+                        "approved": {"type": "boolean"},
+                        "approval_ref": {"type": "string"},
+                        "scope": {"type": "string", "enum": ["single_project_single_object"]},
+                        "project": {"type": "string"},
+                        "max_objects": {"type": "integer", "maximum": 1},
+                        "configured_deployed_mcp_identity_matches_source": {"type": "boolean"},
+                        "read_after_write_smoke_plan": {"type": "boolean"},
+                        "rollback_or_supersession_plan": {"type": "boolean"},
+                        "no_raw_private_evidence": {"type": "boolean"},
+                    },
+                },
+            },
+        },
+    }
+
+
 def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation():
     report = build_source_to_candidate_runtime_readiness_report(expected_commit="7218cb2")
 
@@ -96,9 +131,11 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert claims["live.production.source_to_candidate_denial"]["status"] == "not_validated"
     assert claims["live.production.object_proposal_denial"]["status"] == "not_validated"
     assert claims["live.production.object_decision_denial"]["status"] == "not_validated"
+    assert claims["live.production.object_authority_gate_policy"]["status"] == "not_validated"
     assert "live_mcp_review_tools_unverified" in report["gaps"]
     assert "live_brain_objects_query_route_smokes_unverified" in report["gaps"]
     assert "live_deployed_identity_unverified" in report["gaps"]
+    assert "live_object_authority_gate_policy_unverified" in report["gaps"]
 
 
 def test_runtime_readiness_passes_with_sanitized_live_evidence():
@@ -120,6 +157,95 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.production.approval_board_denial"]["status"] == "denied_as_expected"
     assert claims["live.production.object_proposal_denial"]["status"] == "denied_as_expected"
     assert claims["live.production.object_decision_denial"]["status"] == "denied_as_expected"
+    assert claims["live.production.object_authority_gate_policy"]["status"] == "validated"
+
+
+def test_runtime_readiness_fails_when_object_authority_gate_schema_is_missing():
+    evidence = _sanitized_live_evidence(
+        tool_schemas={
+            "brain_object_proposal_create": {
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"ledger_scope": {"type": "string"}},
+                }
+            },
+            "brain_object_decision_commit": _object_authority_tool_schema(),
+        }
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    gate_claim = claims["live.production.object_authority_gate_policy"]
+    assert gate_claim["status"] == "failed"
+    assert "brain_object_proposal_create_production_gate_schema_missing" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_object_authority_gate_schema_is_partial():
+    partial_schema = _object_authority_tool_schema()
+    gate_properties = partial_schema["inputSchema"]["properties"]["production_gate"]["properties"]
+    gate_properties.pop("approval_ref")
+    evidence = _sanitized_live_evidence(
+        tool_schemas={
+            "brain_object_proposal_create": partial_schema,
+            "brain_object_decision_commit": _object_authority_tool_schema(),
+        }
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    assert "brain_object_proposal_create_production_gate_schema_missing" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_object_authority_runtime_opt_in_is_unsafe():
+    evidence = _sanitized_live_evidence(
+        production_authority_gate={
+            "runtime_flag": "--allow-object-authority-production-writes",
+            "default_enabled": True,
+            "per_call_gate_required": False,
+            "production_mutation_performed": False,
+        }
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    gate_claim = claims["live.production.object_authority_gate_policy"]
+    assert gate_claim["status"] == "failed"
+    assert "object_authority_production_runtime_default_enabled" in report["gaps"]
+    assert "object_authority_production_per_call_gate_not_required" in report["gaps"]
+
+
+def test_runtime_readiness_reports_schema_and_runtime_gate_failures_together():
+    evidence = _sanitized_live_evidence(
+        tool_schemas={
+            "brain_object_proposal_create": {
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"ledger_scope": {"type": "string"}},
+                }
+            },
+            "brain_object_decision_commit": _object_authority_tool_schema(),
+        },
+        production_authority_gate={
+            "runtime_flag": "--unexpected-flag",
+            "default_enabled": True,
+            "per_call_gate_required": False,
+            "production_mutation_performed": True,
+        },
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    assert "brain_object_proposal_create_production_gate_schema_missing" in report["gaps"]
+    assert "object_authority_production_runtime_flag_unverified" in report["gaps"]
+    assert "object_authority_production_runtime_default_enabled" in report["gaps"]
+    assert "object_authority_production_per_call_gate_not_required" in report["gaps"]
+    assert "unexpected_production_mutation" in report["gaps"]
 
 
 def test_runtime_readiness_fails_when_live_object_query_smoke_falls_back_to_unimplemented_route():
