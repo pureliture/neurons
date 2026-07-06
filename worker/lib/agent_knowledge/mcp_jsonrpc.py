@@ -406,6 +406,13 @@ def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict,
                 "proposal_write_requires_local_test_ledger_or_later_production_gate",
             )
         )
+    if not _local_test_object_authority_writes_allowed(service):
+        return _tool_result(
+            denied_payload(
+                tool_name,
+                "local_test_object_authority_write_requires_test_service_gate",
+            )
+        )
     result = ReviewProposal.from_parts(
         proposal_type=_require_non_empty_string(arguments, "proposal_type", tool_name=tool_name),
         target_object_id=_require_non_empty_string(arguments, "target_object_id", tool_name=tool_name),
@@ -431,6 +438,13 @@ def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict,
                 extra={"production_promotion_plan": _production_authority_promotion_plan(arguments)},
             )
         )
+    if not _local_test_object_authority_writes_allowed(service):
+        return _tool_result(
+            denied_payload(
+                tool_name,
+                "local_test_object_authority_write_requires_test_service_gate",
+            )
+        )
     approved_by = _require_non_empty_string(arguments, "approved_by", tool_name=tool_name)
     decision = AuthorityDecision.from_parts(
         decision_type=_require_non_empty_string(arguments, "decision_type", tool_name=tool_name),
@@ -447,6 +461,12 @@ def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict,
     decision["approved_by_hash"] = "sha256:" + short_hash(approved_by, length=24)
     result = service.commit_object_authority_decision(decision)
     return _tool_result(result)
+
+
+def _local_test_object_authority_writes_allowed(service: KnowledgeSearchService) -> bool:
+    return bool(getattr(service, "allow_local_test_object_authority_writes", False)) and not bool(
+        getattr(service.ledger, "read_only", True)
+    )
 
 
 def _production_authority_promotion_plan(arguments: Mapping[str, object]) -> dict:
