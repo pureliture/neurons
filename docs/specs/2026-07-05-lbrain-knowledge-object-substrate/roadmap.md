@@ -13,7 +13,7 @@ Current state:
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, latest configured-endpoint smoke still passes with denied/no-mutation production writes, but the current Codex session's `mcp__lbrain` namespace still does not expose them and the live MCP image is not proven to include the #73/current-main source refactor.
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, and production-denial evidence exist, but real private Palantir manifest ingest and production ingest approval remain gaps.
 - P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / local_validated; local/test reference corpus extraction preview creates deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, and blocked-extraction gaps; repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, and broader evaluator suite previews have local/test evaluator evidence; live graph/Qdrant projection join remains unproven.
-- P4 Review Queue And Authority Promotion: `in_progress`; local/test decision commit records authority state/audit history, object queries surface local/test stale, superseded, retired, archive-only, and rejected states, and production denial returns a read-only promotion plan while authority mutation remains denied.
+- P4 Review Queue And Authority Promotion: `in_progress`; local/test decision commit records authority state/audit history, object queries surface local/test stale, superseded, retired, archive-only, and rejected states, object explain returns local/test decision history, and production denial returns a read-only promotion plan while authority mutation remains denied.
 - Product activation: not complete; configured agent read path refresh remains required.
 - UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
 
@@ -377,8 +377,11 @@ Current local/test evidence:
 - local/test authority decision audit records proposal id, evidence refs, approver identity hash, previous authority lane, new authority lane, and decision reason
 - `brain_objects_query` overlays local/test object authority state onto returned objects and lane indexes after a decision commit
 - local/test object queries now surface stale, superseded, retired, archive-only, and rejected states without deleting audit history or mutating production
+- `brain_object_explain` returns local/test authority state plus decision history for object ids with committed decisions, while still reporting that the object body comes from ledger state only when no object store is configured
 - production-scope `brain_object_decision_commit` remains denied/no-mutation and returns `object_authority_promotion_plan.v1` with allowed object class, decision types, reviewer role, required gate evidence, rollback path, blast radius, and no-mutation report
 - ledger boundary manifest assigns `object_review_proposals`, `object_authority_decisions`, and `object_authority_states` to the native-memory/object area
+- object explain history evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_brain_object_explain_includes_local_authority_decision_history`
+- object explain history result: `1 passed, 1 warning`
 - production-denial plan evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_is_restricted_denied_by_default`
 - production-denial plan result: `1 passed, 1 warning`
 - focused evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_local_test_updates_authority_state_with_audit`
@@ -386,13 +389,13 @@ Current local/test evidence:
 - object-query visibility evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_overlays_local_authority_state`
 - object-query visibility result: `5 passed, 1 warning`
 - MCP regression evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py`
-- MCP regression result: `68 passed, 1 warning`
+- MCP regression result: `69 passed, 1 warning`
 - object/model/boundary regression evidence: `cd worker && uv run pytest -q tests/test_object_packs.py tests/test_knowledge_objects.py tests/test_ledger_area_boundaries.py`
 - object/model/boundary regression result: `23 passed, 1 warning`
 - ledger boundary evidence: `cd worker && uv run pytest -q tests/test_ledger_area_boundaries.py`
 - ledger boundary result: `10 passed`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1534 passed, 9 skipped, 1 warning`
+- worker regression result: `1535 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 

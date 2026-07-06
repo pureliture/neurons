@@ -685,6 +685,79 @@ def test_mcp_object_decision_commit_local_test_updates_authority_state_with_audi
     assert queued["items"][0]["status"] == "accepted"
 
 
+def test_mcp_brain_object_explain_includes_local_authority_decision_history(tmp_path: Path):
+    service = _service(tmp_path)
+    target_object_id = "ko:RepoDocument:explain"
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 106,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Explain current authority state.",
+                    "evidence_refs": ["ev:source_hash:explain"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 107,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "target_object_id": target_object_id,
+                    "decision_type": "accept_current",
+                    "previous_authority_lane": "candidate",
+                    "new_authority_lane": "accepted_current",
+                    "evidence_refs": ["ev:source_hash:explain"],
+                    "decision_reason": "Reviewed local fixture evidence.",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:local-explain-current",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    result = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 108,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
+                "arguments": {"object_id": target_object_id},
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert result["schema_version"] == "brain_object_explain.v1"
+    assert result["object_id"] == target_object_id
+    assert result["object"]["authority_lane"] == "accepted_current"
+    assert result["object"]["lifecycle_status"] == "current"
+    assert result["authority_state"]["decision_id"] == "decision:local-explain-current"
+    assert result["authority_state"]["proposal_id"] == proposal["proposal_id"]
+    assert result["decision_history"][0]["decision_id"] == "decision:local-explain-current"
+    assert result["decision_history"][0]["approved_by"] == "redacted"
+    assert result["decision_history"][0]["approved_by_hash"].startswith("sha256:")
+    assert "authority_state_from_ledger_only" in result["gaps"]
+
+
 @pytest.mark.parametrize(
     ("decision_type", "new_authority_lane", "expected_lifecycle", "expected_review", "expected_action"),
     [
