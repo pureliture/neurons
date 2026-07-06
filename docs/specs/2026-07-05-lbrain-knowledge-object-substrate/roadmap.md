@@ -516,16 +516,19 @@ Current local/test evidence:
 - `run_session_project_rollup_preview` maps redacted session metadata into `Device`, `Session`, `Repository`, `Branch`, and `WorkUnit` objects
 - local/test rollup emits `repository_has_branch`, `session_on_device`, `session_in_repository`, `session_on_branch`, and `part_of_work_unit` edges
 - same-device scope and all-device scope produce different visible session counts while preserving all-device rollup counts
+- optional Spec, PullRequest, and Commit metadata can be linked into the same WorkUnit rollup with bidirectional object edges
 - local path sentinels and source bodies are not returned
 - P5 phase coverage now marks P6 as `in_progress` with explicit future gaps rather than `planned`
 - focused evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_session_project_rollup_preview_separates_same_device_and_all_devices`
 - focused result: `1 passed, 1 warning`
+- bidirectional linked metadata evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_session_project_rollup_preview_links_specs_prs_and_commits_bidirectionally`
+- bidirectional linked metadata result: `1 passed, 1 warning`
 - phase coverage evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
 - phase coverage result: `1 passed, 1 warning`
 - adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
-- adjacent regression result: `30 passed, 1 warning`
+- adjacent regression result: `31 passed, 1 warning`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1541 passed, 9 skipped, 1 warning`
+- worker regression result: `1542 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
@@ -533,7 +536,7 @@ Remaining gaps:
 
 - P6 is not complete; this slice covers local/test metadata rollup only
 - handoff pack generation is not implemented in this slice
-- Spec/PullRequest/Commit bidirectional rollup edges are not yet covered by the P6 rollup preview
+- PR/commit/test provenance is covered only by local/test metadata fixtures, not live repository history
 - live multi-device/project rollup evidence is unproven
 
 ### P7. Preference, Style, And Artifact Memory
