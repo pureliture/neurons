@@ -459,6 +459,8 @@ Current local/test evidence:
 - object explain history result: `1 passed, 1 warning`
 - production-denial plan evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_is_restricted_denied_by_default`
 - production-denial plan result: `1 passed, 1 warning`
+- runtime readiness production safety evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_requires_proposal_and_decision_production_safety_smokes`
+- runtime readiness production safety result: `1 passed, 1 warning`
 - focused evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_local_test_updates_authority_state_with_audit`
 - focused result: `1 passed, 1 warning`
 - object-query visibility evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_overlays_local_authority_state`
@@ -477,14 +479,14 @@ Current local/test evidence:
 PASS_WITH_GAPS rationale:
 
 - Local/test P4 gate evidence is present for proposal creation, review queue listing, default production denial/no-mutation, candidate approval-board decision preview, local/test authority decision commit, audit state, stale/superseded/retired/archive/rejected object-query visibility, and object decision history explainability.
-- Production authority promotion remains intentionally closed without a human approval gate and scoped live pilot evidence.
+- Production authority promotion and bounded production ledger/corpus/runtime mutation are preapproved, but no bounded live pilot/write evidence is attached yet.
 - The current production plan is a read-only denied response that documents the required reviewer role, allowed classes/actions, rollback path, gate evidence, and blast radius. It is not a production approval record and did not mutate production authority.
 
 Remaining gaps:
 
-- approved production authority promotion remains closed and unproven; the current production plan is read-only denial metadata, not an approval record or production pilot
+- approved production authority promotion and ledger/corpus/runtime mutation remain unproven until bounded execution evidence exists; the current production plan is read-only denial metadata, not a production pilot
 - production rollback/supersession/demotion flows are not yet implemented beyond the local/test stored before/after lane audit shape and object-query state overlay
-- production proposal/decision write remains denied and no production ledger/corpus mutation has been performed
+- production proposal/decision and ledger/corpus/runtime mutation are preapproved, but no bounded execution evidence is attached yet; until execution evidence exists, readiness requires denied/no-mutation proposal and decision safety smokes
 
 ### P5. Continuous Golden Query Quality Gates
 
@@ -538,7 +540,7 @@ Current local/test evidence:
 - local_test store-to-candidate CLI/MCP proof covers configured reference corpus store read, candidate graph review pack creation, and production target denied/no-mutation
 - source-to-authority quality report now includes `product_surface_checks` for `brain_objects_query`, `brain_source_to_candidate_graph`, `brain_candidate_review_edit`, `brain_approval_board_decide`, and `brain_source_to_candidate_runtime_readiness` MCP registry/policy surface
 - `brain_objects_query` local MCP read path now returns context-authority object packs for broad authority/archive queries, preference/style object packs for style queries, temporal work recall `WorkUnit` packs for session/work-resume queries, and runtime truth gap packs for merge/deploy queries instead of falling back to `object_pack_route_not_implemented`
-- source-to-candidate runtime readiness CLI can evaluate sanitized post-deploy evidence for MCP read/review tools, `brain_objects_query` route smokes, agent context `tool_hints`, required agent context sections, deployed identity, and production-denial smokes without network or mutation; required object-query routes include `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth`
+- source-to-candidate runtime readiness CLI can evaluate sanitized post-deploy evidence for MCP read/review tools, `brain_objects_query` route smokes, agent context `tool_hints`, required agent context sections, deployed identity, and production-denial/safety smokes without network or mutation; required object-query routes include `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth`, and production safety claims include source-to-candidate, approval-board, proposal-create, and decision-commit tools
 - activation progress report returns `lbrain_product_activation_progress.v1` with `scope_phases=[P2..P9]`, `minimum_review_loop_checkpoint.status=PASS_WITH_GAPS`, `next_phase=P5`, `remaining_phases=[P5..P9]`, `goal_complete=false`, `production_ready=false`, `production_approval_gate=preapproved`, `production_mutation_execution=not_performed_by_local_gate`, and `production_mutation_performed=false`
 - activation progress `product_evidence_summary` now includes P6 session/project/work-unit rollup evidence, P7 artifact preference memory evidence, P8 runtime authority evidence, and P9 agent context product evidence as sanitized local previews
 - P6 evidence summary includes `object_extraction_session_project_rollup_preview.v1`, `object_count=8`, `edge_count=16`, `evidence_count=1`, and `session_project_handoff_pack.v1`
@@ -561,9 +563,9 @@ Current local/test evidence:
 - source-to-authority CLI smoke: `cd worker && uv run neuron-knowledge golden-query-eval --source-to-authority-gate`
 - source-to-authority CLI smoke result: `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`, `production_mutation_performed=false`, `authority_write_scope=local_test`
 - runtime readiness CLI smoke: `cd worker && uv run neuron-knowledge source-to-candidate-runtime-readiness --expected-commit <branch-head-commit>`
-- runtime readiness CLI smoke result: `status=PASS_WITH_GAPS`, `live_evidence_provided=false`, `production_mutation_performed=false`, `network_used=false`, live MCP read/review tools/object query route smokes/context tool hints/context product sections/deployed identity/production denial claims `not_validated`, `missing_routes` includes `temporal_work_recall`, and `missing_sections` includes `style_preference`, `active_work`, and `required_verification`
+- runtime readiness CLI smoke result: `status=PASS_WITH_GAPS`, `live_evidence_provided=false`, `production_mutation_performed=false`, `network_used=false`, live MCP read/review tools/object query route smokes/context tool hints/context product sections/deployed identity/production denial/safety claims `not_validated`, `missing_routes` includes `temporal_work_recall`, `missing_sections` includes `style_preference`, `active_work`, and `required_verification`, and proposal/decision safety claims are unverified without live evidence
 - runtime readiness focused evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_without_mutation tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_without_evidence_preserves_live_gaps tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_default_route_returns_agent_context_objects tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_temporal_route_returns_current_work_objects tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_style_route_uses_preference_objects tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_deploy_route_returns_runtime_gap_pack`
-- runtime readiness focused result: `14 passed, 1 warning`
+- runtime readiness focused result: `15 passed, 1 warning`
 - focused evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
 - focused result: `1 passed, 1 warning`
 - strict-axis evaluator evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_eval_strict_axes_require_edge_freshness_and_gap_fields`
@@ -585,7 +587,7 @@ Current local/test evidence:
 - CLI smoke: `cd worker && uv run neuron-knowledge golden-query-eval --phase-coverage`
 - CLI smoke result: `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1595 passed, 9 skipped, 1 warning`
+- worker regression result: `1596 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
@@ -644,7 +646,7 @@ Current local/test evidence:
 - adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
 - adjacent regression result: `46 passed, 1 warning`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1595 passed, 9 skipped, 1 warning`
+- worker regression result: `1596 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
