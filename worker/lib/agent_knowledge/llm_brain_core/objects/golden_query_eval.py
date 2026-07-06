@@ -602,6 +602,8 @@ def _p9_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     section_counts = evidence.get("section_counts") if isinstance(evidence.get("section_counts"), Mapping) else {}
     if int(section_counts.get("style_preference") or 0) < 1:
         failures.append("p9_style_preference_section_missing")
+    if int(section_counts.get("active_work") or 0) < 1:
+        failures.append("p9_active_work_section_missing")
     if int(evidence.get("tool_hint_count") or 0) < 4:
         failures.append("p9_object_native_tool_hints_missing")
     if bool(evidence.get("mutation_allowed")):
@@ -768,11 +770,24 @@ def _p9_agent_context_evidence(*, preference_preview: Mapping[str, Any]) -> dict
         "lanes": {"accepted_current": [preference_object], "proposal_only": []},
         "gaps": [],
     }
+    active_work_object = {
+        "object_id": "ko:WorkUnit:p9-active-work",
+        "object_type": "WorkUnit",
+        "title": "Continue source-to-candidate graph product activation",
+        "authority_lane": "reference_only",
+        "recommended_action": "resume",
+    }
+    active_work_pack = {
+        "objects": [active_work_object],
+        "lanes": {"reference_only": [active_work_object]},
+        "gaps": [],
+    }
     product = build_agent_context_product_pack(
         consumer="codex",
         block={
             "object_packs": {
                 "preferences": preference_pack,
+                "current_work": active_work_pack,
                 "required_verification": {
                     "objects": [
                         {
