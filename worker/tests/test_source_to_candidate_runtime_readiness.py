@@ -2111,6 +2111,59 @@ def test_runtime_readiness_collector_includes_permission_sensitive_audit_shadow_
     assert report["status"] == "PASS_WITH_GAPS"
 
 
+def test_runtime_readiness_collector_includes_agent_context_startup_shadow_evidence():
+    def route_runner(route: str) -> dict:
+        return {
+            "schema_version": "brain_objects_query.v1",
+            "route": route,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": route,
+                "objects": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}],
+                "lanes": {"candidate": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}]},
+                "recommended_actions": [{"object_id": f"ko:test:{route}", "action": "request_evidence"}],
+                "gaps": [],
+            },
+            "production_mutation_performed": False,
+        }
+
+    packet = build_source_to_candidate_runtime_collected_shadow_evidence_packet(
+        repository="pureliture/neurons",
+        branch="codex/knowledge-object-review-flow-roadmap",
+        consumer="codex",
+        route_runner=route_runner,
+        review_loop_runner=_source_to_candidate_review_loop_evidence,
+        session_project_rollup_runner=_session_project_rollup_runtime_evidence,
+        preference_artifact_memory_runner=_preference_artifact_memory_evidence,
+        permission_sensitive_audit_runner=_permission_sensitive_audit_evidence,
+        agent_context_startup_runner=_agent_context_startup_runtime_evidence,
+    )
+
+    startup = packet["agent_context_startup_runtime"]
+    assert startup["schema_version"] == "agent_context_startup_runtime_evidence.v1"
+    assert startup["startup_context"]["loaded_on_startup"] is True
+    assert startup["startup_context"]["section_counts"]["style_preference"] >= 1
+    assert startup["startup_context"]["section_counts"]["active_work"] >= 1
+    assert startup["startup_context"]["surface_policy"]["mutation_allowed"] is False
+    assert startup["read_path_smoke"]["tool"] == "brain_objects_query"
+    assert startup["read_path_smoke"]["read_only"] is True
+    assert set(startup["read_path_smoke"]["routes_checked"]) == set(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    assert startup["runtime_enforcement"]["direct_execution_allowed"] is False
+    assert startup["runtime_enforcement"]["production_mutation_allowed"] is False
+    assert startup["runtime_enforcement"]["raw_private_context_blocked"] is True
+    assert startup["postcheck"]["status"] == "validated"
+    assert packet["collector"]["agent_context_startup_schema"] == "agent_context_startup_runtime_evidence.v1"
+    assert packet["collector"]["readiness_claim"] == "collector_packet_not_live_evidence"
+    assert packet["production_mutation_performed"] is False
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=packet)
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["live.agent_context.startup_read_path"]["status"] == "validated"
+    assert "live_agent_context_startup_unverified" not in report["gaps"]
+    assert "production_startup_read_path_unproven" not in report["gaps"]
+    assert report["status"] == "PASS_WITH_GAPS"
+
+
 def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys):
     assert (
         main(
@@ -2148,6 +2201,10 @@ def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys)
     assert packet["permission_sensitive_audit"]["schema_version"] == "permission_sensitive_runtime_audit_evidence.v1"
     assert len(packet["permission_sensitive_audit"]["audit_events"]) == 2
     assert packet["permission_sensitive_audit"]["audit_store"]["status"] == "recorded"
+    assert packet["agent_context_startup_runtime"]["schema_version"] == "agent_context_startup_runtime_evidence.v1"
+    assert packet["agent_context_startup_runtime"]["startup_context"]["loaded_on_startup"] is True
+    assert packet["agent_context_startup_runtime"]["read_path_smoke"]["tool"] == "brain_objects_query"
+    assert packet["agent_context_startup_runtime"]["runtime_enforcement"]["production_mutation_allowed"] is False
     assert len(packet["brain_objects_query_smokes"]) == len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
     assert all(
         "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])
@@ -2160,6 +2217,7 @@ def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys)
     assert claims["live.session_project.rollup"]["status"] == "validated"
     assert claims["live.preference_artifact.memory"]["status"] == "validated"
     assert claims["live.production.permission_sensitive_audit"]["status"] == "validated"
+    assert claims["live.agent_context.startup_read_path"]["status"] == "validated"
 
 
 def test_neuron_knowledge_runtime_readiness_cli_normalizes_shadow_evidence_file(tmp_path, capsys):
