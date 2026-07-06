@@ -702,9 +702,9 @@ Current local/test evidence:
 - source-to-authority strengthened review-edit gate evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_source_to_authority_quality_gate_covers_review_approval_and_read_path_without_production_mutation`
 - source-to-authority strengthened review-edit gate result: `1 passed, 1 warning`
 - adjacent regression evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py tests/test_neuron_mcp_stdio.py tests/test_neuron_cli.py tests/test_extraction_pipeline.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
-- adjacent regression result: `225 passed, 1 warning`
+- adjacent regression result: `226 passed, 1 warning`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1659 passed, 9 skipped, 1 warning`
+- worker regression result: `1660 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
@@ -811,6 +811,10 @@ Local validation evidence:
 - live evidence object result: `1 passed, 1 warning`
 - runtime authority policy gate: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_runtime_truth_extraction_preview_denies_authority_promotion_without_leaking_private_deploy_values`
 - runtime authority policy result: `1 passed, 1 warning`
+- runtime readiness permission audit packet gate evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_evidence tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_passes_with_sanitized_live_evidence tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_fails_when_permission_sensitive_audit_is_unsafe_or_incomplete`
+- runtime readiness permission audit packet gate result: `4 passed, 1 warning`
+- runtime/MCP permission audit packet gate adjacent evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_without_mutation tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_plan tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_template tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_accepts_bounded_execution_evidence_from_local_production_gate_simulation tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_without_evidence_preserves_live_gaps`
+- runtime/MCP permission audit packet gate adjacent result: `45 passed, 1 warning`
 - phase coverage gate: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
 - phase coverage result: `1 passed, 1 warning`
 - runtime evidence collection plan gate: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_evidence_collection_plan_is_public_safe_and_read_only tests/test_source_to_candidate_runtime_readiness.py::test_neuron_knowledge_runtime_readiness_cli_outputs_evidence_collection_plan tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_plan`
@@ -828,6 +832,8 @@ Implemented local/test scope:
 - runtime authority promotion without approved scope returns denied/no-mutation and records a public-safe audit event
 - runtime readiness validates sanitized `production_authority_execution` evidence packets for single-object production authority proposal/decision execution, gate-hash continuity, read-after-write, rollback/supersession path, postcheck, and raw-private-evidence redaction
 - missing bounded execution evidence returns `bounded_production_authority_execution_unverified` instead of silently passing P8 production authority execution
+- runtime readiness now includes `live.production.permission_sensitive_audit`, requiring a sanitized `permission_sensitive_runtime_audit_evidence.v1` packet for production-scope proposal/decision denial audit events, hashed actor/request refs, no authority write, no protected value return, audit-store recording, and public-safe postcheck before P8 audit proof can pass
+- missing P8 audit packet evidence remains `PASS_WITH_GAPS` with `permission_sensitive_audit_unverified`; unsafe or incomplete supplied evidence fails closed
 - runtime readiness validates sanitized evidence provenance so a post-deploy evidence packet must disclose collection mode, evidence-side network usage, mutation scope, and public-safe redaction checks without returning raw private evidence, secret, host topology, or raw external ids
 - `source-to-candidate-runtime-readiness --evidence-collection-plan` and `brain_source_to_candidate_runtime_readiness(evidence_collection_plan=true)` return a public-safe post-deploy read-only collection plan for the required MCP tools, `brain_objects_query` route smokes, deployed identity, production denied/no-mutation checks, authority gate policy, and evidence provenance schema
 - `source-to-candidate-runtime-readiness --evidence-packet-template` and `brain_source_to_candidate_runtime_readiness(evidence_packet_template=true)` return a public-safe template for the sanitized `source_to_candidate_runtime_evidence.v1` packet that a post-deploy runner must fill; the template itself is marked `template_only_not_runtime_evidence`
@@ -835,6 +841,7 @@ Implemented local/test scope:
 Remaining gaps:
 
 - no live rollout artifact identity proof is attached to this local/test branch
+- branch-local runtime readiness can now validate or reject a sanitized P8 permission-sensitive audit evidence packet, but that packet has not been collected from deployed runtime
 - production permission-sensitive audit flow is not live-proven
 - production authority promotion is preapproved, but only branch-local/sanitized bounded execution packet validation exists; no deployed/live runtime write gate execution evidence is attached yet
 - the collection plan is a branch-local template, not collected live evidence; it must not be reported as production readiness until an actual sanitized evidence packet is collected from the deployed read path
@@ -1006,14 +1013,14 @@ Current accounting:
 | P5 Continuous Golden Query Quality Gates | `in_progress` | `PASS_WITH_GAPS`; phase coverage, source-to-authority path gate, FR8 code-change-impact route gate, P7 HTML/visualization route evidence, and P2-P9 activation progress gate exist, release quality gate remains `not_green` |
 | P6 Session, Device, Project, And Work-Unit 360 | `local_validated` | `PASS_WITH_GAPS`; local/test rollup, handoff gates, temporal `brain_objects_query` `WorkUnit` route, and branch-local P6 runtime evidence packet validation pass; deployed/live multi-device runtime evidence remains a gap |
 | P7 Preference, Style, And Artifact Memory | `local_validated` | `PASS_WITH_GAPS`; local/test artifact preference pack lanes, no-UI HTML artifact check, branch-local HTML/visualization preference route, and branch-local P7 runtime evidence packet validation pass; deployed/live agent context pack and production authority promotion remain gaps |
-| P8 Runtime Truth, Security, And Deployment Authority | `local_validated` | `PASS_WITH_GAPS`; local/test runtime authority policy, artifact identity join, private authority redaction, denial/no-mutation checks, sanitized source-to-candidate review-loop packet validation, sanitized bounded execution packet validation, evidence provenance validation, current-session shadow evidence packet normalization, and one-step shadow readiness evaluation pass; broader deployed/live production runtime authority and permission audit remain gaps |
+| P8 Runtime Truth, Security, And Deployment Authority | `local_validated` | `PASS_WITH_GAPS`; local/test runtime authority policy, artifact identity join, private authority redaction, denial/no-mutation checks, sanitized source-to-candidate review-loop packet validation, sanitized bounded execution packet validation, sanitized permission-sensitive audit packet validation, evidence provenance validation, current-session shadow evidence packet normalization, and one-step shadow readiness evaluation pass; broader deployed/live production runtime authority and permission audit remain gaps |
 | P9 Agent Context Productization | `local_validated` | `PASS_WITH_GAPS`; local/test consumer compact packs, degraded/stale disclosure, surface policy, and proposal-safe action hints pass; production startup/read path and runtime enforcement remain gaps |
 | P10 UI And Object Browser Surface | `planned` | `PASS_WITH_GAPS` for start-readiness review; full object browser deferred, but minimal P3/P4 candidate edit/review surface is now a prerequisite |
 
 Delivery integration status:
 
 - PR #84 through PR #93 are merged into `main`.
-- PR #95 remains draft/open for the integrated P2-P9 roadmap branch. Its branch-local runtime-readiness surface now includes a public-safe normalizer, one-step readiness evaluator for current-session shadow evidence packets, P6 session/project/work-unit rollup packet validation, and P7 preference/artifact memory packet validation, but this is not merge, deploy, or live runtime evidence.
+- PR #95 remains draft/open for the integrated P2-P9 roadmap branch. Its branch-local runtime-readiness surface now includes a public-safe normalizer, one-step readiness evaluator for current-session shadow evidence packets, P6 session/project/work-unit rollup packet validation, P7 preference/artifact memory packet validation, and P8 permission-sensitive audit packet validation, but this is not merge, deploy, or live runtime evidence.
 - Final head and merge SHAs below are GitHub delivery evidence only. They are not deploy, live runtime, or production readiness evidence.
 - P1 through P10 phase branches were cleaned up or are eligible for cleanup after merge verification.
 - This delivery record does not close the P1 live object-query route proof gap, deployed source-to-candidate graph runtime wiring, P5 release-quality `not_green` status, P6-P9 production/live proof gaps, or deployed/live bounded production authority promotion execution evidence.
