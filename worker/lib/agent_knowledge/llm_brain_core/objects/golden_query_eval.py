@@ -147,7 +147,18 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
                 "production_permission_audit_live_unproven",
             ],
         ),
-        _planned_phase("P9", "Agent-Facing Action Surface", "code change impact analysis", GOLDEN_QUERIES[3]),
+        _phase_coverage(
+            phase="P9",
+            title="Agent Context Productization",
+            golden_query_family="agent context productization",
+            query=GOLDEN_QUERIES[3],
+            result="in_progress",
+            evaluator="consumer-specific compact context pack local/test preview",
+            gaps=[
+                "production_consumer_context_pack_live_unproven",
+                "consumer_action_surface_runtime_policy_unproven",
+            ],
+        ),
         _planned_phase("P10", "Product Application Surface", "HTML/visualization review preference", GOLDEN_QUERIES[9]),
     ]
     report = {

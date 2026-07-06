@@ -21,6 +21,34 @@ NON_CURRENT_AUTHORITY = frozenset({"stale", "superseded", "archive_candidate"})
 TERMINAL_TASK_STATUSES = {"done", "resolved", "closed", "cancelled"}
 CONTEXT_AUTHORITY_CONSUMERS = {"unspecified", "codex", "claude-code", "gemini", "hermes"}
 SEARCH_MIRROR_STATUSES = {"unverified", "configured_unverified", "available", "degraded", "unavailable"}
+AGENT_CONTEXT_SURFACE_POLICIES = {
+    "unspecified": {
+        "allowed_actions": ["request_missing_evidence"],
+        "max_section_items": 4,
+    },
+    "codex": {
+        "allowed_actions": ["suggest_change", "run_verification", "request_missing_evidence"],
+        "max_section_items": 8,
+    },
+    "claude-code": {
+        "allowed_actions": ["suggest_change", "request_missing_evidence"],
+        "max_section_items": 6,
+    },
+    "gemini": {
+        "allowed_actions": ["summarize_context", "request_missing_evidence"],
+        "max_section_items": 5,
+    },
+    "hermes": {
+        "allowed_actions": ["request_missing_evidence"],
+        "max_section_items": 4,
+    },
+}
+AGENT_CONTEXT_PROPERTY_OMISSIONS = [
+    "raw_body",
+    "raw_source",
+    "private_deploy_value",
+    "secret",
+]
 
 
 class ContextPackBuilder:
@@ -187,6 +215,12 @@ def authority_block(
         required_verification=["cd worker && uv run pytest -q"],
         guardrails=block["boundary_guardrails"],
     )
+    block["agent_context_product"] = build_agent_context_product_pack(
+        consumer=safe_consumer,
+        block=block,
+        gaps=gaps,
+        cards=cards,
+    )
     block["object_substrate_status"] = {
         "status": "degraded",
         "authority": "model_available_object_store_not_configured",
@@ -194,6 +228,141 @@ def authority_block(
     }
     ensure_public_safe(block, "context_authority")
     return block
+
+
+def build_agent_context_product_pack(
+    *,
+    consumer: str,
+    block: Mapping[str, Any],
+    gaps: list[str],
+    cards: list[dict[str, Any]],
+) -> dict[str, Any]:
+    safe_consumer = normalize_context_consumer(consumer)
+    policy = AGENT_CONTEXT_SURFACE_POLICIES[safe_consumer]
+    object_packs = block.get("object_packs") if isinstance(block.get("object_packs"), Mapping) else {}
+    missing_evidence = missing_evidence_before_promotion(gaps)
+    stale_count = stale_memory_count(cards)
+    pack = {
+        "schema_version": "agent_context_product_pack.v1",
+        "consumer": safe_consumer,
+        "sections": {
+            "current_authority": compact_section(
+                object_packs,
+                names=("documentation_cleanup",),
+                max_items=int(policy["max_section_items"]),
+            ),
+            "reference_objects": compact_section(
+                object_packs,
+                names=("reference_corpus",),
+                max_items=int(policy["max_section_items"]),
+            ),
+            "style_preference": compact_section(
+                object_packs,
+                names=("preferences", "style"),
+                max_items=int(policy["max_section_items"]),
+            ),
+            "active_work": compact_section(
+                object_packs,
+                names=("current_work",),
+                max_items=int(policy["max_section_items"]),
+            ),
+            "guardrails": compact_section(
+                object_packs,
+                names=("do_not_touch_boundaries",),
+                max_items=int(policy["max_section_items"]),
+            ),
+            "required_verification": compact_section(
+                object_packs,
+                names=("required_verification",),
+                max_items=int(policy["max_section_items"]),
+                missing_evidence=missing_evidence,
+            ),
+        },
+        "surface_policy": {
+            "consumer": safe_consumer,
+            "read_only": True,
+            "mutation_allowed": False,
+            "allowed_actions": list(policy["allowed_actions"]),
+            "property_omissions": list(AGENT_CONTEXT_PROPERTY_OMISSIONS),
+        },
+        "degraded_mode": {
+            "active": bool(gaps or stale_count),
+            "gaps": list(gaps),
+        },
+        "freshness": {
+            "stale_evidence_visible": bool(stale_count),
+            "stale_memory_count": stale_count,
+            "no_recent_source": not bool(block.get("documents") or block.get("preferences") or block.get("workflow_contracts")),
+        },
+        "missing_evidence_before_promotion": missing_evidence,
+        "action_hints": proposal_safe_action_hints(missing_evidence),
+    }
+    ensure_public_safe(pack, "AgentContextProductPack")
+    return pack
+
+
+def compact_section(
+    object_packs: Mapping[str, Any],
+    *,
+    names: tuple[str, ...],
+    max_items: int,
+    missing_evidence: list[str] | None = None,
+) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    lanes: set[str] = set()
+    gaps: list[str] = []
+    for name in names:
+        pack = object_packs.get(name) if isinstance(object_packs.get(name), Mapping) else {}
+        lanes.update(str(lane) for lane, values in (pack.get("lanes") or {}).items() if values)
+        gaps.extend(str(gap) for gap in pack.get("gaps") or [])
+        for obj in pack.get("objects") or []:
+            if len(items) >= max_items:
+                break
+            items.append(
+                {
+                    "object_id": public_safe_text(str(obj.get("object_id") or ""), max_chars=180),
+                    "object_type": public_safe_text(str(obj.get("object_type") or ""), max_chars=80),
+                    "title": public_safe_text(str(obj.get("title") or ""), max_chars=240),
+                    "authority_lane": public_safe_text(str(obj.get("authority_lane") or ""), max_chars=80),
+                    "recommended_action": public_safe_text(str(obj.get("recommended_action") or ""), max_chars=120),
+                }
+            )
+    section = {
+        "object_count": len(items),
+        "items": items,
+        "authority_lanes": sorted(lanes),
+        "gaps": gaps,
+    }
+    if missing_evidence is not None:
+        section["missing_evidence_before_promotion"] = list(missing_evidence)
+    return section
+
+
+def missing_evidence_before_promotion(gaps: list[str]) -> list[str]:
+    return [gap for gap in gaps if "evidence" in gap or gap.endswith("_unverified")]
+
+
+def stale_memory_count(cards: list[dict[str, Any]]) -> int:
+    return sum(1 for card in cards if str(card.get("currentness") or "") in NON_CURRENT_AUTHORITY)
+
+
+def proposal_safe_action_hints(missing_evidence: list[str]) -> list[dict[str, Any]]:
+    blocked_by = list(missing_evidence)
+    promotion_blockers = ["approved_scope_required", *blocked_by]
+    return [
+        {
+            "action": "request_missing_evidence",
+            "suggest_allowed": True,
+            "execute_allowed": False,
+            "blocked_by": blocked_by,
+        },
+        {
+            "action": "promote_authority",
+            "suggest_allowed": True,
+            "execute_allowed": False,
+            "blocked_by": promotion_blockers,
+        },
+    ]
 
 
 def search_mirror_status_block(status: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -269,6 +438,8 @@ def evidence_gap_cards(gaps: list[str]) -> list[dict[str, Any]]:
 def needs_runtime_evidence(current_request: str, current_files: list[str]) -> bool:
     request_text = str(current_request or "").lower()
     text = " ".join([current_request, *current_files]).lower()
+    if any(term in text for term in ("배포", "운영", "프로덕션", "라이브")):
+        return True
     terms = (
         "runtime",
         "deploy",
