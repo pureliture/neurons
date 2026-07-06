@@ -15,6 +15,7 @@ Current state:
 - P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / `local_validated`; local/test reference corpus extraction preview는 deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, blocked-extraction gaps를 생성합니다. repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, broader evaluator suite previews에는 local/test evaluator evidence가 있지만, live graph/Qdrant projection join은 아직 증명되지 않았습니다.
 - P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / `local_validated`; local/test decision commit은 authority state/audit history를 기록하고, object queries는 local/test stale, superseded, retired, archive-only, rejected states를 surface하며, object explain은 local/test decision history를 반환합니다. production denial은 read-only promotion plan을 반환하고 authority mutation은 계속 denied 상태입니다.
 - P5 Continuous Golden Query Quality Gates: `in_progress`; phase coverage report는 P1-P10 golden query families를 나열하고 release quality gate를 명시적으로 `not_green` 상태로 유지합니다.
+- P6 Session, Device, Project, And Work-Unit 360: `PASS_WITH_GAPS` / `local_validated`; local/test session project rollup preview는 Device/Session/Repository/Branch/WorkUnit/Spec/PullRequest/Commit objects를 생성하고, same-device와 all-device fixture rollup을 분리하며, safe handoff pack을 반환합니다. live multi-device runtime evidence는 아직 증명되지 않았습니다.
 - Product activation: 완료되지 않았습니다; configured agent read path refresh가 여전히 필요합니다.
 - UI/object browser: product activation prerequisite는 아니지만, 이후 product surface로 열어 둡니다.
 
@@ -490,7 +491,7 @@ Remaining gaps:
 
 ### P6. Session, Device, Project, And Work-Unit 360
 
-State: planned.
+State: `PASS_WITH_GAPS` / local_validated.
 
 Purpose:
 
@@ -509,6 +510,36 @@ Gate evidence:
 - one-device and all-device fixture queries produce different but compatible answers
 - raw host/path is not exposed
 - project rollup can cite sessions, specs, PRs, and commits without raw transcript body
+
+Current local/test evidence:
+
+- `run_session_project_rollup_preview` maps redacted session metadata into `Device`, `Session`, `Repository`, `Branch`, and `WorkUnit` objects
+- local/test rollup emits `repository_has_branch`, `session_on_device`, `session_in_repository`, `session_on_branch`, and `part_of_work_unit` edges
+- same-device scope and all-device scope produce different visible session counts while preserving all-device rollup counts
+- optional Spec, PullRequest, and Commit metadata can be linked into the same WorkUnit rollup with bidirectional object edges
+- local/test rollup emits `session_project_handoff_pack.v1` from current work objects, edge counts, and explicit gaps
+- local path sentinels and source bodies are not returned
+- P5 phase coverage now marks P6 as `in_progress` with explicit future gaps rather than `planned`
+- focused evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_session_project_rollup_preview_separates_same_device_and_all_devices`
+- focused result: `1 passed, 1 warning`
+- bidirectional linked metadata evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_session_project_rollup_preview_links_specs_prs_and_commits_bidirectionally`
+- bidirectional linked metadata result: `1 passed, 1 warning`
+- handoff pack evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_session_project_rollup_preview_builds_safe_handoff_pack`
+- handoff pack result: `1 passed, 1 warning`
+- phase coverage evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
+- phase coverage result: `1 passed, 1 warning`
+- adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
+- adjacent regression result: `32 passed, 1 warning`
+- worker regression evidence: `cd worker && uv run pytest -q`
+- worker regression result: `1543 passed, 9 skipped, 1 warning`
+- root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
+- root regression result: `BUILD SUCCESSFUL`
+
+Remaining gaps:
+
+- local/test P6 gate evidence is present for same-device/all-device fixture rollups, safe handoff pack generation, and bidirectional linked metadata edges
+- PR/commit/test provenance is covered only by local/test metadata fixtures, not live repository history
+- live multi-device/project rollup evidence is unproven
 
 ### P7. Preference, Style, And Artifact Memory
 
@@ -667,9 +698,9 @@ Current accounting:
 | P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; deployed/configured endpoint validated, current Codex session tool registry gap remains |
 | P2 Living Reference Corpus Store | `local_validated` | `PASS_WITH_GAPS`; local/test store and status gates pass, real private manifest ingest and production approval remain gaps |
 | P3 Processing And Object Extraction Pipeline | `local_validated` | `PASS_WITH_GAPS`; local/test reference corpus extraction preview, repo-document extraction preview, documentation cleanup strategy comparison, runtime truth extraction preview, preference/style extraction preview, work-unit extraction preview, session-detail extraction preview, PR/commit detail extraction preview, graph/search projection join preview, and broader evaluator suite preview pass; live projection join remains a gap |
-| P4 Review Queue And Authority Promotion | `planned` | production authority write closed |
-| P5 Continuous Golden Query Quality Gates | `planned` | baseline red exists; runs across P1-P9 |
-| P6 Session, Device, Project, And Work-Unit 360 | `planned` | object types specified, productized/live flow missing |
+| P4 Review Queue And Authority Promotion | `local_validated` | `PASS_WITH_GAPS`; local/test authority state and audit gates pass, production authority mutation remains denied |
+| P5 Continuous Golden Query Quality Gates | `in_progress` | phase coverage exists and release quality gate remains `not_green` |
+| P6 Session, Device, Project, And Work-Unit 360 | `local_validated` | `PASS_WITH_GAPS`; local/test rollup and handoff gates pass, live multi-device runtime evidence remains a gap |
 | P7 Preference, Style, And Artifact Memory | `planned` | local profile seeds exist, productized workflow incomplete |
 | P8 Runtime Truth, Security, And Deployment Authority | `planned` | local pack exists, live evidence and governance workflow incomplete |
 | P9 Agent Context Productization | `planned` | local pack exists, production context and consumer policy not proven |

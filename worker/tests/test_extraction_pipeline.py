@@ -9,6 +9,7 @@ from agent_knowledge.llm_brain_core.objects.extraction_pipeline import (
     run_repo_document_extraction_preview,
     run_runtime_truth_extraction_preview,
     run_session_detail_extraction_preview,
+    run_session_project_rollup_preview,
     run_work_unit_extraction_preview,
 )
 
@@ -521,6 +522,203 @@ def test_session_detail_extraction_preview_reports_gap_when_raw_body_is_ignored(
         "raw_session_body_ignored",
         "session_evidence_missing",
     ]
+
+
+def test_session_project_rollup_preview_separates_same_device_and_all_devices():
+    sessions = [
+        {
+            "session_id_hash": "sha256:session-alpha",
+            "device_id_hash": "sha256:device-one",
+            "provider": "codex",
+            "summary": "Implemented project rollup preview.",
+            "work_unit_id": "work:p6",
+            "evidence_refs": ["commit:p6a"],
+            "host_path": "HOST_PATH_SENTINEL",
+        },
+        {
+            "session_id_hash": "sha256:session-beta",
+            "device_id_hash": "sha256:device-one",
+            "provider": "codex",
+            "summary": "Verified same-device recall.",
+            "work_unit_id": "work:p6",
+            "evidence_refs": ["pytest:p6"],
+        },
+        {
+            "session_id_hash": "sha256:session-gamma",
+            "device_id_hash": "sha256:device-two",
+            "provider": "codex",
+            "summary": "Captured all-device handoff context.",
+            "work_unit_id": "work:p6",
+            "evidence_refs": ["commit:p6b"],
+        },
+    ]
+
+    all_devices = run_session_project_rollup_preview(
+        sessions=sessions,
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+        scope="all_devices",
+    )
+    same_device = run_session_project_rollup_preview(
+        sessions=sessions,
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+        requesting_device_id_hash="sha256:device-one",
+        scope="same_device",
+    )
+
+    assert all_devices["schema_version"] == "object_extraction_session_project_rollup_preview.v1"
+    assert all_devices["status"] == "pass"
+    assert all_devices["visible_session_count"] == 3
+    assert same_device["visible_session_count"] == 2
+    assert same_device["all_device_session_count"] == 3
+    assert same_device["per_device_counts"] == {
+        "sha256:device-one": 2,
+        "sha256:device-two": 1,
+    }
+    object_types = {obj["object_type"] for obj in all_devices["objects"]}
+    assert {"Device", "Session", "Repository", "Branch", "WorkUnit"}.issubset(object_types)
+    edge_types = {edge["edge_type"] for edge in all_devices["edges"]}
+    assert {
+        "repository_has_branch",
+        "session_on_device",
+        "session_in_repository",
+        "session_on_branch",
+        "part_of_work_unit",
+    }.issubset(edge_types)
+    assert "HOST_PATH_SENTINEL" not in str(all_devices)
+    assert "raw_transcript" not in str(all_devices)
+    assert all_devices["evaluator_report"]["golden_query_slice"] == "temporal repo recall"
+    assert all_devices["evaluator_report"]["passes"] is True
+
+
+def test_session_project_rollup_preview_same_device_requires_requesting_device():
+    result = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "sha256:session-alpha",
+                "device_id_hash": "sha256:device-one",
+                "summary": "This session must not leak into an unscoped same-device view.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["commit:p6a"],
+            },
+            {
+                "session_id_hash": "sha256:session-beta",
+                "device_id_hash": "sha256:device-two",
+                "summary": "This second device must stay hidden without a requester hash.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["commit:p6b"],
+            },
+        ],
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+        scope="same_device",
+    )
+
+    assert result["status"] == "pass_with_gaps"
+    assert result["visible_session_count"] == 0
+    assert result["gaps"] == ["requesting_device_required", "visible_sessions_empty"]
+    assert all(obj["object_type"] != "Session" for obj in result["objects"])
+    assert result["handoff_pack"]["visible_session_count"] == 0
+    assert result["evaluator_report"]["passes"] is False
+
+
+def test_session_project_rollup_preview_reports_gap_without_session_evidence():
+    result = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "sha256:session-alpha",
+                "device_id_hash": "sha256:device-one",
+                "summary": "Metadata exists but evidence is missing.",
+                "work_unit_id": "work:p6",
+            },
+        ],
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+    )
+
+    assert result["status"] == "pass_with_gaps"
+    assert result["visible_session_count"] == 1
+    assert result["evidence_count"] == 0
+    assert result["gaps"] == ["session_evidence_missing"]
+    assert result["evaluator_report"]["passes"] is False
+    assert result["evaluator_report"]["failures"] == ["session_evidence_missing"]
+
+
+def test_session_project_rollup_preview_links_specs_prs_and_commits_bidirectionally():
+    result = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "sha256:session-alpha",
+                "device_id_hash": "sha256:device-one",
+                "provider": "codex",
+                "summary": "Implemented bidirectional rollup.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["commit:p6c"],
+            },
+        ],
+        specs=[{"spec_ref": "docs/specs/p6/design.md", "work_unit_id": "work:p6"}],
+        pull_requests=[{"pr_id": "pr:73", "number": 73, "work_unit_id": "work:p6"}],
+        commits=[{"commit_id": "commit:abc123", "pull_request_id": "pr:73", "work_unit_id": "work:p6"}],
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+    )
+
+    object_types = {obj["object_type"] for obj in result["objects"]}
+    assert {"Spec", "PullRequest", "Commit"}.issubset(object_types)
+    edge_types = {edge["edge_type"] for edge in result["edges"]}
+    assert {
+        "work_unit_has_session",
+        "device_has_session",
+        "work_unit_has_spec",
+        "spec_part_of_work_unit",
+        "work_unit_has_pull_request",
+        "pull_request_part_of_work_unit",
+        "pull_request_includes_commit",
+        "commit_part_of_work_unit",
+    }.issubset(edge_types)
+    assert result["linked_spec_count"] == 1
+    assert result["linked_pull_request_count"] == 1
+    assert result["linked_commit_count"] == 1
+    assert result["evaluator_report"]["passes"] is True
+
+
+def test_session_project_rollup_preview_builds_safe_handoff_pack():
+    result = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "sha256:session-alpha",
+                "device_id_hash": "sha256:device-one",
+                "provider": "codex",
+                "summary": "Prepared handoff pack.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["commit:p6d"],
+                "raw_transcript": "SOURCE_BODY_SENTINEL",
+            },
+        ],
+        specs=[{"spec_ref": "docs/specs/p6/design.md", "work_unit_id": "work:p6"}],
+        pull_requests=[{"pr_id": "pr:73", "number": 73, "work_unit_id": "work:p6"}],
+        commits=[{"commit_id": "commit:def456", "pull_request_id": "pr:73", "work_unit_id": "work:p6"}],
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+    )
+
+    handoff = result["handoff_pack"]
+    assert handoff["schema_version"] == "session_project_handoff_pack.v1"
+    assert handoff["raw_return_capability"] == "denied"
+    assert handoff["visible_session_count"] == 1
+    assert handoff["object_refs"]["Session"]
+    assert handoff["object_refs"]["WorkUnit"]
+    assert handoff["object_refs"]["PullRequest"]
+    assert "raw_session_body_ignored" in handoff["gaps"]
+    assert "verify_live_multi_device_rollup" in handoff["recommended_next_actions"]
+    assert "SOURCE_BODY_SENTINEL" not in str(handoff)
 
 
 def test_pr_commit_extraction_preview_maps_pr_commits_and_tests_without_runtime_inference():
