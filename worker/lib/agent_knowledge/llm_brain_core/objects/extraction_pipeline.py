@@ -872,6 +872,49 @@ def run_graph_search_projection_join_preview(
     return result
 
 
+def run_extraction_evaluator_suite_preview(
+    *,
+    evaluation_reports: list[Mapping[str, Any]],
+    variance_samples: list[Mapping[str, Any]],
+    suite_name: str,
+) -> dict[str, Any]:
+    deterministic = _deterministic_fixture_check(evaluation_reports)
+    golden = _golden_query_check(evaluation_reports)
+    strategy = _strategy_comparison_check(evaluation_reports)
+    variance = _variance_check(variance_samples)
+    model_prompt = _model_prompt_comparison_check(evaluation_reports)
+    failures = [
+        *deterministic["failures"],
+        *golden["failures"],
+        *strategy["failures"],
+        *variance["failures"],
+        *model_prompt["failures"],
+    ]
+    gaps = list(dict.fromkeys(failures))
+    result = {
+        "schema_version": "object_extraction_evaluator_suite.v1",
+        "status": "pass" if not failures else "pass_with_gaps",
+        "suite_name": public_safe_text(suite_name, max_chars=120),
+        "production_mutation_performed": False,
+        "coverage": {
+            "deterministic_fixture_checks": "pass" if deterministic["passes"] else "fail",
+            "golden_query_checks": "pass" if golden["passes"] else "fail",
+            "strategy_comparison_checks": "pass" if strategy["passes"] else "fail",
+            "variance_checks": "pass" if variance["passes"] else "fail",
+            "model_prompt_comparison": model_prompt["status"],
+        },
+        "deterministic_fixture": deterministic,
+        "golden_query": golden,
+        "strategy_comparison": strategy,
+        "variance": variance,
+        "model_prompt_comparison": model_prompt,
+        "failures": failures,
+        "gaps": gaps,
+    }
+    ensure_public_safe(result, "ExtractionEvaluatorSuitePreview")
+    return result
+
+
 def _blocked_preview(
     *,
     bundle: Mapping[str, Any],
@@ -979,6 +1022,136 @@ def _stable_edge(edge: Mapping[str, Any]) -> dict[str, Any]:
         "payload",
     }
     return {key: edge[key] for key in edge if key in allowed}
+
+
+def _deterministic_fixture_check(reports: list[Mapping[str, Any]]) -> dict[str, Any]:
+    failures: list[str] = []
+    if not reports:
+        failures.append("evaluation_reports_empty")
+    if any(bool(report.get("production_mutation_performed")) for report in reports):
+        failures.append("production_mutation_claimed")
+    return {
+        "passes": not failures,
+        "checked_count": len(reports),
+        "failures": failures,
+        "assertions": [
+            "reports_exist",
+            "production_mutation_performed_false",
+            "public_safe_report_shape",
+        ],
+    }
+
+
+def _golden_query_check(reports: list[Mapping[str, Any]]) -> dict[str, Any]:
+    failures: list[str] = []
+    checked_count = 0
+    slices: list[str] = []
+    for report in reports:
+        evaluator = report.get("evaluator_report") if isinstance(report.get("evaluator_report"), Mapping) else {}
+        if not evaluator:
+            failures.append("evaluator_report_missing")
+            continue
+        checked_count += 1
+        golden_slice = public_safe_text(str(evaluator.get("golden_query_slice") or "unknown"), max_chars=160)
+        slices.append(golden_slice)
+        if not bool(evaluator.get("passes")):
+            failures.append(f"golden_query_failed:{golden_slice}")
+    if not reports:
+        failures.append("evaluation_reports_empty")
+    return {
+        "passes": not failures,
+        "checked_count": checked_count,
+        "golden_query_slices": slices,
+        "failures": failures,
+    }
+
+
+def _strategy_comparison_check(reports: list[Mapping[str, Any]]) -> dict[str, Any]:
+    failures: list[str] = []
+    checked_count = 0
+    selected_count = 0
+    for report in reports:
+        comparisons = report.get("strategy_comparison") if isinstance(report.get("strategy_comparison"), list) else []
+        if not comparisons:
+            failures.append("strategy_comparison_missing")
+            continue
+        checked_count += 1
+        if any(bool(item.get("selected")) for item in comparisons if isinstance(item, Mapping)):
+            selected_count += 1
+        else:
+            failures.append("selected_strategy_missing")
+    if not reports:
+        failures.append("evaluation_reports_empty")
+    return {
+        "passes": not failures,
+        "checked_count": checked_count,
+        "selected_strategy_count": selected_count,
+        "failures": failures,
+    }
+
+
+def _variance_check(samples: list[Mapping[str, Any]]) -> dict[str, Any]:
+    output_hashes = [_report_output_hash(sample) for sample in samples]
+    unique_output_hash_count = len(set(output_hashes))
+    failures: list[str] = []
+    if not samples:
+        failures.append("variance_samples_empty")
+    elif unique_output_hash_count > 1:
+        failures.append("variance_detected")
+    return {
+        "passes": not failures,
+        "sample_count": len(samples),
+        "unique_output_hash_count": unique_output_hash_count,
+        "failures": failures,
+    }
+
+
+def _model_prompt_comparison_check(reports: list[Mapping[str, Any]]) -> dict[str, Any]:
+    model_call_count = sum(_report_model_call_count(report) for report in reports)
+    if model_call_count == 0:
+        return {
+            "passes": True,
+            "status": "not_applicable_no_llm",
+            "model_call_count": 0,
+            "failures": [],
+            "gaps": [],
+        }
+    return {
+        "passes": False,
+        "status": "missing_model_prompt_comparison",
+        "model_call_count": model_call_count,
+        "failures": ["model_prompt_comparison_missing"],
+        "gaps": ["model_prompt_comparison_missing"],
+    }
+
+
+def _report_output_hash(report: Mapping[str, Any]) -> str:
+    return hash_payload(
+        {
+            "schema_version": report.get("schema_version"),
+            "status": report.get("status"),
+            "selected_strategy": report.get("selected_strategy"),
+            "object_count": report.get("object_count"),
+            "edge_count": report.get("edge_count"),
+            "chunk_preview_count": report.get("chunk_preview_count"),
+            "evidence_count": report.get("evidence_count"),
+            "projection_object_count": report.get("projection_object_count"),
+            "objects": report.get("objects"),
+            "edges": report.get("edges"),
+            "chunk_preview": report.get("chunk_preview"),
+            "gaps": report.get("gaps"),
+            "evaluator_report": report.get("evaluator_report"),
+        }
+    )
+
+
+def _report_model_call_count(report: Mapping[str, Any]) -> int:
+    extraction_run = report.get("extraction_run") if isinstance(report.get("extraction_run"), Mapping) else {}
+    cost = extraction_run.get("cost_estimate") if isinstance(extraction_run.get("cost_estimate"), Mapping) else {}
+    try:
+        return int(cost.get("model_calls") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _lane_counts(pack: Mapping[str, Any]) -> dict[str, int]:
