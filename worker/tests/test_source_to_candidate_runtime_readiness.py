@@ -73,6 +73,11 @@ def _sanitized_live_evidence(**overrides):
             "per_call_gate_required": True,
             "production_mutation_performed": False,
         },
+        "evidence_provenance": _evidence_provenance(
+            collection_mode="local_test_replay",
+            mutation_scope="bounded_production_authority_execution",
+            network_used=False,
+        ),
         "production_authority_execution": _production_authority_execution_evidence(),
     }
     evidence.update(overrides)
@@ -185,6 +190,22 @@ def _production_authority_execution_evidence(**overrides):
     return evidence
 
 
+def _evidence_provenance(**overrides):
+    provenance = {
+        "schema_version": "source_to_candidate_runtime_evidence_provenance.v1",
+        "collection_mode": "post_deploy_read_only_smoke",
+        "collector": "redacted_operator_or_agent",
+        "network_used": True,
+        "mutation_scope": "none",
+        "raw_private_evidence_returned": False,
+        "secret_returned": False,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": False,
+    }
+    provenance.update(overrides)
+    return provenance
+
+
 def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation():
     report = build_source_to_candidate_runtime_readiness_report(expected_commit="7218cb2")
 
@@ -204,11 +225,13 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert claims["live.production.object_decision_denial"]["status"] == "not_validated"
     assert claims["live.production.object_authority_gate_policy"]["status"] == "not_validated"
     assert claims["live.production.object_authority_bounded_execution"]["status"] == "not_validated"
+    assert claims["live.evidence.provenance"]["status"] == "not_validated"
     assert "live_mcp_review_tools_unverified" in report["gaps"]
     assert "live_brain_objects_query_route_smokes_unverified" in report["gaps"]
     assert "live_deployed_identity_unverified" in report["gaps"]
     assert "live_object_authority_gate_policy_unverified" in report["gaps"]
     assert "bounded_production_authority_execution_unverified" in report["gaps"]
+    assert "live_evidence_provenance_unverified" in report["gaps"]
 
 
 def test_runtime_readiness_passes_with_sanitized_live_evidence():
@@ -234,6 +257,66 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.production.object_authority_bounded_execution"]["status"] == "validated"
     assert claims["live.production.object_authority_bounded_execution"]["production_mutation_performed"] is True
     assert claims["live.production.object_authority_bounded_execution"]["read_after_write_status"] == "validated"
+    assert claims["live.evidence.provenance"]["status"] == "validated"
+    assert claims["live.evidence.provenance"]["collection_mode"] == "local_test_replay"
+    assert claims["live.evidence.provenance"]["mutation_scope"] == "bounded_production_authority_execution"
+    assert report["network_used"] is False
+    assert report["evidence_collection_network_used"] is False
+    assert report["evidence_provenance"]["network_used_for_evidence"] is False
+
+
+def test_runtime_readiness_fails_when_live_evidence_provenance_is_missing():
+    evidence = _sanitized_live_evidence()
+    evidence.pop("evidence_provenance")
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    provenance = claims["live.evidence.provenance"]
+    assert provenance["status"] == "failed"
+    assert "live_evidence_provenance_missing" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_evidence_provenance_hides_bounded_mutation_scope():
+    evidence = _sanitized_live_evidence(
+        evidence_provenance=_evidence_provenance(
+            collection_mode="local_test_replay",
+            mutation_scope="none",
+            network_used=False,
+        )
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    provenance = claims["live.evidence.provenance"]
+    assert provenance["status"] == "failed"
+    assert "live_evidence_provenance_mutation_scope_mismatch" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_evidence_provenance_reports_private_or_topology_values():
+    evidence = _sanitized_live_evidence(
+        evidence_provenance=_evidence_provenance(
+            collection_mode="post_deploy_read_only_smoke",
+            mutation_scope="bounded_production_authority_execution",
+            network_used=True,
+            raw_private_evidence_returned=True,
+            secret_returned=True,
+            host_topology_returned=True,
+            raw_external_ids_returned=True,
+        )
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    assert report["evidence_collection_network_used"] is True
+    assert "live_evidence_provenance_raw_private_evidence_returned" in report["gaps"]
+    assert "live_evidence_provenance_secret_returned" in report["gaps"]
+    assert "live_evidence_provenance_host_topology_returned" in report["gaps"]
+    assert "live_evidence_provenance_raw_external_ids_returned" in report["gaps"]
 
 
 def test_runtime_readiness_fails_when_bounded_production_execution_evidence_is_incomplete():
@@ -556,6 +639,11 @@ def test_runtime_readiness_breaks_partial_live_evidence_into_actionable_gap_ids(
             "contains_expected_commit": False,
             "identity_source": "redacted_live_runtime_evidence",
         },
+        evidence_provenance=_evidence_provenance(
+            collection_mode="post_deploy_read_only_smoke",
+            mutation_scope="none",
+            network_used=True,
+        ),
         production_authority_execution={},
     )
 
