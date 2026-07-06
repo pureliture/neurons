@@ -1,6 +1,7 @@
 from agent_knowledge.llm_brain_core.objects.extraction_pipeline import (
     build_extractor_registry_report,
     run_documentation_cleanup_strategy_comparison,
+    run_preference_style_extraction_preview,
     run_reference_corpus_extraction_preview,
     run_runtime_truth_extraction_preview,
 )
@@ -50,6 +51,11 @@ def test_extractor_registry_reports_implemented_and_gap_extractors():
     assert by_name["runtime_truth"]["output_object_types"] == [
         "PullRequest",
         "RuntimeTruth",
+    ]
+    assert by_name["preference_style"]["status"] == "implemented"
+    assert by_name["preference_style"]["output_object_types"] == [
+        "ArtifactPreference",
+        "StyleRule",
     ]
 
 
@@ -203,4 +209,70 @@ def test_runtime_truth_extraction_preview_creates_runtime_verified_object_only_w
         "claim": "runtime_verified",
     }
     assert result["edges"][0]["edge_type"] == "validated_by"
+    assert result["evaluator_report"]["passes"] is True
+
+
+def test_preference_style_extraction_preview_maps_memory_cards_without_raw_body():
+    result = run_preference_style_extraction_preview(
+        memory_cards=[
+            {
+                "memory_id": "mem_pref_html",
+                "card_type": "preference",
+                "summary": "HTML review artifact preference",
+                "confidence": 0.9,
+                "currentness": "current",
+                "typed_payload": {
+                    "preference": "HTML review artifacts should be information dense.",
+                    "applies_to": "html review",
+                    "reason": "User repeatedly prefers dense review artifacts.",
+                    "exceptions": ["short status reports can stay concise"],
+                },
+                "source_refs": [{"source_ref_id": "session:preference-evidence"}],
+            },
+            {
+                "memory_id": "mem_style_tests",
+                "card_type": "repo_style",
+                "summary": "Use uv for worker tests",
+                "confidence": 0.8,
+                "typed_payload": {
+                    "claim": "Python worker tests use uv run pytest.",
+                    "repo_scope": "neurons/worker",
+                    "reason": "Repo AGENTS and repeated test evidence.",
+                    "files": ["worker/tests/test_extraction_pipeline.py"],
+                    "commits": ["commit:abc123"],
+                },
+            },
+            {
+                "memory_id": "mem_workflow",
+                "card_type": "workflow_contract",
+                "summary": "Use dedicated worktrees.",
+                "typed_payload": {"rule": "Use dedicated worktrees."},
+            },
+        ],
+        repository="neurons",
+        current_request="review HTML artifact for worker tests",
+        current_files=["worker/tests/test_extraction_pipeline.py"],
+    )
+
+    assert result["schema_version"] == "object_extraction_preference_style_preview.v1"
+    assert result["status"] == "pass"
+    assert result["production_mutation_performed"] is False
+    assert result["selected_strategy"] == "memory_card_preference_style_v1"
+    assert result["preference_count"] == 1
+    assert result["style_claim_count"] == 1
+    assert result["ignored_input_count"] == 1
+    assert result["pack_preview"]["preferences"]["object_count"] == 1
+    assert result["pack_preview"]["style"]["object_count"] == 1
+    assert result["objects"][0]["object_type"] == "ArtifactPreference"
+    assert result["objects"][0]["title"] == "HTML review artifacts should be information dense."
+    assert result["objects"][1]["object_type"] == "StyleRule"
+    assert result["objects"][1]["title"] == "Python worker tests use uv run pytest."
+    assert result["source_evidence_refs"] == [
+        "mem_pref_html",
+        "session:preference-evidence",
+        "mem_style_tests",
+        "worker/tests/test_extraction_pipeline.py",
+        "commit:abc123",
+    ]
+    assert result["evaluator_report"]["golden_query_slice"] == "style and artifact preference memory"
     assert result["evaluator_report"]["passes"] is True
