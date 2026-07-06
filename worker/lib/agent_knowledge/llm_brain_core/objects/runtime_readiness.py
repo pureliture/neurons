@@ -47,6 +47,8 @@ SESSION_PROJECT_ROLLUP_RUNTIME_SCHEMA = "session_project_rollup_runtime_evidence
 SESSION_PROJECT_ROLLUP_PREVIEW_SCHEMA = "object_extraction_session_project_rollup_preview.v1"
 SESSION_PROJECT_HANDOFF_SCHEMA = "session_project_handoff_pack.v1"
 SESSION_PROJECT_RESUME_SCHEMA = "session_project_resume_context.v1"
+PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA = "preference_artifact_memory_runtime_evidence.v1"
+ARTIFACT_REVIEW_PREFERENCE_CHECK_SCHEMA = "artifact_review_preference_check.v1"
 REQUIRED_SESSION_PROJECT_OBJECT_TYPES = ("Device", "Session", "Repository", "Branch", "WorkUnit")
 REQUIRED_SESSION_PROJECT_EDGE_TYPES = (
     "repository_has_branch",
@@ -89,6 +91,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
         "probe_brain_objects_query_routes",
         "probe_source_to_candidate_review_loop",
         "probe_session_project_rollup_runtime",
+        "probe_preference_artifact_memory_runtime",
         "collect_deployed_identity",
         "probe_production_no_mutation_denials",
         "collect_object_authority_gate_policy",
@@ -150,6 +153,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
             "probe_brain_objects_query_routes": "live_brain_objects_query_route_smokes_unverified",
             "probe_source_to_candidate_review_loop": "live_source_to_candidate_review_loop_unverified",
             "probe_session_project_rollup_runtime": "live_session_project_rollup_unverified",
+            "probe_preference_artifact_memory_runtime": "live_preference_artifact_memory_unverified",
             "collect_deployed_identity": "live_deployed_identity_unverified",
             "probe_production_no_mutation_denials": "production_denial_smokes_unverified",
             "collect_object_authority_gate_policy": "live_object_authority_gate_policy_unverified",
@@ -208,6 +212,7 @@ def build_source_to_candidate_runtime_evidence_packet_template(
             "brain_objects_query_smokes",
             "source_to_candidate_review_loop",
             "session_project_rollup_runtime",
+            "preference_artifact_memory",
             "deployed_identity",
             "production_denials",
             "tool_schemas",
@@ -240,6 +245,7 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         "brain_objects_query_smokes": _public_safe_mapping_list(captured.get("brain_objects_query_smokes")),
         "source_to_candidate_review_loop": _public_safe_mapping(captured.get("source_to_candidate_review_loop")),
         "session_project_rollup_runtime": _public_safe_mapping(captured.get("session_project_rollup_runtime")),
+        "preference_artifact_memory": _public_safe_mapping(captured.get("preference_artifact_memory")),
         "deployed_identity": _public_safe_mapping(captured.get("deployed_identity")),
         "production_denials": _public_safe_mapping(captured.get("production_denials")),
         "tool_schemas": _public_safe_mapping(captured.get("tool_schemas")),
@@ -365,6 +371,48 @@ def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
                 "route": "temporal_work_recall",
                 "object_pack_schema": "object_pack.v1",
                 "object_types": ["WorkUnit"],
+            },
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
+        "preference_artifact_memory": {
+            "schema_version": PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA,
+            "preference_object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": "code_style_preference",
+                "required_object_type": "ArtifactPreference",
+                "accepted_preference_count": "collector_sets_integer",
+                "proposal_preference_count": "collector_sets_integer",
+                "production_mutation_performed": False,
+            },
+            "html_visualization_route_smoke": {
+                "schema_version": "brain_objects_query.v1",
+                "route": "html_visualization_preference",
+                "required_object_pack_schema": "object_pack.v1",
+                "required_object_type": "ArtifactPreference",
+                "forbidden_gaps": [
+                    "object_pack_route_not_implemented",
+                    "accepted_html_preference_missing",
+                    "visualization_preference_missing",
+                ],
+                "production_mutation_performed": False,
+            },
+            "agent_context_preference_section": {
+                "schema_version": REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA,
+                "section": "style_preference",
+                "accepted_preference_count": "collector_sets_integer",
+                "surface_policy": {"mutation_allowed": False},
+            },
+            "artifact_review_check": {
+                "schema_version": ARTIFACT_REVIEW_PREFERENCE_CHECK_SCHEMA,
+                "status": "pass",
+                "ui_required": False,
+                "raw_artifact_body_returned": False,
             },
             "postcheck": {
                 "status": "validated",
@@ -517,6 +565,20 @@ def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
             "production_mutation_performed": False,
         },
         {
+            "step_id": "probe_preference_artifact_memory_runtime",
+            "evidence_field": "preference_artifact_memory",
+            "required_values": [
+                PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA,
+                "code_style_preference",
+                "html_visualization_preference",
+                "ArtifactPreference",
+                ARTIFACT_REVIEW_PREFERENCE_CHECK_SCHEMA,
+            ],
+            "safe_target": "sanitized_preference_artifact_memory_runtime_smoke",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
             "step_id": "collect_deployed_identity",
             "evidence_field": "deployed_identity",
             "required_values": ["contains_expected_commit"],
@@ -567,6 +629,7 @@ def build_source_to_candidate_runtime_readiness_report(
         _live_brain_objects_query_route_smokes_claim(evidence),
         _live_source_to_candidate_review_loop_claim(evidence),
         _live_session_project_rollup_claim(evidence),
+        _live_preference_artifact_memory_claim(evidence),
         _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
         _live_object_authority_production_gate_policy_claim(evidence),
         _live_object_authority_bounded_execution_claim(evidence),
@@ -1190,6 +1253,176 @@ def _session_project_rollup_reports_mutation(
         rollup.get("production_mutation_performed") is True
         or preview.get("production_mutation_performed") is True
         or resume.get("production_mutation_performed") is True
+    )
+
+
+def _live_preference_artifact_memory_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    preference = evidence.get("preference_artifact_memory")
+    preference = preference if isinstance(preference, Mapping) else {}
+    if not preference:
+        return {
+            "claim_id": "live.preference_artifact.memory",
+            "evidence_class": "runtime_read_path",
+            "status": "not_validated",
+            "schema_version": "",
+            "accepted_preference_count": 0,
+            "proposal_preference_count": 0,
+            "html_route_status": "not_validated",
+            "production_mutation_performed": False,
+            "gaps": [
+                "live_preference_artifact_memory_unverified",
+                "accepted_preference_context_pack_live_unproven",
+            ],
+        }
+    pack = (
+        preference.get("preference_object_pack")
+        if isinstance(preference.get("preference_object_pack"), Mapping)
+        else {}
+    )
+    html_smoke = (
+        preference.get("html_visualization_route_smoke")
+        if isinstance(preference.get("html_visualization_route_smoke"), Mapping)
+        else {}
+    )
+    html_pack = html_smoke.get("object_pack") if isinstance(html_smoke.get("object_pack"), Mapping) else {}
+    context = (
+        preference.get("agent_context_preference_section")
+        if isinstance(preference.get("agent_context_preference_section"), Mapping)
+        else {}
+    )
+    artifact_check = (
+        preference.get("artifact_review_check")
+        if isinstance(preference.get("artifact_review_check"), Mapping)
+        else {}
+    )
+    postcheck = preference.get("postcheck") if isinstance(preference.get("postcheck"), Mapping) else {}
+    failures = _preference_artifact_memory_failures(
+        preference=preference,
+        pack=pack,
+        html_smoke=html_smoke,
+        html_pack=html_pack,
+        context=context,
+        artifact_check=artifact_check,
+        postcheck=postcheck,
+    )
+    return {
+        "claim_id": "live.preference_artifact.memory",
+        "evidence_class": "runtime_read_path",
+        "status": "failed" if failures else "validated",
+        "schema_version": public_safe_text(str(preference.get("schema_version") or ""), max_chars=80),
+        "preference_pack_schema": public_safe_text(str(pack.get("schema_version") or ""), max_chars=80),
+        "accepted_preference_count": _int_value(pack.get("accepted_preference_count")),
+        "proposal_preference_count": _int_value(pack.get("proposal_preference_count")),
+        "html_route_status": "failed" if _html_preference_route_unimplemented(html_smoke, html_pack) else "validated",
+        "agent_context_object_count": _int_value(context.get("object_count")),
+        "artifact_review_check_status": public_safe_text(str(artifact_check.get("status") or ""), max_chars=80),
+        "production_mutation_performed": _preference_artifact_memory_reports_mutation(
+            preference=preference,
+            pack=pack,
+            html_smoke=html_smoke,
+        ),
+        "gaps": failures,
+    }
+
+
+def _preference_artifact_memory_failures(
+    *,
+    preference: Mapping[str, Any],
+    pack: Mapping[str, Any],
+    html_smoke: Mapping[str, Any],
+    html_pack: Mapping[str, Any],
+    context: Mapping[str, Any],
+    artifact_check: Mapping[str, Any],
+    postcheck: Mapping[str, Any],
+) -> list[str]:
+    failures: list[str] = []
+    if preference.get("schema_version") != PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA:
+        failures.append("preference_artifact_memory_schema_mismatch")
+    if pack.get("schema_version") != "object_pack.v1":
+        failures.append("preference_artifact_pack_schema_mismatch")
+    if pack.get("route") != "code_style_preference":
+        failures.append("preference_artifact_pack_route_mismatch")
+    if _int_value(pack.get("accepted_preference_count")) < 1:
+        failures.append("preference_artifact_accepted_preference_missing")
+    if _int_value(pack.get("proposal_preference_count")) < 1:
+        failures.append("preference_artifact_proposal_lane_missing")
+    if not _pack_contains_object_type(pack, "ArtifactPreference"):
+        failures.append("preference_artifact_object_missing")
+    if not isinstance(pack.get("recommended_actions"), list):
+        failures.append("preference_artifact_recommended_actions_missing")
+    if _html_preference_route_unimplemented(html_smoke, html_pack):
+        failures.append("preference_artifact_html_route_unimplemented")
+    if html_smoke.get("schema_version") != "brain_objects_query.v1":
+        failures.append("preference_artifact_html_route_schema_mismatch")
+    if html_smoke.get("route") != "html_visualization_preference":
+        failures.append("preference_artifact_html_route_mismatch")
+    if html_pack.get("schema_version") != "object_pack.v1":
+        failures.append("preference_artifact_html_object_pack_schema_mismatch")
+    if html_pack.get("route") != "html_visualization_preference":
+        failures.append("preference_artifact_html_object_pack_route_mismatch")
+    if not _pack_contains_object_type(html_pack, "ArtifactPreference"):
+        failures.append("preference_artifact_html_preference_missing")
+    if context.get("schema_version") != REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA:
+        failures.append("preference_artifact_agent_context_schema_mismatch")
+    if context.get("section") != "style_preference":
+        failures.append("preference_artifact_agent_context_section_mismatch")
+    if _int_value(context.get("object_count")) < 1 or _int_value(context.get("accepted_preference_count")) < 1:
+        failures.append("preference_artifact_agent_context_missing")
+    policy = context.get("surface_policy") if isinstance(context.get("surface_policy"), Mapping) else {}
+    if policy.get("mutation_allowed") is not False:
+        failures.append("preference_artifact_agent_context_mutation_allowed")
+    if artifact_check.get("schema_version") != ARTIFACT_REVIEW_PREFERENCE_CHECK_SCHEMA:
+        failures.append("preference_artifact_review_check_schema_mismatch")
+    if artifact_check.get("status") != "pass":
+        failures.append("preference_artifact_review_check_failed")
+    if artifact_check.get("ui_required") is not False:
+        failures.append("preference_artifact_review_check_required_ui")
+    if artifact_check.get("raw_artifact_body_returned") is not False:
+        failures.append("preference_artifact_raw_artifact_body_returned")
+    if _preference_artifact_memory_reports_mutation(
+        preference=preference,
+        pack=pack,
+        html_smoke=html_smoke,
+    ):
+        failures.append("preference_artifact_production_mutation_performed")
+    if postcheck.get("status") != "validated":
+        failures.append("preference_artifact_postcheck_missing")
+    for field, gap in (
+        ("raw_private_evidence_returned", "preference_artifact_raw_private_evidence_returned"),
+        ("secret_returned", "preference_artifact_secret_returned"),
+        ("host_topology_returned", "preference_artifact_host_topology_returned"),
+        ("raw_external_ids_returned", "preference_artifact_raw_external_ids_returned"),
+    ):
+        if postcheck.get(field) is not False:
+            failures.append(gap)
+    return _dedupe(failures)
+
+
+def _html_preference_route_unimplemented(html_smoke: Mapping[str, Any], html_pack: Mapping[str, Any]) -> bool:
+    gaps = [str(gap) for gap in html_pack.get("gaps", []) if str(gap or "")]
+    return (
+        html_smoke.get("production_mutation_performed") is True
+        or "object_pack_route_not_implemented" in gaps
+        or "accepted_html_preference_missing" in gaps
+        or "visualization_preference_missing" in gaps
+    )
+
+
+def _pack_contains_object_type(pack: Mapping[str, Any], object_type: str) -> bool:
+    objects = pack.get("objects") if isinstance(pack.get("objects"), list) else []
+    return any(isinstance(obj, Mapping) and obj.get("object_type") == object_type for obj in objects)
+
+
+def _preference_artifact_memory_reports_mutation(
+    *,
+    preference: Mapping[str, Any],
+    pack: Mapping[str, Any],
+    html_smoke: Mapping[str, Any],
+) -> bool:
+    return (
+        preference.get("production_mutation_performed") is True
+        or pack.get("production_mutation_performed") is True
+        or html_smoke.get("production_mutation_performed") is True
     )
 
 

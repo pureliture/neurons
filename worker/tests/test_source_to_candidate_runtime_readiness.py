@@ -41,6 +41,7 @@ def _sanitized_live_evidence(**overrides):
         ],
         "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
         "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
+        "preference_artifact_memory": _preference_artifact_memory_evidence(),
         "production_denials": {
             "brain_source_to_candidate_graph": {
                 "status": "denied",
@@ -213,6 +214,77 @@ def _session_project_rollup_runtime_evidence(**overrides):
             "object_pack_schema": "object_pack.v1",
             "object_types": ["WorkUnit"],
             "object_count": 1,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+    evidence.update(overrides)
+    return evidence
+
+
+def _preference_artifact_memory_evidence(**overrides):
+    accepted_object = {
+        "object_id": "ko:ArtifactPreference:html-review-density",
+        "object_type": "ArtifactPreference",
+        "authority_lane": "accepted_current",
+    }
+    proposal_object = {
+        "object_id": "ko:ArtifactPreference:visualization-proposal",
+        "object_type": "ArtifactPreference",
+        "authority_lane": "proposal_only",
+    }
+    evidence = {
+        "schema_version": "preference_artifact_memory_runtime_evidence.v1",
+        "preference_object_pack": {
+            "schema_version": "object_pack.v1",
+            "route": "code_style_preference",
+            "accepted_preference_count": 1,
+            "proposal_preference_count": 1,
+            "objects": [accepted_object, proposal_object],
+            "lanes": {
+                "accepted_current": [accepted_object],
+                "proposal_only": [proposal_object],
+            },
+            "recommended_actions": [
+                {"object_id": accepted_object["object_id"], "action": "apply_preference"},
+                {"object_id": proposal_object["object_id"], "action": "review_inferred_preference"},
+            ],
+            "gaps": [],
+            "production_mutation_performed": False,
+        },
+        "html_visualization_route_smoke": {
+            "schema_version": "brain_objects_query.v1",
+            "route": "html_visualization_preference",
+            "production_mutation_performed": False,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": "html_visualization_preference",
+                "objects": [accepted_object],
+                "lanes": {"accepted_current": [accepted_object]},
+                "recommended_actions": [
+                    {"object_id": accepted_object["object_id"], "action": "apply_preference"}
+                ],
+                "gaps": [],
+            },
+        },
+        "agent_context_preference_section": {
+            "schema_version": "agent_context_product_pack.v1",
+            "section": "style_preference",
+            "object_count": 1,
+            "accepted_preference_count": 1,
+            "surface_policy": {"mutation_allowed": False},
+        },
+        "artifact_review_check": {
+            "schema_version": "artifact_review_preference_check.v1",
+            "status": "pass",
+            "ui_required": False,
+            "raw_artifact_body_returned": False,
+            "assertions": ["accepted_html_preference_available"],
         },
         "postcheck": {
             "status": "validated",
@@ -499,6 +571,7 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
         "brain_objects_query_smokes",
         "source_to_candidate_review_loop",
         "session_project_rollup_runtime",
+        "preference_artifact_memory",
         "deployed_identity",
         "production_denials",
         "tool_schemas",
@@ -516,6 +589,10 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
     assert (
         template["packet_field_templates"]["session_project_rollup_runtime"]["schema_version"]
         == "session_project_rollup_runtime_evidence.v1"
+    )
+    assert (
+        template["packet_field_templates"]["preference_artifact_memory"]["schema_version"]
+        == "preference_artifact_memory_runtime_evidence.v1"
     )
     assert template["packet_field_templates"]["evidence_provenance"]["mutation_scope"] == "none"
     assert template["packet_field_templates"]["evidence_provenance"]["network_used"] == "collector_sets_boolean"
@@ -615,6 +692,7 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert claims["live.brain_objects_query.route_smokes"]["status"] == "not_validated"
     assert claims["live.source_to_candidate.review_loop"]["status"] == "not_validated"
     assert claims["live.session_project.rollup"]["status"] == "not_validated"
+    assert claims["live.preference_artifact.memory"]["status"] == "not_validated"
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "not_validated"
     assert claims["live.production.source_to_candidate_denial"]["status"] == "not_validated"
     assert claims["live.production.object_proposal_denial"]["status"] == "not_validated"
@@ -627,6 +705,8 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert "live_source_to_candidate_review_loop_unverified" in report["gaps"]
     assert "live_session_project_rollup_unverified" in report["gaps"]
     assert "live_multi_device_rollup_unproven" in report["gaps"]
+    assert "live_preference_artifact_memory_unverified" in report["gaps"]
+    assert "accepted_preference_context_pack_live_unproven" in report["gaps"]
     assert "live_deployed_identity_unverified" in report["gaps"]
     assert "live_object_authority_gate_policy_unverified" in report["gaps"]
     assert "bounded_production_authority_execution_unverified" in report["gaps"]
@@ -652,6 +732,9 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.session_project.rollup"]["status"] == "validated"
     assert claims["live.session_project.rollup"]["device_count"] == 2
     assert claims["live.session_project.rollup"]["read_after_write_status"] == "validated"
+    assert claims["live.preference_artifact.memory"]["status"] == "validated"
+    assert claims["live.preference_artifact.memory"]["accepted_preference_count"] == 1
+    assert claims["live.preference_artifact.memory"]["html_route_status"] == "validated"
     assert "temporal_work_recall" in claims["live.brain_objects_query.route_smokes"]["required_routes"]
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "validated"
     assert claims["live.production.source_to_candidate_denial"]["status"] == "denied_as_expected"
@@ -720,6 +803,77 @@ def test_runtime_readiness_fails_when_session_project_rollup_runtime_is_unsafe_o
     assert "session_project_rollup_read_after_write_missing" in report["gaps"]
     assert "session_project_rollup_raw_private_evidence_returned" in report["gaps"]
     assert "session_project_rollup_host_topology_returned" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_preference_artifact_memory_is_unsafe_or_incomplete():
+    evidence = _sanitized_live_evidence(
+        preference_artifact_memory=_preference_artifact_memory_evidence(
+            preference_object_pack={
+                "schema_version": "object_pack.v1",
+                "route": "code_style_preference",
+                "accepted_preference_count": 0,
+                "proposal_preference_count": 0,
+                "objects": [],
+                "lanes": {},
+                "recommended_actions": [],
+                "gaps": ["accepted_artifact_preference_empty"],
+                "production_mutation_performed": True,
+            },
+            html_visualization_route_smoke={
+                "schema_version": "brain_objects_query.v1",
+                "route": "html_visualization_preference",
+                "production_mutation_performed": False,
+                "object_pack": {
+                    "schema_version": "object_pack.v1",
+                    "route": "html_visualization_preference",
+                    "objects": [],
+                    "lanes": {},
+                    "recommended_actions": [],
+                    "gaps": ["object_pack_route_not_implemented", "accepted_html_preference_missing"],
+                },
+            },
+            agent_context_preference_section={
+                "schema_version": "agent_context_product_pack.v1",
+                "section": "style_preference",
+                "object_count": 0,
+                "accepted_preference_count": 0,
+                "surface_policy": {"mutation_allowed": True},
+            },
+            artifact_review_check={
+                "schema_version": "artifact_review_preference_check.v1",
+                "status": "fail",
+                "ui_required": True,
+                "raw_artifact_body_returned": True,
+                "assertions": [],
+            },
+            postcheck={
+                "status": "validated",
+                "raw_private_evidence_returned": True,
+                "secret_returned": True,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": True,
+            },
+        )
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    preference = claims["live.preference_artifact.memory"]
+    assert preference["status"] == "failed"
+    assert preference["production_mutation_performed"] is True
+    assert "preference_artifact_accepted_preference_missing" in report["gaps"]
+    assert "preference_artifact_proposal_lane_missing" in report["gaps"]
+    assert "preference_artifact_html_route_unimplemented" in report["gaps"]
+    assert "preference_artifact_agent_context_missing" in report["gaps"]
+    assert "preference_artifact_agent_context_mutation_allowed" in report["gaps"]
+    assert "preference_artifact_review_check_failed" in report["gaps"]
+    assert "preference_artifact_review_check_required_ui" in report["gaps"]
+    assert "preference_artifact_raw_artifact_body_returned" in report["gaps"]
+    assert "preference_artifact_raw_private_evidence_returned" in report["gaps"]
+    assert "preference_artifact_secret_returned" in report["gaps"]
+    assert "preference_artifact_raw_external_ids_returned" in report["gaps"]
 
 
 def test_runtime_readiness_fails_when_live_evidence_provenance_is_missing():
