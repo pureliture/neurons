@@ -337,6 +337,7 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert checks["P7"]["result"] == "PASS"
     assert checks["P8"]["result"] == "PASS_WITH_GAPS"
     assert "p8_runtime_evidence_unverified" in checks["P8"]["gaps"]
+    assert "p8_runtime_evidence_collection_plan_not_live_evidence" in checks["P8"]["gaps"]
     assert checks["P9"]["result"] == "PASS"
     evidence = {item["phase"]: item for item in report["product_evidence_summary"]}
     assert set(evidence) == {"P6", "P7", "P8", "P9"}
@@ -351,6 +352,15 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert evidence["P8"]["permission"] == "allowed"
     assert evidence["P8"]["permission_reason"] == "approved_scope_present"
     assert evidence["P8"]["authority_write_performed"] is False
+    assert (
+        evidence["P8"]["runtime_evidence_collection_plan_schema"]
+        == "source_to_candidate_runtime_evidence_collection_plan.v1"
+    )
+    assert evidence["P8"]["runtime_evidence_collection_plan_status"] == "ready"
+    assert evidence["P8"]["runtime_evidence_collection_plan_network_used"] is False
+    assert evidence["P8"]["runtime_evidence_collection_plan_mutation_allowed"] is False
+    assert evidence["P8"]["runtime_evidence_collection_plan_production_mutation_performed"] is False
+    assert evidence["P8"]["runtime_evidence_collection_plan_readiness_claim"] == "plan_only_not_runtime_evidence"
     assert evidence["P9"]["schema_version"] == "agent_context_product_pack.v1"
     assert evidence["P9"]["section_counts"]["style_preference"] >= 1
     assert evidence["P9"]["section_counts"]["active_work"] >= 1
@@ -426,6 +436,12 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "permission": "allowed",
                 "permission_reason": "approved_scope_present",
                 "authority_write_performed": False,
+                "runtime_evidence_collection_plan_schema": "source_to_candidate_runtime_evidence_collection_plan.v1",
+                "runtime_evidence_collection_plan_status": "ready",
+                "runtime_evidence_collection_plan_network_used": False,
+                "runtime_evidence_collection_plan_mutation_allowed": False,
+                "runtime_evidence_collection_plan_production_mutation_performed": False,
+                "runtime_evidence_collection_plan_readiness_claim": "plan_only_not_runtime_evidence",
                 "production_mutation_performed": False,
             },
             {
@@ -447,7 +463,65 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
     assert checks["P8"]["gaps"] == [
         "p8_runtime_evidence_unverified",
         "p8_runtime_verified_evidence_missing",
+        "p8_runtime_evidence_collection_plan_not_live_evidence",
     ]
+
+
+def test_product_evidence_summary_fails_when_p8_collection_plan_is_missing_or_mutating():
+    result = evaluate_product_evidence_summary(
+        [
+            {
+                "phase": "P6",
+                "schema_version": "object_extraction_session_project_rollup_preview.v1",
+                "object_count": 8,
+                "edge_count": 8,
+                "evidence_count": 1,
+                "handoff_pack_schema": "session_project_handoff_pack.v1",
+                "production_mutation_performed": False,
+            },
+            {
+                "phase": "P7",
+                "schema_version": "object_extraction_preference_style_preview.v1",
+                "object_count": 2,
+                "artifact_preference_pack_status": "pass",
+                "accepted_preference_count": 1,
+                "source_evidence_ref_count": 1,
+                "production_mutation_performed": False,
+            },
+            {
+                "phase": "P8",
+                "schema_version": "object_extraction_runtime_truth_preview.v1",
+                "runtime_verified_count": 0,
+                "runtime_unverified_count": 1,
+                "permission": "allowed",
+                "permission_reason": "approved_scope_present",
+                "authority_write_performed": False,
+                "runtime_evidence_collection_plan_schema": "source_to_candidate_runtime_evidence_collection_plan.v1",
+                "runtime_evidence_collection_plan_status": "ready",
+                "runtime_evidence_collection_plan_network_used": True,
+                "runtime_evidence_collection_plan_mutation_allowed": True,
+                "runtime_evidence_collection_plan_production_mutation_performed": True,
+                "runtime_evidence_collection_plan_readiness_claim": "runtime_verified",
+                "production_mutation_performed": False,
+            },
+            {
+                "phase": "P9",
+                "schema_version": "agent_context_product_pack.v1",
+                "section_counts": {"style_preference": 1, "active_work": 1},
+                "tool_hint_count": 5,
+                "mutation_allowed": False,
+                "production_mutation_performed": False,
+            },
+        ]
+    )
+
+    checks = {item["phase"]: item for item in result["checks"]}
+    assert result["status"] == "FAIL"
+    assert "P8:product_evidence_failed" in result["hard_failures"]
+    assert "p8_runtime_evidence_collection_plan_used_network" in checks["P8"]["failures"]
+    assert "p8_runtime_evidence_collection_plan_mutation_allowed" in checks["P8"]["failures"]
+    assert "p8_runtime_evidence_collection_plan_mutated_production" in checks["P8"]["failures"]
+    assert "p8_runtime_evidence_collection_plan_claims_live_evidence" in checks["P8"]["failures"]
 
 
 def test_product_evidence_summary_fails_when_p9_active_work_is_missing():
