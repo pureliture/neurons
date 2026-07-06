@@ -184,6 +184,7 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
 def build_source_to_authority_quality_gate_report() -> dict[str, Any]:
     review_pack = _source_to_authority_fixture_pack()
     candidate_object = review_pack["objects"][0]
+    product_surface_checks = _object_native_product_surface_checks()
     review_eval = evaluate_object_pack_response(
         "새 자료를 candidate object, edge, evidence로 쪼개서 review surface에 올려줘.",
         review_pack,
@@ -302,13 +303,18 @@ def build_source_to_authority_quality_gate_report() -> dict[str, Any]:
             "production_mutation_performed": False,
         },
     ]
-    hard_failures = [item["id"] for item in path_checks if item["result"] != "PASS"]
+    hard_failures = [
+        item["id"]
+        for item in [*path_checks, *product_surface_checks]
+        if item["result"] != "PASS"
+    ]
     report = {
         "schema_version": "source_to_authority_quality_gate_report.v1",
         "status": "FAIL" if hard_failures else "PASS_WITH_GAPS",
         "release_quality_gate": "blocked" if hard_failures else "not_green",
         "required_axes": list(REQUIRED_QUALITY_AXES),
         "path_checks": path_checks,
+        "product_surface_checks": product_surface_checks,
         "hard_failures": hard_failures,
         "gaps": [
             "production_authority_gate_not_approved",
@@ -495,6 +501,83 @@ def _source_to_authority_fixture_pack() -> dict[str, Any]:
         reviewer_actions=["promote", "reject", "hold", "request_more_evidence"],
         consumer="codex",
     )
+
+
+def _object_native_product_surface_checks() -> list[dict[str, Any]]:
+    from agent_knowledge.mcp_tools import (
+        BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+        BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+        BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+        tool_registry,
+    )
+
+    registry = tool_registry()
+    return [
+        {
+            "id": "mcp_source_to_candidate_graph_tool",
+            "surface": "mcp",
+            "tool": BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+            "result": _pass_fail(
+                _tool_has_target_enum(
+                    registry,
+                    BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+                    ("local_test", "production"),
+                )
+            ),
+            "local_test_preview_allowed": True,
+            "production_target_denied": True,
+            "production_mutation_performed": False,
+        },
+        {
+            "id": "mcp_candidate_review_edit_tool",
+            "surface": "mcp",
+            "tool": BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+            "result": _pass_fail(
+                _tool_requires_fields(
+                    registry,
+                    BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+                    ("pack", "edits"),
+                )
+            ),
+            "authority_write_performed": False,
+            "production_mutation_performed": False,
+        },
+        {
+            "id": "mcp_approval_board_decide_tool",
+            "surface": "mcp",
+            "tool": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+            "result": _pass_fail(
+                _tool_has_target_enum(
+                    registry,
+                    BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                    ("local_test", "production"),
+                )
+                and _tool_requires_fields(registry, BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME, ("pack", "decisions"))
+            ),
+            "local_test_preview_allowed": True,
+            "production_target_denied": True,
+            "production_mutation_performed": False,
+        },
+    ]
+
+
+def _tool_has_target_enum(registry: Mapping[str, Any], tool_name: str, expected: tuple[str, ...]) -> bool:
+    tool = registry.get(tool_name)
+    if not isinstance(tool, Mapping):
+        return False
+    schema = tool.get("inputSchema")
+    properties = schema.get("properties") if isinstance(schema, Mapping) else {}
+    target = properties.get("target") if isinstance(properties, Mapping) else {}
+    return isinstance(target, Mapping) and tuple(target.get("enum") or ()) == expected
+
+
+def _tool_requires_fields(registry: Mapping[str, Any], tool_name: str, expected: tuple[str, ...]) -> bool:
+    tool = registry.get(tool_name)
+    if not isinstance(tool, Mapping):
+        return False
+    schema = tool.get("inputSchema")
+    required = schema.get("required") if isinstance(schema, Mapping) else []
+    return all(field in required for field in expected)
 
 
 def _pass_fail(condition: bool) -> str:
