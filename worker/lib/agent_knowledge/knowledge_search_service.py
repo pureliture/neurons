@@ -16,6 +16,7 @@ from .llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_evidence_collection_plan,
     build_source_to_candidate_runtime_evidence_packet_template,
     build_source_to_candidate_runtime_readiness_report,
+    build_source_to_candidate_runtime_shadow_evidence_packet,
 )
 from .memory_read_pipeline import AuthorizedMemoryReader, MemoryReadPipeline, MemorySearchQuery
 from .index_client import RetiredIndexBridgeHttpClient
@@ -268,6 +269,7 @@ class KnowledgeSearchService:
         self,
         *,
         live_evidence: Mapping[str, Any] | None = None,
+        normalize_shadow_evidence: Mapping[str, Any] | None = None,
         expected_commit: str = "",
         evidence_collection_plan: bool = False,
         evidence_packet_template: bool = False,
@@ -288,6 +290,10 @@ class KnowledgeSearchService:
                 repository=repository,
                 branch=branch,
                 consumer=consumer,
+            )
+        if isinstance(normalize_shadow_evidence, Mapping):
+            return build_source_to_candidate_runtime_shadow_evidence_packet(
+                captured_evidence=normalize_shadow_evidence,
             )
         return build_source_to_candidate_runtime_readiness_report(
             live_evidence=live_evidence,
