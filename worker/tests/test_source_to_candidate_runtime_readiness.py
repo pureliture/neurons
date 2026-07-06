@@ -629,9 +629,66 @@ def test_runtime_readiness_reports_schema_and_runtime_gate_failures_together():
 def test_runtime_readiness_fails_when_live_object_query_smoke_falls_back_to_unimplemented_route():
     evidence = _sanitized_live_evidence(
         brain_objects_query_smokes=[
-            _brain_objects_query_smoke("authority_archive_separation", gaps=["object_pack_route_not_implemented"]),
+            _brain_objects_query_smoke("authority_archive_separation"),
             _brain_objects_query_smoke("code_style_preference"),
             _brain_objects_query_smoke("temporal_work_recall"),
+            _brain_objects_query_smoke("deployment_runtime_truth", gaps=["object_pack_route_not_implemented"]),
+        ],
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    route_claim = claims["live.brain_objects_query.route_smokes"]
+    assert route_claim["status"] == "failed"
+    assert route_claim["unimplemented_routes"] == ["deployment_runtime_truth"]
+    assert "brain_objects_query_route_unimplemented:deployment_runtime_truth" in report["gaps"]
+    assert "shadow_route_smoke_not_implemented:deployment_runtime_truth" in report["gaps"]
+
+
+def test_runtime_readiness_marks_current_session_unimplemented_route_as_gap_without_identity():
+    evidence = _sanitized_live_evidence(
+        brain_objects_query_smokes=[
+            _brain_objects_query_smoke("authority_archive_separation"),
+            _brain_objects_query_smoke("code_style_preference"),
+            _brain_objects_query_smoke("temporal_work_recall"),
+            _brain_objects_query_smoke("deployment_runtime_truth", gaps=["object_pack_route_not_implemented"]),
+        ],
+        deployed_identity={
+            "contains_expected_commit": False,
+            "identity_source": "redacted_current_session_mcp",
+        },
+        evidence_provenance=_evidence_provenance(
+            collection_mode="post_deploy_read_only_smoke",
+            mutation_scope="none",
+            network_used=True,
+        ),
+        production_authority_execution={},
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit="f9ea751",
+    )
+
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["production_mutation_performed"] is False
+    assert "live.brain_objects_query.route_smokes" not in report["failed_claims"]
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    route_claim = claims["live.brain_objects_query.route_smokes"]
+    assert route_claim["status"] == "not_validated"
+    assert route_claim["unimplemented_routes"] == ["deployment_runtime_truth"]
+    assert "brain_objects_query_route_unimplemented:deployment_runtime_truth" in report["gaps"]
+    assert "shadow_route_smoke_not_implemented:deployment_runtime_truth" in report["gaps"]
+    assert "live_deployed_identity_expected_commit_unverified" in report["gaps"]
+    assert "bounded_production_authority_execution_unverified" in report["gaps"]
+
+
+def test_runtime_readiness_keeps_missing_route_gaps_visible_when_route_smoke_fails():
+    evidence = _sanitized_live_evidence(
+        brain_objects_query_smokes=[
+            _brain_objects_query_smoke("authority_archive_separation", gaps=["object_pack_route_not_implemented"]),
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
     )
@@ -640,8 +697,13 @@ def test_runtime_readiness_fails_when_live_object_query_smoke_falls_back_to_unim
 
     assert report["status"] == "FAIL"
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
-    assert claims["live.brain_objects_query.route_smokes"]["status"] == "failed"
+    route_claim = claims["live.brain_objects_query.route_smokes"]
+    assert route_claim["status"] == "failed"
+    assert route_claim["missing_routes"] == ["code_style_preference", "temporal_work_recall"]
     assert "brain_objects_query_route_unimplemented:authority_archive_separation" in report["gaps"]
+    assert "shadow_route_smoke_not_implemented:authority_archive_separation" in report["gaps"]
+    assert "live_brain_objects_query_route_missing:code_style_preference" in report["gaps"]
+    assert "live_brain_objects_query_route_missing:temporal_work_recall" in report["gaps"]
 
 
 def test_runtime_readiness_requires_temporal_work_recall_live_smoke():

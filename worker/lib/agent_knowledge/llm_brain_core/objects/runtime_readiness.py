@@ -540,11 +540,37 @@ def _live_brain_objects_query_route_smokes_claim(evidence: Mapping[str, Any]) ->
         for item in smoke_items
     }
     missing = [route for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES if route not in by_route]
+    unimplemented_routes = [
+        route
+        for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+        if route in by_route and _brain_objects_query_route_unimplemented(by_route[route])
+    ]
     failures = [
         failure
         for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
         if route in by_route
         for failure in _brain_objects_query_smoke_failures(route, by_route[route])
+    ]
+    identity = evidence.get("deployed_identity")
+    identity = identity if isinstance(identity, Mapping) else {}
+    deployed_identity_matches_expected = identity.get("contains_expected_commit") is True
+    if unimplemented_routes and not deployed_identity_matches_expected:
+        failures = [
+            failure
+            for failure in failures
+            if not failure.startswith("brain_objects_query_route_unimplemented:")
+        ]
+    missing_gaps = (
+        [
+            "live_brain_objects_query_route_smokes_unverified",
+            *_named_gaps("live_brain_objects_query_route_missing", missing),
+        ]
+        if missing
+        else []
+    )
+    unimplemented_gaps = [
+        *_named_gaps("brain_objects_query_route_unimplemented", unimplemented_routes),
+        *_named_gaps("shadow_route_smoke_not_implemented", unimplemented_routes),
     ]
     base = {
         "claim_id": "live.brain_objects_query.route_smokes",
@@ -552,23 +578,31 @@ def _live_brain_objects_query_route_smokes_claim(evidence: Mapping[str, Any]) ->
         "required_routes": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
         "validated_routes": sorted(route for route in by_route if route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
         "missing_routes": missing,
+        "unimplemented_routes": unimplemented_routes,
         "production_mutation_performed": _object_query_smokes_report_mutation(smoke_items),
     }
     if failures:
         return {
             **base,
             "status": "failed",
-            "gaps": failures,
+            "gaps": _dedupe([*failures, *unimplemented_gaps, *missing_gaps]),
+        }
+    if unimplemented_routes:
+        return {
+            **base,
+            "status": "not_validated",
+            "gaps": _dedupe(
+                [
+                    "live_brain_objects_query_route_smokes_unverified",
+                    *unimplemented_gaps,
+                    *missing_gaps,
+                ]
+            ),
         }
     return {
         **base,
         "status": "not_validated" if missing else "validated",
-        "gaps": [
-            "live_brain_objects_query_route_smokes_unverified",
-            *_named_gaps("live_brain_objects_query_route_missing", missing),
-        ]
-        if missing
-        else [],
+        "gaps": missing_gaps if missing else [],
     }
 
 
@@ -924,14 +958,13 @@ def _section_object_count(section: Any) -> int:
 def _brain_objects_query_smoke_failures(route: str, smoke: Mapping[str, Any]) -> list[str]:
     failures: list[str] = []
     object_pack = smoke.get("object_pack") if isinstance(smoke.get("object_pack"), Mapping) else {}
-    gaps = [str(gap) for gap in object_pack.get("gaps", []) if str(gap or "")]
     if smoke.get("schema_version") != "brain_objects_query.v1":
         failures.append(f"brain_objects_query_schema_mismatch:{route}")
     if object_pack.get("schema_version") != "object_pack.v1":
         failures.append(f"brain_objects_query_object_pack_schema_mismatch:{route}")
     if str(smoke.get("route") or object_pack.get("route") or "") != route:
         failures.append(f"brain_objects_query_route_mismatch:{route}")
-    if "object_pack_route_not_implemented" in gaps:
+    if _brain_objects_query_route_unimplemented(smoke):
         failures.append(f"brain_objects_query_route_unimplemented:{route}")
     if bool(smoke.get("production_mutation_performed")) or bool(smoke.get("mutation_performed")):
         failures.append(f"brain_objects_query_mutation_performed:{route}")
@@ -940,6 +973,12 @@ def _brain_objects_query_smoke_failures(route: str, smoke: Mapping[str, Any]) ->
     if not isinstance(object_pack.get("lanes"), Mapping):
         failures.append(f"brain_objects_query_lanes_missing:{route}")
     return failures
+
+
+def _brain_objects_query_route_unimplemented(smoke: Mapping[str, Any]) -> bool:
+    object_pack = smoke.get("object_pack") if isinstance(smoke.get("object_pack"), Mapping) else {}
+    gaps = [str(gap) for gap in object_pack.get("gaps", []) if str(gap or "")]
+    return "object_pack_route_not_implemented" in gaps
 
 
 def _object_query_smokes_report_mutation(smoke_items: list[Mapping[str, Any]]) -> bool:

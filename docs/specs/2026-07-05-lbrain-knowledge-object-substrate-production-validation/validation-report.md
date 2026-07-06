@@ -239,6 +239,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - status: `not_validated`
 - reason: `current_session_route_and_branch_tool_gaps`
 - evidence: configured Codex namespace can now run `brain_objects_query`, but the route needed for deployment/runtime truth returned `object_pack_route_not_implemented`, and the branch-local source/review/readiness tools are not loaded in this session.
+- interpretation: this is treated as deployment/read-path lag when the evidence packet does not prove the expected source commit is deployed. The runtime-readiness evaluator still exposes `brain_objects_query_route_unimplemented:deployment_runtime_truth` and `shadow_route_smoke_not_implemented:deployment_runtime_truth`; if a packet claims the expected commit is deployed while the route still returns the fallback gap, the claim is `FAIL`.
 
 ### live.production.pr95-branch-inclusion
 
