@@ -6,7 +6,7 @@
 
 Local implementation, package-level contracts, MCP dispatch tests, CLI smoke tests, and production-denial safety gates passed.
 
-P1 live production activation follow-up now validates the deployed HTTP MCP runtime and the user-level configured endpoint: object-native tools are exposed, `brain_objects_query` returns an object pack, and production proposal/decision calls deny with no mutation. The remaining gap is the current Codex session's `mcp__lbrain` tool registry, which still does not expose object-native tools even though the configured endpoint smoke passes.
+P1 live production activation follow-up now validates the deployed HTTP MCP runtime and the user-level configured endpoint: object-native tools are exposed, `brain_objects_query` returns an object pack with explicit authority gaps, and production proposal/decision calls deny with no mutation. The remaining gaps are separated: the current Codex session's `mcp__lbrain` tool registry still does not expose object-native tools even though the configured endpoint smoke passes, and the live MCP image is not proven to include the #73/current-main source refactor.
 
 ## Validated
 
@@ -79,11 +79,11 @@ P1 live production activation follow-up now validates the deployed HTTP MCP runt
 ### live.production.http-mcp-object-tools-loaded
 
 - status: `validated`
-- evidence: read-only live MCP smoke against the deployed production HTTP MCP runtime.
+- evidence: read-only live MCP smoke against the deployed production HTTP MCP runtime on 2026-07-06.
 - result:
   - deployed runtime exposes `brain_objects_query`, `brain_object_explain`, `brain_corpus_status`, `brain_corpus_ingest_plan`, `brain_object_proposal_create`, `brain_object_decision_commit`, and `brain_review_proposals`.
   - tool count: 27
-  - deployment health: `Synced/Healthy`, ready `1/1`, restart count `0`
+  - deployment health: `Synced/Healthy`, rollout passed, ready `1/1`, restart count `0`
   - service health: `status=ok`
 
 ### configured.codex-endpoint.http-mcp-object-tools-loaded
@@ -93,24 +93,25 @@ P1 live production activation follow-up now validates the deployed HTTP MCP runt
 - result:
   - configured endpoint exposes `brain_objects_query`, `brain_object_explain`, `brain_corpus_status`, `brain_corpus_ingest_plan`, `brain_object_proposal_create`, `brain_object_decision_commit`, and `brain_review_proposals`.
   - tool count: 27
-  - `brain_objects_query` returned `brain_objects_query.v1` with `object_pack.v1`, `route=documentation_cleanup`, one public-safe object, and two explicit gaps.
+  - `brain_objects_query` returned `brain_objects_query.v1` with `object_pack.v1`, `route=documentation_cleanup`, and explicit gaps: `accepted_current documents empty`, `review_proposals_needed`.
   - production proposal and restricted decision calls returned denied/no-mutation.
 
 ### live.production.brain-objects-query
 
 - status: `validated`
 - evidence: read-only live `brain_objects_query` smoke.
-- result: returned `brain_objects_query.v1` with `object_pack.v1`, `route=documentation_cleanup`, one public-safe object, and two explicit gaps.
+- result: returned `brain_objects_query.v1` with `object_pack.v1`, `route=documentation_cleanup`, and explicit authority gaps.
 
 ### live.production.deployed-version-identity
 
-- status: `validated`
-- evidence: deployed MCP image identity and Git ancestry check.
+- status: `validated_for_object_tools` / `gap_for_current_main_identity`
+- evidence: deployed MCP image identity, Git ancestry check, source main check, and Argo revision check.
 - result:
-  - production Argo application tracks `main` and is `Synced/Healthy`.
+  - source repo `origin/main` contains PR #73 merge commit `c3f3e34`.
+  - production Argo application tracks ops `main`, is `Synced/Healthy`, and is at ops revision `dbc6ded`.
   - deployed MCP image source commit is `c216ff4`.
   - source commit `c216ff4` includes PR #64 merge commit `7a0b6a6`.
-  - repo `origin/main` is ahead at PR #66; that does not invalidate the P1 MCP evidence because the deployed MCP image identity still includes the object-native tool merge.
+  - deployed MCP image identity does not prove that PR #73/current source `main` is live in the MCP image.
 
 ## Denied As Expected
 
@@ -148,10 +149,20 @@ P1 live production activation follow-up now validates the deployed HTTP MCP runt
 - reason: `current_session_tool_registry_missing_new_tools`
 - evidence: configured Codex namespace cannot yet run `brain_objects_query` directly, so agent-facing product activation is not complete from this session's callable tool surface.
 
+### live.production.current-main-image-identity
+
+- status: `not_validated`
+- reason: `live_mcp_image_not_current_source_main`
+- evidence:
+  - source `origin/main` is at PR #73 merge commit `c3f3e34`.
+  - live MCP image proof remains tied to `c216ff4`.
+  - this does not invalidate the object-native P1 tool proof, because `c216ff4` includes PR #64, but it prevents claiming that the #73/current-main source is deployed in MCP.
+
 ## Gaps
 
 - Current Codex session's `mcp__lbrain` tool registry must refresh/reload to expose object-native tools directly.
 - P1 remains `PASS_WITH_GAPS` until the agent-visible `mcp__lbrain` namespace can call `brain_objects_query` without a separate standalone MCP client probe.
+- Live MCP image identity must move to current source `main` before claiming PR #73 is deployed in MCP.
 - Reference corpus store remains not configured; local CLI correctly reports planned/no mutation rather than pretending ingest completed.
 - Golden query baseline remains red by design; future goal must evaluate the new object-pack answers against those queries after deployment.
 
@@ -159,9 +170,10 @@ P1 live production activation follow-up now validates the deployed HTTP MCP runt
 
 - No production ledger write was performed.
 - No corpus production ingest was performed.
+- No production proposal or authority decision write was performed; denial smokes reported `proposal_write_performed=false`, `authority_write_performed=false`, and `authoritative_memory_changed=false`.
 - No graph/Qdrant write, GC, accepted/current promotion, corpus write, ledger write, or raw private evidence access was performed during validation.
 - Production denial gate did not mutate state.
 
 ## Conclusion
 
-The implementation is locally and contractually validated, safety gates fail closed, and the deployed/configured HTTP MCP runtime is now production-runtime verified for P1 read-only object tools. The result remains `PASS_WITH_GAPS` because the current Codex session's `mcp__lbrain` tool registry still does not expose object-native tools directly.
+The implementation is locally and contractually validated, safety gates fail closed, and the deployed/configured HTTP MCP runtime is production-runtime verified for P1 read-only object tools. The result remains `PASS_WITH_GAPS` because the current Codex session's `mcp__lbrain` tool registry still does not expose object-native tools directly, and the live MCP image identity is not current-source-main / PR #73.
