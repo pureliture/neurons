@@ -152,6 +152,17 @@ def _runtime_evidence_is_verified(live_evidence: Mapping[str, Any] | None) -> bo
     )
 
 
+def _runtime_deployment_gap_view(deployment: Mapping[str, Any] | None) -> dict[str, Any]:
+    target_ref = public_safe_text(str((deployment or {}).get("target") or "deployment"), max_chars=120)
+    private_ref = str((deployment or {}).get("private_authority_ref") or "")
+    return {
+        "target_ref": target_ref,
+        "private_authority_ref_present": bool(private_ref),
+        "private_authority_ref_digest": hash_payload({"private_authority_ref": private_ref}) if private_ref else "",
+        "protected_values_returned": False,
+    }
+
+
 def build_documentation_cleanup_pack(
     *,
     documents: list[Mapping[str, Any]],
@@ -235,7 +246,7 @@ def build_runtime_truth_pack(
     if deployment and _runtime_evidence_is_verified(live_evidence):
         pack["verification"]["runtime_verified"].append(dict(live_evidence))
     else:
-        gap = {"reason": "runtime_evidence_unverified", "deployment": dict(deployment or {})}
+        gap = {"reason": "runtime_evidence_unverified", "deployment": _runtime_deployment_gap_view(deployment)}
         pack["verification"]["runtime_unverified"].append(gap)
         pack["gaps"].append("runtime_evidence_unverified")
         pack["recommended_actions"].append({"action": "verify_runtime", "object_id": ""})

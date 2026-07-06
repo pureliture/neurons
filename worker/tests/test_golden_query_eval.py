@@ -162,3 +162,6 @@ def test_phase_golden_query_coverage_reports_pass_with_gaps_not_green():
     assert phases["P7"]["result"] == "in_progress"
     assert phases["P7"]["golden_query_family"] == "code style drift"
     assert "accepted_preference_context_pack_live_unproven" in phases["P7"]["gaps"]
+    assert phases["P8"]["result"] == "in_progress"
+    assert phases["P8"]["golden_query_family"] == "pr merge and deploy truth"
+    assert "live_runtime_rollout_identity_unproven" in phases["P8"]["gaps"]
