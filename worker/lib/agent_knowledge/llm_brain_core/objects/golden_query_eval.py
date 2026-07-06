@@ -167,6 +167,8 @@ def evaluate_object_pack_response(
         for lane, value in lanes.items():
             if isinstance(value, list) and not value and not _empty_lane_is_stated(str(lane), gaps):
                 failures.append(f"empty_authority_lane_not_stated:{lane}")
+    if checked_axes and _is_runtime_claim(query, response) and not _has_runtime_evidence_or_gap(response, evidence, gaps):
+        failures.append("runtime_evidence_missing")
     result = {
         "query": query,
         "passes": not failures,
@@ -245,5 +247,30 @@ def _empty_lane_is_stated(lane: str, gaps: list[Any]) -> bool:
     for item in gaps:
         text = str(item).lower()
         if lane.lower() in text and any(marker in text for marker in ("empty", "missing", "none")):
+            return True
+    return False
+
+
+def _is_runtime_claim(query: str, response: Mapping[str, Any]) -> bool:
+    route = str(response.get("route") or "").lower()
+    text = f"{route} {query}".lower()
+    return any(marker in text for marker in ("runtime", "deploy", "deployment", "배포", "live"))
+
+
+def _has_runtime_evidence_or_gap(response: Mapping[str, Any], evidence: list[Any], gaps: list[Any]) -> bool:
+    verification = response.get("verification")
+    if isinstance(verification, Mapping):
+        for key in ("runtime_verified", "runtime_unverified"):
+            value = verification.get(key)
+            if isinstance(value, list) and value:
+                return True
+    for item in evidence:
+        if isinstance(item, Mapping) and str(item.get("verification_state") or "") in {
+            "runtime_verified",
+            "runtime_unverified",
+        }:
+            return True
+    for item in gaps:
+        if "runtime_evidence" in str(item):
             return True
     return False
