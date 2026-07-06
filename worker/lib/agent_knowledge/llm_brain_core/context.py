@@ -187,6 +187,13 @@ class BrainReadService:
                 pack_names=("preferences", "style"),
                 consumer=consumer,
             )
+        elif selected_route == "temporal_work_recall":
+            object_pack = _context_authority_object_pack(
+                pack,
+                route=selected_route,
+                pack_names=("current_work", "required_verification"),
+                consumer=consumer,
+            )
         else:
             object_pack = _context_authority_object_pack(
                 pack,
@@ -533,6 +540,26 @@ _project_from_repository = project_from_repository
 
 def _route_for_query(query: str) -> str:
     text = str(query or "").lower()
+    if any(
+        token in text
+        for token in (
+            "어제",
+            "오늘",
+            "세션",
+            "작업",
+            "뭐 했",
+            "무엇 했",
+            "yesterday",
+            "today",
+            "session",
+            "work unit",
+            "current work",
+            "unfinished",
+            "handoff",
+            "resume",
+        )
+    ):
+        return "temporal_work_recall"
     if "문서" in text or "doc" in text or "stale" in text or "archive" in text:
         return "documentation_cleanup"
     if "merge" in text or "배포" in text or "deploy" in text:

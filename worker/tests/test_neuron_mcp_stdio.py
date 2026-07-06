@@ -93,6 +93,46 @@ def _source_span(**overrides):
     return span
 
 
+def _accepted_task_card(memory_id: str, *, next_action: str, project: str = PROJECT) -> dict:
+    summary = f"Resume fixture {memory_id}"
+    return {
+        "memory_id": memory_id,
+        "brain_id": f"/project/{project}",
+        "card_type": "task",
+        "scope": "project",
+        "project": project,
+        "provider": "codex",
+        "title": summary,
+        "summary": summary,
+        "render_text": summary,
+        "lifecycle_state": "accepted",
+        "judgment_state": "none",
+        "status": "accepted",
+        "approval_state": "approved",
+        "governance_tier": "medium",
+        "freshness": "current",
+        "currentness": "current",
+        "confidence": 0.9,
+        "confidence_basis": "temporal work recall fixture",
+        "source_refs": [{"source_ref_id": "src_neuron_mcp", "content_hash": _h("task-source")}],
+        "evidence_refs": [],
+        "evidence_hashes": [_h(memory_id)],
+        "derived_from": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflicts": [],
+        "active_until": "",
+        "updated_at": "2026-07-06T00:00:00Z",
+        "typed_payload": {
+            "task_state": summary,
+            "next_action": next_action,
+            "blocker": "",
+            "owner_hint": project,
+            "status": "open",
+        },
+    }
+
+
 def _reference_manifest() -> dict:
     return {
         "corpus_name": "palantir-ontology-mini",
@@ -686,6 +726,46 @@ def test_mcp_brain_objects_query_default_route_returns_agent_context_objects(tmp
     assert pack["recommended_actions"]
     assert {obj["object_type"] for obj in pack["objects"]} >= {"ArtifactPreference", "Test", "ToolHandoffContext"}
     assert pack["audit"]["object_pack_route_source"] == "context_authority_object_packs"
+    assert pack["response_mode"] == "compact"
+
+
+def test_mcp_brain_objects_query_temporal_route_returns_current_work_objects(tmp_path: Path):
+    service = _service(tmp_path)
+    service.ledger.upsert_llm_brain_memory_card(
+        _accepted_task_card(
+            "mem_temporal_work_recall",
+            next_action="Continue P6 temporal repo recall object query route",
+        )
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "어제 이 repo에서 뭐 했어? 작업 재개하려면 뭐 봐야 해?",
+                    "current_files": ["docs/specs/roadmap.md"],
+                    "consumer": "codex",
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    assert result["route"] == "temporal_work_recall"
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert any(obj["object_type"] == "WorkUnit" for obj in pack["objects"])
+    assert any("P6 temporal repo recall" in obj["title"] for obj in pack["objects"])
+    assert pack["recommended_actions"]
+    assert pack["audit"]["source_pack_names"] == ["current_work", "required_verification"]
     assert pack["response_mode"] == "compact"
 
 
