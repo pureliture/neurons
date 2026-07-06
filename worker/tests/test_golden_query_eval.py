@@ -183,13 +183,13 @@ def test_phase_golden_query_coverage_reports_pass_with_gaps_not_green():
     assert phases["P6"]["result"] == "PASS_WITH_GAPS"
     assert "handoff_pack_not_implemented" not in phases["P6"]["gaps"]
     assert "live_multi_device_rollup_unproven" in phases["P6"]["gaps"]
-    assert phases["P7"]["result"] == "in_progress"
+    assert phases["P7"]["result"] == "PASS_WITH_GAPS"
     assert phases["P7"]["golden_query_family"] == "code style drift"
     assert "accepted_preference_context_pack_live_unproven" in phases["P7"]["gaps"]
-    assert phases["P8"]["result"] == "in_progress"
+    assert phases["P8"]["result"] == "PASS_WITH_GAPS"
     assert phases["P8"]["golden_query_family"] == "pr merge and deploy truth"
     assert "live_runtime_rollout_identity_unproven" in phases["P8"]["gaps"]
-    assert phases["P9"]["result"] == "in_progress"
+    assert phases["P9"]["result"] == "PASS_WITH_GAPS"
     assert phases["P9"]["golden_query_family"] == "agent context productization"
     assert "production_consumer_context_pack_live_unproven" in phases["P9"]["gaps"]
 
