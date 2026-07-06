@@ -10,6 +10,7 @@ import yaml
 
 from ...ledger import Ledger
 
+from ..context import BrainReadService
 from .golden_query_eval import (
     build_baseline_golden_query_report,
     build_product_activation_progress_report,
@@ -86,10 +87,27 @@ def object_query_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--query", required=True)
     parser.add_argument("--repository", default="")
     parser.add_argument("--branch", default="")
+    parser.add_argument("--project", default="")
+    parser.add_argument("--current-file", action="append", default=[])
+    parser.add_argument("--object-type", action="append", default=[])
+    parser.add_argument("--route", default="")
+    parser.add_argument("--limit", type=_non_negative_int, default=20)
+    parser.add_argument("--response-mode", choices=["full", "compact", "degraded"], default="full")
+    parser.add_argument("--consumer", choices=["unspecified", "codex", "claude-code", "gemini", "hermes"], default="unspecified")
     args = parser.parse_args(argv)
-    _ = (args.repository, args.branch)
-    pack = build_documentation_cleanup_pack(documents=[], route="documentation_cleanup")
-    _print_json({"schema_version": "brain_objects_query.v1", "route": "documentation_cleanup", "object_pack": pack})
+    result = BrainReadService().brain_objects_query(
+        repository=args.repository,
+        branch=args.branch,
+        query=args.query,
+        current_files=[str(path) for path in args.current_file],
+        project=args.project or None,
+        object_types=[str(object_type) for object_type in args.object_type],
+        route=args.route,
+        limit=args.limit,
+        response_mode=args.response_mode,
+        consumer=args.consumer,
+    )
+    _print_json(result)
     return 0
 
 
