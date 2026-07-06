@@ -14,6 +14,10 @@ RAW_BODY_POLICY = {
     "deletion_policy": "delete_snapshot_keep_metadata",
     "license_source_rights": "operator_attested",
 }
+PRODUCTION_CORPUS_INGEST_EVIDENCE_SCHEMA = "reference_corpus_production_ingest_evidence.v1"
+PRODUCTION_CORPUS_INGEST_PROVENANCE_SCHEMA = "reference_corpus_production_ingest_evidence_provenance.v1"
+PRODUCTION_CORPUS_INGEST_COLLECTION_MODE = "post_deploy_bounded_production_ingest"
+PRODUCTION_CORPUS_INGEST_MUTATION_SCOPE = "bounded_production_corpus_ingest"
 
 
 def default_corpus_policy_status() -> dict[str, Any]:
@@ -206,6 +210,317 @@ def build_corpus_ingest_plan(
     }
     ensure_public_safe(plan, "ReferenceCorpusIngestPlan")
     return plan
+
+
+def build_reference_corpus_production_ingest_readiness_report(
+    *,
+    live_evidence: Mapping[str, Any] | None = None,
+    expected_manifest_hash: str = "",
+    expected_source_count: int | None = None,
+    expected_corpus_id: str = "",
+) -> dict[str, Any]:
+    evidence = live_evidence if isinstance(live_evidence, Mapping) else {}
+    expected_manifest = public_safe_text(str(expected_manifest_hash or ""), max_chars=120)
+    expected_corpus = public_safe_text(str(expected_corpus_id or ""), max_chars=180)
+    if not evidence:
+        report = {
+            "schema_version": "reference_corpus_production_ingest_readiness.v1",
+            "status": "PASS_WITH_GAPS",
+            "claims": [_production_corpus_ingest_missing_claim()],
+            "failed_claims": [],
+            "gaps": ["production_corpus_ingest_evidence_unverified"],
+            "expected_manifest_hash": expected_manifest,
+            "expected_source_count": expected_source_count,
+            "expected_corpus_id": expected_corpus,
+            "live_evidence_provided": False,
+            "production_mutation_performed": False,
+            "network_used": False,
+            "evidence_collection_network_used": False,
+        }
+        ensure_public_safe(report, "ReferenceCorpusProductionIngestReadiness")
+        return report
+    claims = [
+        _production_corpus_ingest_provenance_claim(evidence),
+        _production_corpus_ingest_approval_claim(evidence),
+        _production_corpus_ingest_corpus_claim(
+            evidence,
+            expected_manifest_hash=expected_manifest,
+            expected_source_count=expected_source_count,
+            expected_corpus_id=expected_corpus,
+        ),
+        _production_corpus_ingest_execution_claim(evidence),
+        _production_corpus_ingest_read_after_write_claim(
+            evidence,
+            expected_manifest_hash=expected_manifest,
+            expected_source_count=expected_source_count,
+            expected_corpus_id=expected_corpus,
+        ),
+        _production_corpus_ingest_rollback_claim(evidence),
+        _production_corpus_ingest_postcheck_claim(evidence),
+    ]
+    gaps = _dedupe(
+        [
+            str(gap)
+            for claim in claims
+            for gap in claim.get("gaps", [])
+            if str(gap or "")
+        ]
+    )
+    failed = [str(claim.get("claim_id") or "") for claim in claims if claim.get("status") == "failed"]
+    report = {
+        "schema_version": "reference_corpus_production_ingest_readiness.v1",
+        "status": "FAIL" if failed else ("PASS_WITH_GAPS" if gaps else "PASS"),
+        "claims": claims,
+        "failed_claims": failed,
+        "gaps": gaps,
+        "expected_manifest_hash": expected_manifest,
+        "expected_source_count": expected_source_count,
+        "expected_corpus_id": expected_corpus,
+        "live_evidence_provided": True,
+        "production_mutation_performed": any(_claim_reports_mutation(claim) for claim in claims),
+        "network_used": False,
+        "evidence_collection_network_used": any(
+            claim.get("claim_id") == "production.corpus_ingest.provenance"
+            and claim.get("network_used_for_evidence") is True
+            for claim in claims
+        ),
+    }
+    ensure_public_safe(report, "ReferenceCorpusProductionIngestReadiness")
+    return report
+
+
+def _production_corpus_ingest_missing_claim() -> dict[str, Any]:
+    return {
+        "claim_id": "production.corpus_ingest.evidence",
+        "evidence_class": "production_corpus_ingest",
+        "status": "not_validated",
+        "production_mutation_performed": False,
+        "gaps": ["production_corpus_ingest_evidence_unverified"],
+    }
+
+
+def _production_corpus_ingest_provenance_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    provenance = evidence.get("evidence_provenance")
+    provenance = provenance if isinstance(provenance, Mapping) else {}
+    failures: list[str] = []
+    if evidence.get("schema_version") != PRODUCTION_CORPUS_INGEST_EVIDENCE_SCHEMA:
+        failures.append("production_corpus_ingest_schema_mismatch")
+    if provenance.get("schema_version") != PRODUCTION_CORPUS_INGEST_PROVENANCE_SCHEMA:
+        failures.append("production_corpus_ingest_provenance_schema_mismatch")
+    if provenance.get("collection_mode") != PRODUCTION_CORPUS_INGEST_COLLECTION_MODE:
+        failures.append("production_corpus_ingest_collection_mode_unverified")
+    if provenance.get("mutation_scope") != PRODUCTION_CORPUS_INGEST_MUTATION_SCOPE:
+        failures.append("production_corpus_ingest_mutation_scope_unverified")
+    for field, gap in (
+        ("raw_private_evidence_returned", "production_corpus_ingest_raw_private_evidence_returned"),
+        ("secret_returned", "production_corpus_ingest_secret_returned"),
+        ("host_topology_returned", "production_corpus_ingest_host_topology_returned"),
+        ("raw_external_ids_returned", "production_corpus_ingest_raw_external_ids_returned"),
+    ):
+        if provenance.get(field) is not False:
+            failures.append(gap)
+    return {
+        "claim_id": "production.corpus_ingest.provenance",
+        "evidence_class": "production_corpus_ingest",
+        "status": "failed" if failures else "validated",
+        "collection_mode": public_safe_text(str(provenance.get("collection_mode") or ""), max_chars=80),
+        "mutation_scope": public_safe_text(str(provenance.get("mutation_scope") or ""), max_chars=80),
+        "network_used_for_evidence": provenance.get("network_used") is True,
+        "production_mutation_performed": False,
+        "gaps": _dedupe(failures),
+    }
+
+
+def _production_corpus_ingest_approval_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    approval = evidence.get("approval")
+    approval = approval if isinstance(approval, Mapping) else {}
+    failures: list[str] = []
+    if approval.get("approved") is not True:
+        failures.append("production_corpus_ingest_approval_missing")
+    if not str(approval.get("approval_ref_hash") or "").startswith("sha256:"):
+        failures.append("production_corpus_ingest_approval_ref_hash_missing")
+    if approval.get("scope") != "single_project_single_corpus":
+        failures.append("production_corpus_ingest_scope_not_single_corpus")
+    if _int_value(approval.get("max_corpora")) != 1:
+        failures.append("production_corpus_ingest_max_corpora_not_one")
+    if approval.get("no_raw_body_returned") is not True:
+        failures.append("production_corpus_ingest_raw_body_guard_missing")
+    return {
+        "claim_id": "production.corpus_ingest.approval",
+        "evidence_class": "production_corpus_ingest",
+        "status": "failed" if failures else "validated",
+        "approval_ref_hash_present": bool(str(approval.get("approval_ref_hash") or "")),
+        "production_mutation_performed": False,
+        "gaps": _dedupe(failures),
+    }
+
+
+def _production_corpus_ingest_corpus_claim(
+    evidence: Mapping[str, Any],
+    *,
+    expected_manifest_hash: str,
+    expected_source_count: int | None,
+    expected_corpus_id: str,
+) -> dict[str, Any]:
+    corpus = evidence.get("corpus")
+    corpus = corpus if isinstance(corpus, Mapping) else {}
+    failures = _corpus_identity_failures(
+        corpus,
+        expected_manifest_hash=expected_manifest_hash,
+        expected_source_count=expected_source_count,
+        expected_corpus_id=expected_corpus_id,
+    )
+    if corpus.get("storage_mode") not in STORAGE_MODES:
+        failures.append("production_corpus_ingest_storage_mode_unknown")
+    if corpus.get("authority_lane") != "reference_only":
+        failures.append("production_corpus_ingest_authority_lane_not_reference_only")
+    if corpus.get("raw_body_policy") != "no_raw_return_by_default":
+        failures.append("production_corpus_ingest_raw_body_policy_unverified")
+    return {
+        "claim_id": "production.corpus_ingest.corpus",
+        "evidence_class": "production_corpus_ingest",
+        "status": "failed" if failures else "validated",
+        "corpus_id": public_safe_text(str(corpus.get("corpus_id") or ""), max_chars=180),
+        "manifest_hash": public_safe_text(str(corpus.get("manifest_hash") or ""), max_chars=120),
+        "source_count": _int_value(corpus.get("source_count")),
+        "production_mutation_performed": False,
+        "gaps": _dedupe(failures),
+    }
+
+
+def _production_corpus_ingest_execution_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    ingest = evidence.get("ingest")
+    ingest = ingest if isinstance(ingest, Mapping) else {}
+    failures: list[str] = []
+    if ingest.get("target") != "production_corpus_store":
+        failures.append("production_corpus_ingest_target_unverified")
+    if ingest.get("ledger_scope") != "production":
+        failures.append("production_corpus_ingest_scope_not_production")
+    if ingest.get("corpus_write_performed") is not True:
+        failures.append("production_corpus_ingest_write_missing")
+    if ingest.get("production_mutation_performed") is not True:
+        failures.append("production_corpus_ingest_mutation_not_reported")
+    if ingest.get("authority_write_performed") is True:
+        failures.append("production_corpus_ingest_changed_authority")
+    return {
+        "claim_id": "production.corpus_ingest.execution",
+        "evidence_class": "production_corpus_ingest",
+        "status": "failed" if failures else "validated",
+        "production_mutation_performed": ingest.get("production_mutation_performed") is True,
+        "authority_write_performed": ingest.get("authority_write_performed") is True,
+        "gaps": _dedupe(failures),
+    }
+
+
+def _production_corpus_ingest_read_after_write_claim(
+    evidence: Mapping[str, Any],
+    *,
+    expected_manifest_hash: str,
+    expected_source_count: int | None,
+    expected_corpus_id: str,
+) -> dict[str, Any]:
+    read_after_write = evidence.get("read_after_write")
+    read_after_write = read_after_write if isinstance(read_after_write, Mapping) else {}
+    failures = _corpus_identity_failures(
+        read_after_write,
+        expected_manifest_hash=expected_manifest_hash,
+        expected_source_count=expected_source_count,
+        expected_corpus_id=expected_corpus_id,
+    )
+    if read_after_write.get("status") != "validated":
+        failures.append("production_corpus_ingest_read_after_write_missing")
+    return {
+        "claim_id": "production.corpus_ingest.read_after_write",
+        "evidence_class": "production_corpus_ingest",
+        "status": "failed" if failures else "validated",
+        "production_mutation_performed": False,
+        "gaps": _dedupe(failures),
+    }
+
+
+def _production_corpus_ingest_rollback_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    rollback = evidence.get("rollback_or_deletion")
+    rollback = rollback if isinstance(rollback, Mapping) else {}
+    failures: list[str] = []
+    if rollback.get("status") not in {"planned", "validated"}:
+        failures.append("production_corpus_ingest_rollback_or_deletion_missing")
+    if not _string_list(rollback.get("path")):
+        failures.append("production_corpus_ingest_rollback_or_deletion_path_missing")
+    return {
+        "claim_id": "production.corpus_ingest.rollback_or_deletion",
+        "evidence_class": "production_corpus_ingest",
+        "status": "failed" if failures else "validated",
+        "production_mutation_performed": False,
+        "gaps": _dedupe(failures),
+    }
+
+
+def _production_corpus_ingest_postcheck_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    postcheck = evidence.get("postcheck")
+    postcheck = postcheck if isinstance(postcheck, Mapping) else {}
+    failures: list[str] = []
+    if postcheck.get("status") != "validated":
+        failures.append("production_corpus_ingest_postcheck_missing")
+    for field, gap in (
+        ("raw_body_returned", "production_corpus_ingest_raw_body_returned"),
+        ("secret_returned", "production_corpus_ingest_secret_returned"),
+        ("host_topology_returned", "production_corpus_ingest_host_topology_returned"),
+        ("raw_external_ids_returned", "production_corpus_ingest_raw_external_ids_returned"),
+    ):
+        if postcheck.get(field) is not False:
+            failures.append(gap)
+    return {
+        "claim_id": "production.corpus_ingest.postcheck",
+        "evidence_class": "production_corpus_ingest",
+        "status": "failed" if failures else "validated",
+        "production_mutation_performed": False,
+        "gaps": _dedupe(failures),
+    }
+
+
+def _corpus_identity_failures(
+    payload: Mapping[str, Any],
+    *,
+    expected_manifest_hash: str,
+    expected_source_count: int | None,
+    expected_corpus_id: str,
+) -> list[str]:
+    failures: list[str] = []
+    if expected_manifest_hash and payload.get("manifest_hash") != expected_manifest_hash:
+        failures.append("production_corpus_ingest_manifest_hash_mismatch")
+    if expected_source_count is not None and _int_value(payload.get("source_count")) != expected_source_count:
+        failures.append("production_corpus_ingest_source_count_mismatch")
+    if expected_corpus_id and payload.get("corpus_id") != expected_corpus_id:
+        failures.append("production_corpus_ingest_corpus_id_mismatch")
+    return failures
+
+
+def _claim_reports_mutation(claim: Mapping[str, Any]) -> bool:
+    return claim.get("production_mutation_performed") is True
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [public_safe_text(str(item), max_chars=160) for item in value if str(item or "")]
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _dedupe(values: list[str] | tuple[str, ...]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def reference_corpus_objects_from_manifest(

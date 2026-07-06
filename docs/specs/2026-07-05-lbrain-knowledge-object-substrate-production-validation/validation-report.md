@@ -93,8 +93,15 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
 
 - status: `validated`
 - evidence: `uv run neuron-knowledge golden-query-eval --activation-progress`
-- result: returned `lbrain_product_activation_progress.v1`, `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`, `minimum_review_loop_checkpoint.status=PASS_WITH_GAPS`, `next_phase=P5`, `goal_complete=false`, `production_ready=false`, `product_evidence_status=PASS_WITH_GAPS`, `production_approval_gate=preapproved`, `production_mutation_execution=not_performed_by_local_gate`, `product_evidence_summary phases=P6/P7/P8/P9`, `production_mutation_performed=false`.
-- interpretation: this is a local P5 progress gate that keeps P2-P9 scope and gaps visible. The evidence summary covers P6 session/project/work-unit rollup, P7 artifact preference memory, P8 runtime authority preview, and P9 agent context product pack as sanitized local previews only. P8 is explicitly `PASS_WITH_GAPS` because live runtime evidence remains unverified and no runtime-verified evidence is attached. The human approval gate for production ledger/corpus/runtime mutation is preapproved, but this local gate did not execute production mutation and does not prove production readiness or deployed/runtime activation.
+- result: returned `lbrain_product_activation_progress.v1`, `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`, `minimum_review_loop_checkpoint.status=PASS_WITH_GAPS`, `next_phase=P5`, `goal_complete=false`, `production_ready=false`, `product_evidence_status=PASS_WITH_GAPS`, `production_approval_gate=preapproved`, `production_mutation_execution=not_performed_by_local_gate`, `product_evidence_summary phases=P2/P6/P7/P8/P9`, `production_mutation_performed=false`.
+- interpretation: this is a local P5 progress gate that keeps P2-P9 scope and gaps visible. The evidence summary now covers P2 production corpus ingest readiness, P6 session/project/work-unit rollup, P7 artifact preference memory, P8 runtime authority preview, and P9 agent context product pack as sanitized local previews only. P2 is explicitly `PASS_WITH_GAPS` with `p2_production_corpus_ingest_evidence_unverified` when no sanitized live corpus-ingest packet is supplied. P8 is explicitly `PASS_WITH_GAPS` because live runtime evidence remains unverified and no runtime-verified evidence is attached. The human approval gate for production ledger/corpus/runtime mutation is preapproved, but this local gate did not execute production mutation and does not prove production readiness or deployed/runtime activation.
+
+### local.production-corpus-ingest-readiness-surface
+
+- status: `validated`
+- evidence: `uv run neuron-knowledge corpus-ingest-readiness --expected-source-count 65`
+- result: returned `reference_corpus_production_ingest_readiness.v1`, `status=PASS_WITH_GAPS`, `live_evidence_provided=false`, `production_mutation_performed=false`, `network_used=false`, gap `production_corpus_ingest_evidence_unverified`.
+- interpretation: this validates the readiness/report surface only. A post-deploy runner can provide a sanitized `reference_corpus_production_ingest_evidence.v1` packet and the local evaluator will check approval, single-corpus scope, reference-only lane, production corpus store write evidence, read-after-write, rollback/deletion path, postcheck redaction, and provenance. The evaluator itself does not perform network calls or production corpus mutation.
 
 ### local.source-to-candidate-runtime-readiness-surface
 
@@ -325,6 +332,7 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
 - P8 evidence packet template is branch-local handoff metadata only. It remains `template_only_not_runtime_evidence`; the latest current-session packet populated from the configured read path validates the gap state, and the branch-local normalizer/evaluator makes that packet shape reusable, but it is not a passing deployed-readiness packet.
 - P8 shadow collection registration artifact is branch-local request metadata only. It records the external post-deploy runner handoff shape and remains `registration_only_not_runtime_evidence`; until a deployed post-rollout runner collects a passing sanitized evidence packet, route smokes remain run-pending gaps.
 - P8 bounded production authority execution has branch-local/sanitized packet validation, but it remains a gap for production readiness until a deployed/live execution packet with postcheck and rollback/supersession evidence is attached.
+- P2 bounded production corpus ingest has branch-local/sanitized packet validation, but it remains a gap for production readiness until a deployed/live corpus-ingest packet with approval, read-after-write, rollback/deletion, postcheck, and provenance evidence is attached.
 - Post-deploy runtime readiness evidence must include sanitized provenance. Missing provenance is a validation failure for injected evidence packets, and missing live evidence remains `PASS_WITH_GAPS`.
 - Live MCP image identity must move to a source revision containing PR #95 before claiming this branch's source-to-candidate activation is deployed in MCP.
 - Direct live Kubernetes/Argo status access must be available, or equivalent redacted live evidence must be supplied, before desired-state GitOps evidence is described as live rollout evidence.
@@ -336,6 +344,7 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
 - No production ledger write was performed.
 - No corpus production ingest was performed.
 - No live production proposal or authority decision write was performed; denial smokes reported `proposal_write_performed=false`, `authority_write_performed=false`, and `authoritative_memory_changed=false`.
+- The bounded production corpus ingest readiness test validates sanitized evidence shape only and did not mutate live production.
 - The bounded production authority execution evidence test used local/fake ledger state only and did not mutate live production.
 - No graph/Qdrant write, GC, accepted/current promotion, corpus write, ledger write, or raw private evidence access was performed during validation.
 - Production denial gate did not mutate state.

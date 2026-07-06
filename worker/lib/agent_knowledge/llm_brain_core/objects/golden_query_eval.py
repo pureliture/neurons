@@ -34,7 +34,7 @@ REQUIRED_QUALITY_AXES = [
 
 ACTIVATION_SCOPE_PHASES = ("P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9")
 MINIMUM_REVIEW_LOOP_PHASES = ("P2", "P3", "P4")
-PRODUCT_EVIDENCE_PHASES = ("P6", "P7", "P8", "P9")
+PRODUCT_EVIDENCE_PHASES = ("P2", "P6", "P7", "P8", "P9")
 
 _LOCAL_VALIDATED_PHASES = {"P2", "P3", "P4", "P6", "P7", "P8", "P9"}
 
@@ -564,11 +564,12 @@ def _activation_phase_progress(phase: str, coverage: Mapping[str, Any]) -> dict[
 
 
 def _product_evidence_summary() -> list[dict[str, Any]]:
+    p2 = _p2_reference_corpus_evidence()
     p6 = _p6_session_project_rollup_evidence()
     p7 = _p7_preference_artifact_evidence()
     p8 = _p8_runtime_authority_evidence()
     p9 = _p9_agent_context_evidence(preference_preview=p7)
-    return [p6, p7, p8, p9]
+    return [p2, p6, p7, p8, p9]
 
 
 def _product_evidence_check(phase: str, evidence: Mapping[str, Any]) -> dict[str, Any]:
@@ -577,8 +578,12 @@ def _product_evidence_check(phase: str, evidence: Mapping[str, Any]) -> dict[str
     if not evidence:
         failures.append("product_evidence_missing")
     elif bool(evidence.get("production_mutation_performed")):
-        failures.append(f"{phase.lower()}_production_mutation_performed")
-    if phase == "P6" and evidence:
+        if phase != "P2":
+            failures.append(f"{phase.lower()}_production_mutation_performed")
+    if phase == "P2" and evidence:
+        failures.extend(_p2_evidence_failures(evidence))
+        gaps.extend(_p2_evidence_gaps(evidence))
+    elif phase == "P6" and evidence:
         failures.extend(_p6_evidence_failures(evidence))
     elif phase == "P7" and evidence:
         failures.extend(_p7_evidence_failures(evidence))
@@ -594,6 +599,30 @@ def _product_evidence_check(phase: str, evidence: Mapping[str, Any]) -> dict[str
         "failures": failures,
         "gaps": _dedupe(gaps),
     }
+
+
+def _p2_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if evidence.get("schema_version") != "reference_corpus_production_ingest_readiness.v1":
+        failures.append("p2_schema_mismatch")
+    if evidence.get("status") == "FAIL":
+        failures.append("p2_production_corpus_ingest_failed")
+    if bool(evidence.get("network_used")):
+        failures.append("p2_corpus_ingest_evaluator_used_network")
+    if (
+        bool(evidence.get("production_mutation_performed"))
+        and evidence.get("status") != "PASS"
+    ):
+        failures.append("p2_unvalidated_production_corpus_mutation")
+    return failures
+
+
+def _p2_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    return [
+        f"p2_{gap}"
+        for gap in evidence.get("gaps", [])
+        if isinstance(gap, str) and gap
+    ]
 
 
 def _p6_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
@@ -750,6 +779,26 @@ def _p9_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     if bool(evidence.get("mutation_allowed")):
         failures.append("p9_mutation_allowed")
     return failures
+
+
+def _p2_reference_corpus_evidence() -> dict[str, Any]:
+    from .reference_corpus import build_reference_corpus_production_ingest_readiness_report
+
+    report = build_reference_corpus_production_ingest_readiness_report(
+        expected_source_count=65,
+    )
+    return {
+        "phase": "P2",
+        "schema_version": str(report.get("schema_version") or ""),
+        "status": str(report.get("status") or ""),
+        "golden_query_slice": "reference corpus freshness/source authority",
+        "expected_source_count": report.get("expected_source_count"),
+        "live_evidence_provided": bool(report.get("live_evidence_provided")),
+        "evidence_collection_network_used": bool(report.get("evidence_collection_network_used")),
+        "gaps": list(report.get("gaps") or []),
+        "production_mutation_performed": bool(report.get("production_mutation_performed")),
+        "network_used": bool(report.get("network_used")),
+    }
 
 
 def _p6_session_project_rollup_evidence() -> dict[str, Any]:

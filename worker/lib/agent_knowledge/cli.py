@@ -99,6 +99,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "corpus-status": llm_brain_object_cli.corpus_status_main,
     "corpus-ingest-plan": llm_brain_object_cli.corpus_ingest_plan_main,
     "corpus-ingest": llm_brain_object_cli.corpus_ingest_main,
+    "corpus-ingest-readiness": llm_brain_object_cli.corpus_ingest_readiness_main,
     "source-to-candidate-graph": llm_brain_object_cli.source_to_candidate_graph_main,
     "candidate-review-edit": llm_brain_object_cli.candidate_review_edit_main,
     "approval-board-decide": llm_brain_object_cli.approval_board_decide_main,

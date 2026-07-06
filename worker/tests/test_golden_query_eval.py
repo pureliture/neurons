@@ -332,7 +332,9 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert "production_quality_not_green" in report["goal_completion_blockers"]
     assert "live_runtime_read_path_unverified" in report["goal_completion_blockers"]
     checks = {item["phase"]: item for item in report["product_evidence_checks"]}
-    assert set(checks) == {"P6", "P7", "P8", "P9"}
+    assert set(checks) == {"P2", "P6", "P7", "P8", "P9"}
+    assert checks["P2"]["result"] == "PASS_WITH_GAPS"
+    assert "p2_production_corpus_ingest_evidence_unverified" in checks["P2"]["gaps"]
     assert checks["P6"]["result"] == "PASS"
     assert checks["P7"]["result"] == "PASS"
     assert checks["P8"]["result"] == "PASS_WITH_GAPS"
@@ -345,7 +347,9 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert "p8_shadow_collection_run_pending:deployment_runtime_truth" in checks["P8"]["gaps"]
     assert checks["P9"]["result"] == "PASS"
     evidence = {item["phase"]: item for item in report["product_evidence_summary"]}
-    assert set(evidence) == {"P6", "P7", "P8", "P9"}
+    assert set(evidence) == {"P2", "P6", "P7", "P8", "P9"}
+    assert evidence["P2"]["schema_version"] == "reference_corpus_production_ingest_readiness.v1"
+    assert evidence["P2"]["production_mutation_performed"] is False
     assert evidence["P6"]["schema_version"] == "object_extraction_session_project_rollup_preview.v1"
     assert evidence["P6"]["object_count"] >= 5
     assert evidence["P6"]["edge_count"] >= 6
@@ -445,6 +449,7 @@ def test_product_evidence_summary_fails_closed_when_required_phase_evidence_is_m
     )
 
     assert result["status"] == "FAIL"
+    assert "P2:product_evidence_missing" in result["hard_failures"]
     assert "P6:product_evidence_failed" in result["hard_failures"]
     assert "P7:product_evidence_missing" in result["hard_failures"]
     assert "P8:product_evidence_failed" in result["hard_failures"]
@@ -456,6 +461,13 @@ def test_product_evidence_summary_fails_closed_when_required_phase_evidence_is_m
 def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
     result = evaluate_product_evidence_summary(
         [
+            {
+                "phase": "P2",
+                "schema_version": "reference_corpus_production_ingest_readiness.v1",
+                "status": "PASS_WITH_GAPS",
+                "production_mutation_performed": False,
+                "gaps": ["production_corpus_ingest_evidence_unverified"],
+            },
             {
                 "phase": "P6",
                 "schema_version": "object_extraction_session_project_rollup_preview.v1",
