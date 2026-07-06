@@ -13,13 +13,13 @@ Current state:
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP는 latest main 기반 image로 object-native tools를 노출하고, read-only query 및 production write denied/no-mutation smoke를 통과했습니다. 현재 Codex session의 `mcp__lbrain` namespace가 아직 object-native tools를 직접 노출하지 않는 gap은 남아 있습니다.
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, production-denial evidence는 존재하지만, real private Palantir manifest ingest 및 production ingest approval은 여전히 gap입니다.
 - P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / `local_validated`; local/test reference corpus extraction preview는 deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, blocked-extraction gaps를 생성합니다. candidate graph review pack은 candidate objects/edges/evidence/confidence/edit actions를 surface하고 reviewer edit fixture는 authority mutation 없이 candidate state만 바꿉니다. live graph/Qdrant projection join은 아직 증명되지 않았습니다.
-- P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / `local_validated`; local/test decision commit은 authority state/audit history를 기록하고, object queries는 local/test stale, superseded, retired, archive-only, rejected states를 surface하며, object explain은 local/test decision history를 반환합니다. candidate approval-board preview와 reviewer edit no-mutation proof는 local/test로 존재하지만, production denial은 유지되고 authority mutation은 계속 denied 상태입니다.
+- P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / `local_validated`; local/test decision commit은 authority state/audit history를 기록하고, object queries는 local/test stale, superseded, retired, archive-only, rejected states를 surface하며, object explain은 local/test decision history를 반환합니다. candidate approval-board preview, reviewer edit no-mutation proof, local_test approval-board promotion preview가 존재하지만, production denial은 유지되고 production authority mutation은 계속 denied 상태입니다.
 - P5 Continuous Golden Query Quality Gates: `in_progress`; phase coverage report는 P1-P10 golden query families를 나열하고 release quality gate를 명시적으로 `not_green` 상태로 유지합니다.
 - P6 Session, Device, Project, And Work-Unit 360: `PASS_WITH_GAPS` / `local_validated`; local/test session project rollup preview는 Device/Session/Repository/Branch/WorkUnit/Spec/PullRequest/Commit objects를 생성하고, same-device와 all-device fixture rollup을 분리하며, safe handoff pack을 반환합니다. live multi-device runtime evidence는 아직 증명되지 않았습니다.
 - P7 Preference, Style, And Artifact Memory: `PASS_WITH_GAPS` / `local_validated`; local/test artifact preference pack은 accepted/proposal lanes, profile objects, no-UI HTML artifact check를 검증하지만, live agent context pack 및 production authority promotion은 아직 gap입니다.
 - P8 Runtime Truth, Security, And Deployment Authority: `PASS_WITH_GAPS` / `local_validated`; local/test runtime authority policy, artifact identity join, private authority redaction, and denial/no-mutation checks pass, but broader production runtime authority and permission audit remain gaps.
 - P9 Agent Context Productization: `PASS_WITH_GAPS` / `local_validated`; local/test consumer compact packs, degraded/stale disclosure, reference object lane, surface policy, and proposal-safe action hints pass, but production startup/read path and runtime enforcement remain gaps.
-- Product activation: 완료되지 않았습니다; configured agent read path refresh, candidate graph extraction, editable review, and approval-board promotion이 여전히 필요합니다.
+- Product activation: 완료되지 않았습니다; configured agent read path refresh, runtime source-to-candidate extraction wiring, editable review surface hardening, and approval-board promotion runtime integration이 여전히 필요합니다.
 - UI/object browser: full UI는 product activation prerequisite가 아니지만, minimal candidate object/edge/evidence edit surface는 P3/P4 product workflow의 prerequisite입니다.
 
 Roadmap lock state:
@@ -362,15 +362,15 @@ Current local/test evidence:
 - broader evaluator suite preview aggregates deterministic fixture checks, golden-query checks, strategy comparison checks, variance checks, and model/prompt comparison status
 - broader evaluator suite preview reports stable deterministic outputs as pass, reports changed outputs as `variance_detected`, and marks model/prompt comparison `not_applicable_no_llm` while all current preview extractors use zero model calls
 - candidate review focused evidence: `cd worker && uv run pytest -q tests/test_object_packs.py`
-- candidate review focused result: `9 passed, 1 warning`
+- candidate review focused result: `11 passed, 1 warning`
 - candidate review adjacent evidence: `cd worker && uv run pytest -q tests/test_object_packs.py tests/test_extraction_pipeline.py tests/test_llm_brain_core_objects_subpackage.py`
-- candidate review adjacent result: `47 passed, 1 warning`
+- candidate review adjacent result: `49 passed, 1 warning`
 - focused evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py`
 - focused result: `19 passed, 1 warning`
 - adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_object_packs.py tests/test_reference_corpus.py tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py tests/test_preference_authority_model.py tests/test_repo_style_profile.py tests/test_llm_brain_core_package_depth.py tests/test_llm_brain_core_objects_subpackage.py tests/test_llm_brain_core_layering.py`
 - adjacent regression result: `141 passed, 1 warning`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1566 passed, 9 skipped, 1 warning`
+- worker regression result: `1568 passed, 9 skipped, 1 warning`
 
 PASS_WITH_GAPS rationale:
 
@@ -434,8 +434,10 @@ Current local/test evidence:
 - ledger boundary manifest assigns `object_review_proposals`, `object_authority_decisions`, and `object_authority_states` to the native-memory/object area
 - candidate graph approval-board preview shows editable candidate object state, related edges, evidence refs, confidence, gaps, recommended action, and allowed reviewer actions
 - reviewer edit fixture changes only candidate object/edge/evidence state, rejects direct authority-lane edits, preserves original extraction hash, and performs no authority write
+- local_test approval-board decision preview promotes a candidate object to `accepted_current`, records an `AuthorityDecision`, rebuilds lane indexes, and marks the write scope as local_test only
+- production-scope approval-board decision preview is denied with `production_approval_gate_required` and returns a no-mutation promotion plan
 - candidate review focused evidence: `cd worker && uv run pytest -q tests/test_object_packs.py`
-- candidate review focused result: `9 passed, 1 warning`
+- candidate review focused result: `11 passed, 1 warning`
 - object explain history evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_brain_object_explain_includes_local_authority_decision_history`
 - object explain history result: `1 passed, 1 warning`
 - production-denial plan evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_is_restricted_denied_by_default`
@@ -451,13 +453,13 @@ Current local/test evidence:
 - ledger boundary evidence: `cd worker && uv run pytest -q tests/test_ledger_area_boundaries.py`
 - ledger boundary result: `10 passed`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1566 passed, 9 skipped, 1 warning`
+- worker regression result: `1568 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
 PASS_WITH_GAPS rationale:
 
-- Local/test P4 gate evidence is present for proposal creation, review queue listing, default production denial/no-mutation, local/test authority decision commit, audit state, stale/superseded/retired/archive/rejected object-query visibility, and object decision history explainability.
+- Local/test P4 gate evidence is present for proposal creation, review queue listing, default production denial/no-mutation, candidate approval-board decision preview, local/test authority decision commit, audit state, stale/superseded/retired/archive/rejected object-query visibility, and object decision history explainability.
 - Production authority promotion remains intentionally closed without a human approval gate and scoped live pilot evidence.
 - The current production plan is a read-only denied response that documents the required reviewer role, allowed classes/actions, rollback path, gate evidence, and blast radius. It is not a production approval record and did not mutate production authority.
 
@@ -851,7 +853,7 @@ Current accounting:
 | P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; latest-main deployed/configured endpoint validated, current Codex session tool registry gap remains |
 | P2 Living Reference Corpus Store | `local_validated` | `PASS_WITH_GAPS`; local/test store and status gates pass, real private manifest ingest and production approval remain gaps |
 | P3 Processing And Object Extraction Pipeline | `local_validated` | `PASS_WITH_GAPS`; local/test extraction previews and candidate review/edit pack pass, but automatic source-to-candidate graph runtime wiring and live projection join remain gaps |
-| P4 Review Queue And Authority Promotion | `local_validated` | `PASS_WITH_GAPS`; local/test authority state, audit gates, approval-board preview, and reviewer edit no-mutation proof pass; production authority mutation remains denied |
+| P4 Review Queue And Authority Promotion | `local_validated` | `PASS_WITH_GAPS`; local/test authority state, audit gates, approval-board preview, local_test promotion preview, and reviewer edit no-mutation proof pass; production authority mutation remains denied |
 | P5 Continuous Golden Query Quality Gates | `in_progress` | phase coverage exists and release quality gate remains `not_green` |
 | P6 Session, Device, Project, And Work-Unit 360 | `local_validated` | `PASS_WITH_GAPS`; local/test rollup and handoff gates pass, live multi-device runtime evidence remains a gap |
 | P7 Preference, Style, And Artifact Memory | `local_validated` | `PASS_WITH_GAPS`; local/test artifact preference pack lanes and no-UI HTML artifact check pass, live agent context pack and production authority promotion remain gaps |

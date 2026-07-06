@@ -1,4 +1,5 @@
 from agent_knowledge.llm_brain_core.object_packs import (
+    apply_approval_board_decisions,
     apply_candidate_review_edits,
     build_agent_context_object_packs,
     build_candidate_graph_review_pack,
@@ -275,6 +276,126 @@ def test_candidate_review_edits_change_candidate_state_without_promoting_authori
     assert result["updated_pack"]["candidate_graph_hash"] != pack["candidate_graph_hash"]
 
 
+def test_approval_board_promotes_candidate_in_local_test_without_production_mutation():
+    evidence = EvidenceRef.from_parts(
+        evidence_type="source_hash",
+        authority_lane="reference_only",
+        verification_state="source_hash_verified",
+        locator={"kind": "relative_repo_path", "value": "docs/source.md"},
+        content_hash="sha256:" + "5" * 64,
+        summary="Source material hash.",
+    )
+    obj = KnowledgeObjectEnvelope.from_parts(
+        object_type="RepoDocument",
+        natural_key="docs/source.md",
+        scope={"project": "neurons"},
+        title="Reviewed source doc",
+        summary="Human reviewed candidate claim.",
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="source_hash_verified",
+        review_state="needs_review",
+        content_hash="sha256:" + "6" * 64,
+        evidence_refs=[evidence.evidence_id],
+        confidence={"score": 0.91, "basis": "reviewed_candidate"},
+        recommended_action="promote",
+        payload={"path_ref": "docs/source.md"},
+    ).to_dict()
+    pack = build_candidate_graph_review_pack(
+        objects=[obj],
+        edges=[],
+        evidence=[evidence.to_view()],
+        extractor="fixture_ai_extractor",
+    )
+
+    result = apply_approval_board_decisions(
+        pack,
+        decisions=[
+            {
+                "action": "promote",
+                "object_id": obj["object_id"],
+                "reason": "Reviewer accepted the candidate as current authority.",
+                "approved_by": "human-reviewer",
+            }
+        ],
+        reviewer={"id": "human-reviewer"},
+        ledger_scope="local_test",
+    )
+
+    promoted = result["updated_pack"]["objects"][0]
+    assert result["schema_version"] == "approval_board_decision_result.v1"
+    assert result["ledger_scope"] == "local_test"
+    assert result["production_mutation_performed"] is False
+    assert result["authority_write_performed"] is True
+    assert result["authority_write_scope"] == "local_test"
+    assert result["authoritative_memory_changed"] is True
+    assert result["decision_count"] == 1
+    assert result["decisions"][0]["decision_type"] == "accept_current"
+    assert result["decisions"][0]["previous_authority_lane"] == "candidate"
+    assert result["decisions"][0]["new_authority_lane"] == "accepted_current"
+    assert promoted["authority_lane"] == "accepted_current"
+    assert promoted["lifecycle_status"] == "current"
+    assert promoted["review_state"] == "accepted"
+    assert promoted["recommended_action"] == "keep"
+    assert result["updated_pack"]["lanes"]["accepted_current"][0]["object_id"] == obj["object_id"]
+    assert result["updated_pack"]["lanes"]["candidate"] == []
+    assert result["updated_pack"]["approval_board"][0]["editable"] is False
+    assert result["updated_pack"]["candidate_graph_hash"] != pack["candidate_graph_hash"]
+
+
+def test_approval_board_decision_denies_production_scope_without_mutation():
+    obj = KnowledgeObjectEnvelope.from_parts(
+        object_type="RepoDocument",
+        natural_key="docs/source.md",
+        scope={"project": "neurons"},
+        title="Reviewed source doc",
+        summary="Human reviewed candidate claim.",
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="source_hash_verified",
+        review_state="needs_review",
+        content_hash="sha256:" + "7" * 64,
+        evidence_refs=["ev:source:production-deny"],
+        confidence={"score": 0.91, "basis": "reviewed_candidate"},
+        recommended_action="promote",
+        payload={"path_ref": "docs/source.md"},
+    ).to_dict()
+    pack = build_candidate_graph_review_pack(
+        objects=[obj],
+        edges=[],
+        evidence=[],
+        extractor="fixture_ai_extractor",
+    )
+
+    result = apply_approval_board_decisions(
+        pack,
+        decisions=[
+            {
+                "action": "promote",
+                "object_id": obj["object_id"],
+                "reason": "Reviewer accepted the candidate as current authority.",
+                "approved_by": "human-reviewer",
+            }
+        ],
+        reviewer={"id": "human-reviewer"},
+        ledger_scope="production",
+    )
+
+    assert result["permission"] == "denied"
+    assert result["reason"] == "production_approval_gate_required"
+    assert result["production_mutation_performed"] is False
+    assert result["authority_write_performed"] is False
+    assert result["authoritative_memory_changed"] is False
+    assert result["updated_pack"]["candidate_graph_hash"] == pack["candidate_graph_hash"]
+    assert result["updated_pack"]["objects"][0]["authority_lane"] == "candidate"
+    assert result["promotion_plan"]["required_gate_evidence"] == [
+        "human_approval",
+        "audit_trail",
+        "rollback_or_supersession_path",
+        "scoped_object_classes",
+    ]
+
+
 def test_route_spec_is_declarative():
     spec = route_spec_for("documentation_cleanup")
 
@@ -284,7 +405,10 @@ def test_route_spec_is_declarative():
 
     review_spec = route_spec_for("candidate_graph_review")
     assert "candidate" in review_spec["allowed_authority_lanes"]
+    assert "edge_type" in review_spec["editable_edge_fields"]
+    assert "summary" in review_spec["editable_evidence_fields"]
     assert "reviewer_edit_does_not_mutate_authority" in review_spec["eval_assertions"]
+    assert "approval_board_decision_promotes_authority" in review_spec["eval_assertions"]
 
 
 def test_agent_context_object_packs_include_fr11_sections():

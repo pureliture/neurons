@@ -4,7 +4,7 @@ from copy import deepcopy
 from typing import Any, Mapping
 
 from .._util import ensure_public_safe, hash_payload, public_safe_text
-from .knowledge_objects import EvidenceRef, KnowledgeEdge, KnowledgeObjectEnvelope
+from .knowledge_objects import AuthorityDecision, EvidenceRef, KnowledgeEdge, KnowledgeObjectEnvelope
 
 
 NON_CURRENT_AUTHORITY = frozenset({"stale", "superseded", "archive_candidate"})
@@ -108,10 +108,14 @@ ROUTE_SPECS: dict[str, dict[str, Any]] = {
         "redaction_mode": "object_safe",
         "recommended_action_vocabulary": list(CANDIDATE_REVIEW_ACTIONS),
         "editable_object_fields": sorted(EDITABLE_OBJECT_FIELDS),
+        "editable_edge_fields": sorted(EDITABLE_EDGE_FIELDS),
+        "editable_evidence_fields": sorted(EDITABLE_EVIDENCE_FIELDS),
         "eval_assertions": [
             "candidate_graph_is_not_authority",
             "reviewer_edit_does_not_mutate_authority",
             "approval_board_required_for_promotion",
+            "approval_board_decision_promotes_authority",
+            "production_decision_denied_without_gate",
         ],
     },
 }
@@ -489,6 +493,168 @@ def apply_candidate_review_edits(
     }
     ensure_public_safe(result, "CandidateReviewEditResult")
     return result
+
+
+def apply_approval_board_decisions(
+    pack: Mapping[str, Any],
+    *,
+    decisions: list[Mapping[str, Any]],
+    reviewer: Mapping[str, Any],
+    ledger_scope: str = "local_test",
+) -> dict[str, Any]:
+    scope = public_safe_text(str(ledger_scope or ""), max_chars=80)
+    if scope != "local_test":
+        result = {
+            "schema_version": "approval_board_decision_result.v1",
+            "permission": "denied",
+            "reason": "production_approval_gate_required",
+            "ledger_scope": scope or "production",
+            "production_mutation_performed": False,
+            "authority_write_performed": False,
+            "authority_write_scope": "",
+            "authoritative_memory_changed": False,
+            "decision_count": 0,
+            "decisions": [],
+            "rejected_decisions": [
+                _denied_production_decision(decision)
+                for decision in decisions
+                if isinstance(decision, Mapping)
+            ],
+            "updated_pack": deepcopy(dict(pack)),
+            "promotion_plan": _production_promotion_plan(),
+        }
+        ensure_public_safe(result, "ApprovalBoardDecisionResult")
+        return result
+
+    updated_pack = deepcopy(dict(pack))
+    original_hash = str(pack.get("candidate_graph_hash") or "")
+    objects = updated_pack.get("objects") if isinstance(updated_pack.get("objects"), list) else []
+    object_by_id = {
+        str(obj.get("object_id") or ""): obj
+        for obj in objects
+        if isinstance(obj, dict) and obj.get("object_id")
+    }
+    accepted_decisions: list[dict[str, Any]] = []
+    rejected_decisions: list[dict[str, Any]] = []
+    for decision in decisions:
+        if not isinstance(decision, Mapping):
+            continue
+        object_id = public_safe_text(str(decision.get("object_id") or ""), max_chars=180)
+        action = public_safe_text(str(decision.get("action") or ""), max_chars=80)
+        target = object_by_id.get(object_id)
+        if target is None:
+            rejected_decisions.append(
+                {
+                    "action": action,
+                    "object_id": object_id,
+                    "reason": "candidate_object_not_found",
+                }
+            )
+            continue
+        decision_type, lane, lifecycle, review_state, recommended_action, writes_authority = _decision_state(action)
+        if not decision_type:
+            rejected_decisions.append(
+                {
+                    "action": action,
+                    "object_id": object_id,
+                    "reason": "unsupported_approval_board_decision",
+                }
+            )
+            continue
+        previous_lane = str(target.get("authority_lane") or "candidate")
+        target["authority_lane"] = lane
+        target["lifecycle_status"] = lifecycle
+        target["review_state"] = review_state
+        target["recommended_action"] = recommended_action
+        target["authority_decision_ref"] = f"decision:{hash_payload([decision_type, object_id, previous_lane, lane])[-16:]}"
+        authority_decision = AuthorityDecision.from_parts(
+            decision_type=decision_type,
+            target_object_id=object_id,
+            previous_authority_lane=previous_lane,
+            new_authority_lane=lane,
+            approved_by=str(decision.get("approved_by") or reviewer.get("id") or reviewer.get("role") or "unspecified"),
+            evidence_refs=[str(ref) for ref in target.get("evidence_refs") or [] if ref],
+        ).to_dict(authority_write_performed=writes_authority, cache_invalidated=writes_authority)
+        authority_decision["ledger_scope"] = "local_test"
+        authority_decision["decision_reason"] = public_safe_text(str(decision.get("reason") or ""), max_chars=512)
+        accepted_decisions.append(authority_decision)
+    _rebuild_lanes(updated_pack)
+    _rebuild_verification(updated_pack)
+    _rebuild_candidate_review_surface(updated_pack)
+    updated_hash = _candidate_graph_hash(
+        [dict(obj) for obj in updated_pack.get("objects") or [] if isinstance(obj, Mapping)],
+        [dict(edge) for edge in updated_pack.get("edges") or [] if isinstance(edge, Mapping)],
+        [dict(item) for item in updated_pack.get("evidence") or [] if isinstance(item, Mapping)],
+    )
+    changed_authority = any(item.get("authority_write_performed") for item in accepted_decisions)
+    updated_pack["candidate_graph_hash"] = updated_hash
+    updated_pack["authority_write_performed"] = changed_authority
+    updated_pack["authority_write_scope"] = "local_test" if changed_authority else ""
+    updated_pack["authoritative_memory_changed"] = changed_authority
+    updated_pack["production_mutation_performed"] = False
+    updated_pack["audit"] = {
+        **dict(updated_pack.get("audit") or {}),
+        "candidate_graph_hash": updated_hash,
+        "approval_board_decision_hash": hash_payload([original_hash, updated_hash, accepted_decisions, rejected_decisions]),
+    }
+    result = {
+        "schema_version": "approval_board_decision_result.v1",
+        "permission": "allowed",
+        "reason": "local_test_approval_board_decision",
+        "ledger_scope": "local_test",
+        "production_mutation_performed": False,
+        "authority_write_performed": changed_authority,
+        "authority_write_scope": "local_test" if changed_authority else "",
+        "authoritative_memory_changed": changed_authority,
+        "original_candidate_graph_hash": original_hash,
+        "updated_candidate_graph_hash": updated_hash,
+        "reviewer_ref": public_safe_text(str(reviewer.get("id") or reviewer.get("role") or "unspecified"), max_chars=120),
+        "decision_count": len(accepted_decisions),
+        "decisions": accepted_decisions,
+        "rejected_decisions": rejected_decisions,
+        "updated_pack": updated_pack,
+    }
+    ensure_public_safe(result, "ApprovalBoardDecisionResult")
+    return result
+
+
+def _denied_production_decision(decision: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "action": public_safe_text(str(decision.get("action") or ""), max_chars=80),
+        "object_id": public_safe_text(str(decision.get("object_id") or ""), max_chars=180),
+        "reason": "production_approval_gate_required",
+    }
+
+
+def _production_promotion_plan() -> dict[str, Any]:
+    return {
+        "schema_version": "object_authority_promotion_plan.v1",
+        "required_gate_evidence": [
+            "human_approval",
+            "audit_trail",
+            "rollback_or_supersession_path",
+            "scoped_object_classes",
+        ],
+        "production_mutation_performed": False,
+        "authority_write_performed": False,
+        "authoritative_memory_changed": False,
+    }
+
+
+def _decision_state(action: str) -> tuple[str, str, str, str, str, bool]:
+    if action == "promote":
+        return "accept_current", "accepted_current", "current", "accepted", "keep", True
+    if action == "reject":
+        return "reject_candidate", "rejected", "rejected", "rejected", "rejected", True
+    if action == "stale":
+        return "commit_stale", "accepted_non_current", "stale", "accepted", "review", True
+    if action == "supersede":
+        return "commit_supersession", "accepted_non_current", "superseded", "accepted", "review", True
+    if action == "retire":
+        return "retire", "accepted_non_current", "retired", "accepted", "archive", True
+    if action in {"hold", "request_more_evidence", "merge", "split"}:
+        return action, "candidate", "proposed", "needs_review", "request_more_evidence", False
+    return "", "", "", "", "", False
 
 
 def _apply_object_edit(
