@@ -41,7 +41,15 @@ def build_extractor_registry_report() -> dict[str, Any]:
                 "version": "0.1",
                 "status": "implemented",
                 "input_object_types": ["RuntimeEvidence"],
-                "output_object_types": ["PullRequest", "RuntimeTruth"],
+                "output_object_types": [
+                    "CIStatus",
+                    "Commit",
+                    "DeploymentTarget",
+                    "LiveEvidenceGap",
+                    "PullRequest",
+                    "RuntimeSurface",
+                    "RuntimeTruth",
+                ],
                 "edge_types": ["validated_by", "requires_live_evidence"],
                 "strategy_scope": "runtime_evidence_mapping",
                 "gaps": [],
@@ -365,6 +373,10 @@ def run_runtime_truth_extraction_preview(
     pull_request: Mapping[str, Any] | None,
     deployment: Mapping[str, Any] | None,
     live_evidence: Mapping[str, Any] | None,
+    ci_statuses: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] = (),
+    runtime_surface: Mapping[str, Any] | None = None,
+    requested_action: Mapping[str, Any] | None = None,
+    actor: Mapping[str, Any] | None = None,
     consumer: str = "unspecified",
 ) -> dict[str, Any]:
     pack = build_runtime_truth_pack(
@@ -380,17 +392,53 @@ def run_runtime_truth_extraction_preview(
         else []
     )
     pr_objects = [_stable_object(obj) for obj in pack["objects"]]
+    commit_objects = _runtime_commit_objects(pull_request=pull_request)
+    ci_status_objects = _runtime_ci_status_objects(ci_statuses=ci_statuses)
+    deployment_target_objects = _runtime_deployment_target_objects(
+        deployment=deployment,
+        pull_request=pull_request,
+        runtime_verified=bool(runtime_verified_count),
+    )
+    runtime_surface_objects = _runtime_surface_objects(runtime_surface=runtime_surface)
+    live_evidence_gap_objects = _runtime_live_evidence_gap_objects(
+        deployment=deployment,
+        runtime_unverified_count=runtime_unverified_count,
+    )
+    objects = [
+        *pr_objects,
+        *commit_objects,
+        *ci_status_objects,
+        *deployment_target_objects,
+        *runtime_surface_objects,
+        *live_evidence_gap_objects,
+    ]
     edges = _runtime_truth_edges(pr_objects=pr_objects, runtime_truth_objects=runtime_truth_objects)
     status = "pass" if runtime_verified_count else "pass_with_gaps"
+    deployed_artifact_identity = _deployed_artifact_identity(
+        deployment=deployment,
+        pull_request=pull_request,
+        runtime_verified=bool(runtime_verified_count),
+    )
+    permission_check = _runtime_action_permission_check(
+        requested_action=requested_action,
+        actor=actor,
+    )
     result = {
         "schema_version": "object_extraction_runtime_truth_preview.v1",
         "status": status,
         "consumer": public_safe_text(consumer, max_chars=80),
         "selected_strategy": "merge_ci_deploy_live_separation_v1",
         "production_mutation_performed": False,
-        "objects": pr_objects,
+        "objects": objects,
         "runtime_truth_objects": runtime_truth_objects,
         "edges": edges,
+        "deployed_artifact_identity": deployed_artifact_identity,
+        **({"permission_check": permission_check} if permission_check else {}),
+        "audit_trail": _runtime_permission_audit_trail(
+            requested_action=requested_action,
+            actor=actor,
+            permission_check=permission_check,
+        ),
         "pack_preview": {
             "route": pack["route"],
             "object_count": len(pack["objects"]),
@@ -406,7 +454,7 @@ def run_runtime_truth_extraction_preview(
                 "scope": "runtime_evidence_mapping",
                 "selected": True,
                 "status": status,
-                "object_count": len(pr_objects) + len(runtime_truth_objects),
+                "object_count": len(objects) + len(runtime_truth_objects),
                 "edge_count": len(edges),
                 "runtime_verified_count": runtime_verified_count,
                 "runtime_unverified_count": runtime_unverified_count,
@@ -1740,6 +1788,247 @@ def _report_model_call_count(report: Mapping[str, Any]) -> int:
         return int(cost.get("model_calls") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _runtime_commit_objects(*, pull_request: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    if not pull_request:
+        return []
+    commit_sha = public_safe_text(str(pull_request.get("head_sha") or pull_request.get("commit_sha") or ""), max_chars=80)
+    if not commit_sha:
+        return []
+    obj = KnowledgeObjectEnvelope.from_parts(
+        object_type="Commit",
+        natural_key=commit_sha,
+        scope={"project": "neurons"},
+        title=f"Commit {commit_sha}",
+        summary="Pull request source commit.",
+        lifecycle_status="observed",
+        authority_lane="candidate",
+        verification_state="unverified",
+        review_state="needs_review",
+        content_hash=hash_payload({"commit_sha": commit_sha, "pull_request_id": pull_request.get("id")}),
+        confidence={"score": 0.7, "basis": "pull_request_head_sha"},
+        recommended_action="join_deployed_artifact_identity",
+        payload={"commit_sha": commit_sha},
+    )
+    return [_stable_object(obj.to_dict())]
+
+
+def _runtime_ci_status_objects(
+    *,
+    ci_statuses: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+) -> list[dict[str, Any]]:
+    objects: list[dict[str, Any]] = []
+    for status in ci_statuses:
+        if not isinstance(status, Mapping):
+            continue
+        name = public_safe_text(str(status.get("name") or "ci"), max_chars=120)
+        conclusion = public_safe_text(str(status.get("conclusion") or status.get("state") or "UNKNOWN"), max_chars=40)
+        commit_sha = public_safe_text(str(status.get("commit_sha") or ""), max_chars=80)
+        obj = KnowledgeObjectEnvelope.from_parts(
+            object_type="CIStatus",
+            natural_key=f"{name}:{commit_sha}:{conclusion}",
+            scope={"project": "neurons", "commit_sha": commit_sha},
+            title=name,
+            summary=f"CI status: {conclusion}",
+            lifecycle_status="observed",
+            authority_lane="candidate",
+            verification_state="source_hash_verified",
+            review_state="needs_review",
+            content_hash=hash_payload({"name": name, "conclusion": conclusion, "commit_sha": commit_sha}),
+            confidence={"score": 0.7, "basis": "public_repo_ci_status"},
+            recommended_action="separate_ci_from_deploy",
+            payload={"name": name, "conclusion": conclusion, "commit_sha": commit_sha},
+        )
+        objects.append(_stable_object(obj.to_dict()))
+    return objects
+
+
+def _runtime_deployment_target_objects(
+    *,
+    deployment: Mapping[str, Any] | None,
+    pull_request: Mapping[str, Any] | None,
+    runtime_verified: bool,
+) -> list[dict[str, Any]]:
+    if not deployment:
+        return []
+    identity = _deployed_artifact_identity(
+        deployment=deployment,
+        pull_request=pull_request,
+        runtime_verified=runtime_verified,
+    )
+    target_ref = identity["target_ref"]
+    private_ref = str(deployment.get("private_authority_ref") or "")
+    payload = {
+        "target_ref": target_ref,
+        "artifact_digest": identity["artifact_digest"],
+        "deployed_source_commit": identity["deployed_source_commit"],
+        "source_commit_matches_pr_head": identity["source_commit_matches_pr_head"],
+        "private_authority_ref_present": bool(private_ref),
+        "private_authority_ref_digest": hash_payload({"private_authority_ref": private_ref}) if private_ref else "",
+    }
+    obj = KnowledgeObjectEnvelope.from_parts(
+        object_type="DeploymentTarget",
+        natural_key=str(target_ref),
+        scope={"project": "neurons", "target_ref": str(target_ref)},
+        title=f"Deployment target {target_ref}",
+        summary="Deployment target with private authority redacted.",
+        lifecycle_status="observed",
+        authority_lane="candidate",
+        verification_state="runtime_verified" if runtime_verified else "runtime_unverified",
+        review_state="needs_review",
+        content_hash=hash_payload(payload),
+        confidence={"score": 0.75 if runtime_verified else 0.45, "basis": "deployment_identity_preview"},
+        recommended_action="verify_runtime" if not runtime_verified else "review_runtime_truth",
+        payload=payload,
+    )
+    return [_stable_object(obj.to_dict())]
+
+
+def _runtime_surface_objects(*, runtime_surface: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    if not runtime_surface:
+        return []
+    surface_ref = public_safe_text(str(runtime_surface.get("surface_ref") or "runtime-surface"), max_chars=120)
+    surface_kind = public_safe_text(str(runtime_surface.get("surface_kind") or "unknown"), max_chars=80)
+    payload = {
+        "surface_ref": surface_ref,
+        "surface_kind": surface_kind,
+        "object_native_tools": bool(runtime_surface.get("object_native_tools")),
+        "protected_values_returned": False,
+    }
+    obj = KnowledgeObjectEnvelope.from_parts(
+        object_type="RuntimeSurface",
+        natural_key=surface_ref,
+        scope={"project": "neurons", "surface_ref": surface_ref},
+        title=f"Runtime surface {surface_ref}",
+        summary="Runtime surface capability view without protected connection values.",
+        lifecycle_status="observed",
+        authority_lane="candidate",
+        verification_state="unverified",
+        review_state="needs_review",
+        content_hash=hash_payload(payload),
+        confidence={"score": 0.65, "basis": "runtime_surface_preview"},
+        recommended_action="verify_runtime_surface",
+        payload=payload,
+    )
+    return [_stable_object(obj.to_dict())]
+
+
+def _runtime_live_evidence_gap_objects(
+    *,
+    deployment: Mapping[str, Any] | None,
+    runtime_unverified_count: int,
+) -> list[dict[str, Any]]:
+    if runtime_unverified_count <= 0:
+        return []
+    target_ref = public_safe_text(str((deployment or {}).get("target") or "deployment"), max_chars=120)
+    payload = {"reason": "runtime_evidence_unverified", "target_ref": target_ref}
+    obj = KnowledgeObjectEnvelope.from_parts(
+        object_type="LiveEvidenceGap",
+        natural_key=f"{target_ref}:runtime_evidence_unverified",
+        scope={"project": "neurons", "target_ref": target_ref},
+        title=f"Missing live evidence for {target_ref}",
+        summary="Runtime evidence is missing or unverified; merge and CI do not imply deployment.",
+        lifecycle_status="proposed",
+        authority_lane="proposal_only",
+        verification_state="runtime_unverified",
+        review_state="needs_review",
+        content_hash=hash_payload(payload),
+        confidence={"score": 0.8, "basis": "runtime_evidence_gap"},
+        recommended_action="verify_runtime",
+        payload=payload,
+    )
+    return [_stable_object(obj.to_dict())]
+
+
+def _deployed_artifact_identity(
+    *,
+    deployment: Mapping[str, Any] | None,
+    pull_request: Mapping[str, Any] | None,
+    runtime_verified: bool,
+) -> dict[str, Any]:
+    target_ref = public_safe_text(str((deployment or {}).get("target") or "deployment"), max_chars=120)
+    artifact_digest = public_safe_text(str((deployment or {}).get("artifact_digest") or ""), max_chars=96)
+    deployed_source_commit = public_safe_text(str((deployment or {}).get("deployed_source_commit") or ""), max_chars=80)
+    pr_head = public_safe_text(str((pull_request or {}).get("head_sha") or (pull_request or {}).get("commit_sha") or ""), max_chars=80)
+    return {
+        "target_ref": target_ref,
+        "artifact_digest": artifact_digest,
+        "deployed_source_commit": deployed_source_commit,
+        "source_commit_matches_pr_head": bool(deployed_source_commit and pr_head and deployed_source_commit == pr_head),
+        "verification_state": "runtime_verified" if runtime_verified else "runtime_unverified",
+    }
+
+
+def _runtime_action_permission_check(
+    *,
+    requested_action: Mapping[str, Any] | None,
+    actor: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not requested_action:
+        return None
+    action = public_safe_text(str(requested_action.get("action") or ""), max_chars=120)
+    approved_scope = bool((actor or {}).get("approved_scope"))
+    read_only_actions = {
+        "inspect_runtime_truth",
+        "query_runtime_truth",
+        "read_runtime_truth",
+        "verify_runtime_surface",
+    }
+    if action in read_only_actions:
+        return {
+            "permission": "allowed",
+            "action": action,
+            "reason": "action_not_restricted",
+            "authority_write_performed": False,
+            "protected_values_returned": False,
+        }
+    if not approved_scope:
+        return {
+            "permission": "denied",
+            "action": action,
+            "reason": "approved_scope_required",
+            "authority_write_performed": False,
+            "protected_values_returned": False,
+        }
+    return {
+        "permission": "allowed",
+        "action": action,
+        "reason": "approved_scope_present",
+        "authority_write_performed": False,
+        "protected_values_returned": False,
+    }
+
+
+def _runtime_permission_audit_trail(
+    *,
+    requested_action: Mapping[str, Any] | None,
+    actor: Mapping[str, Any] | None,
+    permission_check: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not requested_action or not permission_check:
+        return []
+    action = public_safe_text(str(requested_action.get("action") or ""), max_chars=120)
+    actor_role = public_safe_text(str((actor or {}).get("role") or "unknown"), max_chars=80)
+    actor_digest = hash_payload(
+        {
+            "agent": str((actor or {}).get("agent") or ""),
+            "role": actor_role,
+            "approved_scope": bool((actor or {}).get("approved_scope")),
+        }
+    )
+    return [
+        {
+            "schema_version": "runtime_permission_audit_event.v1",
+            "event_type": "permission_sensitive_runtime_action",
+            "action": action,
+            "permission": str(permission_check.get("permission") or ""),
+            "actor_role": actor_role,
+            "actor_digest": actor_digest,
+            "authority_write_performed": bool(permission_check.get("authority_write_performed")),
+            "protected_values_returned": False,
+        }
+    ]
 
 
 def _lane_counts(pack: Mapping[str, Any]) -> dict[str, int]:
