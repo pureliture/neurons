@@ -15,6 +15,12 @@ def _sanitized_live_evidence(**overrides):
         "tool_names": list(REQUIRED_RUNTIME_TOOL_NAMES),
         "agent_context_product": {
             "schema_version": "agent_context_product_pack.v1",
+            "sections": {
+                "style_preference": {"object_count": 1},
+                "active_work": {"object_count": 1},
+                "required_verification": {"object_count": 1},
+            },
+            "surface_policy": {"mutation_allowed": False},
             "tool_hints": [{"tool": name} for name in REQUIRED_RUNTIME_TOOL_NAMES],
         },
         "brain_objects_query_smokes": [
@@ -92,6 +98,7 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     assert claims["live.mcp.review_tools_loaded"]["status"] == "validated"
     assert claims["live.agent_context.tool_hints"]["status"] == "validated"
+    assert claims["live.agent_context.product_sections"]["status"] == "validated"
     assert claims["live.brain_objects_query.route_smokes"]["status"] == "validated"
     assert "temporal_work_recall" in claims["live.brain_objects_query.route_smokes"]["required_routes"]
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "validated"
@@ -134,6 +141,53 @@ def test_runtime_readiness_requires_temporal_work_recall_live_smoke():
     assert route_claim["status"] == "not_validated"
     assert "temporal_work_recall" in route_claim["missing_routes"]
     assert "live_brain_objects_query_route_smokes_unverified" in report["gaps"]
+
+
+def test_runtime_readiness_requires_live_agent_context_product_sections():
+    evidence = _sanitized_live_evidence(
+        agent_context_product={
+            "schema_version": "agent_context_product_pack.v1",
+            "tool_hints": [{"tool": name} for name in REQUIRED_RUNTIME_TOOL_NAMES],
+            "surface_policy": {"mutation_allowed": False},
+            "sections": {
+                "style_preference": {"object_count": 1},
+                "active_work": {"object_count": 0},
+                "required_verification": {"object_count": 1},
+            },
+        },
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "PASS_WITH_GAPS"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    section_claim = claims["live.agent_context.product_sections"]
+    assert section_claim["status"] == "not_validated"
+    assert section_claim["missing_sections"] == ["active_work"]
+    assert "live_agent_context_product_sections_unverified" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_live_agent_context_allows_mutation():
+    evidence = _sanitized_live_evidence(
+        agent_context_product={
+            "schema_version": "agent_context_product_pack.v1",
+            "tool_hints": [{"tool": name} for name in REQUIRED_RUNTIME_TOOL_NAMES],
+            "surface_policy": {"mutation_allowed": True},
+            "sections": {
+                "style_preference": {"object_count": 1},
+                "active_work": {"object_count": 1},
+                "required_verification": {"object_count": 1},
+            },
+        },
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    section_claim = claims["live.agent_context.product_sections"]
+    assert section_claim["status"] == "failed"
+    assert "live_agent_context_mutation_allowed" in report["gaps"]
 
 
 def test_runtime_readiness_fails_on_unexpected_production_mutation():

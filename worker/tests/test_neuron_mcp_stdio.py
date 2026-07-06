@@ -374,6 +374,12 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
         ],
         "agent_context_product": {
             "schema_version": "agent_context_product_pack.v1",
+            "sections": {
+                "style_preference": {"object_count": 1},
+                "active_work": {"object_count": 1},
+                "required_verification": {"object_count": 1},
+            },
+            "surface_policy": {"mutation_allowed": False},
             "tool_hints": [
                 {"tool": BRAIN_OBJECTS_QUERY_TOOL_NAME},
                 {"tool": BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME},
