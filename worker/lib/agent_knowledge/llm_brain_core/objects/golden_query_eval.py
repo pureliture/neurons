@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .._util import ensure_public_safe
+from .._util import ensure_public_safe, hash_payload
+from .knowledge_objects import EvidenceRef, KnowledgeEdge, KnowledgeObjectEnvelope
+from .object_packs import (
+    apply_approval_board_decisions,
+    apply_candidate_review_edits,
+    build_candidate_graph_review_pack,
+)
 
 GOLDEN_QUERIES = [
     "어제 이 repo에서 뭐 했어?",
@@ -176,6 +182,149 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
     return report
 
 
+def build_source_to_authority_quality_gate_report() -> dict[str, Any]:
+    review_pack = _source_to_authority_fixture_pack()
+    candidate_object = review_pack["objects"][0]
+    review_eval = evaluate_object_pack_response(
+        "새 자료를 candidate object, edge, evidence로 쪼개서 review surface에 올려줘.",
+        review_pack,
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+    edit_result = apply_candidate_review_edits(
+        review_pack,
+        edits=[
+            {
+                "action": "update_object",
+                "object_id": candidate_object["object_id"],
+                "fields": {
+                    "summary": "Reviewer clarified the candidate claim before promotion.",
+                    "recommended_action": "promote",
+                    "freshness": {"source_checked": True, "state": "freshness_checked"},
+                },
+            }
+        ],
+        reviewer={"id": "quality-gate-reviewer"},
+    )
+    edited_pack = edit_result["updated_pack"]
+    edit_eval = evaluate_object_pack_response(
+        "사용자가 candidate object/edge/evidence를 authority mutation 없이 고쳐줘.",
+        edited_pack,
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+    approval_result = apply_approval_board_decisions(
+        edited_pack,
+        decisions=[
+            {
+                "action": "promote",
+                "object_id": candidate_object["object_id"],
+                "reason": "Quality gate local/test approval preview.",
+                "approved_by": "quality-gate-reviewer",
+            }
+        ],
+        reviewer={"id": "quality-gate-reviewer"},
+        ledger_scope="local_test",
+    )
+    authority_pack = approval_result["updated_pack"]
+    authority_eval = evaluate_object_pack_response(
+        "승격된 object를 accepted/current authority read path에서 읽어줘.",
+        authority_pack,
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+    accepted_current_object = _first_lane_item(authority_pack, "accepted_current")
+    production_denial = apply_approval_board_decisions(
+        edited_pack,
+        decisions=[
+            {
+                "action": "promote",
+                "object_id": candidate_object["object_id"],
+                "reason": "Production promotion must stay gated.",
+                "approved_by": "quality-gate-reviewer",
+            }
+        ],
+        reviewer={"id": "quality-gate-reviewer"},
+        ledger_scope="production",
+    )
+    path_checks = [
+        {
+            "id": "source_to_candidate_graph",
+            "result": _pass_fail(
+                review_eval["passes"]
+                and bool(review_pack["lanes"]["candidate"])
+                and bool(review_pack["edges"])
+                and bool(review_pack["evidence"])
+                and review_pack["authority_write_performed"] is False
+                and review_pack["production_mutation_performed"] is False
+            ),
+            "quality_eval": review_eval,
+            "production_mutation_performed": False,
+        },
+        {
+            "id": "candidate_review_edit",
+            "result": _pass_fail(
+                edit_result["candidate_state_changed"] is True
+                and edit_result["authority_write_performed"] is False
+                and edit_result["production_mutation_performed"] is False
+                and edit_eval["passes"]
+            ),
+            "quality_eval": edit_eval,
+            "production_mutation_performed": False,
+        },
+        {
+            "id": "approval_board_local_test",
+            "result": _pass_fail(
+                approval_result["authority_write_performed"] is True
+                and approval_result["authority_write_scope"] == "local_test"
+                and approval_result["production_mutation_performed"] is False
+                and bool(authority_pack["lanes"]["accepted_current"])
+            ),
+            "authority_write_scope": approval_result["authority_write_scope"],
+            "production_mutation_performed": False,
+        },
+        {
+            "id": "authority_read_after_write",
+            "result": _pass_fail(
+                authority_eval["passes"]
+                and accepted_current_object.get("review_state") == "accepted"
+                and accepted_current_object.get("recommended_action") == "keep"
+            ),
+            "quality_eval": authority_eval,
+            "production_mutation_performed": False,
+        },
+        {
+            "id": "production_decision_denial",
+            "result": _pass_fail(
+                production_denial["permission"] == "denied"
+                and production_denial["production_mutation_performed"] is False
+                and production_denial["authority_write_performed"] is False
+                and production_denial["promotion_plan"]["production_mutation_performed"] is False
+            ),
+            "permission": production_denial["permission"],
+            "reason": production_denial["reason"],
+            "production_mutation_performed": False,
+        },
+    ]
+    hard_failures = [item["id"] for item in path_checks if item["result"] != "PASS"]
+    report = {
+        "schema_version": "source_to_authority_quality_gate_report.v1",
+        "status": "FAIL" if hard_failures else "PASS_WITH_GAPS",
+        "release_quality_gate": "blocked" if hard_failures else "not_green",
+        "required_axes": list(REQUIRED_QUALITY_AXES),
+        "path_checks": path_checks,
+        "hard_failures": hard_failures,
+        "gaps": [
+            "production_authority_gate_not_approved",
+            "live_runtime_read_path_unverified",
+            "production_quality_not_green",
+        ],
+        "production_mutation_performed": False,
+        "production_authoritative_memory_changed": False,
+        "local_test_authority_write_performed": approval_result["authority_write_performed"],
+        "authority_write_scope": approval_result["authority_write_scope"],
+    }
+    ensure_public_safe(report, "SourceToAuthorityQualityGateReport")
+    return report
+
+
 def evaluate_object_pack_response(
     query: str,
     response: Mapping[str, Any],
@@ -300,6 +449,65 @@ def _is_runtime_claim(query: str, response: Mapping[str, Any]) -> bool:
     route = str(response.get("route") or "").lower()
     text = f"{route} {query}".lower()
     return any(marker in text for marker in ("runtime", "deploy", "deployment", "배포", "live"))
+
+
+def _source_to_authority_fixture_pack() -> dict[str, Any]:
+    evidence = EvidenceRef.from_parts(
+        evidence_type="source_freshness",
+        authority_lane="reference_only",
+        verification_state="freshness_checked",
+        locator={"kind": "relative_repo_path", "value": "docs/specs/lbrain-source-fixture.md"},
+        content_hash=hash_payload({"fixture": "source-to-authority-quality-gate"}),
+        summary="Public-safe source fixture with freshness evidence.",
+    )
+    obj = KnowledgeObjectEnvelope.from_parts(
+        object_type="RepoDocument",
+        natural_key="docs/specs/lbrain-source-fixture.md",
+        scope={"project": "neurons"},
+        title="Source-to-authority fixture",
+        summary="AI extracted candidate claim.",
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="freshness_checked",
+        review_state="needs_review",
+        content_hash=hash_payload({"fixture": "candidate-object"}),
+        evidence_refs=[evidence.evidence_id],
+        confidence={"score": 0.82, "basis": "deterministic_quality_gate_fixture"},
+        recommended_action="review",
+        freshness={"source_checked": True, "state": "freshness_checked"},
+        payload={"path_ref": "docs/specs/lbrain-source-fixture.md"},
+    ).to_dict()
+    edge = KnowledgeEdge.from_parts(
+        edge_type="requires_evidence",
+        from_object_id=obj["object_id"],
+        to_object_id=obj["object_id"],
+        evidence_refs=[evidence.evidence_id],
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="freshness_checked",
+        confidence={"score": 0.77, "basis": "deterministic_quality_gate_fixture"},
+        payload={"source": "quality_gate_fixture"},
+    ).to_dict()
+    return build_candidate_graph_review_pack(
+        objects=[obj],
+        edges=[edge],
+        evidence=[evidence.to_view()],
+        extractor="quality_gate_fixture_extractor",
+        reviewer_actions=["promote", "reject", "hold", "request_more_evidence"],
+        consumer="codex",
+    )
+
+
+def _pass_fail(condition: bool) -> str:
+    return "PASS" if condition else "FAIL"
+
+
+def _first_lane_item(pack: Mapping[str, Any], lane: str) -> dict[str, Any]:
+    lanes = pack.get("lanes") if isinstance(pack.get("lanes"), Mapping) else {}
+    items = lanes.get(lane)
+    if isinstance(items, list) and items and isinstance(items[0], Mapping):
+        return dict(items[0])
+    return {}
 
 
 def _has_runtime_evidence_or_gap(response: Mapping[str, Any], evidence: list[Any], gaps: list[Any]) -> bool:

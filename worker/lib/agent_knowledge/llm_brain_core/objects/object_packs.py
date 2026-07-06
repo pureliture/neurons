@@ -388,6 +388,7 @@ def build_candidate_graph_review_pack(
     ]
     if missing_evidence:
         pack["gaps"].append("candidate_evidence_refs_missing")
+    _refresh_empty_lane_gaps(pack)
     pack["confidence"] = {
         "score": 0.75 if pack["approval_board"] else 0.0,
         "basis": "candidate_graph_review_pack",
@@ -463,6 +464,7 @@ def apply_candidate_review_edits(
     _rebuild_lanes(updated_pack)
     _rebuild_verification(updated_pack)
     _rebuild_candidate_review_surface(updated_pack)
+    _refresh_empty_lane_gaps(updated_pack)
     updated_hash = _candidate_graph_hash(
         [dict(obj) for obj in updated_pack.get("objects") or [] if isinstance(obj, Mapping)],
         [dict(edge) for edge in updated_pack.get("edges") or [] if isinstance(edge, Mapping)],
@@ -581,6 +583,7 @@ def apply_approval_board_decisions(
     _rebuild_lanes(updated_pack)
     _rebuild_verification(updated_pack)
     _rebuild_candidate_review_surface(updated_pack)
+    _refresh_empty_lane_gaps(updated_pack)
     updated_hash = _candidate_graph_hash(
         [dict(obj) for obj in updated_pack.get("objects") or [] if isinstance(obj, Mapping)],
         [dict(edge) for edge in updated_pack.get("edges") or [] if isinstance(edge, Mapping)],
@@ -1012,6 +1015,28 @@ def _rebuild_candidate_review_surface(pack: dict[str, Any]) -> None:
         )
     pack["approval_board"] = board
     pack["recommended_actions"] = recommended_actions
+
+
+def _refresh_empty_lane_gaps(pack: dict[str, Any]) -> None:
+    lanes = pack.get("lanes") if isinstance(pack.get("lanes"), Mapping) else {}
+    lane_names = set(_empty_pack("candidate_graph_review")["lanes"])
+    existing_gaps = [
+        str(item)
+        for item in pack.get("gaps") or []
+        if not _is_empty_lane_gap(str(item), lane_names=lane_names)
+    ]
+    for lane, value in lanes.items():
+        lane_name = str(lane or "")
+        if lane_name in lane_names and isinstance(value, list) and not value:
+            existing_gaps.append(f"{lane_name} objects empty")
+    pack["gaps"] = existing_gaps
+
+
+def _is_empty_lane_gap(gap: str, *, lane_names: set[str]) -> bool:
+    suffix = " objects empty"
+    if not gap.endswith(suffix):
+        return False
+    return gap[: -len(suffix)] in lane_names
 
 
 def _safe_edit_value(field_name: str, value: Any) -> Any:
