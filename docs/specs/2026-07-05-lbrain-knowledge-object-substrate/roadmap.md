@@ -2,17 +2,17 @@
 
 ## Status
 
-This roadmap is evidence-gated, not calendar-gated.
+이 roadmap은 calendar가 아니라 evidence gate를 기준으로 진행합니다.
 
-It does not assign percentage completion. The first formal denominator starts here: each phase is complete only when its gate evidence exists and the production/read-path state is honestly labeled.
+이 문서는 percentage completion을 부여하지 않습니다. 첫 formal denominator는 여기서 시작합니다: 각 phase는 gate evidence가 있고 production/read-path 상태가 정직하게 label될 때만 완료됩니다.
 
 Current state:
 
-- Phase 1 substrate implementation: complete in local/test scope.
-- Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates passed, deployed HTTP MCP runtime and configured endpoint validated, current Codex session tool registry still missing object-native tools, and current-source-main image identity is not proven live.
-- P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, latest configured-endpoint smoke still passes with denied/no-mutation production writes, but the current Codex session's `mcp__lbrain` namespace still does not expose them and the live MCP image is not proven to include the #73/current-main source refactor.
-- Product activation: not complete; configured agent read path refresh remains required.
-- UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
+- Phase 1 substrate implementation: local/test scope에서는 완료되었습니다.
+- Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates는 통과했고 deployed HTTP MCP runtime 및 configured endpoint는 검증되었지만, 현재 Codex session tool registry에는 object-native tools가 아직 없으며 current-source-main image identity가 live 상태임은 증명되지 않았습니다.
+- P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP는 object-native tools를 노출하고, 최신 configured-endpoint smoke는 production write에 대해 denied/no-mutation으로 통과하지만, 현재 Codex session의 `mcp__lbrain` namespace는 아직 이를 노출하지 않으며 live MCP image가 #73/current-main source refactor를 포함하는지는 증명되지 않았습니다.
+- Product activation: 완료되지 않았습니다; configured agent read path refresh가 여전히 필요합니다.
+- UI/object browser: product activation prerequisite는 아니지만, 이후 product surface로 열어 둡니다.
 
 Roadmap lock state:
 
