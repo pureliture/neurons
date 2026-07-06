@@ -366,6 +366,7 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
 
 def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_without_mutation(tmp_path: Path):
     service = _service(tmp_path)
+    tools = {tool["name"]: tool for tool in list_tools()}
     evidence = {
         "schema_version": "source_to_candidate_runtime_evidence.v1",
         "tool_names": [
@@ -420,6 +421,16 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
                 "decision_write_performed": False,
                 "authority_write_performed": False,
             },
+        },
+        "tool_schemas": {
+            BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: tools[BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME],
+            BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: tools[BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME],
+        },
+        "production_authority_gate": {
+            "runtime_flag": "--allow-object-authority-production-writes",
+            "default_enabled": False,
+            "per_call_gate_required": True,
+            "production_mutation_performed": False,
         },
         "deployed_identity": {
             "contains_expected_commit": True,
