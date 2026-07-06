@@ -400,6 +400,8 @@ P10 should not force premature object semantics while P1/P5/P8/P9 production gat
 
 - `git diff --check`
 - docs sensitive-pattern scan
+- focused worker stack smoke
+- no production mutation performed
 
 Closes #<ISSUE_NUMBER>
 ```
