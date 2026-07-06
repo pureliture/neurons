@@ -10,6 +10,7 @@ from agent_knowledge.llm_brain_core.objects.extraction_pipeline import (
     run_runtime_truth_extraction_preview,
     run_session_detail_extraction_preview,
     run_session_project_rollup_preview,
+    run_source_to_candidate_graph_activation_preview,
     run_work_unit_extraction_preview,
 )
 
@@ -38,6 +39,37 @@ def _manifest():
                 "summary": "Manual source with missing URL.",
             },
         ],
+    }
+
+
+def _source_to_candidate_corpus_status():
+    return {
+        "schema_version": "brain_corpus_status.v1",
+        "corpus_id": "rc:test-source-to-candidate",
+        "source_count": 2,
+        "reference_object_count": 2,
+        "extraction_run_count": 1,
+        "storage_modes": {"managed_snapshot": 2},
+        "manifest_hashes": ["sha256:" + "8" * 64],
+        "document_sources": [
+            {
+                "source_id": "source-a",
+                "title": "Source A",
+                "content_hash": "sha256:" + "1" * 64,
+                "source_url_status": "verified",
+                "verification_state": "source_hash_verified",
+                "normalized_path_ref": "sources/source-a.md",
+            },
+            {
+                "source_id": "source-b",
+                "title": "Source B",
+                "content_hash": "sha256:" + "2" * 64,
+                "source_url_status": "verified",
+                "verification_state": "source_hash_verified",
+                "normalized_path_ref": "sources/source-b.md",
+            },
+        ],
+        "gaps": [],
     }
 
 
@@ -94,6 +126,42 @@ def test_extractor_registry_reports_implemented_and_gap_extractors():
     ]
     assert by_name["session_detail"]["status"] == "implemented"
     assert by_name["session_detail"]["output_object_types"] == ["Session"]
+
+
+def test_source_to_candidate_graph_activation_preview_resolves_projection_join_gap_when_evidence_present():
+    result = run_source_to_candidate_graph_activation_preview(
+        corpus_status=_source_to_candidate_corpus_status(),
+        project="neurons",
+        runtime_evidence={
+            "projection_join": {
+                "schema_version": "object_extraction_projection_join_preview.v1",
+                "evidence_class": "runtime_projection_join",
+                "status": "pass",
+                "edge_count": 1,
+                "production_mutation_performed": False,
+            }
+        },
+    )
+
+    assert result["status"] == "PASS_WITH_GAPS"
+    assert "live_projection_join_unproven" not in result["gaps"]
+    assert "approval_board_runtime_integration_unproven" in result["gaps"]
+    assert "production_authority_write_denied" in result["gaps"]
+
+    invalid_edge_count = run_source_to_candidate_graph_activation_preview(
+        corpus_status=_source_to_candidate_corpus_status(),
+        project="neurons",
+        runtime_evidence={
+            "projection_join": {
+                "schema_version": "object_extraction_projection_join_preview.v1",
+                "evidence_class": "runtime_projection_join",
+                "status": "pass",
+                "edge_count": "unknown",
+                "production_mutation_performed": False,
+            }
+        },
+    )
+    assert "live_projection_join_unproven" in invalid_edge_count["gaps"]
 
 
 def test_reference_corpus_extraction_preview_creates_deterministic_objects_edges_and_chunk_preview():
