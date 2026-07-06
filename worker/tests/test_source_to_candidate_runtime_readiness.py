@@ -16,11 +16,14 @@ def _sanitized_live_evidence(**overrides):
         "tool_names": list(REQUIRED_RUNTIME_TOOL_NAMES),
         "agent_context_product": {
             "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
             "sections": {
                 "style_preference": {"object_count": 1},
                 "active_work": {"object_count": 1},
                 "required_verification": {"object_count": 1},
             },
+            "degraded_mode": {"active": True, "gaps": ["runtime_evidence_unverified"]},
+            "missing_evidence_before_promotion": ["runtime_evidence_unverified"],
             "surface_policy": {"mutation_allowed": False},
             "tool_hints": _safe_tool_hints(),
         },
@@ -222,6 +225,42 @@ def test_runtime_readiness_fails_when_approval_board_hint_lacks_approved_scope_b
     assert "brain_approval_board_decide_tool_hint_approved_scope_blocker_missing" in report["gaps"]
 
 
+def test_runtime_readiness_fails_when_runtime_readiness_hint_omits_sanitized_target_policy():
+    tool_hints = _safe_tool_hints()
+    for hint in tool_hints:
+        if hint["tool"] == "brain_source_to_candidate_runtime_readiness":
+            hint["safe_targets"] = ["runtime_evidence"]
+            hint["blocked_targets"] = ["production_mutation"]
+
+    evidence = _sanitized_live_evidence(
+        agent_context_product={
+            "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
+            "sections": {
+                "style_preference": {"object_count": 1},
+                "active_work": {"object_count": 1},
+                "required_verification": {"object_count": 1},
+            },
+            "degraded_mode": {"active": True, "gaps": ["runtime_evidence_unverified"]},
+            "missing_evidence_before_promotion": ["runtime_evidence_unverified"],
+            "surface_policy": {"mutation_allowed": False},
+            "tool_hints": tool_hints,
+        },
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    assert (
+        "brain_source_to_candidate_runtime_readiness_tool_hint_sanitized_evidence_target_missing"
+        in report["gaps"]
+    )
+    assert (
+        "brain_source_to_candidate_runtime_readiness_tool_hint_raw_private_blocker_missing"
+        in report["gaps"]
+    )
+
+
 def test_runtime_readiness_fails_when_object_authority_gate_schema_is_missing():
     evidence = _sanitized_live_evidence(
         tool_schemas={
@@ -351,7 +390,10 @@ def test_runtime_readiness_requires_live_agent_context_product_sections():
     evidence = _sanitized_live_evidence(
         agent_context_product={
             "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
             "tool_hints": _safe_tool_hints(),
+            "degraded_mode": {"active": True, "gaps": ["runtime_evidence_unverified"]},
+            "missing_evidence_before_promotion": ["runtime_evidence_unverified"],
             "surface_policy": {"mutation_allowed": False},
             "sections": {
                 "style_preference": {"object_count": 1},
@@ -371,11 +413,41 @@ def test_runtime_readiness_requires_live_agent_context_product_sections():
     assert "live_agent_context_product_sections_unverified" in report["gaps"]
 
 
+def test_runtime_readiness_fails_when_live_agent_context_product_contract_is_incomplete():
+    evidence = _sanitized_live_evidence(
+        agent_context_product={
+            "schema_version": "context_pack.v1",
+            "consumer": "unknown-agent",
+            "tool_hints": _safe_tool_hints(),
+            "surface_policy": {"mutation_allowed": False},
+            "sections": {
+                "style_preference": {"object_count": 1},
+                "active_work": {"object_count": 1},
+                "required_verification": {"object_count": 1},
+            },
+        },
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    section_claim = claims["live.agent_context.product_sections"]
+    assert section_claim["status"] == "failed"
+    assert "live_agent_context_product_schema_mismatch" in report["gaps"]
+    assert "live_agent_context_consumer_unknown" in report["gaps"]
+    assert "live_agent_context_degraded_gap_disclosure_missing" in report["gaps"]
+    assert "live_agent_context_missing_evidence_before_promotion_missing" in report["gaps"]
+
+
 def test_runtime_readiness_fails_when_live_agent_context_allows_mutation():
     evidence = _sanitized_live_evidence(
         agent_context_product={
             "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
             "tool_hints": _safe_tool_hints(),
+            "degraded_mode": {"active": True, "gaps": ["runtime_evidence_unverified"]},
+            "missing_evidence_before_promotion": ["runtime_evidence_unverified"],
             "surface_policy": {"mutation_allowed": True},
             "sections": {
                 "style_preference": {"object_count": 1},
