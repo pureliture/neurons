@@ -2,22 +2,25 @@
 
 ## Status
 
-This roadmap is evidence-gated, not calendar-gated.
+이 roadmap은 calendar가 아니라 evidence gate를 기준으로 진행합니다.
 
-It does not assign percentage completion. The first formal denominator starts here: each phase is complete only when its gate evidence exists and the production/read-path state is honestly labeled.
+이 문서는 percentage completion을 부여하지 않습니다. 첫 formal denominator는 여기서 시작합니다: 각 phase는 gate evidence가 있고 production/read-path 상태가 정직하게 label될 때만 완료됩니다.
 
 Current state:
 
-- Phase 1 substrate implementation: complete in local/test scope.
-- Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates passed, deployed HTTP MCP runtime and configured endpoint validated, current Codex session tool registry still missing object-native tools, and current-source-main image identity is not proven live.
-- P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, latest configured-endpoint smoke still passes with denied/no-mutation production writes, but the current Codex session's `mcp__lbrain` namespace still does not expose them and the live MCP image is not proven to include the #73/current-main source refactor.
-- P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, and production-denial evidence exist, but real private Palantir manifest ingest and production ingest approval remain gaps.
-- P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / local_validated; local/test reference corpus extraction preview creates deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, and blocked-extraction gaps; repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, and broader evaluator suite previews have local/test evaluator evidence; live graph/Qdrant projection join remains unproven.
-- P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / local_validated; local/test decision commit records authority state/audit history, object queries surface local/test stale, superseded, retired, archive-only, and rejected states, object explain returns local/test decision history, and production denial returns a read-only promotion plan while authority mutation remains denied.
-- P5 Continuous Golden Query Quality Gates: `in_progress`; phase coverage report lists P1-P10 golden query families and explicitly keeps the release quality gate `not_green`.
-- P6 Session, Device, Project, And Work-Unit 360: `PASS_WITH_GAPS` / local_validated; local/test session project rollup preview creates Device/Session/Repository/Branch/WorkUnit/Spec/PullRequest/Commit objects, separates same-device from all-device fixture rollups, and emits a safe handoff pack.
-- Product activation: not complete; configured agent read path refresh remains required.
-- UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
+- Phase 1 substrate implementation: local/test scope에서는 완료되었습니다.
+- Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates는 통과했고 deployed HTTP MCP runtime 및 configured endpoint는 검증되었지만, 현재 Codex session tool registry에는 object-native tools가 아직 없으며 current-source-main image identity가 live 상태임은 증명되지 않았습니다.
+- P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP는 object-native tools를 노출하고, 최신 configured-endpoint smoke는 production write에 대해 denied/no-mutation으로 통과하지만, 현재 Codex session의 `mcp__lbrain` namespace는 아직 이를 노출하지 않으며 live MCP image가 #73/current-main source refactor를 포함하는지는 증명되지 않았습니다.
+- P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, production-denial evidence는 존재하지만, real private Palantir manifest ingest 및 production ingest approval은 여전히 gap입니다.
+- P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / `local_validated`; local/test reference corpus extraction preview는 deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, blocked-extraction gaps를 생성합니다. repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, broader evaluator suite previews에는 local/test evaluator evidence가 있지만, live graph/Qdrant projection join은 아직 증명되지 않았습니다.
+- P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / `local_validated`; local/test decision commit은 authority state/audit history를 기록하고, object queries는 local/test stale, superseded, retired, archive-only, rejected states를 surface하며, object explain은 local/test decision history를 반환합니다. production denial은 read-only promotion plan을 반환하고 authority mutation은 계속 denied 상태입니다.
+- P5 Continuous Golden Query Quality Gates: `in_progress`; phase coverage report는 P1-P10 golden query families를 나열하고 release quality gate를 명시적으로 `not_green` 상태로 유지합니다.
+- P6 Session, Device, Project, And Work-Unit 360: `PASS_WITH_GAPS` / `local_validated`; local/test session project rollup preview는 Device/Session/Repository/Branch/WorkUnit/Spec/PullRequest/Commit objects를 생성하고, same-device와 all-device fixture rollup을 분리하며, safe handoff pack을 반환합니다. live multi-device runtime evidence는 아직 증명되지 않았습니다.
+- P7 Preference, Style, And Artifact Memory: `PASS_WITH_GAPS` / `local_validated`; local/test artifact preference pack은 accepted/proposal lanes, profile objects, no-UI HTML artifact check를 검증하지만, live agent context pack 및 production authority promotion은 아직 gap입니다.
+- P8 Runtime Truth, Security, And Deployment Authority: `PASS_WITH_GAPS` / `local_validated`; local/test runtime authority policy, artifact identity join, private authority redaction, and denial/no-mutation checks pass, but live rollout identity and production permission audit remain gaps.
+- P9 Agent Context Productization: `PASS_WITH_GAPS` / `local_validated`; local/test consumer compact packs, degraded/stale disclosure, reference object lane, surface policy, and proposal-safe action hints pass, but production startup/read path and runtime enforcement remain gaps.
+- Product activation: 완료되지 않았습니다; configured agent read path refresh가 여전히 필요합니다.
+- UI/object browser: product activation prerequisite는 아니지만, 이후 product surface로 열어 둡니다.
 
 Roadmap lock state:
 
@@ -793,9 +796,9 @@ Current accounting:
 | P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; deployed/configured endpoint validated, current Codex session tool registry gap remains |
 | P2 Living Reference Corpus Store | `local_validated` | `PASS_WITH_GAPS`; local/test store and status gates pass, real private manifest ingest and production approval remain gaps |
 | P3 Processing And Object Extraction Pipeline | `local_validated` | `PASS_WITH_GAPS`; local/test reference corpus extraction preview, repo-document extraction preview, documentation cleanup strategy comparison, runtime truth extraction preview, preference/style extraction preview, work-unit extraction preview, session-detail extraction preview, PR/commit detail extraction preview, graph/search projection join preview, and broader evaluator suite preview pass; live projection join remains a gap |
-| P4 Review Queue And Authority Promotion | `local_validated` | `PASS_WITH_GAPS`; local/test decision commit, authority state overlay, explain history, and production denial plan pass; approved production pilot and authority write gate remain gaps |
-| P5 Continuous Golden Query Quality Gates | `in_progress` | `PASS_WITH_GAPS`; strict phase coverage and quality-axis evaluator exist, release gate remains not green while future phases continue |
-| P6 Session, Device, Project, And Work-Unit 360 | `local_validated` | `PASS_WITH_GAPS`; local/test session-device-project rollup and safe handoff pack pass, live multi-device/project rollup remains unproven |
+| P4 Review Queue And Authority Promotion | `local_validated` | `PASS_WITH_GAPS`; local/test authority state and audit gates pass, production authority mutation remains denied |
+| P5 Continuous Golden Query Quality Gates | `in_progress` | phase coverage exists and release quality gate remains `not_green` |
+| P6 Session, Device, Project, And Work-Unit 360 | `local_validated` | `PASS_WITH_GAPS`; local/test rollup and handoff gates pass, live multi-device runtime evidence remains a gap |
 | P7 Preference, Style, And Artifact Memory | `local_validated` | `PASS_WITH_GAPS`; local/test artifact preference pack lanes and no-UI HTML artifact check pass, live agent context pack and production authority promotion remain gaps |
 | P8 Runtime Truth, Security, And Deployment Authority | `local_validated` | `PASS_WITH_GAPS`; local/test runtime authority policy, artifact identity join, private authority redaction, and denial/no-mutation checks pass; live rollout identity and production permission audit remain gaps |
 | P9 Agent Context Productization | `local_validated` | `PASS_WITH_GAPS`; local/test consumer compact packs, degraded/stale disclosure, surface policy, and proposal-safe action hints pass; production startup/read path and runtime enforcement remain gaps |
@@ -803,27 +806,26 @@ Current accounting:
 
 Delivery integration status:
 
-- P1 through P10 continuation branches are pushed as phase-specific branches and all include PR #73 merge commit `c3f3e34`.
-- No PR currently exists for the `codex/p1` through `codex/p10` continuation branches.
-- PR creation remains a delivery gap because the repository PR workflow requires a linked issue or explicit approval before GitHub mutation.
-- This gap does not convert local/test evidence into production readiness and does not close P1 live read-path gaps.
-- PR-ready titles, body previews, stack bases, and creation commands are captured in `pr-delivery-package.md`.
-- Phase-specific linked issue draft titles and labels are also captured there so a single closing issue is not accidentally reused across the full stack.
+- PR #84 through PR #92 are merged into `main`; PR #93 is the active P10 defer-decision PR.
+- Final head and merge SHAs below are GitHub delivery evidence only. They are not deploy, live runtime, or production readiness evidence.
+- P1 through P9 phase branches were cleaned up after merge; P10's active PR head is intentionally not hard-coded because this document edits that branch.
+- This delivery record does not close P1 configured-agent namespace or current-main image identity gaps.
+- Historical PR body previews and issue drafts remain in `pr-delivery-package.md`; use the delivery record below as the current SHA source.
 
-PR-ready branch stack:
+Merged PR delivery record:
 
-| Phase | Branch | Head | Recommended PR base |
-| --- | --- | --- | --- |
-| P1 Production MCP Activation | `codex/p1-production-mcp-activation-live` | `0b2cf1d` | `main` |
-| P2 Living Reference Corpus Store | `codex/p2-living-reference-corpus-store` | `f1572b4` | `codex/p1-production-mcp-activation-live` |
-| P3 Processing And Object Extraction Pipeline | `codex/p3-processing-object-extraction-pipeline` | `52aaed1` | `codex/p2-living-reference-corpus-store` |
-| P4 Review Queue And Authority Promotion | `codex/p4-review-authority-promotion` | `d0b7a44` | `codex/p3-processing-object-extraction-pipeline` |
-| P5 Continuous Golden Query Quality Gates | `codex/p5-continuous-golden-query-quality` | `42a9f90` | `codex/p4-review-authority-promotion` |
-| P6 Session, Device, Project, And Work-Unit 360 | `codex/p6-session-device-project-workunit-360` | `ce2518a` | `codex/p5-continuous-golden-query-quality` |
-| P7 Preference, Style, And Artifact Memory | `codex/p7-preference-style-artifact-memory` | `2e97dcb` | `codex/p6-session-device-project-workunit-360` |
-| P8 Runtime Truth, Security, And Deployment Authority | `codex/p8-runtime-truth-security-deployment-authority` | `77fdc11` | `codex/p7-preference-style-artifact-memory` |
-| P9 Agent Context Productization | `codex/p9-agent-context-productization` | `4d44ec2` | `codex/p8-runtime-truth-security-deployment-authority` |
-| P10 UI And Object Browser Surface | `codex/p10-ui-object-browser-defer-decision` | `193a514` | `codex/p9-agent-context-productization` |
+| Phase | PR | Branch | Final/current head | Merge commit | Base |
+| --- | --- | --- | --- | --- | --- |
+| P1 Production MCP Activation | #84 | `codex/p1-production-mcp-activation-live` | `9cf7f9b` | `dea6f8d` | `main` |
+| P2 Living Reference Corpus Store | #85 | `codex/p2-living-reference-corpus-store` | `c0695ba` | `7295092` | `main` |
+| P3 Processing And Object Extraction Pipeline | #86 | `codex/p3-processing-object-extraction-pipeline` | `09b88a2` | `2740766` | `main` |
+| P4 Review Queue And Authority Promotion | #87 | `codex/p4-review-authority-promotion` | `db8caec` | `45eb6cd` | `main` |
+| P5 Continuous Golden Query Quality Gates | #88 | `codex/p5-continuous-golden-query-quality` | `912e3bf` | `9d0c3cc` | `main` |
+| P6 Session, Device, Project, And Work-Unit 360 | #89 | `codex/p6-session-device-project-workunit-360` | `cb1a016` | `9f4969b` | `main` |
+| P7 Preference, Style, And Artifact Memory | #90 | `codex/p7-preference-style-artifact-memory` | `9409b4a` | `af08043` | `main` |
+| P8 Runtime Truth, Security, And Deployment Authority | #91 | `codex/p8-runtime-truth-security-deployment-authority` | `8191d48` | `4ace498` | `main` |
+| P9 Agent Context Productization | #92 | `codex/p9-agent-context-productization` | `c6854e3` | `2d9c92a` | `main` |
+| P10 UI And Object Browser Surface | #93 | `codex/p10-ui-object-browser-defer-decision` | verify live before merge | pending | `main` |
 
 PR creation gate:
 

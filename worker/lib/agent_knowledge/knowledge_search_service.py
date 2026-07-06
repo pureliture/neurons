@@ -91,6 +91,7 @@ class KnowledgeSearchService:
         mirror_search=None,
         allow_restricted_steward: bool = False,
         allow_steward_auto_accept: bool = False,
+        allow_local_test_object_authority_writes: bool = False,
     ):
         self.ledger = ledger
         self.retired_index_bridge = retired_index_bridge
@@ -103,6 +104,7 @@ class KnowledgeSearchService:
         # human/manual gate 또는 명시적 test-only path 에서만 연다.
         self.allow_restricted_steward = bool(allow_restricted_steward)
         self.allow_steward_auto_accept = bool(allow_steward_auto_accept)
+        self.allow_local_test_object_authority_writes = bool(allow_local_test_object_authority_writes)
         # M8 read cutover: a Qdrant-backed (query, brain_id) -> list[dict] callable
         # that fills brain.query's archive/evidence lanes from the Qdrant searchable
         # mirror. When set it REPLACES the RetiredIndexBridge archive search (which is off in the
@@ -194,10 +196,12 @@ class KnowledgeSearchService:
         if not isinstance(object_pack, dict):
             return response
         objects = [dict(obj) for obj in object_pack.get("objects", []) if isinstance(obj, Mapping)]
+        object_ids = [str(obj.get("object_id") or "") for obj in objects if obj.get("object_id")]
+        states = self.ledger.get_object_authority_states(object_ids) if object_ids else {}
         overlay_count = 0
         for obj in objects:
             object_id = str(obj.get("object_id") or "")
-            state = self.ledger.get_object_authority_state(object_id)
+            state = states.get(object_id)
             if not state:
                 continue
             _apply_object_authority_state(obj, state)

@@ -656,6 +656,7 @@ def _with_artifact_memory_authority(
             "artifact_memory_kind": item_kind,
             "source_memory_id": public_safe_text(str(item.get("memory_id") or ""), max_chars=180),
             "raw_return_capability": "denied",
+            "scope": public_safe_text(str(item.get("scope") or item.get("repo_scope") or ""), max_chars=180),
         }
     )
     enriched["payload"] = payload
@@ -743,7 +744,7 @@ def _artifact_profile_objects(
     style_objects: list[Mapping[str, Any]],
     source_evidence_refs: list[str],
 ) -> list[dict[str, Any]]:
-    html_objects = [obj for obj in preference_objects if _text_mentions(obj, ("html", "review"))]
+    html_objects = [obj for obj in preference_objects if _text_mentions_all(obj, ("html", "review"))]
     visualization_objects = [obj for obj in preference_objects if _text_mentions(obj, ("visualization", "visual"))]
     return [
         _artifact_profile_object(
@@ -865,7 +866,7 @@ def _artifact_drift_review_suggestions(
     style_objects: list[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     suggestions: list[dict[str, Any]] = []
-    if any(_text_mentions(obj, ("html", "review")) for obj in preference_objects):
+    if any(_text_mentions_all(obj, ("html", "review")) for obj in preference_objects):
         suggestions.append(
             {
                 "check": "html_review_preference_check",
@@ -896,14 +897,26 @@ def _artifact_drift_review_suggestions(
 
 
 def _text_mentions(obj: Mapping[str, Any], terms: tuple[str, ...]) -> bool:
+    text = _object_search_text(obj)
+    return any(term in text for term in terms)
+
+
+def _text_mentions_all(obj: Mapping[str, Any], terms: tuple[str, ...]) -> bool:
+    text = _object_search_text(obj)
+    return all(term in text for term in terms)
+
+
+def _object_search_text(obj: Mapping[str, Any]) -> str:
+    payload = obj.get("payload") if isinstance(obj.get("payload"), Mapping) else {}
     text = " ".join(
         [
             str(obj.get("title") or ""),
             str(obj.get("summary") or ""),
-            str((obj.get("payload") or {}).get("scope") or "") if isinstance(obj.get("payload"), Mapping) else "",
+            str(payload.get("scope") or ""),
+            str(payload.get("repo_scope") or ""),
         ]
     ).casefold()
-    return any(term in text for term in terms)
+    return text
 
 
 def _artifact_review_preference_check(
@@ -922,7 +935,7 @@ def _artifact_review_preference_check(
     matched_titles = [
         str(obj.get("title") or "")
         for obj in accepted_objects
-        if obj.get("object_type") == "ArtifactPreference" and _text_mentions(obj, ("html", "review"))
+        if obj.get("object_type") == "ArtifactPreference" and _text_mentions_all(obj, ("html", "review"))
     ]
     assertions: list[str] = []
     failures: list[str] = []
@@ -1148,13 +1161,15 @@ def run_session_project_rollup_preview(
     safe_project = public_safe_text(project or repository, max_chars=120)
     requested_device = public_safe_text(requesting_device_id_hash, max_chars=180)
     safe_scope = scope if scope in {"all_devices", "same_device"} else "all_devices"
-    visible_sessions = [
-        session
-        for session in sessions
-        if safe_scope == "all_devices"
-        or not requested_device
-        or public_safe_text(str(session.get("device_id_hash") or ""), max_chars=180) == requested_device
-    ]
+    if safe_scope == "same_device":
+        visible_sessions = [
+            session
+            for session in sessions
+            if requested_device
+            and public_safe_text(str(session.get("device_id_hash") or ""), max_chars=180) == requested_device
+        ]
+    else:
+        visible_sessions = list(sessions)
     repository_object = _rollup_object(
         object_type="Repository",
         natural_key=safe_repository,
@@ -1316,7 +1331,7 @@ def run_pr_commit_extraction_preview(
     commit_objects = [_stable_object(_commit_object(item, repository=repository).to_dict()) for item in commits]
     test_objects = [_stable_object(_test_run_object(item, repository=repository).to_dict()) for item in test_runs]
     test_by_id = {
-        str(item.get("test_id") or item.get("id") or item.get("ref") or ""): obj
+        public_safe_text(str(item.get("test_id") or item.get("id") or item.get("ref") or ""), max_chars=160): obj
         for item, obj in zip(test_runs, test_objects, strict=False)
     }
     edges = [
@@ -1805,6 +1820,8 @@ def _runtime_ci_status_objects(
 ) -> list[dict[str, Any]]:
     objects: list[dict[str, Any]] = []
     for status in ci_statuses:
+        if not isinstance(status, Mapping):
+            continue
         name = public_safe_text(str(status.get("name") or "ci"), max_chars=120)
         conclusion = public_safe_text(str(status.get("conclusion") or status.get("state") or "UNKNOWN"), max_chars=40)
         commit_sha = public_safe_text(str(status.get("commit_sha") or ""), max_chars=80)
@@ -1933,7 +1950,7 @@ def _deployed_artifact_identity(
     target_ref = public_safe_text(str((deployment or {}).get("target") or "deployment"), max_chars=120)
     artifact_digest = public_safe_text(str((deployment or {}).get("artifact_digest") or ""), max_chars=96)
     deployed_source_commit = public_safe_text(str((deployment or {}).get("deployed_source_commit") or ""), max_chars=80)
-    pr_head = public_safe_text(str((pull_request or {}).get("head_sha") or ""), max_chars=80)
+    pr_head = public_safe_text(str((pull_request or {}).get("head_sha") or (pull_request or {}).get("commit_sha") or ""), max_chars=80)
     return {
         "target_ref": target_ref,
         "artifact_digest": artifact_digest,
@@ -1952,7 +1969,21 @@ def _runtime_action_permission_check(
         return None
     action = public_safe_text(str(requested_action.get("action") or ""), max_chars=120)
     approved_scope = bool((actor or {}).get("approved_scope"))
-    if action == "promote_runtime_authority" and not approved_scope:
+    read_only_actions = {
+        "inspect_runtime_truth",
+        "query_runtime_truth",
+        "read_runtime_truth",
+        "verify_runtime_surface",
+    }
+    if action in read_only_actions:
+        return {
+            "permission": "allowed",
+            "action": action,
+            "reason": "action_not_restricted",
+            "authority_write_performed": False,
+            "protected_values_returned": False,
+        }
+    if not approved_scope:
         return {
             "permission": "denied",
             "action": action,
@@ -2248,10 +2279,11 @@ def _rollup_object(
     summary: str,
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:
+    resolved_key = natural_key or object_type
     return _stable_object(
         KnowledgeObjectEnvelope.from_parts(
             object_type=object_type,
-            natural_key=natural_key or object_type,
+            natural_key=resolved_key,
             scope=scope,
             title=title or object_type,
             summary=summary,
@@ -2259,7 +2291,7 @@ def _rollup_object(
             authority_lane="candidate",
             verification_state="source_hash_verified",
             review_state="needs_review",
-            content_hash=hash_payload({"object_type": object_type, "natural_key": natural_key, "scope": dict(scope)}),
+            content_hash=hash_payload({"object_type": object_type, "natural_key": resolved_key, "scope": dict(scope)}),
             evidence_refs=[],
             confidence={"score": 0.6, "basis": "session_rollup_metadata"},
             recommended_action="review",
@@ -2347,8 +2379,8 @@ def _session_project_rollup_edges(
             {"repository": repository_object["title"], "branch": branch_object["title"]},
         )
     ]
-    devices_by_id = {str(obj.get("payload", {}).get("device_id_hash") or ""): obj for obj in device_objects}
-    work_units_by_id = {str(obj.get("payload", {}).get("work_unit_id") or ""): obj for obj in work_unit_objects}
+    devices_by_id = {str((obj.get("payload") or {}).get("device_id_hash") or ""): obj for obj in device_objects}
+    work_units_by_id = {str((obj.get("payload") or {}).get("work_unit_id") or ""): obj for obj in work_unit_objects}
     for session, session_obj in zip(visible_sessions, session_objects, strict=False):
         evidence_refs = [str(item) for item in session_obj.get("evidence_refs") or []]
         device_id = public_safe_text(str(session.get("device_id_hash") or "device:unknown"), max_chars=180)
@@ -2459,6 +2491,8 @@ def _session_project_rollup_gaps(
         gaps.append("requesting_device_required")
     if sessions and not visible_sessions:
         gaps.append("visible_sessions_empty")
+    if visible_sessions and not any(_session_evidence_ids(session) for session in visible_sessions):
+        gaps.append("session_evidence_missing")
     if any(_session_has_raw_body(session) for session in sessions):
         gaps.append("raw_session_body_ignored")
     return gaps
