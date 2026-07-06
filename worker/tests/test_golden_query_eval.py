@@ -78,6 +78,34 @@ def test_eval_strict_axes_require_edge_freshness_and_gap_fields():
     assert passing["checked_axes"] == REQUIRED_QUALITY_AXES
 
 
+def test_eval_strict_axes_require_empty_authority_lane_disclosure():
+    base_response = {
+        "route": "documentation_cleanup",
+        "lanes": {
+            "accepted_current": [],
+            "proposal_only": [{"object_id": "ko:RepoDocument:legacy"}],
+        },
+        "edges": [{"edge_id": "ke:requires_evidence:legacy", "edge_type": "requires_evidence"}],
+        "evidence": [{"evidence_id": "ev:inventory:legacy", "verification_state": "source_hash_verified"}],
+        "verification": {"unverified": [{"evidence_id": "ev:inventory:legacy"}]},
+        "recommended_actions": [{"object_id": "ko:RepoDocument:legacy", "action": "review_archive"}],
+    }
+    failing = evaluate_object_pack_response(
+        GOLDEN_QUERIES[1],
+        {**base_response, "gaps": []},
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+    passing = evaluate_object_pack_response(
+        GOLDEN_QUERIES[1],
+        {**base_response, "gaps": ["accepted_current documents empty"]},
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+
+    assert failing["passes"] is False
+    assert "empty_authority_lane_not_stated:accepted_current" in failing["failures"]
+    assert passing["passes"] is True
+
+
 def test_phase_golden_query_coverage_reports_pass_with_gaps_not_green():
     report = build_phase_golden_query_coverage_report()
 
