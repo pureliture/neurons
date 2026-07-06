@@ -122,10 +122,9 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
             title="Session, Device, Project, And Work-Unit 360",
             golden_query_family="temporal repo recall",
             query=GOLDEN_QUERIES[0],
-            result="in_progress",
-            evaluator="session project rollup local/test preview",
+            result="PASS_WITH_GAPS",
+            evaluator="session project rollup local/test preview and handoff pack",
             gaps=[
-                "handoff_pack_not_implemented",
                 "live_multi_device_rollup_unproven",
             ],
         ),
