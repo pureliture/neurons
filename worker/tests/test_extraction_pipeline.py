@@ -2,6 +2,7 @@ from agent_knowledge.llm_brain_core.objects.extraction_pipeline import (
     build_extractor_registry_report,
     run_documentation_cleanup_strategy_comparison,
     run_preference_style_extraction_preview,
+    run_pr_commit_extraction_preview,
     run_reference_corpus_extraction_preview,
     run_runtime_truth_extraction_preview,
     run_work_unit_extraction_preview,
@@ -60,6 +61,12 @@ def test_extractor_registry_reports_implemented_and_gap_extractors():
     ]
     assert by_name["work_unit"]["status"] == "implemented"
     assert by_name["work_unit"]["output_object_types"] == ["WorkUnit"]
+    assert by_name["pr_commit_detail"]["status"] == "implemented"
+    assert by_name["pr_commit_detail"]["output_object_types"] == [
+        "PullRequest",
+        "Commit",
+        "TestRun",
+    ]
 
 
 def test_reference_corpus_extraction_preview_creates_deterministic_objects_edges_and_chunk_preview():
@@ -345,3 +352,112 @@ def test_work_unit_extraction_preview_reports_gap_without_evidence():
     assert result["gaps"] == ["work_unit_evidence_missing"]
     assert result["evaluator_report"]["passes"] is False
     assert result["evaluator_report"]["failures"] == ["work_unit_evidence_missing"]
+
+
+def test_pr_commit_extraction_preview_maps_pr_commits_and_tests_without_runtime_inference():
+    result = run_pr_commit_extraction_preview(
+        pull_request={
+            "pr_id": "pr:73",
+            "number": 73,
+            "title": "test(deploy): #40 k3s public contract static guard 추가",
+            "state": "merged",
+            "merge_commit": "c3f3e34",
+            "head_ref": "codex/40-pr7-k3s-public-contract",
+        },
+        commits=[
+            {
+                "sha": "3ff8835",
+                "title": "#40 PR7 리뷰 피드백 반영",
+                "test_refs": ["test:static-guard"],
+            },
+            {
+                "sha": "13c75ed",
+                "title": "#40 k3s public contract 리뷰 대응",
+                "test_refs": ["test:gradle"],
+            },
+        ],
+        test_runs=[
+            {
+                "test_id": "test:static-guard",
+                "summary": "Static contract guard passed.",
+                "status": "pass",
+            },
+            {
+                "test_id": "test:gradle",
+                "summary": "Gradle test passed.",
+                "status": "pass",
+            },
+        ],
+        repository="neurons",
+    )
+
+    assert result["schema_version"] == "object_extraction_pr_commit_preview.v1"
+    assert result["status"] == "pass"
+    assert result["production_mutation_performed"] is False
+    assert result["selected_strategy"] == "pr_commit_ci_evidence_v1"
+    assert result["object_counts"] == {
+        "PullRequest": 1,
+        "Commit": 2,
+        "TestRun": 2,
+    }
+    assert [item["object_type"] for item in result["objects"]] == [
+        "PullRequest",
+        "Commit",
+        "Commit",
+        "TestRun",
+        "TestRun",
+    ]
+    assert [edge["edge_type"] for edge in result["edges"]] == [
+        "includes_commit",
+        "includes_commit",
+        "validated_by",
+        "validated_by",
+    ]
+    assert result["runtime_truth_objects"] == []
+    assert result["pack_preview"]["runtime_verified_count"] == 0
+    assert result["pack_preview"]["runtime_unverified_count"] == 1
+    assert result["strategy_comparison"][1]["strategy"] == "merge_only_runtime_truth_v1"
+    assert result["strategy_comparison"][1]["status"] == "rejected"
+    assert result["strategy_comparison"][1]["gaps"] == [
+        "runtime_truth_requires_live_evidence",
+    ]
+    assert result["evaluator_report"]["golden_query_slice"] == "pr commit and test provenance"
+    assert result["evaluator_report"]["passes"] is True
+    assert result["evaluator_report"]["assertions"] == [
+        "pr_commit_test_objects_are_separate",
+        "commit_test_edges_preserve_evidence",
+        "merge_does_not_imply_runtime",
+        "production_mutation_performed_false",
+    ]
+
+
+def test_pr_commit_extraction_preview_reports_gap_for_missing_test_refs():
+    result = run_pr_commit_extraction_preview(
+        pull_request={
+            "pr_id": "pr:gap",
+            "title": "Missing test evidence PR",
+            "state": "open",
+        },
+        commits=[
+            {
+                "sha": "abc123",
+                "title": "Add unverified change",
+                "test_refs": ["test:missing"],
+            },
+        ],
+        test_runs=[],
+        repository="neurons",
+    )
+
+    assert result["status"] == "pass_with_gaps"
+    assert result["object_counts"] == {
+        "PullRequest": 1,
+        "Commit": 1,
+        "TestRun": 0,
+    }
+    assert result["edge_count"] == 1
+    assert result["gaps"] == ["commit_test_ref_missing"]
+    assert result["pack_preview"]["missing_test_ref_count"] == 1
+    assert result["pack_preview"]["runtime_unverified_count"] == 0
+    assert result["evaluator_report"]["passes"] is False
+    assert result["evaluator_report"]["failures"] == ["commit_test_ref_missing"]
