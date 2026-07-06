@@ -451,6 +451,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
         "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
+        "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
         "production_denials": {
             BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
                 "status": "denied",
@@ -519,6 +520,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
     assert report["network_used"] is False
     assert report["evidence_collection_network_used"] is True
     assert "bounded_production_authority_execution_unverified" in report["gaps"]
+    assert "live_session_project_rollup_unverified" not in report["gaps"]
 
 
 def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_plan(tmp_path: Path):
@@ -552,6 +554,8 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_p
     assert plan["network_used"] is False
     assert plan["production_mutation_performed"] is False
     assert plan["mutation_allowed"] is False
+    assert "probe_session_project_rollup_runtime" in plan["required_steps"]
+    assert plan["gap_mapping"]["probe_session_project_rollup_runtime"] == "live_session_project_rollup_unverified"
     registration = plan["shadow_collection_registration"]
     assert registration["schema_version"] == "source_to_candidate_runtime_shadow_collection_registration.v1"
     assert registration["status"] == "registration_ready"
@@ -595,6 +599,11 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_templ
     assert template["production_mutation_performed"] is False
     assert template["readiness_claim"] == "template_only_not_runtime_evidence"
     assert template["packet_field_templates"]["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert "session_project_rollup_runtime" in template["required_packet_fields"]
+    assert (
+        template["packet_field_templates"]["session_project_rollup_runtime"]["schema_version"]
+        == "session_project_rollup_runtime_evidence.v1"
+    )
     assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == 4
 
 
@@ -773,6 +782,7 @@ def _runtime_readiness_complete_evidence(
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
         "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
+        "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
         "production_denials": {
             BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
                 "status": "denied",
@@ -862,6 +872,67 @@ def _source_to_candidate_review_loop_evidence() -> dict:
             "object_pack_schema": "object_pack.v1",
             "route": "authority_archive_separation",
             "authority_lane": "accepted_current",
+            "object_count": 1,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+
+
+def _session_project_rollup_runtime_evidence() -> dict:
+    return {
+        "schema_version": "session_project_rollup_runtime_evidence.v1",
+        "rollup_preview": {
+            "schema_version": "object_extraction_session_project_rollup_preview.v1",
+            "status": "pass",
+            "scope": "all_devices",
+            "object_type_counts": {
+                "Device": 2,
+                "Session": 2,
+                "Repository": 1,
+                "Branch": 1,
+                "WorkUnit": 1,
+            },
+            "edge_types": [
+                "repository_has_branch",
+                "session_on_device",
+                "device_has_session",
+                "session_in_repository",
+                "repository_has_session",
+                "session_on_branch",
+                "branch_has_session",
+                "part_of_work_unit",
+                "work_unit_has_session",
+            ],
+            "object_count": 7,
+            "edge_count": 12,
+            "visible_session_count": 2,
+            "all_device_session_count": 2,
+            "device_count": 2,
+            "production_mutation_performed": False,
+        },
+        "handoff_pack": {
+            "schema_version": "session_project_handoff_pack.v1",
+            "raw_return_capability": "denied",
+            "visible_session_count": 2,
+            "object_ref_counts": {"Session": 2, "WorkUnit": 1},
+            "resume_context": {
+                "schema_version": "session_project_resume_context.v1",
+                "latest_session_ref_present": True,
+                "work_unit_ref_count": 1,
+                "production_mutation_performed": False,
+            },
+        },
+        "read_after_write": {
+            "status": "validated",
+            "route": "temporal_work_recall",
+            "object_pack_schema": "object_pack.v1",
+            "object_types": ["WorkUnit"],
             "object_count": 1,
         },
         "postcheck": {

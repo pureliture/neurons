@@ -43,6 +43,22 @@ OBJECT_AUTHORITY_PRODUCTION_RUNTIME_FLAG = "--allow-object-authority-production-
 PERMISSION_SENSITIVE_AGENT_CONTEXT_TOOLS = ("brain_approval_board_decide",)
 RUNTIME_READINESS_AGENT_CONTEXT_TOOL = "brain_source_to_candidate_runtime_readiness"
 EVIDENCE_PROVENANCE_SCHEMA = "source_to_candidate_runtime_evidence_provenance.v1"
+SESSION_PROJECT_ROLLUP_RUNTIME_SCHEMA = "session_project_rollup_runtime_evidence.v1"
+SESSION_PROJECT_ROLLUP_PREVIEW_SCHEMA = "object_extraction_session_project_rollup_preview.v1"
+SESSION_PROJECT_HANDOFF_SCHEMA = "session_project_handoff_pack.v1"
+SESSION_PROJECT_RESUME_SCHEMA = "session_project_resume_context.v1"
+REQUIRED_SESSION_PROJECT_OBJECT_TYPES = ("Device", "Session", "Repository", "Branch", "WorkUnit")
+REQUIRED_SESSION_PROJECT_EDGE_TYPES = (
+    "repository_has_branch",
+    "session_on_device",
+    "device_has_session",
+    "session_in_repository",
+    "repository_has_session",
+    "session_on_branch",
+    "branch_has_session",
+    "part_of_work_unit",
+    "work_unit_has_session",
+)
 ALLOWED_EVIDENCE_COLLECTION_MODES = {
     "configured_mcp_read_path",
     "live_runtime_probe",
@@ -72,6 +88,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
         "collect_agent_context_product",
         "probe_brain_objects_query_routes",
         "probe_source_to_candidate_review_loop",
+        "probe_session_project_rollup_runtime",
         "collect_deployed_identity",
         "probe_production_no_mutation_denials",
         "collect_object_authority_gate_policy",
@@ -132,6 +149,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
             "collect_agent_context_product": "live_agent_context_product_sections_unverified",
             "probe_brain_objects_query_routes": "live_brain_objects_query_route_smokes_unverified",
             "probe_source_to_candidate_review_loop": "live_source_to_candidate_review_loop_unverified",
+            "probe_session_project_rollup_runtime": "live_session_project_rollup_unverified",
             "collect_deployed_identity": "live_deployed_identity_unverified",
             "probe_production_no_mutation_denials": "production_denial_smokes_unverified",
             "collect_object_authority_gate_policy": "live_object_authority_gate_policy_unverified",
@@ -189,6 +207,7 @@ def build_source_to_candidate_runtime_evidence_packet_template(
             "agent_context_product",
             "brain_objects_query_smokes",
             "source_to_candidate_review_loop",
+            "session_project_rollup_runtime",
             "deployed_identity",
             "production_denials",
             "tool_schemas",
@@ -220,6 +239,7 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         "agent_context_product": _public_safe_mapping(captured.get("agent_context_product")),
         "brain_objects_query_smokes": _public_safe_mapping_list(captured.get("brain_objects_query_smokes")),
         "source_to_candidate_review_loop": _public_safe_mapping(captured.get("source_to_candidate_review_loop")),
+        "session_project_rollup_runtime": _public_safe_mapping(captured.get("session_project_rollup_runtime")),
         "deployed_identity": _public_safe_mapping(captured.get("deployed_identity")),
         "production_denials": _public_safe_mapping(captured.get("production_denials")),
         "tool_schemas": _public_safe_mapping(captured.get("tool_schemas")),
@@ -309,6 +329,42 @@ def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
             "read_after_write": {
                 "status": "validated",
                 "object_pack_schema": "object_pack.v1",
+            },
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
+        "session_project_rollup_runtime": {
+            "schema_version": SESSION_PROJECT_ROLLUP_RUNTIME_SCHEMA,
+            "rollup_preview": {
+                "schema_version": SESSION_PROJECT_ROLLUP_PREVIEW_SCHEMA,
+                "scope": "all_devices",
+                "required_object_types": list(REQUIRED_SESSION_PROJECT_OBJECT_TYPES),
+                "required_edge_types": list(REQUIRED_SESSION_PROJECT_EDGE_TYPES),
+                "visible_session_count": "collector_sets_integer",
+                "all_device_session_count": "collector_sets_integer",
+                "device_count": "collector_sets_integer",
+                "production_mutation_performed": False,
+            },
+            "handoff_pack": {
+                "schema_version": SESSION_PROJECT_HANDOFF_SCHEMA,
+                "raw_return_capability": "denied",
+                "resume_context": {
+                    "schema_version": SESSION_PROJECT_RESUME_SCHEMA,
+                    "latest_session_ref_present": True,
+                    "work_unit_ref_count": "collector_sets_integer",
+                    "production_mutation_performed": False,
+                },
+            },
+            "read_after_write": {
+                "status": "validated",
+                "route": "temporal_work_recall",
+                "object_pack_schema": "object_pack.v1",
+                "object_types": ["WorkUnit"],
             },
             "postcheck": {
                 "status": "validated",
@@ -446,6 +502,21 @@ def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
             "production_mutation_performed": False,
         },
         {
+            "step_id": "probe_session_project_rollup_runtime",
+            "evidence_field": "session_project_rollup_runtime",
+            "required_values": [
+                SESSION_PROJECT_ROLLUP_RUNTIME_SCHEMA,
+                SESSION_PROJECT_ROLLUP_PREVIEW_SCHEMA,
+                SESSION_PROJECT_HANDOFF_SCHEMA,
+                SESSION_PROJECT_RESUME_SCHEMA,
+                "temporal_work_recall",
+                "object_pack.v1",
+            ],
+            "safe_target": "sanitized_session_project_rollup_runtime_smoke",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
             "step_id": "collect_deployed_identity",
             "evidence_field": "deployed_identity",
             "required_values": ["contains_expected_commit"],
@@ -495,6 +566,7 @@ def build_source_to_candidate_runtime_readiness_report(
         _live_agent_context_product_sections_claim(evidence),
         _live_brain_objects_query_route_smokes_claim(evidence),
         _live_source_to_candidate_review_loop_claim(evidence),
+        _live_session_project_rollup_claim(evidence),
         _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
         _live_object_authority_production_gate_policy_claim(evidence),
         _live_object_authority_bounded_execution_claim(evidence),
@@ -977,6 +1049,147 @@ def _source_to_candidate_review_loop_reports_mutation(
         or decision.get("production_mutation_performed") is True
         or decision.get("ledger_scope") == "production"
         or decision.get("authority_write_scope") == "production_ledger"
+    )
+
+
+def _live_session_project_rollup_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    rollup = evidence.get("session_project_rollup_runtime")
+    rollup = rollup if isinstance(rollup, Mapping) else {}
+    if not rollup:
+        return {
+            "claim_id": "live.session_project.rollup",
+            "evidence_class": "runtime_read_path",
+            "status": "not_validated",
+            "schema_version": "",
+            "device_count": 0,
+            "visible_session_count": 0,
+            "all_device_session_count": 0,
+            "read_after_write_status": "",
+            "production_mutation_performed": False,
+            "gaps": ["live_session_project_rollup_unverified", "live_multi_device_rollup_unproven"],
+        }
+    preview = rollup.get("rollup_preview") if isinstance(rollup.get("rollup_preview"), Mapping) else {}
+    handoff = rollup.get("handoff_pack") if isinstance(rollup.get("handoff_pack"), Mapping) else {}
+    resume = handoff.get("resume_context") if isinstance(handoff.get("resume_context"), Mapping) else {}
+    read_after_write = (
+        rollup.get("read_after_write") if isinstance(rollup.get("read_after_write"), Mapping) else {}
+    )
+    postcheck = rollup.get("postcheck") if isinstance(rollup.get("postcheck"), Mapping) else {}
+    object_type_counts = (
+        preview.get("object_type_counts") if isinstance(preview.get("object_type_counts"), Mapping) else {}
+    )
+    edge_types = _string_list(preview.get("edge_types"))
+    failures = _session_project_rollup_failures(
+        rollup=rollup,
+        preview=preview,
+        handoff=handoff,
+        resume=resume,
+        read_after_write=read_after_write,
+        postcheck=postcheck,
+        object_type_counts=object_type_counts,
+        edge_types=edge_types,
+    )
+    return {
+        "claim_id": "live.session_project.rollup",
+        "evidence_class": "runtime_read_path",
+        "status": "failed" if failures else "validated",
+        "schema_version": public_safe_text(str(rollup.get("schema_version") or ""), max_chars=80),
+        "rollup_preview_schema": public_safe_text(str(preview.get("schema_version") or ""), max_chars=80),
+        "handoff_pack_schema": public_safe_text(str(handoff.get("schema_version") or ""), max_chars=80),
+        "resume_context_schema": public_safe_text(str(resume.get("schema_version") or ""), max_chars=80),
+        "scope": public_safe_text(str(preview.get("scope") or ""), max_chars=80),
+        "device_count": _int_value(preview.get("device_count")),
+        "visible_session_count": _int_value(preview.get("visible_session_count")),
+        "all_device_session_count": _int_value(preview.get("all_device_session_count")),
+        "edge_count": _int_value(preview.get("edge_count")),
+        "read_after_write_status": public_safe_text(str(read_after_write.get("status") or ""), max_chars=80),
+        "raw_return_capability": public_safe_text(str(handoff.get("raw_return_capability") or ""), max_chars=80),
+        "production_mutation_performed": _session_project_rollup_reports_mutation(
+            rollup=rollup,
+            preview=preview,
+            resume=resume,
+        ),
+        "gaps": failures,
+    }
+
+
+def _session_project_rollup_failures(
+    *,
+    rollup: Mapping[str, Any],
+    preview: Mapping[str, Any],
+    handoff: Mapping[str, Any],
+    resume: Mapping[str, Any],
+    read_after_write: Mapping[str, Any],
+    postcheck: Mapping[str, Any],
+    object_type_counts: Mapping[str, Any],
+    edge_types: list[str],
+) -> list[str]:
+    failures: list[str] = []
+    if rollup.get("schema_version") != SESSION_PROJECT_ROLLUP_RUNTIME_SCHEMA:
+        failures.append("session_project_rollup_schema_mismatch")
+    if preview.get("schema_version") != SESSION_PROJECT_ROLLUP_PREVIEW_SCHEMA:
+        failures.append("session_project_rollup_preview_schema_mismatch")
+    if str(preview.get("scope") or "") != "all_devices":
+        failures.append("session_project_rollup_scope_not_all_devices")
+    if _int_value(preview.get("visible_session_count")) < 1:
+        failures.append("session_project_rollup_visible_session_missing")
+    if _int_value(preview.get("all_device_session_count")) < _int_value(preview.get("visible_session_count")):
+        failures.append("session_project_rollup_all_device_count_inconsistent")
+    if _int_value(preview.get("device_count")) < 2:
+        failures.append("session_project_rollup_multi_device_unproven")
+    missing_object_types = [
+        object_type
+        for object_type in REQUIRED_SESSION_PROJECT_OBJECT_TYPES
+        if _int_value(object_type_counts.get(object_type)) < 1
+    ]
+    failures.extend(_named_gaps("session_project_rollup_required_object_type_missing", missing_object_types))
+    missing_edge_types = [
+        edge_type for edge_type in REQUIRED_SESSION_PROJECT_EDGE_TYPES if edge_type not in set(edge_types)
+    ]
+    failures.extend(_named_gaps("session_project_rollup_required_edge_missing", missing_edge_types))
+    if handoff.get("schema_version") != SESSION_PROJECT_HANDOFF_SCHEMA:
+        failures.append("session_project_handoff_schema_mismatch")
+    if handoff.get("raw_return_capability") != "denied":
+        failures.append("session_project_handoff_raw_return_not_denied")
+    if resume.get("schema_version") != SESSION_PROJECT_RESUME_SCHEMA:
+        failures.append("session_project_resume_schema_mismatch")
+    if resume.get("latest_session_ref_present") is not True:
+        failures.append("session_project_resume_latest_session_missing")
+    if _int_value(resume.get("work_unit_ref_count")) < 1:
+        failures.append("session_project_resume_work_unit_missing")
+    if read_after_write.get("status") != "validated":
+        failures.append("session_project_rollup_read_after_write_missing")
+    if read_after_write.get("route") != "temporal_work_recall":
+        failures.append("session_project_rollup_read_after_write_route_mismatch")
+    if read_after_write.get("object_pack_schema") != "object_pack.v1":
+        failures.append("session_project_rollup_object_pack_schema_mismatch")
+    if "WorkUnit" not in _string_list(read_after_write.get("object_types")):
+        failures.append("session_project_rollup_work_unit_read_missing")
+    if _session_project_rollup_reports_mutation(rollup=rollup, preview=preview, resume=resume):
+        failures.append("session_project_rollup_production_mutation_performed")
+    if postcheck.get("status") != "validated":
+        failures.append("session_project_rollup_postcheck_missing")
+    for field, gap in (
+        ("raw_private_evidence_returned", "session_project_rollup_raw_private_evidence_returned"),
+        ("secret_returned", "session_project_rollup_secret_returned"),
+        ("host_topology_returned", "session_project_rollup_host_topology_returned"),
+        ("raw_external_ids_returned", "session_project_rollup_raw_external_ids_returned"),
+    ):
+        if postcheck.get(field) is not False:
+            failures.append(gap)
+    return _dedupe(failures)
+
+
+def _session_project_rollup_reports_mutation(
+    *,
+    rollup: Mapping[str, Any],
+    preview: Mapping[str, Any],
+    resume: Mapping[str, Any],
+) -> bool:
+    return (
+        rollup.get("production_mutation_performed") is True
+        or preview.get("production_mutation_performed") is True
+        or resume.get("production_mutation_performed") is True
     )
 
 

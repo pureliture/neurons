@@ -40,6 +40,7 @@ def _sanitized_live_evidence(**overrides):
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
         "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
+        "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
         "production_denials": {
             "brain_source_to_candidate_graph": {
                 "status": "denied",
@@ -148,6 +149,69 @@ def _source_to_candidate_review_loop_evidence(**overrides):
             "object_pack_schema": "object_pack.v1",
             "route": "authority_archive_separation",
             "authority_lane": "accepted_current",
+            "object_count": 1,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+    evidence.update(overrides)
+    return evidence
+
+
+def _session_project_rollup_runtime_evidence(**overrides):
+    evidence = {
+        "schema_version": "session_project_rollup_runtime_evidence.v1",
+        "rollup_preview": {
+            "schema_version": "object_extraction_session_project_rollup_preview.v1",
+            "status": "pass",
+            "scope": "all_devices",
+            "object_type_counts": {
+                "Device": 2,
+                "Session": 2,
+                "Repository": 1,
+                "Branch": 1,
+                "WorkUnit": 1,
+            },
+            "edge_types": [
+                "repository_has_branch",
+                "session_on_device",
+                "device_has_session",
+                "session_in_repository",
+                "repository_has_session",
+                "session_on_branch",
+                "branch_has_session",
+                "part_of_work_unit",
+                "work_unit_has_session",
+            ],
+            "object_count": 7,
+            "edge_count": 12,
+            "visible_session_count": 2,
+            "all_device_session_count": 2,
+            "device_count": 2,
+            "production_mutation_performed": False,
+        },
+        "handoff_pack": {
+            "schema_version": "session_project_handoff_pack.v1",
+            "raw_return_capability": "denied",
+            "visible_session_count": 2,
+            "object_ref_counts": {"Session": 2, "WorkUnit": 1},
+            "resume_context": {
+                "schema_version": "session_project_resume_context.v1",
+                "latest_session_ref_present": True,
+                "work_unit_ref_count": 1,
+                "production_mutation_performed": False,
+            },
+        },
+        "read_after_write": {
+            "status": "validated",
+            "route": "temporal_work_recall",
+            "object_pack_schema": "object_pack.v1",
+            "object_types": ["WorkUnit"],
             "object_count": 1,
         },
         "postcheck": {
@@ -434,6 +498,7 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
         "agent_context_product",
         "brain_objects_query_smokes",
         "source_to_candidate_review_loop",
+        "session_project_rollup_runtime",
         "deployed_identity",
         "production_denials",
         "tool_schemas",
@@ -442,10 +507,15 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
     ]
     assert template["packet_field_templates"]["schema_version"] == "source_to_candidate_runtime_evidence.v1"
     assert "source_to_candidate_review_loop" in template["required_packet_fields"]
+    assert "session_project_rollup_runtime" in template["required_packet_fields"]
     assert template["packet_field_templates"]["evidence_provenance"]["schema_version"] == EVIDENCE_PROVENANCE_SCHEMA
     assert (
         template["packet_field_templates"]["source_to_candidate_review_loop"]["schema_version"]
         == "source_to_candidate_review_loop_evidence.v1"
+    )
+    assert (
+        template["packet_field_templates"]["session_project_rollup_runtime"]["schema_version"]
+        == "session_project_rollup_runtime_evidence.v1"
     )
     assert template["packet_field_templates"]["evidence_provenance"]["mutation_scope"] == "none"
     assert template["packet_field_templates"]["evidence_provenance"]["network_used"] == "collector_sets_boolean"
@@ -544,6 +614,7 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert claims["live.agent_context.tool_hints"]["status"] == "not_validated"
     assert claims["live.brain_objects_query.route_smokes"]["status"] == "not_validated"
     assert claims["live.source_to_candidate.review_loop"]["status"] == "not_validated"
+    assert claims["live.session_project.rollup"]["status"] == "not_validated"
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "not_validated"
     assert claims["live.production.source_to_candidate_denial"]["status"] == "not_validated"
     assert claims["live.production.object_proposal_denial"]["status"] == "not_validated"
@@ -554,6 +625,8 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert "live_mcp_review_tools_unverified" in report["gaps"]
     assert "live_brain_objects_query_route_smokes_unverified" in report["gaps"]
     assert "live_source_to_candidate_review_loop_unverified" in report["gaps"]
+    assert "live_session_project_rollup_unverified" in report["gaps"]
+    assert "live_multi_device_rollup_unproven" in report["gaps"]
     assert "live_deployed_identity_unverified" in report["gaps"]
     assert "live_object_authority_gate_policy_unverified" in report["gaps"]
     assert "bounded_production_authority_execution_unverified" in report["gaps"]
@@ -576,6 +649,9 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.source_to_candidate.review_loop"]["status"] == "validated"
     assert claims["live.source_to_candidate.review_loop"]["candidate_count"] == 3
     assert claims["live.source_to_candidate.review_loop"]["authority_write_scope"] == "local_test"
+    assert claims["live.session_project.rollup"]["status"] == "validated"
+    assert claims["live.session_project.rollup"]["device_count"] == 2
+    assert claims["live.session_project.rollup"]["read_after_write_status"] == "validated"
     assert "temporal_work_recall" in claims["live.brain_objects_query.route_smokes"]["required_routes"]
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "validated"
     assert claims["live.production.source_to_candidate_denial"]["status"] == "denied_as_expected"
@@ -592,6 +668,58 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert report["network_used"] is False
     assert report["evidence_collection_network_used"] is False
     assert report["evidence_provenance"]["network_used_for_evidence"] is False
+
+
+def test_runtime_readiness_fails_when_session_project_rollup_runtime_is_unsafe_or_incomplete():
+    evidence = _sanitized_live_evidence(
+        session_project_rollup_runtime=_session_project_rollup_runtime_evidence(
+            rollup_preview={
+                "schema_version": "object_extraction_session_project_rollup_preview.v1",
+                "status": "pass",
+                "scope": "same_device",
+                "object_type_counts": {"Session": 1, "WorkUnit": 1},
+                "edge_types": ["part_of_work_unit"],
+                "visible_session_count": 1,
+                "all_device_session_count": 1,
+                "device_count": 1,
+                "production_mutation_performed": True,
+            },
+            handoff_pack={
+                "schema_version": "session_project_handoff_pack.v1",
+                "raw_return_capability": "allowed",
+                "resume_context": {
+                    "schema_version": "session_project_resume_context.v1",
+                    "latest_session_ref_present": False,
+                    "work_unit_ref_count": 0,
+                    "production_mutation_performed": True,
+                },
+            },
+            read_after_write={"status": "missing", "route": "temporal_work_recall"},
+            postcheck={
+                "status": "validated",
+                "raw_private_evidence_returned": True,
+                "secret_returned": False,
+                "host_topology_returned": True,
+                "raw_external_ids_returned": False,
+            },
+        )
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    rollup = claims["live.session_project.rollup"]
+    assert rollup["status"] == "failed"
+    assert rollup["production_mutation_performed"] is True
+    assert "session_project_rollup_required_object_type_missing:Device" in report["gaps"]
+    assert "session_project_rollup_required_edge_missing:session_on_device" in report["gaps"]
+    assert "session_project_rollup_multi_device_unproven" in report["gaps"]
+    assert "session_project_handoff_raw_return_not_denied" in report["gaps"]
+    assert "session_project_resume_latest_session_missing" in report["gaps"]
+    assert "session_project_rollup_read_after_write_missing" in report["gaps"]
+    assert "session_project_rollup_raw_private_evidence_returned" in report["gaps"]
+    assert "session_project_rollup_host_topology_returned" in report["gaps"]
 
 
 def test_runtime_readiness_fails_when_live_evidence_provenance_is_missing():
