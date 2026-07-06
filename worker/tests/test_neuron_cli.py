@@ -91,6 +91,8 @@ def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
         "corpus-ingest-plan",
         "corpus-ingest",
         "source-to-candidate-graph",
+        "candidate-review-edit",
+        "approval-board-decide",
         "golden-query-eval",
         "okf-export",
         "brain-regression-gate",
@@ -508,6 +510,178 @@ def test_neuron_knowledge_source_to_candidate_graph_does_not_create_missing_loca
     assert report["ledger_mutation_performed"] is False
     assert "reference_corpus_store_missing" in report["gaps"]
     assert ledger.exists() is False
+
+
+def test_neuron_knowledge_candidate_review_and_approval_board_cli_chain_local_test(
+    tmp_path,
+    capsys,
+):
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "ledger.sqlite"
+    manifest.write_text(json.dumps(_reference_manifest()), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "corpus-ingest",
+                "--project",
+                "neurons",
+                "--target",
+                "local_test",
+                "--ledger",
+                str(ledger),
+                "--manifest-file",
+                str(manifest),
+                "--storage-mode",
+                "managed_snapshot",
+            ]
+        )
+        == 0
+    )
+    ingest = json.loads(capsys.readouterr().out)
+    assert (
+        main(
+            [
+                "source-to-candidate-graph",
+                "--project",
+                "neurons",
+                "--target",
+                "local_test",
+                "--ledger",
+                str(ledger),
+                "--corpus-id",
+                ingest["corpus_id"],
+            ]
+        )
+        == 0
+    )
+    graph = json.loads(capsys.readouterr().out)
+    pack_file = tmp_path / "candidate-pack.json"
+    pack_file.write_text(json.dumps(graph["candidate_graph_review_pack"]), encoding="utf-8")
+    candidate_id = graph["candidate_graph_review_pack"]["lanes"]["candidate"][0]["object_id"]
+    edits_file = tmp_path / "candidate-edits.json"
+    edits_file.write_text(
+        json.dumps(
+            [
+                {
+                    "action": "update_object",
+                    "object_id": candidate_id,
+                    "fields": {
+                        "summary": "Reviewer clarified this candidate before local approval.",
+                        "recommended_action": "promote",
+                    },
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "candidate-review-edit",
+                "--pack-file",
+                str(pack_file),
+                "--edits-file",
+                str(edits_file),
+                "--reviewer-id",
+                "reviewer-local",
+            ]
+        )
+        == 0
+    )
+    edit_result = json.loads(capsys.readouterr().out)
+    assert edit_result["schema_version"] == "candidate_review_edit_result.v1"
+    assert edit_result["candidate_state_changed"] is True
+    assert edit_result["authority_write_performed"] is False
+    assert edit_result["production_mutation_performed"] is False
+    assert edit_result["updated_pack"]["lanes"]["accepted_current"] == []
+    edited_pack_file = tmp_path / "edited-candidate-pack.json"
+    edited_pack_file.write_text(json.dumps(edit_result["updated_pack"]), encoding="utf-8")
+    decisions_file = tmp_path / "approval-decisions.json"
+    decisions_file.write_text(
+        json.dumps(
+            [
+                {
+                    "action": "promote",
+                    "object_id": candidate_id,
+                    "reason": "Local test approval board preview.",
+                    "approved_by": "reviewer-local",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "approval-board-decide",
+                "--target",
+                "local_test",
+                "--pack-file",
+                str(edited_pack_file),
+                "--decisions-file",
+                str(decisions_file),
+                "--reviewer-id",
+                "reviewer-local",
+            ]
+        )
+        == 0
+    )
+    decision_result = json.loads(capsys.readouterr().out)
+    assert decision_result["schema_version"] == "approval_board_decision_result.v1"
+    assert decision_result["permission"] == "allowed"
+    assert decision_result["authority_write_scope"] == "local_test"
+    assert decision_result["production_mutation_performed"] is False
+    assert decision_result["updated_pack"]["lanes"]["accepted_current"][0]["object_id"] == candidate_id
+
+
+def test_neuron_knowledge_approval_board_cli_denies_production_without_mutation(
+    tmp_path,
+    capsys,
+):
+    pack_file = tmp_path / "candidate-pack.json"
+    decisions_file = tmp_path / "approval-decisions.json"
+    pack_file.write_text(
+        json.dumps(
+            {
+                "schema_version": "object_pack.v1",
+                "route": "candidate_graph_review",
+                "candidate_graph_hash": "sha256:" + "5" * 64,
+                "objects": [],
+                "edges": [],
+                "evidence": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    decisions_file.write_text(
+        json.dumps([{"action": "promote", "object_id": "ko:ReferenceDocument:test"}]),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "approval-board-decide",
+            "--target",
+            "production",
+            "--pack-file",
+            str(pack_file),
+            "--decisions-file",
+            str(decisions_file),
+            "--reviewer-id",
+            "reviewer-local",
+        ]
+    )
+
+    result = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert result["schema_version"] == "approval_board_decision_result.v1"
+    assert result["permission"] == "denied"
+    assert result["production_mutation_performed"] is False
+    assert result["authority_write_performed"] is False
+    assert result["promotion_plan"]["production_mutation_performed"] is False
 
 
 def test_neuron_knowledge_golden_query_eval_baseline(capsys):
