@@ -845,10 +845,12 @@ def _simple_pack(route: str, titles: list[str], object_type: str) -> dict[str, A
             verification_state="unverified",
             review_state="not_required",
             content_hash=hash_payload([route, title]),
+            recommended_action="review",
             payload={},
         ).to_dict()
         pack["objects"].append(obj)
         pack["lanes"]["reference_only"].append(obj)
+        pack["recommended_actions"].append({"object_id": obj["object_id"], "action": "review"})
     return pack
 
 
