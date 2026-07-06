@@ -158,6 +158,7 @@ def _service(tmp_path: Path) -> KnowledgeSearchService:
         retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         allow_private_results=True,
+        allow_local_test_object_authority_writes=True,
     )
 
 
@@ -284,6 +285,15 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
     assert tools[BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME]["inputSchema"]["properties"]["ledger_scope"]["enum"] == [
         "local_test",
         "production",
+    ]
+    assert tools[BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME]["inputSchema"]["required"] == [
+        "proposal_id",
+        "decision_type",
+        "target_object_id",
+        "previous_authority_lane",
+        "new_authority_lane",
+        "approved_by",
+        "decision_id",
     ]
     corpus_plan_properties = tools[BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME]["inputSchema"]["properties"]
     assert "expected_source_count" in corpus_plan_properties
@@ -598,6 +608,415 @@ def test_mcp_object_decision_commit_is_restricted_denied_by_default(tmp_path: Pa
     assert result["permission"] == "denied"
     assert result["authority_write_performed"] is False
     assert result["authoritative_memory_changed"] is False
+    plan = result["production_promotion_plan"]
+    assert plan["schema_version"] == "object_authority_promotion_plan.v1"
+    assert plan["production_write_state"] == "closed_without_human_gate"
+    assert plan["mutation_allowed"] is False
+    assert plan["allowed_object_classes"] == ["RepoDocument"]
+    assert "commit_stale" in plan["allowed_decision_types"]
+    assert plan["reviewer_role"] == "human_object_authority_reviewer"
+    assert plan["blast_radius"]["max_objects_per_decision"] == 1
+    assert plan["no_mutation_report"] == {
+        "proposal_write_performed": False,
+        "authority_write_performed": False,
+        "authoritative_memory_changed": False,
+    }
+
+
+def test_mcp_object_authority_local_test_write_requires_test_service_gate(tmp_path: Path):
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
+        dataset_ids=[],
+        allow_private_results=True,
+    )
+
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 104,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": "ko:RepoDocument:gate",
+                    "reason": "Should not write without local-test service gate.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert proposal["permission"] == "denied"
+    assert proposal["reason"] == "local_test_object_authority_write_requires_test_service_gate"
+    assert proposal["proposal_write_performed"] is False
+    assert service.object_review_proposals(project=PROJECT)["items"] == []
+
+    decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 105,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": "proposal:gate",
+                    "decision_type": "accept_current",
+                    "target_object_id": "ko:RepoDocument:gate",
+                    "previous_authority_lane": "candidate",
+                    "new_authority_lane": "accepted_current",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:gate",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert decision["permission"] == "denied"
+    assert decision["reason"] == "local_test_object_authority_write_requires_test_service_gate"
+    assert decision["authority_write_performed"] is False
+    assert service.ledger.get_object_authority_state("ko:RepoDocument:gate") == {}
+
+
+def test_mcp_object_decision_commit_local_test_updates_authority_state_with_audit(tmp_path: Path):
+    service = _service(tmp_path)
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 104,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": "ko:RepoDocument:current",
+                    "reason": "Promote reviewed docs SoT.",
+                    "evidence_refs": ["ev:source_hash:current"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 105,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "target_object_id": proposal["target_object_id"],
+                    "decision_type": "accept_current",
+                    "previous_authority_lane": "candidate",
+                    "new_authority_lane": "accepted_current",
+                    "evidence_refs": ["ev:source_hash:current"],
+                    "decision_reason": "Reviewed local fixture evidence.",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:local-current",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert decision["schema_version"] == "authority_decision.v1"
+    assert decision["proposal_id"] == proposal["proposal_id"]
+    assert decision["target_object_id"] == proposal["target_object_id"]
+    assert decision["previous_authority_lane"] == "candidate"
+    assert decision["new_authority_lane"] == "accepted_current"
+    assert decision["authority_write_performed"] is True
+    assert decision["authoritative_memory_changed"] is True
+    assert decision["cache_invalidated"] is True
+    assert decision["approved_by_hash"].startswith("sha256:")
+    assert decision["approved_by"] == "redacted"
+    assert decision["decision_reason"] == "Reviewed local fixture evidence."
+
+    state = service.ledger.get_object_authority_state(proposal["target_object_id"])
+    assert state["authority_lane"] == "accepted_current"
+    assert state["decision_id"] == "decision:local-current"
+    assert state["proposal_id"] == proposal["proposal_id"]
+    assert state["decision_reason"] == "Reviewed local fixture evidence."
+    decisions = service.ledger.list_object_authority_decisions(target_object_id=proposal["target_object_id"])
+    assert decisions[0]["decision_id"] == "decision:local-current"
+    assert decisions[0]["approved_by_hash"] == decision["approved_by_hash"]
+    queued = service.object_review_proposals(project=PROJECT)
+    assert queued["items"][0]["status"] == "accepted"
+
+
+def test_mcp_object_decision_commit_requires_matching_review_proposal(tmp_path: Path):
+    service = _service(tmp_path)
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 106,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": "ko:RepoDocument:proposal-a",
+                    "reason": "Promote reviewed docs SoT.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    missing = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 107,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": "proposal:missing",
+                    "target_object_id": "ko:RepoDocument:proposal-a",
+                    "decision_type": "accept_current",
+                    "previous_authority_lane": "candidate",
+                    "new_authority_lane": "accepted_current",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:missing",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    mismatch = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 108,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "target_object_id": "ko:RepoDocument:proposal-b",
+                    "decision_type": "accept_current",
+                    "previous_authority_lane": "candidate",
+                    "new_authority_lane": "accepted_current",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:mismatch",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    assert missing["error"]["code"] == -32602
+    assert mismatch["error"]["code"] == -32602
+    assert service.ledger.get_object_authority_state("ko:RepoDocument:proposal-a") == {}
+    assert service.ledger.get_object_authority_state("ko:RepoDocument:proposal-b") == {}
+
+
+def test_mcp_brain_object_explain_includes_local_authority_decision_history(tmp_path: Path):
+    service = _service(tmp_path)
+    target_object_id = "ko:RepoDocument:explain"
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 106,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Explain current authority state.",
+                    "evidence_refs": ["ev:source_hash:explain"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 107,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "target_object_id": target_object_id,
+                    "decision_type": "accept_current",
+                    "previous_authority_lane": "candidate",
+                    "new_authority_lane": "accepted_current",
+                    "evidence_refs": ["ev:source_hash:explain"],
+                    "decision_reason": "Reviewed local fixture evidence.",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:local-explain-current",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    result = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 108,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
+                "arguments": {"object_id": target_object_id},
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert result["schema_version"] == "brain_object_explain.v1"
+    assert result["object_id"] == target_object_id
+    assert result["object"]["authority_lane"] == "accepted_current"
+    assert result["object"]["lifecycle_status"] == "current"
+    assert result["authority_state"]["decision_id"] == "decision:local-explain-current"
+    assert result["authority_state"]["proposal_id"] == proposal["proposal_id"]
+    assert result["decision_history"][0]["decision_id"] == "decision:local-explain-current"
+    assert result["decision_history"][0]["approved_by"] == "redacted"
+    assert result["decision_history"][0]["approved_by_hash"].startswith("sha256:")
+    assert "authority_state_from_ledger_only" in result["gaps"]
+
+
+@pytest.mark.parametrize(
+    ("decision_type", "new_authority_lane", "expected_lifecycle", "expected_review", "expected_action"),
+    [
+        ("commit_stale", "accepted_non_current", "stale", "accepted", "archive"),
+        ("commit_supersession", "accepted_non_current", "superseded", "accepted", "supersede"),
+        ("retire", "accepted_non_current", "retired", "accepted", "retire"),
+        ("archive_only", "archive_only", "archived", "accepted", "archive"),
+        ("reject_candidate", "rejected", "rejected", "rejected", "retire"),
+    ],
+)
+def test_mcp_brain_objects_query_overlays_local_authority_state(
+    tmp_path: Path,
+    decision_type: str,
+    new_authority_lane: str,
+    expected_lifecycle: str,
+    expected_review: str,
+    expected_action: str,
+):
+    service = _service(tmp_path)
+    query_args = {
+        "repository": FIXTURE_REPOSITORY,
+        "branch": FIXTURE_BRANCH,
+        "query": "이 repo 문서 최신화하려면 뭘 봐야 해?",
+        "current_files": ["README.md"],
+        "consumer": "codex",
+        "project": PROJECT,
+    }
+    before = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 106,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": query_args,
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    target = next(obj for obj in before["object_pack"]["objects"] if obj["title"] == "README.md")
+
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 107,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_stale",
+                    "target_object_id": target["object_id"],
+                    "reason": "README is no longer the current roadmap source.",
+                    "evidence_refs": ["ev:source_hash:readme"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 108,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "target_object_id": target["object_id"],
+                    "decision_type": decision_type,
+                    "previous_authority_lane": target["authority_lane"],
+                    "new_authority_lane": new_authority_lane,
+                    "evidence_refs": ["ev:source_hash:readme"],
+                    "decision_reason": "Reviewed local fixture evidence.",
+                    "approved_by": "human-reviewer",
+                    "decision_id": f"decision:local-{expected_lifecycle}-readme",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    after = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 109,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": query_args,
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    updated = next(obj for obj in after["object_pack"]["objects"] if obj["object_id"] == target["object_id"])
+    assert updated["authority_lane"] == new_authority_lane
+    assert updated["lifecycle_status"] == expected_lifecycle
+    assert updated["review_state"] == expected_review
+    assert updated["recommended_action"] == expected_action
+    assert updated["authority_state"]["decision_id"] == f"decision:local-{expected_lifecycle}-readme"
+    assert updated["authority_state"]["proposal_id"] == proposal["proposal_id"]
+    assert updated["authority_state"]["decision_type"] == decision_type
+    lane_ids = {obj["object_id"] for obj in after["object_pack"]["lanes"][new_authority_lane]}
+    assert target["object_id"] in lane_ids
+    assert all(
+        obj["object_id"] != target["object_id"]
+        for lane, objects in after["object_pack"]["lanes"].items()
+        if lane != new_authority_lane
+        for obj in objects
+    )
 
 
 def test_brain_query_semantic_recall_type_error_is_audited(tmp_path: Path, monkeypatch):
