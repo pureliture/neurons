@@ -34,6 +34,7 @@ REQUIRED_QUALITY_AXES = [
 
 ACTIVATION_SCOPE_PHASES = ("P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9")
 MINIMUM_REVIEW_LOOP_PHASES = ("P2", "P3", "P4")
+PRODUCT_EVIDENCE_PHASES = ("P6", "P7", "P8", "P9")
 
 _LOCAL_VALIDATED_PHASES = {"P2", "P3", "P4", "P6", "P7", "P8", "P9"}
 
@@ -84,7 +85,7 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
             evaluator="reference corpus store local/test status and ingest policy checks",
             gaps=[
                 "private_palantir_manifest_ingest_not_performed",
-                "production_ingest_gate_denied",
+                "production_ingest_pilot_not_executed",
             ],
         ),
         _phase_coverage(
@@ -106,8 +107,8 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
             result="PASS_WITH_GAPS",
             evaluator="local/test review queue, authority decision, object query, and object explain checks",
             gaps=[
-                "approved_production_pilot_missing",
-                "production_authority_write_denied",
+                "production_authority_pilot_not_executed",
+                "production_authority_write_evidence_missing",
             ],
         ),
         _phase_coverage(
@@ -322,12 +323,14 @@ def build_source_to_authority_quality_gate_report() -> dict[str, Any]:
         "product_surface_checks": product_surface_checks,
         "hard_failures": hard_failures,
         "gaps": [
-            "production_authority_gate_not_approved",
+            "production_authority_gate_preapproved_not_executed",
             "live_runtime_read_path_unverified",
             "production_quality_not_green",
         ],
         "production_mutation_performed": False,
         "production_authoritative_memory_changed": False,
+        "production_approval_gate": "preapproved",
+        "production_mutation_execution": "not_performed_by_local_gate",
         "local_test_authority_write_performed": approval_result["authority_write_performed"],
         "authority_write_scope": approval_result["authority_write_scope"],
     }
@@ -339,6 +342,7 @@ def build_product_activation_progress_report() -> dict[str, Any]:
     phase_coverage = build_phase_golden_query_coverage_report()
     source_gate = build_source_to_authority_quality_gate_report()
     product_evidence_summary = _product_evidence_summary()
+    product_evidence_result = evaluate_product_evidence_summary(product_evidence_summary)
     phases_by_id = {
         str(item.get("phase") or ""): item
         for item in phase_coverage.get("phases", [])
@@ -366,6 +370,7 @@ def build_product_activation_progress_report() -> dict[str, Any]:
                 for phase in ACTIVATION_SCOPE_PHASES
                 if phase not in phases_by_id
             ],
+            *product_evidence_result["hard_failures"],
         ]
     )
     blockers = _activation_goal_blockers(
@@ -386,6 +391,8 @@ def build_product_activation_progress_report() -> dict[str, Any]:
         "scope_phases": list(ACTIVATION_SCOPE_PHASES),
         "phase_progress": phase_progress,
         "product_evidence_summary": product_evidence_summary,
+        "product_evidence_checks": product_evidence_result["checks"],
+        "product_evidence_status": product_evidence_result["status"],
         "minimum_review_loop_checkpoint": minimum_checkpoint,
         "next_phase": next_phase,
         "remaining_phases": _remaining_activation_phases(next_phase),
@@ -394,6 +401,8 @@ def build_product_activation_progress_report() -> dict[str, Any]:
             "source_to_authority_status": source_gate["status"],
             "source_to_authority_release_quality_gate": source_gate["release_quality_gate"],
         },
+        "production_approval_gate": str(source_gate.get("production_approval_gate") or ""),
+        "production_mutation_execution": str(source_gate.get("production_mutation_execution") or ""),
         "release_quality_gate": "blocked" if hard_failures else source_gate["release_quality_gate"],
         "goal_completion_blockers": blockers,
         "hard_failures": hard_failures,
@@ -410,6 +419,38 @@ def build_product_activation_progress_report() -> dict[str, Any]:
     }
     ensure_public_safe(report, "LBrainProductActivationProgress")
     return report
+
+
+def evaluate_product_evidence_summary(evidence_summary: list[Mapping[str, Any]]) -> dict[str, Any]:
+    by_phase = {
+        str(item.get("phase") or ""): item
+        for item in evidence_summary
+        if isinstance(item, Mapping)
+    }
+    checks = [_product_evidence_check(phase, by_phase.get(phase, {})) for phase in PRODUCT_EVIDENCE_PHASES]
+    hard_failures = [
+        f"{check['phase']}:product_evidence_failed"
+        for check in checks
+        if check["result"] != "PASS" and "product_evidence_missing" not in check["failures"]
+    ]
+    hard_failures.extend(
+        f"{check['phase']}:product_evidence_missing"
+        for check in checks
+        if "product_evidence_missing" in check["failures"]
+    )
+    result = {
+        "schema_version": "lbrain_product_evidence_summary_eval.v1",
+        "status": "FAIL" if hard_failures else "PASS",
+        "checks": checks,
+        "hard_failures": hard_failures,
+        "production_mutation_performed": any(
+            bool(item.get("production_mutation_performed"))
+            for item in evidence_summary
+            if isinstance(item, Mapping)
+        ),
+    }
+    ensure_public_safe(result, "LBrainProductEvidenceSummaryEval")
+    return result
 
 
 def evaluate_object_pack_response(
@@ -482,6 +523,90 @@ def _product_evidence_summary() -> list[dict[str, Any]]:
     p8 = _p8_runtime_authority_evidence()
     p9 = _p9_agent_context_evidence(preference_preview=p7)
     return [p6, p7, p8, p9]
+
+
+def _product_evidence_check(phase: str, evidence: Mapping[str, Any]) -> dict[str, Any]:
+    failures: list[str] = []
+    if not evidence:
+        failures.append("product_evidence_missing")
+    elif bool(evidence.get("production_mutation_performed")):
+        failures.append(f"{phase.lower()}_production_mutation_performed")
+    if phase == "P6" and evidence:
+        failures.extend(_p6_evidence_failures(evidence))
+    elif phase == "P7" and evidence:
+        failures.extend(_p7_evidence_failures(evidence))
+    elif phase == "P8" and evidence:
+        failures.extend(_p8_evidence_failures(evidence))
+    elif phase == "P9" and evidence:
+        failures.extend(_p9_evidence_failures(evidence))
+    return {
+        "phase": phase,
+        "result": "FAIL" if failures else "PASS",
+        "schema_version": str(evidence.get("schema_version") or ""),
+        "failures": failures,
+    }
+
+
+def _p6_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if evidence.get("schema_version") != "object_extraction_session_project_rollup_preview.v1":
+        failures.append("p6_schema_mismatch")
+    if int(evidence.get("object_count") or 0) < 5:
+        failures.append("p6_session_rollup_incomplete")
+    if int(evidence.get("edge_count") or 0) < 6:
+        failures.append("p6_session_rollup_incomplete")
+    if int(evidence.get("evidence_count") or 0) < 1:
+        failures.append("p6_session_rollup_incomplete")
+    if evidence.get("handoff_pack_schema") != "session_project_handoff_pack.v1":
+        failures.append("p6_handoff_pack_missing")
+    return _dedupe(failures)
+
+
+def _p7_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if evidence.get("schema_version") != "object_extraction_preference_style_preview.v1":
+        failures.append("p7_schema_mismatch")
+    if int(evidence.get("object_count") or 0) < 2:
+        failures.append("p7_preference_style_objects_missing")
+    if int(evidence.get("source_evidence_ref_count") or 0) < 1:
+        failures.append("p7_source_evidence_missing")
+    if evidence.get("artifact_preference_pack_status") != "pass":
+        failures.append("p7_artifact_preference_pack_not_pass")
+    if int(evidence.get("accepted_preference_count") or 0) < 1:
+        failures.append("p7_accepted_preference_missing")
+    return failures
+
+
+def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if evidence.get("schema_version") != "object_extraction_runtime_truth_preview.v1":
+        failures.append("p8_schema_mismatch")
+    runtime_evidence_count = int(evidence.get("runtime_verified_count") or 0) + int(
+        evidence.get("runtime_unverified_count") or 0
+    )
+    if runtime_evidence_count < 1:
+        failures.append("p8_runtime_evidence_classification_missing")
+    if evidence.get("permission") != "allowed" or evidence.get("permission_reason") != "approved_scope_present":
+        failures.append("p8_preapproved_scope_missing")
+    if bool(evidence.get("authority_write_performed")):
+        failures.append("p8_authority_write_performed")
+    if bool(evidence.get("production_mutation_performed")):
+        failures.append("p8_production_mutation_performed")
+    return failures
+
+
+def _p9_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if evidence.get("schema_version") != "agent_context_product_pack.v1":
+        failures.append("p9_schema_mismatch")
+    section_counts = evidence.get("section_counts") if isinstance(evidence.get("section_counts"), Mapping) else {}
+    if int(section_counts.get("style_preference") or 0) < 1:
+        failures.append("p9_style_preference_section_missing")
+    if int(evidence.get("tool_hint_count") or 0) < 4:
+        failures.append("p9_object_native_tool_hints_missing")
+    if bool(evidence.get("mutation_allowed")):
+        failures.append("p9_mutation_allowed")
+    return failures
 
 
 def _p6_session_project_rollup_evidence() -> dict[str, Any]:
@@ -604,7 +729,7 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
             "object_native_tools": True,
         },
         requested_action={"action": "promote_runtime_authority", "target": "production"},
-        actor={"agent": "codex", "role": "agent", "approved_scope": False},
+        actor={"agent": "codex", "role": "agent", "approved_scope": True},
         consumer="codex",
     )
     preview = report.get("pack_preview") if isinstance(report.get("pack_preview"), Mapping) else {}
@@ -621,6 +746,7 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         "runtime_unverified_count": int(preview.get("runtime_unverified_count") or 0),
         "source_commit_matches_pr_head": bool(identity.get("source_commit_matches_pr_head")),
         "permission": str(permission.get("permission") or ""),
+        "permission_reason": str(permission.get("reason") or ""),
         "authority_write_performed": bool(permission.get("authority_write_performed")),
         "gaps": list(preview.get("gaps") or []),
         "production_mutation_performed": bool(report.get("production_mutation_performed")),
@@ -713,7 +839,7 @@ def _activation_phase_next_action(phase: str, state: str, gaps: list[str]) -> st
     if phase == "P5":
         return "keep_continuous_quality_gate_active_until_release_gate_green"
     if any("production" in gap or "live" in gap for gap in gaps):
-        return "collect_runtime_or_production_evidence_without_mutation"
+        return "collect_bounded_runtime_or_production_evidence"
     if state == "local_validated":
         return "advance_next_phase_with_gap_visible"
     return "complete_local_phase_slice"
