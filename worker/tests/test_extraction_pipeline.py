@@ -9,6 +9,7 @@ from agent_knowledge.llm_brain_core.objects.extraction_pipeline import (
     run_repo_document_extraction_preview,
     run_runtime_truth_extraction_preview,
     run_session_detail_extraction_preview,
+    run_session_project_rollup_preview,
     run_work_unit_extraction_preview,
 )
 
@@ -521,6 +522,76 @@ def test_session_detail_extraction_preview_reports_gap_when_raw_body_is_ignored(
         "raw_session_body_ignored",
         "session_evidence_missing",
     ]
+
+
+def test_session_project_rollup_preview_separates_same_device_and_all_devices():
+    sessions = [
+        {
+            "session_id_hash": "sha256:session-alpha",
+            "device_id_hash": "sha256:device-one",
+            "provider": "codex",
+            "summary": "Implemented project rollup preview.",
+            "work_unit_id": "work:p6",
+            "evidence_refs": ["commit:p6a"],
+            "host_path": "HOST_PATH_SENTINEL",
+        },
+        {
+            "session_id_hash": "sha256:session-beta",
+            "device_id_hash": "sha256:device-one",
+            "provider": "codex",
+            "summary": "Verified same-device recall.",
+            "work_unit_id": "work:p6",
+            "evidence_refs": ["pytest:p6"],
+        },
+        {
+            "session_id_hash": "sha256:session-gamma",
+            "device_id_hash": "sha256:device-two",
+            "provider": "codex",
+            "summary": "Captured all-device handoff context.",
+            "work_unit_id": "work:p6",
+            "evidence_refs": ["commit:p6b"],
+        },
+    ]
+
+    all_devices = run_session_project_rollup_preview(
+        sessions=sessions,
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+        scope="all_devices",
+    )
+    same_device = run_session_project_rollup_preview(
+        sessions=sessions,
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+        requesting_device_id_hash="sha256:device-one",
+        scope="same_device",
+    )
+
+    assert all_devices["schema_version"] == "object_extraction_session_project_rollup_preview.v1"
+    assert all_devices["status"] == "pass"
+    assert all_devices["visible_session_count"] == 3
+    assert same_device["visible_session_count"] == 2
+    assert same_device["all_device_session_count"] == 3
+    assert same_device["per_device_counts"] == {
+        "sha256:device-one": 2,
+        "sha256:device-two": 1,
+    }
+    object_types = {obj["object_type"] for obj in all_devices["objects"]}
+    assert {"Device", "Session", "Repository", "Branch", "WorkUnit"}.issubset(object_types)
+    edge_types = {edge["edge_type"] for edge in all_devices["edges"]}
+    assert {
+        "repository_has_branch",
+        "session_on_device",
+        "session_in_repository",
+        "session_on_branch",
+        "part_of_work_unit",
+    }.issubset(edge_types)
+    assert "HOST_PATH_SENTINEL" not in str(all_devices)
+    assert "raw_transcript" not in str(all_devices)
+    assert all_devices["evaluator_report"]["golden_query_slice"] == "temporal repo recall"
+    assert all_devices["evaluator_report"]["passes"] is True
 
 
 def test_pr_commit_extraction_preview_maps_pr_commits_and_tests_without_runtime_inference():

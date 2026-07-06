@@ -15,6 +15,7 @@ Current state:
 - P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / local_validated; local/test reference corpus extraction preview creates deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, and blocked-extraction gaps; repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, and broader evaluator suite previews have local/test evaluator evidence; live graph/Qdrant projection join remains unproven.
 - P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / local_validated; local/test decision commit records authority state/audit history, object queries surface local/test stale, superseded, retired, archive-only, and rejected states, object explain returns local/test decision history, and production denial returns a read-only promotion plan while authority mutation remains denied.
 - P5 Continuous Golden Query Quality Gates: `in_progress`; phase coverage report lists P1-P10 golden query families and explicitly keeps the release quality gate `not_green`.
+- P6 Session, Device, Project, And Work-Unit 360: `in_progress`; local/test session project rollup preview now creates Device/Session/Repository/Branch/WorkUnit objects and separates same-device from all-device fixture rollups.
 - Product activation: not complete; configured agent read path refresh remains required.
 - UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
 
@@ -490,7 +491,7 @@ Remaining gaps:
 
 ### P6. Session, Device, Project, And Work-Unit 360
 
-State: planned.
+State: `in_progress`.
 
 Purpose:
 
@@ -509,6 +510,31 @@ Gate evidence:
 - one-device and all-device fixture queries produce different but compatible answers
 - raw host/path is not exposed
 - project rollup can cite sessions, specs, PRs, and commits without raw transcript body
+
+Current local/test evidence:
+
+- `run_session_project_rollup_preview` maps redacted session metadata into `Device`, `Session`, `Repository`, `Branch`, and `WorkUnit` objects
+- local/test rollup emits `repository_has_branch`, `session_on_device`, `session_in_repository`, `session_on_branch`, and `part_of_work_unit` edges
+- same-device scope and all-device scope produce different visible session counts while preserving all-device rollup counts
+- local path sentinels and source bodies are not returned
+- P5 phase coverage now marks P6 as `in_progress` with explicit future gaps rather than `planned`
+- focused evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_session_project_rollup_preview_separates_same_device_and_all_devices`
+- focused result: `1 passed, 1 warning`
+- phase coverage evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
+- phase coverage result: `1 passed, 1 warning`
+- adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
+- adjacent regression result: `30 passed, 1 warning`
+- worker regression evidence: `cd worker && uv run pytest -q`
+- worker regression result: `1541 passed, 9 skipped, 1 warning`
+- root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
+- root regression result: `BUILD SUCCESSFUL`
+
+Remaining gaps:
+
+- P6 is not complete; this slice covers local/test metadata rollup only
+- handoff pack generation is not implemented in this slice
+- Spec/PullRequest/Commit bidirectional rollup edges are not yet covered by the P6 rollup preview
+- live multi-device/project rollup evidence is unproven
 
 ### P7. Preference, Style, And Artifact Memory
 
