@@ -73,6 +73,7 @@ def _sanitized_live_evidence(**overrides):
             "per_call_gate_required": True,
             "production_mutation_performed": False,
         },
+        "production_authority_execution": _production_authority_execution_evidence(),
     }
     evidence.update(overrides)
     return evidence
@@ -123,6 +124,67 @@ def _object_authority_tool_schema():
     }
 
 
+def _production_authority_execution_evidence(**overrides):
+    target_object_id = "ko:RepoDocument:production-gate-smoke"
+    approval_ref_hash = "sha256:" + "a" * 24
+    evidence = {
+        "schema_version": "object_authority_bounded_execution_evidence.v1",
+        "approval": {
+            "approved": True,
+            "approval_ref_hash": approval_ref_hash,
+            "scope": "single_project_single_object",
+            "project": "workspace-index-advisor",
+            "max_objects": 1,
+        },
+        "proposal": {
+            "proposal_write_performed": True,
+            "proposal_write_target": "production_ledger",
+            "authority_write_performed": False,
+            "production_mutation_performed": True,
+            "ledger_scope": "production",
+            "target_object_id": target_object_id,
+            "production_gate_ref_hash": approval_ref_hash,
+        },
+        "decision": {
+            "authority_write_performed": True,
+            "authoritative_memory_changed": True,
+            "production_mutation_performed": True,
+            "authority_write_scope": "production_ledger",
+            "ledger_scope": "production",
+            "target_object_id": target_object_id,
+            "decision_id": "decision:production-gate-smoke",
+            "production_gate_ref_hash": approval_ref_hash,
+        },
+        "read_after_write": {
+            "status": "validated",
+            "target_object_id": target_object_id,
+            "authority_lane": "rejected",
+            "decision_id": "decision:production-gate-smoke",
+        },
+        "rollback_or_supersession": {
+            "status": "planned",
+            "path": [
+                "write_new_authority_decision_preserving_audit_history",
+                "demote_prior_object_to_accepted_non_current_or_archive_only",
+                "verify_brain_objects_query_read_after_write",
+            ],
+        },
+        "postcheck": {
+            "status": "validated",
+            "review_queue_status": "rejected",
+            "raw_private_evidence_returned": False,
+        },
+        "scope": {
+            "project": "workspace-index-advisor",
+            "object_ids": [target_object_id],
+            "max_objects": 1,
+            "allowed_object_classes": ["RepoDocument"],
+        },
+    }
+    evidence.update(overrides)
+    return evidence
+
+
 def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation():
     report = build_source_to_candidate_runtime_readiness_report(expected_commit="7218cb2")
 
@@ -141,10 +203,12 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert claims["live.production.object_proposal_denial"]["status"] == "not_validated"
     assert claims["live.production.object_decision_denial"]["status"] == "not_validated"
     assert claims["live.production.object_authority_gate_policy"]["status"] == "not_validated"
+    assert claims["live.production.object_authority_bounded_execution"]["status"] == "not_validated"
     assert "live_mcp_review_tools_unverified" in report["gaps"]
     assert "live_brain_objects_query_route_smokes_unverified" in report["gaps"]
     assert "live_deployed_identity_unverified" in report["gaps"]
     assert "live_object_authority_gate_policy_unverified" in report["gaps"]
+    assert "bounded_production_authority_execution_unverified" in report["gaps"]
 
 
 def test_runtime_readiness_passes_with_sanitized_live_evidence():
@@ -167,6 +231,63 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.production.object_proposal_denial"]["status"] == "denied_as_expected"
     assert claims["live.production.object_decision_denial"]["status"] == "denied_as_expected"
     assert claims["live.production.object_authority_gate_policy"]["status"] == "validated"
+    assert claims["live.production.object_authority_bounded_execution"]["status"] == "validated"
+    assert claims["live.production.object_authority_bounded_execution"]["production_mutation_performed"] is True
+    assert claims["live.production.object_authority_bounded_execution"]["read_after_write_status"] == "validated"
+
+
+def test_runtime_readiness_fails_when_bounded_production_execution_evidence_is_incomplete():
+    evidence = _sanitized_live_evidence(
+        production_authority_execution=_production_authority_execution_evidence(
+            approval={"approved": True, "approval_ref_hash": "", "scope": "single_project_single_object", "max_objects": 2},
+            read_after_write={"status": "missing"},
+            postcheck={"status": "validated", "raw_private_evidence_returned": True},
+            scope={
+                "project": "workspace-index-advisor",
+                "object_ids": [
+                    "ko:RepoDocument:production-gate-smoke",
+                    "ko:RepoDocument:second-object",
+                ],
+                "max_objects": 2,
+                "allowed_object_classes": ["RepoDocument"],
+            },
+        )
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    execution = claims["live.production.object_authority_bounded_execution"]
+    assert execution["status"] == "failed"
+    assert "bounded_execution_approval_ref_hash_missing" in report["gaps"]
+    assert "bounded_execution_max_objects_not_one" in report["gaps"]
+    assert "bounded_execution_read_after_write_missing" in report["gaps"]
+    assert "bounded_execution_raw_private_evidence_returned" in report["gaps"]
+
+
+def test_runtime_readiness_reports_bounded_execution_gate_hash_mismatch():
+    evidence = _sanitized_live_evidence(
+        production_authority_execution=_production_authority_execution_evidence(
+            proposal={
+                "proposal_write_performed": True,
+                "proposal_write_target": "production_ledger",
+                "authority_write_performed": False,
+                "production_mutation_performed": True,
+                "ledger_scope": "production",
+                "target_object_id": "ko:RepoDocument:production-gate-smoke",
+                "production_gate_ref_hash": "sha256:" + "b" * 24,
+            }
+        )
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    execution = claims["live.production.object_authority_bounded_execution"]
+    assert execution["status"] == "failed"
+    assert "bounded_execution_gate_hash_mismatch" in report["gaps"]
 
 
 def test_runtime_readiness_keeps_fr8_route_out_of_required_live_smokes_until_deployed():
@@ -435,6 +556,7 @@ def test_runtime_readiness_breaks_partial_live_evidence_into_actionable_gap_ids(
             "contains_expected_commit": False,
             "identity_source": "redacted_live_runtime_evidence",
         },
+        production_authority_execution={},
     )
 
     report = build_source_to_candidate_runtime_readiness_report(
@@ -606,4 +728,4 @@ def test_neuron_knowledge_runtime_readiness_cli_accepts_sanitized_evidence_file(
     report = json.loads(capsys.readouterr().out)
     assert report["schema_version"] == "source_to_candidate_runtime_readiness.v1"
     assert report["status"] == "PASS"
-    assert report["production_mutation_performed"] is False
+    assert report["production_mutation_performed"] is True

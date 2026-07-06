@@ -501,9 +501,10 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
 
     report = response["result"]["structuredContent"]
     assert report["schema_version"] == "source_to_candidate_runtime_readiness.v1"
-    assert report["status"] == "PASS"
+    assert report["status"] == "PASS_WITH_GAPS"
     assert report["production_mutation_performed"] is False
     assert report["network_used"] is False
+    assert "bounded_production_authority_execution_unverified" in report["gaps"]
 
 
 def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None) -> dict:
@@ -520,6 +521,244 @@ def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None) -> 
             "gaps": list(gaps or []),
         },
     }
+
+
+def _runtime_readiness_complete_evidence(
+    *,
+    production_authority_execution: dict | None = None,
+) -> dict:
+    tools = {tool["name"]: tool for tool in list_tools()}
+    evidence = {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "tool_names": [
+            BRAIN_OBJECTS_QUERY_TOOL_NAME,
+            BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+            BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+            BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+            BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+        ],
+        "agent_context_product": {
+            "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
+            "sections": {
+                "style_preference": {"object_count": 1},
+                "active_work": {"object_count": 1},
+                "required_verification": {"object_count": 1},
+            },
+            "degraded_mode": {"active": True, "gaps": ["runtime_evidence_unverified"]},
+            "missing_evidence_before_promotion": ["runtime_evidence_unverified"],
+            "surface_policy": {"mutation_allowed": False},
+            "tool_hints": object_native_review_tool_hints([]),
+        },
+        "brain_objects_query_smokes": [
+            _brain_objects_query_smoke("authority_archive_separation"),
+            _brain_objects_query_smoke("code_style_preference"),
+            _brain_objects_query_smoke("temporal_work_recall"),
+            _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
+        ],
+        "production_denials": {
+            BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
+                "status": "denied",
+                "production_mutation_performed": False,
+                "mutation_performed": False,
+            },
+            BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME: {
+                "permission": "denied",
+                "production_mutation_performed": False,
+                "authority_write_performed": False,
+            },
+            BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: {
+                "status": "denied",
+                "production_mutation_performed": False,
+                "proposal_write_performed": False,
+                "authority_write_performed": False,
+            },
+            BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: {
+                "permission": "denied",
+                "production_mutation_performed": False,
+                "decision_write_performed": False,
+                "authority_write_performed": False,
+            },
+        },
+        "tool_schemas": {
+            BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: tools[BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME],
+            BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: tools[BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME],
+        },
+        "production_authority_gate": {
+            "runtime_flag": "--allow-object-authority-production-writes",
+            "default_enabled": False,
+            "per_call_gate_required": True,
+            "production_mutation_performed": False,
+        },
+        "deployed_identity": {
+            "contains_expected_commit": True,
+            "identity_source": "redacted_live_runtime_evidence",
+        },
+    }
+    if production_authority_execution is not None:
+        evidence["production_authority_execution"] = production_authority_execution
+    return evidence
+
+
+def _production_authority_execution_from_smoke(
+    *,
+    proposal: dict,
+    decision: dict,
+    state: dict,
+    queued_item: dict,
+) -> dict:
+    target_object_id = proposal["target_object_id"]
+    return {
+        "schema_version": "object_authority_bounded_execution_evidence.v1",
+        "approval": {
+            "approved": True,
+            "approval_ref_hash": proposal["production_gate_ref_hash"],
+            "scope": "single_project_single_object",
+            "project": proposal["project"],
+            "max_objects": 1,
+        },
+        "proposal": {
+            "proposal_write_performed": proposal["proposal_write_performed"],
+            "proposal_write_target": proposal["proposal_write_target"],
+            "authority_write_performed": proposal["authority_write_performed"],
+            "production_mutation_performed": proposal["production_mutation_performed"],
+            "ledger_scope": proposal["ledger_scope"],
+            "target_object_id": target_object_id,
+            "production_gate_ref_hash": proposal["production_gate_ref_hash"],
+        },
+        "decision": {
+            "authority_write_performed": decision["authority_write_performed"],
+            "authoritative_memory_changed": decision["authoritative_memory_changed"],
+            "production_mutation_performed": decision["production_mutation_performed"],
+            "authority_write_scope": decision["authority_write_scope"],
+            "ledger_scope": decision["ledger_scope"],
+            "target_object_id": decision["target_object_id"],
+            "decision_id": decision["decision_id"],
+            "production_gate_ref_hash": decision["production_gate_ref_hash"],
+        },
+        "read_after_write": {
+            "status": "validated",
+            "target_object_id": target_object_id,
+            "authority_lane": state["authority_lane"],
+            "decision_id": state["decision_id"],
+        },
+        "rollback_or_supersession": {
+            "status": "planned",
+            "path": [
+                "write_new_authority_decision_preserving_audit_history",
+                "demote_prior_object_to_accepted_non_current_or_archive_only",
+                "verify_brain_objects_query_read_after_write",
+            ],
+        },
+        "postcheck": {
+            "status": "validated",
+            "review_queue_status": queued_item["status"],
+            "raw_private_evidence_returned": False,
+        },
+        "scope": {
+            "project": proposal["project"],
+            "object_ids": [target_object_id],
+            "max_objects": 1,
+            "allowed_object_classes": ["RepoDocument"],
+        },
+    }
+
+
+def test_mcp_source_to_candidate_runtime_readiness_accepts_bounded_execution_evidence_from_local_production_gate_simulation(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    production_gate = {
+        "approved": True,
+        "approval_ref": "preapproved-user-gate-2026-07-06",
+        "scope": "single_project_single_object",
+        "project": PROJECT,
+        "max_objects": 1,
+        "configured_deployed_mcp_identity_matches_source": True,
+        "read_after_write_smoke_plan": True,
+        "rollback_or_supersession_plan": True,
+        "no_raw_private_evidence": True,
+    }
+    target_object_id = "ko:RepoDocument:production-gate-runtime-readiness"
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 121,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Bounded production proposal smoke for runtime readiness.",
+                    "evidence_refs": ["github_pr:95", "git_commit:73d5f6a"],
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 122,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "reject_candidate",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "rejected",
+                    "approved_by": "preapproved-user-gate-2026-07-06",
+                    "decision_id": "decision:production-runtime-readiness",
+                    "decision_reason": "Bounded production decision smoke rejects the candidate.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    state = service.ledger.get_object_authority_state(target_object_id)
+    queued_item = service.object_review_proposals(project=PROJECT)["items"][0]
+    evidence = _runtime_readiness_complete_evidence(
+        production_authority_execution=_production_authority_execution_from_smoke(
+            proposal=proposal,
+            decision=decision,
+            state=state,
+            queued_item=queued_item,
+        )
+    )
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 123,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "live_evidence": evidence,
+                    "expected_commit": "73d5f6a",
+                },
+            },
+        },
+        service,
+    )
+
+    report = response["result"]["structuredContent"]
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert report["status"] == "PASS"
+    assert report["production_mutation_performed"] is True
+    assert claims["live.production.object_authority_bounded_execution"]["status"] == "validated"
+    assert claims["live.production.object_authority_bounded_execution"]["read_after_write_status"] == "validated"
+    assert "bounded_production_authority_execution_unverified" not in report["gaps"]
 
 
 def test_mcp_source_to_candidate_runtime_readiness_without_evidence_preserves_live_gaps(tmp_path: Path):

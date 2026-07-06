@@ -59,6 +59,7 @@ def build_source_to_candidate_runtime_readiness_report(
         _live_brain_objects_query_route_smokes_claim(evidence),
         _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
         _live_object_authority_production_gate_policy_claim(evidence),
+        _live_object_authority_bounded_execution_claim(evidence),
         *[
             _production_denial_claim(evidence, claim_id=claim_id, tool_name=tool_name)
             for claim_id, tool_name in PRODUCTION_DENIAL_CLAIMS
@@ -376,6 +377,152 @@ def _object_authority_runtime_gate_policy_failures(runtime_gate: Mapping[str, An
     return failures
 
 
+def _live_object_authority_bounded_execution_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    execution = evidence.get("production_authority_execution")
+    execution = execution if isinstance(execution, Mapping) else {}
+    if not execution:
+        return {
+            "claim_id": "live.production.object_authority_bounded_execution",
+            "evidence_class": "runtime_safety_gate",
+            "status": "not_validated",
+            "production_mutation_performed": False,
+            "gaps": ["bounded_production_authority_execution_unverified"],
+        }
+    approval = execution.get("approval") if isinstance(execution.get("approval"), Mapping) else {}
+    proposal = execution.get("proposal") if isinstance(execution.get("proposal"), Mapping) else {}
+    decision = execution.get("decision") if isinstance(execution.get("decision"), Mapping) else {}
+    read_after_write = (
+        execution.get("read_after_write") if isinstance(execution.get("read_after_write"), Mapping) else {}
+    )
+    rollback = (
+        execution.get("rollback_or_supersession")
+        if isinstance(execution.get("rollback_or_supersession"), Mapping)
+        else {}
+    )
+    postcheck = execution.get("postcheck") if isinstance(execution.get("postcheck"), Mapping) else {}
+    scope = execution.get("scope") if isinstance(execution.get("scope"), Mapping) else {}
+    proposal_target = public_safe_text(str(proposal.get("target_object_id") or ""), max_chars=180)
+    decision_target = public_safe_text(str(decision.get("target_object_id") or ""), max_chars=180)
+    read_target = public_safe_text(str(read_after_write.get("target_object_id") or ""), max_chars=180)
+    decision_id = public_safe_text(str(decision.get("decision_id") or ""), max_chars=180)
+    approval_ref_hash = public_safe_text(str(approval.get("approval_ref_hash") or ""), max_chars=120)
+    proposal_gate_hash = public_safe_text(str(proposal.get("production_gate_ref_hash") or ""), max_chars=120)
+    decision_gate_hash = public_safe_text(str(decision.get("production_gate_ref_hash") or ""), max_chars=120)
+    object_ids = _string_list(scope.get("object_ids"))
+    allowed_object_classes = set(_string_list(scope.get("allowed_object_classes")))
+    failures = _bounded_execution_failures(
+        execution=execution,
+        approval=approval,
+        proposal=proposal,
+        decision=decision,
+        read_after_write=read_after_write,
+        rollback=rollback,
+        postcheck=postcheck,
+        scope=scope,
+        proposal_target=proposal_target,
+        decision_target=decision_target,
+        read_target=read_target,
+        decision_id=decision_id,
+        approval_ref_hash=approval_ref_hash,
+        proposal_gate_hash=proposal_gate_hash,
+        decision_gate_hash=decision_gate_hash,
+        object_ids=object_ids,
+        allowed_object_classes=allowed_object_classes,
+    )
+    return {
+        "claim_id": "live.production.object_authority_bounded_execution",
+        "evidence_class": "runtime_safety_gate",
+        "status": "failed" if failures else "validated",
+        "schema_version": public_safe_text(str(execution.get("schema_version") or ""), max_chars=80),
+        "target_object_id": proposal_target,
+        "decision_id": decision_id,
+        "approval_ref_hash_present": bool(approval_ref_hash),
+        "read_after_write_status": public_safe_text(str(read_after_write.get("status") or ""), max_chars=80),
+        "rollback_or_supersession_status": public_safe_text(str(rollback.get("status") or ""), max_chars=80),
+        "postcheck_status": public_safe_text(str(postcheck.get("status") or ""), max_chars=80),
+        "object_count": len(object_ids),
+        "production_mutation_performed": _bounded_execution_reports_mutation(proposal, decision),
+        "gaps": failures,
+    }
+
+
+def _bounded_execution_failures(
+    *,
+    execution: Mapping[str, Any],
+    approval: Mapping[str, Any],
+    proposal: Mapping[str, Any],
+    decision: Mapping[str, Any],
+    read_after_write: Mapping[str, Any],
+    rollback: Mapping[str, Any],
+    postcheck: Mapping[str, Any],
+    scope: Mapping[str, Any],
+    proposal_target: str,
+    decision_target: str,
+    read_target: str,
+    decision_id: str,
+    approval_ref_hash: str,
+    proposal_gate_hash: str,
+    decision_gate_hash: str,
+    object_ids: list[str],
+    allowed_object_classes: set[str],
+) -> list[str]:
+    failures: list[str] = []
+    if execution.get("schema_version") != "object_authority_bounded_execution_evidence.v1":
+        failures.append("bounded_execution_schema_mismatch")
+    if approval.get("approved") is not True:
+        failures.append("bounded_execution_approval_missing")
+    if not approval_ref_hash.startswith("sha256:"):
+        failures.append("bounded_execution_approval_ref_hash_missing")
+    if str(approval.get("scope") or "") != "single_project_single_object":
+        failures.append("bounded_execution_scope_not_single_project_single_object")
+    if _int_value(approval.get("max_objects")) != 1 or _int_value(scope.get("max_objects")) != 1:
+        failures.append("bounded_execution_max_objects_not_one")
+    if len(object_ids) != 1:
+        failures.append("bounded_execution_object_count_not_one")
+    if not proposal_target or proposal_target != decision_target or proposal_target != read_target:
+        failures.append("bounded_execution_target_object_mismatch")
+    if proposal_target and not proposal_target.startswith("ko:RepoDocument:"):
+        failures.append("bounded_execution_object_class_not_allowed")
+    if "RepoDocument" not in allowed_object_classes:
+        failures.append("bounded_execution_allowed_object_class_missing")
+    if proposal.get("proposal_write_performed") is not True:
+        failures.append("bounded_execution_proposal_write_missing")
+    if proposal.get("proposal_write_target") != "production_ledger":
+        failures.append("bounded_execution_proposal_target_not_production")
+    if proposal.get("authority_write_performed") is True:
+        failures.append("bounded_execution_proposal_changed_authority")
+    if proposal.get("ledger_scope") != "production" or decision.get("ledger_scope") != "production":
+        failures.append("bounded_execution_ledger_scope_not_production")
+    if proposal_gate_hash != approval_ref_hash or decision_gate_hash != approval_ref_hash:
+        failures.append("bounded_execution_gate_hash_mismatch")
+    if decision.get("authority_write_performed") is not True:
+        failures.append("bounded_execution_decision_write_missing")
+    if decision.get("authoritative_memory_changed") is not True:
+        failures.append("bounded_execution_authoritative_memory_not_changed")
+    if decision.get("authority_write_scope") != "production_ledger":
+        failures.append("bounded_execution_decision_scope_not_production")
+    if read_after_write.get("status") != "validated" or not decision_id:
+        failures.append("bounded_execution_read_after_write_missing")
+    if public_safe_text(str(read_after_write.get("decision_id") or ""), max_chars=180) != decision_id:
+        failures.append("bounded_execution_read_after_write_decision_mismatch")
+    if str(rollback.get("status") or "") not in {"planned", "validated"} or not _string_list(rollback.get("path")):
+        failures.append("bounded_execution_rollback_or_supersession_missing")
+    if postcheck.get("status") != "validated":
+        failures.append("bounded_execution_postcheck_missing")
+    if postcheck.get("raw_private_evidence_returned") is not False:
+        failures.append("bounded_execution_raw_private_evidence_returned")
+    return _dedupe(failures)
+
+
+def _bounded_execution_reports_mutation(proposal: Mapping[str, Any], decision: Mapping[str, Any]) -> bool:
+    return (
+        proposal.get("production_mutation_performed") is True
+        or proposal.get("proposal_write_performed") is True
+        or decision.get("production_mutation_performed") is True
+        or decision.get("authority_write_performed") is True
+    )
+
+
 def _production_denial_claim(
     evidence: Mapping[str, Any],
     *,
@@ -506,6 +653,13 @@ def _string_list(value: Any) -> list[str]:
 
 def _claim_reports_mutation(claim: Mapping[str, Any]) -> bool:
     return claim.get("production_mutation_performed") is True
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _dedupe(values) -> list[str]:
