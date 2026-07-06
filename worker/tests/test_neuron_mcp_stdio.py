@@ -672,6 +672,123 @@ def test_mcp_object_decision_commit_local_test_updates_authority_state_with_audi
     assert queued["items"][0]["status"] == "accepted"
 
 
+@pytest.mark.parametrize(
+    ("decision_type", "new_authority_lane", "expected_lifecycle", "expected_review", "expected_action"),
+    [
+        ("commit_stale", "accepted_non_current", "stale", "accepted", "archive"),
+        ("commit_supersession", "accepted_non_current", "superseded", "accepted", "supersede"),
+        ("retire", "accepted_non_current", "retired", "accepted", "retire"),
+        ("archive_only", "archive_only", "archived", "accepted", "archive"),
+        ("reject_candidate", "rejected", "rejected", "rejected", "retire"),
+    ],
+)
+def test_mcp_brain_objects_query_overlays_local_authority_state(
+    tmp_path: Path,
+    decision_type: str,
+    new_authority_lane: str,
+    expected_lifecycle: str,
+    expected_review: str,
+    expected_action: str,
+):
+    service = _service(tmp_path)
+    query_args = {
+        "repository": FIXTURE_REPOSITORY,
+        "branch": FIXTURE_BRANCH,
+        "query": "이 repo 문서 최신화하려면 뭘 봐야 해?",
+        "current_files": ["README.md"],
+        "consumer": "codex",
+        "project": PROJECT,
+    }
+    before = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 106,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": query_args,
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    target = next(obj for obj in before["object_pack"]["objects"] if obj["title"] == "README.md")
+
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 107,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_stale",
+                    "target_object_id": target["object_id"],
+                    "reason": "README is no longer the current roadmap source.",
+                    "evidence_refs": ["ev:source_hash:readme"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 108,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "target_object_id": target["object_id"],
+                    "decision_type": decision_type,
+                    "previous_authority_lane": target["authority_lane"],
+                    "new_authority_lane": new_authority_lane,
+                    "evidence_refs": ["ev:source_hash:readme"],
+                    "decision_reason": "Reviewed local fixture evidence.",
+                    "approved_by": "human-reviewer",
+                    "decision_id": f"decision:local-{expected_lifecycle}-readme",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    after = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 109,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": query_args,
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    updated = next(obj for obj in after["object_pack"]["objects"] if obj["object_id"] == target["object_id"])
+    assert updated["authority_lane"] == new_authority_lane
+    assert updated["lifecycle_status"] == expected_lifecycle
+    assert updated["review_state"] == expected_review
+    assert updated["recommended_action"] == expected_action
+    assert updated["authority_state"]["decision_id"] == f"decision:local-{expected_lifecycle}-readme"
+    assert updated["authority_state"]["proposal_id"] == proposal["proposal_id"]
+    assert updated["authority_state"]["decision_type"] == decision_type
+    lane_ids = {obj["object_id"] for obj in after["object_pack"]["lanes"][new_authority_lane]}
+    assert target["object_id"] in lane_ids
+    assert all(
+        obj["object_id"] != target["object_id"]
+        for lane, objects in after["object_pack"]["lanes"].items()
+        if lane != new_authority_lane
+        for obj in objects
+    )
+
+
 def test_brain_query_semantic_recall_type_error_is_audited(tmp_path: Path, monkeypatch):
     service = _service(tmp_path)
     service.native_memory_id = "mem_native"
