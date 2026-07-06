@@ -3,9 +3,11 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from .._util import ensure_public_safe, hash_payload, public_safe_text
+from ..preference_authority import preference_rule_cards_from_memory_cards
+from ..repo_style_profile import repo_style_profile_from_memory_cards
 from .golden_query_eval import evaluate_object_pack_response
 from .knowledge_objects import KnowledgeEdge, KnowledgeObjectEnvelope
-from .object_packs import build_documentation_cleanup_pack, build_runtime_truth_pack
+from .object_packs import build_agent_context_object_packs, build_documentation_cleanup_pack, build_runtime_truth_pack
 from .reference_corpus import reference_corpus_objects_from_manifest
 
 
@@ -42,6 +44,16 @@ def build_extractor_registry_report() -> dict[str, Any]:
                 "output_object_types": ["PullRequest", "RuntimeTruth"],
                 "edge_types": ["validated_by", "requires_live_evidence"],
                 "strategy_scope": "runtime_evidence_mapping",
+                "gaps": [],
+            },
+            {
+                "extractor": "preference_style",
+                "version": "0.1",
+                "status": "implemented",
+                "input_object_types": ["MemoryCard"],
+                "output_object_types": ["ArtifactPreference", "StyleRule"],
+                "edge_types": ["supported_by_evidence"],
+                "strategy_scope": "style_preference_mapping",
                 "gaps": [],
             },
         ],
@@ -284,6 +296,105 @@ def run_runtime_truth_extraction_preview(
     return result
 
 
+def run_preference_style_extraction_preview(
+    *,
+    memory_cards: list[Mapping[str, Any]],
+    repository: str,
+    current_request: str = "",
+    current_files: list[str] | tuple[str, ...] = (),
+) -> dict[str, Any]:
+    preference_rules = preference_rule_cards_from_memory_cards(
+        [dict(card) for card in memory_cards],
+        current_request=current_request,
+        current_files=current_files,
+    )
+    style_profile = repo_style_profile_from_memory_cards(
+        list(memory_cards),
+        repository=repository,
+    )
+    packs = build_agent_context_object_packs(
+        documents=[],
+        preferences=preference_rules,
+        style_profile=style_profile,
+        current_work=[],
+        required_verification=[],
+        guardrails=[],
+    )
+    preference_objects = [_stable_object(obj) for obj in packs["preferences"]["objects"]]
+    style_objects = [_stable_object(obj) for obj in packs["style"]["objects"]]
+    objects = [*preference_objects, *style_objects]
+    source_evidence_refs = _preference_style_evidence_refs(preference_rules, style_profile)
+    consumed_memory_ids = {
+        str(item.get("memory_id") or "")
+        for item in [*preference_rules, *style_profile.get("claims", [])]
+        if str(item.get("memory_id") or "")
+    }
+    ignored_input_count = sum(
+        1
+        for card in memory_cards
+        if str(card.get("memory_id") or "") not in consumed_memory_ids
+    )
+    gaps = [] if objects else ["preference_style_objects_empty"]
+    result = {
+        "schema_version": "object_extraction_preference_style_preview.v1",
+        "status": "pass" if objects else "pass_with_gaps",
+        "repository": public_safe_text(repository, max_chars=180),
+        "selected_strategy": "memory_card_preference_style_v1",
+        "production_mutation_performed": False,
+        "preference_count": len(preference_rules),
+        "style_claim_count": len(style_profile.get("claims", [])),
+        "ignored_input_count": ignored_input_count,
+        "objects": objects,
+        "source_evidence_refs": source_evidence_refs,
+        "pack_preview": {
+            "preferences": {
+                "route": packs["preferences"]["route"],
+                "object_count": len(preference_objects),
+                "gaps": list(packs["preferences"]["gaps"]),
+            },
+            "style": {
+                "route": packs["style"]["route"],
+                "object_count": len(style_objects),
+                "gaps": list(packs["style"]["gaps"]),
+            },
+        },
+        "strategy_comparison": [
+            {
+                "strategy": "memory_card_preference_style_v1",
+                "scope": "style_preference_mapping",
+                "selected": True,
+                "status": "pass" if objects else "pass_with_gaps",
+                "object_count": len(objects),
+                "source_evidence_ref_count": len(source_evidence_refs),
+                "gaps": gaps,
+            },
+            {
+                "strategy": "raw_session_body_inference_v1",
+                "scope": "style_preference_mapping",
+                "selected": False,
+                "status": "rejected",
+                "object_count": 0,
+                "source_evidence_ref_count": 0,
+                "gaps": ["raw_body_inference_forbidden"],
+            },
+        ],
+        "evaluator_report": {
+            "schema_version": "object_extraction_evaluator_report.v1",
+            "golden_query_slice": "style and artifact preference memory",
+            "passes": bool(objects),
+            "failures": [] if objects else ["preference_style_objects_empty"],
+            "gaps": gaps,
+            "assertions": [
+                "preference_and_style_are_distinct_objects",
+                "source_evidence_refs_without_raw_body",
+                "production_mutation_performed_false",
+            ],
+        },
+    }
+    ensure_public_safe(result, "PreferenceStyleExtractionPreview")
+    return result
+
+
 def _blocked_preview(
     *,
     bundle: Mapping[str, Any],
@@ -452,6 +563,19 @@ def _runtime_truth_edges(
         payload={"claim": "deploy_requires_live_evidence"},
     )
     return [_stable_edge(edge.to_dict())]
+
+
+def _preference_style_evidence_refs(
+    preference_rules: list[Mapping[str, Any]],
+    style_profile: Mapping[str, Any],
+) -> list[str]:
+    refs: list[str] = []
+    for item in [*preference_rules, *style_profile.get("claims", [])]:
+        for ref in item.get("evidence_refs") or []:
+            safe_ref = public_safe_text(str(ref or ""), max_chars=180)
+            if safe_ref and safe_ref not in refs:
+                refs.append(safe_ref)
+    return refs
 
 
 def _chunk_preview(chunk: Mapping[str, Any]) -> dict[str, Any]:
