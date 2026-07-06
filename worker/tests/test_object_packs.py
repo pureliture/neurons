@@ -156,6 +156,7 @@ def test_candidate_graph_review_pack_exposes_editable_review_surface_without_aut
     ]
     assert pack["approval_board"][0]["evidence_refs"] == [evidence.evidence_id]
     assert pack["candidate_graph_hash"].startswith("sha256:")
+    assert "accepted_current objects empty" in pack["gaps"]
 
 
 def test_candidate_review_edits_change_candidate_state_without_promoting_authority():

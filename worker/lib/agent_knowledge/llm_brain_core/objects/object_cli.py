@@ -10,7 +10,11 @@ import yaml
 
 from ...ledger import Ledger
 
-from .golden_query_eval import build_baseline_golden_query_report, build_phase_golden_query_coverage_report
+from .golden_query_eval import (
+    build_baseline_golden_query_report,
+    build_phase_golden_query_coverage_report,
+    build_source_to_authority_quality_gate_report,
+)
 from .okf_export import build_okf_bundle
 from .object_packs import build_documentation_cleanup_pack
 from .reference_corpus import build_corpus_ingest_plan, default_corpus_policy_status, reference_corpus_objects_from_manifest
@@ -201,7 +205,11 @@ def golden_query_eval_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="neuron-knowledge golden-query-eval")
     parser.add_argument("--baseline", action="store_true")
     parser.add_argument("--phase-coverage", action="store_true")
+    parser.add_argument("--source-to-authority-gate", action="store_true")
     args = parser.parse_args(argv)
+    if args.source_to_authority_gate:
+        _print_json(build_source_to_authority_quality_gate_report())
+        return 0
     if args.phase_coverage:
         _print_json(build_phase_golden_query_coverage_report())
         return 0

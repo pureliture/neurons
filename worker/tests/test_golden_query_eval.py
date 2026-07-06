@@ -3,6 +3,7 @@ from agent_knowledge.llm_brain_core.golden_query_eval import (
     REQUIRED_QUALITY_AXES,
     build_baseline_golden_query_report,
     build_phase_golden_query_coverage_report,
+    build_source_to_authority_quality_gate_report,
     evaluate_object_pack_response,
 )
 
@@ -190,3 +191,31 @@ def test_phase_golden_query_coverage_reports_pass_with_gaps_not_green():
     assert phases["P9"]["result"] == "in_progress"
     assert phases["P9"]["golden_query_family"] == "agent context productization"
     assert "production_consumer_context_pack_live_unproven" in phases["P9"]["gaps"]
+
+
+def test_source_to_authority_quality_gate_covers_review_approval_and_read_path_without_production_mutation():
+    report = build_source_to_authority_quality_gate_report()
+
+    assert report["schema_version"] == "source_to_authority_quality_gate_report.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["release_quality_gate"] == "not_green"
+    assert report["production_mutation_performed"] is False
+    assert report["authority_write_scope"] == "local_test"
+    checks = {item["id"]: item for item in report["path_checks"]}
+
+    assert set(checks) >= {
+        "source_to_candidate_graph",
+        "candidate_review_edit",
+        "approval_board_local_test",
+        "authority_read_after_write",
+        "production_decision_denial",
+    }
+    assert checks["source_to_candidate_graph"]["result"] == "PASS"
+    assert checks["source_to_candidate_graph"]["quality_eval"]["passes"] is True
+    assert checks["candidate_review_edit"]["result"] == "PASS"
+    assert checks["approval_board_local_test"]["result"] == "PASS"
+    assert checks["authority_read_after_write"]["result"] == "PASS"
+    assert checks["authority_read_after_write"]["quality_eval"]["passes"] is True
+    assert checks["production_decision_denial"]["result"] == "PASS"
+    assert checks["production_decision_denial"]["production_mutation_performed"] is False
+    assert "production_authority_gate_not_approved" in report["gaps"]

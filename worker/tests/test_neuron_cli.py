@@ -407,6 +407,16 @@ def test_neuron_knowledge_golden_query_eval_phase_coverage(capsys):
     assert report["release_quality_gate"] == "not_green"
 
 
+def test_neuron_knowledge_golden_query_eval_source_to_authority_gate(capsys):
+    assert main(["golden-query-eval", "--source-to-authority-gate"]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == "source_to_authority_quality_gate_report.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["release_quality_gate"] == "not_green"
+    assert report["production_mutation_performed"] is False
+
+
 def test_neuron_knowledge_memory_regeneration_live_args_fail_closed(tmp_path, capsys):
     rc = main(
         [
