@@ -594,6 +594,45 @@ def test_session_project_rollup_preview_separates_same_device_and_all_devices():
     assert all_devices["evaluator_report"]["passes"] is True
 
 
+def test_session_project_rollup_preview_links_specs_prs_and_commits_bidirectionally():
+    result = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "sha256:session-alpha",
+                "device_id_hash": "sha256:device-one",
+                "provider": "codex",
+                "summary": "Implemented bidirectional rollup.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["commit:p6c"],
+            },
+        ],
+        specs=[{"spec_ref": "docs/specs/p6/design.md", "work_unit_id": "work:p6"}],
+        pull_requests=[{"pr_id": "pr:73", "number": 73, "work_unit_id": "work:p6"}],
+        commits=[{"commit_id": "commit:abc123", "pull_request_id": "pr:73", "work_unit_id": "work:p6"}],
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+    )
+
+    object_types = {obj["object_type"] for obj in result["objects"]}
+    assert {"Spec", "PullRequest", "Commit"}.issubset(object_types)
+    edge_types = {edge["edge_type"] for edge in result["edges"]}
+    assert {
+        "work_unit_has_session",
+        "device_has_session",
+        "work_unit_has_spec",
+        "spec_part_of_work_unit",
+        "work_unit_has_pull_request",
+        "pull_request_part_of_work_unit",
+        "pull_request_includes_commit",
+        "commit_part_of_work_unit",
+    }.issubset(edge_types)
+    assert result["linked_spec_count"] == 1
+    assert result["linked_pull_request_count"] == 1
+    assert result["linked_commit_count"] == 1
+    assert result["evaluator_report"]["passes"] is True
+
+
 def test_pr_commit_extraction_preview_maps_pr_commits_and_tests_without_runtime_inference():
     result = run_pr_commit_extraction_preview(
         pull_request={

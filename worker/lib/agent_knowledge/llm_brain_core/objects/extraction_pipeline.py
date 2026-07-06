@@ -706,9 +706,15 @@ def run_session_project_rollup_preview(
     repository: str,
     branch: str = "",
     project: str = "",
+    specs: list[Mapping[str, Any]] | None = None,
+    pull_requests: list[Mapping[str, Any]] | None = None,
+    commits: list[Mapping[str, Any]] | None = None,
     requesting_device_id_hash: str = "",
     scope: str = "all_devices",
 ) -> dict[str, Any]:
+    spec_items = list(specs or [])
+    pr_items = list(pull_requests or [])
+    commit_items = list(commits or [])
     safe_repository = public_safe_text(repository, max_chars=180)
     safe_branch = public_safe_text(branch, max_chars=180)
     safe_project = public_safe_text(project or repository, max_chars=120)
@@ -758,9 +764,44 @@ def run_session_project_rollup_preview(
             summary="Work unit referenced by session metadata.",
             payload={"work_unit_id": work_unit_id},
         )
-        for work_unit_id in sorted(_work_unit_ids(visible_sessions))
+        for work_unit_id in sorted(
+            _work_unit_ids(visible_sessions)
+            | _work_unit_ids(spec_items)
+            | _work_unit_ids(pr_items)
+            | _work_unit_ids(commit_items)
+        )
     ]
-    objects = [repository_object, branch_object, *device_objects, *work_unit_objects, *session_objects]
+    spec_objects = _linked_rollup_objects(
+        spec_items,
+        object_type="Spec",
+        id_keys=("spec_ref", "path", "spec_id"),
+        safe_project=safe_project,
+        safe_repository=safe_repository,
+    )
+    pr_objects = _linked_rollup_objects(
+        pr_items,
+        object_type="PullRequest",
+        id_keys=("pr_id", "pull_request_id", "number"),
+        safe_project=safe_project,
+        safe_repository=safe_repository,
+    )
+    commit_objects = _linked_rollup_objects(
+        commit_items,
+        object_type="Commit",
+        id_keys=("commit_id", "sha", "commit"),
+        safe_project=safe_project,
+        safe_repository=safe_repository,
+    )
+    objects = [
+        repository_object,
+        branch_object,
+        *device_objects,
+        *work_unit_objects,
+        *spec_objects,
+        *pr_objects,
+        *commit_objects,
+        *session_objects,
+    ]
     evidence = _session_evidence_views(visible_sessions)
     edges = _session_project_rollup_edges(
         visible_sessions=visible_sessions,
@@ -769,6 +810,12 @@ def run_session_project_rollup_preview(
         branch_object=branch_object,
         device_objects=device_objects,
         work_unit_objects=work_unit_objects,
+        specs=spec_items,
+        spec_objects=spec_objects,
+        pull_requests=pr_items,
+        pull_request_objects=pr_objects,
+        commits=commit_items,
+        commit_objects=commit_objects,
     )
     gaps = _session_project_rollup_gaps(
         sessions=sessions,
@@ -797,6 +844,9 @@ def run_session_project_rollup_preview(
         "all_device_session_count": len(sessions),
         "device_count": len(_device_counts(sessions)),
         "per_device_counts": _device_counts(sessions),
+        "linked_spec_count": len(spec_objects),
+        "linked_pull_request_count": len(pr_objects),
+        "linked_commit_count": len(commit_objects),
         "gaps": gaps,
         "evaluator_report": {
             "schema_version": "object_extraction_evaluator_report.v1",
@@ -1570,6 +1620,45 @@ def _work_unit_ids(sessions: list[Mapping[str, Any]]) -> set[str]:
     }
 
 
+def _linked_rollup_objects(
+    items: list[Mapping[str, Any]],
+    *,
+    object_type: str,
+    id_keys: tuple[str, ...],
+    safe_project: str,
+    safe_repository: str,
+) -> list[dict[str, Any]]:
+    objects: list[dict[str, Any]] = []
+    for item in items:
+        ref = _public_safe_first(item, id_keys, default=object_type)
+        objects.append(
+            _rollup_object(
+                object_type=object_type,
+                natural_key=ref,
+                scope={"project": safe_project, "repository": safe_repository},
+                title=ref,
+                summary=f"{object_type} referenced by session project rollup.",
+                payload={
+                    "ref": ref,
+                    "work_unit_id": public_safe_text(str(item.get("work_unit_id") or ""), max_chars=180),
+                    "pull_request_id": public_safe_text(
+                        str(item.get("pull_request_id") or item.get("pr_id") or ""),
+                        max_chars=180,
+                    ),
+                },
+            )
+        )
+    return objects
+
+
+def _public_safe_first(item: Mapping[str, Any], keys: tuple[str, ...], *, default: str = "") -> str:
+    for key in keys:
+        value = item.get(key)
+        if value not in (None, ""):
+            return public_safe_text(str(value), max_chars=180)
+    return public_safe_text(default, max_chars=180)
+
+
 def _session_project_rollup_edges(
     *,
     visible_sessions: list[Mapping[str, Any]],
@@ -1578,6 +1667,12 @@ def _session_project_rollup_edges(
     branch_object: dict[str, Any],
     device_objects: list[dict[str, Any]],
     work_unit_objects: list[dict[str, Any]],
+    specs: list[Mapping[str, Any]],
+    spec_objects: list[dict[str, Any]],
+    pull_requests: list[Mapping[str, Any]],
+    pull_request_objects: list[dict[str, Any]],
+    commits: list[Mapping[str, Any]],
+    commit_objects: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     edges: list[dict[str, Any]] = [
         _rollup_edge(
@@ -1596,13 +1691,71 @@ def _session_project_rollup_edges(
         device_obj = devices_by_id.get(device_id)
         if device_obj is not None:
             edges.append(_rollup_edge("session_on_device", session_obj["object_id"], device_obj["object_id"], evidence_refs, {"device_id_hash": device_id}))
+            edges.append(_rollup_edge("device_has_session", device_obj["object_id"], session_obj["object_id"], evidence_refs, {"device_id_hash": device_id}))
         edges.append(_rollup_edge("session_in_repository", session_obj["object_id"], repository_object["object_id"], evidence_refs, {"repository": repository_object["title"]}))
+        edges.append(_rollup_edge("repository_has_session", repository_object["object_id"], session_obj["object_id"], evidence_refs, {"repository": repository_object["title"]}))
         edges.append(_rollup_edge("session_on_branch", session_obj["object_id"], branch_object["object_id"], evidence_refs, {"branch": branch_object["title"]}))
+        edges.append(_rollup_edge("branch_has_session", branch_object["object_id"], session_obj["object_id"], evidence_refs, {"branch": branch_object["title"]}))
         work_unit_id = public_safe_text(str(session.get("work_unit_id") or ""), max_chars=180)
         work_unit_obj = work_units_by_id.get(work_unit_id)
         if work_unit_obj is not None:
             edges.append(_rollup_edge("part_of_work_unit", session_obj["object_id"], work_unit_obj["object_id"], evidence_refs, {"work_unit_id": work_unit_id}))
+            edges.append(_rollup_edge("work_unit_has_session", work_unit_obj["object_id"], session_obj["object_id"], evidence_refs, {"work_unit_id": work_unit_id}))
+    pull_requests_by_id = {
+        _public_safe_first(item, ("pr_id", "pull_request_id", "number"), default="PullRequest"): obj
+        for item, obj in zip(pull_requests, pull_request_objects, strict=False)
+    }
+    for spec, spec_obj in zip(specs, spec_objects, strict=False):
+        _append_work_unit_link_edges(
+            edges,
+            work_units_by_id=work_units_by_id,
+            item=spec,
+            item_obj=spec_obj,
+            forward_edge_type="work_unit_has_spec",
+            reverse_edge_type="spec_part_of_work_unit",
+        )
+    for pull_request, pr_obj in zip(pull_requests, pull_request_objects, strict=False):
+        _append_work_unit_link_edges(
+            edges,
+            work_units_by_id=work_units_by_id,
+            item=pull_request,
+            item_obj=pr_obj,
+            forward_edge_type="work_unit_has_pull_request",
+            reverse_edge_type="pull_request_part_of_work_unit",
+        )
+    for commit, commit_obj in zip(commits, commit_objects, strict=False):
+        _append_work_unit_link_edges(
+            edges,
+            work_units_by_id=work_units_by_id,
+            item=commit,
+            item_obj=commit_obj,
+            forward_edge_type="work_unit_has_commit",
+            reverse_edge_type="commit_part_of_work_unit",
+        )
+        pr_ref = _public_safe_first(commit, ("pull_request_id", "pr_id"), default="")
+        pr_obj = pull_requests_by_id.get(pr_ref)
+        if pr_obj is not None:
+            evidence_refs = [str(item) for item in commit.get("evidence_refs") or []]
+            edges.append(_rollup_edge("pull_request_includes_commit", pr_obj["object_id"], commit_obj["object_id"], evidence_refs, {"pull_request_id": pr_ref}))
     return edges
+
+
+def _append_work_unit_link_edges(
+    edges: list[dict[str, Any]],
+    *,
+    work_units_by_id: dict[str, dict[str, Any]],
+    item: Mapping[str, Any],
+    item_obj: dict[str, Any],
+    forward_edge_type: str,
+    reverse_edge_type: str,
+) -> None:
+    work_unit_id = public_safe_text(str(item.get("work_unit_id") or ""), max_chars=180)
+    work_unit_obj = work_units_by_id.get(work_unit_id)
+    if work_unit_obj is None:
+        return
+    evidence_refs = [str(ref) for ref in item.get("evidence_refs") or []]
+    edges.append(_rollup_edge(forward_edge_type, work_unit_obj["object_id"], item_obj["object_id"], evidence_refs, {"work_unit_id": work_unit_id}))
+    edges.append(_rollup_edge(reverse_edge_type, item_obj["object_id"], work_unit_obj["object_id"], evidence_refs, {"work_unit_id": work_unit_id}))
 
 
 def _rollup_edge(
