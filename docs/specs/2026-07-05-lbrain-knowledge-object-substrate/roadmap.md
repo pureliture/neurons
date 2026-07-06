@@ -700,6 +700,10 @@ Remaining gaps:
 
 State: planned; deferred and open.
 
+Decision: DEFER.
+
+Result: PASS_WITH_GAPS for start-readiness review.
+
 Purpose:
 
 Provide human inspection and review workflows after object contracts, authority lifecycle, and corpus store are stable.
@@ -722,6 +726,19 @@ Entry criteria:
 - P2 corpus status is usable
 - P4 review lifecycle has stable object contracts
 - P5 golden query quality shows object answers are useful enough to inspect visually
+
+Defer decision evidence:
+
+- P1 remains `in_progress` with current Codex session object-native MCP namespace gap.
+- P5 remains `in_progress` and release quality gate is not green.
+- P8 and P9 are local/test validated only; live rollout identity, production permission audit, production startup/read path, and runtime enforcement remain gaps.
+- UI is explicitly not a prerequisite for MCP/read-path activation, authority writes, or production rollout.
+
+Decision outcome:
+
+- Do not start UI/object browser implementation in this roadmap run.
+- Keep P10 open as a later product surface after the read path, authority lifecycle, and quality gates are production-proven.
+- If P10 is later started, the first slice must be read-only/local, must use existing object packs, and must not introduce production mutation or protected-value disclosure.
 
 ## Recommended Execution Order
 
@@ -782,11 +799,18 @@ Current accounting:
 | P7 Preference, Style, And Artifact Memory | `local_validated` | `PASS_WITH_GAPS`; local/test artifact preference pack lanes and no-UI HTML artifact check pass, live agent context pack and production authority promotion remain gaps |
 | P8 Runtime Truth, Security, And Deployment Authority | `local_validated` | `PASS_WITH_GAPS`; local/test runtime authority policy, artifact identity join, private authority redaction, and denial/no-mutation checks pass; live rollout identity and production permission audit remain gaps |
 | P9 Agent Context Productization | `local_validated` | `PASS_WITH_GAPS`; local/test consumer compact packs, degraded/stale disclosure, surface policy, and proposal-safe action hints pass; production startup/read path and runtime enforcement remain gaps |
-| P10 UI And Object Browser Surface | `planned` | deferred, open, non-prerequisite |
+| P10 UI And Object Browser Surface | `planned` | `PASS_WITH_GAPS` for start-readiness review; deferred, open, non-prerequisite because P1/P5/P8/P9 production gates remain open |
+
+Delivery integration status:
+
+- P7, P8, P9, and P10 continuation branches are pushed as phase-specific branches.
+- No PR currently exists for the `codex/p*` continuation branches.
+- PR creation remains a delivery gap because the repository PR workflow requires a linked issue or explicit approval before GitHub mutation.
+- This gap does not convert local/test evidence into production readiness and does not close P1 live read-path gaps.
 
 ## Next Design Targets
 
-Decide whether to keep P10 UI And Object Browser Surface deferred or start a thin local inspection surface after object contracts stabilize. Keep P1 configured-agent namespace and current-main image identity gaps open until live evidence closes them, and keep production authority writes denied until an approved write gate exists.
+Open approved PRs for the pushed continuation branches, then continue production read-path validation only when the configured LBrain MCP object-native tool namespace and deployed artifact identity can be proven. Keep P1 configured-agent namespace and current-main image identity gaps open until live evidence closes them, and keep production authority writes denied until an approved write gate exists.
 
 Recommended goal:
 
