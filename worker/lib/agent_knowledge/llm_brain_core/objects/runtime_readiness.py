@@ -71,6 +71,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
         "collect_mcp_tool_inventory",
         "collect_agent_context_product",
         "probe_brain_objects_query_routes",
+        "probe_source_to_candidate_review_loop",
         "collect_deployed_identity",
         "probe_production_no_mutation_denials",
         "collect_object_authority_gate_policy",
@@ -130,6 +131,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
             "collect_mcp_tool_inventory": "live_mcp_review_tools_unverified",
             "collect_agent_context_product": "live_agent_context_product_sections_unverified",
             "probe_brain_objects_query_routes": "live_brain_objects_query_route_smokes_unverified",
+            "probe_source_to_candidate_review_loop": "live_source_to_candidate_review_loop_unverified",
             "collect_deployed_identity": "live_deployed_identity_unverified",
             "probe_production_no_mutation_denials": "production_denial_smokes_unverified",
             "collect_object_authority_gate_policy": "live_object_authority_gate_policy_unverified",
@@ -186,6 +188,7 @@ def build_source_to_candidate_runtime_evidence_packet_template(
             "tool_names",
             "agent_context_product",
             "brain_objects_query_smokes",
+            "source_to_candidate_review_loop",
             "deployed_identity",
             "production_denials",
             "tool_schemas",
@@ -216,6 +219,7 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         "tool_names": _string_list(captured.get("tool_names")),
         "agent_context_product": _public_safe_mapping(captured.get("agent_context_product")),
         "brain_objects_query_smokes": _public_safe_mapping_list(captured.get("brain_objects_query_smokes")),
+        "source_to_candidate_review_loop": _public_safe_mapping(captured.get("source_to_candidate_review_loop")),
         "deployed_identity": _public_safe_mapping(captured.get("deployed_identity")),
         "production_denials": _public_safe_mapping(captured.get("production_denials")),
         "tool_schemas": _public_safe_mapping(captured.get("tool_schemas")),
@@ -282,6 +286,38 @@ def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
             }
             for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
         ],
+        "source_to_candidate_review_loop": {
+            "schema_version": "source_to_candidate_review_loop_evidence.v1",
+            "source_to_candidate_graph": {
+                "schema_version": "source_to_candidate_graph_activation.v1",
+                "target_scope": "local_test",
+                "pack_type": "candidate_graph_review",
+                "production_mutation_performed": False,
+            },
+            "candidate_review_edit": {
+                "schema_version": "candidate_review_edit_result.v1",
+                "target_scope": "local_test",
+                "mutation_mode": "no_mutation",
+                "production_mutation_performed": False,
+            },
+            "approval_board_decision": {
+                "schema_version": "approval_board_decision_result.v1",
+                "ledger_scope": "local_test",
+                "authority_write_scope": "local_test",
+                "production_mutation_performed": False,
+            },
+            "read_after_write": {
+                "status": "validated",
+                "object_pack_schema": "object_pack.v1",
+            },
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
         "deployed_identity": {
             "contains_expected_commit": "collector_sets_boolean",
             "identity_source": "redacted_artifact_identity_summary",
@@ -397,6 +433,19 @@ def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
             "production_mutation_performed": False,
         },
         {
+            "step_id": "probe_source_to_candidate_review_loop",
+            "evidence_field": "source_to_candidate_review_loop",
+            "required_values": [
+                "source_to_candidate_graph_activation.v1",
+                "candidate_review_edit_result.v1",
+                "approval_board_decision_result.v1",
+                "object_pack.v1",
+            ],
+            "safe_target": "local_test_source_to_candidate_review_loop_smoke",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
             "step_id": "collect_deployed_identity",
             "evidence_field": "deployed_identity",
             "required_values": ["contains_expected_commit"],
@@ -445,6 +494,7 @@ def build_source_to_candidate_runtime_readiness_report(
         _live_agent_context_tool_hints_claim(evidence),
         _live_agent_context_product_sections_claim(evidence),
         _live_brain_objects_query_route_smokes_claim(evidence),
+        _live_source_to_candidate_review_loop_claim(evidence),
         _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
         _live_object_authority_production_gate_policy_claim(evidence),
         _live_object_authority_bounded_execution_claim(evidence),
@@ -802,6 +852,132 @@ def _live_brain_objects_query_route_smokes_claim(evidence: Mapping[str, Any]) ->
         "status": "not_validated" if missing else "validated",
         "gaps": missing_gaps if missing else [],
     }
+
+
+def _live_source_to_candidate_review_loop_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    loop = evidence.get("source_to_candidate_review_loop")
+    loop = loop if isinstance(loop, Mapping) else {}
+    if not loop:
+        return {
+            "claim_id": "live.source_to_candidate.review_loop",
+            "evidence_class": "runtime_read_path",
+            "status": "not_validated",
+            "candidate_count": 0,
+            "edited_candidate_count": 0,
+            "decision_count": 0,
+            "authority_write_scope": "",
+            "production_mutation_performed": False,
+            "gaps": ["live_source_to_candidate_review_loop_unverified"],
+        }
+    graph = loop.get("source_to_candidate_graph") if isinstance(loop.get("source_to_candidate_graph"), Mapping) else {}
+    review = loop.get("candidate_review_edit") if isinstance(loop.get("candidate_review_edit"), Mapping) else {}
+    decision = loop.get("approval_board_decision") if isinstance(loop.get("approval_board_decision"), Mapping) else {}
+    read_after_write = loop.get("read_after_write") if isinstance(loop.get("read_after_write"), Mapping) else {}
+    postcheck = loop.get("postcheck") if isinstance(loop.get("postcheck"), Mapping) else {}
+    failures = _source_to_candidate_review_loop_failures(
+        loop=loop,
+        graph=graph,
+        review=review,
+        decision=decision,
+        read_after_write=read_after_write,
+        postcheck=postcheck,
+    )
+    mutation_performed = _source_to_candidate_review_loop_reports_mutation(
+        graph=graph,
+        review=review,
+        decision=decision,
+    )
+    return {
+        "claim_id": "live.source_to_candidate.review_loop",
+        "evidence_class": "runtime_read_path",
+        "status": "failed" if failures else "validated",
+        "schema_version": public_safe_text(str(loop.get("schema_version") or ""), max_chars=80),
+        "candidate_count": _int_value(graph.get("candidate_count")),
+        "edited_candidate_count": _int_value(review.get("edited_candidate_count")),
+        "decision_count": _int_value(decision.get("decision_count")),
+        "authority_write_scope": public_safe_text(str(decision.get("authority_write_scope") or ""), max_chars=120),
+        "read_after_write_status": public_safe_text(str(read_after_write.get("status") or ""), max_chars=80),
+        "postcheck_status": public_safe_text(str(postcheck.get("status") or ""), max_chars=80),
+        "production_mutation_performed": mutation_performed,
+        "gaps": failures,
+    }
+
+
+def _source_to_candidate_review_loop_failures(
+    *,
+    loop: Mapping[str, Any],
+    graph: Mapping[str, Any],
+    review: Mapping[str, Any],
+    decision: Mapping[str, Any],
+    read_after_write: Mapping[str, Any],
+    postcheck: Mapping[str, Any],
+) -> list[str]:
+    failures: list[str] = []
+    if loop.get("schema_version") != "source_to_candidate_review_loop_evidence.v1":
+        failures.append("source_to_candidate_review_loop_schema_mismatch")
+    if graph.get("schema_version") != "source_to_candidate_graph_activation.v1":
+        failures.append("source_to_candidate_review_loop_graph_schema_mismatch")
+    if str(graph.get("target_scope") or "") != "local_test":
+        failures.append("source_to_candidate_review_loop_graph_scope_not_local_test")
+    if graph.get("pack_type") != "candidate_graph_review":
+        failures.append("source_to_candidate_review_loop_pack_type_mismatch")
+    if _int_value(graph.get("candidate_count")) < 1:
+        failures.append("source_to_candidate_review_loop_candidate_count_missing")
+    if graph.get("quality_gate"):
+        quality_gate = graph.get("quality_gate") if isinstance(graph.get("quality_gate"), Mapping) else {}
+        if quality_gate.get("source_to_candidate_graph") != "PASS":
+            failures.append("source_to_candidate_review_loop_quality_gate_failed")
+    if review.get("schema_version") != "candidate_review_edit_result.v1":
+        failures.append("source_to_candidate_review_loop_candidate_review_schema_mismatch")
+    if str(review.get("target_scope") or "") != "local_test":
+        failures.append("source_to_candidate_review_loop_candidate_review_scope_not_local_test")
+    if review.get("mutation_mode") != "no_mutation" or review.get("authority_write_performed") is True:
+        failures.append("source_to_candidate_review_loop_candidate_review_not_no_mutation")
+    if _int_value(review.get("edited_candidate_count")) < 1:
+        failures.append("source_to_candidate_review_loop_candidate_review_missing")
+    if _int_value(review.get("rejected_edit_count")) > 0:
+        failures.append("source_to_candidate_review_loop_rejected_edits_present")
+    if decision.get("schema_version") != "approval_board_decision_result.v1":
+        failures.append("source_to_candidate_review_loop_approval_schema_mismatch")
+    if decision.get("ledger_scope") != "local_test" or decision.get("authority_write_scope") != "local_test":
+        failures.append("source_to_candidate_review_loop_authority_scope_not_local_test")
+    if decision.get("authority_write_performed") is not True:
+        failures.append("source_to_candidate_review_loop_authority_write_missing")
+    if _int_value(decision.get("decision_count")) < 1:
+        failures.append("source_to_candidate_review_loop_decision_count_missing")
+    if read_after_write.get("status") != "validated":
+        failures.append("source_to_candidate_review_loop_read_after_write_missing")
+    if read_after_write.get("object_pack_schema") != "object_pack.v1":
+        failures.append("source_to_candidate_review_loop_object_pack_schema_mismatch")
+    if _source_to_candidate_review_loop_reports_mutation(graph=graph, review=review, decision=decision):
+        failures.append("source_to_candidate_review_loop_production_mutation_performed")
+    if postcheck.get("status") != "validated":
+        failures.append("source_to_candidate_review_loop_postcheck_missing")
+    for field, gap in (
+        ("raw_private_evidence_returned", "source_to_candidate_review_loop_raw_private_evidence_returned"),
+        ("secret_returned", "source_to_candidate_review_loop_secret_returned"),
+        ("host_topology_returned", "source_to_candidate_review_loop_host_topology_returned"),
+        ("raw_external_ids_returned", "source_to_candidate_review_loop_raw_external_ids_returned"),
+    ):
+        if postcheck.get(field) is not False:
+            failures.append(gap)
+    return _dedupe(failures)
+
+
+def _source_to_candidate_review_loop_reports_mutation(
+    *,
+    graph: Mapping[str, Any],
+    review: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> bool:
+    return (
+        graph.get("production_mutation_performed") is True
+        or graph.get("mutation_performed") is True
+        or review.get("production_mutation_performed") is True
+        or decision.get("production_mutation_performed") is True
+        or decision.get("ledger_scope") == "production"
+        or decision.get("authority_write_scope") == "production_ledger"
+    )
 
 
 def _live_deployed_identity_claim(evidence: Mapping[str, Any], *, expected_commit: str) -> dict[str, Any]:
