@@ -1948,6 +1948,15 @@ def _live_brain_objects_query_route_smokes_claim(evidence: Mapping[str, Any]) ->
     identity = evidence.get("deployed_identity")
     identity = identity if isinstance(identity, Mapping) else {}
     deployed_identity_matches_expected = identity.get("contains_expected_commit") is True
+    route_fallback_interpretation = (
+        "fail_expected_deployed_identity"
+        if unimplemented_routes and deployed_identity_matches_expected
+        else (
+            "gap_until_deployed_identity_matches_expected_commit"
+            if unimplemented_routes
+            else "not_applicable"
+        )
+    )
     if unimplemented_routes and not deployed_identity_matches_expected:
         failures = [
             failure
@@ -1973,6 +1982,7 @@ def _live_brain_objects_query_route_smokes_claim(evidence: Mapping[str, Any]) ->
         "validated_routes": sorted(route for route in by_route if route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
         "missing_routes": missing,
         "unimplemented_routes": unimplemented_routes,
+        "route_fallback_interpretation": route_fallback_interpretation,
         "production_mutation_performed": _object_query_smokes_report_mutation(smoke_items),
     }
     if failures:

@@ -1404,6 +1404,7 @@ def test_runtime_readiness_fails_when_live_object_query_smoke_falls_back_to_unim
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     route_claim = claims["live.brain_objects_query.route_smokes"]
     assert route_claim["status"] == "failed"
+    assert route_claim["route_fallback_interpretation"] == "fail_expected_deployed_identity"
     assert route_claim["unimplemented_routes"] == ["deployment_runtime_truth"]
     assert "brain_objects_query_route_unimplemented:deployment_runtime_truth" in report["gaps"]
     assert "shadow_route_smoke_not_implemented:deployment_runtime_truth" in report["gaps"]
@@ -1440,6 +1441,10 @@ def test_runtime_readiness_marks_current_session_unimplemented_route_as_gap_with
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     route_claim = claims["live.brain_objects_query.route_smokes"]
     assert route_claim["status"] == "not_validated"
+    assert (
+        route_claim["route_fallback_interpretation"]
+        == "gap_until_deployed_identity_matches_expected_commit"
+    )
     assert route_claim["unimplemented_routes"] == ["deployment_runtime_truth"]
     assert "brain_objects_query_route_unimplemented:deployment_runtime_truth" in report["gaps"]
     assert "shadow_route_smoke_not_implemented:deployment_runtime_truth" in report["gaps"]
@@ -1461,6 +1466,7 @@ def test_runtime_readiness_keeps_missing_route_gaps_visible_when_route_smoke_fai
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     route_claim = claims["live.brain_objects_query.route_smokes"]
     assert route_claim["status"] == "failed"
+    assert route_claim["route_fallback_interpretation"] == "fail_expected_deployed_identity"
     assert route_claim["missing_routes"] == ["code_style_preference", "temporal_work_recall"]
     assert "brain_objects_query_route_unimplemented:authority_archive_separation" in report["gaps"]
     assert "shadow_route_smoke_not_implemented:authority_archive_separation" in report["gaps"]
