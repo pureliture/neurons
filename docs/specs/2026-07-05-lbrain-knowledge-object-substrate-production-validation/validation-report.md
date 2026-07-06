@@ -4,15 +4,11 @@
 
 `PASS_WITH_GAPS`
 
-Local implementation, package-level contracts, MCP dispatch tests, CLI smoke tests, and production-denial safety gates passed.
+Local implementation, package-level contracts, MCP dispatch tests, CLI smoke tests, production-denial safety gates는 통과했습니다.
 
-P1 live production activation follow-up now validates the deployed HTTP MCP runtime and the user-level configured endpoint: object-native tools are exposed, `brain_objects_query` returns an object pack with explicit authority gaps, and production proposal/decision calls deny with no mutation. The remaining gaps are separated: the current Codex session's `mcp__lbrain` tool registry still does not expose object-native tools even though the configured endpoint smoke passes, and the live MCP image is not proven to include the #73/current-main source refactor.
+P1 live production activation follow-up는 deployed HTTP MCP runtime 및 user-level configured endpoint를 검증했습니다: object-native tools가 노출되고, `brain_objects_query`는 explicit authority gaps가 포함된 object pack을 반환하며, production proposal/decision calls는 mutation 없이 deny됩니다. 남은 gaps는 분리되어 있습니다: configured endpoint smoke는 통과하지만 현재 Codex session의 `mcp__lbrain` tool registry는 object-native tools를 아직 노출하지 않으며, live MCP image가 #73/current-main source refactor를 포함하는지는 증명되지 않았습니다.
 
-Latest recheck after PR #73 and the ops deploy-button merge keeps the result at
-`PASS_WITH_GAPS`: the configured endpoint still exposes object-native tools and
-denies production proposal/decision mutation, but this Codex session still has a
-stale `mcp__lbrain` callable registry and current-main MCP image identity remains
-unproven.
+PR #73 및 ops deploy-button merge 이후 최신 recheck 결과는 `PASS_WITH_GAPS`로 유지됩니다: configured endpoint는 여전히 object-native tools를 노출하고 production proposal/decision mutation을 deny하지만, 이 Codex session은 여전히 stale `mcp__lbrain` callable registry를 가지고 있으며 current-main MCP image identity는 증명되지 않은 상태입니다.
 
 ## Validated
 
@@ -89,8 +85,7 @@ unproven.
 - result:
   - deployed runtime exposes `brain_objects_query`, `brain_object_explain`, `brain_corpus_status`, `brain_corpus_ingest_plan`, `brain_object_proposal_create`, `brain_object_decision_commit`, and `brain_review_proposals`.
   - tool count: 27
-  - deployment health: `Synced/Healthy`, rollout passed, ready `1/1`, restart count `0`
-  - service health: `status=ok`
+  - redacted live rollout and service-health evidence was captured outside this public document.
 
 ### configured.codex-endpoint.http-mcp-object-tools-loaded
 
@@ -111,15 +106,13 @@ unproven.
 ### live.production.deployed-version-identity
 
 - status: `validated_for_object_tools` / `gap_for_current_main_identity`
-- evidence: deployed MCP image identity, Git ancestry check, source main check, Argo revision check, and latest GitOps desired-state recheck.
+- evidence: redacted deployed MCP image identity check, Git ancestry check, source main check, and latest GitOps desired-state recheck.
 - result:
-  - source repo `origin/main` contains PR #73 merge commit `c3f3e34`.
-  - production Argo application tracks ops `main`, is `Synced/Healthy`, and is at ops revision `dbc6ded`.
-  - deployed MCP image source commit is `c216ff4`.
-  - source commit `c216ff4` includes PR #64 merge commit `7a0b6a6`.
-  - deployed MCP image identity does not prove that PR #73/current source `main` is live in the MCP image.
-  - latest ops `main` desired state still does not provide a `c3f3e34` MCP image identity; the active production overlay resource set still points the MCP workload at a pre-#73 source tag.
-  - current shell could not directly query live Kubernetes/Argo runtime status because no usable kube context or non-interactive sudo-backed kube access was available, and the local Argo CLI had no server address configured. This is not production failure evidence, but it prevents upgrading desired-state evidence into a live rollout identity claim.
+  - public source `origin/main` contains PR #73.
+  - redacted private evidence showed the deployed MCP image identity was sufficient for object-tool availability, but not sufficient to prove current-source-main/#73 identity.
+  - latest desired-state recheck still did not provide current-source-main MCP image identity.
+  - this public report intentionally omits raw ops revision, live image identity, and runtime-status values; those belong in `neurons-ops` or private evidence storage.
+  - current shell could not directly re-read live runtime controller status, so desired-state evidence was not upgraded into a live rollout identity claim.
 
 ## Denied As Expected
 
@@ -162,11 +155,11 @@ unproven.
 - status: `not_validated`
 - reason: `live_mcp_image_not_current_source_main`
 - evidence:
-  - source `origin/main` is at PR #73 merge commit `c3f3e34`.
-  - live MCP image proof remains tied to `c216ff4`.
-  - latest GitOps desired-state recheck still does not show a `c3f3e34` MCP image.
-  - direct live K8s/Argo status could not be re-read from this shell, so no stronger live rollout identity evidence was captured.
-  - this does not invalidate the object-native P1 tool proof, because `c216ff4` includes PR #64, but it prevents claiming that the #73/current-main source is deployed in MCP.
+  - public source `origin/main` includes PR #73.
+  - redacted live MCP image proof remains below current-source-main identity.
+  - latest GitOps desired-state recheck still does not show a current-source-main MCP image.
+  - direct live runtime controller status could not be re-read from this shell, so no stronger live rollout identity evidence was captured.
+  - this does not invalidate the object-native P1 tool proof, but it prevents claiming that the #73/current-main source is deployed in MCP.
 
 ## Gaps
 
@@ -187,4 +180,4 @@ unproven.
 
 ## Conclusion
 
-The implementation is locally and contractually validated, safety gates fail closed, and the deployed/configured HTTP MCP runtime is production-runtime verified for P1 read-only object tools. The result remains `PASS_WITH_GAPS` because the current Codex session's `mcp__lbrain` tool registry still does not expose object-native tools directly, and the live MCP image identity is not current-source-main / PR #73.
+Implementation은 local 및 contract scope에서 검증되었고 safety gates는 fail-closed로 동작하며, deployed/configured HTTP MCP runtime은 P1 read-only object tools에 대해 production-runtime verified 상태입니다. 결과는 `PASS_WITH_GAPS`로 유지됩니다. 현재 Codex session의 `mcp__lbrain` tool registry가 object-native tools를 직접 노출하지 않고, live MCP image identity가 current-source-main / PR #73이라고 증명되지 않았기 때문입니다.
