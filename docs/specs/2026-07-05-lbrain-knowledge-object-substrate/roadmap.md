@@ -12,6 +12,7 @@ Current state:
 - Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates는 통과했고 deployed HTTP MCP runtime 및 configured endpoint는 검증되었지만, 현재 Codex session tool registry에는 object-native tools가 아직 없으며 current-source-main image identity가 live 상태임은 증명되지 않았습니다.
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP는 object-native tools를 노출하고, 최신 configured-endpoint smoke는 production write에 대해 denied/no-mutation으로 통과하지만, 현재 Codex session의 `mcp__lbrain` namespace는 아직 이를 노출하지 않으며 live MCP image가 #73/current-main source refactor를 포함하는지는 증명되지 않았습니다.
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, production-denial evidence는 존재하지만, real private Palantir manifest ingest 및 production ingest approval은 여전히 gap입니다.
+- P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / `local_validated`; local/test reference corpus extraction preview는 deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, blocked-extraction gaps를 생성합니다. repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, broader evaluator suite previews에는 local/test evaluator evidence가 있지만, live graph/Qdrant projection join은 아직 증명되지 않았습니다.
 - Product activation: 완료되지 않았습니다; configured agent read path refresh가 여전히 필요합니다.
 - UI/object browser: product activation prerequisite는 아니지만, 이후 product surface로 열어 둡니다.
 
@@ -263,7 +264,7 @@ Remaining gaps:
 
 ### P3. Processing And Object Extraction Pipeline
 
-State: planned.
+State: local_validated / PASS_WITH_GAPS.
 
 Purpose:
 
@@ -288,6 +289,53 @@ Gate evidence:
 - chunk preview proves evidence can be inspected without raw/private leakage
 - evaluator report ties extractor output to at least one golden query slice
 - graph/search projection can join to objects but cannot become canonical authority
+
+Current local/test evidence:
+
+- stacked branch note: this phase branch is based on the P2 reference corpus store branch because P2 is not merged to `main` yet
+- extractor registry report exists for implemented `reference_corpus_manifest` and planned-gap extractor entries
+- deterministic reference corpus extraction preview creates `ReferenceCorpus` and `ReferenceDocument` objects plus `member_of_corpus` edges
+- chunk preview omits raw body storage refs and keeps raw body return denied
+- extraction run preview reports quality metrics, zero model calls, zero LLM token budget, speed class, and debug trace availability
+- hash mismatch blocks extraction output and reports gaps without inventing authority
+- documentation cleanup strategy comparison compares `document_authority_pack_v1` against `path_inventory_only_v1`
+- documentation cleanup strategy comparison reports lane counts, evidence counts, recommended action counts, and evaluator evidence for the current-vs-archive golden query slice
+- full repo-document extraction preview maps repo inventory into `RepoDocument` objects, `supersedes` / `requires_evidence` edges, evidence refs, recommended actions, and extraction-run metrics
+- full repo-document extraction preview reports missing accepted-current document lanes as gaps instead of inventing authority
+- runtime truth extraction preview separates PR merge evidence from deployment/runtime truth
+- runtime truth extraction preview returns `runtime_evidence_unverified` without inferring deploy from merge when live evidence is missing
+- runtime truth extraction preview creates a candidate `RuntimeTruth` object and `validated_by` edge only when sanitized live evidence is explicitly `runtime_verified`
+- preference/style extraction preview maps preference and repo-style memory cards into `ArtifactPreference` and `StyleRule` objects
+- preference/style extraction preview reports source evidence refs without raw body inference and rejects raw-session-body inference as a strategy gap
+- work-unit extraction preview groups session, PR, commit, and test evidence into a candidate `WorkUnit` object
+- work-unit extraction preview emits evidence refs and `supported_by_evidence` / `validated_by` edges without raw transcript body return
+- session-detail extraction preview maps session metadata into `Session` objects with `part_of_work_unit` and `supported_by_evidence` edges
+- session-detail extraction preview keeps raw body return denied, reports ignored raw session body as a gap, and hashes sanitized metadata only
+- PR/commit detail extraction preview maps PR metadata, commits, and test runs into separate `PullRequest`, `Commit`, and `TestRun` objects
+- PR/commit detail extraction preview emits `includes_commit` and `validated_by` edges, reports missing test refs as gaps, and rejects merge-only runtime truth inference
+- graph/search projection join preview maps derived graph/search hits into `ProjectionHit` objects and `projection_join` edges
+- graph/search projection join preview keeps projection objects and edges in `derived_projection`, reports unknown join targets as gaps, and rejects projection-as-authority strategy
+- broader evaluator suite preview aggregates deterministic fixture checks, golden-query checks, strategy comparison checks, variance checks, and model/prompt comparison status
+- broader evaluator suite preview reports stable deterministic outputs as pass, reports changed outputs as `variance_detected`, and marks model/prompt comparison `not_applicable_no_llm` while all current preview extractors use zero model calls
+- focused evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py`
+- focused result: `19 passed, 1 warning`
+- adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_object_packs.py tests/test_reference_corpus.py tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py tests/test_preference_authority_model.py tests/test_repo_style_profile.py tests/test_llm_brain_core_package_depth.py tests/test_llm_brain_core_objects_subpackage.py tests/test_llm_brain_core_layering.py`
+- adjacent regression result: `141 passed, 1 warning`
+- worker regression evidence: `cd worker && uv run pytest -q`
+- worker regression result: `1528 passed, 9 skipped, 1 warning`
+
+PASS_WITH_GAPS rationale:
+
+- Local/test P3 gate evidence is present for deterministic extraction, failed extraction gaps, strategy comparison, chunk preview, evaluator reports, and derived projection join authority separation.
+- The remaining live graph/Qdrant projection join proof requires configured runtime evidence and is not proven by local fixture tests.
+- This phase did not perform or claim production authority, corpus, graph, search, or deployment mutation.
+
+Remaining gaps:
+
+- P3 is not production-complete; local/test reference corpus extraction preview, repo-document extraction preview, documentation cleanup strategy comparison, runtime truth extraction preview, preference/style extraction preview, work-unit extraction preview, session-detail extraction preview, PR/commit detail extraction preview, graph/search projection join preview, and broader evaluator suite preview slices are implemented
+- evaluator coverage is still local/test only; it covers reference corpus, repo-document cleanup, documentation cleanup, PR merge/deploy truth, preference/style, temporal work recall, session detail extraction, PR commit/test provenance, graph/search projection join, deterministic variance, and no-LLM model/prompt applicability
+- graph/search projection join is proven only for local/test fixture hits, not for a live graph/Qdrant projection surface
+- no production authority, corpus, graph, search, or deployment mutation has been performed or claimed
 
 ### P4. Review Queue And Authority Promotion
 
@@ -536,7 +584,7 @@ Current accounting:
 | P0 Local Object Substrate Foundation | `complete` | complete for local/test scope |
 | P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; deployed/configured endpoint validated, current Codex session tool registry gap remains |
 | P2 Living Reference Corpus Store | `local_validated` | `PASS_WITH_GAPS`; local/test store and status gates pass, real private manifest ingest and production approval remain gaps |
-| P3 Processing And Object Extraction Pipeline | `planned` | skeletal extraction only |
+| P3 Processing And Object Extraction Pipeline | `local_validated` | `PASS_WITH_GAPS`; local/test reference corpus extraction preview, repo-document extraction preview, documentation cleanup strategy comparison, runtime truth extraction preview, preference/style extraction preview, work-unit extraction preview, session-detail extraction preview, PR/commit detail extraction preview, graph/search projection join preview, and broader evaluator suite preview pass; live projection join remains a gap |
 | P4 Review Queue And Authority Promotion | `planned` | production authority write closed |
 | P5 Continuous Golden Query Quality Gates | `planned` | baseline red exists; runs across P1-P9 |
 | P6 Session, Device, Project, And Work-Unit 360 | `planned` | object types specified, productized/live flow missing |
@@ -547,7 +595,7 @@ Current accounting:
 
 ## Next Design Targets
 
-Resolve the P2 delivery gate by linking the branch to an approved issue/PR, then start P3 Processing And Object Extraction Pipeline from this roadmap. The remaining P1 configured-agent read-path gap stays open until the current Codex `mcp__lbrain` namespace exposes object-native tools directly.
+Resolve the P2 delivery gate by linking the branch to an approved issue/PR, then continue P3 Processing And Object Extraction Pipeline from the first reference corpus extraction preview slice into repo documentation cleanup strategy comparison. The remaining P1 configured-agent read-path gap stays open until the current Codex `mcp__lbrain` namespace exposes object-native tools directly.
 
 Recommended goal:
 
