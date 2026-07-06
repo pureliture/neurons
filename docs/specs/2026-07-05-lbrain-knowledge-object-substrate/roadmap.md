@@ -456,18 +456,23 @@ Current local/test evidence:
 - `golden-query-eval --phase-coverage` returns `knowledge_object_phase_golden_query_coverage.v1`
 - phase coverage report lists P1-P10 golden query families, required quality axes, evaluator owner, result status, and explicit gaps
 - current report status is `PASS_WITH_GAPS` and `release_quality_gate=not_green`; it does not claim production-quality answers
+- `evaluate_object_pack_response(..., required_axes=...)` can now enforce the full object, edge, evidence, freshness, gap, and recommended-action axis set without changing legacy evaluator callers
 - P1-P4 are represented as PASS_WITH_GAPS slices with their production/live gaps preserved
 - P6-P10 are represented as planned slices with `phase_slice_not_implemented` gaps
 - focused evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
 - focused result: `1 passed, 1 warning`
+- strict-axis evaluator evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_eval_strict_axes_require_edge_freshness_and_gap_fields`
+- strict-axis evaluator result: `1 passed, 1 warning`
 - CLI evidence: `cd worker && uv run pytest -q tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_phase_coverage`
 - CLI result: `1 passed, 1 warning`
 - adjacent regression evidence: `cd worker && uv run pytest -q tests/test_neuron_cli.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
 - adjacent regression result: `33 passed, 1 warning`
+- strict evaluator adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_neuron_cli.py tests/test_llm_brain_core_objects_subpackage.py`
+- strict evaluator adjacent regression result: `49 passed, 1 warning`
 - CLI smoke: `cd worker && uv run neuron-knowledge golden-query-eval --phase-coverage`
 - CLI smoke result: `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1537 passed, 9 skipped, 1 warning`
+- worker regression result: `1538 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
