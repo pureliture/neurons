@@ -412,6 +412,7 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
     assert readiness_schema["properties"]["expected_commit"]["type"] == "string"
     assert readiness_schema["properties"]["evidence_collection_plan"]["type"] == "boolean"
     assert readiness_schema["properties"]["evidence_packet_template"]["type"] == "boolean"
+    assert readiness_schema["properties"]["collect_shadow_evidence"]["type"] == "boolean"
     assert readiness_schema["properties"]["normalize_shadow_evidence"]["type"] == "object"
     assert readiness_schema["properties"]["shadow_evidence"]["type"] == "object"
     assert readiness_schema["properties"]["repository"]["type"] == "string"
@@ -683,6 +684,40 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_shadow_evidence(tmp
     assert report["network_used"] is False
     assert report["evidence_collection_network_used"] is True
     assert "shadow_route_smoke_not_implemented:deployment_runtime_truth" in report["gaps"]
+
+
+def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 124,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "collect_shadow_evidence": True,
+                    "repository": "pureliture/neurons",
+                    "branch": "codex/knowledge-object-review-flow-roadmap",
+                    "consumer": "codex",
+                },
+            },
+        },
+        service,
+    )
+
+    packet = response["result"]["structuredContent"]
+    assert packet["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert packet["production_mutation_performed"] is False
+    assert packet["collector"]["readiness_claim"] == "collector_packet_not_live_evidence"
+    assert packet["evidence_provenance"]["collection_mode"] == "local_test_replay"
+    assert packet["evidence_provenance"]["network_used"] is False
+    assert len(packet["brain_objects_query_smokes"]) == 4
+    assert all(
+        "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])
+        for smoke in packet["brain_objects_query_smokes"]
+    )
 
 
 def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None) -> dict:

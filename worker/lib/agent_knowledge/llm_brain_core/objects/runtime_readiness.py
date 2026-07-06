@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from .._util import ensure_public_safe, public_safe_text
@@ -298,6 +298,117 @@ def build_source_to_candidate_runtime_shadow_readiness_report(
         live_evidence=packet,
         expected_commit=expected_commit,
     )
+
+
+def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
+    *,
+    repository: str = "",
+    branch: str = "",
+    consumer: str = "codex",
+    expected_commit: str = "",
+    route_runner: Callable[[str], Mapping[str, Any]],
+    tool_names: Any = None,
+    collection_mode: str = "local_test_replay",
+    network_used: bool = False,
+) -> dict[str, Any]:
+    """Run read-only route smokes and return evaluator-ready public-safe evidence."""
+
+    smokes = [
+        _collect_brain_objects_query_route_smoke(route_runner, route)
+        for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+    ]
+    capture = {
+        "schema_version": "source_to_candidate_runtime_shadow_capture.v1",
+        "tool_names": _string_list(tool_names) or list(REQUIRED_RUNTIME_TOOL_NAMES),
+        "brain_objects_query_smokes": smokes,
+        "deployed_identity": {
+            "contains_expected_commit": False,
+            "identity_source": "collector_not_deployed_identity_proof",
+        },
+        "collector": {
+            "schema_version": "source_to_candidate_runtime_evidence_collector.v1",
+            "status": "completed_with_gaps",
+            "repository": public_safe_text(str(repository or ""), max_chars=120),
+            "branch": public_safe_text(str(branch or ""), max_chars=120),
+            "consumer": public_safe_text(str(consumer or "codex"), max_chars=80),
+            "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
+            "routes_collected": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
+            "route_failure_count": sum(1 for smoke in smokes if "collector_route_smoke_failed" in _smoke_gaps(smoke)),
+            "network_used": network_used is True,
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+            "readiness_claim": "collector_packet_not_live_evidence",
+        },
+        "evidence_provenance": {
+            "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
+            "collection_mode": public_safe_text(str(collection_mode or "local_test_replay"), max_chars=80),
+            "network_used": network_used is True,
+            "mutation_scope": "none",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": False,
+    }
+    packet = build_source_to_candidate_runtime_shadow_evidence_packet(captured_evidence=capture)
+    packet["collector"] = capture["collector"]
+    ensure_public_safe(packet, "SourceToCandidateRuntimeCollectedShadowEvidencePacket")
+    return packet
+
+
+def _collect_brain_objects_query_route_smoke(
+    route_runner: Callable[[str], Mapping[str, Any]],
+    route: str,
+) -> dict[str, Any]:
+    try:
+        raw = route_runner(route)
+    except Exception as exc:  # pragma: no cover - defensive public-safe guard
+        raw = {
+            "schema_version": "brain_objects_query.v1",
+            "route": route,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": route,
+                "objects": [],
+                "edges": [],
+                "evidence": [],
+                "gaps": ["collector_route_smoke_failed"],
+            },
+            "collector_error_type": public_safe_text(type(exc).__name__, max_chars=80),
+        }
+    smoke = _public_safe_mapping(raw)
+    smoke["schema_version"] = public_safe_text(
+        str(smoke.get("schema_version") or "brain_objects_query.v1"),
+        max_chars=80,
+    )
+    smoke["route"] = public_safe_text(str(smoke.get("route") or route), max_chars=120)
+    smoke["production_mutation_performed"] = False
+    object_pack = smoke.get("object_pack") if isinstance(smoke.get("object_pack"), Mapping) else {}
+    if not object_pack:
+        object_pack = {
+            "schema_version": "object_pack.v1",
+            "route": route,
+            "objects": [],
+            "edges": [],
+            "evidence": [],
+            "gaps": ["collector_route_smoke_missing_object_pack"],
+        }
+    else:
+        object_pack = _public_safe_mapping(object_pack)
+        object_pack["schema_version"] = public_safe_text(
+            str(object_pack.get("schema_version") or "object_pack.v1"),
+            max_chars=80,
+        )
+        object_pack["route"] = public_safe_text(str(object_pack.get("route") or route), max_chars=120)
+    smoke["object_pack"] = object_pack
+    ensure_public_safe(smoke, "CollectedBrainObjectsQueryRouteSmoke")
+    return smoke
+
+
+def _smoke_gaps(smoke: Mapping[str, Any]) -> list[str]:
+    object_pack = smoke.get("object_pack") if isinstance(smoke.get("object_pack"), Mapping) else {}
+    return _string_list(object_pack.get("gaps")) if isinstance(object_pack, Mapping) else []
 
 
 def _runtime_evidence_packet_field_templates() -> dict[str, Any]:

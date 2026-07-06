@@ -484,6 +484,7 @@ def _dispatch_brain_source_to_candidate_runtime_readiness_tool(
         expected_commit=str(arguments.get("expected_commit") or ""),
         evidence_collection_plan=arguments.get("evidence_collection_plan") is True,
         evidence_packet_template=arguments.get("evidence_packet_template") is True,
+        collect_shadow_evidence=arguments.get("collect_shadow_evidence") is True,
         repository=str(arguments.get("repository") or ""),
         branch=str(arguments.get("branch") or ""),
         consumer=str(arguments.get("consumer") or "codex"),

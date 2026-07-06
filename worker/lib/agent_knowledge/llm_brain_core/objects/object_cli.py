@@ -27,6 +27,7 @@ from .reference_corpus import (
     reference_corpus_objects_from_manifest,
 )
 from .runtime_readiness import (
+    build_source_to_candidate_runtime_collected_shadow_evidence_packet,
     build_source_to_candidate_runtime_evidence_collection_plan,
     build_source_to_candidate_runtime_evidence_packet_template,
     build_source_to_candidate_runtime_readiness_report,
@@ -386,6 +387,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     parser.add_argument("--expected-commit", default="")
     parser.add_argument("--evidence-collection-plan", action="store_true")
     parser.add_argument("--evidence-packet-template", action="store_true")
+    parser.add_argument("--collect-shadow-evidence", action="store_true")
     parser.add_argument("--repository", default="")
     parser.add_argument("--branch", default="")
     parser.add_argument("--consumer", default="codex")
@@ -407,6 +409,31 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 repository=args.repository,
                 branch=args.branch,
                 consumer=args.consumer,
+            )
+        )
+        return 0
+    if args.collect_shadow_evidence:
+        read_service = BrainReadService()
+
+        def route_runner(route: str) -> dict[str, Any]:
+            return read_service.brain_objects_query(
+                repository=args.repository,
+                branch=args.branch,
+                query=f"source-to-candidate runtime readiness route smoke: {route}",
+                current_files=[],
+                route=route,
+                limit=5,
+                response_mode="full",
+                consumer=args.consumer,
+            )
+
+        _print_json(
+            build_source_to_candidate_runtime_collected_shadow_evidence_packet(
+                expected_commit=args.expected_commit,
+                repository=args.repository,
+                branch=args.branch,
+                consumer=args.consumer,
+                route_runner=route_runner,
             )
         )
         return 0
