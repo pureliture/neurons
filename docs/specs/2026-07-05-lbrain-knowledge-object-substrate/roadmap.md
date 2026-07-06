@@ -13,7 +13,7 @@ Current state:
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP는 latest main 기반 image로 object-native tools 일부를 노출하고, read-only query 및 production write denied/no-mutation smoke를 통과했습니다. 현재 gap은 branch-local `brain_source_to_candidate_graph`, `brain_candidate_review_edit`, `brain_approval_board_decide`, `brain_source_to_candidate_runtime_readiness` 및 `brain_objects_query` route fixes의 live rollout/read-path proof 부재입니다.
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, unscoped production-denial evidence는 존재하지만, real private Palantir manifest ingest 및 bounded production ingest pilot evidence는 여전히 gap입니다.
 - P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / `local_validated`; local/test reference corpus extraction preview는 deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, blocked-extraction gaps를 생성합니다. local_test `source-to-candidate-graph` CLI 및 `brain_source_to_candidate_graph` MCP tool은 configured reference corpus store를 candidate graph review pack으로 연결합니다. candidate graph review pack은 candidate objects/edges/evidence/confidence/edit actions를 surface하고 reviewer edit fixture는 authority mutation 없이 candidate state만 바꿉니다. `source-to-candidate-runtime-readiness` CLI 및 `brain_source_to_candidate_runtime_readiness` MCP tool은 post-deploy sanitized evidence packet을 PASS/PASS_WITH_GAPS/FAIL로 판정합니다. deployed/runtime source-to-candidate wiring 및 live graph/Qdrant projection join은 아직 증명되지 않았습니다.
-- P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / `local_validated`; local/test decision commit은 authority state/audit history를 기록하고, object queries는 local/test stale, superseded, retired, archive-only, rejected states를 surface하며, object explain은 local/test decision history를 반환합니다. `candidate-review-edit` / `approval-board-decide` CLI 및 `brain_candidate_review_edit` / `brain_approval_board_decide` MCP tools가 candidate edit에서 local_test approval-board preview까지 연결합니다. unscoped production denial은 유지되지만, scoped production mutation gate는 사전승인 상태이며 실제 production authority pilot/write evidence는 아직 없습니다.
+- P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / `local_validated`; local/test decision commit은 authority state/audit history를 기록하고, object queries는 local/test stale, superseded, retired, archive-only, rejected states를 surface하며, object explain은 local/test decision history를 반환합니다. `candidate-review-edit` / `approval-board-decide` CLI 및 `brain_candidate_review_edit` / `brain_approval_board_decide` MCP tools가 candidate edit에서 local_test approval-board preview까지 연결합니다. unscoped production denial은 유지되며, branch-local MCP proposal/decision tools는 production-scope ledger write 전에 runtime flag `--allow-object-authority-production-writes`와 per-call `production_gate`를 모두 요구합니다. 이 gate는 local test ledger evidence로만 검증되었고, live production authority pilot/write evidence는 아직 없습니다.
 - P5 Continuous Golden Query Quality Gates: `PASS_WITH_GAPS` / `in_progress`; phase coverage report는 P1-P10 golden query families를 나열하고, source-to-authority quality gate는 source_to_candidate_graph, candidate_review_edit, approval_board_local_test, authority_read_after_write, production_decision_denial path를 검증합니다. activation progress report는 P2-P9 scope, P2/P3/P4 minimum review-loop checkpoint, next phase P5, remaining P5-P9 gaps를 한 JSON gate로 반환합니다. `product_surface_checks`는 `brain_objects_query`, object-native MCP tool registry surface, runtime readiness tool, local_test/default production-denial policy를 함께 검증합니다. `product_evidence_checks`는 P6-P9 evidence를 fail-closed로 검증하고, report는 `production_approval_gate=preapproved`와 `production_mutation_execution=not_performed_by_local_gate`를 분리해서 반환합니다. release quality gate는 명시적으로 `not_green` 상태로 유지합니다.
 - P6 Session, Device, Project, And Work-Unit 360: `PASS_WITH_GAPS` / `local_validated`; local/test session project rollup preview는 Device/Session/Repository/Branch/WorkUnit/Spec/PullRequest/Commit objects를 생성하고, same-device와 all-device fixture rollup을 분리하며, safe handoff pack과 resume context를 반환합니다. local MCP `brain_objects_query` temporal work recall route는 "어제 이 repo에서 뭐 했어?"류 질의를 `WorkUnit` object pack으로 반환하고, runtime readiness는 live `temporal_work_recall` route smoke를 요구합니다. live multi-device runtime evidence는 아직 증명되지 않았습니다.
 - P7 Preference, Style, And Artifact Memory: `PASS_WITH_GAPS` / `local_validated`; local/test artifact preference pack은 accepted/proposal lanes, profile objects, no-UI HTML artifact check를 검증하지만, live agent context pack 및 production authority promotion은 아직 gap입니다.
@@ -445,6 +445,9 @@ Current local/test evidence:
 - local/test object queries now surface stale, superseded, retired, archive-only, and rejected states without deleting audit history or mutating production
 - `brain_object_explain` returns local/test authority state plus decision history for object ids with committed decisions, while still reporting that the object body comes from ledger state only when no object store is configured
 - production-scope `brain_object_decision_commit` remains denied/no-mutation and returns `object_authority_promotion_plan.v1` with allowed object class, decision types, reviewer role, required gate evidence, rollback path, blast radius, and no-mutation report
+- branch-local `brain_object_proposal_create` 및 `brain_object_decision_commit`은 explicit per-call `production_gate` schema를 노출하며, runtime flag `--allow-object-authority-production-writes`만으로는 production scope mutation이 열리지 않습니다
+- branch-local MCP stdio/http service wiring은 object authority production write를 기본 비활성화 상태로 유지하며, `--allow-object-authority-production-writes`를 명시적으로 선택한 경우에만 writable ledger를 엽니다
+- branch-local production-gate focused test writes a single `RepoDocument` proposal to the test ledger using `ledger_scope=production`, commits a bounded `reject_candidate` decision, records `authority_write_scope=production_ledger`, and verifies read-after-write authority state and review-queue status without touching live production
 - ledger boundary manifest assigns `object_review_proposals`, `object_authority_decisions`, and `object_authority_states` to the native-memory/object area
 - candidate graph approval-board preview shows editable candidate object state, related edges, evidence refs, confidence, gaps, recommended action, and allowed reviewer actions
 - reviewer edit fixture changes only candidate object/edge/evidence state, rejects direct authority-lane edits, preserves original extraction hash, and performs no authority write
@@ -465,12 +468,16 @@ Current local/test evidence:
 - production-denial plan result: `1 passed, 1 warning`
 - runtime readiness production safety evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_requires_proposal_and_decision_production_safety_smokes`
 - runtime readiness production safety result: `1 passed, 1 warning`
+- production gate focused evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_tool_list_exposes_object_substrate_tools tests/test_neuron_mcp_stdio.py::test_mcp_object_proposal_create_local_test_and_production_denial tests/test_neuron_mcp_stdio.py::test_mcp_object_authority_production_gate_writes_single_object_with_postcheck tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_is_restricted_denied_by_default tests/test_neuron_mcp_stdio.py::test_mcp_object_authority_local_test_write_requires_test_service_gate`
+- production gate focused result: `5 passed, 1 warning`
+- runtime opt-in focused evidence: `cd worker && uv run pytest -q tests/test_brain_steward.py::test_mcp_cli_object_authority_production_write_flag_requires_explicit_runtime_opt_in tests/test_brain_steward.py::test_mcp_cli_review_commit_flag_enables_only_review_commit`
+- runtime opt-in focused result: `2 passed, 1 warning`
 - focused evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_local_test_updates_authority_state_with_audit`
 - focused result: `1 passed, 1 warning`
 - object-query visibility evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_overlays_local_authority_state`
 - object-query visibility result: `5 passed, 1 warning`
 - MCP regression evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py`
-- MCP regression result: `73 passed, 1 warning`
+- MCP regression result: `80 passed, 1 warning`
 - object/model/boundary regression evidence: `cd worker && uv run pytest -q tests/test_object_packs.py tests/test_knowledge_objects.py tests/test_ledger_area_boundaries.py`
 - object/model/boundary regression result: `23 passed, 1 warning`
 - ledger boundary evidence: `cd worker && uv run pytest -q tests/test_ledger_area_boundaries.py`
@@ -482,13 +489,13 @@ Current local/test evidence:
 
 PASS_WITH_GAPS rationale:
 
-- Local/test P4 gate evidence is present for proposal creation, review queue listing, default production denial/no-mutation, candidate approval-board decision preview, local/test authority decision commit, audit state, stale/superseded/retired/archive/rejected object-query visibility, and object decision history explainability.
-- Production authority promotion and bounded production ledger/corpus/runtime mutation are preapproved, but no bounded live pilot/write evidence is attached yet.
-- The current production plan is a read-only denied response that documents the required reviewer role, allowed classes/actions, rollback path, gate evidence, and blast radius. It is not a production approval record and did not mutate production authority.
+- Local/test P4 gate evidence is present for proposal creation, review queue listing, default production denial/no-mutation, candidate approval-board decision preview, local/test authority decision commit, audit state, stale/superseded/retired/archive/rejected object-query visibility, object decision history explainability, and explicit production-gate semantics.
+- Production authority promotion and bounded production ledger/corpus/runtime mutation are preapproved, and branch-local MCP proposal/decision code now has a bounded gate shape, but no bounded live pilot/write evidence is attached yet.
+- The current live production evidence remains denied/no-mutation. The new production-gate write proof is branch-local test-ledger evidence, not a production approval record and not production readiness.
 
 Remaining gaps:
 
-- approved production authority promotion and ledger/corpus/runtime mutation remain unproven until bounded execution evidence exists; the current production plan is read-only denial metadata, not a production pilot
+- approved production authority promotion and ledger/corpus/runtime mutation remain unproven until bounded deployed/live execution evidence exists; the branch-local production-gate proof is not a production pilot
 - production rollback/supersession/demotion flows are not yet implemented beyond the local/test stored before/after lane audit shape and object-query state overlay
 - production proposal/decision and ledger/corpus/runtime mutation are preapproved, but no bounded execution evidence is attached yet; until execution evidence exists, readiness requires denied/no-mutation proposal and decision safety smokes
 
@@ -592,7 +599,7 @@ Current local/test evidence:
 - CLI smoke: `cd worker && uv run neuron-knowledge golden-query-eval --phase-coverage`
 - CLI smoke result: `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1596 passed, 9 skipped, 1 warning`
+- worker regression result: `1598 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
@@ -651,7 +658,7 @@ Current local/test evidence:
 - adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
 - adjacent regression result: `46 passed, 1 warning`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1596 passed, 9 skipped, 1 warning`
+- worker regression result: `1598 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 

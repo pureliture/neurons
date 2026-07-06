@@ -334,6 +334,9 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
         "local_test",
         "production",
     ]
+    assert "project" in tools[BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME]["inputSchema"]["properties"]
+    assert "production_gate" in tools[BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME]["inputSchema"]["properties"]
+    assert "production_gate" in tools[BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME]["inputSchema"]["properties"]
     assert tools[BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME]["inputSchema"]["required"] == [
         "proposal_id",
         "decision_type",
@@ -904,8 +907,116 @@ def test_mcp_object_proposal_create_local_test_and_production_denial(tmp_path: P
     assert queued["count"] == 1
     assert queued["items"][0]["proposal_id"] == local["proposal_id"]
     assert denied["permission"] == "denied"
+    assert denied["reason"] == "proposal_write_requires_local_test_ledger_or_later_production_gate"
     assert denied["proposal_write_performed"] is False
     assert denied["authoritative_memory_changed"] is False
+
+
+def test_mcp_object_authority_production_gate_writes_single_object_with_postcheck(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    production_gate = {
+        "approved": True,
+        "approval_ref": "preapproved-user-gate-2026-07-06",
+        "scope": "single_project_single_object",
+        "project": PROJECT,
+        "max_objects": 1,
+        "configured_deployed_mcp_identity_matches_source": True,
+        "read_after_write_smoke_plan": True,
+        "rollback_or_supersession_plan": True,
+        "no_raw_private_evidence": True,
+    }
+    target_object_id = "ko:RepoDocument:production-gate-smoke"
+    missing_gate = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 105,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Production write still needs per-call gate.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert missing_gate["permission"] == "denied"
+    assert missing_gate["reason"] == "proposal_write_requires_local_test_ledger_or_later_production_gate"
+    assert missing_gate["proposal_write_performed"] is False
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 106,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Bounded production proposal smoke.",
+                    "evidence_refs": ["github_pr:95", "git_commit:f8bbb42"],
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert proposal["ledger_scope"] == "production"
+    assert proposal["proposal_write_performed"] is True
+    assert proposal["proposal_write_target"] == "production_ledger"
+    assert proposal["production_mutation_performed"] is True
+    assert proposal["authority_write_performed"] is False
+    assert service.object_review_proposals(project=PROJECT)["count"] == 1
+
+    decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 107,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "reject_candidate",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "rejected",
+                    "approved_by": "preapproved-user-gate-2026-07-06",
+                    "decision_id": "decision:production-gate-smoke",
+                    "decision_reason": "Bounded production decision smoke rejects the candidate.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert decision["ledger_scope"] == "production"
+    assert decision["authority_write_scope"] == "production_ledger"
+    assert decision["authority_write_performed"] is True
+    assert decision["authoritative_memory_changed"] is True
+    assert decision["production_mutation_performed"] is True
+    state = service.ledger.get_object_authority_state(target_object_id)
+    assert state["authority_lane"] == "rejected"
+    assert state["decision_id"] == "decision:production-gate-smoke"
+    queued = service.object_review_proposals(project=PROJECT)
+    assert queued["items"][0]["status"] == "rejected"
+    assert queued["items"][0]["decision_id"] == "decision:production-gate-smoke"
 
 
 def test_mcp_corpus_ingest_plan_reports_manifest_ref_gap(tmp_path: Path):
@@ -1055,6 +1166,7 @@ def test_mcp_object_decision_commit_is_restricted_denied_by_default(tmp_path: Pa
     )["result"]["structuredContent"]
 
     assert result["permission"] == "denied"
+    assert result["reason"] == "restricted_tool_requires_human_gate"
     assert result["authority_write_performed"] is False
     assert result["authoritative_memory_changed"] is False
     plan = result["production_promotion_plan"]

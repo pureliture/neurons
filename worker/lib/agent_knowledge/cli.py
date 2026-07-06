@@ -174,6 +174,7 @@ def _build_recall_service(args) -> KnowledgeSearchService:
         steward_write_enabled = bool(
             getattr(args, "allow_steward_proposals", False)
             or getattr(args, "allow_steward_review_commit", False)
+            or getattr(args, "allow_object_authority_production_writes", False)
         )
         if steward_write_enabled:
             # MCP steward write runtimes attach to an existing production ledger.
@@ -209,6 +210,9 @@ def _build_recall_service(args) -> KnowledgeSearchService:
         mirror_search=mirror_search,
         allow_restricted_steward=bool(getattr(args, "allow_steward_review_commit", False)),
         allow_steward_auto_accept=False,
+        allow_production_object_authority_writes=bool(
+            getattr(args, "allow_object_authority_production_writes", False)
+        ),
     )
 
 
@@ -230,6 +234,11 @@ def _add_recall_service_arguments(parser) -> None:
         "--allow-steward-review-commit",
         action="store_true",
         help="enable human-gated Brain Steward review commits approve/reject/supersede/stale; auto-accept remains disabled",
+    )
+    parser.add_argument(
+        "--allow-object-authority-production-writes",
+        action="store_true",
+        help="enable explicitly gated object authority production writes; every write still requires a per-call production_gate",
     )
 
 

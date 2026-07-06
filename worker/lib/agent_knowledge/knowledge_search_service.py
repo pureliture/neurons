@@ -95,6 +95,7 @@ class KnowledgeSearchService:
         allow_restricted_steward: bool = False,
         allow_steward_auto_accept: bool = False,
         allow_local_test_object_authority_writes: bool = False,
+        allow_production_object_authority_writes: bool = False,
     ):
         self.ledger = ledger
         self.retired_index_bridge = retired_index_bridge
@@ -108,6 +109,7 @@ class KnowledgeSearchService:
         self.allow_restricted_steward = bool(allow_restricted_steward)
         self.allow_steward_auto_accept = bool(allow_steward_auto_accept)
         self.allow_local_test_object_authority_writes = bool(allow_local_test_object_authority_writes)
+        self.allow_production_object_authority_writes = bool(allow_production_object_authority_writes)
         # M8 read cutover: a Qdrant-backed (query, brain_id) -> list[dict] callable
         # that fills brain.query's archive/evidence lanes from the Qdrant searchable
         # mirror. When set it REPLACES the RetiredIndexBridge archive search (which is off in the
