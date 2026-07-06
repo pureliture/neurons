@@ -62,7 +62,12 @@ def test_extractor_registry_reports_implemented_and_gap_extractors():
     assert by_name["preference_style"]["status"] == "implemented"
     assert by_name["preference_style"]["output_object_types"] == [
         "ArtifactPreference",
+        "ArtifactPreferencePack",
+        "HtmlReviewProfile",
+        "PersonalCodeStyleProfile",
+        "RepoStyleProfile",
         "StyleRule",
+        "VisualizationProfile",
     ]
     assert by_name["work_unit"]["status"] == "implemented"
     assert by_name["work_unit"]["output_object_types"] == ["WorkUnit"]
@@ -374,6 +379,7 @@ def test_preference_style_extraction_preview_maps_memory_cards_without_raw_body(
     assert result["pack_preview"]["style"]["object_count"] == 1
     assert result["objects"][0]["object_type"] == "ArtifactPreference"
     assert result["objects"][0]["title"] == "HTML review artifacts should be information dense."
+    assert result["objects"][0]["payload"]["scope"] == "html review"
     assert result["objects"][1]["object_type"] == "StyleRule"
     assert result["objects"][1]["title"] == "Python worker tests use uv run pytest."
     assert result["source_evidence_refs"] == [
@@ -385,6 +391,224 @@ def test_preference_style_extraction_preview_maps_memory_cards_without_raw_body(
     ]
     assert result["evaluator_report"]["golden_query_slice"] == "style and artifact preference memory"
     assert result["evaluator_report"]["passes"] is True
+
+
+def test_preference_style_extraction_preview_builds_artifact_preference_pack_lanes():
+    result = run_preference_style_extraction_preview(
+        memory_cards=[
+            {
+                "memory_id": "mem_html_review_accepted",
+                "card_type": "preference",
+                "summary": "Accepted HTML artifact preference",
+                "confidence": 0.94,
+                "currentness": "current",
+                "review_state": "accepted",
+                "typed_payload": {
+                    "preference": "HTML review artifacts should be information dense.",
+                    "applies_to": "html review artifact",
+                    "reason": "Explicitly accepted in review workflow.",
+                    "exceptions": ["tiny status updates can stay compact"],
+                },
+                "source_refs": [{"source_ref_id": "session:accepted-html-pref"}],
+            },
+            {
+                "memory_id": "mem_visual_inferred",
+                "card_type": "preference",
+                "summary": "Inferred visualization preference",
+                "confidence": 0.61,
+                "currentness": "inferred",
+                "typed_payload": {
+                    "preference": "Visualization artifacts should use animated hero sections.",
+                    "applies_to": "visualization artifact",
+                    "reason": "Observed once; needs reviewer confirmation.",
+                },
+                "source_refs": [{"source_ref_id": "artifact:visual-once"}],
+            },
+            {
+                "memory_id": "mem_repo_uv_accepted",
+                "card_type": "repo_style",
+                "summary": "Accepted worker test command",
+                "confidence": 0.91,
+                "review_state": "accepted",
+                "typed_payload": {
+                    "claim": "Python worker tests use uv run pytest.",
+                    "repo_scope": "neurons/worker",
+                    "reason": "Repo instructions and repeated verified runs.",
+                    "files": ["worker/tests/test_extraction_pipeline.py"],
+                    "commits": ["commit:p7style"],
+                },
+            },
+            {
+                "memory_id": "mem_legacy_singleton",
+                "card_type": "repo_style",
+                "summary": "Legacy code pattern observed",
+                "confidence": 0.88,
+                "typed_payload": {
+                    "claim": "Legacy singleton manager usage is common.",
+                    "repo_scope": "neurons/worker",
+                    "reason": "Observed old code; not accepted style authority.",
+                    "files": ["worker/lib/agent_knowledge/legacy_manager.py"],
+                },
+            },
+        ],
+        repository="neurons",
+        current_request="review HTML visualization artifact and worker test diff",
+        current_files=["worker/tests/test_extraction_pipeline.py"],
+    )
+
+    assert result["status"] == "pass"
+    pack = result["artifact_preference_pack"]
+    assert pack["schema_version"] == "artifact_preference_pack_preview.v1"
+    assert pack["raw_body_return_capability"] == "denied"
+    assert pack["object"]["object_type"] == "ArtifactPreferencePack"
+    assert [item["object_type"] for item in pack["profile_objects"]] == [
+        "PersonalCodeStyleProfile",
+        "RepoStyleProfile",
+        "HtmlReviewProfile",
+        "VisualizationProfile",
+    ]
+    accepted_titles = [item["title"] for item in pack["lanes"]["accepted_current"]]
+    proposal_titles = [item["title"] for item in pack["lanes"]["proposal_only"]]
+    assert "HTML review artifacts should be information dense." in accepted_titles
+    assert "Python worker tests use uv run pytest." in accepted_titles
+    assert "Visualization artifacts should use animated hero sections." in proposal_titles
+    assert "Legacy singleton manager usage is common." in proposal_titles
+    assert all(item["review_state"] == "accepted" for item in pack["lanes"]["accepted_current"])
+    assert all(item["review_state"] == "needs_review" for item in pack["lanes"]["proposal_only"])
+    assert "Legacy singleton manager usage is common." not in accepted_titles
+    assert pack["recommended_actions"] == [
+        {"action": "apply_preference", "lane": "accepted_current"},
+        {"action": "review_inferred_preference", "lane": "proposal_only"},
+        {"action": "review_style_drift", "lane": "proposal_only"},
+    ]
+    assert [item["check"] for item in pack["drift_review_suggestions"]] == [
+        "html_review_preference_check",
+        "visualization_preference_check",
+        "repo_style_drift_check",
+    ]
+    assert all(item["raw_return_capability"] == "denied" for item in pack["evidence"])
+
+
+def test_preference_style_extraction_preview_checks_html_artifact_without_ui():
+    result = run_preference_style_extraction_preview(
+        memory_cards=[
+            {
+                "memory_id": "mem_html_review_accepted",
+                "card_type": "preference",
+                "summary": "Accepted HTML artifact preference",
+                "confidence": 0.94,
+                "currentness": "current",
+                "review_state": "accepted",
+                "typed_payload": {
+                    "preference": "HTML review artifacts should be information dense.",
+                    "applies_to": "html review artifact",
+                    "reason": "Explicitly accepted in review workflow.",
+                },
+                "source_refs": [{"source_ref_id": "session:accepted-html-pref"}],
+            }
+        ],
+        repository="neurons",
+        current_request="review HTML artifact",
+        current_files=[],
+        artifact_review={
+            "artifact_type": "html_review",
+            "summary": "Dense review output with prioritized findings and evidence links.",
+            "text_metrics": {
+                "finding_count": 4,
+                "evidence_ref_count": 4,
+                "word_count": 740,
+            },
+            "body": "redacted-body-placeholder",
+        },
+    )
+
+    check = result["artifact_review_check"]
+    assert check["schema_version"] == "artifact_review_preference_check.v1"
+    assert check["ui_required"] is False
+    assert check["raw_body_return_capability"] == "denied"
+    assert check["status"] == "pass"
+    assert check["matched_preference_titles"] == ["HTML review artifacts should be information dense."]
+    assert check["assertions"] == [
+        "html_artifact_summary_available",
+        "accepted_html_preference_available",
+        "artifact_body_not_returned",
+    ]
+    assert "redacted-body-placeholder" not in str(check)
+
+
+def test_preference_style_extraction_preview_uses_scope_for_html_artifact_match():
+    result = run_preference_style_extraction_preview(
+        memory_cards=[
+            {
+                "memory_id": "mem_dense_artifact_scope",
+                "card_type": "preference",
+                "summary": "Accepted scoped artifact preference",
+                "confidence": 0.94,
+                "currentness": "current",
+                "review_state": "accepted",
+                "typed_payload": {
+                    "preference": "Make artifacts information dense.",
+                    "applies_to": "html review artifact",
+                    "reason": "Scope carries the artifact type.",
+                },
+            }
+        ],
+        repository="neurons",
+        current_request="review HTML artifact",
+        current_files=[],
+        artifact_review={
+            "artifact_type": "html_review",
+            "summary": "Dense review output with evidence links.",
+            "text_metrics": {
+                "finding_count": 2,
+                "evidence_ref_count": 2,
+                "word_count": 420,
+            },
+        },
+    )
+
+    check = result["artifact_review_check"]
+    assert result["objects"][0]["payload"]["scope"] == "html review artifact"
+    assert check["status"] == "pass"
+    assert check["matched_preference_titles"] == ["Make artifacts information dense."]
+    assert "accepted_html_preference_missing" not in check["failures"]
+
+
+def test_preference_style_extraction_preview_rejects_review_only_match_for_html_artifact():
+    result = run_preference_style_extraction_preview(
+        memory_cards=[
+            {
+                "memory_id": "mem_code_review_pref",
+                "card_type": "preference",
+                "summary": "Accepted code review preference",
+                "confidence": 0.94,
+                "currentness": "current",
+                "review_state": "accepted",
+                "typed_payload": {
+                    "preference": "Code review comments should be concise.",
+                    "applies_to": "code review",
+                    "reason": "This is not an HTML artifact preference.",
+                },
+            }
+        ],
+        repository="neurons",
+        current_request="review HTML artifact",
+        current_files=[],
+        artifact_review={
+            "artifact_type": "html_review",
+            "summary": "Dense review output with evidence links.",
+            "text_metrics": {
+                "finding_count": 2,
+                "evidence_ref_count": 2,
+                "word_count": 420,
+            },
+        },
+    )
+
+    check = result["artifact_review_check"]
+    assert check["status"] == "pass_with_gaps"
+    assert check["matched_preference_titles"] == []
+    assert "accepted_html_preference_missing" in check["failures"]
 
 
 def test_work_unit_extraction_preview_groups_session_pr_commit_and_tests_without_raw_transcript():

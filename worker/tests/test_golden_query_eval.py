@@ -181,3 +181,6 @@ def test_phase_golden_query_coverage_reports_pass_with_gaps_not_green():
     assert "approved_production_pilot_missing" in phases["P4"]["gaps"]
     assert phases["P6"]["result"] == "in_progress"
     assert "live_multi_device_rollup_unproven" in phases["P6"]["gaps"]
+    assert phases["P7"]["result"] == "in_progress"
+    assert phases["P7"]["golden_query_family"] == "code style drift"
+    assert "accepted_preference_context_pack_live_unproven" in phases["P7"]["gaps"]
