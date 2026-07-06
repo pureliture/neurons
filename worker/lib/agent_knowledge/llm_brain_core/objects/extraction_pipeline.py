@@ -848,6 +848,17 @@ def run_session_project_rollup_preview(
         "linked_pull_request_count": len(pr_objects),
         "linked_commit_count": len(commit_objects),
         "gaps": gaps,
+        "handoff_pack": _session_project_handoff_pack(
+            repository=safe_repository,
+            branch=safe_branch,
+            project=safe_project,
+            scope=safe_scope,
+            objects=objects,
+            edges=edges,
+            gaps=gaps,
+            visible_session_count=len(visible_sessions),
+            all_device_session_count=len(sessions),
+        ),
         "evaluator_report": {
             "schema_version": "object_extraction_evaluator_report.v1",
             "golden_query_slice": "temporal repo recall",
@@ -1798,6 +1809,55 @@ def _session_project_rollup_gaps(
     if any(_session_has_raw_body(session) for session in sessions):
         gaps.append("raw_session_body_ignored")
     return gaps
+
+
+def _session_project_handoff_pack(
+    *,
+    repository: str,
+    branch: str,
+    project: str,
+    scope: str,
+    objects: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    gaps: list[str],
+    visible_session_count: int,
+    all_device_session_count: int,
+) -> dict[str, Any]:
+    object_refs: dict[str, list[dict[str, str]]] = {}
+    for obj in objects:
+        object_type = public_safe_text(str(obj.get("object_type") or "KnowledgeObject"), max_chars=80)
+        object_refs.setdefault(object_type, []).append(
+            {
+                "object_id": public_safe_text(str(obj.get("object_id") or ""), max_chars=180),
+                "title": public_safe_text(str(obj.get("title") or ""), max_chars=180),
+                "authority_lane": public_safe_text(str(obj.get("authority_lane") or ""), max_chars=80),
+                "recommended_action": public_safe_text(str(obj.get("recommended_action") or ""), max_chars=80),
+            }
+        )
+    edge_type_counts: dict[str, int] = {}
+    for edge in edges:
+        edge_type = public_safe_text(str(edge.get("edge_type") or ""), max_chars=120)
+        edge_type_counts[edge_type] = edge_type_counts.get(edge_type, 0) + 1
+    pack = {
+        "schema_version": "session_project_handoff_pack.v1",
+        "repository": repository,
+        "branch": branch,
+        "project": project,
+        "scope": scope,
+        "visible_session_count": visible_session_count,
+        "all_device_session_count": all_device_session_count,
+        "object_refs": object_refs,
+        "edge_type_counts": dict(sorted(edge_type_counts.items())),
+        "gaps": list(gaps),
+        "recommended_next_actions": [
+            "verify_live_multi_device_rollup",
+            "review_missing_phase_gaps",
+            "keep_raw_source_body_denied",
+        ],
+        "raw_return_capability": "denied",
+    }
+    ensure_public_safe(pack, "SessionProjectHandoffPack")
+    return pack
 
 
 def _session_detail_gaps(
