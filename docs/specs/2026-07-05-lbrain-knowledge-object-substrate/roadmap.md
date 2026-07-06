@@ -679,6 +679,8 @@ Current local/test evidence:
 - resume context carries latest session ref, active branch, work unit refs, linked Spec/PullRequest/Commit refs, local/test gaps, and live gap disclosure without raw transcript/body return
 - local MCP `brain_objects_query` routes temporal/session/work-resume questions such as "어제 이 repo에서 뭐 했어?" to `temporal_work_recall` and returns `WorkUnit` objects from the `current_work` object pack
 - runtime readiness now requires a live `temporal_work_recall` `brain_objects_query` smoke before P6/P9 startup/read-path proof can be called complete
+- runtime readiness now includes `live.session_project.rollup`, requiring a sanitized `session_project_rollup_runtime_evidence.v1` packet for all-device session/project/work-unit rollup, safe handoff/resume context, `temporal_work_recall` read-after-write, and public-safe postcheck before P6 live runtime proof can pass
+- missing P6 runtime packet evidence remains `PASS_WITH_GAPS` with `live_session_project_rollup_unverified` and `live_multi_device_rollup_unproven`; unsafe or incomplete supplied evidence fails closed
 - local path sentinels and source bodies are not returned
 - P5 phase coverage now marks P6 as `PASS_WITH_GAPS` with `live_multi_device_rollup_unproven`, not `handoff_pack_not_implemented`
 - focused evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py::test_session_project_rollup_preview_separates_same_device_and_all_devices`
@@ -691,20 +693,25 @@ Current local/test evidence:
 - temporal MCP object query result: `1 passed, 1 warning`
 - runtime readiness temporal route evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_requires_temporal_work_recall_live_smoke`
 - runtime readiness temporal route result: `1 passed, 1 warning`
+- runtime readiness P6 packet gate evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_evidence tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_passes_with_sanitized_live_evidence tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_fails_when_session_project_rollup_runtime_is_unsafe_or_incomplete`
+- runtime readiness P6 packet gate result: `4 passed, 1 warning`
+- runtime/MCP P6 packet gate adjacent evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_without_mutation tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_plan tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_template tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_accepts_bounded_execution_evidence_from_local_production_gate_simulation tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_without_evidence_preserves_live_gaps`
+- runtime/MCP P6 packet gate adjacent result: `43 passed, 1 warning`
 - phase coverage evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
 - phase coverage result: `1 passed, 1 warning`
 - source-to-authority strengthened review-edit gate evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_source_to_authority_quality_gate_covers_review_approval_and_read_path_without_production_mutation`
 - source-to-authority strengthened review-edit gate result: `1 passed, 1 warning`
-- adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
-- adjacent regression result: `46 passed, 1 warning`
+- adjacent regression evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py tests/test_neuron_mcp_stdio.py tests/test_extraction_pipeline.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
+- adjacent regression result: `182 passed, 1 warning`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1607 passed, 9 skipped, 1 warning`
+- worker regression result: `1658 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
 Remaining gaps:
 
 - local/test P6 gate evidence is present for same-device/all-device fixture rollups, safe handoff/resume context generation, and bidirectional linked metadata edges
+- branch-local runtime readiness can now validate or reject a sanitized P6 live rollup evidence packet, but that packet has not been collected from deployed runtime
 - PR/commit/test provenance is covered only by local/test metadata fixtures, not live repository history
 - live multi-device/project rollup evidence is unproven
 
@@ -990,7 +997,7 @@ Current accounting:
 | P3 Processing And Object Extraction Pipeline | `local_validated` | `PASS_WITH_GAPS`; local/test extraction previews, store-to-candidate CLI/MCP wiring, candidate review/edit pack, and branch-local review-loop readiness evidence gate pass, but deployed/runtime source-to-candidate wiring and live projection join remain gaps |
 | P4 Review Queue And Authority Promotion | `local_validated` | `PASS_WITH_GAPS`; local/test authority state, audit gates, review/approval CLI/MCP chain, approval-board preview, local_test promotion preview, reviewer edit no-mutation proof, branch-local review-loop readiness gate, and bounded execution packet shape pass; deployed/live production authority pilot/write evidence is still missing |
 | P5 Continuous Golden Query Quality Gates | `in_progress` | `PASS_WITH_GAPS`; phase coverage, source-to-authority path gate, FR8 code-change-impact route gate, P7 HTML/visualization route evidence, and P2-P9 activation progress gate exist, release quality gate remains `not_green` |
-| P6 Session, Device, Project, And Work-Unit 360 | `local_validated` | `PASS_WITH_GAPS`; local/test rollup, handoff gates, and temporal `brain_objects_query` `WorkUnit` route pass; live multi-device runtime evidence remains a gap |
+| P6 Session, Device, Project, And Work-Unit 360 | `local_validated` | `PASS_WITH_GAPS`; local/test rollup, handoff gates, temporal `brain_objects_query` `WorkUnit` route, and branch-local P6 runtime evidence packet validation pass; deployed/live multi-device runtime evidence remains a gap |
 | P7 Preference, Style, And Artifact Memory | `local_validated` | `PASS_WITH_GAPS`; local/test artifact preference pack lanes, no-UI HTML artifact check, and branch-local HTML/visualization preference route pass, live agent context pack and production authority promotion remain gaps |
 | P8 Runtime Truth, Security, And Deployment Authority | `local_validated` | `PASS_WITH_GAPS`; local/test runtime authority policy, artifact identity join, private authority redaction, denial/no-mutation checks, sanitized source-to-candidate review-loop packet validation, sanitized bounded execution packet validation, evidence provenance validation, current-session shadow evidence packet normalization, and one-step shadow readiness evaluation pass; broader deployed/live production runtime authority and permission audit remain gaps |
 | P9 Agent Context Productization | `local_validated` | `PASS_WITH_GAPS`; local/test consumer compact packs, degraded/stale disclosure, surface policy, and proposal-safe action hints pass; production startup/read path and runtime enforcement remain gaps |
@@ -999,7 +1006,7 @@ Current accounting:
 Delivery integration status:
 
 - PR #84 through PR #93 are merged into `main`.
-- PR #95 remains draft/open for the integrated P2-P9 roadmap branch. Its branch-local runtime-readiness surface now includes a public-safe normalizer and one-step readiness evaluator for current-session shadow evidence packets, but this is not merge, deploy, or live runtime evidence.
+- PR #95 remains draft/open for the integrated P2-P9 roadmap branch. Its branch-local runtime-readiness surface now includes a public-safe normalizer, one-step readiness evaluator for current-session shadow evidence packets, and P6 session/project/work-unit rollup packet validation, but this is not merge, deploy, or live runtime evidence.
 - Final head and merge SHAs below are GitHub delivery evidence only. They are not deploy, live runtime, or production readiness evidence.
 - P1 through P10 phase branches were cleaned up or are eligible for cleanup after merge verification.
 - This delivery record does not close the P1 live object-query route proof gap, deployed source-to-candidate graph runtime wiring, P5 release-quality `not_green` status, P6-P9 production/live proof gaps, or deployed/live bounded production authority promotion execution evidence.
