@@ -13,7 +13,7 @@ Current state:
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, latest configured-endpoint smoke still passes with denied/no-mutation production writes, but the current Codex session's `mcp__lbrain` namespace still does not expose them and the live MCP image is not proven to include the #73/current-main source refactor.
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, and production-denial evidence exist, but real private Palantir manifest ingest and production ingest approval remain gaps.
 - P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / local_validated; local/test reference corpus extraction preview creates deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, and blocked-extraction gaps; repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, and broader evaluator suite previews have local/test evaluator evidence; live graph/Qdrant projection join remains unproven.
-- P4 Review Queue And Authority Promotion: `in_progress`; local/test decision commit records authority state/audit history and object queries surface local/test stale, superseded, retired, archive-only, and rejected states, while production authority mutation remains denied.
+- P4 Review Queue And Authority Promotion: `in_progress`; local/test decision commit records authority state/audit history, object queries surface local/test stale, superseded, retired, archive-only, and rejected states, and production denial returns a read-only promotion plan while authority mutation remains denied.
 - Product activation: not complete; configured agent read path refresh remains required.
 - UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
 
@@ -377,7 +377,10 @@ Current local/test evidence:
 - local/test authority decision audit records proposal id, evidence refs, approver identity hash, previous authority lane, new authority lane, and decision reason
 - `brain_objects_query` overlays local/test object authority state onto returned objects and lane indexes after a decision commit
 - local/test object queries now surface stale, superseded, retired, archive-only, and rejected states without deleting audit history or mutating production
+- production-scope `brain_object_decision_commit` remains denied/no-mutation and returns `object_authority_promotion_plan.v1` with allowed object class, decision types, reviewer role, required gate evidence, rollback path, blast radius, and no-mutation report
 - ledger boundary manifest assigns `object_review_proposals`, `object_authority_decisions`, and `object_authority_states` to the native-memory/object area
+- production-denial plan evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_is_restricted_denied_by_default`
+- production-denial plan result: `1 passed, 1 warning`
 - focused evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_local_test_updates_authority_state_with_audit`
 - focused result: `1 passed, 1 warning`
 - object-query visibility evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_overlays_local_authority_state`
@@ -396,7 +399,7 @@ Current local/test evidence:
 Remaining gaps:
 
 - P4 is not complete; this slice covers local/test authority decision state, audit, and object-query state visibility only
-- approved production authority promotion remains closed and unproven
+- approved production authority promotion remains closed and unproven; the current production plan is read-only denial metadata, not an approval record or production pilot
 - production rollback/supersession/demotion flows are not yet implemented beyond the local/test stored before/after lane audit shape and object-query state overlay
 - production proposal/decision write remains denied and no production ledger/corpus mutation has been performed
 
