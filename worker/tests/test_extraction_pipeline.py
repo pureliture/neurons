@@ -1,6 +1,7 @@
 from agent_knowledge.llm_brain_core.objects.extraction_pipeline import (
     build_extractor_registry_report,
     run_documentation_cleanup_strategy_comparison,
+    run_graph_search_projection_join_preview,
     run_preference_style_extraction_preview,
     run_pr_commit_extraction_preview,
     run_reference_corpus_extraction_preview,
@@ -66,6 +67,10 @@ def test_extractor_registry_reports_implemented_and_gap_extractors():
         "PullRequest",
         "Commit",
         "TestRun",
+    ]
+    assert by_name["graph_search_projection_join"]["status"] == "implemented"
+    assert by_name["graph_search_projection_join"]["output_object_types"] == [
+        "ProjectionHit",
     ]
 
 
@@ -461,3 +466,101 @@ def test_pr_commit_extraction_preview_reports_gap_for_missing_test_refs():
     assert result["pack_preview"]["runtime_unverified_count"] == 0
     assert result["evaluator_report"]["passes"] is False
     assert result["evaluator_report"]["failures"] == ["commit_test_ref_missing"]
+
+
+def test_graph_search_projection_join_preview_joins_without_promoting_authority():
+    base = run_pr_commit_extraction_preview(
+        pull_request={
+            "pr_id": "pr:73",
+            "title": "Merged deployment contract PR",
+            "state": "merged",
+            "merge_commit": "c3f3e34",
+        },
+        commits=[
+            {
+                "sha": "3ff8835",
+                "title": "#40 PR7 리뷰 피드백 반영",
+                "test_refs": ["test:static-guard"],
+            }
+        ],
+        test_runs=[
+            {
+                "test_id": "test:static-guard",
+                "summary": "Static contract guard passed.",
+                "status": "pass",
+            }
+        ],
+        repository="neurons",
+    )
+    pr_object = base["objects"][0]
+    commit_object = base["objects"][1]
+
+    result = run_graph_search_projection_join_preview(
+        objects=base["objects"],
+        projection_hits=[
+            {
+                "hit_id": "graph:pr73:summary",
+                "source": "graph",
+                "object_ref": pr_object["object_id"],
+                "summary": "Derived graph hit for the merged PR.",
+                "score": 0.78,
+            },
+            {
+                "hit_id": "search:commit:3ff8835",
+                "source": "search",
+                "object_ref": commit_object["object_id"],
+                "summary": "Search mirror hit for the commit evidence.",
+                "score": 0.72,
+            },
+        ],
+        repository="neurons",
+    )
+
+    assert result["schema_version"] == "object_extraction_projection_join_preview.v1"
+    assert result["status"] == "pass"
+    assert result["production_mutation_performed"] is False
+    assert result["selected_strategy"] == "projection_join_read_only_v1"
+    assert result["canonical_authority_unchanged"] is True
+    assert result["authority_promotion_performed"] is False
+    assert result["object_count"] == len(base["objects"])
+    assert result["projection_object_count"] == 2
+    assert result["edge_count"] == 2
+    assert all(item["object_type"] == "ProjectionHit" for item in result["projection_objects"])
+    assert all(item["authority_lane"] == "derived_projection" for item in result["projection_objects"])
+    assert all(item["verification_state"] == "unverified" for item in result["projection_objects"])
+    assert [edge["edge_type"] for edge in result["edges"]] == [
+        "projection_join",
+        "projection_join",
+    ]
+    assert all(edge["authority_lane"] == "derived_projection" for edge in result["edges"])
+    assert result["strategy_comparison"][1]["strategy"] == "projection_as_authority_v1"
+    assert result["strategy_comparison"][1]["status"] == "rejected"
+    assert result["strategy_comparison"][1]["gaps"] == [
+        "derived_projection_cannot_become_canonical_authority",
+    ]
+    assert result["evaluator_report"]["golden_query_slice"] == "graph/search projection object join"
+    assert result["evaluator_report"]["passes"] is True
+
+
+def test_graph_search_projection_join_preview_reports_gap_for_unknown_object_target():
+    result = run_graph_search_projection_join_preview(
+        objects=[],
+        projection_hits=[
+            {
+                "hit_id": "graph:missing",
+                "source": "graph",
+                "object_ref": "ko:missing",
+                "summary": "Projection target missing.",
+                "score": 0.5,
+            }
+        ],
+        repository="neurons",
+    )
+
+    assert result["status"] == "pass_with_gaps"
+    assert result["projection_object_count"] == 0
+    assert result["edge_count"] == 0
+    assert result["gaps"] == ["projection_join_target_missing"]
+    assert result["pack_preview"]["missing_target_count"] == 1
+    assert result["evaluator_report"]["passes"] is False
+    assert result["evaluator_report"]["failures"] == ["projection_join_target_missing"]

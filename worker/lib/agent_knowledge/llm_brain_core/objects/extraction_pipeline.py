@@ -76,6 +76,16 @@ def build_extractor_registry_report() -> dict[str, Any]:
                 "strategy_scope": "pr_commit_test_provenance_mapping",
                 "gaps": [],
             },
+            {
+                "extractor": "graph_search_projection_join",
+                "version": "0.1",
+                "status": "implemented",
+                "input_object_types": ["KnowledgeObjectEnvelope", "ProjectionHit"],
+                "output_object_types": ["ProjectionHit"],
+                "edge_types": ["projection_join"],
+                "strategy_scope": "derived_projection_join_mapping",
+                "gaps": [],
+            },
         ],
     }
     ensure_public_safe(report, "ObjectExtractorRegistry")
@@ -607,6 +617,100 @@ def run_pr_commit_extraction_preview(
     return result
 
 
+def run_graph_search_projection_join_preview(
+    *,
+    objects: list[Mapping[str, Any]],
+    projection_hits: list[Mapping[str, Any]],
+    repository: str,
+) -> dict[str, Any]:
+    object_by_id = {
+        str(obj.get("object_id") or ""): obj
+        for obj in objects
+        if str(obj.get("object_id") or "")
+    }
+    missing_target_refs = _missing_projection_target_refs(
+        projection_hits=projection_hits,
+        object_by_id=object_by_id,
+    )
+    matched_hits = [
+        hit
+        for hit in projection_hits
+        if str(hit.get("object_ref") or hit.get("target_object_id") or "") in object_by_id
+    ]
+    projection_objects = [
+        _stable_object(_projection_hit_object(hit, repository=repository).to_dict())
+        for hit in matched_hits
+    ]
+    edges = _projection_join_edges(
+        projection_hits=matched_hits,
+        projection_objects=projection_objects,
+    )
+    gaps = _projection_join_gaps(
+        projection_objects=projection_objects,
+        missing_target_refs=missing_target_refs,
+        projection_hits=projection_hits,
+    )
+    status = "pass" if projection_objects and not gaps else "pass_with_gaps"
+    result = {
+        "schema_version": "object_extraction_projection_join_preview.v1",
+        "status": status,
+        "repository": public_safe_text(repository, max_chars=180),
+        "selected_strategy": "projection_join_read_only_v1",
+        "production_mutation_performed": False,
+        "canonical_authority_unchanged": True,
+        "authority_promotion_performed": False,
+        "objects": [_stable_object(obj) for obj in objects],
+        "projection_objects": projection_objects,
+        "edges": edges,
+        "object_count": len(objects),
+        "projection_object_count": len(projection_objects),
+        "edge_count": len(edges),
+        "gaps": gaps,
+        "pack_preview": {
+            "joined_object_count": len({edge["from_object_id"] for edge in edges}),
+            "missing_target_count": len(missing_target_refs),
+            "graph_hit_count": _projection_source_count(matched_hits, "graph"),
+            "search_hit_count": _projection_source_count(matched_hits, "search"),
+            "production_mutation_performed": False,
+        },
+        "strategy_comparison": [
+            {
+                "strategy": "projection_join_read_only_v1",
+                "scope": "derived_projection_join_mapping",
+                "selected": True,
+                "status": status,
+                "object_count": len(objects) + len(projection_objects),
+                "edge_count": len(edges),
+                "gaps": gaps,
+            },
+            {
+                "strategy": "projection_as_authority_v1",
+                "scope": "authority_mapping",
+                "selected": False,
+                "status": "rejected",
+                "object_count": 0,
+                "edge_count": 0,
+                "gaps": ["derived_projection_cannot_become_canonical_authority"],
+            },
+        ],
+        "evaluator_report": {
+            "schema_version": "object_extraction_evaluator_report.v1",
+            "golden_query_slice": "graph/search projection object join",
+            "passes": status == "pass",
+            "failures": [] if status == "pass" else gaps or ["projection_join_missing"],
+            "gaps": gaps,
+            "assertions": [
+                "projection_hits_stay_derived_projection",
+                "projection_edges_do_not_promote_authority",
+                "missing_targets_report_gaps",
+                "production_mutation_performed_false",
+            ],
+        },
+    }
+    ensure_public_safe(result, "GraphSearchProjectionJoinPreview")
+    return result
+
+
 def _blocked_preview(
     *,
     bundle: Mapping[str, Any],
@@ -933,6 +1037,121 @@ def _missing_commit_test_refs(
 def _is_merged_pr(pull_request: Mapping[str, Any]) -> bool:
     state = str(pull_request.get("state") or "").lower()
     return bool(pull_request.get("merged")) or state == "merged" or bool(pull_request.get("merge_commit"))
+
+
+def _projection_hit_object(
+    hit: Mapping[str, Any],
+    *,
+    repository: str,
+) -> KnowledgeObjectEnvelope:
+    hit_id = public_safe_text(str(hit.get("hit_id") or hit.get("id") or ""), max_chars=180)
+    source = public_safe_text(str(hit.get("source") or "projection"), max_chars=80)
+    object_ref = public_safe_text(str(hit.get("object_ref") or hit.get("target_object_id") or ""), max_chars=180)
+    summary = public_safe_text(str(hit.get("summary") or "Derived projection hit."), max_chars=360)
+    score = _safe_score(hit.get("score"))
+    return KnowledgeObjectEnvelope.from_parts(
+        object_type="ProjectionHit",
+        natural_key=hit_id,
+        scope={
+            "repository": public_safe_text(repository, max_chars=180),
+            "projection_source": source,
+        },
+        title=hit_id or f"{source} projection hit",
+        summary=summary,
+        lifecycle_status="observed",
+        authority_lane="derived_projection",
+        verification_state="unverified",
+        review_state="not_required",
+        content_hash=hash_payload(
+            {
+                "hit_id": hit_id,
+                "source": source,
+                "object_ref": object_ref,
+                "summary": summary,
+                "score": score,
+            }
+        ),
+        evidence_refs=[hit_id] if hit_id else [],
+        confidence={"score": score, "basis": "derived_projection_score"},
+        recommended_action="join_as_context_only",
+        payload={
+            "hit_id": hit_id,
+            "source": source,
+            "object_ref": object_ref,
+        },
+    )
+
+
+def _projection_join_edges(
+    *,
+    projection_hits: list[Mapping[str, Any]],
+    projection_objects: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    edges: list[dict[str, Any]] = []
+    for hit, projection_object in zip(projection_hits, projection_objects, strict=False):
+        object_ref = public_safe_text(str(hit.get("object_ref") or hit.get("target_object_id") or ""), max_chars=180)
+        hit_id = public_safe_text(str(hit.get("hit_id") or hit.get("id") or ""), max_chars=180)
+        edge = KnowledgeEdge.from_parts(
+            edge_type="projection_join",
+            from_object_id=object_ref,
+            to_object_id=projection_object["object_id"],
+            evidence_refs=[hit_id] if hit_id else [],
+            lifecycle_status="observed",
+            authority_lane="derived_projection",
+            verification_state="unverified",
+            confidence={"score": _safe_score(hit.get("score")), "basis": "projection_hit_similarity"},
+            payload={
+                "projection_source": public_safe_text(str(hit.get("source") or "projection"), max_chars=80),
+                "authority_effect": "none",
+            },
+        )
+        edges.append(_stable_edge(edge.to_dict()))
+    return edges
+
+
+def _missing_projection_target_refs(
+    *,
+    projection_hits: list[Mapping[str, Any]],
+    object_by_id: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    missing: list[str] = []
+    for hit in projection_hits:
+        object_ref = public_safe_text(str(hit.get("object_ref") or hit.get("target_object_id") or ""), max_chars=180)
+        if object_ref and object_ref not in object_by_id:
+            missing.append(object_ref)
+    return missing
+
+
+def _projection_join_gaps(
+    *,
+    projection_objects: list[dict[str, Any]],
+    missing_target_refs: list[str],
+    projection_hits: list[Mapping[str, Any]],
+) -> list[str]:
+    gaps: list[str] = []
+    if missing_target_refs:
+        gaps.append("projection_join_target_missing")
+    if projection_hits and not projection_objects and not missing_target_refs:
+        gaps.append("projection_join_empty")
+    if not projection_hits:
+        gaps.append("projection_hits_empty")
+    return gaps
+
+
+def _projection_source_count(projection_hits: list[Mapping[str, Any]], source: str) -> int:
+    return sum(1 for hit in projection_hits if str(hit.get("source") or "").lower() == source)
+
+
+def _safe_score(value: Any) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if score < 0:
+        return 0.0
+    if score > 1:
+        return 1.0
+    return score
 
 
 def _preference_style_evidence_refs(
