@@ -10,7 +10,7 @@ P1 live production activation follow-up는 deployed HTTP MCP runtime 및 user-le
 
 PR #73 및 ops deploy-button merge 이후의 이전 recheck는 P1 object-tool availability를 뒷받침하는 historical evidence입니다. 현재 #95 continuation 기준 최신 recheck는 `PASS_WITH_GAPS`로 유지됩니다: current Codex-session `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 `deployment_runtime_truth` route는 `object_pack_route_not_implemented`를 반환했고, #95 branch-local MCP tools 및 image identity는 증명되지 않은 상태입니다.
 
-PR #95 source-to-candidate activation continuation은 local/test product surface를 P6-P9까지 확장했으며, post-deploy sanitized evidence packet을 평가하는 `source-to-candidate-runtime-readiness` CLI와 `brain_source_to_candidate_runtime_readiness` MCP tool을 branch-local로 추가했습니다. 현재 branch head는 `93a4483a8605fc78a4cbdc1ac4bf82e6dc934dda`이고 PR은 draft/open입니다. Local activation progress는 `product_evidence_status=PASS_WITH_GAPS`로 유지됩니다: P8 runtime evidence는 `runtime_unverified_count=1`, `runtime_verified_count=0`이므로 `PASS`가 아니라 `PASS_WITH_GAPS`입니다. Current Codex-session LBrain MCP read path는 `brain_objects_query`를 호출할 수 있지만 `deployment_runtime_truth` route는 `object_pack_route_not_implemented`를 반환했고, branch-local source/review/readiness MCP tools는 아직 live/current session callable registry에 없습니다. 이 branch-local command/tool smoke는 network나 production mutation을 수행하지 않습니다.
+PR #95 source-to-candidate activation continuation은 local/test product surface를 P6-P9까지 확장했으며, post-deploy sanitized evidence packet을 평가하는 `source-to-candidate-runtime-readiness` CLI와 `brain_source_to_candidate_runtime_readiness` MCP tool을 branch-local로 추가했습니다. PR은 draft/open이며, branch-local `neuron-knowledge object-query` CLI도 MCP `brain_objects_query`와 같은 route-aware read-side contract를 사용합니다. Local activation progress는 `product_evidence_status=PASS_WITH_GAPS`로 유지됩니다: P8 runtime evidence는 `runtime_unverified_count=1`, `runtime_verified_count=0`이므로 `PASS`가 아니라 `PASS_WITH_GAPS`입니다. Current Codex-session LBrain MCP read path는 `brain_objects_query`를 호출할 수 있지만 `deployment_runtime_truth` route는 `object_pack_route_not_implemented`를 반환했고, branch-local source/review/readiness MCP tools와 CLI route parity source는 아직 live MCP image/current session callable registry에 반영되었다고 증명되지 않았습니다. 이 branch-local command/tool smoke는 network나 production mutation을 수행하지 않습니다.
 
 ## Validated
 
@@ -18,7 +18,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 - status: `validated`
 - evidence: `cd worker && uv run pytest -q`
-- result: `1610 passed, 9 skipped, 1 warning`
+- result: `1614 passed, 9 skipped, 1 warning`
 - note: covers object model, reference corpus, object packs, MCP stdio, CLI, context authority, ledger area boundary, and existing worker regression surface.
 
 ### local.root.gradle
@@ -48,8 +48,11 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 ### local.cli.object-query
 
 - status: `validated`
-- evidence: `uv run neuron-knowledge object-query --repository neurons --branch codex/lbrain-knowledge-object-substrate --query '이 repo 문서 최신화하려면 뭘 봐야 해?'`
-- result: returned `brain_objects_query.v1` with `documentation_cleanup` object pack and explicit gaps: `accepted_current documents empty`, `review_proposals_needed`.
+- evidence: `uv run pytest -q tests/test_neuron_cli.py`
+- result: CLI route tests pass for default `authority_archive_separation`, explicit `code_style_preference`, inferred `temporal_work_recall`, and inferred `deployment_runtime_truth`.
+- evidence: `uv run neuron-knowledge object-query --repository pureliture/neurons --branch codex/knowledge-object-review-flow-roadmap --route deployment_runtime_truth --query '이 PR merge됐어? 배포도 됐어?' --response-mode compact --consumer codex`
+- result: returned `brain_objects_query.v1` with `object_pack.v1`, `route=deployment_runtime_truth`, `runtime_evidence_unverified`, and no `object_pack_route_not_implemented`.
+- interpretation: this is branch-local CLI parity with the MCP read-side route contract. It is read-only, does not use network, does not mutate production ledger/corpus/runtime, and does not prove that the deployed MCP image has the same route implementation.
 
 ### local.cli.okf-export
 
@@ -80,7 +83,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 ### local.source-to-candidate-runtime-readiness-surface
 
 - status: `validated`
-- evidence: `uv run neuron-knowledge source-to-candidate-runtime-readiness --expected-commit 93a4483a8605fc78a4cbdc1ac4bf82e6dc934dda`
+- evidence: `uv run neuron-knowledge source-to-candidate-runtime-readiness --expected-commit 789b95cd2c248ee89394dcb20917a8e13d89db89`
 - result: returned `source_to_candidate_runtime_readiness.v1`, `status=PASS_WITH_GAPS`, `live_evidence_provided=false`, `production_mutation_performed=false`, `network_used=false`
 - interpretation: this validates the report surface and local product-surface claim only. The local claim now includes `brain_objects_query` plus source-to-candidate/review/approval/readiness tools, and live evidence must now include `brain_objects_query` route smokes for authority/archive, style/preference, temporal work recall, and deploy/runtime queries. It also requires live agent context product evidence to include the `agent_context_product_pack.v1` schema, allowed consumer, degraded-gap disclosure, `missing_evidence_before_promotion`, mutation-disabled policy, and safe `sanitized_evidence_packet` runtime-readiness target. It does not prove deployed/runtime source-to-candidate activation.
 
@@ -89,7 +92,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - status: `validated`
 - evidence: focused MCP stdio tests for `brain_objects_query`
 - result: broad authority/archive queries return context-authority object packs, style queries return preference/style object packs, and merge/deploy queries return runtime truth gap packs without `object_pack_route_not_implemented`.
-- interpretation: this validates the branch-local read path routing only. It does not prove the deployed MCP runtime has this branch image.
+- interpretation: this validates the branch-local MCP read path routing only. Together with `local.cli.object-query`, local CLI and branch-local MCP now share route-aware behavior, but this still does not prove the deployed MCP runtime has this branch image.
 
 ### local.mcp.source-to-candidate-runtime-readiness-tool
 
@@ -191,8 +194,8 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - status: `not_validated`
 - reason: `pr95_draft_not_merged_or_deployed`
 - evidence:
-  - PR #95 head is `93a4483a8605fc78a4cbdc1ac4bf82e6dc934dda`.
   - PR #95 is draft/open with clean merge state and passing checks.
+  - The branch head is not merged to `main` or proven in a deployed image in this validation slice.
   - No merge, image rebuild, GitOps manifest update, Argo sync, or live rollout evidence for PR #95 was performed in this branch-local validation slice.
 
 ### live.production.source-to-candidate-review-tools

@@ -128,6 +128,106 @@ def test_neuron_knowledge_pending_server_command_fails_closed(capsys):
     assert report["network_used"] is False
 
 
+def test_neuron_knowledge_object_query_defaults_to_authority_archive_route(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "codex/knowledge-object-review-flow-roadmap",
+            "--query",
+            "LBrain source-to-candidate-graph product activation roadmap P5 P6 P7 P8 P9 current gaps",
+            "--current-file",
+            "docs/specs/roadmap.md",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["schema_version"] == "brain_objects_query.v1"
+    assert report["route"] == "authority_archive_separation"
+    assert report["object_pack"]["schema_version"] == "object_pack.v1"
+    assert report["object_pack"]["route"] == "authority_archive_separation"
+    assert "object_pack_route_not_implemented" not in report["object_pack"]["gaps"]
+
+
+def test_neuron_knowledge_object_query_accepts_explicit_route(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--route",
+            "code_style_preference",
+            "--query",
+            "문서 정리 질문이어도 명시 route가 우선이어야 한다",
+            "--consumer",
+            "codex",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["route"] == "code_style_preference"
+    assert report["response_mode"] == "compact"
+    assert report["object_pack"]["route"] == "code_style_preference"
+    assert report["object_pack"]["audit"]["consumer"] == "codex"
+    assert "object_pack_route_not_implemented" not in report["object_pack"]["gaps"]
+
+
+def test_neuron_knowledge_object_query_infers_temporal_route(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--query",
+            "어제 이 repo에서 뭐 했어? 작업 재개하려면 뭐 봐야 해?",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["route"] == "temporal_work_recall"
+    assert report["object_pack"]["route"] == "temporal_work_recall"
+    assert report["object_pack"]["audit"]["source_pack_names"] == ["current_work", "required_verification"]
+    assert "object_pack_route_not_implemented" not in report["object_pack"]["gaps"]
+
+
+def test_neuron_knowledge_object_query_infers_deployment_route_with_runtime_gap(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--query",
+            "이 PR merge됐어? 배포도 됐어?",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["route"] == "deployment_runtime_truth"
+    assert report["object_pack"]["route"] == "deployment_runtime_truth"
+    assert "runtime_evidence_unverified" in report["object_pack"]["gaps"]
+    assert "object_pack_route_not_implemented" not in report["object_pack"]["gaps"]
+
+
 def test_neuron_knowledge_delegates_memory_regeneration_help(capsys):
     assert main(["memory-regeneration", "--help"]) == 0
     assert "usage: memory-regeneration" in capsys.readouterr().out
