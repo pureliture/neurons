@@ -38,6 +38,7 @@ OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS = (
     "brain_object_decision_commit",
 )
 OBJECT_AUTHORITY_PRODUCTION_RUNTIME_FLAG = "--allow-object-authority-production-writes"
+PERMISSION_SENSITIVE_AGENT_CONTEXT_TOOLS = ("brain_approval_board_decide",)
 
 
 def build_source_to_candidate_runtime_readiness_report(
@@ -118,14 +119,35 @@ def _live_tools_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
 
 def _live_agent_context_tool_hints_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
     tool_hints = _agent_context_tool_hints(evidence)
-    hinted_tools = {str(item.get("tool") or "") for item in tool_hints if isinstance(item, Mapping)}
+    hints_by_tool = {
+        str(item.get("tool") or ""): item
+        for item in tool_hints
+        if isinstance(item, Mapping) and str(item.get("tool") or "")
+    }
+    hinted_tools = set(hints_by_tool)
     missing = [name for name in REQUIRED_RUNTIME_TOOL_NAMES if name not in hinted_tools]
-    return {
+    safety_failures = [
+        failure
+        for name in REQUIRED_RUNTIME_TOOL_NAMES
+        if name in hints_by_tool
+        for failure in _agent_context_tool_hint_safety_failures(name, hints_by_tool[name])
+    ]
+    base = {
         "claim_id": "live.agent_context.tool_hints",
         "evidence_class": "runtime_read_path",
-        "status": "not_validated" if missing else "validated",
         "required_tools": list(REQUIRED_RUNTIME_TOOL_NAMES),
         "missing_tools": missing,
+        "unsafe_tool_hints": safety_failures,
+    }
+    if safety_failures:
+        return {
+            **base,
+            "status": "failed",
+            "gaps": [*safety_failures, *(["live_agent_context_tool_hints_unverified"] if missing else [])],
+        }
+    return {
+        **base,
+        "status": "not_validated" if missing else "validated",
         "gaps": ["live_agent_context_tool_hints_unverified"] if missing else [],
     }
 
@@ -352,6 +374,23 @@ def _agent_context_tool_hints(evidence: Mapping[str, Any]) -> list[Any]:
     product = _agent_context_product(evidence)
     hints = product.get("tool_hints") if isinstance(product, Mapping) else []
     return list(hints) if isinstance(hints, list) else []
+
+
+def _agent_context_tool_hint_safety_failures(tool_name: str, hint: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if hint.get("suggest_allowed") is not True:
+        failures.append(f"{tool_name}_tool_hint_suggest_not_allowed")
+    if hint.get("execute_allowed") is not False:
+        failures.append(f"{tool_name}_tool_hint_execute_allowed")
+    if hint.get("production_mutation_allowed") is not False:
+        failures.append(f"{tool_name}_tool_hint_production_mutation_allowed")
+    if not _string_list(hint.get("safe_targets")):
+        failures.append(f"{tool_name}_tool_hint_safe_targets_missing")
+    if tool_name in PERMISSION_SENSITIVE_AGENT_CONTEXT_TOOLS and "approved_scope_required" not in _string_list(
+        hint.get("blocked_by")
+    ):
+        failures.append(f"{tool_name}_tool_hint_approved_scope_blocker_missing")
+    return failures
 
 
 def _agent_context_product(evidence: Mapping[str, Any]) -> Mapping[str, Any]:

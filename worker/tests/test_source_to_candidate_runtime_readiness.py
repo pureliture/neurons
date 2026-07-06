@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from agent_knowledge.cli import main
+from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     REQUIRED_RUNTIME_TOOL_NAMES,
     build_source_to_candidate_runtime_readiness_report,
@@ -21,7 +22,7 @@ def _sanitized_live_evidence(**overrides):
                 "required_verification": {"object_count": 1},
             },
             "surface_policy": {"mutation_allowed": False},
-            "tool_hints": [{"tool": name} for name in REQUIRED_RUNTIME_TOOL_NAMES],
+            "tool_hints": _safe_tool_hints(),
         },
         "brain_objects_query_smokes": [
             _brain_objects_query_smoke("authority_archive_separation"),
@@ -71,6 +72,10 @@ def _sanitized_live_evidence(**overrides):
     }
     evidence.update(overrides)
     return evidence
+
+
+def _safe_tool_hints():
+    return [dict(item) for item in object_native_review_tool_hints([])]
 
 
 def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None):
@@ -158,6 +163,63 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.production.object_proposal_denial"]["status"] == "denied_as_expected"
     assert claims["live.production.object_decision_denial"]["status"] == "denied_as_expected"
     assert claims["live.production.object_authority_gate_policy"]["status"] == "validated"
+
+
+def test_runtime_readiness_fails_when_agent_context_tool_hint_allows_execution_or_mutation():
+    tool_hints = _safe_tool_hints()
+    for hint in tool_hints:
+        if hint["tool"] == "brain_source_to_candidate_graph":
+            hint["execute_allowed"] = True
+            hint["production_mutation_allowed"] = True
+            hint["safe_targets"] = []
+
+    evidence = _sanitized_live_evidence(
+        agent_context_product={
+            "schema_version": "agent_context_product_pack.v1",
+            "sections": {
+                "style_preference": {"object_count": 1},
+                "active_work": {"object_count": 1},
+                "required_verification": {"object_count": 1},
+            },
+            "surface_policy": {"mutation_allowed": False},
+            "tool_hints": tool_hints,
+        },
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    hint_claim = claims["live.agent_context.tool_hints"]
+    assert hint_claim["status"] == "failed"
+    assert "brain_source_to_candidate_graph_tool_hint_execute_allowed" in report["gaps"]
+    assert "brain_source_to_candidate_graph_tool_hint_production_mutation_allowed" in report["gaps"]
+    assert "brain_source_to_candidate_graph_tool_hint_safe_targets_missing" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_approval_board_hint_lacks_approved_scope_blocker():
+    tool_hints = _safe_tool_hints()
+    for hint in tool_hints:
+        if hint["tool"] == "brain_approval_board_decide":
+            hint["blocked_by"] = []
+
+    evidence = _sanitized_live_evidence(
+        agent_context_product={
+            "schema_version": "agent_context_product_pack.v1",
+            "sections": {
+                "style_preference": {"object_count": 1},
+                "active_work": {"object_count": 1},
+                "required_verification": {"object_count": 1},
+            },
+            "surface_policy": {"mutation_allowed": False},
+            "tool_hints": tool_hints,
+        },
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    assert "brain_approval_board_decide_tool_hint_approved_scope_blocker_missing" in report["gaps"]
 
 
 def test_runtime_readiness_fails_when_object_authority_gate_schema_is_missing():
@@ -289,7 +351,7 @@ def test_runtime_readiness_requires_live_agent_context_product_sections():
     evidence = _sanitized_live_evidence(
         agent_context_product={
             "schema_version": "agent_context_product_pack.v1",
-            "tool_hints": [{"tool": name} for name in REQUIRED_RUNTIME_TOOL_NAMES],
+            "tool_hints": _safe_tool_hints(),
             "surface_policy": {"mutation_allowed": False},
             "sections": {
                 "style_preference": {"object_count": 1},
@@ -313,7 +375,7 @@ def test_runtime_readiness_fails_when_live_agent_context_allows_mutation():
     evidence = _sanitized_live_evidence(
         agent_context_product={
             "schema_version": "agent_context_product_pack.v1",
-            "tool_hints": [{"tool": name} for name in REQUIRED_RUNTIME_TOOL_NAMES],
+            "tool_hints": _safe_tool_hints(),
             "surface_policy": {"mutation_allowed": True},
             "sections": {
                 "style_preference": {"object_count": 1},
