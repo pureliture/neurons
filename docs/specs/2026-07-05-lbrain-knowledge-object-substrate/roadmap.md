@@ -13,7 +13,7 @@ Current state:
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, latest configured-endpoint smoke still passes with denied/no-mutation production writes, but the current Codex session's `mcp__lbrain` namespace still does not expose them and the live MCP image is not proven to include the #73/current-main source refactor.
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, and production-denial evidence exist, but real private Palantir manifest ingest and production ingest approval remain gaps.
 - P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / local_validated; local/test reference corpus extraction preview creates deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, and blocked-extraction gaps; repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, and broader evaluator suite previews have local/test evaluator evidence; live graph/Qdrant projection join remains unproven.
-- P4 Review Queue And Authority Promotion: `in_progress`; local/test decision commit records authority state/audit history, object queries surface local/test stale, superseded, retired, archive-only, and rejected states, object explain returns local/test decision history, and production denial returns a read-only promotion plan while authority mutation remains denied.
+- P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / local_validated; local/test decision commit records authority state/audit history, object queries surface local/test stale, superseded, retired, archive-only, and rejected states, object explain returns local/test decision history, and production denial returns a read-only promotion plan while authority mutation remains denied.
 - Product activation: not complete; configured agent read path refresh remains required.
 - UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
 
@@ -340,7 +340,7 @@ Remaining gaps:
 
 ### P4. Review Queue And Authority Promotion
 
-State: `in_progress`.
+State: `PASS_WITH_GAPS` / local_validated.
 
 Purpose:
 
@@ -399,9 +399,14 @@ Current local/test evidence:
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
+PASS_WITH_GAPS rationale:
+
+- Local/test P4 gate evidence is present for proposal creation, review queue listing, default production denial/no-mutation, local/test authority decision commit, audit state, stale/superseded/retired/archive/rejected object-query visibility, and object decision history explainability.
+- Production authority promotion remains intentionally closed without a human approval gate and scoped live pilot evidence.
+- The current production plan is a read-only denied response that documents the required reviewer role, allowed classes/actions, rollback path, gate evidence, and blast radius. It is not a production approval record and did not mutate production authority.
+
 Remaining gaps:
 
-- P4 is not complete; this slice covers local/test authority decision state, audit, and object-query state visibility only
 - approved production authority promotion remains closed and unproven; the current production plan is read-only denial metadata, not an approval record or production pilot
 - production rollback/supersession/demotion flows are not yet implemented beyond the local/test stored before/after lane audit shape and object-query state overlay
 - production proposal/decision write remains denied and no production ledger/corpus mutation has been performed
