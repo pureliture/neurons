@@ -438,6 +438,14 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert evidence["P8"]["runtime_evidence_collector_session_rollup_device_count"] >= 2
     assert evidence["P8"]["runtime_evidence_collector_session_rollup_visible_session_count"] >= 1
     assert evidence["P8"]["runtime_evidence_collector_session_rollup_read_after_write_status"] == "validated"
+    assert (
+        evidence["P8"]["runtime_evidence_collector_preference_artifact_schema"]
+        == "preference_artifact_memory_runtime_evidence.v1"
+    )
+    assert evidence["P8"]["runtime_evidence_collector_preference_accepted_count"] >= 1
+    assert evidence["P8"]["runtime_evidence_collector_preference_proposal_count"] >= 1
+    assert evidence["P8"]["runtime_evidence_collector_preference_html_route"] == "html_visualization_preference"
+    assert evidence["P8"]["runtime_evidence_collector_preference_artifact_check_status"] == "pass"
     assert evidence["P9"]["schema_version"] == "agent_context_product_pack.v1"
     assert evidence["P9"]["section_counts"]["style_preference"] >= 1
     assert evidence["P9"]["section_counts"]["active_work"] >= 1
@@ -577,6 +585,11 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "runtime_evidence_collector_session_rollup_device_count": 2,
                 "runtime_evidence_collector_session_rollup_visible_session_count": 2,
                 "runtime_evidence_collector_session_rollup_read_after_write_status": "validated",
+                "runtime_evidence_collector_preference_artifact_schema": "preference_artifact_memory_runtime_evidence.v1",
+                "runtime_evidence_collector_preference_accepted_count": 1,
+                "runtime_evidence_collector_preference_proposal_count": 1,
+                "runtime_evidence_collector_preference_html_route": "html_visualization_preference",
+                "runtime_evidence_collector_preference_artifact_check_status": "pass",
                 "production_mutation_performed": False,
             },
             {

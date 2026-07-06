@@ -1008,6 +1008,26 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         if isinstance(collector_session_rollup.get("read_after_write"), Mapping)
         else {}
     )
+    collector_preference_memory = (
+        collector_packet.get("preference_artifact_memory")
+        if isinstance(collector_packet.get("preference_artifact_memory"), Mapping)
+        else {}
+    )
+    collector_preference_pack = (
+        collector_preference_memory.get("preference_object_pack")
+        if isinstance(collector_preference_memory.get("preference_object_pack"), Mapping)
+        else {}
+    )
+    collector_preference_html_smoke = (
+        collector_preference_memory.get("html_visualization_route_smoke")
+        if isinstance(collector_preference_memory.get("html_visualization_route_smoke"), Mapping)
+        else {}
+    )
+    collector_preference_artifact_check = (
+        collector_preference_memory.get("artifact_review_check")
+        if isinstance(collector_preference_memory.get("artifact_review_check"), Mapping)
+        else {}
+    )
     return {
         "phase": "P8",
         "schema_version": str(report.get("schema_version") or ""),
@@ -1105,6 +1125,21 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         ),
         "runtime_evidence_collector_session_rollup_read_after_write_status": str(
             collector_session_read_after_write.get("status") or ""
+        ),
+        "runtime_evidence_collector_preference_artifact_schema": str(
+            collector_preference_memory.get("schema_version") or ""
+        ),
+        "runtime_evidence_collector_preference_accepted_count": int(
+            collector_preference_pack.get("accepted_preference_count") or 0
+        ),
+        "runtime_evidence_collector_preference_proposal_count": int(
+            collector_preference_pack.get("proposal_preference_count") or 0
+        ),
+        "runtime_evidence_collector_preference_html_route": str(
+            collector_preference_html_smoke.get("route") or ""
+        ),
+        "runtime_evidence_collector_preference_artifact_check_status": str(
+            collector_preference_artifact_check.get("status") or ""
         ),
         "gaps": list(preview.get("gaps") or []),
         "production_mutation_performed": bool(report.get("production_mutation_performed")),

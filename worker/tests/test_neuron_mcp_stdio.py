@@ -723,6 +723,11 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_
     assert packet["session_project_rollup_runtime"]["schema_version"] == "session_project_rollup_runtime_evidence.v1"
     assert packet["session_project_rollup_runtime"]["rollup_preview"]["scope"] == "all_devices"
     assert packet["session_project_rollup_runtime"]["rollup_preview"]["device_count"] >= 2
+    assert packet["preference_artifact_memory"]["schema_version"] == "preference_artifact_memory_runtime_evidence.v1"
+    assert packet["preference_artifact_memory"]["preference_object_pack"]["accepted_preference_count"] >= 1
+    assert packet["preference_artifact_memory"]["preference_object_pack"]["proposal_preference_count"] >= 1
+    assert packet["preference_artifact_memory"]["html_visualization_route_smoke"]["route"] == "html_visualization_preference"
+    assert packet["preference_artifact_memory"]["artifact_review_check"]["raw_artifact_body_returned"] is False
     assert len(packet["brain_objects_query_smokes"]) == 4
     assert all(
         "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])
