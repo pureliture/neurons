@@ -548,6 +548,12 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_p
     assert plan["network_used"] is False
     assert plan["production_mutation_performed"] is False
     assert plan["mutation_allowed"] is False
+    registration = plan["shadow_collection_registration"]
+    assert registration["schema_version"] == "source_to_candidate_runtime_shadow_collection_registration.v1"
+    assert registration["status"] == "registration_ready"
+    assert registration["run_status"] == "not_run"
+    assert registration["request_ids"] == ["shadow_brain_objects_query_route_smoke"]
+    assert registration["readiness_claim"] == "registration_only_not_runtime_evidence"
 
 
 def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None) -> dict:

@@ -656,6 +656,26 @@ def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
         failures.append("p8_shadow_route_smoke_mutated_production")
     if evidence.get("shadow_route_smoke_readiness_claim") != "request_only_not_live_evidence":
         failures.append("p8_shadow_route_smoke_claims_live_evidence")
+    if evidence.get("shadow_collection_registration_schema") != (
+        "source_to_candidate_runtime_shadow_collection_registration.v1"
+    ):
+        failures.append("p8_shadow_collection_registration_missing")
+    if evidence.get("shadow_collection_registration_status") != "registration_ready":
+        failures.append("p8_shadow_collection_registration_not_ready")
+    if evidence.get("shadow_collection_registration_run_status") != "not_run":
+        failures.append("p8_shadow_collection_registration_claims_run")
+    if int(evidence.get("shadow_collection_registration_request_count") or 0) < 1:
+        failures.append("p8_shadow_collection_registration_requests_missing")
+    if int(evidence.get("shadow_collection_registration_route_count") or 0) < 1:
+        failures.append("p8_shadow_collection_registration_routes_missing")
+    if bool(evidence.get("shadow_collection_registration_network_used")):
+        failures.append("p8_shadow_collection_registration_used_network")
+    if bool(evidence.get("shadow_collection_registration_mutation_allowed")):
+        failures.append("p8_shadow_collection_registration_mutation_allowed")
+    if bool(evidence.get("shadow_collection_registration_production_mutation_performed")):
+        failures.append("p8_shadow_collection_registration_mutated_production")
+    if evidence.get("shadow_collection_registration_readiness_claim") != "registration_only_not_runtime_evidence":
+        failures.append("p8_shadow_collection_registration_claims_live_evidence")
     runtime_evidence_count = int(evidence.get("runtime_verified_count") or 0) + int(
         evidence.get("runtime_unverified_count") or 0
     )
@@ -683,6 +703,13 @@ def _p8_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
         gaps.extend(
             f"p8_shadow_route_smoke_collection_pending:{route}"
             for route in evidence.get("shadow_route_smoke_pending_routes", [])
+            if isinstance(route, str) and route
+        )
+    if evidence.get("shadow_collection_registration_readiness_claim") == "registration_only_not_runtime_evidence":
+        gaps.append("p8_shadow_collection_run_pending")
+        gaps.extend(
+            f"p8_shadow_collection_run_pending:{route}"
+            for route in evidence.get("shadow_collection_registration_routes", [])
             if isinstance(route, str) and route
         )
     return gaps
@@ -844,6 +871,8 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         if isinstance(item, Mapping) and item.get("request_id") == "shadow_brain_objects_query_route_smoke"
     ]
     shadow_request = shadow_requests[0] if shadow_requests else {}
+    shadow_registration = collection_plan.get("shadow_collection_registration")
+    shadow_registration = shadow_registration if isinstance(shadow_registration, Mapping) else {}
     return {
         "phase": "P8",
         "schema_version": str(report.get("schema_version") or ""),
@@ -878,6 +907,24 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
             shadow_request.get("production_mutation_performed")
         ),
         "shadow_route_smoke_readiness_claim": str(shadow_request.get("readiness_claim") or ""),
+        "shadow_collection_registration_schema": str(shadow_registration.get("schema_version") or ""),
+        "shadow_collection_registration_status": str(shadow_registration.get("status") or ""),
+        "shadow_collection_registration_run_status": str(shadow_registration.get("run_status") or ""),
+        "shadow_collection_registration_request_count": len(shadow_registration.get("request_ids") or []),
+        "shadow_collection_registration_route_count": len(shadow_registration.get("routes") or []),
+        "shadow_collection_registration_routes": [
+            str(route) for route in shadow_registration.get("routes", []) if isinstance(route, str) and route
+        ],
+        "shadow_collection_registration_network_used": bool(shadow_registration.get("network_used")),
+        "shadow_collection_registration_mutation_allowed": bool(
+            shadow_registration.get("mutation_allowed")
+        ),
+        "shadow_collection_registration_production_mutation_performed": bool(
+            shadow_registration.get("production_mutation_performed")
+        ),
+        "shadow_collection_registration_readiness_claim": str(
+            shadow_registration.get("readiness_claim") or ""
+        ),
         "gaps": list(preview.get("gaps") or []),
         "production_mutation_performed": bool(report.get("production_mutation_performed")),
     }
