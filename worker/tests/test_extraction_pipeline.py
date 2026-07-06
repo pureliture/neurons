@@ -403,6 +403,81 @@ def test_runtime_truth_extraction_preview_denies_authority_promotion_without_lea
     assert "protected-namespace" not in rendered
 
 
+def test_runtime_truth_extraction_preview_matches_deployed_source_against_commit_sha_fallback():
+    result = run_runtime_truth_extraction_preview(
+        pull_request={"id": "pr:84", "merged": True, "commit_sha": "fallback123"},
+        deployment={
+            "target": "production",
+            "artifact_digest": "sha256:" + "b" * 64,
+            "deployed_source_commit": "fallback123",
+        },
+        live_evidence=None,
+        consumer="codex",
+    )
+
+    assert result["deployed_artifact_identity"]["source_commit_matches_pr_head"] is True
+    deployment_target = next(item for item in result["objects"] if item["object_type"] == "DeploymentTarget")
+    assert deployment_target["payload"]["source_commit_matches_pr_head"] is True
+
+
+def test_runtime_truth_extraction_preview_ignores_non_mapping_ci_statuses():
+    result = run_runtime_truth_extraction_preview(
+        pull_request={"id": "pr:84", "merged": True, "head_sha": "abc123"},
+        deployment={"target": "production"},
+        live_evidence=None,
+        ci_statuses=[
+            None,
+            "not-a-status",
+            {
+                "name": "worker pytest",
+                "conclusion": "SUCCESS",
+                "commit_sha": "abc123",
+            },
+        ],
+        consumer="codex",
+    )
+
+    assert [item["object_type"] for item in result["objects"]].count("CIStatus") == 1
+
+
+def test_runtime_truth_extraction_preview_denies_unknown_runtime_action_without_approved_scope():
+    result = run_runtime_truth_extraction_preview(
+        pull_request={"id": "pr:84", "merged": True, "head_sha": "abc123"},
+        deployment={"target": "production"},
+        live_evidence=None,
+        consumer="codex",
+        requested_action={"action": "delete_runtime_authority", "target": "production"},
+        actor={"agent": "codex", "role": "agent", "approved_scope": False},
+    )
+
+    assert result["permission_check"] == {
+        "permission": "denied",
+        "action": "delete_runtime_authority",
+        "reason": "approved_scope_required",
+        "authority_write_performed": False,
+        "protected_values_returned": False,
+    }
+
+
+def test_runtime_truth_extraction_preview_allows_read_only_runtime_action_without_scope():
+    result = run_runtime_truth_extraction_preview(
+        pull_request={"id": "pr:84", "merged": True, "head_sha": "abc123"},
+        deployment={"target": "production"},
+        live_evidence=None,
+        consumer="codex",
+        requested_action={"action": "inspect_runtime_truth", "target": "production"},
+        actor={"agent": "codex", "role": "agent", "approved_scope": False},
+    )
+
+    assert result["permission_check"] == {
+        "permission": "allowed",
+        "action": "inspect_runtime_truth",
+        "reason": "action_not_restricted",
+        "authority_write_performed": False,
+        "protected_values_returned": False,
+    }
+
+
 def test_preference_style_extraction_preview_maps_memory_cards_without_raw_body():
     result = run_preference_style_extraction_preview(
         memory_cards=[
@@ -456,6 +531,7 @@ def test_preference_style_extraction_preview_maps_memory_cards_without_raw_body(
     assert result["pack_preview"]["style"]["object_count"] == 1
     assert result["objects"][0]["object_type"] == "ArtifactPreference"
     assert result["objects"][0]["title"] == "HTML review artifacts should be information dense."
+    assert result["objects"][0]["payload"]["scope"] == "html review"
     assert result["objects"][1]["object_type"] == "StyleRule"
     assert result["objects"][1]["title"] == "Python worker tests use uv run pytest."
     assert result["source_evidence_refs"] == [
@@ -610,6 +686,81 @@ def test_preference_style_extraction_preview_checks_html_artifact_without_ui():
         "artifact_body_not_returned",
     ]
     assert "redacted-body-placeholder" not in str(check)
+
+
+def test_preference_style_extraction_preview_uses_scope_for_html_artifact_match():
+    result = run_preference_style_extraction_preview(
+        memory_cards=[
+            {
+                "memory_id": "mem_dense_artifact_scope",
+                "card_type": "preference",
+                "summary": "Accepted scoped artifact preference",
+                "confidence": 0.94,
+                "currentness": "current",
+                "review_state": "accepted",
+                "typed_payload": {
+                    "preference": "Make artifacts information dense.",
+                    "applies_to": "html review artifact",
+                    "reason": "Scope carries the artifact type.",
+                },
+            }
+        ],
+        repository="neurons",
+        current_request="review HTML artifact",
+        current_files=[],
+        artifact_review={
+            "artifact_type": "html_review",
+            "summary": "Dense review output with evidence links.",
+            "text_metrics": {
+                "finding_count": 2,
+                "evidence_ref_count": 2,
+                "word_count": 420,
+            },
+        },
+    )
+
+    check = result["artifact_review_check"]
+    assert result["objects"][0]["payload"]["scope"] == "html review artifact"
+    assert check["status"] == "pass"
+    assert check["matched_preference_titles"] == ["Make artifacts information dense."]
+    assert "accepted_html_preference_missing" not in check["failures"]
+
+
+def test_preference_style_extraction_preview_rejects_review_only_match_for_html_artifact():
+    result = run_preference_style_extraction_preview(
+        memory_cards=[
+            {
+                "memory_id": "mem_code_review_pref",
+                "card_type": "preference",
+                "summary": "Accepted code review preference",
+                "confidence": 0.94,
+                "currentness": "current",
+                "review_state": "accepted",
+                "typed_payload": {
+                    "preference": "Code review comments should be concise.",
+                    "applies_to": "code review",
+                    "reason": "This is not an HTML artifact preference.",
+                },
+            }
+        ],
+        repository="neurons",
+        current_request="review HTML artifact",
+        current_files=[],
+        artifact_review={
+            "artifact_type": "html_review",
+            "summary": "Dense review output with evidence links.",
+            "text_metrics": {
+                "finding_count": 2,
+                "evidence_ref_count": 2,
+                "word_count": 420,
+            },
+        },
+    )
+
+    check = result["artifact_review_check"]
+    assert check["status"] == "pass_with_gaps"
+    assert check["matched_preference_titles"] == []
+    assert "accepted_html_preference_missing" in check["failures"]
 
 
 def test_work_unit_extraction_preview_groups_session_pr_commit_and_tests_without_raw_transcript():
@@ -819,6 +970,61 @@ def test_session_project_rollup_preview_separates_same_device_and_all_devices():
     assert all_devices["evaluator_report"]["passes"] is True
 
 
+def test_session_project_rollup_preview_same_device_requires_requesting_device():
+    result = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "sha256:session-alpha",
+                "device_id_hash": "sha256:device-one",
+                "summary": "This session must not leak into an unscoped same-device view.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["commit:p6a"],
+            },
+            {
+                "session_id_hash": "sha256:session-beta",
+                "device_id_hash": "sha256:device-two",
+                "summary": "This second device must stay hidden without a requester hash.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["commit:p6b"],
+            },
+        ],
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+        scope="same_device",
+    )
+
+    assert result["status"] == "pass_with_gaps"
+    assert result["visible_session_count"] == 0
+    assert result["gaps"] == ["requesting_device_required", "visible_sessions_empty"]
+    assert all(obj["object_type"] != "Session" for obj in result["objects"])
+    assert result["handoff_pack"]["visible_session_count"] == 0
+    assert result["evaluator_report"]["passes"] is False
+
+
+def test_session_project_rollup_preview_reports_gap_without_session_evidence():
+    result = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "sha256:session-alpha",
+                "device_id_hash": "sha256:device-one",
+                "summary": "Metadata exists but evidence is missing.",
+                "work_unit_id": "work:p6",
+            },
+        ],
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+    )
+
+    assert result["status"] == "pass_with_gaps"
+    assert result["visible_session_count"] == 1
+    assert result["evidence_count"] == 0
+    assert result["gaps"] == ["session_evidence_missing"]
+    assert result["evaluator_report"]["passes"] is False
+    assert result["evaluator_report"]["failures"] == ["session_evidence_missing"]
+
+
 def test_session_project_rollup_preview_links_specs_prs_and_commits_bidirectionally():
     result = run_session_project_rollup_preview(
         sessions=[
@@ -998,6 +1204,36 @@ def test_pr_commit_extraction_preview_reports_gap_for_missing_test_refs():
     assert result["pack_preview"]["runtime_unverified_count"] == 0
     assert result["evaluator_report"]["passes"] is False
     assert result["evaluator_report"]["failures"] == ["commit_test_ref_missing"]
+
+
+def test_pr_commit_extraction_preview_normalizes_test_run_lookup_ids():
+    result = run_pr_commit_extraction_preview(
+        pull_request={
+            "pr_id": "pr:normalized",
+            "title": "Normalized test evidence PR",
+            "state": "open",
+        },
+        commits=[
+            {
+                "sha": "def456",
+                "title": "Add verified change",
+                "test_refs": ["test:unit"],
+            },
+        ],
+        test_runs=[
+            {
+                "test_id": " test:unit\n",
+                "summary": "Unit test passed.",
+                "status": "pass",
+            },
+        ],
+        repository="neurons",
+    )
+
+    assert result["status"] == "pass"
+    assert result["edge_count"] == 2
+    assert result["gaps"] == []
+    assert result["pack_preview"]["missing_test_ref_count"] == 0
 
 
 def test_graph_search_projection_join_preview_joins_without_promoting_authority():

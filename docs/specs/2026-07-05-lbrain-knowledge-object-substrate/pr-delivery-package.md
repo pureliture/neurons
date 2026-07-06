@@ -4,6 +4,8 @@ Status: `PR_READY_WITH_GAPS`
 
 This package captures the stack PR plan for the LBrain Ontology-Style Knowledge Product Roadmap continuation branches. It is a delivery aid, not merge, CI, deploy, or runtime evidence.
 
+Post-delivery note: PR #84 through PR #92 are now merged into `main`, and PR #93 is the active P10 defer-decision PR. The final head and merge SHAs below are GitHub delivery evidence only; they do not prove deploy, live runtime, or production readiness.
+
 ## Gate
 
 Do not create GitHub PRs from this package until one of the following is true:
@@ -55,12 +57,27 @@ Deliver the corresponding phase from the LBrain Ontology-Style Knowledge Product
 
 ## Current Evidence
 
-- `origin/main` includes PR #73 merge commit `c3f3e34`.
-- No existing PR currently targets the `codex/p1` through `codex/p10` continuation branches.
-- All continuation branches include PR #73 merge commit `c3f3e34`.
-- All continuation branches have been rebased onto the latest P1 evidence commit `fe39cdd`.
+- `origin/main` includes PR #73 merge commit `c3f3e34` and PR #84 through PR #92 merge commits.
+- PR #93 currently targets `main` from `codex/p10-ui-object-browser-defer-decision`.
+- P1 through P9 phase branches were cleaned up after merge.
+- P10's active PR head must be verified live before merge because this package edits the P10 branch and cannot carry a stable self-referential head SHA.
 - Current Codex `mcp__lbrain` namespace still does not expose `brain_objects_query`; P1 remains `PASS_WITH_GAPS`.
 - Branch push is not merge, CI, deploy, or live runtime evidence.
+
+## Current Delivery Record
+
+| Phase | PR | Branch | Final/current head | Merge commit | Base |
+| --- | --- | --- | --- | --- | --- |
+| P1 | #84 | `codex/p1-production-mcp-activation-live` | `9cf7f9b` | `dea6f8d` | `main` |
+| P2 | #85 | `codex/p2-living-reference-corpus-store` | `c0695ba` | `7295092` | `main` |
+| P3 | #86 | `codex/p3-processing-object-extraction-pipeline` | `09b88a2` | `2740766` | `main` |
+| P4 | #87 | `codex/p4-review-authority-promotion` | `db8caec` | `45eb6cd` | `main` |
+| P5 | #88 | `codex/p5-continuous-golden-query-quality` | `912e3bf` | `9d0c3cc` | `main` |
+| P6 | #89 | `codex/p6-session-device-project-workunit-360` | `cb1a016` | `9f4969b` | `main` |
+| P7 | #90 | `codex/p7-preference-style-artifact-memory` | `9409b4a` | `af08043` | `main` |
+| P8 | #91 | `codex/p8-runtime-truth-security-deployment-authority` | `8191d48` | `4ace498` | `main` |
+| P9 | #92 | `codex/p9-agent-context-productization` | `c6854e3` | `2d9c92a` | `main` |
+| P10 | #93 | `codex/p10-ui-object-browser-defer-decision` | verify live before merge | pending | `main` |
 
 ## Stack Order
 
@@ -83,11 +100,9 @@ Deliver the corresponding phase from the LBrain Ontology-Style Knowledge Product
 
 - branch: `codex/p1-production-mcp-activation-live`
 - base: `main`
-- head: `fe39cdd`
+- head: `9cf7f9b`
 - commits:
-  - `fe39cdd P1 최신 배포 재확인 gap을 기록`
-  - `0b2cf1d P1 최신 main 배포 identity gap을 기록`
-  - `c31bfc9 P1 Production MCP Activation 증거 갱신`
+  - final head includes P1 evidence updates and PR review follow-up; use Current Delivery Record as the SHA source.
 - diff: `2 files changed, 109 insertions(+), 25 deletions(-)`
 
 Body preview:
@@ -115,7 +130,7 @@ Closes #<ISSUE_NUMBER>
 
 - branch: `codex/p2-living-reference-corpus-store`
 - base: `codex/p1-production-mcp-activation-live`
-- head: `343bbb5`
+- head: `c0695ba`
 - commits: `8`
 - diff: `13 files changed, 1707 insertions(+), 22 deletions(-)`
 
@@ -145,7 +160,7 @@ Closes #<ISSUE_NUMBER>
 
 - branch: `codex/p3-processing-object-extraction-pipeline`
 - base: `codex/p2-living-reference-corpus-store`
-- head: `dafad79`
+- head: `09b88a2`
 - commits: `11`
 - diff: `6 files changed, 2809 insertions(+), 3 deletions(-)`
 
@@ -175,7 +190,7 @@ Closes #<ISSUE_NUMBER>
 
 - branch: `codex/p4-review-authority-promotion`
 - base: `codex/p3-processing-object-extraction-pipeline`
-- head: `ab8d1ba`
+- head: `db8caec`
 - commits: `5`
 - diff: `10 files changed, 856 insertions(+), 9 deletions(-)`
 
@@ -206,7 +221,7 @@ Closes #<ISSUE_NUMBER>
 
 - branch: `codex/p5-continuous-golden-query-quality`
 - base: `codex/p4-review-authority-promotion`
-- head: `336db2f`
+- head: `912e3bf`
 - commits: `4`
 - diff: `5 files changed, 380 insertions(+), 4 deletions(-)`
 
@@ -237,7 +252,7 @@ Closes #<ISSUE_NUMBER>
 
 - branch: `codex/p6-session-device-project-workunit-360`
 - base: `codex/p5-continuous-golden-query-quality`
-- head: `bf1de38`
+- head: `cb1a016`
 - commits: `3`
 - diff: `5 files changed, 656 insertions(+), 4 deletions(-)`
 
@@ -268,7 +283,7 @@ Closes #<ISSUE_NUMBER>
 
 - branch: `codex/p7-preference-style-artifact-memory`
 - base: `codex/p6-session-device-project-workunit-360`
-- head: `5883d04`
+- head: `9409b4a`
 - commits: `1`
 - diff: `5 files changed, 579 insertions(+), 11 deletions(-)`
 
@@ -298,7 +313,7 @@ Closes #<ISSUE_NUMBER>
 
 - branch: `codex/p8-runtime-truth-security-deployment-authority`
 - base: `codex/p7-preference-style-artifact-memory`
-- head: `e65924e`
+- head: `8191d48`
 - commits: `1`
 - diff: `6 files changed, 411 insertions(+), 8 deletions(-)`
 
@@ -328,7 +343,7 @@ Closes #<ISSUE_NUMBER>
 
 - branch: `codex/p9-agent-context-productization`
 - base: `codex/p8-runtime-truth-security-deployment-authority`
-- head: `5468e45`
+- head: `c6854e3`
 - commits: `1`
 - diff: `5 files changed, 299 insertions(+), 18 deletions(-)`
 

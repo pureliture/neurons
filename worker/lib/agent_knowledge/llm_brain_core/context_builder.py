@@ -313,9 +313,14 @@ def compact_section(
     gaps: list[str] = []
     for name in names:
         pack = object_packs.get(name) if isinstance(object_packs.get(name), Mapping) else {}
-        lanes.update(str(lane) for lane, values in (pack.get("lanes") or {}).items() if values)
-        gaps.extend(str(gap) for gap in pack.get("gaps") or [])
-        for obj in pack.get("objects") or []:
+        pack_lanes = pack.get("lanes") if isinstance(pack.get("lanes"), Mapping) else {}
+        lanes.update(str(lane) for lane, values in pack_lanes.items() if values)
+        pack_gaps = pack.get("gaps") if isinstance(pack.get("gaps"), (list, tuple)) else []
+        gaps.extend(str(gap) for gap in pack_gaps)
+        pack_objects = pack.get("objects") if isinstance(pack.get("objects"), (list, tuple)) else []
+        for obj in pack_objects:
+            if not isinstance(obj, Mapping):
+                continue
             if len(items) >= max_items:
                 break
             items.append(
@@ -437,7 +442,7 @@ def evidence_gap_cards(gaps: list[str]) -> list[dict[str, Any]]:
 
 def needs_runtime_evidence(current_request: str, current_files: list[str]) -> bool:
     request_text = str(current_request or "").lower()
-    text = " ".join([current_request, *current_files]).lower()
+    text = " ".join([request_text, *current_files]).lower()
     if any(term in text for term in ("배포", "운영", "프로덕션", "라이브")):
         return True
     terms = (
