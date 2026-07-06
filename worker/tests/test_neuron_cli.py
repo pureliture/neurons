@@ -152,6 +152,10 @@ def test_neuron_knowledge_object_query_defaults_to_authority_archive_route(capsy
     assert report["object_pack"]["schema_version"] == "object_pack.v1"
     assert report["object_pack"]["route"] == "authority_archive_separation"
     assert "object_pack_route_not_implemented" not in report["object_pack"]["gaps"]
+    assert report["object_pack"]["route_trace"]["route"] == "authority_archive_separation"
+    assert report["object_pack"]["route_trace"]["route_source"] == "inferred"
+    assert "reference_only" in report["object_pack"]["route_trace"]["selected_source_lanes"]
+    assert report["object_pack"]["route_trace"]["stop_reason"] == "returned_object_pack"
 
 
 def test_neuron_knowledge_object_query_accepts_explicit_route(capsys):
@@ -226,6 +230,8 @@ def test_neuron_knowledge_object_query_infers_deployment_route_with_runtime_gap(
     assert report["object_pack"]["route"] == "deployment_runtime_truth"
     assert "runtime_evidence_unverified" in report["object_pack"]["gaps"]
     assert "object_pack_route_not_implemented" not in report["object_pack"]["gaps"]
+    assert report["object_pack"]["route_trace"]["missing_evidence"] == ["runtime_evidence_unverified"]
+    assert report["object_pack"]["route_trace"]["stop_reason"] == "missing_evidence_gap_returned"
 
 
 def test_neuron_knowledge_object_query_infers_code_change_impact_route(capsys):
@@ -256,6 +262,12 @@ def test_neuron_knowledge_object_query_infers_code_change_impact_route(capsys):
     assert {"RepoFile", "VerificationCommand", "RuntimeSurface"} <= object_types
     assert "live_runtime_impact_unverified" in pack["gaps"]
     assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert pack["route_trace"]["route"] == "code_change_impact"
+    assert pack["route_trace"]["selected_source_lanes"] == ["candidate", "reference_only"]
+    assert pack["route_trace"]["missing_evidence"] == [
+        "live_runtime_impact_unverified",
+        "source_freshness_unverified",
+    ]
 
 
 def test_neuron_knowledge_delegates_memory_regeneration_help(capsys):

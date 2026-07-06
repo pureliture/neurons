@@ -14,6 +14,8 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 이번 continuation은 FR8 `code_change_impact` branch-local route를 추가했습니다. 해당 route는 "이 파일 바꾸면 어떤 테스트/런타임 영향 있어?"류 질문을 `RepoFile`, `VerificationCommand`, `RuntimeSurface`, `McpTool` object pack과 `validated_by`, `requires_live_evidence`, `exposes_tool` edges로 반환하고, `live_runtime_impact_unverified`, `source_freshness_unverified`, `production_mutation_forbidden` gaps를 유지합니다. 이는 local/branch evidence이며, deployed MCP image나 live runtime route proof로 승격하지 않았습니다.
 
+이번 continuation은 FR6 route trace도 branch-local object-query 응답에 추가했습니다. 반환된 object pack은 `object_query_route_trace.v1`로 `route`, `route_source`, 실제 non-empty `selected_source_lanes`, route `confidence`, `stop_reason`, and gap-derived `missing_evidence`를 노출합니다. 이는 query-routing 설명성 evidence이며, live route proof가 아닙니다.
+
 ## Validated
 
 ### local.worker.full-regression
@@ -55,7 +57,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - evidence: `uv run neuron-knowledge object-query --repository pureliture/neurons --branch codex/knowledge-object-review-flow-roadmap --route deployment_runtime_truth --query '이 PR merge됐어? 배포도 됐어?' --response-mode compact --consumer codex`
 - result: returned `brain_objects_query.v1` with `object_pack.v1`, `route=deployment_runtime_truth`, `runtime_evidence_unverified`, and no `object_pack_route_not_implemented`.
 - evidence: `uv run neuron-knowledge object-query --repository pureliture/neurons --branch codex/knowledge-object-review-flow-roadmap --query '이 파일 바꾸면 어떤 테스트/런타임 영향 있어?' --current-file worker/lib/agent_knowledge/llm_brain_core/objects/runtime_readiness.py --response-mode compact --consumer codex`
-- result: returned `brain_objects_query.v1` with `object_pack.v1`, `route=code_change_impact`, object types `RepoFile`, `VerificationCommand`, `RuntimeSurface`, `McpTool`, and gaps `live_runtime_impact_unverified`, `source_freshness_unverified`, `production_mutation_forbidden`.
+- result: returned `brain_objects_query.v1` with `object_pack.v1`, `route=code_change_impact`, object types `RepoFile`, `VerificationCommand`, `RuntimeSurface`, `McpTool`, gaps `live_runtime_impact_unverified`, `source_freshness_unverified`, `production_mutation_forbidden`, and route trace `selected_source_lanes=[candidate, reference_only]`, `stop_reason=missing_evidence_gap_returned`.
 - interpretation: this is branch-local CLI parity with the MCP read-side route contract. It is read-only, does not use network, does not mutate production ledger/corpus/runtime, and does not prove that the deployed MCP image has the same route implementation.
 
 ### local.cli.okf-export
@@ -95,7 +97,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 - status: `validated`
 - evidence: focused MCP stdio tests for `brain_objects_query`
-- result: broad authority/archive queries return context-authority object packs, style queries return preference/style object packs, temporal work recall queries return current-work packs, code-change-impact queries return file/test/runtime-surface impact packs, and merge/deploy queries return runtime truth gap packs without `object_pack_route_not_implemented`.
+- result: broad authority/archive queries return context-authority object packs, style queries return preference/style object packs, temporal work recall queries return current-work packs, code-change-impact queries return file/test/runtime-surface impact packs, and merge/deploy queries return runtime truth gap packs without `object_pack_route_not_implemented`; returned packs include FR6 route traces for source lanes, confidence, stop reason, and missing evidence.
 - interpretation: this validates the branch-local MCP read path routing only. Together with `local.cli.object-query`, local CLI and branch-local MCP now share route-aware behavior, but this still does not prove the deployed MCP runtime has this branch image.
 
 ### local.golden-query.fr8-code-change-impact
