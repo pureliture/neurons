@@ -74,8 +74,8 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 - status: `validated`
 - evidence: `uv run neuron-knowledge golden-query-eval --activation-progress`
-- result: returned `lbrain_product_activation_progress.v1`, `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`, `minimum_review_loop_checkpoint.status=PASS_WITH_GAPS`, `next_phase=P5`, `goal_complete=false`, `production_ready=false`, `production_mutation_performed=false`.
-- interpretation: this is a local P5 progress gate that keeps P2-P9 scope and gaps visible. It does not prove production readiness or deployed/runtime activation.
+- result: returned `lbrain_product_activation_progress.v1`, `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`, `minimum_review_loop_checkpoint.status=PASS_WITH_GAPS`, `next_phase=P5`, `goal_complete=false`, `production_ready=false`, `product_evidence_summary phases=P6/P7/P8/P9`, `production_mutation_performed=false`.
+- interpretation: this is a local P5 progress gate that keeps P2-P9 scope and gaps visible. The evidence summary covers P6 session/project/work-unit rollup, P7 artifact preference memory, P8 runtime authority preview, and P9 agent context product pack as sanitized local previews only. It does not prove production readiness or deployed/runtime activation.
 
 ### local.source-to-candidate-runtime-readiness-surface
 

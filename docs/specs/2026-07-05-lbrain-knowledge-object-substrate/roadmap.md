@@ -539,14 +539,19 @@ Current local/test evidence:
 - source-to-authority quality report now includes `product_surface_checks` for `brain_source_to_candidate_graph`, `brain_candidate_review_edit`, `brain_approval_board_decide`, and `brain_source_to_candidate_runtime_readiness` MCP registry/policy surface
 - source-to-candidate runtime readiness CLI can evaluate sanitized post-deploy evidence for MCP review tools, agent context `tool_hints`, deployed identity, and production-denial smokes without network or mutation
 - activation progress report returns `lbrain_product_activation_progress.v1` with `scope_phases=[P2..P9]`, `minimum_review_loop_checkpoint.status=PASS_WITH_GAPS`, `next_phase=P5`, `remaining_phases=[P5..P9]`, `goal_complete=false`, `production_ready=false`, and `production_mutation_performed=false`
+- activation progress `product_evidence_summary` now includes P6 session/project/work-unit rollup evidence, P7 artifact preference memory evidence, P8 runtime authority evidence, and P9 agent context product evidence as sanitized local previews
+- P6 evidence summary includes `object_extraction_session_project_rollup_preview.v1`, `object_count=8`, `edge_count=16`, `evidence_count=1`, and `session_project_handoff_pack.v1`
+- P7 evidence summary includes `object_extraction_preference_style_preview.v1`, accepted artifact preference pack status `pass`, and source evidence refs without raw body
+- P8 evidence summary keeps merge/deploy/runtime separated with `runtime_unverified_count=1`, production promotion `permission=denied`, and `authority_write_performed=false`
+- P9 evidence summary includes `agent_context_product_pack.v1`, Codex tool hints for object-native review/readiness tools, style/preference section evidence, and `mutation_allowed=false`
 - `candidate_graph_review` packs state empty authority lanes explicitly so P5 strict axis checks do not hide candidate-vs-authority separation
 - P6-P9 remain represented with local/test evidence plus production/live gaps, and P10 remains planned
 - activation progress focused evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_product_activation_progress_keeps_p2_to_p9_scope_visible tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_activation_progress tests/test_llm_brain_core_objects_subpackage.py::test_object_subpackage_exports_match_root_contracts`
 - activation progress focused result: `3 passed, 1 warning`
-- activation progress adjacent evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py tests/test_neuron_cli.py tests/test_llm_brain_core_objects_subpackage.py`
-- activation progress adjacent result: `46 passed, 1 warning`
+- activation progress adjacent evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py tests/test_neuron_cli.py tests/test_extraction_pipeline.py tests/test_context_pack_builder.py`
+- activation progress adjacent result: `83 passed, 1 warning`
 - activation progress CLI smoke: `cd worker && uv run neuron-knowledge golden-query-eval --activation-progress`
-- activation progress CLI smoke result: `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`, `minimum_review_loop_checkpoint.status=PASS_WITH_GAPS`, `next_phase=P5`, `goal_complete=false`, `production_ready=false`, `production_mutation_performed=false`
+- activation progress CLI smoke result: `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`, `minimum_review_loop_checkpoint.status=PASS_WITH_GAPS`, `next_phase=P5`, `goal_complete=false`, `production_ready=false`, `product_evidence_summary phases=P6/P7/P8/P9`, `production_mutation_performed=false`
 - source-to-authority gate focused evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_source_to_authority_quality_gate_covers_review_approval_and_read_path_without_production_mutation`
 - source-to-authority gate focused result: `1 passed, 1 warning`
 - source-to-authority CLI evidence: `cd worker && uv run pytest -q tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_source_to_authority_gate`

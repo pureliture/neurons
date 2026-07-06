@@ -257,6 +257,22 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert report["hard_failures"] == []
     assert "production_quality_not_green" in report["goal_completion_blockers"]
     assert "live_runtime_read_path_unverified" in report["goal_completion_blockers"]
+    evidence = {item["phase"]: item for item in report["product_evidence_summary"]}
+    assert set(evidence) == {"P6", "P7", "P8", "P9"}
+    assert evidence["P6"]["schema_version"] == "object_extraction_session_project_rollup_preview.v1"
+    assert evidence["P6"]["object_count"] >= 5
+    assert evidence["P6"]["edge_count"] >= 6
+    assert evidence["P6"]["evidence_count"] >= 1
+    assert evidence["P7"]["schema_version"] == "object_extraction_preference_style_preview.v1"
+    assert evidence["P7"]["artifact_preference_pack_status"] == "pass"
+    assert evidence["P8"]["schema_version"] == "object_extraction_runtime_truth_preview.v1"
+    assert evidence["P8"]["runtime_unverified_count"] == 1
+    assert evidence["P8"]["permission"] == "denied"
+    assert evidence["P9"]["schema_version"] == "agent_context_product_pack.v1"
+    assert evidence["P9"]["section_counts"]["style_preference"] >= 1
+    assert evidence["P9"]["tool_hint_count"] >= 4
+    assert evidence["P9"]["mutation_allowed"] is False
+    assert all(item["production_mutation_performed"] is False for item in evidence.values())
 
     phase_progress = {item["phase"]: item for item in report["phase_progress"]}
     assert phase_progress["P4"]["quality_result"] == "PASS_WITH_GAPS"
