@@ -598,6 +598,19 @@ def test_mcp_object_decision_commit_is_restricted_denied_by_default(tmp_path: Pa
     assert result["permission"] == "denied"
     assert result["authority_write_performed"] is False
     assert result["authoritative_memory_changed"] is False
+    plan = result["production_promotion_plan"]
+    assert plan["schema_version"] == "object_authority_promotion_plan.v1"
+    assert plan["production_write_state"] == "closed_without_human_gate"
+    assert plan["mutation_allowed"] is False
+    assert plan["allowed_object_classes"] == ["RepoDocument"]
+    assert "commit_stale" in plan["allowed_decision_types"]
+    assert plan["reviewer_role"] == "human_object_authority_reviewer"
+    assert plan["blast_radius"]["max_objects_per_decision"] == 1
+    assert plan["no_mutation_report"] == {
+        "proposal_write_performed": False,
+        "authority_write_performed": False,
+        "authoritative_memory_changed": False,
+    }
 
 
 def test_mcp_object_decision_commit_local_test_updates_authority_state_with_audit(tmp_path: Path):

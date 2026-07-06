@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TextIO
 
@@ -424,7 +424,13 @@ def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict,
 def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
     ledger_scope = str(arguments.get("ledger_scope") or "production")
     if ledger_scope != "local_test":
-        return _tool_result(denied_payload(tool_name, "restricted_tool_requires_human_gate"))
+        return _tool_result(
+            denied_payload(
+                tool_name,
+                "restricted_tool_requires_human_gate",
+                extra={"production_promotion_plan": _production_authority_promotion_plan(arguments)},
+            )
+        )
     approved_by = _require_non_empty_string(arguments, "approved_by", tool_name=tool_name)
     decision = AuthorityDecision.from_parts(
         decision_type=_require_non_empty_string(arguments, "decision_type", tool_name=tool_name),
@@ -441,6 +447,53 @@ def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict,
     decision["approved_by_hash"] = "sha256:" + short_hash(approved_by, length=24)
     result = service.commit_object_authority_decision(decision)
     return _tool_result(result)
+
+
+def _production_authority_promotion_plan(arguments: Mapping[str, object]) -> dict:
+    decision_type = public_safe_text(str(arguments.get("decision_type") or ""), max_chars=120)
+    proposal_id = public_safe_text(str(arguments.get("proposal_id") or ""), max_chars=180)
+    decision_id = public_safe_text(str(arguments.get("decision_id") or ""), max_chars=180)
+    project = public_safe_text(str(arguments.get("project") or ""), max_chars=120)
+    return {
+        "schema_version": "object_authority_promotion_plan.v1",
+        "production_write_state": "closed_without_human_gate",
+        "mutation_allowed": False,
+        "requested_decision_type": decision_type,
+        "requested_proposal_id": proposal_id,
+        "requested_decision_id": decision_id,
+        "project": project,
+        "allowed_object_classes": ["RepoDocument"],
+        "allowed_decision_types": [
+            "accept_current",
+            "commit_stale",
+            "commit_supersession",
+            "retire",
+            "reject_candidate",
+        ],
+        "reviewer_role": "human_object_authority_reviewer",
+        "required_gate_evidence": [
+            "configured_deployed_mcp_identity_matches_source",
+            "single_object_scope",
+            "read_after_write_smoke_plan",
+            "rollback_or_supersession_plan",
+            "no_raw_private_evidence",
+        ],
+        "rollback_path": [
+            "write_new_authority_decision_preserving_audit_history",
+            "demote_prior_object_to_accepted_non_current_or_archive_only",
+            "verify_brain_objects_query_read_after_write",
+        ],
+        "blast_radius": {
+            "scope": "single_project_single_object",
+            "max_objects_per_decision": 1,
+            "requires_project": True,
+        },
+        "no_mutation_report": {
+            "proposal_write_performed": False,
+            "authority_write_performed": False,
+            "authoritative_memory_changed": False,
+        },
+    }
 
 
 def _dispatch_brain_review_proposals_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
