@@ -49,6 +49,7 @@ from agent_knowledge import mcp_tools
 from agent_knowledge.mcp_tools import tool_contract_registry, tool_registry, tool_names
 from agent_knowledge.session_memory.memory_card import build_memory_candidate
 from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
+from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
 from agent_knowledge.llm_brain_core.ledger_adapter import LedgerSourceRefCatalog
 from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
 from agent_knowledge.llm_brain_core.models import CONTEXT_PACK_SCHEMA_VERSION, OntologyEpisode
@@ -384,13 +385,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
                 "required_verification": {"object_count": 1},
             },
             "surface_policy": {"mutation_allowed": False},
-            "tool_hints": [
-                {"tool": BRAIN_OBJECTS_QUERY_TOOL_NAME},
-                {"tool": BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME},
-                {"tool": BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME},
-                {"tool": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME},
-                {"tool": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME},
-            ],
+            "tool_hints": object_native_review_tool_hints([]),
         },
         "brain_objects_query_smokes": [
             _brain_objects_query_smoke("authority_archive_separation"),
