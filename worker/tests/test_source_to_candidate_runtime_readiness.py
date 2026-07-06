@@ -309,8 +309,8 @@ def _permission_sensitive_audit_evidence(**overrides):
         "permission": "denied",
         "authority_write_performed": False,
         "production_mutation_performed": False,
-        "actor_ref_hash": "sha256:" + "c" * 24,
-        "request_hash": "sha256:" + "d" * 24,
+        "actor_ref_hash": "sha256:" + "c" * 64,
+        "request_hash": "sha256:" + "d" * 64,
         "protected_values_returned": False,
         "raw_private_evidence_returned": False,
         "secret_returned": False,
@@ -987,8 +987,8 @@ def test_runtime_readiness_fails_when_permission_sensitive_audit_is_unsafe_or_in
         "permission": "allowed",
         "authority_write_performed": True,
         "production_mutation_performed": True,
-        "actor_ref_hash": "",
-        "request_hash": "",
+        "actor_ref_hash": "sha256:not-a-64-hex-digest",
+        "request_hash": "sha256:" + "g" * 64,
         "protected_values_returned": True,
         "raw_private_evidence_returned": True,
         "secret_returned": True,
@@ -2089,8 +2089,14 @@ def test_runtime_readiness_collector_includes_permission_sensitive_audit_shadow_
     assert all(event["permission"] == "denied" for event in audit["audit_events"])
     assert all(event["authority_write_performed"] is False for event in audit["audit_events"])
     assert all(event["production_mutation_performed"] is False for event in audit["audit_events"])
-    assert all(event["actor_ref_hash"].startswith("sha256:") for event in audit["audit_events"])
-    assert all(event["request_hash"].startswith("sha256:") for event in audit["audit_events"])
+    assert all(
+        event["actor_ref_hash"].startswith("sha256:") and len(event["actor_ref_hash"]) == 71
+        for event in audit["audit_events"]
+    )
+    assert all(
+        event["request_hash"].startswith("sha256:") and len(event["request_hash"]) == 71
+        for event in audit["audit_events"]
+    )
     assert audit["audit_store"]["status"] == "recorded"
     assert audit["postcheck"]["status"] == "validated"
     assert packet["collector"]["permission_sensitive_audit_schema"] == "permission_sensitive_runtime_audit_evidence.v1"

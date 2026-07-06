@@ -2429,9 +2429,9 @@ def _permission_audit_event_failures(action: str, event: Mapping[str, Any]) -> l
         failures.append(f"permission_sensitive_audit_event_mutation_performed:{action}")
     actor_hash = public_safe_text(str(event.get("actor_ref_hash") or ""), max_chars=120)
     request_hash = public_safe_text(str(event.get("request_hash") or ""), max_chars=120)
-    if not actor_hash.startswith("sha256:"):
+    if not _is_sha256_hash_ref(actor_hash):
         failures.append(f"permission_sensitive_audit_actor_hash_missing:{action}")
-    if not request_hash.startswith("sha256:"):
+    if not _is_sha256_hash_ref(request_hash):
         failures.append(f"permission_sensitive_audit_request_hash_missing:{action}")
     for field, gap in (
         ("protected_values_returned", "permission_sensitive_audit_protected_values_returned"),
@@ -2443,6 +2443,13 @@ def _permission_audit_event_failures(action: str, event: Mapping[str, Any]) -> l
         if event.get(field) is not False:
             failures.append(f"{gap}:{action}")
     return failures
+
+
+def _is_sha256_hash_ref(value: str) -> bool:
+    if not value.startswith("sha256:"):
+        return False
+    digest = value.removeprefix("sha256:")
+    return len(digest) == 64 and all(char in "0123456789abcdefABCDEF" for char in digest)
 
 
 def _permission_sensitive_audit_reports_mutation(
