@@ -32,6 +32,11 @@ REQUIRED_QUALITY_AXES = [
     "recommended_action",
 ]
 
+ACTIVATION_SCOPE_PHASES = ("P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9")
+MINIMUM_REVIEW_LOOP_PHASES = ("P2", "P3", "P4")
+
+_LOCAL_VALIDATED_PHASES = {"P2", "P3", "P4", "P6", "P7", "P8", "P9"}
+
 
 def build_baseline_golden_query_report() -> dict[str, Any]:
     report = {
@@ -330,6 +335,80 @@ def build_source_to_authority_quality_gate_report() -> dict[str, Any]:
     return report
 
 
+def build_product_activation_progress_report() -> dict[str, Any]:
+    phase_coverage = build_phase_golden_query_coverage_report()
+    source_gate = build_source_to_authority_quality_gate_report()
+    phases_by_id = {
+        str(item.get("phase") or ""): item
+        for item in phase_coverage.get("phases", [])
+        if isinstance(item, Mapping)
+    }
+    phase_progress = [
+        _activation_phase_progress(phase, phases_by_id.get(phase, {}))
+        for phase in ACTIVATION_SCOPE_PHASES
+    ]
+    minimum_checkpoint = _minimum_review_loop_checkpoint(phase_progress, source_gate)
+    hard_failures = _dedupe(
+        [
+            *[
+                str(item)
+                for item in source_gate.get("hard_failures", [])
+                if str(item or "")
+            ],
+            *[
+                f"{item['phase']}:quality_failed"
+                for item in phase_progress
+                if item.get("quality_result") == "FAIL"
+            ],
+            *[
+                f"{phase}:coverage_missing"
+                for phase in ACTIVATION_SCOPE_PHASES
+                if phase not in phases_by_id
+            ],
+        ]
+    )
+    blockers = _activation_goal_blockers(
+        phase_coverage=phase_coverage,
+        source_gate=source_gate,
+        phase_progress=phase_progress,
+    )
+    status = "FAIL" if hard_failures else ("PASS_WITH_GAPS" if blockers else "PASS")
+    next_phase = _next_activation_phase(phase_progress)
+    production_ready = (
+        status == "PASS"
+        and source_gate["release_quality_gate"] == "green"
+        and all(item.get("state") in {"production_validated", "complete"} for item in phase_progress)
+    )
+    report = {
+        "schema_version": "lbrain_product_activation_progress.v1",
+        "status": status,
+        "scope_phases": list(ACTIVATION_SCOPE_PHASES),
+        "phase_progress": phase_progress,
+        "minimum_review_loop_checkpoint": minimum_checkpoint,
+        "next_phase": next_phase,
+        "remaining_phases": _remaining_activation_phases(next_phase),
+        "quality_gate_inputs": {
+            "phase_coverage_status": phase_coverage["status"],
+            "source_to_authority_status": source_gate["status"],
+            "source_to_authority_release_quality_gate": source_gate["release_quality_gate"],
+        },
+        "release_quality_gate": "blocked" if hard_failures else source_gate["release_quality_gate"],
+        "goal_completion_blockers": blockers,
+        "hard_failures": hard_failures,
+        "goal_complete": production_ready and not blockers,
+        "production_ready": production_ready,
+        "production_mutation_performed": bool(
+            source_gate.get("production_mutation_performed")
+            or any(item.get("production_mutation_performed") for item in phase_progress)
+        ),
+        "production_authoritative_memory_changed": bool(
+            source_gate.get("production_authoritative_memory_changed")
+        ),
+    }
+    ensure_public_safe(report, "LBrainProductActivationProgress")
+    return report
+
+
 def evaluate_object_pack_response(
     query: str,
     response: Mapping[str, Any],
@@ -375,6 +454,131 @@ def evaluate_object_pack_response(
         "checked_axes": checked_axes,
     }
     ensure_public_safe(result, "GoldenQueryEvalResult")
+    return result
+
+
+def _activation_phase_progress(phase: str, coverage: Mapping[str, Any]) -> dict[str, Any]:
+    result = str(coverage.get("result") or "missing")
+    state = _activation_phase_state(phase, result)
+    gaps = [str(gap) for gap in coverage.get("gaps", []) if str(gap or "")]
+    return {
+        "phase": phase,
+        "state": state,
+        "quality_result": result,
+        "golden_query_family": str(coverage.get("golden_query_family") or ""),
+        "evaluator": str(coverage.get("evaluator") or ""),
+        "gaps": gaps,
+        "production_mutation_performed": False,
+        "next_action": _activation_phase_next_action(phase, state, gaps),
+    }
+
+
+def _activation_phase_state(phase: str, quality_result: str) -> str:
+    if quality_result == "FAIL":
+        return "blocked"
+    if phase == "P5":
+        return "in_progress"
+    if phase in _LOCAL_VALIDATED_PHASES and quality_result in {"PASS", "PASS_WITH_GAPS"}:
+        return "local_validated"
+    if quality_result == "PASS":
+        return "local_validated"
+    if quality_result == "missing":
+        return "missing"
+    return "in_progress"
+
+
+def _activation_phase_next_action(phase: str, state: str, gaps: list[str]) -> str:
+    if state == "blocked":
+        return "fix_quality_failure"
+    if phase == "P5":
+        return "keep_continuous_quality_gate_active_until_release_gate_green"
+    if any("production" in gap or "live" in gap for gap in gaps):
+        return "collect_runtime_or_production_evidence_without_mutation"
+    if state == "local_validated":
+        return "advance_next_phase_with_gap_visible"
+    return "complete_local_phase_slice"
+
+
+def _minimum_review_loop_checkpoint(
+    phase_progress: list[Mapping[str, Any]],
+    source_gate: Mapping[str, Any],
+) -> dict[str, Any]:
+    by_phase = {str(item.get("phase") or ""): item for item in phase_progress}
+    checkpoint_items = [by_phase.get(phase, {}) for phase in MINIMUM_REVIEW_LOOP_PHASES]
+    checkpoint_failures = [
+        str(item.get("phase") or "unknown")
+        for item in checkpoint_items
+        if item.get("quality_result") == "FAIL" or item.get("state") in {"missing", "blocked"}
+    ]
+    gaps = _dedupe(
+        [
+            *[
+                str(gap)
+                for item in checkpoint_items
+                for gap in item.get("gaps", [])
+                if str(gap or "")
+            ],
+            *[
+                str(gap)
+                for gap in source_gate.get("gaps", [])
+                if str(gap or "")
+            ],
+        ]
+    )
+    return {
+        "phases": list(MINIMUM_REVIEW_LOOP_PHASES),
+        "status": "FAIL" if checkpoint_failures else ("PASS_WITH_GAPS" if gaps else "PASS"),
+        "local_product_loop_ready": not checkpoint_failures,
+        "does_not_complete_goal": True,
+        "failures": checkpoint_failures,
+        "gaps": gaps,
+    }
+
+
+def _activation_goal_blockers(
+    *,
+    phase_coverage: Mapping[str, Any],
+    source_gate: Mapping[str, Any],
+    phase_progress: list[Mapping[str, Any]],
+) -> list[str]:
+    blockers = [
+        str(gap)
+        for gap in phase_coverage.get("gaps", [])
+        if str(gap or "")
+    ]
+    blockers.extend(str(gap) for gap in source_gate.get("gaps", []) if str(gap or ""))
+    for item in phase_progress:
+        blockers.extend(str(gap) for gap in item.get("gaps", []) if str(gap or ""))
+    if source_gate.get("release_quality_gate") != "green":
+        blockers.append("production_quality_not_green")
+    return _dedupe(blockers)
+
+
+def _next_activation_phase(phase_progress: list[Mapping[str, Any]]) -> str:
+    for item in phase_progress:
+        if item.get("state") == "in_progress":
+            return str(item.get("phase") or "")
+    for item in phase_progress:
+        if item.get("state") not in {"local_validated", "production_validated", "complete"}:
+            return str(item.get("phase") or "")
+    return ""
+
+
+def _remaining_activation_phases(next_phase: str) -> list[str]:
+    if not next_phase or next_phase not in ACTIVATION_SCOPE_PHASES:
+        return []
+    start = ACTIVATION_SCOPE_PHASES.index(next_phase)
+    return list(ACTIVATION_SCOPE_PHASES[start:])
+
+
+def _dedupe(values: list[str] | tuple[str, ...]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
     return result
 
 

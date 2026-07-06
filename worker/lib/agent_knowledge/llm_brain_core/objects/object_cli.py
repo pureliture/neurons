@@ -12,6 +12,7 @@ from ...ledger import Ledger
 
 from .golden_query_eval import (
     build_baseline_golden_query_report,
+    build_product_activation_progress_report,
     build_phase_golden_query_coverage_report,
     build_source_to_authority_quality_gate_report,
 )
@@ -310,7 +311,11 @@ def golden_query_eval_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--baseline", action="store_true")
     parser.add_argument("--phase-coverage", action="store_true")
     parser.add_argument("--source-to-authority-gate", action="store_true")
+    parser.add_argument("--activation-progress", action="store_true")
     args = parser.parse_args(argv)
+    if args.activation_progress:
+        _print_json(build_product_activation_progress_report())
+        return 0
     if args.source_to_authority_gate:
         _print_json(build_source_to_authority_quality_gate_report())
         return 0

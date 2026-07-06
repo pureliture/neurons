@@ -48,6 +48,7 @@ OBJECT_PARITY_SYMBOLS: dict[str, tuple[str, ...]] = {
     ),
     "golden_query_eval": (
         "build_baseline_golden_query_report",
+        "build_product_activation_progress_report",
         "build_source_to_authority_quality_gate_report",
         "evaluate_object_pack_response",
     ),
