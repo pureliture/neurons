@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent_knowledge.llm_brain_core.context_builder import ContextPackBuilder
+from agent_knowledge.llm_brain_core.context_builder import (
+    ContextPackBuilder,
+    build_agent_context_product_pack,
+    needs_runtime_evidence,
+)
 from agent_knowledge.llm_brain_core.models import GraphMemoryResult, OntologyEpisode
 
 
@@ -172,7 +176,7 @@ def test_builder_adds_consumer_specific_compact_agent_context_pack_with_safe_act
             brain_id="/project/neurons",
             repository="neurons",
             branch="main",
-            current_files=["worker/tests/test_context_pack_builder.py"],
+            current_files=["docs/specs/roadmap.md"],
             current_request="이 PR merge됐어? 배포도 됐어?",
             artifacts=[],
             cards=cards,
@@ -206,6 +210,7 @@ def test_builder_adds_consumer_specific_compact_agent_context_pack_with_safe_act
             "secret",
         ]
         assert product["surface_policy"]["mutation_allowed"] is False
+        assert product["sections"]["reference_objects"]["object_count"] >= 1
         assert product["action_hints"] == [
             {
                 "action": "request_missing_evidence",
@@ -220,3 +225,87 @@ def test_builder_adds_consumer_specific_compact_agent_context_pack_with_safe_act
                 "blocked_by": ["approved_scope_required", "runtime_evidence_unverified"],
             },
         ]
+
+
+def test_builder_filters_stale_preference_from_compact_style_guidance():
+    builder = ContextPackBuilder()
+    cards = [
+        {
+            "memory_id": "mem_current_pref",
+            "card_type": "preference",
+            "summary": "Use concise Korean status updates.",
+            "currentness": "current",
+            "confidence": 0.9,
+            "typed_payload": {
+                "preference": "Use concise Korean status updates.",
+                "applies_to": "communication",
+            },
+        },
+        {
+            "memory_id": "mem_stale_pref",
+            "card_type": "preference",
+            "summary": "Use stale verbose status updates.",
+            "currentness": "stale",
+            "confidence": 0.99,
+            "typed_payload": {
+                "preference": "Use stale verbose status updates.",
+                "applies_to": "communication",
+            },
+        },
+    ]
+
+    pack = builder.build(
+        brain_id="/project/neurons",
+        repository="neurons",
+        branch="main",
+        current_files=["docs/specs/roadmap.md"],
+        current_request="status update",
+        artifacts=[],
+        cards=cards,
+        graph_result=GraphMemoryResult(status="available"),
+        incidents=(),
+        bridge_status={"status": "disabled", "authority": "bridge", "details": []},
+        bridge_evidence=(),
+        consumer="codex",
+    ).to_dict()
+
+    style_items = pack["authority"]["agent_context_product"]["sections"]["style_preference"]["items"]
+    titles = [item["title"] for item in style_items]
+    assert "Use concise Korean status updates." in titles
+    assert "Use stale verbose status updates." not in titles
+
+
+def test_agent_context_product_pack_defensively_compacts_dynamic_object_packs():
+    product = build_agent_context_product_pack(
+        consumer="codex",
+        block={
+            "object_packs": {
+                "preferences": {
+                    "lanes": None,
+                    "gaps": None,
+                    "objects": [
+                        None,
+                        "not-an-object",
+                        {
+                            "object_id": "obj:pref",
+                            "object_type": "ArtifactPreference",
+                            "title": "Current preference",
+                            "authority_lane": "accepted_current",
+                            "recommended_action": "apply_preference",
+                        },
+                    ],
+                }
+            }
+        },
+        gaps=[],
+        cards=[],
+    )
+
+    section = product["sections"]["style_preference"]
+    assert section["object_count"] == 1
+    assert section["items"][0]["title"] == "Current preference"
+    assert section["gaps"] == []
+
+
+def test_needs_runtime_evidence_handles_missing_current_request():
+    assert needs_runtime_evidence(None, ["deploy/status.md"]) is True
