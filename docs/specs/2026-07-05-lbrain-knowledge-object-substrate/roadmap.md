@@ -9,18 +9,18 @@
 Current state:
 
 - Phase 1 substrate implementation: local/test scope에서는 완료되었습니다.
-- Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates는 통과했고 deployed HTTP MCP runtime 및 configured endpoint는 검증되었지만, 현재 Codex session tool registry에는 object-native tools가 아직 없으며 current-source-main image identity가 live 상태임은 증명되지 않았습니다.
-- P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP는 object-native tools를 노출하고, 최신 configured-endpoint smoke는 production write에 대해 denied/no-mutation으로 통과하지만, 현재 Codex session의 `mcp__lbrain` namespace는 아직 이를 노출하지 않으며 live MCP image가 #73/current-main source refactor를 포함하는지는 증명되지 않았습니다.
+- Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates와 latest-main deployed HTTP MCP runtime/configured endpoint smoke는 통과했지만, 현재 Codex session tool registry에는 object-native tools가 아직 없고 production authority write gate는 계속 denied 상태입니다.
+- P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP는 latest main 기반 image로 object-native tools를 노출하고, read-only query 및 production write denied/no-mutation smoke를 통과했습니다. 현재 Codex session의 `mcp__lbrain` namespace가 아직 object-native tools를 직접 노출하지 않는 gap은 남아 있습니다.
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, production-denial evidence는 존재하지만, real private Palantir manifest ingest 및 production ingest approval은 여전히 gap입니다.
 - P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / `local_validated`; local/test reference corpus extraction preview는 deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, blocked-extraction gaps를 생성합니다. repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, broader evaluator suite previews에는 local/test evaluator evidence가 있지만, live graph/Qdrant projection join은 아직 증명되지 않았습니다.
 - P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / `local_validated`; local/test decision commit은 authority state/audit history를 기록하고, object queries는 local/test stale, superseded, retired, archive-only, rejected states를 surface하며, object explain은 local/test decision history를 반환합니다. production denial은 read-only promotion plan을 반환하고 authority mutation은 계속 denied 상태입니다.
 - P5 Continuous Golden Query Quality Gates: `in_progress`; phase coverage report는 P1-P10 golden query families를 나열하고 release quality gate를 명시적으로 `not_green` 상태로 유지합니다.
 - P6 Session, Device, Project, And Work-Unit 360: `PASS_WITH_GAPS` / `local_validated`; local/test session project rollup preview는 Device/Session/Repository/Branch/WorkUnit/Spec/PullRequest/Commit objects를 생성하고, same-device와 all-device fixture rollup을 분리하며, safe handoff pack을 반환합니다. live multi-device runtime evidence는 아직 증명되지 않았습니다.
 - P7 Preference, Style, And Artifact Memory: `PASS_WITH_GAPS` / `local_validated`; local/test artifact preference pack은 accepted/proposal lanes, profile objects, no-UI HTML artifact check를 검증하지만, live agent context pack 및 production authority promotion은 아직 gap입니다.
-- P8 Runtime Truth, Security, And Deployment Authority: `PASS_WITH_GAPS` / `local_validated`; local/test runtime authority policy, artifact identity join, private authority redaction, and denial/no-mutation checks pass, but live rollout identity and production permission audit remain gaps.
+- P8 Runtime Truth, Security, And Deployment Authority: `PASS_WITH_GAPS` / `local_validated`; local/test runtime authority policy, artifact identity join, private authority redaction, and denial/no-mutation checks pass, but broader production runtime authority and permission audit remain gaps.
 - P9 Agent Context Productization: `PASS_WITH_GAPS` / `local_validated`; local/test consumer compact packs, degraded/stale disclosure, reference object lane, surface policy, and proposal-safe action hints pass, but production startup/read path and runtime enforcement remain gaps.
-- Product activation: 완료되지 않았습니다; configured agent read path refresh가 여전히 필요합니다.
-- UI/object browser: product activation prerequisite는 아니지만, 이후 product surface로 열어 둡니다.
+- Product activation: 완료되지 않았습니다; configured agent read path refresh, candidate graph extraction, editable review, and approval-board promotion이 여전히 필요합니다.
+- UI/object browser: full UI는 product activation prerequisite가 아니지만, minimal candidate object/edge/evidence edit surface는 P3/P4 product workflow의 prerequisite입니다.
 
 Roadmap lock state:
 
@@ -37,11 +37,45 @@ The target is an ontology-style product in the practical sense:
 - typed objects for work knowledge
 - typed relationships between those objects
 - evidence and freshness on claims
+- AI-assisted candidate graph extraction from source material
+- human correction of object, edge, and evidence candidates
 - proposal/review/action lifecycle
 - accepted/current authority separated from archive, reference, graph, search, and runtime evidence
 - agent-facing context packs for Codex, Claude, Gemini, Hermes, and later tools
 
 This is not a goal to clone Palantir. Palantir reference material is used to reduce the problem into needed mechanics: object, link, action, function, pipeline, governance, and application surface.
+
+## Product Operating Model
+
+The product direction is:
+
+```text
+source material
+→ AI extraction
+→ candidate KnowledgeObjects, edges, and evidence refs
+→ human review and correction
+→ approval board decision
+→ accepted/current authority only after approval
+```
+
+Automatic extraction should help create and maintain the graph, but it must not directly rewrite production authority.
+
+User-facing correction is part of the core workflow, not a cosmetic UI layer. A reviewer must be able to:
+
+- rename or rewrite object claims
+- add, remove, merge, or split objects
+- add, remove, or correct typed edges
+- attach, replace, or reject evidence refs
+- promote, reject, hold, stale-mark, supersede, retire, or request more evidence
+
+Authority rule:
+
+```text
+AI output = draft/candidate graph
+human-approved decision = accepted/current authority
+```
+
+Therefore P3 and P4 must include a minimal editable review surface even if the full P10 object browser remains deferred.
 
 ## Palantir Corpus Traceability
 
@@ -97,11 +131,11 @@ Completed local/test substrate gates:
 Known production gaps:
 
 - deployed/configured HTTP LBrain MCP exposes object-native tools, but the current Codex session's `mcp__lbrain` namespace is still stale and does not expose them.
-- deployed MCP image identity proves the object-native PR #64 merge is included, but does not prove the #73/current-main source refactor is in the live MCP image.
 - reference corpus store is not configured as a living LBrain corpus store.
 - golden queries are baseline red, not production-quality green.
 - accepted/current promotion workflow is not open for production object decisions.
-- object extraction and processing pipeline is skeletal.
+- object extraction and processing pipeline is not wired as an automatic candidate-graph factory.
+- editable object/edge/evidence review surface is not implemented.
 - session/device/project 360 is specified but not production-usable.
 
 Known roadmap lock gaps from multi-agent review:
@@ -152,9 +186,9 @@ This phase does not prove production deployment or live LBrain quality.
 
 ### P1. Production MCP Activation
 
-State: `PASS_WITH_GAPS` as of 2026-07-06 latest recheck.
+State: `PASS_WITH_GAPS` as of 2026-07-06 latest production recheck.
 
-Deployed HTTP MCP runtime activation and configured endpoint smoke passed. The latest configured-endpoint smoke still exposes object-native tools and denies production proposal/decision mutation without writes. Current Codex session tool-registry activation remains a gap. Current-source-main image identity is also a gap: source `origin/main` is at PR #73, while the live MCP image proof remains tied to the earlier object-native artifact.
+Deployed HTTP MCP runtime activation and configured endpoint smoke passed on a latest-main image. The latest configured-endpoint smoke exposes object-native tools, returns a public-safe `brain_objects_query.v1` response, and denies production proposal/decision mutation without writes. Current Codex session tool-registry activation remains a gap.
 
 Purpose:
 
@@ -180,26 +214,23 @@ Gate evidence:
 
 Current evidence summary:
 
-- previous live production evidence recorded the Argo application tracking `main` and `Synced/Healthy`
-- source repo `origin/main` contains PR #73 merge commit `c3f3e34`; the P1 branch is rebased onto that commit
-- production GitOps desired state is the ops repo `main` revision `dbc6ded`
-- deployed MCP image identity is tied to source commit `c216ff4`, which contains PR #64 merge commit `7a0b6a6`
-- deployed MCP image identity is not proof that PR #73/current source `main` is live in the MCP image
+- latest live production evidence recorded the Argo application tracking `main` and `Synced/Healthy`
+- source repo `origin/main` contains PR #93 merge commit `7bda476`
+- deployed MCP image identity is tied to a latest-main source image that includes the object-native PR stack
 - live HTTP MCP `tools/list` exposes `brain_objects_query`, `brain_object_explain`, `brain_corpus_status`, `brain_corpus_ingest_plan`, `brain_object_proposal_create`, `brain_object_decision_commit`, and `brain_review_proposals`
-- live read-only `brain_objects_query` returns `brain_objects_query.v1` with `object_pack.v1`, `route=documentation_cleanup`, and explicit authority gaps
+- live read-only `brain_objects_query` returns `brain_objects_query.v1` in public-safe shape
 - user-level Codex LBrain MCP config source includes object-native tools, and standalone smoke against the configured endpoint returns the same object-native tool list and read-only query shape
-- latest standalone configured-endpoint smoke after PR #73 merge still exposes all required object-native tools, returns `brain_objects_query.v1` / `object_pack.v1`, and denies production proposal/decision mutation with no authoritative memory change
+- latest standalone configured-endpoint smoke exposes all required object-native tools and denies production proposal/decision mutation with no authoritative memory change
 - production-scope `brain_object_proposal_create` returns denied/no-mutation
 - `brain_object_decision_commit` returns denied/no-mutation
 - no production ledger/corpus mutation was performed
 - current Codex session's `mcp__lbrain` namespace does not expose `brain_objects_query` even though the configured endpoint smoke passes; this keeps P1 at `PASS_WITH_GAPS`, not `PASS`
-- latest direct Kubernetes/Argo live status recheck could not be completed from this shell because no usable kube context, non-interactive sudo-backed kube access, or configured local Argo server address was available; this prevents upgrading GitOps desired-state evidence into a fresh live rollout identity claim
+- raw live evidence, host topology, private ledger details, and raw dataset/document ids remain outside this public repo
 
 Next gate:
 
 - restart or refresh the Codex LBrain MCP tool registry until the configured `mcp__lbrain` namespace exposes object-native tools directly, then rerun read-only smoke through that configured path.
-- rebuild/deploy the MCP image from current source `main` and rerun the artifact identity smoke before claiming the live MCP image includes PR #73.
-- rerun direct live Argo/Kubernetes status once an approved control-plane path is available; do not treat GitOps desired state alone as live rollout evidence.
+- keep production authority writes denied until the approval-board and scoped promotion gate are approved.
 
 ### P2. Living Reference Corpus Store
 
@@ -274,7 +305,7 @@ State: local_validated / PASS_WITH_GAPS.
 
 Purpose:
 
-Convert files, docs, sessions, PRs, commits, runtime evidence, code style, and artifact preferences into typed knowledge objects and edges.
+Convert files, docs, sessions, PRs, commits, runtime evidence, code style, and artifact preferences into editable candidate knowledge objects and edges.
 
 Required capabilities:
 
@@ -282,7 +313,10 @@ Required capabilities:
 - extraction strategy registry for chunking, mapping, summarization, style inference, runtime evidence mapping, and preference inference
 - extraction run records with input hash, output object ids, evaluator result, and failure reason
 - extraction run records quality metrics, cost estimate, speed, token budget, and debug trace availability
+- extracted objects and edges are marked candidate/draft until reviewed
+- extraction output includes proposed edits, merge/split suggestions, confidence, and evidence gaps
 - chunk preview and public-safe output preview exist before managed snapshot or corpus-derived object promotion
+- reviewer can edit object names, claims, edge types, and evidence refs before approval
 - evaluator supports deterministic fixture checks, golden query checks, variance checks, and model/prompt comparison where LLM extraction is used
 - freshness checks separated from authority decisions
 - public-safe projection for every object returned through MCP
@@ -293,6 +327,8 @@ Gate evidence:
 - failed extraction reports gaps instead of inventing authority
 - extraction strategy comparison exists for Palantir corpus document mapping and repo document cleanup mapping
 - chunk preview proves evidence can be inspected without raw/private leakage
+- candidate graph preview shows objects, edges, evidence refs, confidence, and edit actions
+- reviewer edit fixture changes candidate object/edge/evidence without changing accepted/current authority
 - evaluator report ties extractor output to at least one golden query slice
 - graph/search projection can join to objects but cannot become canonical authority
 
@@ -353,8 +389,11 @@ Create a closed lifecycle from candidate object to accepted/current, stale, supe
 
 Required capabilities:
 
+- approval board for candidate KnowledgeObjects, edges, and evidence refs
 - proposal creation for current/stale/supersede/retire/reject decisions
 - review queue listing with evidence and confidence
+- reviewer actions for promote, reject, hold, merge, split, stale-mark, supersede, retire, and request more evidence
+- reviewer edits preserve original AI extraction output as audit evidence
 - restricted authority decision gate
 - read-after-write proof for local/test and approved production flows
 - audit record for who/what promoted an object and from which evidence
@@ -367,6 +406,8 @@ Gate evidence:
 
 - proposal write never changes accepted/current authority
 - restricted decision is denied by default in production
+- approval board can show candidate object, candidate edges, evidence refs, conflicts, gaps, and recommended action
+- reviewer edit changes candidate state without mutating accepted/current authority
 - approved local/test decision updates authority lane correctly
 - approved production pilot updates only scoped object classes and proves read-after-write
 - rollback or supersession can reverse or demote an accepted/current decision without deleting audit history
@@ -713,7 +754,9 @@ Provide human inspection and review workflows after object contracts, authority 
 
 Position:
 
-UI is not required to activate CLI/MCP product quality. It remains open for later productization.
+Full UI is not required to activate CLI/MCP product quality. It remains open for later productization.
+
+However, a minimal review/edit surface is required before P3/P4 can be considered product-ready, because users must be able to correct AI-extracted objects, edges, and evidence before authority promotion.
 
 Possible surfaces:
 
@@ -722,6 +765,7 @@ Possible surfaces:
 - object graph browser
 - HTML dashboard for inspection
 - work-unit and project 360 view
+- minimal candidate object/edge/evidence editor for P3/P4
 
 Entry criteria:
 
@@ -734,13 +778,14 @@ Defer decision evidence:
 
 - P1 remains `in_progress` with current Codex session object-native MCP namespace gap.
 - P5 remains `in_progress` and release quality gate is not green.
-- P8 and P9 are local/test validated only; live rollout identity, production permission audit, production startup/read path, and runtime enforcement remain gaps.
+- P8 and P9 are local/test validated only; broader production runtime authority, production permission audit, production startup/read path, and runtime enforcement remain gaps.
 - UI is explicitly not a prerequisite for MCP/read-path activation, authority writes, or production rollout.
 
 Decision outcome:
 
 - Do not start UI/object browser implementation in this roadmap run.
 - Keep P10 open as a later product surface after the read path, authority lifecycle, and quality gates are production-proven.
+- Do not defer the minimal candidate edit/review surface needed by P3/P4.
 - If P10 is later started, the first slice must be read-only/local, must use existing object packs, and must not introduce production mutation or protected-value disclosure.
 
 ## Recommended Execution Order
@@ -793,23 +838,23 @@ Current accounting:
 | Phase | State | Notes |
 | --- | --- | --- |
 | P0 Local Object Substrate Foundation | `complete` | complete for local/test scope |
-| P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; deployed/configured endpoint validated, current Codex session tool registry gap remains |
+| P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; latest-main deployed/configured endpoint validated, current Codex session tool registry gap remains |
 | P2 Living Reference Corpus Store | `local_validated` | `PASS_WITH_GAPS`; local/test store and status gates pass, real private manifest ingest and production approval remain gaps |
-| P3 Processing And Object Extraction Pipeline | `local_validated` | `PASS_WITH_GAPS`; local/test reference corpus extraction preview, repo-document extraction preview, documentation cleanup strategy comparison, runtime truth extraction preview, preference/style extraction preview, work-unit extraction preview, session-detail extraction preview, PR/commit detail extraction preview, graph/search projection join preview, and broader evaluator suite preview pass; live projection join remains a gap |
-| P4 Review Queue And Authority Promotion | `local_validated` | `PASS_WITH_GAPS`; local/test authority state and audit gates pass, production authority mutation remains denied |
+| P3 Processing And Object Extraction Pipeline | `local_validated` | `PASS_WITH_GAPS`; local/test extraction previews pass, but automatic candidate-graph creation, editable object/edge/evidence review, and live projection join remain gaps |
+| P4 Review Queue And Authority Promotion | `local_validated` | `PASS_WITH_GAPS`; local/test authority state and audit gates pass, approval-board/edit surface remains a product gap, and production authority mutation remains denied |
 | P5 Continuous Golden Query Quality Gates | `in_progress` | phase coverage exists and release quality gate remains `not_green` |
 | P6 Session, Device, Project, And Work-Unit 360 | `local_validated` | `PASS_WITH_GAPS`; local/test rollup and handoff gates pass, live multi-device runtime evidence remains a gap |
 | P7 Preference, Style, And Artifact Memory | `local_validated` | `PASS_WITH_GAPS`; local/test artifact preference pack lanes and no-UI HTML artifact check pass, live agent context pack and production authority promotion remain gaps |
-| P8 Runtime Truth, Security, And Deployment Authority | `local_validated` | `PASS_WITH_GAPS`; local/test runtime authority policy, artifact identity join, private authority redaction, and denial/no-mutation checks pass; live rollout identity and production permission audit remain gaps |
+| P8 Runtime Truth, Security, And Deployment Authority | `local_validated` | `PASS_WITH_GAPS`; local/test runtime authority policy, artifact identity join, private authority redaction, and denial/no-mutation checks pass; broader production runtime authority and permission audit remain gaps |
 | P9 Agent Context Productization | `local_validated` | `PASS_WITH_GAPS`; local/test consumer compact packs, degraded/stale disclosure, surface policy, and proposal-safe action hints pass; production startup/read path and runtime enforcement remain gaps |
-| P10 UI And Object Browser Surface | `planned` | `PASS_WITH_GAPS` for start-readiness review; deferred, open, non-prerequisite because P1/P5/P8/P9 production gates remain open |
+| P10 UI And Object Browser Surface | `planned` | `PASS_WITH_GAPS` for start-readiness review; full object browser deferred, but minimal P3/P4 candidate edit/review surface is now a prerequisite |
 
 Delivery integration status:
 
-- PR #84 through PR #92 are merged into `main`; PR #93 is the active P10 defer-decision PR.
+- PR #84 through PR #93 are merged into `main`.
 - Final head and merge SHAs below are GitHub delivery evidence only. They are not deploy, live runtime, or production readiness evidence.
-- P1 through P9 phase branches were cleaned up after merge; P10's active PR head is intentionally not hard-coded because this document edits that branch.
-- This delivery record does not close P1 configured-agent namespace or current-main image identity gaps.
+- P1 through P10 phase branches were cleaned up or are eligible for cleanup after merge verification.
+- This delivery record does not close the P1 configured-agent namespace gap or the P3/P4 approval-board promotion gaps.
 - Historical PR body previews and issue drafts remain in `pr-delivery-package.md`; use the delivery record below as the current SHA source.
 
 Merged PR delivery record:
@@ -825,7 +870,7 @@ Merged PR delivery record:
 | P7 Preference, Style, And Artifact Memory | #90 | `codex/p7-preference-style-artifact-memory` | `9409b4a` | `af08043` | `main` |
 | P8 Runtime Truth, Security, And Deployment Authority | #91 | `codex/p8-runtime-truth-security-deployment-authority` | `8191d48` | `4ace498` | `main` |
 | P9 Agent Context Productization | #92 | `codex/p9-agent-context-productization` | `c6854e3` | `2d9c92a` | `main` |
-| P10 UI And Object Browser Surface | #93 | `codex/p10-ui-object-browser-defer-decision` | verify live before merge | pending | `main` |
+| P10 UI And Object Browser Surface | #93 | `codex/p10-ui-object-browser-defer-decision` | `8c483d0` | `7bda476` | `main` |
 
 PR creation gate:
 
@@ -836,18 +881,35 @@ PR creation gate:
 
 ## Next Design Targets
 
-Open approved PRs for the pushed continuation branches, then continue production read-path validation only when the configured LBrain MCP object-native tool namespace and deployed artifact identity can be proven. Keep P1 configured-agent namespace and current-main image identity gaps open until live evidence closes them, and keep production authority writes denied until an approved write gate exists.
+The next grill-to-spec / agentic-execution loop should target the product spine:
+
+```text
+source/corpus storage
+→ candidate graph extraction
+→ editable review
+→ approval-board promotion
+→ accepted/current authority
+```
+
+Continue production read-path validation only when the configured LBrain MCP object-native tool namespace can be proven from the active agent path. Keep production authority writes denied until the approval board, audit trail, rollback/supersession path, and scoped promotion gate are approved.
 
 Recommended goal:
 
 ```text
-If P10 is started, build only a local/read-only object inspection surface over existing object packs; do not make UI a prerequisite for MCP/read-path activation, authority writes, or production rollout.
+LBrain source-to-candidate-graph workflow with editable review and approval-board promotion.
 ```
 
 Expected outputs:
 
-- explicit P10 start/defer decision
-- read-only local object browser or inspection report if started
+- source/corpus storage requirements
+- candidate extraction design
+- minimal candidate object/edge/evidence edit surface contract
+- approval-board promotion contract
+- candidate object/edge/evidence edit fixtures
+- no-authority-mutation proof for extraction and reviewer edits
+- local/test promotion read-after-write proof
+- production promotion gate plan with human approval, audit, rollback/supersession, and scoped object classes
+- golden query slices for source-to-graph, review, approval, and authority read paths
 - no production mutation
 - no protected content, credentials, topology, or raw external ID output
 - clear PASS / PASS_WITH_GAPS / FAIL result with live gaps preserved
