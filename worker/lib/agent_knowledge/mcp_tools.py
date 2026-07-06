@@ -449,6 +449,10 @@ def list_tools() -> list[dict]:
                 "properties": {
                     "live_evidence": {"type": "object", "default": {}},
                     "expected_commit": {"type": "string"},
+                    "evidence_collection_plan": {"type": "boolean", "default": False},
+                    "repository": {"type": "string", "default": ""},
+                    "branch": {"type": "string", "default": ""},
+                    "consumer": {"type": "string", "default": "codex"},
                 },
                 "additionalProperties": False,
             },

@@ -60,6 +60,151 @@ LIVE_EVIDENCE_COLLECTION_MODES = {
 ALLOWED_EVIDENCE_MUTATION_SCOPES = {"none", "bounded_production_authority_execution"}
 
 
+def build_source_to_candidate_runtime_evidence_collection_plan(
+    *,
+    expected_commit: str = "",
+    repository: str = "",
+    branch: str = "",
+    consumer: str = "codex",
+) -> dict[str, Any]:
+    required_steps = [
+        "collect_mcp_tool_inventory",
+        "collect_agent_context_product",
+        "probe_brain_objects_query_routes",
+        "collect_deployed_identity",
+        "probe_production_no_mutation_denials",
+        "collect_object_authority_gate_policy",
+        "collect_evidence_provenance",
+    ]
+    plan = {
+        "schema_version": "source_to_candidate_runtime_evidence_collection_plan.v1",
+        "status": "ready",
+        "collection_mode": "post_deploy_read_only_smoke",
+        "output_schema": "source_to_candidate_runtime_evidence.v1",
+        "evidence_provenance_schema": EVIDENCE_PROVENANCE_SCHEMA,
+        "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
+        "repository": public_safe_text(str(repository or ""), max_chars=120),
+        "branch": public_safe_text(str(branch or ""), max_chars=120),
+        "consumer": public_safe_text(str(consumer or "codex"), max_chars=80),
+        "network_used": False,
+        "production_mutation_performed": False,
+        "mutation_allowed": False,
+        "required_steps": required_steps,
+        "required_tools": list(REQUIRED_RUNTIME_TOOL_NAMES),
+        "required_routes": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
+        "required_agent_context": {
+            "schema_version": REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA,
+            "sections": list(REQUIRED_AGENT_CONTEXT_SECTIONS),
+            "surface_policy": {"mutation_allowed": False},
+            "consumer_allowlist": list(ALLOWED_AGENT_CONTEXT_CONSUMERS),
+        },
+        "required_production_denials": [tool_name for _, tool_name in PRODUCTION_DENIAL_CLAIMS],
+        "required_tool_schema_gates": list(OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS),
+        "required_production_authority_gate": {
+            "runtime_flag": OBJECT_AUTHORITY_PRODUCTION_RUNTIME_FLAG,
+            "default_enabled": False,
+            "per_call_gate_required": True,
+            "production_mutation_performed": False,
+        },
+        "required_evidence_provenance": {
+            "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
+            "collection_mode": "post_deploy_read_only_smoke",
+            "mutation_scope": "none",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "collection_steps": _runtime_evidence_collection_steps(),
+        "forbidden_outputs": [
+            "raw_private_transcript",
+            "secret_value",
+            "host_topology",
+            "raw_dataset_id",
+            "raw_document_id",
+            "raw_private_runtime_evidence",
+        ],
+        "gap_mapping": {
+            "collect_mcp_tool_inventory": "live_mcp_review_tools_unverified",
+            "collect_agent_context_product": "live_agent_context_product_sections_unverified",
+            "probe_brain_objects_query_routes": "live_brain_objects_query_route_smokes_unverified",
+            "collect_deployed_identity": "live_deployed_identity_unverified",
+            "probe_production_no_mutation_denials": "production_denial_smokes_unverified",
+            "collect_object_authority_gate_policy": "live_object_authority_gate_policy_unverified",
+            "collect_evidence_provenance": "live_evidence_provenance_unverified",
+        },
+        "expected_readiness_outcomes": {
+            "no_live_evidence": "PASS_WITH_GAPS",
+            "complete_sanitized_packet": "PASS",
+            "unsafe_or_incomplete_packet": "FAIL",
+        },
+        "readiness_claim": "plan_only_not_runtime_evidence",
+    }
+    ensure_public_safe(plan, "SourceToCandidateRuntimeEvidenceCollectionPlan")
+    return plan
+
+
+def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
+    return [
+        {
+            "step_id": "collect_mcp_tool_inventory",
+            "evidence_field": "tool_names",
+            "required_values": list(REQUIRED_RUNTIME_TOOL_NAMES),
+            "safe_target": "configured_deployed_mcp_read_path",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
+            "step_id": "collect_agent_context_product",
+            "evidence_field": "agent_context_product",
+            "required_values": list(REQUIRED_AGENT_CONTEXT_SECTIONS),
+            "safe_target": "sanitized_agent_context_product",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
+            "step_id": "probe_brain_objects_query_routes",
+            "evidence_field": "brain_objects_query_smokes",
+            "required_values": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
+            "safe_target": "object_native_read_path",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
+            "step_id": "collect_deployed_identity",
+            "evidence_field": "deployed_identity",
+            "required_values": ["contains_expected_commit"],
+            "safe_target": "redacted_artifact_identity_summary",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
+            "step_id": "probe_production_no_mutation_denials",
+            "evidence_field": "production_denials",
+            "required_values": [tool_name for _, tool_name in PRODUCTION_DENIAL_CLAIMS],
+            "safe_target": "denied_no_mutation_smoke_results",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
+            "step_id": "collect_object_authority_gate_policy",
+            "evidence_field": "production_authority_gate",
+            "required_values": [OBJECT_AUTHORITY_PRODUCTION_RUNTIME_FLAG, *OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS],
+            "safe_target": "redacted_runtime_gate_policy",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
+            "step_id": "collect_evidence_provenance",
+            "evidence_field": "evidence_provenance",
+            "required_values": [EVIDENCE_PROVENANCE_SCHEMA, "post_deploy_read_only_smoke", "none"],
+            "safe_target": "sanitized_evidence_provenance",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+    ]
+
+
 def build_source_to_candidate_runtime_readiness_report(
     *,
     live_evidence: Mapping[str, Any] | None = None,

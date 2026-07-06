@@ -12,7 +12,10 @@ from .llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore, Led
 from .llm_brain_core.runtime import build_runtime_brain_service
 from .llm_brain_core.objects.extraction_pipeline import run_source_to_candidate_graph_activation_preview
 from .llm_brain_core.objects.object_packs import apply_approval_board_decisions, apply_candidate_review_edits
-from .llm_brain_core.objects.runtime_readiness import build_source_to_candidate_runtime_readiness_report
+from .llm_brain_core.objects.runtime_readiness import (
+    build_source_to_candidate_runtime_evidence_collection_plan,
+    build_source_to_candidate_runtime_readiness_report,
+)
 from .memory_read_pipeline import AuthorizedMemoryReader, MemoryReadPipeline, MemorySearchQuery
 from .index_client import RetiredIndexBridgeHttpClient
 from .public_safe_util import ensure_public_safe, public_safe_text
@@ -265,7 +268,18 @@ class KnowledgeSearchService:
         *,
         live_evidence: Mapping[str, Any] | None = None,
         expected_commit: str = "",
+        evidence_collection_plan: bool = False,
+        repository: str = "",
+        branch: str = "",
+        consumer: str = "codex",
     ) -> dict[str, Any]:
+        if evidence_collection_plan:
+            return build_source_to_candidate_runtime_evidence_collection_plan(
+                expected_commit=expected_commit,
+                repository=repository,
+                branch=branch,
+                consumer=consumer,
+            )
         return build_source_to_candidate_runtime_readiness_report(
             live_evidence=live_evidence,
             expected_commit=expected_commit,
