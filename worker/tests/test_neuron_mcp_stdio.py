@@ -412,6 +412,7 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
     assert readiness_schema["properties"]["expected_commit"]["type"] == "string"
     assert readiness_schema["properties"]["evidence_collection_plan"]["type"] == "boolean"
     assert readiness_schema["properties"]["evidence_packet_template"]["type"] == "boolean"
+    assert readiness_schema["properties"]["normalize_shadow_evidence"]["type"] == "object"
     assert readiness_schema["properties"]["repository"]["type"] == "string"
     assert readiness_schema["properties"]["branch"]["type"] == "string"
     assert readiness_schema["properties"]["consumer"]["type"] == "string"
@@ -595,6 +596,36 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_templ
     assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == 4
 
 
+def test_mcp_source_to_candidate_runtime_readiness_normalizes_shadow_evidence(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 122,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "normalize_shadow_evidence": _shadow_runtime_evidence_capture(),
+                },
+            },
+        },
+        service,
+    )
+
+    packet = response["result"]["structuredContent"]
+    assert packet["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert packet["production_mutation_performed"] is False
+    assert (
+        packet["evidence_provenance"]["schema_version"]
+        == "source_to_candidate_runtime_evidence_provenance.v1"
+    )
+    assert packet["evidence_provenance"]["collection_mode"] == "post_deploy_read_only_smoke"
+    assert packet["evidence_provenance"]["network_used"] is True
+    assert len(packet["brain_objects_query_smokes"]) == 4
+
+
 def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None) -> dict:
     return {
         "schema_version": "brain_objects_query.v1",
@@ -627,6 +658,52 @@ def _runtime_evidence_provenance(
         "secret_returned": False,
         "host_topology_returned": False,
         "raw_external_ids_returned": False,
+    }
+
+
+def _shadow_runtime_evidence_capture() -> dict:
+    return {
+        "tool_names": [BRAIN_CONTEXT_RESOLVE_TOOL_NAME, BRAIN_OBJECTS_QUERY_TOOL_NAME],
+        "agent_context_product": {
+            "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
+            "sections": {
+                "style_preference": {"object_count": 0},
+                "active_work": {"object_count": 0},
+                "required_verification": {"object_count": 1},
+            },
+            "surface_policy": {"mutation_allowed": False},
+            "degraded_mode": {"active": True, "gaps": ["runtime_evidence_unverified"]},
+            "missing_evidence_before_promotion": ["runtime_evidence_unverified"],
+            "tool_hints": [],
+        },
+        "brain_objects_query_smokes": [
+            _brain_objects_query_smoke(
+                "authority_archive_separation",
+                gaps=["object_pack_route_not_implemented"],
+            ),
+            _brain_objects_query_smoke(
+                "code_style_preference",
+                gaps=["object_pack_route_not_implemented"],
+            ),
+            _brain_objects_query_smoke(
+                "temporal_work_recall",
+                gaps=["object_pack_route_not_implemented"],
+            ),
+            _brain_objects_query_smoke(
+                "deployment_runtime_truth",
+                gaps=["object_pack_route_not_implemented"],
+            ),
+        ],
+        "deployed_identity": {
+            "contains_expected_commit": False,
+            "identity_source": "current_codex_session_configured_mcp_namespace",
+        },
+        "collection": {
+            "collection_mode": "post_deploy_read_only_smoke",
+            "network_used": True,
+            "mutation_scope": "none",
+        },
     }
 
 

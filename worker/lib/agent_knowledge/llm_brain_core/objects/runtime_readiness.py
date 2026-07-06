@@ -200,6 +200,51 @@ def build_source_to_candidate_runtime_evidence_packet_template(
     return template
 
 
+def build_source_to_candidate_runtime_shadow_evidence_packet(
+    *,
+    captured_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Normalize a public-safe post-deploy shadow capture into evaluator input."""
+
+    captured = captured_evidence if isinstance(captured_evidence, Mapping) else {}
+    collection = captured.get("collection")
+    collection = collection if isinstance(collection, Mapping) else {}
+    provenance = captured.get("evidence_provenance")
+    provenance = provenance if isinstance(provenance, Mapping) else collection
+    packet = {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "tool_names": _string_list(captured.get("tool_names")),
+        "agent_context_product": _public_safe_mapping(captured.get("agent_context_product")),
+        "brain_objects_query_smokes": _public_safe_mapping_list(captured.get("brain_objects_query_smokes")),
+        "deployed_identity": _public_safe_mapping(captured.get("deployed_identity")),
+        "production_denials": _public_safe_mapping(captured.get("production_denials")),
+        "tool_schemas": _public_safe_mapping(captured.get("tool_schemas")),
+        "production_authority_gate": _public_safe_mapping(captured.get("production_authority_gate")),
+        "evidence_provenance": {
+            "schema_version": public_safe_text(
+                str(provenance.get("schema_version") or EVIDENCE_PROVENANCE_SCHEMA),
+                max_chars=80,
+            ),
+            "collection_mode": public_safe_text(
+                str(provenance.get("collection_mode") or "post_deploy_read_only_smoke"),
+                max_chars=80,
+            ),
+            "network_used": provenance.get("network_used") is True,
+            "mutation_scope": public_safe_text(
+                str(provenance.get("mutation_scope") or "none"),
+                max_chars=80,
+            ),
+            "raw_private_evidence_returned": _provenance_flag(provenance, "raw_private_evidence_returned"),
+            "secret_returned": _provenance_flag(provenance, "secret_returned"),
+            "host_topology_returned": _provenance_flag(provenance, "host_topology_returned"),
+            "raw_external_ids_returned": _provenance_flag(provenance, "raw_external_ids_returned"),
+        },
+        "production_mutation_performed": False,
+    }
+    ensure_public_safe(packet, "SourceToCandidateRuntimeShadowEvidencePacket")
+    return packet
+
+
 def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
     return {
         "schema_version": "source_to_candidate_runtime_evidence.v1",
@@ -1125,6 +1170,35 @@ def _object_query_smokes_report_mutation(smoke_items: list[Mapping[str, Any]]) -
         bool(item.get("production_mutation_performed")) or bool(item.get("mutation_performed"))
         for item in smoke_items
     )
+
+
+def _public_safe_mapping(value: Any) -> dict[str, Any]:
+    return _public_safe_json_value(value) if isinstance(value, Mapping) else {}
+
+
+def _public_safe_mapping_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [_public_safe_mapping(item) for item in value if isinstance(item, Mapping)]
+
+
+def _public_safe_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            public_safe_text(str(key), max_chars=160): _public_safe_json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_public_safe_json_value(item) for item in value]
+    if isinstance(value, str):
+        return public_safe_text(value, max_chars=2048)
+    return value
+
+
+def _provenance_flag(provenance: Mapping[str, Any], name: str) -> Any:
+    if name in provenance:
+        return provenance.get(name)
+    return False
 
 
 def _string_list(value: Any) -> list[str]:

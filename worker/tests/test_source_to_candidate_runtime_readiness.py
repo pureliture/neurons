@@ -11,6 +11,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_evidence_collection_plan,
     build_source_to_candidate_runtime_evidence_packet_template,
     build_source_to_candidate_runtime_readiness_report,
+    build_source_to_candidate_runtime_shadow_evidence_packet,
 )
 
 
@@ -103,6 +104,56 @@ def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None):
             "lanes": {"candidate": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}]},
             "recommended_actions": [{"object_id": f"ko:test:{route}", "action": "review"}],
             "gaps": list(gaps or []),
+        },
+    }
+
+
+def _shadow_brain_objects_query_smoke(route: str):
+    return {
+        "schema_version": "brain_objects_query.v1",
+        "route": route,
+        "production_mutation_performed": False,
+        "object_pack": {
+            "schema_version": "object_pack.v1",
+            "route": route,
+            "objects": [],
+            "edges": [],
+            "evidence": [],
+            "lanes": {},
+            "recommended_actions": [],
+            "gaps": ["object_pack_route_not_implemented"],
+        },
+    }
+
+
+def _current_session_shadow_evidence_capture():
+    return {
+        "tool_names": ["brain_context_resolve", "brain_objects_query"],
+        "agent_context_product": {
+            "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
+            "sections": {
+                "style_preference": {"object_count": 0},
+                "active_work": {"object_count": 0},
+                "required_verification": {"object_count": 1},
+            },
+            "surface_policy": {"mutation_allowed": False},
+            "degraded_mode": {"active": True, "gaps": ["runtime_evidence_unverified"]},
+            "missing_evidence_before_promotion": ["runtime_evidence_unverified"],
+            "tool_hints": [],
+        },
+        "brain_objects_query_smokes": [
+            _shadow_brain_objects_query_smoke(route)
+            for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+        ],
+        "deployed_identity": {
+            "contains_expected_commit": False,
+            "identity_source": "current_codex_session_configured_mcp_namespace",
+        },
+        "collection": {
+            "collection_mode": "post_deploy_read_only_smoke",
+            "network_used": True,
+            "mutation_scope": "none",
         },
     }
 
@@ -355,6 +406,48 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
     assert "host_topology" in template["forbidden_outputs"]
     assert "raw_dataset_id" in template["forbidden_outputs"]
     assert "raw_document_id" in template["forbidden_outputs"]
+
+
+def test_runtime_readiness_shadow_evidence_normalizer_builds_public_safe_packet_without_mutation():
+    packet = build_source_to_candidate_runtime_shadow_evidence_packet(
+        captured_evidence=_current_session_shadow_evidence_capture()
+    )
+
+    assert packet["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert packet["production_mutation_performed"] is False
+    assert packet["tool_names"] == ["brain_context_resolve", "brain_objects_query"]
+    provenance = packet["evidence_provenance"]
+    assert provenance["schema_version"] == EVIDENCE_PROVENANCE_SCHEMA
+    assert provenance["collection_mode"] == "post_deploy_read_only_smoke"
+    assert provenance["network_used"] is True
+    assert provenance["mutation_scope"] == "none"
+    assert provenance["raw_private_evidence_returned"] is False
+    assert provenance["secret_returned"] is False
+    assert provenance["host_topology_returned"] is False
+    assert provenance["raw_external_ids_returned"] is False
+    assert {item["route"] for item in packet["brain_objects_query_smokes"]} == set(
+        REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+    )
+
+
+def test_runtime_readiness_shadow_evidence_normalized_packet_evaluates_current_session_gaps():
+    packet = build_source_to_candidate_runtime_shadow_evidence_packet(
+        captured_evidence=_current_session_shadow_evidence_capture()
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=packet,
+        expected_commit="c264b46",
+    )
+
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["failed_claims"] == []
+    assert report["production_mutation_performed"] is False
+    assert report["network_used"] is False
+    assert report["evidence_collection_network_used"] is True
+    for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES:
+        assert f"brain_objects_query_route_unimplemented:{route}" in report["gaps"]
+        assert f"shadow_route_smoke_not_implemented:{route}" in report["gaps"]
 
 
 def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation():
@@ -1106,3 +1199,29 @@ def test_neuron_knowledge_runtime_readiness_cli_outputs_evidence_packet_template
     assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == len(
         REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
     )
+
+
+def test_neuron_knowledge_runtime_readiness_cli_normalizes_shadow_evidence_file(tmp_path, capsys):
+    capture_file = tmp_path / "shadow-evidence-capture.json"
+    capture_file.write_text(
+        json.dumps(_current_session_shadow_evidence_capture()),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "source-to-candidate-runtime-readiness",
+                "--normalize-shadow-evidence-file",
+                str(capture_file),
+            ]
+        )
+        == 0
+    )
+
+    packet = json.loads(capsys.readouterr().out)
+    assert packet["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert packet["production_mutation_performed"] is False
+    assert packet["evidence_provenance"]["schema_version"] == EVIDENCE_PROVENANCE_SCHEMA
+    assert packet["evidence_provenance"]["network_used"] is True
+    assert len(packet["brain_objects_query_smokes"]) == len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)

@@ -25,6 +25,7 @@ from .runtime_readiness import (
     build_source_to_candidate_runtime_evidence_collection_plan,
     build_source_to_candidate_runtime_evidence_packet_template,
     build_source_to_candidate_runtime_readiness_report,
+    build_source_to_candidate_runtime_shadow_evidence_packet,
 )
 
 REFERENCE_CORPUS_LEDGER_ENV = "NEURON_REFERENCE_CORPUS_LEDGER"
@@ -355,6 +356,7 @@ def golden_query_eval_main(argv: list[str] | None = None) -> int:
 def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="neuron-knowledge source-to-candidate-runtime-readiness")
     parser.add_argument("--live-evidence-file", default="")
+    parser.add_argument("--normalize-shadow-evidence-file", default="")
     parser.add_argument("--expected-commit", default="")
     parser.add_argument("--evidence-collection-plan", action="store_true")
     parser.add_argument("--evidence-packet-template", action="store_true")
@@ -379,6 +381,16 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 repository=args.repository,
                 branch=args.branch,
                 consumer=args.consumer,
+            )
+        )
+        return 0
+    if args.normalize_shadow_evidence_file:
+        _print_json(
+            build_source_to_candidate_runtime_shadow_evidence_packet(
+                captured_evidence=_load_json_mapping(
+                    args.normalize_shadow_evidence_file,
+                    label="shadow evidence",
+                ),
             )
         )
         return 0
