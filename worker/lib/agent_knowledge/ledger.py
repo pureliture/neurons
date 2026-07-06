@@ -2593,6 +2593,15 @@ class Ledger(
         state_json = json.dumps(state, ensure_ascii=False, sort_keys=True)
         proposal_status = _object_proposal_status_for_decision(decision_type, new_lane)
         with self._connect() as connection:
+            row = connection.execute(
+                "SELECT proposal_json FROM object_review_proposals WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("object authority decision requires an existing review proposal")
+            proposal = json.loads(row["proposal_json"])
+            if str(proposal.get("target_object_id") or "") != target_object_id:
+                raise ValueError("object authority decision target must match the review proposal target")
             connection.execute(
                 """
                 INSERT INTO object_authority_decisions (
@@ -2646,25 +2655,19 @@ class Ledger(
                     now,
                 ),
             )
-            row = connection.execute(
-                "SELECT proposal_json FROM object_review_proposals WHERE proposal_id = ?",
-                (proposal_id,),
-            ).fetchone()
-            if row is not None:
-                proposal = json.loads(row["proposal_json"])
-                proposal["status"] = proposal_status
-                proposal["decision_id"] = decision_id
-                proposal["authority_write_performed"] = False
-                proposal["authoritative_memory_changed"] = False
-                proposal_json = json.dumps(proposal, ensure_ascii=False, sort_keys=True)
-                connection.execute(
-                    """
-                    UPDATE object_review_proposals
-                    SET status = ?, proposal_json = ?, updated_at = ?
-                    WHERE proposal_id = ?
-                    """,
-                    (proposal_status, proposal_json, now, proposal_id),
-                )
+            proposal["status"] = proposal_status
+            proposal["decision_id"] = decision_id
+            proposal["authority_write_performed"] = False
+            proposal["authoritative_memory_changed"] = False
+            proposal_json = json.dumps(proposal, ensure_ascii=False, sort_keys=True)
+            connection.execute(
+                """
+                UPDATE object_review_proposals
+                SET status = ?, proposal_json = ?, updated_at = ?
+                WHERE proposal_id = ?
+                """,
+                (proposal_status, proposal_json, now, proposal_id),
+            )
             readback = connection.execute(
                 "SELECT decision_json FROM object_authority_decisions WHERE decision_id = ?",
                 (decision_id,),
@@ -2683,6 +2686,22 @@ class Ledger(
                 (target,),
             ).fetchone()
         return json.loads(row["state_json"]) if row is not None else {}
+
+    def get_object_authority_states(self, target_object_ids: list[str]) -> dict[str, dict]:
+        targets = [str(target_id or "") for target_id in target_object_ids if target_id]
+        if not targets:
+            return {}
+        placeholders = ", ".join("?" for _ in targets)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT target_object_id, state_json
+                FROM object_authority_states
+                WHERE target_object_id IN ({placeholders})
+                """,
+                targets,
+            ).fetchall()
+        return {str(row["target_object_id"]): json.loads(row["state_json"]) for row in rows}
 
     def list_object_authority_decisions(
         self,
@@ -2749,12 +2768,30 @@ class Ledger(
         extraction_run = dict(bundle.get("extraction_run") or {})
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         payload = json.dumps(bundle, ensure_ascii=False, sort_keys=True)
+        source_ids = [str(source.get("source_id") or "") for source in sources]
+        version_ids = [str(version.get("version_id") or "") for version in versions]
+        snapshot_ids = [str(snapshot.get("snapshot_id") or "") for snapshot in snapshots]
+        chunk_ids = [str(chunk.get("chunk_id") or "") for chunk in chunks]
+        freshness_check_ids = [str(check.get("check_id") or "") for check in freshness_checks]
+        extraction_run_ids = [str(extraction_run.get("run_id") or "")] if extraction_run else []
         with self._connect() as connection:
-            existing = connection.execute(
-                "SELECT created_at FROM reference_corpus_bundles WHERE corpus_id = ?",
-                (corpus_id,),
-            ).fetchone()
-            created_at = existing["created_at"] if existing is not None else now
+            def delete_missing_child_rows(table: str, id_column: str, current_ids: list[str]) -> None:
+                ids = [current_id for current_id in current_ids if current_id]
+                if not ids:
+                    connection.execute(f"DELETE FROM {table} WHERE corpus_id = ?", (corpus_id,))
+                    return
+                placeholders = ", ".join("?" for _ in ids)
+                connection.execute(
+                    f"DELETE FROM {table} WHERE corpus_id = ? AND {id_column} NOT IN ({placeholders})",
+                    (corpus_id, *ids),
+                )
+
+            delete_missing_child_rows("reference_corpus_extraction_runs", "run_id", extraction_run_ids)
+            delete_missing_child_rows("reference_corpus_freshness_checks", "check_id", freshness_check_ids)
+            delete_missing_child_rows("reference_corpus_document_chunks", "chunk_id", chunk_ids)
+            delete_missing_child_rows("reference_corpus_document_snapshots", "snapshot_id", snapshot_ids)
+            delete_missing_child_rows("reference_corpus_document_versions", "version_id", version_ids)
+            delete_missing_child_rows("reference_corpus_document_sources", "source_id", source_ids)
             connection.execute(
                 """
                 INSERT INTO reference_corpus_bundles (
@@ -2770,7 +2807,7 @@ class Ledger(
                     bundle_json=excluded.bundle_json,
                     updated_at=excluded.updated_at
                 """,
-                (corpus_id, project_name, name, storage_mode, manifest_hash, len(sources), payload, created_at, now),
+                (corpus_id, project_name, name, storage_mode, manifest_hash, len(sources), payload, now, now),
             )
             for source in sources:
                 source_id = str(source.get("source_id") or "")
@@ -2778,11 +2815,6 @@ class Ledger(
                 if not source_id or not source_mode:
                     raise ValueError("document source requires source_id and storage_mode")
                 source_payload = json.dumps(source, ensure_ascii=False, sort_keys=True)
-                existing_source = connection.execute(
-                    "SELECT created_at FROM reference_corpus_document_sources WHERE source_id = ?",
-                    (source_id,),
-                ).fetchone()
-                source_created_at = existing_source["created_at"] if existing_source is not None else now
                 connection.execute(
                     """
                     INSERT INTO reference_corpus_document_sources (
@@ -2795,7 +2827,7 @@ class Ledger(
                         source_json=excluded.source_json,
                         updated_at=excluded.updated_at
                     """,
-                    (source_id, corpus_id, project_name, source_mode, source_payload, source_created_at, now),
+                    (source_id, corpus_id, project_name, source_mode, source_payload, now, now),
                 )
             for version in versions:
                 version_id = str(version.get("version_id") or "")
@@ -2805,11 +2837,6 @@ class Ledger(
                 if not version_id or not source_id or not content_hash or not metadata_hash:
                     raise ValueError("document version requires version_id, source_id, content_hash and metadata_hash")
                 version_payload = json.dumps(version, ensure_ascii=False, sort_keys=True)
-                existing_version = connection.execute(
-                    "SELECT created_at FROM reference_corpus_document_versions WHERE version_id = ?",
-                    (version_id,),
-                ).fetchone()
-                version_created_at = existing_version["created_at"] if existing_version is not None else now
                 connection.execute(
                     """
                     INSERT INTO reference_corpus_document_versions (
@@ -2833,7 +2860,7 @@ class Ledger(
                         content_hash,
                         metadata_hash,
                         version_payload,
-                        version_created_at,
+                        now,
                         now,
                     ),
                 )
@@ -2845,11 +2872,6 @@ class Ledger(
                 if not snapshot_id or not source_id or not content_hash:
                     raise ValueError("document snapshot requires snapshot_id, source_id and content_hash")
                 snapshot_payload = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
-                existing_snapshot = connection.execute(
-                    "SELECT created_at FROM reference_corpus_document_snapshots WHERE snapshot_id = ?",
-                    (snapshot_id,),
-                ).fetchone()
-                snapshot_created_at = existing_snapshot["created_at"] if existing_snapshot is not None else now
                 connection.execute(
                     """
                     INSERT INTO reference_corpus_document_snapshots (
@@ -2873,7 +2895,7 @@ class Ledger(
                         project_name,
                         content_hash,
                         snapshot_payload,
-                        snapshot_created_at,
+                        now,
                         now,
                     ),
                 )
@@ -2883,11 +2905,6 @@ class Ledger(
                 if not chunk_id or not snapshot_id:
                     raise ValueError("document chunk requires chunk_id and snapshot_id")
                 chunk_payload = json.dumps(chunk, ensure_ascii=False, sort_keys=True)
-                existing_chunk = connection.execute(
-                    "SELECT created_at FROM reference_corpus_document_chunks WHERE chunk_id = ?",
-                    (chunk_id,),
-                ).fetchone()
-                chunk_created_at = existing_chunk["created_at"] if existing_chunk is not None else now
                 connection.execute(
                     """
                     INSERT INTO reference_corpus_document_chunks (
@@ -2900,7 +2917,7 @@ class Ledger(
                         chunk_json=excluded.chunk_json,
                         updated_at=excluded.updated_at
                     """,
-                    (chunk_id, corpus_id, snapshot_id, project_name, chunk_payload, chunk_created_at, now),
+                    (chunk_id, corpus_id, snapshot_id, project_name, chunk_payload, now, now),
                 )
             for check in freshness_checks:
                 check_id = str(check.get("check_id") or "")
@@ -2910,11 +2927,6 @@ class Ledger(
                 if not check_id or not source_id:
                     raise ValueError("freshness check requires check_id and source_id")
                 check_payload = json.dumps(check, ensure_ascii=False, sort_keys=True)
-                existing_check = connection.execute(
-                    "SELECT created_at FROM reference_corpus_freshness_checks WHERE check_id = ?",
-                    (check_id,),
-                ).fetchone()
-                check_created_at = existing_check["created_at"] if existing_check is not None else now
                 connection.execute(
                     """
                     INSERT INTO reference_corpus_freshness_checks (
@@ -2930,7 +2942,7 @@ class Ledger(
                         check_json=excluded.check_json,
                         updated_at=excluded.updated_at
                     """,
-                    (check_id, corpus_id, source_id, project_name, status, result, check_payload, check_created_at, now),
+                    (check_id, corpus_id, source_id, project_name, status, result, check_payload, now, now),
                 )
             if extraction_run:
                 run_id = str(extraction_run.get("run_id") or "")
@@ -2939,11 +2951,6 @@ class Ledger(
                 if not run_id or not status or not input_hash:
                     raise ValueError("extraction run requires run_id, status and input_hash")
                 run_payload = json.dumps(extraction_run, ensure_ascii=False, sort_keys=True)
-                existing_run = connection.execute(
-                    "SELECT created_at FROM reference_corpus_extraction_runs WHERE run_id = ?",
-                    (run_id,),
-                ).fetchone()
-                run_created_at = existing_run["created_at"] if existing_run is not None else now
                 connection.execute(
                     """
                     INSERT INTO reference_corpus_extraction_runs (
@@ -2958,7 +2965,7 @@ class Ledger(
                         run_json=excluded.run_json,
                         updated_at=excluded.updated_at
                     """,
-                    (run_id, corpus_id, project_name, status, input_hash, run_payload, run_created_at, now),
+                    (run_id, corpus_id, project_name, status, input_hash, run_payload, now, now),
                 )
             row = connection.execute(
                 "SELECT bundle_json FROM reference_corpus_bundles WHERE corpus_id = ?",
@@ -2994,6 +3001,97 @@ class Ledger(
         project_name = public_safe_text(project, max_chars=120)
         corpus_key = public_safe_text(corpus_id, max_chars=180)
         with self._connect() as connection:
+            def count_rows(table: str) -> int:
+                if corpus_key:
+                    row = connection.execute(
+                        f"""
+                        SELECT COUNT(*) AS c
+                        FROM {table}
+                        WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                        """,
+                        (corpus_key, project_name, project_name),
+                    ).fetchone()
+                elif project_name:
+                    row = connection.execute(
+                        f"""
+                        SELECT COUNT(*) AS c
+                        FROM {table}
+                        WHERE project = ? OR project = ''
+                        """,
+                        (project_name,),
+                    ).fetchone()
+                else:
+                    row = connection.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
+                return int(row["c"] if row is not None else 0)
+
+            def sum_bundle_source_count() -> int:
+                if corpus_key:
+                    row = connection.execute(
+                        """
+                        SELECT COALESCE(SUM(source_count), 0) AS c
+                        FROM reference_corpus_bundles
+                        WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                        """,
+                        (corpus_key, project_name, project_name),
+                    ).fetchone()
+                elif project_name:
+                    row = connection.execute(
+                        """
+                        SELECT COALESCE(SUM(source_count), 0) AS c
+                        FROM reference_corpus_bundles
+                        WHERE project = ? OR project = ''
+                        """,
+                        (project_name,),
+                    ).fetchone()
+                else:
+                    row = connection.execute(
+                        "SELECT COALESCE(SUM(source_count), 0) AS c FROM reference_corpus_bundles"
+                    ).fetchone()
+                return int(row["c"] if row is not None else 0)
+
+            def storage_mode_counts() -> dict[str, int]:
+                if corpus_key:
+                    rows_for_modes = connection.execute(
+                        """
+                        SELECT storage_mode, COUNT(*) AS c
+                        FROM reference_corpus_document_sources
+                        WHERE corpus_id = ? AND (? = '' OR project = ? OR project = '')
+                        GROUP BY storage_mode
+                        """,
+                        (corpus_key, project_name, project_name),
+                    ).fetchall()
+                elif project_name:
+                    rows_for_modes = connection.execute(
+                        """
+                        SELECT storage_mode, COUNT(*) AS c
+                        FROM reference_corpus_document_sources
+                        WHERE project = ? OR project = ''
+                        GROUP BY storage_mode
+                        """,
+                        (project_name,),
+                    ).fetchall()
+                else:
+                    rows_for_modes = connection.execute(
+                        """
+                        SELECT storage_mode, COUNT(*) AS c
+                        FROM reference_corpus_document_sources
+                        GROUP BY storage_mode
+                        """
+                    ).fetchall()
+                return {
+                    str(row["storage_mode"]): int(row["c"])
+                    for row in rows_for_modes
+                    if str(row["storage_mode"] or "")
+                }
+
+            total_bundles = count_rows("reference_corpus_bundles")
+            total_document_sources = count_rows("reference_corpus_document_sources")
+            total_document_versions = count_rows("reference_corpus_document_versions")
+            total_document_snapshots = count_rows("reference_corpus_document_snapshots")
+            total_document_chunks = count_rows("reference_corpus_document_chunks")
+            total_freshness_checks = count_rows("reference_corpus_freshness_checks")
+            total_extraction_runs = count_rows("reference_corpus_extraction_runs")
+            total_bundle_sources = sum_bundle_source_count()
             if corpus_key:
                 rows = connection.execute(
                     """
@@ -3206,6 +3304,7 @@ class Ledger(
                     """,
                     (bounded,),
                 ).fetchall()
+            storage_modes = storage_mode_counts()
         bundles = [json.loads(row["bundle_json"]) for row in rows]
         document_sources = [json.loads(row["source_json"]) for row in source_rows]
         document_versions = [json.loads(row["version_json"]) for row in version_rows]
@@ -3213,18 +3312,13 @@ class Ledger(
         document_chunks = [json.loads(row["chunk_json"]) for row in chunk_rows]
         freshness_checks = [json.loads(row["check_json"]) for row in freshness_rows]
         stored_extraction_runs = [json.loads(row["run_json"]) for row in run_rows]
-        storage_modes: dict[str, int] = {}
         freshness_gaps: list[dict] = []
         extraction_runs: list[dict] = []
-        source_count = 0
+        source_count = total_document_sources or total_bundle_sources
         reference_object_count = 0
-        snapshot_count = 0
-        chunk_count = 0
+        snapshot_count = total_document_snapshots
+        chunk_count = total_document_chunks
         manifest_hashes: list[str] = []
-        for source in document_sources:
-            mode = str(source.get("storage_mode") or "")
-            if mode:
-                storage_modes[mode] = storage_modes.get(mode, 0) + 1
         for run in stored_extraction_runs:
             extraction_runs.append(
                 {
@@ -3237,13 +3331,12 @@ class Ledger(
             )
         for bundle in bundles:
             sources = list(bundle.get("sources") or [])
-            source_count += len(sources)
             reference_object_count += len(bundle.get("objects") or [])
-            if not document_snapshots:
+            if not total_document_snapshots:
                 snapshot_count += len(bundle.get("snapshots") or [])
-            if not document_chunks:
+            if not total_document_chunks:
                 chunk_count += len(bundle.get("chunks") or [])
-            if not document_sources:
+            if not storage_modes:
                 for source in sources:
                     mode = str(source.get("storage_mode") or "")
                     if mode:
@@ -3263,38 +3356,34 @@ class Ledger(
             manifest_hash = str((bundle.get("corpus") or {}).get("manifest_ref") or "")
             if manifest_hash:
                 manifest_hashes.append(manifest_hash)
-        if document_snapshots:
-            snapshot_count = len(document_snapshots)
-        if document_chunks:
-            chunk_count = len(document_chunks)
         status = {
             "schema_version": "brain_corpus_status.v1",
             "project": project_name,
             "corpus_id": corpus_key,
-            "corpus_count": len(bundles),
+            "corpus_count": total_bundles,
             "source_count": source_count,
             "storage_modes": storage_modes,
             "reference_object_count": reference_object_count,
-            "document_source_count": len(document_sources) if document_sources else source_count,
+            "document_source_count": total_document_sources if total_document_sources else source_count,
             "document_sources": document_sources,
-            "version_count": len(document_versions),
+            "version_count": total_document_versions,
             "document_versions": document_versions,
             "snapshot_count": snapshot_count,
             "document_snapshots": document_snapshots,
             "chunk_count": chunk_count,
             "document_chunks": document_chunks,
-            "freshness_check_count": len(freshness_checks),
+            "freshness_check_count": total_freshness_checks,
             "freshness_checks": freshness_checks,
-            "extraction_run_count": len(extraction_runs),
+            "extraction_run_count": total_extraction_runs,
             "freshness_gaps": freshness_gaps,
             "extraction_runs": extraction_runs,
             "first_class_store_counts": {
-                "document_sources": len(document_sources),
-                "document_versions": len(document_versions),
-                "document_snapshots": len(document_snapshots),
-                "document_chunks": len(document_chunks),
-                "freshness_checks": len(freshness_checks),
-                "extraction_runs": len(stored_extraction_runs),
+                "document_sources": total_document_sources,
+                "document_versions": total_document_versions,
+                "document_snapshots": total_document_snapshots,
+                "document_chunks": total_document_chunks,
+                "freshness_checks": total_freshness_checks,
+                "extraction_runs": total_extraction_runs,
             },
             "manifest_hashes": manifest_hashes,
             "limit": bounded,

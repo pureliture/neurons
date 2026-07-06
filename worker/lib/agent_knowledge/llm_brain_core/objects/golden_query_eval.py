@@ -139,7 +139,7 @@ def evaluate_object_pack_response(
     required_axes: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     failures: list[str] = []
-    checked_axes = [str(axis) for axis in required_axes or []]
+    checked_axes = [str(axis or "") for axis in required_axes or []]
     lanes = response.get("lanes") if isinstance(response.get("lanes"), Mapping) else {}
     lane_items = []
     for value in lanes.values():
@@ -165,8 +165,9 @@ def evaluate_object_pack_response(
         failures.append("missing_gap_field")
     if checked_axes:
         for lane, value in lanes.items():
-            if isinstance(value, list) and not value and not _empty_lane_is_stated(str(lane), gaps):
-                failures.append(f"empty_authority_lane_not_stated:{lane}")
+            safe_lane = str(lane or "")
+            if isinstance(value, list) and not value and not _empty_lane_is_stated(safe_lane, gaps):
+                failures.append(f"empty_authority_lane_not_stated:{safe_lane}")
     if checked_axes and _is_runtime_claim(query, response) and not _has_runtime_evidence_or_gap(response, evidence, gaps):
         failures.append("runtime_evidence_missing")
     result = {
@@ -215,7 +216,7 @@ def _planned_phase(phase: str, title: str, golden_query_family: str, query: str)
 
 def _gap_declares_not_applicable(gaps: list[Any], axis: str) -> bool:
     wanted = {f"{axis}_not_applicable", f"{axis}s_not_applicable"}
-    return any(str(item) in wanted for item in gaps)
+    return any(str(item or "") in wanted for item in gaps)
 
 
 def _has_freshness_signal(response: Mapping[str, Any], evidence: list[Any]) -> bool:
@@ -223,29 +224,29 @@ def _has_freshness_signal(response: Mapping[str, Any], evidence: list[Any]) -> b
         return True
     verification = response.get("verification")
     if isinstance(verification, Mapping):
-        for value in verification.values():
+        for key in ("freshness", "freshness_checked", "freshness_gaps", "freshness_verified"):
+            value = verification.get(key)
             if isinstance(value, list) and value:
                 return True
             if isinstance(value, Mapping) and value:
+                return True
+            if isinstance(value, bool) and value:
+                return True
+            if isinstance(value, str) and value:
                 return True
     for item in evidence:
         if not isinstance(item, Mapping):
             continue
         verification_state = str(item.get("verification_state") or "")
-        if verification_state in {
-            "freshness_checked",
-            "source_hash_verified",
-            "test_verified",
-            "runtime_verified",
-            "runtime_unverified",
-        }:
+        evidence_type = str(item.get("evidence_type") or "").lower()
+        if verification_state in {"freshness_checked", "freshness_verified"} or "freshness" in evidence_type:
             return True
     return False
 
 
 def _empty_lane_is_stated(lane: str, gaps: list[Any]) -> bool:
     for item in gaps:
-        text = str(item).lower()
+        text = str(item or "").lower()
         if lane.lower() in text and any(marker in text for marker in ("empty", "missing", "none")):
             return True
     return False
@@ -271,6 +272,6 @@ def _has_runtime_evidence_or_gap(response: Mapping[str, Any], evidence: list[Any
         }:
             return True
     for item in gaps:
-        if "runtime_evidence" in str(item):
+        if "runtime_evidence" in str(item or ""):
             return True
     return False
