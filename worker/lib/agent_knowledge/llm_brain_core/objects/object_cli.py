@@ -26,6 +26,7 @@ from .runtime_readiness import (
     build_source_to_candidate_runtime_evidence_packet_template,
     build_source_to_candidate_runtime_readiness_report,
     build_source_to_candidate_runtime_shadow_evidence_packet,
+    build_source_to_candidate_runtime_shadow_readiness_report,
 )
 
 REFERENCE_CORPUS_LEDGER_ENV = "NEURON_REFERENCE_CORPUS_LEDGER"
@@ -357,6 +358,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     parser = argparse.ArgumentParser(prog="neuron-knowledge source-to-candidate-runtime-readiness")
     parser.add_argument("--live-evidence-file", default="")
     parser.add_argument("--normalize-shadow-evidence-file", default="")
+    parser.add_argument("--shadow-evidence-file", default="")
     parser.add_argument("--expected-commit", default="")
     parser.add_argument("--evidence-collection-plan", action="store_true")
     parser.add_argument("--evidence-packet-template", action="store_true")
@@ -394,6 +396,16 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
             )
         )
         return 0
+    if args.shadow_evidence_file:
+        report = build_source_to_candidate_runtime_shadow_readiness_report(
+            captured_evidence=_load_json_mapping(
+                args.shadow_evidence_file,
+                label="shadow evidence",
+            ),
+            expected_commit=args.expected_commit,
+        )
+        _print_json(report)
+        return 1 if report["status"] == "FAIL" else 0
     live_evidence = (
         _load_json_mapping(args.live_evidence_file, label="live evidence")
         if args.live_evidence_file

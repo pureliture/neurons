@@ -245,6 +245,20 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
     return packet
 
 
+def build_source_to_candidate_runtime_shadow_readiness_report(
+    *,
+    captured_evidence: Mapping[str, Any],
+    expected_commit: str = "",
+) -> dict[str, Any]:
+    packet = build_source_to_candidate_runtime_shadow_evidence_packet(
+        captured_evidence=captured_evidence,
+    )
+    return build_source_to_candidate_runtime_readiness_report(
+        live_evidence=packet,
+        expected_commit=expected_commit,
+    )
+
+
 def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
     return {
         "schema_version": "source_to_candidate_runtime_evidence.v1",

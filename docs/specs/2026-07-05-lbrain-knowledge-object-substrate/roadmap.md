@@ -980,14 +980,14 @@ Current accounting:
 | P5 Continuous Golden Query Quality Gates | `in_progress` | `PASS_WITH_GAPS`; phase coverage, source-to-authority path gate, FR8 code-change-impact route gate, P7 HTML/visualization route evidence, and P2-P9 activation progress gate exist, release quality gate remains `not_green` |
 | P6 Session, Device, Project, And Work-Unit 360 | `local_validated` | `PASS_WITH_GAPS`; local/test rollup, handoff gates, and temporal `brain_objects_query` `WorkUnit` route pass; live multi-device runtime evidence remains a gap |
 | P7 Preference, Style, And Artifact Memory | `local_validated` | `PASS_WITH_GAPS`; local/test artifact preference pack lanes, no-UI HTML artifact check, and branch-local HTML/visualization preference route pass, live agent context pack and production authority promotion remain gaps |
-| P8 Runtime Truth, Security, And Deployment Authority | `local_validated` | `PASS_WITH_GAPS`; local/test runtime authority policy, artifact identity join, private authority redaction, denial/no-mutation checks, sanitized bounded execution packet validation, evidence provenance validation, and current-session shadow evidence packet normalization pass; broader deployed/live production runtime authority and permission audit remain gaps |
+| P8 Runtime Truth, Security, And Deployment Authority | `local_validated` | `PASS_WITH_GAPS`; local/test runtime authority policy, artifact identity join, private authority redaction, denial/no-mutation checks, sanitized bounded execution packet validation, evidence provenance validation, current-session shadow evidence packet normalization, and one-step shadow readiness evaluation pass; broader deployed/live production runtime authority and permission audit remain gaps |
 | P9 Agent Context Productization | `local_validated` | `PASS_WITH_GAPS`; local/test consumer compact packs, degraded/stale disclosure, surface policy, and proposal-safe action hints pass; production startup/read path and runtime enforcement remain gaps |
 | P10 UI And Object Browser Surface | `planned` | `PASS_WITH_GAPS` for start-readiness review; full object browser deferred, but minimal P3/P4 candidate edit/review surface is now a prerequisite |
 
 Delivery integration status:
 
 - PR #84 through PR #93 are merged into `main`.
-- PR #95 remains draft/open for the integrated P2-P9 roadmap branch. Its branch-local runtime-readiness surface now includes a public-safe normalizer for current-session shadow evidence packets, but this is not merge, deploy, or live runtime evidence.
+- PR #95 remains draft/open for the integrated P2-P9 roadmap branch. Its branch-local runtime-readiness surface now includes a public-safe normalizer and one-step readiness evaluator for current-session shadow evidence packets, but this is not merge, deploy, or live runtime evidence.
 - Final head and merge SHAs below are GitHub delivery evidence only. They are not deploy, live runtime, or production readiness evidence.
 - P1 through P10 phase branches were cleaned up or are eligible for cleanup after merge verification.
 - This delivery record does not close the P1 live object-query route proof gap, deployed source-to-candidate graph runtime wiring, P5 release-quality `not_green` status, P6-P9 production/live proof gaps, or deployed/live bounded production authority promotion execution evidence.
