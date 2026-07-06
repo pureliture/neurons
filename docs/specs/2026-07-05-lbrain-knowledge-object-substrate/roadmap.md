@@ -18,7 +18,7 @@ Current state:
 - P6 Session, Device, Project, And Work-Unit 360: `PASS_WITH_GAPS` / `local_validated`; local/test session project rollup preview는 Device/Session/Repository/Branch/WorkUnit/Spec/PullRequest/Commit objects를 생성하고, same-device와 all-device fixture rollup을 분리하며, safe handoff pack과 resume context를 반환합니다. local MCP `brain_objects_query` temporal work recall route는 "어제 이 repo에서 뭐 했어?"류 질의를 `WorkUnit` object pack으로 반환하고, runtime readiness는 live `temporal_work_recall` route smoke를 요구합니다. live multi-device runtime evidence는 아직 증명되지 않았습니다.
 - P7 Preference, Style, And Artifact Memory: `PASS_WITH_GAPS` / `local_validated`; local/test artifact preference pack은 accepted/proposal lanes, profile objects, no-UI HTML artifact check를 검증하지만, live agent context pack 및 production authority promotion은 아직 gap입니다.
 - P8 Runtime Truth, Security, And Deployment Authority: `PASS_WITH_GAPS` / `local_validated`; local/test runtime authority policy, artifact identity join, private authority redaction, preapproved-scope permission check, and no-write local gate checks pass, but bounded production runtime authority pilot/write evidence and permission audit remain gaps.
-- P9 Agent Context Productization: `PASS_WITH_GAPS` / `local_validated`; local/test consumer compact packs, degraded/stale disclosure, reference object lane, surface policy, proposal-safe action hints, `brain_objects_query` read-path hint, and object-native review/readiness `tool_hints` pass. Runtime readiness report now checks whether live agent context contains those `tool_hints`, but production startup/read path and runtime enforcement remain gaps.
+- P9 Agent Context Productization: `PASS_WITH_GAPS` / `local_validated`; local/test consumer compact packs, degraded/stale disclosure, reference object lane, surface policy, proposal-safe action hints, `brain_objects_query` read-path hint, and object-native review/readiness `tool_hints` pass. Runtime readiness report now checks whether live agent context contains required `tool_hints`, required product sections, and mutation-disabled policy, but production startup/read path and runtime enforcement remain gaps.
 - Product activation: 완료되지 않았습니다; local_test store-to-candidate graph wiring 및 review/approval CLI/MCP proof는 추가되었지만 configured deployed agent read path refresh, deployed/runtime source-to-candidate extraction wiring, deployed review surface hardening, and approval-board promotion runtime integration이 여전히 필요합니다.
 - UI/object browser: full UI는 product activation prerequisite가 아니지만, minimal candidate object/edge/evidence edit surface는 P3/P4 product workflow의 prerequisite입니다.
 
@@ -538,7 +538,7 @@ Current local/test evidence:
 - local_test store-to-candidate CLI/MCP proof covers configured reference corpus store read, candidate graph review pack creation, and production target denied/no-mutation
 - source-to-authority quality report now includes `product_surface_checks` for `brain_objects_query`, `brain_source_to_candidate_graph`, `brain_candidate_review_edit`, `brain_approval_board_decide`, and `brain_source_to_candidate_runtime_readiness` MCP registry/policy surface
 - `brain_objects_query` local MCP read path now returns context-authority object packs for broad authority/archive queries, preference/style object packs for style queries, temporal work recall `WorkUnit` packs for session/work-resume queries, and runtime truth gap packs for merge/deploy queries instead of falling back to `object_pack_route_not_implemented`
-- source-to-candidate runtime readiness CLI can evaluate sanitized post-deploy evidence for MCP read/review tools, `brain_objects_query` route smokes, agent context `tool_hints`, deployed identity, and production-denial smokes without network or mutation; required object-query routes include `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth`
+- source-to-candidate runtime readiness CLI can evaluate sanitized post-deploy evidence for MCP read/review tools, `brain_objects_query` route smokes, agent context `tool_hints`, required agent context sections, deployed identity, and production-denial smokes without network or mutation; required object-query routes include `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth`
 - activation progress report returns `lbrain_product_activation_progress.v1` with `scope_phases=[P2..P9]`, `minimum_review_loop_checkpoint.status=PASS_WITH_GAPS`, `next_phase=P5`, `remaining_phases=[P5..P9]`, `goal_complete=false`, `production_ready=false`, `production_approval_gate=preapproved`, `production_mutation_execution=not_performed_by_local_gate`, and `production_mutation_performed=false`
 - activation progress `product_evidence_summary` now includes P6 session/project/work-unit rollup evidence, P7 artifact preference memory evidence, P8 runtime authority evidence, and P9 agent context product evidence as sanitized local previews
 - P6 evidence summary includes `object_extraction_session_project_rollup_preview.v1`, `object_count=8`, `edge_count=16`, `evidence_count=1`, and `session_project_handoff_pack.v1`
@@ -561,9 +561,9 @@ Current local/test evidence:
 - source-to-authority CLI smoke: `cd worker && uv run neuron-knowledge golden-query-eval --source-to-authority-gate`
 - source-to-authority CLI smoke result: `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`, `production_mutation_performed=false`, `authority_write_scope=local_test`
 - runtime readiness CLI smoke: `cd worker && uv run neuron-knowledge source-to-candidate-runtime-readiness --expected-commit <branch-head-commit>`
-- runtime readiness CLI smoke result: `status=PASS_WITH_GAPS`, `live_evidence_provided=false`, `production_mutation_performed=false`, `network_used=false`, live MCP read/review tools/object query route smokes/context tool hints/deployed identity/production denial claims `not_validated`, `missing_routes` includes `temporal_work_recall`
+- runtime readiness CLI smoke result: `status=PASS_WITH_GAPS`, `live_evidence_provided=false`, `production_mutation_performed=false`, `network_used=false`, live MCP read/review tools/object query route smokes/context tool hints/context product sections/deployed identity/production denial claims `not_validated`, `missing_routes` includes `temporal_work_recall`, and `missing_sections` includes `style_preference`, `active_work`, and `required_verification`
 - runtime readiness focused evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_without_mutation tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_without_evidence_preserves_live_gaps tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_default_route_returns_agent_context_objects tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_temporal_route_returns_current_work_objects tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_style_route_uses_preference_objects tests/test_neuron_mcp_stdio.py::test_mcp_brain_objects_query_deploy_route_returns_runtime_gap_pack`
-- runtime readiness focused result: `12 passed, 1 warning`
+- runtime readiness focused result: `14 passed, 1 warning`
 - focused evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
 - focused result: `1 passed, 1 warning`
 - strict-axis evaluator evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_eval_strict_axes_require_edge_freshness_and_gap_fields`
@@ -585,7 +585,7 @@ Current local/test evidence:
 - CLI smoke: `cd worker && uv run neuron-knowledge golden-query-eval --phase-coverage`
 - CLI smoke result: `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1593 passed, 9 skipped, 1 warning`
+- worker regression result: `1595 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
@@ -644,7 +644,7 @@ Current local/test evidence:
 - adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
 - adjacent regression result: `46 passed, 1 warning`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1593 passed, 9 skipped, 1 warning`
+- worker regression result: `1595 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
@@ -805,7 +805,7 @@ Implemented local/test scope:
 - proposal-safe action hints distinguish `suggest_allowed` from `execute_allowed` and list missing evidence before promotion
 - object-native read/review `tool_hints` list `brain_objects_query`, `brain_source_to_candidate_graph`, `brain_candidate_review_edit`, and `brain_approval_board_decide` as suggest-only local_test/read-only preview surfaces with production mutation disabled
 - object-native readiness `tool_hints` list `brain_source_to_candidate_runtime_readiness` as a suggest-only sanitized-evidence evaluator with production mutation disabled
-- runtime readiness report includes a live agent context `tool_hints` claim so post-deploy startup/read-path evidence can be checked without upgrading local tests into runtime proof
+- runtime readiness report includes live agent context `tool_hints` and `product_sections` claims so post-deploy startup/read-path evidence can be checked without upgrading local tests into runtime proof
 
 Remaining gaps:
 

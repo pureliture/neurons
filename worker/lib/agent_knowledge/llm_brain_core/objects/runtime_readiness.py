@@ -22,6 +22,11 @@ REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES = (
     "temporal_work_recall",
     "deployment_runtime_truth",
 )
+REQUIRED_AGENT_CONTEXT_SECTIONS = (
+    "style_preference",
+    "active_work",
+    "required_verification",
+)
 
 
 def build_source_to_candidate_runtime_readiness_report(
@@ -35,6 +40,7 @@ def build_source_to_candidate_runtime_readiness_report(
         _local_product_surface_claim(local_gate),
         _live_tools_claim(evidence),
         _live_agent_context_tool_hints_claim(evidence),
+        _live_agent_context_product_sections_claim(evidence),
         _live_brain_objects_query_route_smokes_claim(evidence),
         _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
         _production_denial_claim(
@@ -115,6 +121,37 @@ def _live_agent_context_tool_hints_claim(evidence: Mapping[str, Any]) -> dict[st
         "required_tools": list(REQUIRED_RUNTIME_TOOL_NAMES),
         "missing_tools": missing,
         "gaps": ["live_agent_context_tool_hints_unverified"] if missing else [],
+    }
+
+
+def _live_agent_context_product_sections_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    product = _agent_context_product(evidence)
+    sections = product.get("sections") if isinstance(product.get("sections"), Mapping) else {}
+    missing = [
+        name
+        for name in REQUIRED_AGENT_CONTEXT_SECTIONS
+        if _section_object_count(sections.get(name)) < 1
+    ]
+    mutation_allowed = (
+        product.get("surface_policy") if isinstance(product.get("surface_policy"), Mapping) else {}
+    ).get("mutation_allowed")
+    base = {
+        "claim_id": "live.agent_context.product_sections",
+        "evidence_class": "runtime_read_path",
+        "required_sections": list(REQUIRED_AGENT_CONTEXT_SECTIONS),
+        "missing_sections": missing,
+        "mutation_allowed": bool(mutation_allowed),
+    }
+    if bool(mutation_allowed):
+        return {
+            **base,
+            "status": "failed",
+            "gaps": ["live_agent_context_mutation_allowed"],
+        }
+    return {
+        **base,
+        "status": "not_validated" if missing else "validated",
+        "gaps": ["live_agent_context_product_sections_unverified"] if missing else [],
     }
 
 
@@ -212,15 +249,28 @@ def _production_denial_claim(
 
 
 def _agent_context_tool_hints(evidence: Mapping[str, Any]) -> list[Any]:
+    product = _agent_context_product(evidence)
+    hints = product.get("tool_hints") if isinstance(product, Mapping) else []
+    return list(hints) if isinstance(hints, list) else []
+
+
+def _agent_context_product(evidence: Mapping[str, Any]) -> Mapping[str, Any]:
     product = evidence.get("agent_context_product")
     if isinstance(product, Mapping):
-        hints = product.get("tool_hints")
-        return list(hints) if isinstance(hints, list) else []
+        return product
     context_pack = evidence.get("context_pack")
     authority = context_pack.get("authority") if isinstance(context_pack, Mapping) else {}
     product = authority.get("agent_context_product") if isinstance(authority, Mapping) else {}
-    hints = product.get("tool_hints") if isinstance(product, Mapping) else []
-    return list(hints) if isinstance(hints, list) else []
+    return product if isinstance(product, Mapping) else {}
+
+
+def _section_object_count(section: Any) -> int:
+    if not isinstance(section, Mapping):
+        return 0
+    try:
+        return int(section.get("object_count") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _brain_objects_query_smoke_failures(route: str, smoke: Mapping[str, Any]) -> list[str]:
