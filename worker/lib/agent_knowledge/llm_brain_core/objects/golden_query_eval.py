@@ -338,6 +338,7 @@ def build_source_to_authority_quality_gate_report() -> dict[str, Any]:
 def build_product_activation_progress_report() -> dict[str, Any]:
     phase_coverage = build_phase_golden_query_coverage_report()
     source_gate = build_source_to_authority_quality_gate_report()
+    product_evidence_summary = _product_evidence_summary()
     phases_by_id = {
         str(item.get("phase") or ""): item
         for item in phase_coverage.get("phases", [])
@@ -384,6 +385,7 @@ def build_product_activation_progress_report() -> dict[str, Any]:
         "status": status,
         "scope_phases": list(ACTIVATION_SCOPE_PHASES),
         "phase_progress": phase_progress,
+        "product_evidence_summary": product_evidence_summary,
         "minimum_review_loop_checkpoint": minimum_checkpoint,
         "next_phase": next_phase,
         "remaining_phases": _remaining_activation_phases(next_phase),
@@ -400,6 +402,7 @@ def build_product_activation_progress_report() -> dict[str, Any]:
         "production_mutation_performed": bool(
             source_gate.get("production_mutation_performed")
             or any(item.get("production_mutation_performed") for item in phase_progress)
+            or any(item.get("production_mutation_performed") for item in product_evidence_summary)
         ),
         "production_authoritative_memory_changed": bool(
             source_gate.get("production_authoritative_memory_changed")
@@ -471,6 +474,223 @@ def _activation_phase_progress(phase: str, coverage: Mapping[str, Any]) -> dict[
         "production_mutation_performed": False,
         "next_action": _activation_phase_next_action(phase, state, gaps),
     }
+
+
+def _product_evidence_summary() -> list[dict[str, Any]]:
+    p6 = _p6_session_project_rollup_evidence()
+    p7 = _p7_preference_artifact_evidence()
+    p8 = _p8_runtime_authority_evidence()
+    p9 = _p9_agent_context_evidence(preference_preview=p7)
+    return [p6, p7, p8, p9]
+
+
+def _p6_session_project_rollup_evidence() -> dict[str, Any]:
+    from .extraction_pipeline import run_session_project_rollup_preview
+
+    report = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "session:p6-a",
+                "device_id_hash": "device:this",
+                "provider": "codex",
+                "summary": "P6 rollup fixture session.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["ev:p6:session"],
+            }
+        ],
+        repository="neurons",
+        branch="codex/knowledge-object-review-flow-roadmap",
+        project="neurons",
+        specs=[{"spec_ref": "docs/specs/p6/design.md", "work_unit_id": "work:p6"}],
+        pull_requests=[{"pr_id": "pr:95", "number": 95, "work_unit_id": "work:p6"}],
+        commits=[{"commit_id": "commit:p6", "pull_request_id": "pr:95", "work_unit_id": "work:p6"}],
+        requesting_device_id_hash="device:this",
+        scope="all_devices",
+    )
+    return {
+        "phase": "P6",
+        "schema_version": str(report.get("schema_version") or ""),
+        "status": str(report.get("status") or ""),
+        "golden_query_slice": _golden_slice(report),
+        "object_count": int(report.get("object_count") or 0),
+        "edge_count": int(report.get("edge_count") or 0),
+        "evidence_count": int(report.get("evidence_count") or 0),
+        "handoff_pack_schema": str((report.get("handoff_pack") or {}).get("schema_version") or ""),
+        "gaps": list(report.get("gaps") or []),
+        "production_mutation_performed": bool(report.get("production_mutation_performed")),
+    }
+
+
+def _p7_preference_artifact_evidence() -> dict[str, Any]:
+    from .extraction_pipeline import run_preference_style_extraction_preview
+
+    report = run_preference_style_extraction_preview(
+        memory_cards=[
+            {
+                "memory_id": "mem:p7-html",
+                "card_type": "preference",
+                "summary": "Accepted HTML artifact preference",
+                "confidence": 0.94,
+                "currentness": "current",
+                "review_state": "accepted",
+                "typed_payload": {
+                    "preference": "HTML review artifacts should be information dense.",
+                    "applies_to": "html review artifact",
+                    "reason": "Accepted local fixture preference.",
+                },
+                "source_refs": [{"source_ref_id": "ev:p7:preference"}],
+            },
+            {
+                "memory_id": "mem:p7-style",
+                "card_type": "repo_style",
+                "summary": "Accepted worker test command",
+                "confidence": 0.91,
+                "review_state": "accepted",
+                "typed_payload": {
+                    "claim": "Python worker tests use uv run pytest.",
+                    "repo_scope": "neurons/worker",
+                    "reason": "Repo instructions and verified runs.",
+                    "files": ["worker/tests/test_golden_query_eval.py"],
+                    "commits": ["commit:p7"],
+                },
+            },
+        ],
+        repository="neurons",
+        current_request="review HTML artifact and worker test evidence",
+        current_files=["worker/tests/test_golden_query_eval.py"],
+        artifact_review={
+            "artifact_type": "html_review",
+            "summary": "Information dense HTML review artifact.",
+            "text_metrics": {"word_count": 120},
+        },
+    )
+    artifact_pack = report.get("artifact_preference_pack") if isinstance(report.get("artifact_preference_pack"), Mapping) else {}
+    accepted_count = len((artifact_pack.get("lanes") or {}).get("accepted_current") or [])
+    return {
+        "phase": "P7",
+        "schema_version": str(report.get("schema_version") or ""),
+        "status": str(report.get("status") or ""),
+        "golden_query_slice": _golden_slice(report),
+        "object_count": len(report.get("objects") or []),
+        "source_evidence_ref_count": len(report.get("source_evidence_refs") or []),
+        "artifact_preference_pack_status": "pass" if accepted_count else "pass_with_gaps",
+        "accepted_preference_count": accepted_count,
+        "proposal_preference_count": len((artifact_pack.get("lanes") or {}).get("proposal_only") or []),
+        "artifact_review_check_status": str((report.get("artifact_review_check") or {}).get("status") or ""),
+        "gaps": list(report.get("gaps") or []),
+        "production_mutation_performed": bool(report.get("production_mutation_performed")),
+    }
+
+
+def _p8_runtime_authority_evidence() -> dict[str, Any]:
+    from .extraction_pipeline import run_runtime_truth_extraction_preview
+
+    report = run_runtime_truth_extraction_preview(
+        pull_request={"id": "pr:95", "merged": False, "head_sha": "e3f6296"},
+        deployment={
+            "target": "production",
+            "artifact_digest": "sha256:" + "a" * 64,
+            "deployed_source_commit": "e3f6296",
+            "private_authority_ref": "redacted-private-authority",
+        },
+        live_evidence=None,
+        ci_statuses=[
+            {"name": "worker pytest", "conclusion": "SUCCESS", "commit_sha": "e3f6296"},
+            {"name": "gradle-test", "conclusion": "SUCCESS", "commit_sha": "e3f6296"},
+        ],
+        runtime_surface={
+            "surface_ref": "lbrain-mcp-read-path",
+            "surface_kind": "mcp_http",
+            "object_native_tools": True,
+        },
+        requested_action={"action": "promote_runtime_authority", "target": "production"},
+        actor={"agent": "codex", "role": "agent", "approved_scope": False},
+        consumer="codex",
+    )
+    preview = report.get("pack_preview") if isinstance(report.get("pack_preview"), Mapping) else {}
+    identity = report.get("deployed_artifact_identity") if isinstance(report.get("deployed_artifact_identity"), Mapping) else {}
+    permission = report.get("permission_check") if isinstance(report.get("permission_check"), Mapping) else {}
+    return {
+        "phase": "P8",
+        "schema_version": str(report.get("schema_version") or ""),
+        "status": str(report.get("status") or ""),
+        "golden_query_slice": _golden_slice(report),
+        "object_count": len(report.get("objects") or []),
+        "edge_count": len(report.get("edges") or []),
+        "runtime_verified_count": int(preview.get("runtime_verified_count") or 0),
+        "runtime_unverified_count": int(preview.get("runtime_unverified_count") or 0),
+        "source_commit_matches_pr_head": bool(identity.get("source_commit_matches_pr_head")),
+        "permission": str(permission.get("permission") or ""),
+        "authority_write_performed": bool(permission.get("authority_write_performed")),
+        "gaps": list(preview.get("gaps") or []),
+        "production_mutation_performed": bool(report.get("production_mutation_performed")),
+    }
+
+
+def _p9_agent_context_evidence(*, preference_preview: Mapping[str, Any]) -> dict[str, Any]:
+    from ..context_builder import build_agent_context_product_pack
+
+    preference_object = {
+        "object_id": "ko:ArtifactPreference:p9-html",
+        "object_type": "ArtifactPreference",
+        "title": "HTML review artifacts should be information dense.",
+        "authority_lane": "accepted_current",
+        "recommended_action": "apply_preference",
+    }
+    preference_pack = {
+        "objects": [preference_object],
+        "lanes": {"accepted_current": [preference_object], "proposal_only": []},
+        "gaps": [],
+    }
+    product = build_agent_context_product_pack(
+        consumer="codex",
+        block={
+            "object_packs": {
+                "preferences": preference_pack,
+                "required_verification": {
+                    "objects": [
+                        {
+                            "object_id": "ko:Verification:worker",
+                            "object_type": "VerificationCommand",
+                            "title": "cd worker && uv run pytest -q",
+                            "authority_lane": "candidate",
+                            "recommended_action": "run",
+                        }
+                    ],
+                    "lanes": {"candidate": [{"object_id": "ko:Verification:worker"}]},
+                    "gaps": [],
+                },
+            },
+            "documents": [],
+            "preferences": [{"summary": "HTML review artifacts should be information dense."}],
+            "workflow_contracts": [],
+        },
+        gaps=["runtime_evidence_unverified"],
+        cards=[{"currentness": "current"}],
+    )
+    section_counts = {
+        name: int(section.get("object_count") or 0)
+        for name, section in product.get("sections", {}).items()
+        if isinstance(section, Mapping)
+    }
+    return {
+        "phase": "P9",
+        "schema_version": str(product.get("schema_version") or ""),
+        "status": "pass_with_gaps" if product.get("degraded_mode", {}).get("active") else "pass",
+        "consumer": str(product.get("consumer") or ""),
+        "section_counts": section_counts,
+        "tool_hint_count": len(product.get("tool_hints") or []),
+        "action_hint_count": len(product.get("action_hints") or []),
+        "mutation_allowed": bool(product.get("surface_policy", {}).get("mutation_allowed")),
+        "degraded_mode_active": bool(product.get("degraded_mode", {}).get("active")),
+        "gaps": list(product.get("degraded_mode", {}).get("gaps") or []),
+        "production_mutation_performed": False,
+    }
+
+
+def _golden_slice(report: Mapping[str, Any]) -> str:
+    evaluator = report.get("evaluator_report") if isinstance(report.get("evaluator_report"), Mapping) else {}
+    return str(evaluator.get("golden_query_slice") or "")
 
 
 def _activation_phase_state(phase: str, quality_result: str) -> str:
