@@ -5,6 +5,7 @@ from agent_knowledge.llm_brain_core.objects.extraction_pipeline import (
     run_preference_style_extraction_preview,
     run_pr_commit_extraction_preview,
     run_reference_corpus_extraction_preview,
+    run_repo_document_extraction_preview,
     run_runtime_truth_extraction_preview,
     run_work_unit_extraction_preview,
 )
@@ -48,8 +49,8 @@ def test_extractor_registry_reports_implemented_and_gap_extractors():
         "ReferenceCorpus",
         "ReferenceDocument",
     ]
-    assert by_name["repo_document_cleanup"]["status"] == "planned"
-    assert by_name["repo_document_cleanup"]["gaps"] == ["extractor_not_implemented"]
+    assert by_name["repo_document_cleanup"]["status"] == "implemented"
+    assert by_name["repo_document_cleanup"]["gaps"] == []
     assert by_name["runtime_truth"]["status"] == "implemented"
     assert by_name["runtime_truth"]["output_object_types"] == [
         "PullRequest",
@@ -167,6 +168,92 @@ def test_documentation_cleanup_strategy_comparison_reports_lane_evaluator_eviden
     assert result["strategy_comparison"][1]["gaps"] == ["authority_lane_inference_missing"]
     assert result["evaluator_report"]["golden_query_slice"] == "documentation cleanup current-vs-archive"
     assert result["evaluator_report"]["passes"] is True
+
+
+def test_repo_document_extraction_preview_reports_full_run_edges_and_metrics():
+    result = run_repo_document_extraction_preview(
+        documents=[
+            {
+                "path": "README.md",
+                "status": "source_of_truth",
+                "reason": "approved_repo_entrypoint",
+                "confidence": 0.9,
+                "evidence_refs": ["inventory:README.md"],
+            },
+            {
+                "path": "docs/legacy.md",
+                "status": "superseded",
+                "reason": "new roadmap supersedes legacy note",
+                "confidence": 0.7,
+                "evidence_refs": ["inventory:docs/legacy.md"],
+                "superseded_by": "README.md",
+            },
+            {
+                "path": "docs/generated-view.md",
+                "status": "generated_companion",
+                "reason": "generated companion view",
+                "confidence": 0.6,
+                "requires_evidence": True,
+            },
+        ],
+        repository="neurons",
+        consumer="codex",
+    )
+
+    assert result["schema_version"] == "object_extraction_repo_document_preview.v1"
+    assert result["status"] == "pass"
+    assert result["production_mutation_performed"] is False
+    assert result["selected_strategy"] == "repo_document_pack_extraction_v1"
+    assert result["object_count"] == 3
+    assert result["edge_count"] == 2
+    assert result["evidence_count"] == 3
+    assert result["lane_counts"] == {
+        "accepted_current": 1,
+        "archive_only": 0,
+        "candidate": 0,
+        "derived_projection": 1,
+        "proposal_only": 1,
+        "reference_only": 0,
+    }
+    assert all(item["object_type"] == "RepoDocument" for item in result["objects"])
+    assert [edge["edge_type"] for edge in result["edges"]] == [
+        "supersedes",
+        "requires_evidence",
+    ]
+    assert result["extraction_run"]["output_object_count"] == 3
+    assert result["extraction_run"]["output_edge_count"] == 2
+    assert result["extraction_run"]["quality_metrics"] == {
+        "public_safe_scan": "pass",
+        "authority_lane_separation": "pass",
+        "missing_evidence_gap_count": 0,
+    }
+    assert result["extraction_run"]["cost_estimate"]["model_calls"] == 0
+    assert result["extraction_run"]["token_budget"]["llm_tokens"] == 0
+    assert result["evaluator_report"]["golden_query_slice"] == "repo document cleanup extraction run"
+    assert result["evaluator_report"]["passes"] is True
+
+
+def test_repo_document_extraction_preview_reports_gap_without_current_document():
+    result = run_repo_document_extraction_preview(
+        documents=[
+            {
+                "path": "docs/archive.md",
+                "status": "archive_candidate",
+                "reason": "candidate only",
+                "confidence": 0.5,
+            },
+        ],
+        repository="neurons",
+        consumer="codex",
+    )
+
+    assert result["status"] == "pass_with_gaps"
+    assert "accepted_current documents empty" in result["gaps"]
+    assert result["evaluator_report"]["passes"] is False
+    assert result["evaluator_report"]["failures"] == [
+        "accepted_current documents empty",
+        "review_proposals_needed",
+    ]
 
 
 def test_runtime_truth_extraction_preview_keeps_merge_and_deploy_separate_without_live_evidence():

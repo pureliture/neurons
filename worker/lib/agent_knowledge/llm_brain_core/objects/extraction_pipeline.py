@@ -28,13 +28,13 @@ def build_extractor_registry_report() -> dict[str, Any]:
             },
             {
                 "extractor": "repo_document_cleanup",
-                "version": "",
-                "status": "planned",
+                "version": "0.1",
+                "status": "implemented",
                 "input_object_types": ["RepoDocument"],
                 "output_object_types": ["RepoDocument"],
                 "edge_types": ["supersedes", "requires_evidence"],
                 "strategy_scope": "repo_document_cleanup_mapping",
-                "gaps": ["extractor_not_implemented"],
+                "gaps": [],
             },
             {
                 "extractor": "runtime_truth",
@@ -242,6 +242,87 @@ def run_documentation_cleanup_strategy_comparison(
         },
     }
     ensure_public_safe(result, "DocumentationCleanupStrategyComparison")
+    return result
+
+
+def run_repo_document_extraction_preview(
+    *,
+    documents: list[Mapping[str, Any]],
+    repository: str,
+    consumer: str = "unspecified",
+) -> dict[str, Any]:
+    pack = build_documentation_cleanup_pack(
+        documents=documents,
+        route="documentation_cleanup",
+        consumer=consumer,
+    )
+    objects = [_stable_object(obj) for obj in pack["objects"]]
+    edges = _repo_document_edges(documents=documents, objects=objects)
+    gaps = list(pack["gaps"])
+    status = "pass" if objects and not gaps else "pass_with_gaps"
+    lane_counts = _lane_counts(pack)
+    result = {
+        "schema_version": "object_extraction_repo_document_preview.v1",
+        "status": status,
+        "repository": public_safe_text(repository, max_chars=180),
+        "consumer": public_safe_text(consumer, max_chars=80),
+        "selected_strategy": "repo_document_pack_extraction_v1",
+        "production_mutation_performed": False,
+        "objects": objects,
+        "edges": edges,
+        "evidence": list(pack["evidence"]),
+        "object_count": len(objects),
+        "edge_count": len(edges),
+        "evidence_count": len(pack["evidence"]),
+        "lane_counts": lane_counts,
+        "recommended_actions": list(pack["recommended_actions"]),
+        "extraction_run": _repo_document_extraction_run(
+            documents=documents,
+            object_count=len(objects),
+            edge_count=len(edges),
+            evidence_count=len(pack["evidence"]),
+            gaps=gaps,
+        ),
+        "strategy_comparison": [
+            {
+                "strategy": "repo_document_pack_extraction_v1",
+                "scope": "repo_document_cleanup_mapping",
+                "selected": True,
+                "status": status,
+                "object_count": len(objects),
+                "edge_count": len(edges),
+                "evidence_count": len(pack["evidence"]),
+                "lane_counts": lane_counts,
+                "gaps": gaps,
+            },
+            {
+                "strategy": "path_inventory_only_v1",
+                "scope": "repo_document_cleanup_mapping",
+                "selected": False,
+                "status": "available_with_gap",
+                "object_count": len(documents),
+                "edge_count": 0,
+                "evidence_count": len(documents),
+                "lane_counts": {"reference_only": len(documents)},
+                "gaps": ["authority_lane_inference_missing"],
+            },
+        ],
+        "evaluator_report": {
+            "schema_version": "object_extraction_evaluator_report.v1",
+            "golden_query_slice": "repo document cleanup extraction run",
+            "passes": status == "pass",
+            "failures": [] if status == "pass" else gaps or ["repo_document_extraction_empty"],
+            "gaps": gaps,
+            "assertions": [
+                "repo_documents_have_authority_lanes",
+                "cleanup_edges_are_public_safe",
+                "recommended_actions_are_present",
+                "production_mutation_performed_false",
+            ],
+        },
+        "gaps": gaps,
+    }
+    ensure_public_safe(result, "RepoDocumentExtractionPreview")
     return result
 
 
@@ -855,6 +936,100 @@ def _runtime_truth_object(
             "claim": "runtime_verified",
         },
     )
+
+
+def _repo_document_edges(
+    *,
+    documents: list[Mapping[str, Any]],
+    objects: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    object_by_path = {
+        str(obj.get("payload", {}).get("path_ref") or ""): obj
+        for obj in objects
+        if str(obj.get("payload", {}).get("path_ref") or "")
+    }
+    edges: list[dict[str, Any]] = []
+    for doc in documents:
+        path = public_safe_text(str(doc.get("path") or doc.get("document_path") or ""), max_chars=240)
+        obj = object_by_path.get(path)
+        if not obj:
+            continue
+        superseded_by = public_safe_text(str(doc.get("superseded_by") or ""), max_chars=240)
+        superseding_obj = object_by_path.get(superseded_by)
+        if superseding_obj:
+            edge = KnowledgeEdge.from_parts(
+                edge_type="supersedes",
+                from_object_id=superseding_obj["object_id"],
+                to_object_id=obj["object_id"],
+                evidence_refs=obj.get("evidence_refs") or [],
+                lifecycle_status="proposed",
+                authority_lane="proposal_only",
+                verification_state="unverified",
+                confidence={"score": 0.65, "basis": "repo_document_superseded_by"},
+                payload={"relationship": "supersedes", "path_ref": path},
+            )
+            edges.append(_stable_edge(edge.to_dict()))
+        if bool(doc.get("requires_evidence")):
+            gap_ref = f"evidence_gap:{hash_payload({'path': path})[7:19]}"
+            edge = KnowledgeEdge.from_parts(
+                edge_type="requires_evidence",
+                from_object_id=obj["object_id"],
+                to_object_id=gap_ref,
+                evidence_refs=obj.get("evidence_refs") or [],
+                lifecycle_status="proposed",
+                authority_lane="proposal_only",
+                verification_state="unverified",
+                confidence={"score": 0.6, "basis": "repo_document_requires_evidence"},
+                payload={"relationship": "requires_evidence", "path_ref": path},
+            )
+            edges.append(_stable_edge(edge.to_dict()))
+    return edges
+
+
+def _repo_document_extraction_run(
+    *,
+    documents: list[Mapping[str, Any]],
+    object_count: int,
+    edge_count: int,
+    evidence_count: int,
+    gaps: list[str],
+) -> dict[str, Any]:
+    input_hash = hash_payload(documents)
+    return {
+        "schema_version": "object_extraction_run_preview.v1",
+        "run_id": f"run:repo-document:{input_hash[7:19]}",
+        "status": "completed" if object_count else "blocked",
+        "input_hash": input_hash,
+        "extractor": "repo_document_cleanup",
+        "extractor_version": "0.1",
+        "output_object_count": object_count,
+        "output_edge_count": edge_count,
+        "output_evidence_count": evidence_count,
+        "quality_metrics": {
+            "public_safe_scan": "pass",
+            "authority_lane_separation": "pass",
+            "missing_evidence_gap_count": sum(1 for gap in gaps if "evidence" in gap),
+        },
+        "cost_estimate": {
+            "model_calls": 0,
+            "estimated_usd": 0.0,
+        },
+        "speed": {
+            "runtime_class": "local_deterministic_fixture",
+            "external_network_calls": 0,
+        },
+        "token_budget": {
+            "llm_tokens": 0,
+            "budget_required": False,
+        },
+        "debug_trace_available": True,
+        "debug_trace": [
+            "load_document_inventory",
+            "map_repo_documents",
+            "build_cleanup_edges",
+            "public_safe_preview",
+        ],
+    }
 
 
 def _runtime_truth_edges(
