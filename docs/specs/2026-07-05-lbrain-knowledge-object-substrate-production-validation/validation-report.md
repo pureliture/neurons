@@ -6,11 +6,11 @@
 
 Local implementation, package-level contracts, MCP dispatch tests, CLI smoke tests, production-denial safety gates는 통과했습니다.
 
-P1 live production activation follow-up는 deployed HTTP MCP runtime 및 user-level configured endpoint를 검증했습니다: object-native tools가 노출되고, `brain_objects_query`는 explicit authority gaps가 포함된 object pack을 반환하며, production proposal/decision calls는 mutation 없이 deny됩니다. 남은 gaps는 분리되어 있습니다: configured endpoint smoke는 통과하지만 현재 Codex session의 `mcp__lbrain` tool registry는 object-native tools를 아직 노출하지 않으며, live MCP image가 #73/current-main source refactor를 포함하는지는 증명되지 않았습니다.
+P1 live production activation follow-up는 deployed HTTP MCP runtime 및 user-level configured endpoint를 검증했습니다: object-native read/proposal tools 일부가 노출되고, production proposal/decision calls는 mutation 없이 deny됩니다. 남은 gaps는 분리되어 있습니다: current Codex-session `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 branch-local source/review/readiness tools는 아직 노출하지 않으며, live MCP image가 #95 source-to-candidate activation branch를 포함하는지는 증명되지 않았습니다.
 
-PR #73 및 ops deploy-button merge 이후 최신 recheck 결과는 `PASS_WITH_GAPS`로 유지됩니다: configured endpoint는 여전히 object-native tools를 노출하고 production proposal/decision mutation을 deny하지만, 이 Codex session은 여전히 stale `mcp__lbrain` callable registry를 가지고 있으며 current-main MCP image identity는 증명되지 않은 상태입니다.
+PR #73 및 ops deploy-button merge 이후의 이전 recheck는 P1 object-tool availability를 뒷받침하는 historical evidence입니다. 현재 #95 continuation 기준 최신 recheck는 `PASS_WITH_GAPS`로 유지됩니다: current Codex-session `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 `deployment_runtime_truth` route는 `object_pack_route_not_implemented`를 반환했고, #95 branch-local MCP tools 및 image identity는 증명되지 않은 상태입니다.
 
-PR #95 source-to-candidate activation continuation은 local/test product surface를 확장했으며, post-deploy sanitized evidence packet을 평가하는 `source-to-candidate-runtime-readiness` CLI와 `brain_source_to_candidate_runtime_readiness` MCP tool을 추가했습니다. 현재 branch-local smoke는 `PASS_WITH_GAPS`입니다: local product surface는 validated지만 live MCP read/review/readiness tools, live agent context `tool_hints`, deployed identity, and live production denial smokes는 evidence packet이 없어 `not_validated`로 남습니다. 이 command/tool은 network나 production mutation을 수행하지 않습니다.
+PR #95 source-to-candidate activation continuation은 local/test product surface를 P6-P9까지 확장했으며, post-deploy sanitized evidence packet을 평가하는 `source-to-candidate-runtime-readiness` CLI와 `brain_source_to_candidate_runtime_readiness` MCP tool을 branch-local로 추가했습니다. 현재 branch head는 `93a4483a8605fc78a4cbdc1ac4bf82e6dc934dda`이고 PR은 draft/open입니다. Local activation progress는 `product_evidence_status=PASS_WITH_GAPS`로 유지됩니다: P8 runtime evidence는 `runtime_unverified_count=1`, `runtime_verified_count=0`이므로 `PASS`가 아니라 `PASS_WITH_GAPS`입니다. Current Codex-session LBrain MCP read path는 `brain_objects_query`를 호출할 수 있지만 `deployment_runtime_truth` route는 `object_pack_route_not_implemented`를 반환했고, branch-local source/review/readiness MCP tools는 아직 live/current session callable registry에 없습니다. 이 branch-local command/tool smoke는 network나 production mutation을 수행하지 않습니다.
 
 ## Validated
 
@@ -18,7 +18,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 - status: `validated`
 - evidence: `cd worker && uv run pytest -q`
-- result: `1590 passed, 9 skipped, 1 warning`
+- result: `1610 passed, 9 skipped, 1 warning`
 - note: covers object model, reference corpus, object packs, MCP stdio, CLI, context authority, ledger area boundary, and existing worker regression surface.
 
 ### local.root.gradle
@@ -74,15 +74,15 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 - status: `validated`
 - evidence: `uv run neuron-knowledge golden-query-eval --activation-progress`
-- result: returned `lbrain_product_activation_progress.v1`, `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`, `minimum_review_loop_checkpoint.status=PASS_WITH_GAPS`, `next_phase=P5`, `goal_complete=false`, `production_ready=false`, `product_evidence_status=PASS`, `production_approval_gate=preapproved`, `production_mutation_execution=not_performed_by_local_gate`, `product_evidence_summary phases=P6/P7/P8/P9`, `production_mutation_performed=false`.
-- interpretation: this is a local P5 progress gate that keeps P2-P9 scope and gaps visible. The evidence summary covers P6 session/project/work-unit rollup, P7 artifact preference memory, P8 runtime authority preview, and P9 agent context product pack as sanitized local previews only. The human approval gate for production ledger/corpus/runtime mutation is preapproved, but this local gate did not execute production mutation and does not prove production readiness or deployed/runtime activation.
+- result: returned `lbrain_product_activation_progress.v1`, `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`, `minimum_review_loop_checkpoint.status=PASS_WITH_GAPS`, `next_phase=P5`, `goal_complete=false`, `production_ready=false`, `product_evidence_status=PASS_WITH_GAPS`, `production_approval_gate=preapproved`, `production_mutation_execution=not_performed_by_local_gate`, `product_evidence_summary phases=P6/P7/P8/P9`, `production_mutation_performed=false`.
+- interpretation: this is a local P5 progress gate that keeps P2-P9 scope and gaps visible. The evidence summary covers P6 session/project/work-unit rollup, P7 artifact preference memory, P8 runtime authority preview, and P9 agent context product pack as sanitized local previews only. P8 is explicitly `PASS_WITH_GAPS` because live runtime evidence remains unverified and no runtime-verified evidence is attached. The human approval gate for production ledger/corpus/runtime mutation is preapproved, but this local gate did not execute production mutation and does not prove production readiness or deployed/runtime activation.
 
 ### local.source-to-candidate-runtime-readiness-surface
 
 - status: `validated`
-- evidence: `uv run neuron-knowledge source-to-candidate-runtime-readiness --expected-commit 7218cb2`
+- evidence: `uv run neuron-knowledge source-to-candidate-runtime-readiness --expected-commit 93a4483a8605fc78a4cbdc1ac4bf82e6dc934dda`
 - result: returned `source_to_candidate_runtime_readiness.v1`, `status=PASS_WITH_GAPS`, `live_evidence_provided=false`, `production_mutation_performed=false`, `network_used=false`
-- interpretation: this validates the report surface and local product-surface claim only. The local claim now includes `brain_objects_query` plus source-to-candidate/review/approval/readiness tools, and live evidence must now include `brain_objects_query` route smokes for authority/archive, style/preference, and deploy/runtime queries. It does not prove deployed/runtime source-to-candidate activation.
+- interpretation: this validates the report surface and local product-surface claim only. The local claim now includes `brain_objects_query` plus source-to-candidate/review/approval/readiness tools, and live evidence must now include `brain_objects_query` route smokes for authority/archive, style/preference, temporal work recall, and deploy/runtime queries. It also requires live agent context product evidence to include the `agent_context_product_pack.v1` schema, allowed consumer, degraded-gap disclosure, `missing_evidence_before_promotion`, mutation-disabled policy, and safe `sanitized_evidence_packet` runtime-readiness target. It does not prove deployed/runtime source-to-candidate activation.
 
 ### local.mcp.brain-objects-query-routes
 
@@ -100,15 +100,17 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
   - missing evidence returns `PASS_WITH_GAPS`
   - `production_mutation_performed=false`
   - `network_used=false`
+  - malformed or incomplete live agent context product evidence fails instead of being accepted from section counts alone.
+  - runtime-readiness tool hints must target `sanitized_evidence_packet` and block `raw_private_runtime_evidence`.
 
 ### lbrain.current-read-path
 
 - status: `validated`
-- evidence: LBrain MCP `memory_authority_pack_read(project=neurons)` and `brain_context_resolve(...)`
+- evidence: LBrain MCP `memory_authority_pack_read(repository=pureliture/neurons)` and current-session `brain_objects_query(route=deployment_runtime_truth, repository=pureliture/neurons, branch=codex/knowledge-object-review-flow-roadmap)`
 - result:
   - accepted/current authority pack count: 7
   - current authority includes live mutation requiring separate gates
-  - compact context resolves current design file as active inventory candidate
+  - `brain_objects_query` is callable in the current Codex session, but `deployment_runtime_truth` returned `object_pack_route_not_implemented`
   - runtime evidence remains `runtime_evidence_unverified`
 
 ### live.production.http-mcp-object-tools-loaded
@@ -166,22 +168,32 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 ## Not Validated
 
-### configured.codex-mcp.object-tools-loaded
+### configured.codex-mcp.branch-local-review-tools-loaded
 
 - status: `not_validated`
-- reason: `current_session_tool_registry_stale`
+- reason: `branch_local_review_tools_missing_from_current_session_registry`
 - evidence:
   - deployed HTTP MCP runtime exposes object-native tools.
   - local Codex MCP allowlist source has been updated to include object-native tool names.
   - standalone smoke against the configured endpoint exposes and calls object-native tools successfully.
-  - current Codex `mcp__lbrain` callable namespace still exposes the pre-object-native read tools only in this session.
-  - `brain_objects_query` is not callable from the configured Codex namespace in this session.
+  - current Codex `mcp__lbrain` callable namespace can call `brain_objects_query`.
+  - current Codex `mcp__lbrain.brain_objects_query(route=deployment_runtime_truth)` returned `object_pack_route_not_implemented`.
+  - branch-local `brain_source_to_candidate_graph`, `brain_candidate_review_edit`, `brain_approval_board_decide`, and `brain_source_to_candidate_runtime_readiness` are not callable from the current session namespace.
 
 ### configured.codex-mcp.runtime-verified-answers
 
 - status: `not_validated`
-- reason: `current_session_tool_registry_missing_new_tools`
-- evidence: configured Codex namespace cannot yet run `brain_objects_query` directly, so agent-facing product activation is not complete from this session's callable tool surface.
+- reason: `current_session_route_and_branch_tool_gaps`
+- evidence: configured Codex namespace can now run `brain_objects_query`, but the route needed for deployment/runtime truth returned `object_pack_route_not_implemented`, and the branch-local source/review/readiness tools are not loaded in this session.
+
+### live.production.pr95-branch-inclusion
+
+- status: `not_validated`
+- reason: `pr95_draft_not_merged_or_deployed`
+- evidence:
+  - PR #95 head is `93a4483a8605fc78a4cbdc1ac4bf82e6dc934dda`.
+  - PR #95 is draft/open with clean merge state and passing checks.
+  - No merge, image rebuild, GitOps manifest update, Argo sync, or live rollout evidence for PR #95 was performed in this branch-local validation slice.
 
 ### live.production.source-to-candidate-review-tools
 
@@ -204,7 +216,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 - status: `not_validated`
 - reason: `live_evidence_packet_not_supplied`
 - evidence:
-  - local readiness report expects read-only live `brain_objects_query` smoke for `authority_archive_separation`, `code_style_preference`, and `deployment_runtime_truth`.
+  - local readiness report expects read-only live `brain_objects_query` smoke for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth`.
   - current branch-local smoke did not contact live MCP and therefore reports `live_brain_objects_query_route_smokes_unverified`.
 
 ### live.production.source-to-candidate-denial-smokes
@@ -228,9 +240,9 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 ## Gaps
 
-- Current Codex session's `mcp__lbrain` tool registry must refresh/reload to expose object-native tools directly.
-- P1 remains `PASS_WITH_GAPS` until the agent-visible `mcp__lbrain` namespace can call `brain_objects_query` without a separate standalone MCP client probe.
-- Live MCP image identity must move to current source `main` before claiming PR #73 is deployed in MCP.
+- Current Codex session's `mcp__lbrain` read path can call `brain_objects_query`, but branch-local source/review/readiness tools must be deployed/reloaded before P3/P4/P9 runtime-readiness claims can be runtime-verified.
+- P1/P6/P8/P9 remain `PASS_WITH_GAPS` until live `brain_objects_query` route smokes return implemented object packs for authority/archive, style/preference, temporal work recall, and deployment/runtime truth.
+- Live MCP image identity must move to a source revision containing PR #95 before claiming this branch's source-to-candidate activation is deployed in MCP.
 - Direct live Kubernetes/Argo status access must be available, or equivalent redacted live evidence must be supplied, before desired-state GitOps evidence is described as live rollout evidence.
 - Reference corpus store remains not configured; local CLI correctly reports planned/no mutation rather than pretending ingest completed.
 - Golden query baseline remains red by design; future goal must evaluate the new object-pack answers against those queries after deployment.
@@ -245,4 +257,4 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 ## Conclusion
 
-Implementation은 local 및 contract scope에서 검증되었고 safety gates는 fail-closed로 동작하며, deployed/configured HTTP MCP runtime은 P1 read-only object tools에 대해 production-runtime verified 상태입니다. 결과는 `PASS_WITH_GAPS`로 유지됩니다. 현재 Codex session의 `mcp__lbrain` tool registry가 object-native tools를 직접 노출하지 않고, live MCP image identity가 current-source-main / PR #73이라고 증명되지 않았기 때문입니다.
+Implementation은 local 및 contract scope에서 검증되었고 safety gates는 fail-closed로 동작합니다. 결과는 `PASS_WITH_GAPS`로 유지됩니다. 현재 Codex session의 `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 필요한 runtime truth route가 아직 구현된 live object pack을 반환하지 않고, branch-local source/review/readiness tools 및 PR #95 image identity가 live runtime에서 증명되지 않았기 때문입니다.
