@@ -66,6 +66,16 @@ def build_extractor_registry_report() -> dict[str, Any]:
                 "strategy_scope": "temporal_work_recall_mapping",
                 "gaps": [],
             },
+            {
+                "extractor": "pr_commit_detail",
+                "version": "0.1",
+                "status": "implemented",
+                "input_object_types": ["PullRequest", "Commit", "Test"],
+                "output_object_types": ["PullRequest", "Commit", "TestRun"],
+                "edge_types": ["includes_commit", "validated_by"],
+                "strategy_scope": "pr_commit_test_provenance_mapping",
+                "gaps": [],
+            },
         ],
     }
     ensure_public_safe(report, "ObjectExtractorRegistry")
@@ -503,6 +513,100 @@ def run_work_unit_extraction_preview(
     return result
 
 
+def run_pr_commit_extraction_preview(
+    *,
+    pull_request: Mapping[str, Any],
+    commits: list[Mapping[str, Any]],
+    test_runs: list[Mapping[str, Any]],
+    repository: str,
+) -> dict[str, Any]:
+    pr_object = _stable_object(_pull_request_object(pull_request, repository=repository).to_dict())
+    commit_objects = [_stable_object(_commit_object(item, repository=repository).to_dict()) for item in commits]
+    test_objects = [_stable_object(_test_run_object(item, repository=repository).to_dict()) for item in test_runs]
+    test_by_id = {
+        str(item.get("test_id") or item.get("id") or item.get("ref") or ""): obj
+        for item, obj in zip(test_runs, test_objects, strict=False)
+    }
+    edges = [
+        _stable_edge(
+            KnowledgeEdge.from_parts(
+                edge_type="includes_commit",
+                from_object_id=pr_object["object_id"],
+                to_object_id=obj["object_id"],
+                evidence_refs=obj.get("evidence_refs") or [],
+                lifecycle_status="observed",
+                authority_lane="candidate",
+                verification_state=obj["verification_state"],
+                confidence={"score": 0.68, "basis": "pr_commit_ref"},
+                payload={"extractor": "pr_commit_detail"},
+            ).to_dict()
+        )
+        for obj in commit_objects
+    ]
+    edges.extend(_commit_test_edges(commits=commits, commit_objects=commit_objects, test_by_id=test_by_id))
+    missing_test_refs = _missing_commit_test_refs(commits=commits, test_by_id=test_by_id)
+    gaps = ["commit_test_ref_missing"] if missing_test_refs else []
+    status = "pass" if not gaps and pr_object and commit_objects else "pass_with_gaps"
+    result = {
+        "schema_version": "object_extraction_pr_commit_preview.v1",
+        "status": status,
+        "repository": public_safe_text(repository, max_chars=180),
+        "selected_strategy": "pr_commit_ci_evidence_v1",
+        "production_mutation_performed": False,
+        "objects": [pr_object, *commit_objects, *test_objects],
+        "edges": edges,
+        "runtime_truth_objects": [],
+        "object_counts": {
+            "PullRequest": 1 if pr_object else 0,
+            "Commit": len(commit_objects),
+            "TestRun": len(test_objects),
+        },
+        "edge_count": len(edges),
+        "gaps": gaps,
+        "pack_preview": {
+            "runtime_verified_count": 0,
+            "runtime_unverified_count": 1 if _is_merged_pr(pull_request) else 0,
+            "missing_test_ref_count": len(missing_test_refs),
+            "production_mutation_performed": False,
+        },
+        "strategy_comparison": [
+            {
+                "strategy": "pr_commit_ci_evidence_v1",
+                "scope": "pr_commit_test_provenance_mapping",
+                "selected": True,
+                "status": status,
+                "object_count": 1 + len(commit_objects) + len(test_objects),
+                "edge_count": len(edges),
+                "gaps": gaps,
+            },
+            {
+                "strategy": "merge_only_runtime_truth_v1",
+                "scope": "runtime_evidence_mapping",
+                "selected": False,
+                "status": "rejected",
+                "object_count": 0,
+                "edge_count": 0,
+                "gaps": ["runtime_truth_requires_live_evidence"],
+            },
+        ],
+        "evaluator_report": {
+            "schema_version": "object_extraction_evaluator_report.v1",
+            "golden_query_slice": "pr commit and test provenance",
+            "passes": status == "pass",
+            "failures": [] if status == "pass" else gaps or ["pr_commit_evidence_missing"],
+            "gaps": gaps,
+            "assertions": [
+                "pr_commit_test_objects_are_separate",
+                "commit_test_edges_preserve_evidence",
+                "merge_does_not_imply_runtime",
+                "production_mutation_performed_false",
+            ],
+        },
+    }
+    ensure_public_safe(result, "PrCommitExtractionPreview")
+    return result
+
+
 def _blocked_preview(
     *,
     bundle: Mapping[str, Any],
@@ -671,6 +775,164 @@ def _runtime_truth_edges(
         payload={"claim": "deploy_requires_live_evidence"},
     )
     return [_stable_edge(edge.to_dict())]
+
+
+def _pull_request_object(
+    pull_request: Mapping[str, Any],
+    *,
+    repository: str,
+) -> KnowledgeObjectEnvelope:
+    pr_id = public_safe_text(
+        str(pull_request.get("pr_id") or pull_request.get("id") or pull_request.get("number") or ""),
+        max_chars=160,
+    )
+    title = public_safe_text(
+        str(pull_request.get("title") or pr_id or "PullRequest"),
+        max_chars=240,
+    )
+    state = public_safe_text(str(pull_request.get("state") or "unknown"), max_chars=80)
+    merge_commit = public_safe_text(str(pull_request.get("merge_commit") or ""), max_chars=80)
+    evidence_refs = [ref for ref in [pr_id, merge_commit] if ref]
+    return KnowledgeObjectEnvelope.from_parts(
+        object_type="PullRequest",
+        natural_key=pr_id,
+        scope={"repository": public_safe_text(repository, max_chars=180)},
+        title=title,
+        summary=f"Pull request {pr_id} is {state}.",
+        lifecycle_status="observed",
+        authority_lane="candidate",
+        verification_state="source_hash_verified",
+        review_state="needs_review",
+        content_hash=hash_payload(
+            {
+                "pr_id": pr_id,
+                "state": state,
+                "merge_commit": merge_commit,
+                "head_ref": pull_request.get("head_ref") or "",
+            }
+        ),
+        evidence_refs=evidence_refs,
+        confidence={"score": 0.7, "basis": "pr_metadata"},
+        recommended_action="review",
+        payload={
+            "pr_id": pr_id,
+            "state": state,
+            "merged": _is_merged_pr(pull_request),
+        },
+    )
+
+
+def _commit_object(
+    commit: Mapping[str, Any],
+    *,
+    repository: str,
+) -> KnowledgeObjectEnvelope:
+    sha = public_safe_text(
+        str(commit.get("sha") or commit.get("commit") or commit.get("id") or ""),
+        max_chars=80,
+    )
+    title = public_safe_text(str(commit.get("title") or sha or "Commit"), max_chars=240)
+    test_refs = [public_safe_text(str(ref or ""), max_chars=160) for ref in commit.get("test_refs") or []]
+    evidence_refs = [sha, *[ref for ref in test_refs if ref]]
+    return KnowledgeObjectEnvelope.from_parts(
+        object_type="Commit",
+        natural_key=sha,
+        scope={"repository": public_safe_text(repository, max_chars=180)},
+        title=title,
+        summary=title,
+        lifecycle_status="observed",
+        authority_lane="candidate",
+        verification_state="source_hash_verified",
+        review_state="needs_review",
+        content_hash=hash_payload({"sha": sha, "title": title, "test_refs": test_refs}),
+        evidence_refs=evidence_refs,
+        confidence={"score": 0.68, "basis": "commit_metadata"},
+        recommended_action="review",
+        payload={
+            "sha": sha,
+            "test_ref_count": len(test_refs),
+        },
+    )
+
+
+def _test_run_object(
+    test_run: Mapping[str, Any],
+    *,
+    repository: str,
+) -> KnowledgeObjectEnvelope:
+    test_id = public_safe_text(
+        str(test_run.get("test_id") or test_run.get("id") or test_run.get("ref") or ""),
+        max_chars=160,
+    )
+    status = public_safe_text(str(test_run.get("status") or "unknown"), max_chars=80)
+    summary = public_safe_text(str(test_run.get("summary") or test_id or "Test run"), max_chars=360)
+    verification_state = "test_verified" if status == "pass" else "unverified"
+    return KnowledgeObjectEnvelope.from_parts(
+        object_type="TestRun",
+        natural_key=test_id,
+        scope={"repository": public_safe_text(repository, max_chars=180)},
+        title=test_id,
+        summary=summary,
+        lifecycle_status="observed",
+        authority_lane="candidate",
+        verification_state=verification_state,
+        review_state="needs_review",
+        content_hash=hash_payload({"test_id": test_id, "status": status, "summary": summary}),
+        evidence_refs=[test_id],
+        confidence={"score": 0.74 if status == "pass" else 0.35, "basis": "test_run_metadata"},
+        recommended_action="review",
+        payload={
+            "test_id": test_id,
+            "status": status,
+        },
+    )
+
+
+def _commit_test_edges(
+    *,
+    commits: list[Mapping[str, Any]],
+    commit_objects: list[dict[str, Any]],
+    test_by_id: Mapping[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    edges: list[dict[str, Any]] = []
+    for commit, commit_object in zip(commits, commit_objects, strict=False):
+        for test_ref in commit.get("test_refs") or []:
+            safe_test_ref = public_safe_text(str(test_ref or ""), max_chars=160)
+            test_object = test_by_id.get(safe_test_ref)
+            if not test_object:
+                continue
+            edge = KnowledgeEdge.from_parts(
+                edge_type="validated_by",
+                from_object_id=commit_object["object_id"],
+                to_object_id=test_object["object_id"],
+                evidence_refs=[safe_test_ref],
+                lifecycle_status="observed",
+                authority_lane="candidate",
+                verification_state=test_object["verification_state"],
+                confidence={"score": 0.74, "basis": "commit_test_ref"},
+                payload={"extractor": "pr_commit_detail"},
+            )
+            edges.append(_stable_edge(edge.to_dict()))
+    return edges
+
+
+def _missing_commit_test_refs(
+    *,
+    commits: list[Mapping[str, Any]],
+    test_by_id: Mapping[str, dict[str, Any]],
+) -> list[str]:
+    missing: list[str] = []
+    for commit in commits:
+        for test_ref in commit.get("test_refs") or []:
+            safe_test_ref = public_safe_text(str(test_ref or ""), max_chars=160)
+            if safe_test_ref and safe_test_ref not in test_by_id:
+                missing.append(safe_test_ref)
+    return missing
+
+
+def _is_merged_pr(pull_request: Mapping[str, Any]) -> bool:
+    state = str(pull_request.get("state") or "").lower()
+    return bool(pull_request.get("merged")) or state == "merged" or bool(pull_request.get("merge_commit"))
 
 
 def _preference_style_evidence_refs(
