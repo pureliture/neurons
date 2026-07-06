@@ -163,6 +163,10 @@ def evaluate_object_pack_response(
         failures.append("missing_freshness")
     if "gap" in checked_axes and not isinstance(response.get("gaps"), list):
         failures.append("missing_gap_field")
+    if checked_axes:
+        for lane, value in lanes.items():
+            if isinstance(value, list) and not value and not _empty_lane_is_stated(str(lane), gaps):
+                failures.append(f"empty_authority_lane_not_stated:{lane}")
     result = {
         "query": query,
         "passes": not failures,
@@ -233,5 +237,13 @@ def _has_freshness_signal(response: Mapping[str, Any], evidence: list[Any]) -> b
             "runtime_verified",
             "runtime_unverified",
         }:
+            return True
+    return False
+
+
+def _empty_lane_is_stated(lane: str, gaps: list[Any]) -> bool:
+    for item in gaps:
+        text = str(item).lower()
+        if lane.lower() in text and any(marker in text for marker in ("empty", "missing", "none")):
             return True
     return False
