@@ -219,4 +219,17 @@ def test_source_to_authority_quality_gate_covers_review_approval_and_read_path_w
     assert checks["authority_read_after_write"]["quality_eval"]["passes"] is True
     assert checks["production_decision_denial"]["result"] == "PASS"
     assert checks["production_decision_denial"]["production_mutation_performed"] is False
+    surface_checks = {item["id"]: item for item in report["product_surface_checks"]}
+    assert set(surface_checks) >= {
+        "mcp_source_to_candidate_graph_tool",
+        "mcp_candidate_review_edit_tool",
+        "mcp_approval_board_decide_tool",
+    }
+    assert surface_checks["mcp_source_to_candidate_graph_tool"]["result"] == "PASS"
+    assert surface_checks["mcp_source_to_candidate_graph_tool"]["tool"] == "brain_source_to_candidate_graph"
+    assert surface_checks["mcp_source_to_candidate_graph_tool"]["production_target_denied"] is True
+    assert surface_checks["mcp_candidate_review_edit_tool"]["result"] == "PASS"
+    assert surface_checks["mcp_candidate_review_edit_tool"]["authority_write_performed"] is False
+    assert surface_checks["mcp_approval_board_decide_tool"]["result"] == "PASS"
+    assert surface_checks["mcp_approval_board_decide_tool"]["production_target_denied"] is True
     assert "production_authority_gate_not_approved" in report["gaps"]
