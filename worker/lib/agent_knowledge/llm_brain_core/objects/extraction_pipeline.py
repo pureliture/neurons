@@ -6,7 +6,7 @@ from .._util import ensure_public_safe, hash_payload, public_safe_text
 from ..preference_authority import preference_rule_cards_from_memory_cards
 from ..repo_style_profile import repo_style_profile_from_memory_cards
 from .golden_query_eval import evaluate_object_pack_response
-from .knowledge_objects import KnowledgeEdge, KnowledgeObjectEnvelope
+from .knowledge_objects import EvidenceRef, KnowledgeEdge, KnowledgeObjectEnvelope
 from .object_packs import build_agent_context_object_packs, build_documentation_cleanup_pack, build_runtime_truth_pack
 from .reference_corpus import reference_corpus_objects_from_manifest
 
@@ -54,6 +54,16 @@ def build_extractor_registry_report() -> dict[str, Any]:
                 "output_object_types": ["ArtifactPreference", "StyleRule"],
                 "edge_types": ["supported_by_evidence"],
                 "strategy_scope": "style_preference_mapping",
+                "gaps": [],
+            },
+            {
+                "extractor": "work_unit",
+                "version": "0.1",
+                "status": "implemented",
+                "input_object_types": ["Session", "PullRequest", "Commit", "Test"],
+                "output_object_types": ["WorkUnit"],
+                "edge_types": ["supported_by_evidence", "validated_by"],
+                "strategy_scope": "temporal_work_recall_mapping",
                 "gaps": [],
             },
         ],
@@ -395,6 +405,104 @@ def run_preference_style_extraction_preview(
     return result
 
 
+def run_work_unit_extraction_preview(
+    *,
+    work_item: Mapping[str, Any],
+    evidence_items: list[Mapping[str, Any]],
+    repository: str,
+) -> dict[str, Any]:
+    evidence_refs = [_work_unit_evidence_ref(item).to_view() for item in evidence_items]
+    evidence_ids = [item["evidence_id"] for item in evidence_refs]
+    work_id = public_safe_text(str(work_item.get("work_id") or work_item.get("id") or work_item.get("title") or ""), max_chars=160)
+    work_object = KnowledgeObjectEnvelope.from_parts(
+        object_type="WorkUnit",
+        natural_key=work_id,
+        scope={"repository": public_safe_text(repository, max_chars=180)},
+        title=str(work_item.get("title") or work_id or "WorkUnit"),
+        summary=str(work_item.get("summary") or ""),
+        lifecycle_status="observed",
+        authority_lane="candidate",
+        verification_state="source_hash_verified" if evidence_refs else "unverified",
+        review_state="needs_review",
+        content_hash=hash_payload({"work_item": dict(work_item), "evidence_ids": evidence_ids}),
+        evidence_refs=evidence_ids,
+        confidence={"score": 0.7 if evidence_refs else 0.2, "basis": "grouped_work_evidence"},
+        recommended_action="review",
+        payload={
+            "work_id": work_id,
+            "status": public_safe_text(str(work_item.get("status") or "unknown"), max_chars=80),
+            "evidence_count": len(evidence_refs),
+        },
+    )
+    object_view = _stable_object(work_object.to_dict())
+    edges = [
+        _stable_edge(
+            KnowledgeEdge.from_parts(
+                edge_type="validated_by" if evidence["evidence_type"] == "test" else "supported_by_evidence",
+                from_object_id=object_view["object_id"],
+                to_object_id=f"evidence:{evidence['evidence_id']}",
+                evidence_refs=[evidence["evidence_id"]],
+                lifecycle_status="observed",
+                authority_lane="candidate",
+                verification_state=evidence["verification_state"],
+                confidence={"score": 0.65, "basis": "work_unit_evidence_ref"},
+                payload={"evidence_type": evidence["evidence_type"]},
+            ).to_dict()
+        )
+        for evidence in evidence_refs
+    ]
+    gaps = [] if evidence_refs else ["work_unit_evidence_missing"]
+    result = {
+        "schema_version": "object_extraction_work_unit_preview.v1",
+        "status": "pass" if evidence_refs else "pass_with_gaps",
+        "repository": public_safe_text(repository, max_chars=180),
+        "selected_strategy": "evidence_ref_work_unit_v1",
+        "production_mutation_performed": False,
+        "object": object_view,
+        "evidence": evidence_refs,
+        "edges": edges,
+        "evidence_count": len(evidence_refs),
+        "edge_count": len(edges),
+        "gaps": gaps,
+        "strategy_comparison": [
+            {
+                "strategy": "evidence_ref_work_unit_v1",
+                "scope": "temporal_work_recall_mapping",
+                "selected": True,
+                "status": "pass" if evidence_refs else "pass_with_gaps",
+                "object_count": 1,
+                "evidence_count": len(evidence_refs),
+                "edge_count": len(edges),
+                "gaps": gaps,
+            },
+            {
+                "strategy": "raw_transcript_summary_v1",
+                "scope": "temporal_work_recall_mapping",
+                "selected": False,
+                "status": "rejected",
+                "object_count": 0,
+                "evidence_count": 0,
+                "edge_count": 0,
+                "gaps": ["raw_transcript_body_forbidden"],
+            },
+        ],
+        "evaluator_report": {
+            "schema_version": "object_extraction_evaluator_report.v1",
+            "golden_query_slice": "temporal work recall",
+            "passes": bool(evidence_refs),
+            "failures": [] if evidence_refs else ["work_unit_evidence_missing"],
+            "gaps": gaps,
+            "assertions": [
+                "work_unit_groups_session_pr_commit_test_evidence",
+                "raw_transcript_body_not_returned",
+                "production_mutation_performed_false",
+            ],
+        },
+    }
+    ensure_public_safe(result, "WorkUnitExtractionPreview")
+    return result
+
+
 def _blocked_preview(
     *,
     bundle: Mapping[str, Any],
@@ -576,6 +684,22 @@ def _preference_style_evidence_refs(
             if safe_ref and safe_ref not in refs:
                 refs.append(safe_ref)
     return refs
+
+
+def _work_unit_evidence_ref(item: Mapping[str, Any]) -> EvidenceRef:
+    evidence_type = public_safe_text(str(item.get("kind") or "evidence"), max_chars=80)
+    ref = public_safe_text(str(item.get("ref") or item.get("id") or ""), max_chars=180)
+    summary = public_safe_text(str(item.get("summary") or evidence_type), max_chars=360)
+    verification_state = "test_verified" if evidence_type == "test" else "source_hash_verified"
+    return EvidenceRef.from_parts(
+        evidence_type=evidence_type,
+        authority_lane="candidate",
+        verification_state=verification_state,
+        locator={"kind": "evidence_ref", "value": ref},
+        content_hash=hash_payload({"kind": evidence_type, "ref": ref, "summary": summary}),
+        summary=summary,
+        producer={"extractor": "work_unit"},
+    )
 
 
 def _chunk_preview(chunk: Mapping[str, Any]) -> dict[str, Any]:

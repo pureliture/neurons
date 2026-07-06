@@ -12,7 +12,7 @@ Current state:
 - Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates passed, deployed HTTP MCP runtime and configured endpoint validated, current Codex session tool registry still missing object-native tools, and current-source-main image identity is not proven live.
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP exposes object-native tools, latest configured-endpoint smoke still passes with denied/no-mutation production writes, but the current Codex session's `mcp__lbrain` namespace still does not expose them and the live MCP image is not proven to include the #73/current-main source refactor.
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, and production-denial evidence exist, but real private Palantir manifest ingest and production ingest approval remain gaps.
-- P3 Processing And Object Extraction Pipeline: in progress; local/test reference corpus extraction preview creates deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, and blocked-extraction gaps; repo documentation cleanup, runtime truth, and preference/style extraction previews now have local/test evaluator evidence.
+- P3 Processing And Object Extraction Pipeline: in progress; local/test reference corpus extraction preview creates deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, and blocked-extraction gaps; repo documentation cleanup, runtime truth, preference/style, and work-unit extraction previews now have local/test evaluator evidence.
 - Product activation: not complete; configured agent read path refresh remains required.
 - UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
 
@@ -305,19 +305,21 @@ Current local/test evidence:
 - runtime truth extraction preview creates a candidate `RuntimeTruth` object and `validated_by` edge only when sanitized live evidence is explicitly `runtime_verified`
 - preference/style extraction preview maps preference and repo-style memory cards into `ArtifactPreference` and `StyleRule` objects
 - preference/style extraction preview reports source evidence refs without raw body inference and rejects raw-session-body inference as a strategy gap
+- work-unit extraction preview groups session, PR, commit, and test evidence into a candidate `WorkUnit` object
+- work-unit extraction preview emits evidence refs and `supported_by_evidence` / `validated_by` edges without raw transcript body return
 - focused evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py`
-- focused result: `7 passed, 1 warning`
+- focused result: `9 passed, 1 warning`
 - adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_object_packs.py tests/test_reference_corpus.py tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py tests/test_preference_authority_model.py tests/test_repo_style_profile.py tests/test_llm_brain_core_package_depth.py tests/test_llm_brain_core_objects_subpackage.py tests/test_llm_brain_core_layering.py`
-- adjacent regression result: `129 passed, 1 warning`
+- adjacent regression result: `131 passed, 1 warning`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1516 passed, 9 skipped, 1 warning`
+- worker regression result: `1518 passed, 9 skipped, 1 warning`
 
 Remaining gaps:
 
-- P3 is not complete; only the reference corpus extraction preview, documentation cleanup strategy comparison, runtime truth extraction preview, and preference/style extraction preview slices are implemented
+- P3 is not complete; only the reference corpus extraction preview, documentation cleanup strategy comparison, runtime truth extraction preview, preference/style extraction preview, and work-unit extraction preview slices are implemented
 - repo documentation cleanup strategy comparison exists, but a full repo-document extractor run and graph/search projection join are still missing
-- session and PR/commit detail extractors are still planned
-- evaluator coverage is limited to reference corpus, documentation cleanup, PR merge/deploy truth, and preference/style golden query slices
+- PR/commit detail extractors are still planned beyond the current work-unit grouping preview
+- evaluator coverage is limited to reference corpus, documentation cleanup, PR merge/deploy truth, preference/style, and temporal work recall golden query slices
 - graph/search projection join remains unproven
 - no production authority, corpus, graph, search, or deployment mutation has been performed or claimed
 
@@ -568,7 +570,7 @@ Current accounting:
 | P0 Local Object Substrate Foundation | `complete` | complete for local/test scope |
 | P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; deployed/configured endpoint validated, current Codex session tool registry gap remains |
 | P2 Living Reference Corpus Store | `local_validated` | `PASS_WITH_GAPS`; local/test store and status gates pass, real private manifest ingest and production approval remain gaps |
-| P3 Processing And Object Extraction Pipeline | `in_progress` | local/test reference corpus extraction preview, documentation cleanup strategy comparison, runtime truth extraction preview, and preference/style extraction preview pass; session/PR detail extractors, graph/search join, and broader evaluator coverage remain gaps |
+| P3 Processing And Object Extraction Pipeline | `in_progress` | local/test reference corpus extraction preview, documentation cleanup strategy comparison, runtime truth extraction preview, preference/style extraction preview, and work-unit extraction preview pass; PR/commit detail extractors, graph/search join, and broader evaluator coverage remain gaps |
 | P4 Review Queue And Authority Promotion | `planned` | production authority write closed |
 | P5 Continuous Golden Query Quality Gates | `planned` | baseline red exists; runs across P1-P9 |
 | P6 Session, Device, Project, And Work-Unit 360 | `planned` | object types specified, productized/live flow missing |

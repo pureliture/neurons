@@ -4,6 +4,7 @@ from agent_knowledge.llm_brain_core.objects.extraction_pipeline import (
     run_preference_style_extraction_preview,
     run_reference_corpus_extraction_preview,
     run_runtime_truth_extraction_preview,
+    run_work_unit_extraction_preview,
 )
 
 
@@ -57,6 +58,8 @@ def test_extractor_registry_reports_implemented_and_gap_extractors():
         "ArtifactPreference",
         "StyleRule",
     ]
+    assert by_name["work_unit"]["status"] == "implemented"
+    assert by_name["work_unit"]["output_object_types"] == ["WorkUnit"]
 
 
 def test_reference_corpus_extraction_preview_creates_deterministic_objects_edges_and_chunk_preview():
@@ -276,3 +279,69 @@ def test_preference_style_extraction_preview_maps_memory_cards_without_raw_body(
     ]
     assert result["evaluator_report"]["golden_query_slice"] == "style and artifact preference memory"
     assert result["evaluator_report"]["passes"] is True
+
+
+def test_work_unit_extraction_preview_groups_session_pr_commit_and_tests_without_raw_transcript():
+    result = run_work_unit_extraction_preview(
+        work_item={
+            "work_id": "work:p3-runtime",
+            "title": "P3 runtime truth extraction preview",
+            "summary": "Added runtime truth extraction preview.",
+            "status": "in_progress",
+        },
+        evidence_items=[
+            {"kind": "session", "ref": "session:abc", "summary": "Implemented runtime preview."},
+            {"kind": "pull_request", "ref": "pr:73", "summary": "Merge evidence exists."},
+            {"kind": "commit", "ref": "commit:e0958fd", "summary": "Preference style preview commit."},
+            {"kind": "test", "ref": "pytest:worker", "summary": "1516 passed."},
+        ],
+        repository="neurons",
+    )
+
+    assert result["schema_version"] == "object_extraction_work_unit_preview.v1"
+    assert result["status"] == "pass"
+    assert result["production_mutation_performed"] is False
+    assert result["object"]["object_type"] == "WorkUnit"
+    assert result["object"]["title"] == "P3 runtime truth extraction preview"
+    assert result["object"]["payload"] == {
+        "work_id": "work:p3-runtime",
+        "status": "in_progress",
+        "evidence_count": 4,
+    }
+    assert result["evidence_count"] == 4
+    assert [item["evidence_type"] for item in result["evidence"]] == [
+        "session",
+        "pull_request",
+        "commit",
+        "test",
+    ]
+    assert all(item["raw_return_capability"] == "denied" for item in result["evidence"])
+    assert all("raw_transcript" not in str(item) for item in result["evidence"])
+    assert [edge["edge_type"] for edge in result["edges"]] == [
+        "supported_by_evidence",
+        "supported_by_evidence",
+        "supported_by_evidence",
+        "validated_by",
+    ]
+    assert result["evaluator_report"]["golden_query_slice"] == "temporal work recall"
+    assert result["evaluator_report"]["passes"] is True
+
+
+def test_work_unit_extraction_preview_reports_gap_without_evidence():
+    result = run_work_unit_extraction_preview(
+        work_item={
+            "work_id": "work:empty",
+            "title": "Empty work item",
+            "summary": "No evidence yet.",
+            "status": "planned",
+        },
+        evidence_items=[],
+        repository="neurons",
+    )
+
+    assert result["status"] == "pass_with_gaps"
+    assert result["evidence"] == []
+    assert result["edges"] == []
+    assert result["gaps"] == ["work_unit_evidence_missing"]
+    assert result["evaluator_report"]["passes"] is False
+    assert result["evaluator_report"]["failures"] == ["work_unit_evidence_missing"]
