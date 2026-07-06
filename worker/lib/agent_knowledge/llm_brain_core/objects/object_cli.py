@@ -17,7 +17,7 @@ from .golden_query_eval import (
 )
 from .extraction_pipeline import run_source_to_candidate_graph_activation_preview
 from .okf_export import build_okf_bundle
-from .object_packs import build_documentation_cleanup_pack
+from .object_packs import apply_approval_board_decisions, apply_candidate_review_edits, build_documentation_cleanup_pack
 from .reference_corpus import build_corpus_ingest_plan, default_corpus_policy_status, reference_corpus_objects_from_manifest
 
 REFERENCE_CORPUS_LEDGER_ENV = "NEURON_REFERENCE_CORPUS_LEDGER"
@@ -33,6 +33,20 @@ def _load_manifest(path: str) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise ValueError("manifest file must contain a mapping")
     return loaded
+
+
+def _load_json_mapping(path: str, *, label: str) -> dict[str, Any]:
+    loaded = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{label} file must contain a JSON object")
+    return loaded
+
+
+def _load_json_list(path: str, *, label: str) -> list[dict[str, Any]]:
+    loaded = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(loaded, list):
+        raise ValueError(f"{label} file must contain a JSON array")
+    return [dict(item) for item in loaded if isinstance(item, dict)]
 
 
 def _parse_expected_source_type_counts(values: list[str], parser: argparse.ArgumentParser) -> dict[str, int]:
@@ -256,6 +270,38 @@ def source_to_candidate_graph_main(argv: list[str] | None = None) -> int:
     )
     _print_json(report)
     return 0 if report["quality_gate"]["source_to_candidate_graph"] == "PASS" else 1
+
+
+def candidate_review_edit_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="neuron-knowledge candidate-review-edit")
+    parser.add_argument("--pack-file", required=True)
+    parser.add_argument("--edits-file", required=True)
+    parser.add_argument("--reviewer-id", default="unspecified")
+    args = parser.parse_args(argv)
+    result = apply_candidate_review_edits(
+        _load_json_mapping(args.pack_file, label="pack"),
+        edits=_load_json_list(args.edits_file, label="edits"),
+        reviewer={"id": args.reviewer_id},
+    )
+    _print_json(result)
+    return 0 if result["candidate_state_changed"] else 1
+
+
+def approval_board_decide_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="neuron-knowledge approval-board-decide")
+    parser.add_argument("--target", choices=["local_test", "production"], default="local_test")
+    parser.add_argument("--pack-file", required=True)
+    parser.add_argument("--decisions-file", required=True)
+    parser.add_argument("--reviewer-id", default="unspecified")
+    args = parser.parse_args(argv)
+    result = apply_approval_board_decisions(
+        _load_json_mapping(args.pack_file, label="pack"),
+        decisions=_load_json_list(args.decisions_file, label="decisions"),
+        reviewer={"id": args.reviewer_id},
+        ledger_scope=args.target,
+    )
+    _print_json(result)
+    return 0 if result["permission"] == "allowed" and result["decision_count"] else 1
 
 
 def golden_query_eval_main(argv: list[str] | None = None) -> int:
