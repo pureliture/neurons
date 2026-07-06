@@ -398,6 +398,15 @@ def test_neuron_knowledge_golden_query_eval_baseline(capsys):
     assert len(report["queries"]) >= 10
 
 
+def test_neuron_knowledge_golden_query_eval_phase_coverage(capsys):
+    assert main(["golden-query-eval", "--phase-coverage"]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == "knowledge_object_phase_golden_query_coverage.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["release_quality_gate"] == "not_green"
+
+
 def test_neuron_knowledge_memory_regeneration_live_args_fail_closed(tmp_path, capsys):
     rc = main(
         [

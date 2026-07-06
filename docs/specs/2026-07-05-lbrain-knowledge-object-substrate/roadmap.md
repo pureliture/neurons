@@ -14,6 +14,7 @@ Current state:
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, and production-denial evidence exist, but real private Palantir manifest ingest and production ingest approval remain gaps.
 - P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / local_validated; local/test reference corpus extraction preview creates deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, and blocked-extraction gaps; repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, and broader evaluator suite previews have local/test evaluator evidence; live graph/Qdrant projection join remains unproven.
 - P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / local_validated; local/test decision commit records authority state/audit history, object queries surface local/test stale, superseded, retired, archive-only, and rejected states, object explain returns local/test decision history, and production denial returns a read-only promotion plan while authority mutation remains denied.
+- P5 Continuous Golden Query Quality Gates: `in_progress`; phase coverage report lists P1-P10 golden query families and explicitly keeps the release quality gate `not_green`.
 - Product activation: not complete; configured agent read path refresh remains required.
 - UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
 
@@ -413,7 +414,7 @@ Remaining gaps:
 
 ### P5. Continuous Golden Query Quality Gates
 
-State: planned; continuous from P1 onward.
+State: `in_progress`; continuous from P1 onward.
 
 Purpose:
 
@@ -449,6 +450,32 @@ Gate evidence:
 - runtime claims require runtime evidence
 - query routing does not fall back to generic safety/current cards for domain-specific questions
 - failed queries are reported as product gaps, not hidden as successful tool calls
+
+Current local/test evidence:
+
+- `golden-query-eval --phase-coverage` returns `knowledge_object_phase_golden_query_coverage.v1`
+- phase coverage report lists P1-P10 golden query families, required quality axes, evaluator owner, result status, and explicit gaps
+- current report status is `PASS_WITH_GAPS` and `release_quality_gate=not_green`; it does not claim production-quality answers
+- P1-P4 are represented as PASS_WITH_GAPS slices with their production/live gaps preserved
+- P6-P10 are represented as planned slices with `phase_slice_not_implemented` gaps
+- focused evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
+- focused result: `1 passed, 1 warning`
+- CLI evidence: `cd worker && uv run pytest -q tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_phase_coverage`
+- CLI result: `1 passed, 1 warning`
+- adjacent regression evidence: `cd worker && uv run pytest -q tests/test_neuron_cli.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
+- adjacent regression result: `33 passed, 1 warning`
+- CLI smoke: `cd worker && uv run neuron-knowledge golden-query-eval --phase-coverage`
+- CLI smoke result: `status=PASS_WITH_GAPS`, `release_quality_gate=not_green`
+- worker regression evidence: `cd worker && uv run pytest -q`
+- worker regression result: `1537 passed, 9 skipped, 1 warning`
+- root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
+- root regression result: `BUILD SUCCESSFUL`
+
+Remaining gaps:
+
+- P5 is not complete; this slice adds coverage accounting, not production-quality golden answer generation
+- future P6-P10 phase slices are still planned and intentionally reported as gaps
+- release quality remains `not_green` until data, processing, authority, runtime, preference, and context lanes can support production-quality answers
 
 ### P6. Session, Device, Project, And Work-Unit 360
 

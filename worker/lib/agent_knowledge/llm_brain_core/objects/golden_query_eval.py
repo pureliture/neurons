@@ -17,6 +17,15 @@ GOLDEN_QUERIES = [
     "내가 선호하는 HTML review artifact 기준으로 이 산출물을 평가해줘.",
 ]
 
+REQUIRED_QUALITY_AXES = [
+    "object",
+    "edge",
+    "evidence",
+    "freshness",
+    "gap",
+    "recommended_action",
+]
+
 
 def build_baseline_golden_query_report() -> dict[str, Any]:
     report = {
@@ -38,6 +47,88 @@ def build_baseline_golden_query_report() -> dict[str, Any]:
         ],
     }
     ensure_public_safe(report, "GoldenQueryBaseline")
+    return report
+
+
+def build_phase_golden_query_coverage_report() -> dict[str, Any]:
+    phases = [
+        _phase_coverage(
+            phase="P1",
+            title="Production MCP Activation",
+            golden_query_family="pr merge and deploy truth",
+            query=GOLDEN_QUERIES[4],
+            result="PASS_WITH_GAPS",
+            evaluator="configured/live MCP smoke plus deployment identity check",
+            gaps=[
+                "current_session_mcp_namespace_stale",
+                "current_main_image_identity_unproven",
+            ],
+        ),
+        _phase_coverage(
+            phase="P2",
+            title="Living Reference Corpus Store",
+            golden_query_family="reference corpus freshness/source authority",
+            query=GOLDEN_QUERIES[6],
+            result="PASS_WITH_GAPS",
+            evaluator="reference corpus store local/test status and ingest policy checks",
+            gaps=[
+                "private_palantir_manifest_ingest_not_performed",
+                "production_ingest_gate_denied",
+            ],
+        ),
+        _phase_coverage(
+            phase="P3",
+            title="Processing And Object Extraction Pipeline",
+            golden_query_family="corpus-to-design concept extraction",
+            query=GOLDEN_QUERIES[7],
+            result="PASS_WITH_GAPS",
+            evaluator="extraction evaluator suite preview",
+            gaps=[
+                "live_graph_qdrant_projection_join_unproven",
+            ],
+        ),
+        _phase_coverage(
+            phase="P4",
+            title="Review Queue And Authority Promotion",
+            golden_query_family="review queue and authority promotion",
+            query=GOLDEN_QUERIES[2],
+            result="PASS_WITH_GAPS",
+            evaluator="local/test review queue, authority decision, object query, and object explain checks",
+            gaps=[
+                "approved_production_pilot_missing",
+                "production_authority_write_denied",
+            ],
+        ),
+        _phase_coverage(
+            phase="P5",
+            title="Continuous Golden Query Quality Gates",
+            golden_query_family="continuous phase coverage",
+            query="P1-P10 phase coverage is explicit and gaps are visible.",
+            result="in_progress",
+            evaluator="phase golden query coverage report",
+            gaps=[
+                "release_quality_gate_not_green",
+                "future_phase_slices_planned",
+            ],
+        ),
+        _planned_phase("P6", "Session, Device, Project, And Work-Unit 360", "temporal repo recall", GOLDEN_QUERIES[0]),
+        _planned_phase("P7", "Preference, Style, And Artifact Memory", "code style drift", GOLDEN_QUERIES[8]),
+        _planned_phase("P8", "Runtime Truth, Security, And Deployment Authority", "pr merge and deploy truth", GOLDEN_QUERIES[4]),
+        _planned_phase("P9", "Agent-Facing Action Surface", "code change impact analysis", GOLDEN_QUERIES[3]),
+        _planned_phase("P10", "Product Application Surface", "HTML/visualization review preference", GOLDEN_QUERIES[9]),
+    ]
+    report = {
+        "schema_version": "knowledge_object_phase_golden_query_coverage.v1",
+        "status": "PASS_WITH_GAPS",
+        "release_quality_gate": "not_green",
+        "required_axes": list(REQUIRED_QUALITY_AXES),
+        "phases": phases,
+        "gaps": [
+            "production_quality_not_green",
+            "future_phase_golden_query_slices_planned",
+        ],
+    }
+    ensure_public_safe(report, "PhaseGoldenQueryCoverage")
     return report
 
 
@@ -66,3 +157,37 @@ def evaluate_object_pack_response(query: str, response: Mapping[str, Any]) -> di
     }
     ensure_public_safe(result, "GoldenQueryEvalResult")
     return result
+
+
+def _phase_coverage(
+    *,
+    phase: str,
+    title: str,
+    golden_query_family: str,
+    query: str,
+    result: str,
+    evaluator: str,
+    gaps: list[str],
+) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "title": title,
+        "golden_query_family": golden_query_family,
+        "query": query,
+        "result": result,
+        "evaluator": evaluator,
+        "required_axes": list(REQUIRED_QUALITY_AXES),
+        "gaps": list(gaps),
+    }
+
+
+def _planned_phase(phase: str, title: str, golden_query_family: str, query: str) -> dict[str, Any]:
+    return _phase_coverage(
+        phase=phase,
+        title=title,
+        golden_query_family=golden_query_family,
+        query=query,
+        result="planned",
+        evaluator="not_implemented",
+        gaps=["phase_slice_not_implemented"],
+    )
