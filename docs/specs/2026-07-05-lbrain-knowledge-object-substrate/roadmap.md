@@ -2,16 +2,17 @@
 
 ## Status
 
-This roadmap is evidence-gated, not calendar-gated.
+이 roadmap은 calendar가 아니라 evidence gate를 기준으로 진행합니다.
 
-It does not assign percentage completion. The first formal denominator starts here: each phase is complete only when its gate evidence exists and the production/read-path state is honestly labeled.
+이 문서는 percentage completion을 부여하지 않습니다. 첫 formal denominator는 여기서 시작합니다: 각 phase는 gate evidence가 있고 production/read-path 상태가 정직하게 label될 때만 완료됩니다.
 
 Current state:
 
-- Phase 1 substrate implementation: complete in local/test scope.
-- Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates passed, live production inclusion not validated.
-- Product activation: not complete.
-- UI/object browser: not a prerequisite for product activation, but remains an open later product surface.
+- Phase 1 substrate implementation: local/test scope에서는 완료되었습니다.
+- Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates는 통과했고 deployed HTTP MCP runtime 및 configured endpoint는 검증되었지만, 현재 Codex session tool registry에는 object-native tools가 아직 없으며 current-source-main image identity가 live 상태임은 증명되지 않았습니다.
+- P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP는 object-native tools를 노출하고, 최신 configured-endpoint smoke는 production write에 대해 denied/no-mutation으로 통과하지만, 현재 Codex session의 `mcp__lbrain` namespace는 아직 이를 노출하지 않으며 live MCP image가 #73/current-main source refactor를 포함하는지는 증명되지 않았습니다.
+- Product activation: 완료되지 않았습니다; configured agent read path refresh가 여전히 필요합니다.
+- UI/object browser: product activation prerequisite는 아니지만, 이후 product surface로 열어 둡니다.
 
 Roadmap lock state:
 
@@ -87,7 +88,8 @@ Completed local/test substrate gates:
 
 Known production gaps:
 
-- deployed/configured LBrain MCP does not expose the new object-native tools yet.
+- deployed/configured HTTP LBrain MCP exposes object-native tools, but the current Codex session's `mcp__lbrain` namespace is still stale and does not expose them.
+- deployed MCP image identity proves the object-native PR #64 merge is included, but does not prove the #73/current-main source refactor is in the live MCP image.
 - reference corpus store is not configured as a living LBrain corpus store.
 - golden queries are baseline red, not production-quality green.
 - accepted/current promotion workflow is not open for production object decisions.
@@ -142,7 +144,9 @@ This phase does not prove production deployment or live LBrain quality.
 
 ### P1. Production MCP Activation
 
-State: planned; immediate next.
+State: `PASS_WITH_GAPS` as of 2026-07-06 latest recheck.
+
+Deployed HTTP MCP runtime activation and configured endpoint smoke passed. The latest configured-endpoint smoke still exposes object-native tools and denies production proposal/decision mutation without writes. Current Codex session tool-registry activation remains a gap. Current-source-main image identity is also a gap: source `origin/main` is at PR #73, while the live MCP image proof remains tied to the earlier object-native artifact.
 
 Purpose:
 
@@ -165,6 +169,29 @@ Gate evidence:
 - deployed artifact identity check that ties the configured read path to the exact commit, image, or build artifact
 - live denial smoke for production proposal/decision calls when no production mutation gate is open
 - no production ledger/corpus mutation during activation validation
+
+Current evidence summary:
+
+- previous live production evidence recorded the Argo application tracking `main` and `Synced/Healthy`
+- source repo `origin/main` contains PR #73 merge commit `c3f3e34`; the P1 branch is rebased onto that commit
+- production GitOps desired state is the ops repo `main` revision `dbc6ded`
+- deployed MCP image identity is tied to source commit `c216ff4`, which contains PR #64 merge commit `7a0b6a6`
+- deployed MCP image identity is not proof that PR #73/current source `main` is live in the MCP image
+- live HTTP MCP `tools/list` exposes `brain_objects_query`, `brain_object_explain`, `brain_corpus_status`, `brain_corpus_ingest_plan`, `brain_object_proposal_create`, `brain_object_decision_commit`, and `brain_review_proposals`
+- live read-only `brain_objects_query` returns `brain_objects_query.v1` with `object_pack.v1`, `route=documentation_cleanup`, and explicit authority gaps
+- user-level Codex LBrain MCP config source includes object-native tools, and standalone smoke against the configured endpoint returns the same object-native tool list and read-only query shape
+- latest standalone configured-endpoint smoke after PR #73 merge still exposes all required object-native tools, returns `brain_objects_query.v1` / `object_pack.v1`, and denies production proposal/decision mutation with no authoritative memory change
+- production-scope `brain_object_proposal_create` returns denied/no-mutation
+- `brain_object_decision_commit` returns denied/no-mutation
+- no production ledger/corpus mutation was performed
+- current Codex session's `mcp__lbrain` namespace does not expose `brain_objects_query` even though the configured endpoint smoke passes; this keeps P1 at `PASS_WITH_GAPS`, not `PASS`
+- latest direct Kubernetes/Argo live status recheck could not be completed from this shell because no usable kube context, non-interactive sudo-backed kube access, or configured local Argo server address was available; this prevents upgrading GitOps desired-state evidence into a fresh live rollout identity claim
+
+Next gate:
+
+- restart or refresh the Codex LBrain MCP tool registry until the configured `mcp__lbrain` namespace exposes object-native tools directly, then rerun read-only smoke through that configured path.
+- rebuild/deploy the MCP image from current source `main` and rerun the artifact identity smoke before claiming the live MCP image includes PR #73.
+- rerun direct live Argo/Kubernetes status once an approved control-plane path is available; do not treat GitOps desired state alone as live rollout evidence.
 
 ### P2. Living Reference Corpus Store
 
@@ -464,7 +491,7 @@ Current accounting:
 | Phase | State | Notes |
 | --- | --- | --- |
 | P0 Local Object Substrate Foundation | `complete` | complete for local/test scope |
-| P1 Production MCP Activation | `planned` | immediate next product gate |
+| P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; deployed/configured endpoint validated, current Codex session tool registry gap remains |
 | P2 Living Reference Corpus Store | `planned` | corpus store not configured |
 | P3 Processing And Object Extraction Pipeline | `planned` | skeletal extraction only |
 | P4 Review Queue And Authority Promotion | `planned` | production authority write closed |
@@ -477,12 +504,12 @@ Current accounting:
 
 ## Next Design Targets
 
-The next `grill-to-spec` / `agentic-execution` loop should target P1.
+The next `grill-to-spec` / `agentic-execution` loop should close the remaining P1 configured-agent read-path gap, then move to P2.
 
 Recommended goal:
 
 ```text
-LBrain object-native MCP production activation without production authority mutation.
+Refresh the configured Codex LBrain MCP tool registry so object-native tools are available through the agent read path, without production authority mutation.
 ```
 
 Expected outputs:
