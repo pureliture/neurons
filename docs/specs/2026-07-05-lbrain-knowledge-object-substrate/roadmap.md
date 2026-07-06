@@ -12,8 +12,8 @@ Current state:
 - Production validation follow-up: `PASS_WITH_GAPS`; local/safety gates와 latest-main deployed HTTP MCP runtime/configured endpoint smoke는 통과했지만, 현재 Codex session tool registry에는 object-native tools가 아직 없고 production authority write gate는 계속 denied 상태입니다.
 - P1 Production MCP Activation: `PASS_WITH_GAPS`; deployed/configured HTTP MCP는 latest main 기반 image로 object-native tools를 노출하고, read-only query 및 production write denied/no-mutation smoke를 통과했습니다. 현재 Codex session의 `mcp__lbrain` namespace가 아직 object-native tools를 직접 노출하지 않는 gap은 남아 있습니다.
 - P2 Living Reference Corpus Store: `PASS_WITH_GAPS`; local/test corpus policy, configured local/test store, first-class reference object rows, CLI/MCP status, idempotence, production-denial evidence는 존재하지만, real private Palantir manifest ingest 및 production ingest approval은 여전히 gap입니다.
-- P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / `local_validated`; local/test reference corpus extraction preview는 deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, blocked-extraction gaps를 생성합니다. repo document extraction, documentation cleanup, runtime truth, preference/style, work-unit, session-detail, PR/commit detail, graph/search projection join, broader evaluator suite previews에는 local/test evaluator evidence가 있지만, live graph/Qdrant projection join은 아직 증명되지 않았습니다.
-- P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / `local_validated`; local/test decision commit은 authority state/audit history를 기록하고, object queries는 local/test stale, superseded, retired, archive-only, rejected states를 surface하며, object explain은 local/test decision history를 반환합니다. production denial은 read-only promotion plan을 반환하고 authority mutation은 계속 denied 상태입니다.
+- P3 Processing And Object Extraction Pipeline: `PASS_WITH_GAPS` / `local_validated`; local/test reference corpus extraction preview는 deterministic objects, edges, public-safe chunk preview, strategy comparison, evaluator evidence, blocked-extraction gaps를 생성합니다. candidate graph review pack은 candidate objects/edges/evidence/confidence/edit actions를 surface하고 reviewer edit fixture는 authority mutation 없이 candidate state만 바꿉니다. live graph/Qdrant projection join은 아직 증명되지 않았습니다.
+- P4 Review Queue And Authority Promotion: `PASS_WITH_GAPS` / `local_validated`; local/test decision commit은 authority state/audit history를 기록하고, object queries는 local/test stale, superseded, retired, archive-only, rejected states를 surface하며, object explain은 local/test decision history를 반환합니다. candidate approval-board preview와 reviewer edit no-mutation proof는 local/test로 존재하지만, production denial은 유지되고 authority mutation은 계속 denied 상태입니다.
 - P5 Continuous Golden Query Quality Gates: `in_progress`; phase coverage report는 P1-P10 golden query families를 나열하고 release quality gate를 명시적으로 `not_green` 상태로 유지합니다.
 - P6 Session, Device, Project, And Work-Unit 360: `PASS_WITH_GAPS` / `local_validated`; local/test session project rollup preview는 Device/Session/Repository/Branch/WorkUnit/Spec/PullRequest/Commit objects를 생성하고, same-device와 all-device fixture rollup을 분리하며, safe handoff pack을 반환합니다. live multi-device runtime evidence는 아직 증명되지 않았습니다.
 - P7 Preference, Style, And Artifact Memory: `PASS_WITH_GAPS` / `local_validated`; local/test artifact preference pack은 accepted/proposal lanes, profile objects, no-UI HTML artifact check를 검증하지만, live agent context pack 및 production authority promotion은 아직 gap입니다.
@@ -357,18 +357,24 @@ Current local/test evidence:
 - PR/commit detail extraction preview emits `includes_commit` and `validated_by` edges, reports missing test refs as gaps, and rejects merge-only runtime truth inference
 - graph/search projection join preview maps derived graph/search hits into `ProjectionHit` objects and `projection_join` edges
 - graph/search projection join preview keeps projection objects and edges in `derived_projection`, reports unknown join targets as gaps, and rejects projection-as-authority strategy
+- candidate graph review pack exposes candidate objects, edges, evidence refs, confidence, allowed reviewer actions, and minimal editable object fields
+- candidate reviewer edit fixture changes candidate object fields, edge type, and evidence summary; rejects direct `authority_lane` edits; preserves the original extraction hash; and keeps `authority_write_performed=false`
 - broader evaluator suite preview aggregates deterministic fixture checks, golden-query checks, strategy comparison checks, variance checks, and model/prompt comparison status
 - broader evaluator suite preview reports stable deterministic outputs as pass, reports changed outputs as `variance_detected`, and marks model/prompt comparison `not_applicable_no_llm` while all current preview extractors use zero model calls
+- candidate review focused evidence: `cd worker && uv run pytest -q tests/test_object_packs.py`
+- candidate review focused result: `9 passed, 1 warning`
+- candidate review adjacent evidence: `cd worker && uv run pytest -q tests/test_object_packs.py tests/test_extraction_pipeline.py tests/test_llm_brain_core_objects_subpackage.py`
+- candidate review adjacent result: `47 passed, 1 warning`
 - focused evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py`
 - focused result: `19 passed, 1 warning`
 - adjacent regression evidence: `cd worker && uv run pytest -q tests/test_extraction_pipeline.py tests/test_object_packs.py tests/test_reference_corpus.py tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py tests/test_preference_authority_model.py tests/test_repo_style_profile.py tests/test_llm_brain_core_package_depth.py tests/test_llm_brain_core_objects_subpackage.py tests/test_llm_brain_core_layering.py`
 - adjacent regression result: `141 passed, 1 warning`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1528 passed, 9 skipped, 1 warning`
+- worker regression result: `1566 passed, 9 skipped, 1 warning`
 
 PASS_WITH_GAPS rationale:
 
-- Local/test P3 gate evidence is present for deterministic extraction, failed extraction gaps, strategy comparison, chunk preview, evaluator reports, and derived projection join authority separation.
+- Local/test P3 gate evidence is present for deterministic extraction, failed extraction gaps, strategy comparison, chunk preview, candidate review/edit surface, evaluator reports, and derived projection join authority separation.
 - The remaining live graph/Qdrant projection join proof requires configured runtime evidence and is not proven by local fixture tests.
 - This phase did not perform or claim production authority, corpus, graph, search, or deployment mutation.
 
@@ -426,6 +432,10 @@ Current local/test evidence:
 - `brain_object_explain` returns local/test authority state plus decision history for object ids with committed decisions, while still reporting that the object body comes from ledger state only when no object store is configured
 - production-scope `brain_object_decision_commit` remains denied/no-mutation and returns `object_authority_promotion_plan.v1` with allowed object class, decision types, reviewer role, required gate evidence, rollback path, blast radius, and no-mutation report
 - ledger boundary manifest assigns `object_review_proposals`, `object_authority_decisions`, and `object_authority_states` to the native-memory/object area
+- candidate graph approval-board preview shows editable candidate object state, related edges, evidence refs, confidence, gaps, recommended action, and allowed reviewer actions
+- reviewer edit fixture changes only candidate object/edge/evidence state, rejects direct authority-lane edits, preserves original extraction hash, and performs no authority write
+- candidate review focused evidence: `cd worker && uv run pytest -q tests/test_object_packs.py`
+- candidate review focused result: `9 passed, 1 warning`
 - object explain history evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_brain_object_explain_includes_local_authority_decision_history`
 - object explain history result: `1 passed, 1 warning`
 - production-denial plan evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_is_restricted_denied_by_default`
@@ -441,7 +451,7 @@ Current local/test evidence:
 - ledger boundary evidence: `cd worker && uv run pytest -q tests/test_ledger_area_boundaries.py`
 - ledger boundary result: `10 passed`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1535 passed, 9 skipped, 1 warning`
+- worker regression result: `1566 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
@@ -840,8 +850,8 @@ Current accounting:
 | P0 Local Object Substrate Foundation | `complete` | complete for local/test scope |
 | P1 Production MCP Activation | `in_progress` | `PASS_WITH_GAPS`; latest-main deployed/configured endpoint validated, current Codex session tool registry gap remains |
 | P2 Living Reference Corpus Store | `local_validated` | `PASS_WITH_GAPS`; local/test store and status gates pass, real private manifest ingest and production approval remain gaps |
-| P3 Processing And Object Extraction Pipeline | `local_validated` | `PASS_WITH_GAPS`; local/test extraction previews pass, but automatic candidate-graph creation, editable object/edge/evidence review, and live projection join remain gaps |
-| P4 Review Queue And Authority Promotion | `local_validated` | `PASS_WITH_GAPS`; local/test authority state and audit gates pass, approval-board/edit surface remains a product gap, and production authority mutation remains denied |
+| P3 Processing And Object Extraction Pipeline | `local_validated` | `PASS_WITH_GAPS`; local/test extraction previews and candidate review/edit pack pass, but automatic source-to-candidate graph runtime wiring and live projection join remain gaps |
+| P4 Review Queue And Authority Promotion | `local_validated` | `PASS_WITH_GAPS`; local/test authority state, audit gates, approval-board preview, and reviewer edit no-mutation proof pass; production authority mutation remains denied |
 | P5 Continuous Golden Query Quality Gates | `in_progress` | phase coverage exists and release quality gate remains `not_green` |
 | P6 Session, Device, Project, And Work-Unit 360 | `local_validated` | `PASS_WITH_GAPS`; local/test rollup and handoff gates pass, live multi-device runtime evidence remains a gap |
 | P7 Preference, Style, And Artifact Memory | `local_validated` | `PASS_WITH_GAPS`; local/test artifact preference pack lanes and no-UI HTML artifact check pass, live agent context pack and production authority promotion remain gaps |
@@ -854,7 +864,7 @@ Delivery integration status:
 - PR #84 through PR #93 are merged into `main`.
 - Final head and merge SHAs below are GitHub delivery evidence only. They are not deploy, live runtime, or production readiness evidence.
 - P1 through P10 phase branches were cleaned up or are eligible for cleanup after merge verification.
-- This delivery record does not close the P1 configured-agent namespace gap or the P3/P4 approval-board promotion gaps.
+- This delivery record does not close the P1 configured-agent namespace gap, full source-to-candidate graph runtime wiring, P5-P9 product activation gaps, or production authority promotion gates.
 - Historical PR body previews and issue drafts remain in `pr-delivery-package.md`; use the delivery record below as the current SHA source.
 
 Merged PR delivery record:
@@ -881,14 +891,17 @@ PR creation gate:
 
 ## Next Design Targets
 
-The next grill-to-spec / agentic-execution loop should target the product spine:
+The next agentic-execution loop should keep the full product activation scope, not stop at P4:
 
 ```text
-source/corpus storage
-→ candidate graph extraction
-→ editable review
-→ approval-board promotion
-→ accepted/current authority
+P2 source/corpus storage
+→ P3 candidate graph extraction and editing
+→ P4 approval-board promotion
+→ P5 quality gates
+→ P6 project/session/work-unit rollup
+→ P7 preference/artifact memory
+→ P8 runtime authority
+→ P9 agent context productization
 ```
 
 Continue production read-path validation only when the configured LBrain MCP object-native tool namespace can be proven from the active agent path. Keep production authority writes denied until the approval board, audit trail, rollback/supersession path, and scoped promotion gate are approved.
@@ -896,7 +909,7 @@ Continue production read-path validation only when the configured LBrain MCP obj
 Recommended goal:
 
 ```text
-LBrain source-to-candidate-graph workflow with editable review and approval-board promotion.
+LBrain source-to-candidate-graph product activation through P9, with full P10 object browser deferred and minimal P3/P4 edit/review surface included.
 ```
 
 Expected outputs:
@@ -908,6 +921,11 @@ Expected outputs:
 - candidate object/edge/evidence edit fixtures
 - no-authority-mutation proof for extraction and reviewer edits
 - local/test promotion read-after-write proof
+- P5 quality gate evidence for source-to-graph, review, approval, and authority read paths
+- P6 project/session/work-unit rollup evidence
+- P7 preference/artifact memory evidence
+- P8 runtime authority evidence with merge, CI, deploy, and live runtime separated
+- P9 agent context pack evidence
 - production promotion gate plan with human approval, audit, rollback/supersession, and scoped object classes
 - golden query slices for source-to-graph, review, approval, and authority read paths
 - no production mutation
