@@ -438,6 +438,8 @@ def _dispatch_brain_candidate_review_edit_tool(
         pack=pack,
         edits=[dict(item) for item in edits if isinstance(item, Mapping)],
         reviewer_id=str(arguments.get("reviewer_id") or "unspecified"),
+        target=str(arguments.get("target") or "local_test"),
+        mutation_mode=str(arguments.get("mutation_mode") or "no_mutation"),
     )
     return _tool_result(result)
 

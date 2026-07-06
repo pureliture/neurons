@@ -276,6 +276,8 @@ def source_to_candidate_graph_main(argv: list[str] | None = None) -> int:
 
 def candidate_review_edit_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="neuron-knowledge candidate-review-edit")
+    parser.add_argument("--target", choices=["local_test", "production"], default="local_test")
+    parser.add_argument("--mutation-mode", choices=["no_mutation"], default="no_mutation")
     parser.add_argument("--pack-file", required=True)
     parser.add_argument("--edits-file", required=True)
     parser.add_argument("--reviewer-id", default="unspecified")
@@ -284,6 +286,8 @@ def candidate_review_edit_main(argv: list[str] | None = None) -> int:
         _load_json_mapping(args.pack_file, label="pack"),
         edits=_load_json_list(args.edits_file, label="edits"),
         reviewer={"id": args.reviewer_id},
+        target_scope=args.target,
+        mutation_mode=args.mutation_mode,
     )
     _print_json(result)
     return 0 if result["candidate_state_changed"] else 1

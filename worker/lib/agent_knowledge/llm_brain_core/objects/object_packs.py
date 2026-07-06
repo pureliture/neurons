@@ -19,6 +19,17 @@ CANDIDATE_REVIEW_ACTIONS = (
     "retire",
     "request_more_evidence",
 )
+CANDIDATE_REVIEW_EDIT_ACTIONS = (
+    "update_object",
+    "update_edge",
+    "update_evidence",
+    "add_edge",
+    "remove_edge",
+    "add_evidence",
+    "remove_evidence",
+)
+EDITABLE_CANDIDATE_LANES = frozenset({"candidate", "proposal_only"})
+EDITABLE_EVIDENCE_LANES = frozenset({"candidate", "proposal_only", "reference_only"})
 EDITABLE_OBJECT_FIELDS = frozenset(
     {
         "title",
@@ -110,6 +121,7 @@ ROUTE_SPECS: dict[str, dict[str, Any]] = {
         "editable_object_fields": sorted(EDITABLE_OBJECT_FIELDS),
         "editable_edge_fields": sorted(EDITABLE_EDGE_FIELDS),
         "editable_evidence_fields": sorted(EDITABLE_EVIDENCE_FIELDS),
+        "supported_edit_actions": list(CANDIDATE_REVIEW_EDIT_ACTIONS),
         "eval_assertions": [
             "candidate_graph_is_not_authority",
             "reviewer_edit_does_not_mutate_authority",
@@ -352,6 +364,7 @@ def build_candidate_graph_review_pack(
                 "editable_object_fields": sorted(EDITABLE_OBJECT_FIELDS),
                 "editable_edge_fields": sorted(EDITABLE_EDGE_FIELDS),
                 "editable_evidence_fields": sorted(EDITABLE_EVIDENCE_FIELDS),
+                "supported_edit_actions": list(CANDIDATE_REVIEW_EDIT_ACTIONS),
                 "protected_authority_fields": sorted(AUTHORITY_PROTECTED_FIELDS),
                 "allowed_actions": list(actions),
             },
@@ -402,9 +415,49 @@ def apply_candidate_review_edits(
     *,
     edits: list[Mapping[str, Any]],
     reviewer: Mapping[str, Any],
+    target_scope: str = "local_test",
+    mutation_mode: str = "no_mutation",
 ) -> dict[str, Any]:
     updated_pack = deepcopy(dict(pack))
+    scope = public_safe_text(str(target_scope or "local_test"), max_chars=80)
+    mode = public_safe_text(str(mutation_mode or "no_mutation"), max_chars=80)
     original_hash = str(pack.get("candidate_graph_hash") or "")
+    if mode != "no_mutation":
+        updated_pack["authority_write_performed"] = False
+        updated_pack["authoritative_memory_changed"] = False
+        updated_pack["production_mutation_performed"] = False
+        updated_pack["review_edit_target_scope"] = scope
+        updated_pack["mutation_mode"] = mode
+        result = {
+            "schema_version": "candidate_review_edit_result.v1",
+            "permission": "denied",
+            "reason": "candidate_review_edit_mutation_mode_not_supported",
+            "target_scope": scope,
+            "mutation_mode": mode,
+            "candidate_state_changed": False,
+            "authority_write_performed": False,
+            "authoritative_memory_changed": False,
+            "production_mutation_performed": False,
+            "original_extraction_preserved": True,
+            "original_candidate_graph_hash": original_hash,
+            "updated_candidate_graph_hash": original_hash,
+            "reviewer_ref": public_safe_text(
+                str(reviewer.get("id") or reviewer.get("role") or "unspecified"),
+                max_chars=120,
+            ),
+            "accepted_edits": [],
+            "rejected_edits": [
+                {
+                    "action": public_safe_text(str(edit.get("action") or ""), max_chars=80),
+                    "reason": "candidate_review_edit_mutation_mode_not_supported",
+                }
+                for edit in edits
+                if isinstance(edit, Mapping)
+            ],
+            "updated_pack": updated_pack,
+        }
+        ensure_public_safe(result, "CandidateReviewEditResult")
+        return result
     objects = updated_pack.get("objects") if isinstance(updated_pack.get("objects"), list) else []
     edges = updated_pack.get("edges") if isinstance(updated_pack.get("edges"), list) else []
     evidence_items = updated_pack.get("evidence") if isinstance(updated_pack.get("evidence"), list) else []
@@ -441,6 +494,7 @@ def apply_candidate_review_edits(
             _apply_edge_edit(
                 edit=edit,
                 edge_by_id=edge_by_id,
+                objects=objects,
                 accepted_edits=accepted_edits,
                 rejected_edits=rejected_edits,
             )
@@ -449,6 +503,53 @@ def apply_candidate_review_edits(
             _apply_evidence_edit(
                 edit=edit,
                 evidence_by_id=evidence_by_id,
+                objects=objects,
+                edges=edges,
+                accepted_edits=accepted_edits,
+                rejected_edits=rejected_edits,
+            )
+            continue
+        if action == "add_edge":
+            _apply_add_edge_edit(
+                edit=edit,
+                object_by_id=object_by_id,
+                edge_by_id=edge_by_id,
+                evidence_by_id=evidence_by_id,
+                objects=objects,
+                edges=edges,
+                accepted_edits=accepted_edits,
+                rejected_edits=rejected_edits,
+            )
+            continue
+        if action == "remove_edge":
+            _apply_remove_edge_edit(
+                edit=edit,
+                edge_by_id=edge_by_id,
+                edges=edges,
+                objects=objects,
+                accepted_edits=accepted_edits,
+                rejected_edits=rejected_edits,
+            )
+            continue
+        if action == "add_evidence":
+            _apply_add_evidence_edit(
+                edit=edit,
+                object_by_id=object_by_id,
+                edge_by_id=edge_by_id,
+                evidence_by_id=evidence_by_id,
+                evidence_items=evidence_items,
+                accepted_edits=accepted_edits,
+                rejected_edits=rejected_edits,
+            )
+            continue
+        if action == "remove_evidence":
+            _apply_remove_evidence_edit(
+                edit=edit,
+                evidence_by_id=evidence_by_id,
+                evidence_items=evidence_items,
+                objects=objects,
+                edges=edges,
+                edge_by_id=edge_by_id,
                 accepted_edits=accepted_edits,
                 rejected_edits=rejected_edits,
             )
@@ -474,6 +575,8 @@ def apply_candidate_review_edits(
     updated_pack["authority_write_performed"] = False
     updated_pack["authoritative_memory_changed"] = False
     updated_pack["production_mutation_performed"] = False
+    updated_pack["review_edit_target_scope"] = scope
+    updated_pack["mutation_mode"] = "no_mutation"
     updated_pack["audit"] = {
         **dict(updated_pack.get("audit") or {}),
         "candidate_graph_hash": updated_hash,
@@ -481,6 +584,10 @@ def apply_candidate_review_edits(
     }
     result = {
         "schema_version": "candidate_review_edit_result.v1",
+        "permission": "allowed" if mode == "no_mutation" else "denied",
+        "reason": "candidate_review_edit_no_mutation_preview",
+        "target_scope": scope,
+        "mutation_mode": "no_mutation",
         "candidate_state_changed": bool(accepted_edits),
         "authority_write_performed": False,
         "authoritative_memory_changed": False,
@@ -679,6 +786,15 @@ def _apply_object_edit(
             }
         )
         return
+    if not _candidate_lane_editable(target):
+        rejected_edits.append(
+            {
+                "action": action,
+                "object_id": object_id,
+                "reason": "candidate_review_edit_requires_candidate_lane",
+            }
+        )
+        return
     fields = edit.get("fields") if isinstance(edit.get("fields"), Mapping) else {}
     changed_fields: list[str] = []
     for field, value in fields.items():
@@ -719,6 +835,7 @@ def _apply_edge_edit(
     *,
     edit: Mapping[str, Any],
     edge_by_id: dict[str, dict[str, Any]],
+    objects: list[Any],
     accepted_edits: list[dict[str, Any]],
     rejected_edits: list[dict[str, Any]],
 ) -> None:
@@ -727,6 +844,15 @@ def _apply_edge_edit(
     target = edge_by_id.get(edge_id)
     if target is None:
         rejected_edits.append({"action": action, "edge_id": edge_id, "reason": "candidate_edge_not_found"})
+        return
+    if not _candidate_lane_editable(target):
+        rejected_edits.append(
+            {
+                "action": action,
+                "edge_id": edge_id,
+                "reason": "candidate_review_edit_requires_candidate_lane",
+            }
+        )
         return
     fields = edit.get("fields") if isinstance(edit.get("fields"), Mapping) else {}
     changed_fields: list[str] = []
@@ -755,12 +881,18 @@ def _apply_edge_edit(
         target[field_name] = _safe_edit_value(field_name, value)
         changed_fields.append(field_name)
     if changed_fields:
+        old_edge_id = edge_id
         _refresh_edge_identity(target)
+        new_edge_id = str(target.get("edge_id") or "")
+        if new_edge_id != old_edge_id:
+            edge_by_id.pop(old_edge_id, None)
+            edge_by_id[new_edge_id] = target
+            _replace_object_edge_ref((obj for obj in objects if isinstance(obj, dict)), old_edge_id, new_edge_id)
         accepted_edits.append(
             {
                 "action": action,
                 "edge_id": edge_id,
-                "updated_edge_id": target.get("edge_id", ""),
+                "updated_edge_id": new_edge_id,
                 "changed_fields": sorted(changed_fields),
             }
         )
@@ -770,6 +902,8 @@ def _apply_evidence_edit(
     *,
     edit: Mapping[str, Any],
     evidence_by_id: dict[str, dict[str, Any]],
+    objects: list[Any],
+    edges: list[Any],
     accepted_edits: list[dict[str, Any]],
     rejected_edits: list[dict[str, Any]],
 ) -> None:
@@ -778,6 +912,24 @@ def _apply_evidence_edit(
     target = evidence_by_id.get(evidence_id)
     if target is None:
         rejected_edits.append({"action": action, "evidence_id": evidence_id, "reason": "candidate_evidence_not_found"})
+        return
+    if not _evidence_lane_editable(target):
+        rejected_edits.append(
+            {
+                "action": action,
+                "evidence_id": evidence_id,
+                "reason": "candidate_review_edit_requires_reference_or_candidate_evidence_lane",
+            }
+        )
+        return
+    if _evidence_used_by_non_candidate_authority(evidence_id, objects=objects, edges=edges):
+        rejected_edits.append(
+            {
+                "action": action,
+                "evidence_id": evidence_id,
+                "reason": "candidate_evidence_used_by_non_candidate_authority",
+            }
+        )
         return
     fields = edit.get("fields") if isinstance(edit.get("fields"), Mapping) else {}
     changed_fields: list[str] = []
@@ -813,6 +965,334 @@ def _apply_evidence_edit(
                 "changed_fields": sorted(changed_fields),
             }
         )
+
+
+def _apply_add_edge_edit(
+    *,
+    edit: Mapping[str, Any],
+    object_by_id: dict[str, dict[str, Any]],
+    edge_by_id: dict[str, dict[str, Any]],
+    evidence_by_id: dict[str, dict[str, Any]],
+    objects: list[Any],
+    edges: list[Any],
+    accepted_edits: list[dict[str, Any]],
+    rejected_edits: list[dict[str, Any]],
+) -> None:
+    action = "add_edge"
+    fields = edit.get("fields") if isinstance(edit.get("fields"), Mapping) else {}
+    edge_type = public_safe_text(str(fields.get("edge_type") or ""), max_chars=180)
+    from_object_id = public_safe_text(str(fields.get("from_object_id") or ""), max_chars=180)
+    to_object_id = public_safe_text(str(fields.get("to_object_id") or ""), max_chars=180)
+    if not edge_type or not from_object_id or not to_object_id:
+        rejected_edits.append({"action": action, "reason": "candidate_edge_required_fields_missing"})
+        return
+    from_object = object_by_id.get(from_object_id)
+    to_object = object_by_id.get(to_object_id)
+    if from_object is None or to_object is None:
+        rejected_edits.append(
+            {
+                "action": action,
+                "from_object_id": from_object_id,
+                "to_object_id": to_object_id,
+                "reason": "candidate_edge_endpoint_not_found",
+            }
+        )
+        return
+    if not _candidate_lane_editable(from_object) or not _candidate_lane_editable(to_object):
+        rejected_edits.append(
+            {
+                "action": action,
+                "from_object_id": from_object_id,
+                "to_object_id": to_object_id,
+                "reason": "candidate_review_edit_requires_candidate_lane",
+            }
+        )
+        return
+    evidence_refs = _safe_edit_value("evidence_refs", fields.get("evidence_refs") or [])
+    missing_evidence = [ref for ref in evidence_refs if ref not in evidence_by_id]
+    if missing_evidence:
+        rejected_edits.append(
+            {
+                "action": action,
+                "evidence_refs": missing_evidence,
+                "reason": "candidate_evidence_not_found",
+            }
+        )
+        return
+    non_candidate_evidence_refs = [
+        ref
+        for ref in evidence_refs
+        if _evidence_used_by_non_candidate_authority(ref, objects=objects, edges=edge_by_id.values())
+    ]
+    if non_candidate_evidence_refs:
+        rejected_edits.append(
+            {
+                "action": action,
+                "evidence_refs": non_candidate_evidence_refs,
+                "reason": "candidate_evidence_used_by_non_candidate_authority",
+            }
+        )
+        return
+    try:
+        edge = KnowledgeEdge.from_parts(
+            edge_type=edge_type,
+            from_object_id=from_object_id,
+            to_object_id=to_object_id,
+            evidence_refs=evidence_refs,
+            lifecycle_status="proposed",
+            authority_lane="candidate",
+            verification_state="unverified",
+            confidence=dict(fields.get("confidence") or {}) if isinstance(fields.get("confidence"), Mapping) else {},
+            payload=dict(fields.get("payload") or {}) if isinstance(fields.get("payload"), Mapping) else {},
+        ).to_dict()
+    except ValueError as exc:
+        rejected_edits.append({"action": action, "reason": public_safe_text(str(exc), max_chars=240)})
+        return
+    edge_id = str(edge.get("edge_id") or "")
+    if edge_id in edge_by_id:
+        rejected_edits.append({"action": action, "edge_id": edge_id, "reason": "candidate_edge_already_exists"})
+        return
+    edges.append(edge)
+    edge_by_id[edge_id] = edge
+    _append_unique_ref(from_object, "edge_refs", edge_id)
+    _append_unique_ref(to_object, "edge_refs", edge_id)
+    accepted_edits.append({"action": action, "edge_id": edge_id})
+
+
+def _apply_remove_edge_edit(
+    *,
+    edit: Mapping[str, Any],
+    edge_by_id: dict[str, dict[str, Any]],
+    edges: list[Any],
+    objects: list[Any],
+    accepted_edits: list[dict[str, Any]],
+    rejected_edits: list[dict[str, Any]],
+) -> None:
+    action = "remove_edge"
+    edge_id = public_safe_text(str(edit.get("edge_id") or ""), max_chars=180)
+    if edge_id not in edge_by_id:
+        rejected_edits.append({"action": action, "edge_id": edge_id, "reason": "candidate_edge_not_found"})
+        return
+    if not _candidate_lane_editable(edge_by_id[edge_id]):
+        rejected_edits.append(
+            {
+                "action": action,
+                "edge_id": edge_id,
+                "reason": "candidate_review_edit_requires_candidate_lane",
+            }
+        )
+        return
+    edges[:] = [
+        edge
+        for edge in edges
+        if not (isinstance(edge, Mapping) and str(edge.get("edge_id") or "") == edge_id)
+    ]
+    edge_by_id.pop(edge_id, None)
+    for obj in objects:
+        if isinstance(obj, dict):
+            obj["edge_refs"] = [ref for ref in obj.get("edge_refs") or [] if str(ref) != edge_id]
+    accepted_edits.append({"action": action, "edge_id": edge_id})
+
+
+def _apply_add_evidence_edit(
+    *,
+    edit: Mapping[str, Any],
+    object_by_id: dict[str, dict[str, Any]],
+    edge_by_id: dict[str, dict[str, Any]],
+    evidence_by_id: dict[str, dict[str, Any]],
+    evidence_items: list[Any],
+    accepted_edits: list[dict[str, Any]],
+    rejected_edits: list[dict[str, Any]],
+) -> None:
+    action = "add_evidence"
+    fields = edit.get("fields") if isinstance(edit.get("fields"), Mapping) else {}
+    locator = fields.get("locator") if isinstance(fields.get("locator"), Mapping) else {}
+    evidence_type = public_safe_text(str(fields.get("evidence_type") or ""), max_chars=120)
+    content_hash = public_safe_text(str(fields.get("content_hash") or ""), max_chars=100)
+    summary = public_safe_text(str(fields.get("summary") or ""), max_chars=512)
+    if not evidence_type or not locator or not content_hash or not summary:
+        rejected_edits.append({"action": action, "reason": "candidate_evidence_required_fields_missing"})
+        return
+    attach_to_object_id = public_safe_text(str(edit.get("attach_to_object_id") or ""), max_chars=180)
+    attach_to_edge_id = public_safe_text(str(edit.get("attach_to_edge_id") or ""), max_chars=180)
+    target_object = object_by_id.get(attach_to_object_id) if attach_to_object_id else None
+    target_edge = edge_by_id.get(attach_to_edge_id) if attach_to_edge_id else None
+    if attach_to_object_id and target_object is None:
+        rejected_edits.append(
+            {"action": action, "object_id": attach_to_object_id, "reason": "candidate_object_not_found"}
+        )
+        return
+    if attach_to_edge_id and target_edge is None:
+        rejected_edits.append({"action": action, "edge_id": attach_to_edge_id, "reason": "candidate_edge_not_found"})
+        return
+    if target_object is not None and not _candidate_lane_editable(target_object):
+        rejected_edits.append(
+            {
+                "action": action,
+                "object_id": attach_to_object_id,
+                "reason": "candidate_review_edit_requires_candidate_lane",
+            }
+        )
+        return
+    if target_edge is not None and not _candidate_lane_editable(target_edge):
+        rejected_edits.append(
+            {
+                "action": action,
+                "edge_id": attach_to_edge_id,
+                "reason": "candidate_review_edit_requires_candidate_lane",
+            }
+        )
+        return
+    try:
+        evidence = EvidenceRef.from_parts(
+            evidence_type=evidence_type,
+            authority_lane="reference_only",
+            verification_state=public_safe_text(
+                str(fields.get("verification_state") or "source_hash_verified"),
+                max_chars=80,
+            ),
+            locator=dict(locator),
+            content_hash=content_hash,
+            summary=summary,
+            producer=dict(fields.get("producer") or {}) if isinstance(fields.get("producer"), Mapping) else {},
+            privacy_class=public_safe_text(str(fields.get("privacy_class") or "public_safe"), max_chars=80),
+            gaps=[public_safe_text(str(item), max_chars=180) for item in fields.get("gaps") or [] if item],
+        )
+        evidence_view = evidence.to_view()
+    except ValueError as exc:
+        rejected_edits.append({"action": action, "reason": public_safe_text(str(exc), max_chars=240)})
+        return
+    evidence_id = evidence.evidence_id
+    if evidence_id in evidence_by_id:
+        rejected_edits.append(
+            {"action": action, "evidence_id": evidence_id, "reason": "candidate_evidence_already_exists"}
+        )
+        return
+    evidence_items.append(evidence_view)
+    evidence_by_id[evidence_id] = evidence_view
+    attached_to: list[dict[str, str]] = []
+    if target_object is not None:
+        _append_unique_ref(target_object, "evidence_refs", evidence_id)
+        attached_to.append({"object_id": attach_to_object_id})
+    if target_edge is not None:
+        old_edge_id = str(target_edge.get("edge_id") or "")
+        _append_unique_ref(target_edge, "evidence_refs", evidence_id)
+        _refresh_edge_identity(target_edge)
+        _replace_object_edge_ref(object_by_id.values(), old_edge_id, str(target_edge.get("edge_id") or ""))
+        _rebuild_edge_map(edge_by_id, list(edge_by_id.values()))
+        attached_to.append({"edge_id": str(target_edge.get("edge_id") or "")})
+    accepted_edits.append({"action": action, "evidence_id": evidence_id, "attached_to": attached_to})
+
+
+def _apply_remove_evidence_edit(
+    *,
+    edit: Mapping[str, Any],
+    evidence_by_id: dict[str, dict[str, Any]],
+    evidence_items: list[Any],
+    objects: list[Any],
+    edges: list[Any],
+    edge_by_id: dict[str, dict[str, Any]],
+    accepted_edits: list[dict[str, Any]],
+    rejected_edits: list[dict[str, Any]],
+) -> None:
+    action = "remove_evidence"
+    evidence_id = public_safe_text(str(edit.get("evidence_id") or ""), max_chars=180)
+    if evidence_id not in evidence_by_id:
+        rejected_edits.append({"action": action, "evidence_id": evidence_id, "reason": "candidate_evidence_not_found"})
+        return
+    if not _evidence_lane_editable(evidence_by_id[evidence_id]):
+        rejected_edits.append(
+            {
+                "action": action,
+                "evidence_id": evidence_id,
+                "reason": "candidate_review_edit_requires_reference_or_candidate_evidence_lane",
+            }
+        )
+        return
+    if _evidence_used_by_non_candidate_authority(evidence_id, objects=objects, edges=edges):
+        rejected_edits.append(
+            {
+                "action": action,
+                "evidence_id": evidence_id,
+                "reason": "candidate_evidence_used_by_non_candidate_authority",
+            }
+        )
+        return
+    evidence_items[:] = [
+        item
+        for item in evidence_items
+        if not (isinstance(item, Mapping) and str(item.get("evidence_id") or "") == evidence_id)
+    ]
+    evidence_by_id.pop(evidence_id, None)
+    for obj in objects:
+        if isinstance(obj, dict):
+            obj["evidence_refs"] = [ref for ref in obj.get("evidence_refs") or [] if str(ref) != evidence_id]
+    changed_edge_ids: list[dict[str, str]] = []
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        evidence_refs = [ref for ref in edge.get("evidence_refs") or [] if str(ref) != evidence_id]
+        if evidence_refs == edge.get("evidence_refs"):
+            continue
+        old_edge_id = str(edge.get("edge_id") or "")
+        edge["evidence_refs"] = evidence_refs
+        _refresh_edge_identity(edge)
+        new_edge_id = str(edge.get("edge_id") or "")
+        _replace_object_edge_ref((obj for obj in objects if isinstance(obj, dict)), old_edge_id, new_edge_id)
+        changed_edge_ids.append({"previous_edge_id": old_edge_id, "edge_id": new_edge_id})
+    _rebuild_edge_map(edge_by_id, edges)
+    accepted_edits.append({"action": action, "evidence_id": evidence_id, "updated_edges": changed_edge_ids})
+
+
+def _append_unique_ref(target: dict[str, Any], field_name: str, ref: str) -> None:
+    refs = [str(item) for item in target.get(field_name) or [] if item]
+    if ref not in refs:
+        refs.append(ref)
+    target[field_name] = refs
+
+
+def _candidate_lane_editable(target: Mapping[str, Any]) -> bool:
+    return str(target.get("authority_lane") or "") in EDITABLE_CANDIDATE_LANES
+
+
+def _evidence_lane_editable(target: Mapping[str, Any]) -> bool:
+    return str(target.get("authority_lane") or "") in EDITABLE_EVIDENCE_LANES
+
+
+def _evidence_used_by_non_candidate_authority(
+    evidence_id: str,
+    *,
+    objects: Any,
+    edges: Any,
+) -> bool:
+    for obj in objects:
+        if not isinstance(obj, Mapping) or evidence_id not in {str(ref) for ref in obj.get("evidence_refs") or []}:
+            continue
+        if not _candidate_lane_editable(obj):
+            return True
+    for edge in edges:
+        if not isinstance(edge, Mapping) or evidence_id not in {str(ref) for ref in edge.get("evidence_refs") or []}:
+            continue
+        if not _candidate_lane_editable(edge):
+            return True
+    return False
+
+
+def _replace_object_edge_ref(objects: Any, old_edge_id: str, new_edge_id: str) -> None:
+    if not old_edge_id or not new_edge_id or old_edge_id == new_edge_id:
+        return
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        refs = [str(item) for item in obj.get("edge_refs") or [] if item]
+        obj["edge_refs"] = [new_edge_id if ref == old_edge_id else ref for ref in refs]
+
+
+def _rebuild_edge_map(edge_by_id: dict[str, dict[str, Any]], edges: list[Any]) -> None:
+    edge_by_id.clear()
+    for edge in edges:
+        if isinstance(edge, dict) and edge.get("edge_id"):
+            edge_by_id[str(edge.get("edge_id") or "")] = edge
 
 
 def _refresh_edge_identity(edge: dict[str, Any]) -> None:
