@@ -23,6 +23,9 @@ OBJECT_PARITY_SYMBOLS: dict[str, tuple[str, ...]] = {
         "memory_card_to_knowledge_object",
     ),
     "object_packs": (
+        "apply_approval_board_decisions",
+        "apply_candidate_review_edits",
+        "build_candidate_graph_review_pack",
         "build_documentation_cleanup_pack",
         "build_agent_context_object_packs",
     ),
