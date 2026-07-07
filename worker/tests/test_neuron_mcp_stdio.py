@@ -209,6 +209,59 @@ def _reference_manifest() -> dict:
     }
 
 
+def _approval_board_production_gate() -> dict:
+    return {
+        "approved": True,
+        "approval_ref": "preapproved-user-gate-2026-07-06",
+        "scope": "single_project_single_object",
+        "project": PROJECT,
+        "max_objects": 1,
+        "configured_deployed_mcp_identity_matches_source": True,
+        "read_after_write_smoke_plan": True,
+        "rollback_or_supersession_plan": True,
+        "no_raw_private_evidence": True,
+    }
+
+
+def _approval_board_candidate_pack(candidate_id: str) -> dict:
+    candidate = {
+        "schema_version": "knowledge_object.v1",
+        "object_id": candidate_id,
+        "object_type": "RepoDocument",
+        "scope": {"project": PROJECT},
+        "title": "Approval board production candidate",
+        "summary": "Production approval-board candidate.",
+        "lifecycle_status": "proposed",
+        "authority_lane": "candidate",
+        "verification_state": "source_hash_verified",
+        "review_state": "needs_review",
+        "content_hash": _h(candidate_id),
+        "source_refs": [],
+        "evidence_refs": [f"ev:source_hash:{candidate_id.rsplit(':', 1)[-1]}"],
+        "edge_refs": [],
+        "observed_at": "2026-07-08T00:00:00Z",
+        "valid_from": "",
+        "valid_to": "",
+        "confidence": {"score": 0.9, "basis": "approval_board_test_fixture"},
+        "recommended_action": "promote",
+        "freshness": {},
+        "privacy_class": "public_safe",
+        "payload": {"path_ref": "docs/specs/redacted-approval-board-candidate.md"},
+    }
+    return {
+        "schema_version": "object_pack.v1",
+        "route": "candidate_graph_review",
+        "candidate_graph_hash": _h(f"candidate-pack:{candidate_id}"),
+        "objects": [candidate],
+        "edges": [],
+        "evidence": [],
+        "lanes": {"candidate": [candidate]},
+        "verification": {"runtime_verified": [], "runtime_unverified": [], "unverified": []},
+        "recommended_actions": [{"object_id": candidate_id, "action": "promote"}],
+        "gaps": [],
+    }
+
+
 def _service(tmp_path: Path) -> KnowledgeSearchService:
     ledger = _ledger(tmp_path)
     LedgerSourceRefCatalog(ledger).register(
@@ -488,6 +541,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
             },
         },
         "tool_schemas": {
+            BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME: tools[BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME],
             BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: tools[BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME],
             BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: tools[BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME],
         },
@@ -793,8 +847,9 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_
     assert packet["preference_artifact_memory"]["html_visualization_route_smoke"]["route"] == "html_visualization_preference"
     assert packet["preference_artifact_memory"]["artifact_review_check"]["raw_artifact_body_returned"] is False
     assert packet["permission_sensitive_audit"]["schema_version"] == "permission_sensitive_runtime_audit_evidence.v1"
-    assert len(packet["permission_sensitive_audit"]["audit_events"]) == 2
+    assert len(packet["permission_sensitive_audit"]["audit_events"]) == 3
     assert {event["action"] for event in packet["permission_sensitive_audit"]["audit_events"]} == {
+        BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
         BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
         BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
     }
@@ -973,6 +1028,7 @@ def _runtime_readiness_complete_evidence(
             },
         },
         "tool_schemas": {
+            BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME: tools[BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME],
             BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: tools[BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME],
             BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: tools[BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME],
         },
@@ -1216,12 +1272,13 @@ def _permission_sensitive_audit_evidence() -> dict:
     return {
         "schema_version": "permission_sensitive_runtime_audit_evidence.v1",
         "audit_events": [
+            {**event_base, "action": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME},
             {**event_base, "action": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME},
             {**event_base, "action": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME},
         ],
         "audit_store": {
             "status": "recorded",
-            "event_count": 2,
+            "event_count": 3,
             "production_mutation_performed": False,
         },
         "postcheck": {
@@ -1629,6 +1686,9 @@ def test_mcp_source_to_candidate_graph_and_review_approval_preview_roundtrip(tmp
 
 def test_mcp_approval_board_preview_denies_production_without_mutation(tmp_path: Path):
     service = _service(tmp_path)
+    tools = {tool["name"]: tool for tool in list_tools()}
+    approval_schema = tools[BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME]["inputSchema"]
+    assert "production_gate" in approval_schema["properties"]
 
     response = handle_jsonrpc_message(
         {
@@ -1661,6 +1721,224 @@ def test_mcp_approval_board_preview_denies_production_without_mutation(tmp_path:
     assert result["production_mutation_performed"] is False
     assert result["authority_write_performed"] is False
     assert result["promotion_plan"]["production_mutation_performed"] is False
+
+
+def test_mcp_approval_board_production_gate_requires_runtime_opt_in(tmp_path: Path):
+    service = _service(tmp_path)
+    candidate_id = "ko:RepoDocument:approval-board-runtime-closed"
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 125,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": _approval_board_candidate_pack(candidate_id),
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": candidate_id,
+                            "reason": "Production approval board still needs runtime opt-in.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "reviewer_id": "reviewer-local",
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["permission"] == "denied"
+    assert result["reason"] == "production_approval_gate_invalid"
+    assert result["production_mutation_performed"] is False
+    assert result["authority_write_performed"] is False
+    assert "service_production_object_authority_write_flag" in result["promotion_plan"]["missing_gate_evidence"]
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+    assert service.ledger.get_object_authority_state(candidate_id) == {}
+
+
+def test_mcp_approval_board_production_gate_requires_candidate_project_match(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    candidate_id = "ko:RepoDocument:approval-board-project-mismatch"
+    production_gate = _approval_board_production_gate()
+    production_gate["project"] = "other-project"
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 126,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": _approval_board_candidate_pack(candidate_id),
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": candidate_id,
+                            "reason": "Project mismatch must keep production approval board closed.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "reviewer_id": "reviewer-local",
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["permission"] == "denied"
+    assert result["production_mutation_performed"] is False
+    assert result["authority_write_performed"] is False
+    assert "project_scope_match" in result["promotion_plan"]["missing_gate_evidence"]
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+    assert service.ledger.get_object_authority_state(candidate_id) == {}
+
+
+def test_mcp_approval_board_production_gate_requires_repo_document_object_type(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    candidate_id = "ko:RepoDocument:approval-board-type-mismatch"
+    pack = _approval_board_candidate_pack(candidate_id)
+    pack["objects"][0]["object_type"] = "RuntimeTruth"
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 127,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": pack,
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": candidate_id,
+                            "reason": "Object id prefix alone is not enough for production promotion.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "reviewer_id": "reviewer-local",
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["permission"] == "denied"
+    assert result["production_mutation_performed"] is False
+    assert result["authority_write_performed"] is False
+    assert "allowed_object_class_RepoDocument" in result["promotion_plan"]["missing_gate_evidence"]
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+    assert service.ledger.get_object_authority_state(candidate_id) == {}
+
+
+def test_mcp_approval_board_production_write_rolls_back_proposal_on_decision_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    candidate_id = "ko:RepoDocument:approval-board-transaction-rollback"
+
+    def fail_decision_commit(_connection, _decision):
+        raise RuntimeError("injected decision commit failure")
+
+    monkeypatch.setattr(service.ledger, "_commit_object_authority_decision_on", fail_decision_commit)
+
+    with pytest.raises(RuntimeError, match="injected decision commit failure"):
+        service.brain_approval_board_decide(
+            target="production",
+            pack=_approval_board_candidate_pack(candidate_id),
+            decisions=[
+                {
+                    "action": "promote",
+                    "object_id": candidate_id,
+                    "reason": "Injected failure must not leave a production proposal behind.",
+                    "approved_by": "reviewer-local",
+                }
+            ],
+            reviewer_id="reviewer-local",
+            production_gate=_approval_board_production_gate(),
+        )
+
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+    assert service.ledger.get_object_authority_state(candidate_id) == {}
+
+
+def test_mcp_approval_board_production_gate_promotes_candidate_to_authority(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    candidate_id = "ko:RepoDocument:approval-board-production-candidate"
+    assert candidate_id.startswith("ko:RepoDocument:")
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 127,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": _approval_board_candidate_pack(candidate_id),
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": candidate_id,
+                            "reason": "Production approval-board smoke promotes reviewed candidate.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "reviewer_id": "reviewer-local",
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["schema_version"] == "approval_board_decision_result.v1"
+    assert result["permission"] == "allowed"
+    assert result["reason"] == "production_approval_board_decision"
+    assert result["ledger_scope"] == "production"
+    assert result["production_mutation_performed"] is True
+    assert result["authority_write_performed"] is True
+    assert result["authority_write_scope"] == "production_ledger"
+    assert result["decision_count"] == 1
+    assert result["proposal_write_performed"] is True
+    assert result["reviewer_ref"] == "redacted"
+    assert result["reviewer_ref_hash"].startswith("sha256:")
+    assert result["production_gate_ref_hash"].startswith("sha256:")
+    assert len(result["production_gate_ref_hash"]) == 71
+    decision = result["decisions"][0]
+    assert decision["decision_type"] == "accept_current"
+    assert decision["ledger_scope"] == "production"
+    assert decision["authority_write_scope"] == "production_ledger"
+    assert decision["approved_by_hash"] == result["reviewer_ref_hash"]
+    assert decision["production_gate_ref_hash"] == result["production_gate_ref_hash"]
+    state = service.ledger.get_object_authority_state(candidate_id)
+    assert state["authority_lane"] == "accepted_current"
+    assert state["decision_id"] == decision["decision_id"]
+    queued = service.object_review_proposals(project=PROJECT)
+    assert queued["count"] == 1
+    assert queued["items"][0]["status"] == "accepted"
+    assert queued["items"][0]["target_object_id"] == candidate_id
+    assert result["updated_pack"]["lanes"]["accepted_current"][0]["object_id"] == candidate_id
 
 
 def test_project_deriving_brain_tool_schemas_allow_repository():
