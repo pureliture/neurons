@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ from .golden_query_eval import (
 from .extraction_pipeline import run_source_to_candidate_graph_activation_preview
 from .okf_export import build_okf_bundle
 from .object_packs import apply_approval_board_decisions, apply_candidate_review_edits, build_documentation_cleanup_pack
+from .post_deploy_mcp_capture import collect_source_to_candidate_post_deploy_mcp_capture
 from .reference_corpus import (
     build_corpus_ingest_plan,
     build_reference_corpus_production_ingest_evidence,
@@ -598,6 +600,9 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     parser.add_argument("--evidence-collection-plan", action="store_true")
     parser.add_argument("--evidence-packet-template", action="store_true")
     parser.add_argument("--collect-shadow-evidence", action="store_true")
+    parser.add_argument("--collect-post-deploy-mcp-capture", action="store_true")
+    parser.add_argument("--mcp-url", default="")
+    parser.add_argument("--deployed-identity-file", default="")
     parser.add_argument("--repository", default="")
     parser.add_argument("--branch", default="")
     parser.add_argument("--consumer", default="codex")
@@ -619,6 +624,27 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 repository=args.repository,
                 branch=args.branch,
                 consumer=args.consumer,
+            )
+        )
+        return 0
+    if args.collect_post_deploy_mcp_capture:
+        if not args.mcp_url:
+            parser.error("--collect-post-deploy-mcp-capture requires --mcp-url")
+        deployed_identity = (
+            _load_json_mapping(args.deployed_identity_file, label="deployed identity")
+            if args.deployed_identity_file
+            else None
+        )
+        _print_json(
+            asyncio.run(
+                collect_source_to_candidate_post_deploy_mcp_capture(
+                    mcp_url=args.mcp_url,
+                    expected_commit=args.expected_commit,
+                    repository=args.repository,
+                    branch=args.branch,
+                    consumer=args.consumer,
+                    deployed_identity=deployed_identity,
+                )
             )
         )
         return 0
