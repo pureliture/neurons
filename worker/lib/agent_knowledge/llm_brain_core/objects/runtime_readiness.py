@@ -314,6 +314,31 @@ def build_source_to_candidate_runtime_shadow_readiness_report(
     )
 
 
+def build_source_to_candidate_runtime_post_deploy_capture_packet(
+    *,
+    captured_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Normalize a sanitized post-deploy capture into evaluator input."""
+
+    return build_source_to_candidate_runtime_shadow_evidence_packet(
+        captured_evidence=captured_evidence,
+    )
+
+
+def build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+    *,
+    captured_evidence: Mapping[str, Any],
+    expected_commit: str = "",
+) -> dict[str, Any]:
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=captured_evidence,
+    )
+    return build_source_to_candidate_runtime_readiness_report(
+        live_evidence=packet,
+        expected_commit=expected_commit,
+    )
+
+
 def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
     *,
     repository: str = "",

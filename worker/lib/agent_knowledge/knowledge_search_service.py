@@ -16,6 +16,8 @@ from .llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_collected_shadow_evidence_packet,
     build_source_to_candidate_runtime_evidence_collection_plan,
     build_source_to_candidate_runtime_evidence_packet_template,
+    build_source_to_candidate_runtime_post_deploy_capture_packet,
+    build_source_to_candidate_runtime_post_deploy_capture_readiness_report,
     build_source_to_candidate_runtime_readiness_report,
     build_source_to_candidate_runtime_shadow_evidence_packet,
     build_source_to_candidate_runtime_shadow_readiness_report,
@@ -271,6 +273,8 @@ class KnowledgeSearchService:
         self,
         *,
         live_evidence: Mapping[str, Any] | None = None,
+        normalize_post_deploy_capture: Mapping[str, Any] | None = None,
+        post_deploy_capture: Mapping[str, Any] | None = None,
         normalize_shadow_evidence: Mapping[str, Any] | None = None,
         shadow_evidence: Mapping[str, Any] | None = None,
         expected_commit: str = "",
@@ -314,6 +318,15 @@ class KnowledgeSearchService:
                 branch=branch,
                 consumer=consumer,
                 route_runner=route_runner,
+            )
+        if isinstance(normalize_post_deploy_capture, Mapping):
+            return build_source_to_candidate_runtime_post_deploy_capture_packet(
+                captured_evidence=normalize_post_deploy_capture,
+            )
+        if isinstance(post_deploy_capture, Mapping):
+            return build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+                captured_evidence=post_deploy_capture,
+                expected_commit=expected_commit,
             )
         if isinstance(normalize_shadow_evidence, Mapping):
             return build_source_to_candidate_runtime_shadow_evidence_packet(

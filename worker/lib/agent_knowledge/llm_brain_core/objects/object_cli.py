@@ -30,6 +30,8 @@ from .runtime_readiness import (
     build_source_to_candidate_runtime_collected_shadow_evidence_packet,
     build_source_to_candidate_runtime_evidence_collection_plan,
     build_source_to_candidate_runtime_evidence_packet_template,
+    build_source_to_candidate_runtime_post_deploy_capture_packet,
+    build_source_to_candidate_runtime_post_deploy_capture_readiness_report,
     build_source_to_candidate_runtime_readiness_report,
     build_source_to_candidate_runtime_shadow_evidence_packet,
     build_source_to_candidate_runtime_shadow_readiness_report,
@@ -382,6 +384,8 @@ def golden_query_eval_main(argv: list[str] | None = None) -> int:
 def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="neuron-knowledge source-to-candidate-runtime-readiness")
     parser.add_argument("--live-evidence-file", default="")
+    parser.add_argument("--normalize-post-deploy-capture-file", default="")
+    parser.add_argument("--post-deploy-capture-file", default="")
     parser.add_argument("--normalize-shadow-evidence-file", default="")
     parser.add_argument("--shadow-evidence-file", default="")
     parser.add_argument("--expected-commit", default="")
@@ -437,6 +441,26 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
             )
         )
         return 0
+    if args.normalize_post_deploy_capture_file:
+        _print_json(
+            build_source_to_candidate_runtime_post_deploy_capture_packet(
+                captured_evidence=_load_json_mapping(
+                    args.normalize_post_deploy_capture_file,
+                    label="post-deploy capture",
+                ),
+            )
+        )
+        return 0
+    if args.post_deploy_capture_file:
+        report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+            captured_evidence=_load_json_mapping(
+                args.post_deploy_capture_file,
+                label="post-deploy capture",
+            ),
+            expected_commit=args.expected_commit,
+        )
+        _print_json(report)
+        return 1 if report["status"] == "FAIL" else 0
     if args.normalize_shadow_evidence_file:
         _print_json(
             build_source_to_candidate_runtime_shadow_evidence_packet(

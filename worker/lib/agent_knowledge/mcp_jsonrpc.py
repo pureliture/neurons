@@ -488,10 +488,18 @@ def _dispatch_brain_source_to_candidate_runtime_readiness_tool(
 ) -> dict:
     _ = tool_name
     live_evidence = arguments.get("live_evidence")
+    normalize_post_deploy_capture = arguments.get("normalize_post_deploy_capture")
+    post_deploy_capture = arguments.get("post_deploy_capture")
     normalize_shadow_evidence = arguments.get("normalize_shadow_evidence")
     shadow_evidence = arguments.get("shadow_evidence")
     result = service.brain_source_to_candidate_runtime_readiness(
         live_evidence=live_evidence if isinstance(live_evidence, Mapping) else None,
+        normalize_post_deploy_capture=normalize_post_deploy_capture
+        if isinstance(normalize_post_deploy_capture, Mapping)
+        else None,
+        post_deploy_capture=post_deploy_capture
+        if isinstance(post_deploy_capture, Mapping)
+        else None,
         normalize_shadow_evidence=normalize_shadow_evidence
         if isinstance(normalize_shadow_evidence, Mapping)
         else None,
