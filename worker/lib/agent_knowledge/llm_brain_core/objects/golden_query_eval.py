@@ -600,13 +600,16 @@ def _product_evidence_check(phase: str, evidence: Mapping[str, Any]) -> dict[str
         gaps.extend(_p2_evidence_gaps(evidence))
     elif phase == "P6" and evidence:
         failures.extend(_p6_evidence_failures(evidence))
+        gaps.extend(_p6_evidence_gaps(evidence))
     elif phase == "P7" and evidence:
         failures.extend(_p7_evidence_failures(evidence))
+        gaps.extend(_p7_evidence_gaps(evidence))
     elif phase == "P8" and evidence:
         failures.extend(_p8_evidence_failures(evidence))
         gaps.extend(_p8_evidence_gaps(evidence))
     elif phase == "P9" and evidence:
         failures.extend(_p9_evidence_failures(evidence))
+        gaps.extend(_p9_evidence_gaps(evidence))
     return {
         "phase": phase,
         "result": "FAIL" if failures else ("PASS_WITH_GAPS" if gaps else "PASS"),
@@ -665,6 +668,14 @@ def _p6_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     return _dedupe(failures)
 
 
+def _p6_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    return [
+        f"p6_{gap}"
+        for gap in evidence.get("gaps", [])
+        if isinstance(gap, str) and gap
+    ]
+
+
 def _p7_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     failures: list[str] = []
     if evidence.get("schema_version") != "object_extraction_preference_style_preview.v1":
@@ -678,6 +689,14 @@ def _p7_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     if int(evidence.get("accepted_preference_count") or 0) < 1:
         failures.append("p7_accepted_preference_missing")
     return failures
+
+
+def _p7_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    return [
+        f"p7_{gap}"
+        for gap in evidence.get("gaps", [])
+        if isinstance(gap, str) and gap
+    ]
 
 
 def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
@@ -864,6 +883,14 @@ def _p9_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     return failures
 
 
+def _p9_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    return [
+        f"p9_{gap}"
+        for gap in evidence.get("gaps", [])
+        if isinstance(gap, str) and gap
+    ]
+
+
 def _p9_tool_hint_safety_summary(tool_hints: Any) -> dict[str, Any]:
     hints = tool_hints if isinstance(tool_hints, list) else []
     safe_target_count = 0
@@ -982,7 +1009,12 @@ def _p6_session_project_rollup_evidence() -> dict[str, Any]:
         "edge_count": int(report.get("edge_count") or 0),
         "evidence_count": int(report.get("evidence_count") or 0),
         "handoff_pack_schema": str((report.get("handoff_pack") or {}).get("schema_version") or ""),
-        "gaps": list(report.get("gaps") or []),
+        "gaps": _dedupe(
+            [
+                *[gap for gap in report.get("gaps", []) if isinstance(gap, str) and gap],
+                "live_multi_device_rollup_unproven",
+            ]
+        ),
         "production_mutation_performed": bool(report.get("production_mutation_performed")),
     }
 
@@ -1043,7 +1075,13 @@ def _p7_preference_artifact_evidence() -> dict[str, Any]:
         "accepted_preference_count": accepted_count,
         "proposal_preference_count": len((artifact_pack.get("lanes") or {}).get("proposal_only") or []),
         "artifact_review_check_status": str((report.get("artifact_review_check") or {}).get("status") or ""),
-        "gaps": list(report.get("gaps") or []),
+        "gaps": _dedupe(
+            [
+                *[gap for gap in report.get("gaps", []) if isinstance(gap, str) and gap],
+                "accepted_preference_context_pack_live_unproven",
+                "html_artifact_review_live_unproven",
+            ]
+        ),
         "production_mutation_performed": bool(report.get("production_mutation_performed")),
     }
 
@@ -1479,7 +1517,17 @@ def _p9_agent_context_evidence(*, preference_preview: Mapping[str, Any]) -> dict
         "action_hint_count": len(product.get("action_hints") or []),
         "mutation_allowed": bool(product.get("surface_policy", {}).get("mutation_allowed")),
         "degraded_mode_active": bool(product.get("degraded_mode", {}).get("active")),
-        "gaps": list(product.get("degraded_mode", {}).get("gaps") or []),
+        "gaps": _dedupe(
+            [
+                *[
+                    gap
+                    for gap in product.get("degraded_mode", {}).get("gaps", [])
+                    if isinstance(gap, str) and gap
+                ],
+                "production_consumer_context_pack_live_unproven",
+                "consumer_action_surface_runtime_policy_unproven",
+            ]
+        ),
         "production_mutation_performed": False,
     }
 
