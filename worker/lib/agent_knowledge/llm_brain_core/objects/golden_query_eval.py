@@ -396,10 +396,12 @@ def build_source_to_authority_quality_gate_report() -> dict[str, Any]:
     return report
 
 
-def build_product_activation_progress_report() -> dict[str, Any]:
+def build_product_activation_progress_report(
+    *, live_evidence: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     phase_coverage = build_phase_golden_query_coverage_report()
     source_gate = build_source_to_authority_quality_gate_report()
-    product_evidence_summary = _product_evidence_summary()
+    product_evidence_summary = _product_evidence_summary(live_evidence=live_evidence)
     product_evidence_result = evaluate_product_evidence_summary(product_evidence_summary)
     phases_by_id = {
         str(item.get("phase") or ""): item
@@ -578,10 +580,12 @@ def _activation_phase_progress(phase: str, coverage: Mapping[str, Any]) -> dict[
     }
 
 
-def _product_evidence_summary() -> list[dict[str, Any]]:
+def _product_evidence_summary(
+    *, live_evidence: Mapping[str, Any] | None = None
+) -> list[dict[str, Any]]:
     p2 = _p2_reference_corpus_evidence()
     p3 = _p3_projection_join_evidence()
-    p6 = _p6_session_project_rollup_evidence()
+    p6 = _p6_session_project_rollup_evidence(live_evidence=live_evidence)
     p7 = _p7_preference_artifact_evidence()
     p8 = _p8_runtime_authority_evidence()
     p9 = _p9_agent_context_evidence(preference_preview=p7)
@@ -750,6 +754,20 @@ def _p6_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     failures: list[str] = []
     if evidence.get("schema_version") != "object_extraction_session_project_rollup_preview.v1":
         failures.append("p6_schema_mismatch")
+    status = str(evidence.get("status") or "")
+    rollup_status = str(evidence.get("rollup_claim_status") or "")
+    if status == "FAIL" or rollup_status == "failed":
+        failures.append("p6_session_rollup_runtime_failed")
+    if evidence.get("runtime_readiness_status") == "FAIL":
+        failures.append("p6_runtime_readiness_failed")
+    if evidence.get("evidence_provenance_status") == "failed":
+        failures.append("p6_evidence_provenance_failed")
+    if status == "PASS" and rollup_status and rollup_status != "validated":
+        failures.append("p6_session_rollup_missing_for_pass")
+    if status == "PASS" and evidence.get("evidence_is_live") is not True:
+        failures.append("p6_live_evidence_missing_for_pass")
+    if status == "PASS" and evidence.get("evidence_provenance_status") != "validated":
+        failures.append("p6_evidence_provenance_not_validated")
     if int(evidence.get("object_count") or 0) < 5:
         failures.append("p6_session_rollup_incomplete")
     if int(evidence.get("edge_count") or 0) < 6:
@@ -762,11 +780,17 @@ def _p6_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
 
 
 def _p6_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
-    return [
+    gaps = [
         f"p6_{gap}"
-        for gap in evidence.get("gaps", [])
+        for gap in (evidence.get("gaps") or [])
         if isinstance(gap, str) and gap
     ]
+    if (
+        evidence.get("rollup_claim_status") == "validated"
+        and evidence.get("evidence_is_live") is not True
+    ):
+        gaps.append("p6_session_project_rollup_evidence_not_live")
+    return _dedupe(gaps)
 
 
 def _p7_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
@@ -1070,7 +1094,14 @@ def _p2_reference_corpus_evidence() -> dict[str, Any]:
     }
 
 
-def _p6_session_project_rollup_evidence() -> dict[str, Any]:
+def _p6_session_project_rollup_evidence(
+    *, live_evidence: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    if live_evidence:
+        live_summary = _p6_live_session_project_rollup_evidence(live_evidence)
+        if live_summary:
+            return live_summary
+
     from .extraction_pipeline import run_session_project_rollup_preview
 
     report = run_session_project_rollup_preview(
@@ -1110,6 +1141,99 @@ def _p6_session_project_rollup_evidence() -> dict[str, Any]:
         ),
         "production_mutation_performed": bool(report.get("production_mutation_performed")),
     }
+
+
+def _p6_live_session_project_rollup_evidence(
+    live_evidence: Mapping[str, Any]
+) -> dict[str, Any]:
+    from .runtime_readiness import build_source_to_candidate_runtime_readiness_report
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=live_evidence)
+    claims = {
+        str(item.get("claim_id") or ""): item
+        for item in (report.get("claims") or [])
+        if isinstance(item, Mapping)
+    }
+    claim = claims.get("live.session_project.rollup", {})
+    provenance_claim = claims.get("live.evidence.provenance", {})
+    rollup = live_evidence.get("session_project_rollup_runtime")
+    rollup = rollup if isinstance(rollup, Mapping) else {}
+    preview = rollup.get("rollup_preview") if isinstance(rollup.get("rollup_preview"), Mapping) else {}
+    handoff = rollup.get("handoff_pack") if isinstance(rollup.get("handoff_pack"), Mapping) else {}
+    read_after_write = (
+        rollup.get("read_after_write") if isinstance(rollup.get("read_after_write"), Mapping) else {}
+    )
+    object_type_counts = (
+        preview.get("object_type_counts") if isinstance(preview.get("object_type_counts"), Mapping) else {}
+    )
+    claim_gaps = [
+        gap
+        for gap in (claim.get("gaps") or [])
+        if isinstance(gap, str) and gap
+    ]
+    evidence_is_live = bool(report.get("evidence_is_live"))
+    claim_status = str(claim.get("status") or "not_validated")
+    provenance_status = str(provenance_claim.get("status") or "not_validated")
+    runtime_readiness_status = str(report.get("status") or "")
+    status = _p6_session_project_rollup_product_status(
+        claim_status=claim_status,
+        evidence_is_live=evidence_is_live,
+        provenance_status=provenance_status,
+        runtime_readiness_status=runtime_readiness_status,
+        gaps=claim_gaps,
+    )
+    evidence_count = 1 if rollup else 0
+    return {
+        "phase": "P6",
+        "schema_version": str(
+            preview.get("schema_version") or "object_extraction_session_project_rollup_preview.v1"
+        ),
+        "status": status,
+        "golden_query_slice": "temporal repo recall",
+        "runtime_readiness_schema": str(report.get("schema_version") or ""),
+        "runtime_readiness_status": runtime_readiness_status,
+        "rollup_claim_id": str(claim.get("claim_id") or ""),
+        "rollup_claim_status": claim_status,
+        "evidence_provenance_status": provenance_status,
+        "live_evidence_provided": bool(report.get("live_evidence_provided")),
+        "evidence_is_live": evidence_is_live,
+        "production_ready": bool(report.get("production_ready")),
+        "object_count": _positive_int(
+            preview.get("object_count"),
+            default=sum(_positive_int(count) for count in object_type_counts.values()),
+        ),
+        "edge_count": _positive_int(preview.get("edge_count")),
+        "evidence_count": evidence_count,
+        "handoff_pack_schema": str(handoff.get("schema_version") or ""),
+        "device_count": _positive_int(claim.get("device_count")),
+        "visible_session_count": _positive_int(claim.get("visible_session_count")),
+        "all_device_session_count": _positive_int(claim.get("all_device_session_count")),
+        "read_after_write_status": str(claim.get("read_after_write_status") or read_after_write.get("status") or ""),
+        "raw_return_capability": str(claim.get("raw_return_capability") or handoff.get("raw_return_capability") or ""),
+        "gaps": claim_gaps,
+        "production_mutation_performed": bool(claim.get("production_mutation_performed"))
+        or bool(report.get("production_mutation_performed")),
+    }
+
+
+def _p6_session_project_rollup_product_status(
+    *,
+    claim_status: str,
+    evidence_is_live: bool,
+    provenance_status: str,
+    runtime_readiness_status: str,
+    gaps: list[str],
+) -> str:
+    if claim_status == "failed" or provenance_status == "failed" or runtime_readiness_status == "FAIL":
+        return "FAIL"
+    if (
+        claim_status == "validated"
+        and evidence_is_live
+        and provenance_status == "validated"
+        and not gaps
+    ):
+        return "PASS"
+    return "PASS_WITH_GAPS"
 
 
 def _p7_preference_artifact_evidence() -> dict[str, Any]:
@@ -1730,6 +1854,15 @@ def _remaining_activation_phases(next_phase: str) -> list[str]:
         return []
     start = ACTIVATION_SCOPE_PHASES.index(next_phase)
     return list(ACTIVATION_SCOPE_PHASES[start:])
+
+
+def _positive_int(value: Any, *, default: int = 0) -> int:
+    candidate = default if value is None or value == "" else value
+    try:
+        number = int(candidate)
+    except (TypeError, ValueError):
+        number = default
+    return max(0, number)
 
 
 def _dedupe(values: list[str] | tuple[str, ...]) -> list[str]:

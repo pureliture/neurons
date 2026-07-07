@@ -10,6 +10,7 @@ from agent_knowledge.llm_brain_core.golden_query_eval import (
 )
 from agent_knowledge.llm_brain_core.object_packs import build_code_change_impact_pack
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
+    EVIDENCE_PROVENANCE_SCHEMA,
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
 )
 
@@ -26,6 +27,82 @@ def _valid_p3_projection_join_evidence():
         "evidence_is_live": True,
         "production_ready": False,
         "gaps": [],
+        "production_mutation_performed": False,
+    }
+
+
+def _valid_p6_runtime_evidence(*, live: bool = True):
+    return {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "session_project_rollup_runtime": {
+            "schema_version": "session_project_rollup_runtime_evidence.v1",
+            "rollup_preview": {
+                "schema_version": "object_extraction_session_project_rollup_preview.v1",
+                "status": "pass",
+                "scope": "all_devices",
+                "object_type_counts": {
+                    "Device": 2,
+                    "Session": 2,
+                    "Repository": 1,
+                    "Branch": 1,
+                    "WorkUnit": 1,
+                },
+                "edge_types": [
+                    "repository_has_branch",
+                    "session_on_device",
+                    "device_has_session",
+                    "session_in_repository",
+                    "repository_has_session",
+                    "session_on_branch",
+                    "branch_has_session",
+                    "part_of_work_unit",
+                    "work_unit_has_session",
+                ],
+                "object_count": 7,
+                "edge_count": 12,
+                "visible_session_count": 2,
+                "all_device_session_count": 2,
+                "device_count": 2,
+                "production_mutation_performed": False,
+            },
+            "handoff_pack": {
+                "schema_version": "session_project_handoff_pack.v1",
+                "raw_return_capability": "denied",
+                "visible_session_count": 2,
+                "all_device_session_count": 2,
+                "object_ref_counts": {"Session": 2, "WorkUnit": 1},
+                "resume_context": {
+                    "schema_version": "session_project_resume_context.v1",
+                    "latest_session_ref_present": True,
+                    "work_unit_ref_count": 1,
+                    "production_mutation_performed": False,
+                },
+            },
+            "read_after_write": {
+                "status": "validated",
+                "route": "temporal_work_recall",
+                "object_pack_schema": "object_pack.v1",
+                "object_types": ["WorkUnit"],
+                "object_count": 1,
+            },
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
+        "evidence_provenance": {
+            "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
+            "collection_mode": "post_deploy_read_only_smoke" if live else "local_test_replay",
+            "mutation_scope": "none",
+            "network_used": live,
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
         "production_mutation_performed": False,
     }
 
@@ -536,6 +613,64 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert phase_progress["P9"]["state"] == "local_validated"
 
 
+def test_product_activation_progress_closes_p6_gap_with_live_session_project_rollup_evidence():
+    report = build_product_activation_progress_report(
+        live_evidence=_valid_p6_runtime_evidence(live=True)
+    )
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p6 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P6")
+
+    assert checks["P6"]["result"] == "PASS"
+    assert "p6_live_multi_device_rollup_unproven" not in checks["P6"]["gaps"]
+    assert p6["rollup_claim_status"] == "validated"
+    assert p6["live_evidence_provided"] is True
+    assert p6["evidence_is_live"] is True
+    assert p6["device_count"] == 2
+    assert p6["visible_session_count"] == 2
+    assert p6["all_device_session_count"] == 2
+    assert p6["read_after_write_status"] == "validated"
+    assert p6["production_mutation_performed"] is False
+    assert report["production_mutation_performed"] is False
+    assert report["production_ready"] is False
+
+
+def test_product_activation_progress_keeps_p6_gap_when_rollup_evidence_is_not_live():
+    report = build_product_activation_progress_report(
+        live_evidence=_valid_p6_runtime_evidence(live=False)
+    )
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p6 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P6")
+
+    assert p6["rollup_claim_status"] == "validated"
+    assert p6["live_evidence_provided"] is True
+    assert p6["evidence_is_live"] is False
+    assert checks["P6"]["result"] == "PASS_WITH_GAPS"
+    assert "p6_session_project_rollup_evidence_not_live" in checks["P6"]["gaps"]
+
+
+def test_product_activation_progress_fails_p6_when_live_provenance_is_not_redacted():
+    evidence = _valid_p6_runtime_evidence(live=True)
+    evidence["evidence_provenance"] = {
+        **evidence["evidence_provenance"],
+        "raw_private_evidence_returned": True,
+    }
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p6 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P6")
+
+    assert report["status"] == "FAIL"
+    assert checks["P6"]["result"] == "FAIL"
+    assert p6["rollup_claim_status"] == "validated"
+    assert p6["evidence_is_live"] is True
+    assert p6["evidence_provenance_status"] == "failed"
+    assert "p6_runtime_readiness_failed" in checks["P6"]["failures"]
+    assert "p6_evidence_provenance_failed" in checks["P6"]["failures"]
+
+
 def test_product_evidence_summary_fails_when_p8_source_commit_mismatches_pr_head():
     progress = build_product_activation_progress_report()
     evidence = [
@@ -602,6 +737,28 @@ def test_product_evidence_summary_fails_closed_when_required_phase_evidence_is_m
     checks = {item["phase"]: item for item in result["checks"]}
     assert "p6_session_rollup_incomplete" in checks["P6"]["failures"]
     assert "p8_production_mutation_performed" in checks["P8"]["failures"]
+
+
+def test_product_evidence_summary_fails_when_p6_claims_pass_without_live_evidence():
+    progress = build_product_activation_progress_report(
+        live_evidence=_valid_p6_runtime_evidence(live=True)
+    )
+    evidence = [
+        {
+            **item,
+            "evidence_is_live": False,
+        }
+        if item.get("phase") == "P6"
+        else item
+        for item in progress["product_evidence_summary"]
+    ]
+
+    result = evaluate_product_evidence_summary(evidence)
+
+    checks = {item["phase"]: item for item in result["checks"]}
+    assert result["status"] == "FAIL"
+    assert "P6:product_evidence_failed" in result["hard_failures"]
+    assert "p6_live_evidence_missing_for_pass" in checks["P6"]["failures"]
 
 
 def test_product_evidence_summary_fails_when_p2_claims_pass_without_live_evidence():
