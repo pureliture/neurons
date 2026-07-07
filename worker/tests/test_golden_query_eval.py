@@ -487,7 +487,7 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
         evidence["P8"]["runtime_evidence_collector_permission_audit_schema"]
         == "permission_sensitive_runtime_audit_evidence.v1"
     )
-    assert evidence["P8"]["runtime_evidence_collector_permission_audit_event_count"] == 2
+    assert evidence["P8"]["runtime_evidence_collector_permission_audit_event_count"] == 3
     assert evidence["P8"]["runtime_evidence_collector_permission_audit_store_status"] == "recorded"
     assert (
         evidence["P8"]["runtime_evidence_collector_agent_context_startup_schema"]
@@ -703,7 +703,7 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "runtime_evidence_collector_preference_html_route": "html_visualization_preference",
                 "runtime_evidence_collector_preference_artifact_check_status": "pass",
                 "runtime_evidence_collector_permission_audit_schema": "permission_sensitive_runtime_audit_evidence.v1",
-                "runtime_evidence_collector_permission_audit_event_count": 2,
+                "runtime_evidence_collector_permission_audit_event_count": 3,
                 "runtime_evidence_collector_permission_audit_store_status": "recorded",
                 "runtime_evidence_collector_agent_context_startup_schema": "agent_context_startup_runtime_evidence.v1",
                 "runtime_evidence_collector_agent_context_startup_loaded": True,

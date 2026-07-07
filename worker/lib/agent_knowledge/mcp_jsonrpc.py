@@ -477,6 +477,7 @@ def _dispatch_brain_approval_board_decide_tool(
         decisions=[dict(item) for item in decisions if isinstance(item, Mapping)],
         target=str(arguments.get("target") or "production"),
         reviewer_id=str(arguments.get("reviewer_id") or "unspecified"),
+        production_gate=arguments.get("production_gate") if isinstance(arguments.get("production_gate"), Mapping) else None,
     )
     return _tool_result(result)
 

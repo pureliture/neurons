@@ -541,6 +541,12 @@ class _LedgerTransaction:
         self._mark_indexed(card["memory_id"], run="LOCAL")
         return self.get_memory_card(card["memory_id"])
 
+    def upsert_object_review_proposal(self, proposal: dict) -> dict:
+        return self._ledger._upsert_object_review_proposal_on(self._connection, proposal)
+
+    def commit_object_authority_decision(self, decision: dict) -> dict:
+        return self._ledger._commit_object_authority_decision_on(self._connection, decision)
+
     def add_memory_card_evidence(self, memory_id: str, evidence_refs: list[dict]) -> None:
         for ref in evidence_refs:
             self._connection.execute(
@@ -2544,6 +2550,11 @@ class Ledger(
     def upsert_object_review_proposal(self, proposal: dict) -> dict:
         if self.read_only:
             raise sqlite3.OperationalError("read-only ledger는 object proposal write를 허용하지 않습니다")
+        with self._connect() as connection:
+            return self._upsert_object_review_proposal_on(connection, proposal)
+
+    def _upsert_object_review_proposal_on(self, connection, proposal: dict) -> dict:
+        ensure_public_safe(proposal, "object_review_proposal")
         proposal_id = str(proposal.get("proposal_id") or "")
         proposal_type = str(proposal.get("proposal_type") or "")
         target_object_id = str(proposal.get("target_object_id") or "")
@@ -2553,27 +2564,26 @@ class Ledger(
         status = str(proposal.get("status") or "needs_review")
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         payload = json.dumps(proposal, ensure_ascii=False, sort_keys=True)
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO object_review_proposals (
-                    proposal_id, project, proposal_type, target_object_id,
-                    status, proposal_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(proposal_id) DO UPDATE SET
-                    project=excluded.project,
-                    proposal_type=excluded.proposal_type,
-                    target_object_id=excluded.target_object_id,
-                    status=excluded.status,
-                    proposal_json=excluded.proposal_json,
-                    updated_at=excluded.updated_at
-                """,
-                (proposal_id, project, proposal_type, target_object_id, status, payload, now, now),
-            )
-            row = connection.execute(
-                "SELECT proposal_json FROM object_review_proposals WHERE proposal_id = ?",
-                (proposal_id,),
-            ).fetchone()
+        connection.execute(
+            """
+            INSERT INTO object_review_proposals (
+                proposal_id, project, proposal_type, target_object_id,
+                status, proposal_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(proposal_id) DO UPDATE SET
+                project=excluded.project,
+                proposal_type=excluded.proposal_type,
+                target_object_id=excluded.target_object_id,
+                status=excluded.status,
+                proposal_json=excluded.proposal_json,
+                updated_at=excluded.updated_at
+            """,
+            (proposal_id, project, proposal_type, target_object_id, status, payload, now, now),
+        )
+        row = connection.execute(
+            "SELECT proposal_json FROM object_review_proposals WHERE proposal_id = ?",
+            (proposal_id,),
+        ).fetchone()
         if row is None:
             raise ValueError(f"Failed to read back upserted object review proposal: {proposal_id}")
         return json.loads(row["proposal_json"])
@@ -2607,6 +2617,10 @@ class Ledger(
     def commit_object_authority_decision(self, decision: dict) -> dict:
         if self.read_only:
             raise sqlite3.OperationalError("read-only ledger는 object authority decision write를 허용하지 않습니다")
+        with self._connect() as connection:
+            return self._commit_object_authority_decision_on(connection, decision)
+
+    def _commit_object_authority_decision_on(self, connection, decision: dict) -> dict:
         ensure_public_safe(decision, "object_authority_decision")
         decision_id = str(decision.get("decision_id") or "")
         proposal_id = str(decision.get("proposal_id") or "")
@@ -2649,86 +2663,85 @@ class Ledger(
         decision_json = json.dumps(decision_payload, ensure_ascii=False, sort_keys=True)
         state_json = json.dumps(state, ensure_ascii=False, sort_keys=True)
         proposal_status = _object_proposal_status_for_decision(decision_type, new_lane)
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT proposal_json FROM object_review_proposals WHERE proposal_id = ?",
-                (proposal_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("object authority decision requires an existing review proposal")
-            proposal = json.loads(row["proposal_json"])
-            if str(proposal.get("target_object_id") or "") != target_object_id:
-                raise ValueError("object authority decision target must match the review proposal target")
-            connection.execute(
-                """
-                INSERT INTO object_authority_decisions (
-                    decision_id, project, proposal_id, target_object_id, decision_type,
-                    previous_authority_lane, new_authority_lane, decision_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(decision_id) DO UPDATE SET
-                    project=excluded.project,
-                    proposal_id=excluded.proposal_id,
-                    target_object_id=excluded.target_object_id,
-                    decision_type=excluded.decision_type,
-                    previous_authority_lane=excluded.previous_authority_lane,
-                    new_authority_lane=excluded.new_authority_lane,
-                    decision_json=excluded.decision_json
-                """,
-                (
-                    decision_id,
-                    project,
-                    proposal_id,
-                    target_object_id,
-                    decision_type,
-                    previous_lane,
-                    new_lane,
-                    decision_json,
-                    now,
-                ),
-            )
-            connection.execute(
-                """
-                INSERT INTO object_authority_states (
-                    target_object_id, project, authority_lane, decision_id, proposal_id,
-                    decision_reason, state_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(target_object_id) DO UPDATE SET
-                    project=excluded.project,
-                    authority_lane=excluded.authority_lane,
-                    decision_id=excluded.decision_id,
-                    proposal_id=excluded.proposal_id,
-                    decision_reason=excluded.decision_reason,
-                    state_json=excluded.state_json,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    target_object_id,
-                    project,
-                    new_lane,
-                    decision_id,
-                    proposal_id,
-                    state["decision_reason"],
-                    state_json,
-                    now,
-                ),
-            )
-            proposal["status"] = proposal_status
-            proposal["decision_id"] = decision_id
-            proposal["authority_write_performed"] = False
-            proposal["authoritative_memory_changed"] = False
-            proposal_json = json.dumps(proposal, ensure_ascii=False, sort_keys=True)
-            connection.execute(
-                """
-                UPDATE object_review_proposals
-                SET status = ?, proposal_json = ?, updated_at = ?
-                WHERE proposal_id = ?
-                """,
-                (proposal_status, proposal_json, now, proposal_id),
-            )
-            readback = connection.execute(
-                "SELECT decision_json FROM object_authority_decisions WHERE decision_id = ?",
-                (decision_id,),
-            ).fetchone()
+        row = connection.execute(
+            "SELECT proposal_json FROM object_review_proposals WHERE proposal_id = ?",
+            (proposal_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("object authority decision requires an existing review proposal")
+        proposal = json.loads(row["proposal_json"])
+        if str(proposal.get("target_object_id") or "") != target_object_id:
+            raise ValueError("object authority decision target must match the review proposal target")
+        connection.execute(
+            """
+            INSERT INTO object_authority_decisions (
+                decision_id, project, proposal_id, target_object_id, decision_type,
+                previous_authority_lane, new_authority_lane, decision_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(decision_id) DO UPDATE SET
+                project=excluded.project,
+                proposal_id=excluded.proposal_id,
+                target_object_id=excluded.target_object_id,
+                decision_type=excluded.decision_type,
+                previous_authority_lane=excluded.previous_authority_lane,
+                new_authority_lane=excluded.new_authority_lane,
+                decision_json=excluded.decision_json
+            """,
+            (
+                decision_id,
+                project,
+                proposal_id,
+                target_object_id,
+                decision_type,
+                previous_lane,
+                new_lane,
+                decision_json,
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO object_authority_states (
+                target_object_id, project, authority_lane, decision_id, proposal_id,
+                decision_reason, state_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(target_object_id) DO UPDATE SET
+                project=excluded.project,
+                authority_lane=excluded.authority_lane,
+                decision_id=excluded.decision_id,
+                proposal_id=excluded.proposal_id,
+                decision_reason=excluded.decision_reason,
+                state_json=excluded.state_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                target_object_id,
+                project,
+                new_lane,
+                decision_id,
+                proposal_id,
+                state["decision_reason"],
+                state_json,
+                now,
+            ),
+        )
+        proposal["status"] = proposal_status
+        proposal["decision_id"] = decision_id
+        proposal["authority_write_performed"] = False
+        proposal["authoritative_memory_changed"] = False
+        proposal_json = json.dumps(proposal, ensure_ascii=False, sort_keys=True)
+        connection.execute(
+            """
+            UPDATE object_review_proposals
+            SET status = ?, proposal_json = ?, updated_at = ?
+            WHERE proposal_id = ?
+            """,
+            (proposal_status, proposal_json, now, proposal_id),
+        )
+        readback = connection.execute(
+            "SELECT decision_json FROM object_authority_decisions WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
         if readback is None:
             raise ValueError(f"Failed to read back object authority decision: {decision_id}")
         return json.loads(readback["decision_json"])

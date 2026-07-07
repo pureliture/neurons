@@ -11,6 +11,7 @@ from .llm_brain_core.graph import GraphMemoryAdapter
 from .llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
 from .llm_brain_core.runtime import build_runtime_brain_service
 from .llm_brain_core.objects.extraction_pipeline import run_source_to_candidate_graph_activation_preview
+from .llm_brain_core.objects.knowledge_objects import AuthorityDecision, ReviewProposal
 from .llm_brain_core.objects.object_packs import apply_approval_board_decisions, apply_candidate_review_edits
 from .llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_collected_shadow_evidence_packet,
@@ -24,7 +25,7 @@ from .llm_brain_core.objects.runtime_readiness import (
 )
 from .memory_read_pipeline import AuthorizedMemoryReader, MemoryReadPipeline, MemorySearchQuery
 from .index_client import RetiredIndexBridgeHttpClient
-from .public_safe_util import ensure_public_safe, public_safe_text
+from .public_safe_util import ensure_public_safe, public_safe_text, sha256_text, short_hash
 from .session_memory.brain_query import resolve_brain_ids, run_brain_query_v2
 from .session_memory.brain_read_model import LegacyLedgerBrainReadModel, build_semantic_recall
 
@@ -35,6 +36,20 @@ class DisabledRetiredIndexBridgeClient:
 
     def search_messages(self, *args, **kwargs) -> dict:
         return {"status_code": 200, "json": {"code": 0, "data": []}}
+
+
+_APPROVAL_BOARD_PRODUCTION_REQUIRED_TRUE_FIELDS = (
+    "configured_deployed_mcp_identity_matches_source",
+    "read_after_write_smoke_plan",
+    "rollback_or_supersession_plan",
+    "no_raw_private_evidence",
+)
+
+
+def _approval_board_production_decision_state(action: str) -> tuple[str, str, str, str, str]:
+    if action == "promote":
+        return "propose_current", "accept_current", "accepted_current", "current", "accepted"
+    return "", "", "", "", ""
 
 
 def build_index_client(
@@ -261,13 +276,247 @@ class KnowledgeSearchService:
         decisions: list[Mapping[str, Any]],
         target: str = "production",
         reviewer_id: str = "unspecified",
+        production_gate: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        safe_target = public_safe_text(str(target or "production"), max_chars=80)
+        if safe_target != "local_test" and isinstance(production_gate, Mapping):
+            return self._brain_approval_board_decide_production(
+                pack=pack,
+                decisions=decisions,
+                reviewer_id=reviewer_id,
+                production_gate=production_gate,
+            )
         return apply_approval_board_decisions(
             pack,
             decisions=decisions,
             reviewer={"id": reviewer_id},
-            ledger_scope=target,
+            ledger_scope=safe_target,
         )
+
+    def _brain_approval_board_decide_production(
+        self,
+        *,
+        pack: Mapping[str, Any],
+        decisions: list[Mapping[str, Any]],
+        reviewer_id: str,
+        production_gate: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        preview = apply_approval_board_decisions(
+            pack,
+            decisions=decisions,
+            reviewer={"id": reviewer_id},
+            ledger_scope="local_test",
+        )
+        accepted_decisions = [dict(item) for item in preview.get("decisions") or [] if isinstance(item, Mapping)]
+        rejected_decisions = [dict(item) for item in preview.get("rejected_decisions") or [] if isinstance(item, Mapping)]
+        decision_arg = decisions[0] if len(decisions) == 1 and isinstance(decisions[0], Mapping) else {}
+        target_object_id = public_safe_text(str(decision_arg.get("object_id") or ""), max_chars=180)
+        target = self._candidate_object(pack, target_object_id)
+        target_scope = target.get("scope") if isinstance(target.get("scope"), Mapping) else {}
+        target_project = public_safe_text(
+            str(target_scope.get("project") or target.get("project") or ""),
+            max_chars=120,
+        )
+        target_object_type = public_safe_text(str(target.get("object_type") or ""), max_chars=120)
+        gate = self._approval_board_production_gate(
+            production_gate,
+            target_object_id=target_object_id,
+            target_project=target_project,
+            target_object_type=target_object_type,
+            decision_count=len(decisions),
+            action=public_safe_text(str(decision_arg.get("action") or ""), max_chars=80),
+        )
+        if not gate["allowed"] or len(accepted_decisions) != 1 or rejected_decisions:
+            missing = list(gate["missing_gate_evidence"])
+            if len(accepted_decisions) != 1:
+                missing.append("approval_board_single_accepted_decision")
+            if rejected_decisions:
+                missing.append("approval_board_rejected_decisions_absent")
+            result = {
+                "schema_version": "approval_board_decision_result.v1",
+                "permission": "denied",
+                "reason": "production_approval_gate_invalid",
+                "ledger_scope": "production",
+                "production_mutation_performed": False,
+                "proposal_write_performed": False,
+                "authority_write_performed": False,
+                "authority_write_scope": "",
+                "authoritative_memory_changed": False,
+                "decision_count": 0,
+                "decisions": [],
+                "rejected_decisions": rejected_decisions,
+                "updated_pack": copy.deepcopy(dict(pack)),
+                "promotion_plan": self._approval_board_production_promotion_plan(
+                    gate=gate,
+                    missing_gate_evidence=missing,
+                    requested_action=str(decision_arg.get("action") or ""),
+                ),
+            }
+            ensure_public_safe(result, "ApprovalBoardDecisionResult")
+            return result
+
+        authority_decision = accepted_decisions[0]
+        reason = public_safe_text(str(decision_arg.get("reason") or "Production approval-board decision."), max_chars=512)
+        evidence_refs = [str(ref) for ref in target.get("evidence_refs") or [] if ref]
+        proposal = ReviewProposal.from_parts(
+            proposal_type=gate["proposal_type"],
+            target_object_id=target_object_id,
+            reason=reason,
+            evidence_refs=evidence_refs,
+            proposer="codex",
+        ).to_dict(proposal_write_performed=True, proposal_write_target="production_ledger")
+        proposal["project"] = gate["project"]
+        proposal["ledger_scope"] = "production"
+        proposal["production_mutation_performed"] = True
+        proposal["production_gate_ref_hash"] = gate["approval_ref_hash"]
+
+        decision = AuthorityDecision.from_parts(
+            decision_type=str(authority_decision["decision_type"]),
+            target_object_id=target_object_id,
+            previous_authority_lane=str(authority_decision["previous_authority_lane"]),
+            new_authority_lane=str(authority_decision["new_authority_lane"]),
+            approved_by="redacted",
+            evidence_refs=evidence_refs,
+        ).to_dict(authority_write_performed=True, cache_invalidated=True)
+        decision["proposal_id"] = proposal["proposal_id"]
+        decision["project"] = gate["project"]
+        decision["decision_reason"] = reason
+        reviewer_ref_hash = "sha256:" + short_hash(str(decision_arg.get("approved_by") or reviewer_id), length=24)
+        decision["approved_by_hash"] = reviewer_ref_hash
+        decision["ledger_scope"] = "production"
+        decision["authority_write_scope"] = "production_ledger"
+        decision["production_mutation_performed"] = True
+        decision["production_gate_ref_hash"] = gate["approval_ref_hash"]
+        with self.ledger._transaction() as tx:
+            tx.upsert_object_review_proposal(proposal)
+            committed = tx.commit_object_authority_decision(decision)
+        self.invalidate_brain_card_cache()
+
+        updated_pack = copy.deepcopy(dict(preview.get("updated_pack") or pack))
+        updated_pack["authority_write_scope"] = "production_ledger"
+        updated_pack["production_mutation_performed"] = True
+        updated_pack["ledger_scope"] = "production"
+        result = {
+            "schema_version": "approval_board_decision_result.v1",
+            "permission": "allowed",
+            "reason": "production_approval_board_decision",
+            "ledger_scope": "production",
+            "production_mutation_performed": True,
+            "proposal_write_performed": True,
+            "proposal_id": proposal["proposal_id"],
+            "proposal_write_target": "production_ledger",
+            "authority_write_performed": True,
+            "authority_write_scope": "production_ledger",
+            "authoritative_memory_changed": True,
+            "production_gate_ref_hash": gate["approval_ref_hash"],
+            "original_candidate_graph_hash": preview.get("original_candidate_graph_hash", ""),
+            "updated_candidate_graph_hash": preview.get("updated_candidate_graph_hash", ""),
+            "reviewer_ref": "redacted",
+            "reviewer_ref_hash": reviewer_ref_hash,
+            "decision_count": 1,
+            "decisions": [committed],
+            "rejected_decisions": [],
+            "updated_pack": updated_pack,
+            "promotion_plan": self._approval_board_production_promotion_plan(
+                gate=gate,
+                missing_gate_evidence=[],
+                requested_action=str(decision_arg.get("action") or ""),
+            ),
+        }
+        ensure_public_safe(result, "ApprovalBoardDecisionResult")
+        return result
+
+    def _approval_board_production_gate(
+        self,
+        gate: Mapping[str, Any],
+        *,
+        target_object_id: str,
+        target_project: str,
+        target_object_type: str,
+        decision_count: int,
+        action: str,
+    ) -> dict[str, Any]:
+        approval_ref = public_safe_text(str(gate.get("approval_ref") or ""), max_chars=160)
+        project = public_safe_text(str(gate.get("project") or ""), max_chars=120)
+        candidate_project = public_safe_text(str(target_project or ""), max_chars=120)
+        proposal_type, decision_type, new_lane, _lifecycle, _review = _approval_board_production_decision_state(action)
+        missing: list[str] = []
+        if not bool(self.allow_production_object_authority_writes):
+            missing.append("service_production_object_authority_write_flag")
+        if bool(getattr(self.ledger, "read_only", True)):
+            missing.append("writable_ledger")
+        if gate.get("approved") is not True:
+            missing.append("approved")
+        if not approval_ref:
+            missing.append("approval_ref")
+        if str(gate.get("scope") or "") != "single_project_single_object":
+            missing.append("single_project_single_object_scope")
+        if not project or project != candidate_project:
+            missing.append("project_scope_match")
+        try:
+            max_objects = int(gate.get("max_objects") or 0)
+        except (TypeError, ValueError):
+            max_objects = 0
+        if max_objects != 1:
+            missing.append("max_objects_1")
+        if decision_count != 1:
+            missing.append("approval_board_single_decision")
+        for field in _APPROVAL_BOARD_PRODUCTION_REQUIRED_TRUE_FIELDS:
+            if gate.get(field) is not True:
+                missing.append(field)
+        if not target_object_id.startswith("ko:RepoDocument:") or target_object_type != "RepoDocument":
+            missing.append("allowed_object_class_RepoDocument")
+        if not proposal_type or not decision_type or new_lane != "accepted_current":
+            missing.append("allowed_approval_board_action")
+        return {
+            "allowed": not missing,
+            "missing_gate_evidence": list(dict.fromkeys(missing)),
+            "approval_ref_hash": sha256_text(approval_ref) if approval_ref else "",
+            "project": project,
+            "target_project": candidate_project,
+            "target_object_id": target_object_id,
+            "proposal_type": proposal_type,
+            "decision_type": decision_type,
+        }
+
+    def _candidate_object(self, pack: Mapping[str, Any], object_id: str) -> dict[str, Any]:
+        objects = pack.get("objects") if isinstance(pack.get("objects"), list) else []
+        for obj in objects:
+            if isinstance(obj, Mapping) and str(obj.get("object_id") or "") == object_id:
+                return dict(obj)
+        return {}
+
+    def _approval_board_production_promotion_plan(
+        self,
+        *,
+        gate: Mapping[str, Any],
+        missing_gate_evidence: list[str],
+        requested_action: str,
+    ) -> dict[str, Any]:
+        mutation_allowed = not missing_gate_evidence and bool(gate.get("allowed"))
+        return {
+            "schema_version": "object_authority_promotion_plan.v1",
+            "production_write_state": "open_with_preapproved_gate" if mutation_allowed else "closed_without_valid_production_gate",
+            "mutation_allowed": mutation_allowed,
+            "requested_approval_board_action": public_safe_text(requested_action, max_chars=80),
+            "project": public_safe_text(str(gate.get("project") or ""), max_chars=120),
+            "target_object_id": public_safe_text(str(gate.get("target_object_id") or ""), max_chars=180),
+            "missing_gate_evidence": list(dict.fromkeys(missing_gate_evidence)),
+            "allowed_object_classes": ["RepoDocument"],
+            "allowed_approval_board_actions": ["promote"],
+            "required_gate_evidence": [
+                "configured_deployed_mcp_identity_matches_source",
+                "single_object_scope",
+                "read_after_write_smoke_plan",
+                "rollback_or_supersession_plan",
+                "no_raw_private_evidence",
+            ],
+            "no_mutation_report": {
+                "proposal_write_performed": False,
+                "authority_write_performed": False,
+                "authoritative_memory_changed": False,
+            },
+        }
 
     def brain_source_to_candidate_runtime_readiness(
         self,
