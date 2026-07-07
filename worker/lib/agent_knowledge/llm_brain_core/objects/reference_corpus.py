@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from .._util import ensure_public_safe, hash_payload, public_safe_text, require_sha256, short_hash, utc_now_iso
+from .._util import ensure_public_safe, hash_payload, public_safe_text, require_sha256, short_hash
 from .knowledge_objects import EvidenceRef, KnowledgeObjectEnvelope
 
 STORAGE_MODES = {"external_object_store", "managed_snapshot", "metadata_only"}
@@ -41,6 +42,14 @@ def _sources(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(sources, list):
         raise ValueError("manifest.sources must be a list")
     return [dict(source) for source in sources if isinstance(source, Mapping)]
+
+
+def _stable_manifest_observed_at(*, corpus_id: str, manifest_ref: str, storage_mode: str) -> str:
+    seed = short_hash([corpus_id, manifest_ref, storage_mode])
+    offset_seconds = int(seed[:8], 16) % (366 * 24 * 60 * 60)
+    return (datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=offset_seconds)).isoformat(
+        timespec="seconds"
+    )
 
 
 def _source_id(source: Mapping[str, Any]) -> str:
@@ -667,6 +676,12 @@ def reference_corpus_objects_from_manifest(
         "raw_body_policy": "no_raw_return_by_default",
         "manifest_ref": plan["manifest_hash"],
     }
+    observed_at = _stable_manifest_observed_at(
+        corpus_id=str(corpus["corpus_id"]),
+        manifest_ref=str(corpus["manifest_ref"]),
+        storage_mode=mode,
+    )
+    corpus["observed_at"] = observed_at
     document_sources: list[dict[str, Any]] = []
     versions: list[dict[str, Any]] = []
     snapshots: list[dict[str, Any]] = []
@@ -714,7 +729,7 @@ def reference_corpus_objects_from_manifest(
             "check_mode": "url_metadata",
             "status": "checked" if status == "present" else "gap",
             "result": "source_url_present" if status == "present" else "source_url_missing_manual_text",
-            "checked_at": utc_now_iso(),
+            "checked_at": observed_at,
             "gaps": ["freshness_gap"] if status == "missing_manual_text" else [],
         }
         freshness_checks.append(freshness_check)
@@ -733,7 +748,7 @@ def reference_corpus_objects_from_manifest(
             "authority_lane": "reference_only",
             "verification_state": "source_hash_verified",
             "freshness_state": status,
-            "observed_at": utc_now_iso(),
+            "observed_at": observed_at,
         }
         versions.append(version)
         if mode == "managed_snapshot":
@@ -769,6 +784,7 @@ def reference_corpus_objects_from_manifest(
             content_hash=content_hash,
             summary=f"Reference source hash for {source_id}.",
             gaps=["freshness_gap"] if status == "missing_manual_text" else [],
+            observed_at=observed_at,
         )
         evidence.append(ev.to_dict())
         obj = KnowledgeObjectEnvelope.from_parts(
@@ -786,6 +802,7 @@ def reference_corpus_objects_from_manifest(
             confidence={"score": 0.6, "basis": "manifest_hash"},
             recommended_action="review" if status == "missing_manual_text" else "use_as_reference",
             freshness={"state": status, "gaps": ["freshness_gap"] if status == "missing_manual_text" else []},
+            observed_at=observed_at,
             payload={
                 "source_id": document_source["source_id"],
                 "source_url_status": status,
