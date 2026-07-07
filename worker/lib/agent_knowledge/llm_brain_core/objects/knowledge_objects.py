@@ -220,6 +220,7 @@ class KnowledgeEdge:
         verification_state: str,
         confidence: Mapping[str, Any] | None = None,
         payload: Mapping[str, Any] | None = None,
+        observed_at: str = "",
     ) -> "KnowledgeEdge":
         edge_id = f"ke:{edge_type}:{short_hash([edge_type, from_object_id, to_object_id, list(evidence_refs)])}"
         return cls(
@@ -232,7 +233,7 @@ class KnowledgeEdge:
             authority_lane=authority_lane,
             verification_state=verification_state,
             confidence=dict(confidence or {}),
-            observed_at=utc_now_iso(),
+            observed_at=observed_at or utc_now_iso(),
             payload=dict(payload or {}),
         )
 
@@ -276,6 +277,7 @@ class EvidenceRef:
         producer: Mapping[str, Any] | None = None,
         privacy_class: str = "public_safe",
         gaps: list[str] | tuple[str, ...] = (),
+        observed_at: str = "",
     ) -> "EvidenceRef":
         evidence_id = f"ev:{evidence_type}:{short_hash([evidence_type, dict(locator), content_hash])}"
         return cls(
@@ -285,7 +287,7 @@ class EvidenceRef:
             verification_state=verification_state,
             locator=dict(locator),
             content_hash=content_hash,
-            observed_at=utc_now_iso(),
+            observed_at=observed_at or utc_now_iso(),
             summary=public_safe_text(summary, max_chars=512),
             producer=dict(producer or {}),
             privacy_class=privacy_class,
