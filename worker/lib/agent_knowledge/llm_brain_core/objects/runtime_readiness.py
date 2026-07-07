@@ -44,6 +44,13 @@ OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS = (
 OBJECT_AUTHORITY_PRODUCTION_RUNTIME_FLAG = "--allow-object-authority-production-writes"
 PERMISSION_SENSITIVE_AGENT_CONTEXT_TOOLS = ("brain_approval_board_decide",)
 RUNTIME_READINESS_AGENT_CONTEXT_TOOL = "brain_source_to_candidate_runtime_readiness"
+ALLOWED_AGENT_CONTEXT_TOOL_SAFE_TARGETS = {
+    "brain_objects_query": frozenset({"read_only_object_pack"}),
+    "brain_source_to_candidate_graph": frozenset({"local_test"}),
+    "brain_candidate_review_edit": frozenset({"local_test_pack"}),
+    "brain_approval_board_decide": frozenset({"local_test"}),
+    "brain_source_to_candidate_runtime_readiness": frozenset({"sanitized_evidence_packet"}),
+}
 EVIDENCE_PROVENANCE_SCHEMA = "source_to_candidate_runtime_evidence_provenance.v1"
 PROJECTION_JOIN_RUNTIME_SCHEMA = "object_extraction_projection_join_preview.v1"
 SESSION_PROJECT_ROLLUP_RUNTIME_SCHEMA = "session_project_rollup_runtime_evidence.v1"
@@ -3154,6 +3161,9 @@ def _agent_context_tool_hint_safety_failures(tool_name: str, hint: Mapping[str, 
         failures.append(f"{tool_name}_tool_hint_production_mutation_allowed")
     if not safe_targets:
         failures.append(f"{tool_name}_tool_hint_safe_targets_missing")
+    allowed_safe_targets = ALLOWED_AGENT_CONTEXT_TOOL_SAFE_TARGETS.get(tool_name, frozenset())
+    if allowed_safe_targets and any(target not in allowed_safe_targets for target in safe_targets):
+        failures.append(f"{tool_name}_tool_hint_safe_targets_not_allowed")
     if tool_name in PERMISSION_SENSITIVE_AGENT_CONTEXT_TOOLS and "approved_scope_required" not in _string_list(
         hint.get("blocked_by")
     ):

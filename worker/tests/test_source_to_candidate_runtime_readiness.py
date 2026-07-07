@@ -1393,6 +1393,35 @@ def test_runtime_readiness_fails_when_approval_board_hint_lacks_approved_scope_b
     assert "brain_approval_board_decide_tool_hint_approved_scope_blocker_missing" in report["gaps"]
 
 
+def test_runtime_readiness_fails_when_agent_context_tool_hint_targets_production():
+    tool_hints = _safe_tool_hints()
+    for hint in tool_hints:
+        if hint["tool"] == "brain_approval_board_decide":
+            hint["safe_targets"] = ["production"]
+            hint["blocked_by"] = ["approved_scope_required"]
+
+    evidence = _sanitized_live_evidence(
+        agent_context_product={
+            "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
+            "sections": {
+                "style_preference": {"object_count": 1},
+                "active_work": {"object_count": 1},
+                "required_verification": {"object_count": 1},
+            },
+            "degraded_mode": {"active": True, "gaps": ["runtime_evidence_unverified"]},
+            "missing_evidence_before_promotion": ["runtime_evidence_unverified"],
+            "surface_policy": {"mutation_allowed": False},
+            "tool_hints": tool_hints,
+        },
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    assert "brain_approval_board_decide_tool_hint_safe_targets_not_allowed" in report["gaps"]
+
+
 def test_runtime_readiness_fails_when_runtime_readiness_hint_omits_sanitized_target_policy():
     tool_hints = _safe_tool_hints()
     for hint in tool_hints:
