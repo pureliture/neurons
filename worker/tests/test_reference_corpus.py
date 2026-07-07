@@ -57,6 +57,45 @@ def _palantir_full_count_manifest():
     return {"corpus_name": "palantir-ontology", "sources": sources}
 
 
+def _lbrain_corpus_index_manifest():
+    return {
+        "corpus_name": "palantir-ontology",
+        "counts": {
+            "SOURCE_TYPE_PDF": 1,
+            "SOURCE_TYPE_TEXT": 1,
+            "SOURCE_TYPE_WEB_PAGE": 1,
+            "missing_source_url": 1,
+            "sources": 3,
+            "with_source_url": 2,
+        },
+        "sources": [
+            {
+                "canonical_id": "palantir-ontology-001",
+                "title": "Ontology overview",
+                "source_type": "SOURCE_TYPE_WEB_PAGE",
+                "source_url": "https://example.test/ontology",
+                "normalized_path": "sources-normalized/palantir-ontology-001.md",
+                "normalized_sha256": "1" * 64,
+            },
+            {
+                "canonical_id": "palantir-ontology-002",
+                "title": "Ontology whitepaper",
+                "source_type": "SOURCE_TYPE_PDF",
+                "source_url": "https://example.test/ontology.pdf",
+                "normalized_path": "sources-normalized/palantir-ontology-002.md",
+                "normalized_sha256": "2" * 64,
+            },
+            {
+                "canonical_id": "palantir-ontology-003",
+                "title": "Manual excerpt",
+                "source_type": "SOURCE_TYPE_TEXT",
+                "normalized_path": "sources-normalized/palantir-ontology-003.md",
+                "normalized_sha256": "3" * 64,
+            },
+        ],
+    }
+
+
 def _bounded_production_corpus_ingest_evidence(**overrides):
     manifest_hash = "sha256:" + "a" * 64
     corpus_id = "rc:palantir-ontology"
@@ -317,6 +356,34 @@ def test_corpus_ingest_plan_expected_count_gate_passes_without_writes():
         "source_type_counts": {"PDF": 6, "TEXT": 26, "WEB_PAGE": 33},
     }
     assert plan["writes_planned"] is False
+
+
+def test_lbrain_corpus_index_manifest_normalizes_source_type_and_hashes():
+    manifest = _lbrain_corpus_index_manifest()
+    plan = build_corpus_ingest_plan(
+        manifest,
+        project="neurons",
+        storage_mode="managed_snapshot",
+        expected_source_count=3,
+        expected_source_url_count=2,
+        expected_manual_text_without_url_count=1,
+        expected_source_type_counts={"PDF": 1, "WEB_PAGE": 1, "TEXT": 1},
+    )
+
+    assert plan["count_gate_status"] == "pass"
+    assert plan["source_type_counts"] == {"PDF": 1, "TEXT": 1, "WEB_PAGE": 1}
+    assert plan["source_url_count"] == 2
+    assert plan["manual_text_without_url_count"] == 1
+
+    result = reference_corpus_objects_from_manifest(
+        manifest,
+        project="neurons",
+        storage_mode="managed_snapshot",
+    )
+    assert result["sources"][0]["natural_source_id"] == "palantir-ontology-001"
+    assert result["sources"][0]["source_type"] == "WEB_PAGE"
+    assert result["versions"][0]["content_hash"] == "sha256:" + "1" * 64
+    assert result["snapshots"][0]["content_hash"] == "sha256:" + "1" * 64
 
 
 def test_corpus_ingest_plan_expected_count_gate_fails_closed_on_mismatch():

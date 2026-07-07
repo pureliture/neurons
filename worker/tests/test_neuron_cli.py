@@ -1077,6 +1077,35 @@ def test_neuron_knowledge_corpus_ingest_local_test_writes_configured_store(tmp_p
     assert status["gaps"] == []
 
 
+def test_neuron_knowledge_corpus_ingest_manifest_corpus_name_override(tmp_path, capsys):
+    manifest_payload = _reference_manifest()
+    manifest_payload.pop("corpus_name")
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "ledger.sqlite"
+    manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
+
+    rc = main(
+        [
+            "corpus-ingest",
+            "--project",
+            "neurons",
+            "--target",
+            "local_test",
+            "--ledger",
+            str(ledger),
+            "--manifest-file",
+            str(manifest),
+            "--corpus-name",
+            "palantir-ontology",
+        ]
+    )
+
+    ingest = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert ingest["schema_version"] == "reference_corpus_store_write.v1"
+    assert ingest["corpus_id"] == "rc:93206b931d457c9a"
+
+
 def test_neuron_knowledge_corpus_ingest_and_status_use_configured_local_test_ledger_env(
     tmp_path,
     capsys,

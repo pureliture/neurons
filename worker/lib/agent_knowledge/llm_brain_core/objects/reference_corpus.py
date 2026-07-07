@@ -44,7 +44,17 @@ def _sources(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _source_id(source: Mapping[str, Any]) -> str:
-    return public_safe_text(str(source.get("source_id") or source.get("id") or source.get("title") or ""), max_chars=160)
+    return public_safe_text(
+        str(source.get("source_id") or source.get("canonical_id") or source.get("id") or source.get("title") or ""),
+        max_chars=160,
+    )
+
+
+def _source_type(source: Mapping[str, Any]) -> str:
+    raw_type = str(source.get("source_type") or "TEXT")
+    if raw_type.startswith("SOURCE_TYPE_"):
+        raw_type = raw_type.removeprefix("SOURCE_TYPE_")
+    return public_safe_text(raw_type, max_chars=80)
 
 
 def _source_url_status(source: Mapping[str, Any]) -> str:
@@ -53,7 +63,22 @@ def _source_url_status(source: Mapping[str, Any]) -> str:
 
 def _hash_or_payload(value: str, payload: Any) -> str:
     text = str(value or "")
+    if len(text) == 64 and all(char in "0123456789abcdefABCDEF" for char in text):
+        text = f"sha256:{text.lower()}"
     return require_sha256(text, "hash") if text else hash_payload(payload)
+
+
+def _source_content_hash(source: Mapping[str, Any]) -> str:
+    return _hash_or_payload(
+        str(
+            source.get("content_hash")
+            or source.get("normalized_sha256")
+            or source.get("notebook_content_sha256")
+            or source.get("raw_sha256")
+            or ""
+        ),
+        source,
+    )
 
 
 def _hash_mismatches(source: Mapping[str, Any]) -> bool:
@@ -158,7 +183,7 @@ def build_corpus_ingest_plan(
     corpus_name = public_safe_text(str(manifest.get("corpus_name") or manifest.get("name") or "reference-corpus"), max_chars=160)
     source_type_counts: dict[str, int] = {}
     for source in sources:
-        source_type = public_safe_text(str(source.get("source_type") or "TEXT"), max_chars=80)
+        source_type = _source_type(source)
         source_type_counts[source_type] = source_type_counts.get(source_type, 0) + 1
     gaps = [
         {
@@ -660,7 +685,7 @@ def reference_corpus_objects_from_manifest(
     extraction_blocked = bool(rejected_inputs)
     for source in _sources(manifest):
         source_id = _source_id(source)
-        content_hash = _hash_or_payload(str(source.get("content_hash") or ""), source)
+        content_hash = _source_content_hash(source)
         metadata_hash = _hash_or_payload(str(source.get("metadata_hash") or ""), {"source_id": source_id, "title": source.get("title")})
         normalized_path = public_safe_text(str(source.get("normalized_path") or ""), max_chars=240)
         status = _source_url_status(source)
@@ -670,7 +695,7 @@ def reference_corpus_objects_from_manifest(
             "natural_source_id": source_id,
             "corpus_id": corpus["corpus_id"],
             "title": public_safe_text(str(source.get("title") or source_id), max_chars=240),
-            "source_type": public_safe_text(str(source.get("source_type") or "TEXT"), max_chars=80),
+            "source_type": _source_type(source),
             "source_url_status": status,
             "storage_mode": mode,
             "source_url_ref": hash_payload(str(source.get("source_url") or "")) if status == "present" else "",
