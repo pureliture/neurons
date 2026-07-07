@@ -100,6 +100,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "corpus-ingest-plan": llm_brain_object_cli.corpus_ingest_plan_main,
     "corpus-ingest": llm_brain_object_cli.corpus_ingest_main,
     "corpus-ingest-readiness": llm_brain_object_cli.corpus_ingest_readiness_main,
+    "object-authority-schema-ensure": llm_brain_object_cli.object_authority_schema_ensure_main,
     "source-to-candidate-graph": llm_brain_object_cli.source_to_candidate_graph_main,
     "candidate-review-edit": llm_brain_object_cli.candidate_review_edit_main,
     "approval-board-decide": llm_brain_object_cli.approval_board_decide_main,
@@ -149,6 +150,11 @@ COMMAND_METADATA: dict[str, dict[str, object]] = {
     },
     "transcript-migration": {
         "runtime_category": "human_gated_migration",
+        "deletion_candidate": False,
+        "live_mutation_requires_approval": True,
+    },
+    "object-authority-schema-ensure": {
+        "runtime_category": "human_gated_schema_repair",
         "deletion_candidate": False,
         "live_mutation_requires_approval": True,
     },

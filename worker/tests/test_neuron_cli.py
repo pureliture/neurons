@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 
 from agent_knowledge.cli import BOUNDARY, COMMAND_HANDLERS, main
+from agent_knowledge.ledger import Ledger
 from agent_knowledge.llm_brain_core.knowledge_objects import EvidenceRef, KnowledgeEdge
 from object_query_route_cases import REQUIRED_OBJECT_QUERY_ROUTE_CASES
 
@@ -94,6 +96,7 @@ def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
         "corpus-status",
         "corpus-ingest-plan",
         "corpus-ingest",
+        "object-authority-schema-ensure",
         "source-to-candidate-graph",
         "candidate-review-edit",
         "approval-board-decide",
@@ -564,6 +567,164 @@ def test_neuron_knowledge_corpus_ingest_readiness_accepts_bounded_evidence_file(
     assert report["status"] == "PASS"
     assert report["production_mutation_performed"] is True
     assert report["evidence_collection_network_used"] is True
+
+
+def test_neuron_knowledge_object_authority_schema_ensure_requires_production_approval(tmp_path, capsys):
+    ledger = tmp_path / "ledger.sqlite"
+
+    rc = main(
+        [
+            "object-authority-schema-ensure",
+            "--target",
+            "production",
+            "--ledger",
+            str(ledger),
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["schema_version"] == "object_authority_schema_ensure.v1"
+    assert report["status"] == "denied"
+    assert report["reason"] == "production_object_authority_schema_ensure_requires_approval"
+    assert report["mutation_performed"] is False
+    assert report["production_mutation_performed"] is False
+    assert ledger.exists() is False
+
+
+def test_neuron_knowledge_object_authority_schema_ensure_repairs_missing_overlay_tables(tmp_path, capsys):
+    ledger = tmp_path / "ledger.sqlite"
+    Ledger(ledger)
+    with sqlite3.connect(ledger) as connection:
+        connection.execute("DROP TABLE object_authority_states")
+        connection.execute("DROP TABLE object_authority_decisions")
+        connection.execute("DROP TABLE object_review_proposals")
+        for version in (
+            "agent_knowledge_object_review_proposals.v1",
+            "agent_knowledge_object_authority_decisions.v1",
+            "agent_knowledge_object_authority_states.v1",
+        ):
+            connection.execute("DELETE FROM schema_migrations WHERE version = ?", (version,))
+
+    rc = main(
+        [
+            "object-authority-schema-ensure",
+            "--target",
+            "local_test",
+            "--ledger",
+            str(ledger),
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["schema_version"] == "object_authority_schema_ensure.v1"
+    assert report["status"] == "ensured"
+    assert report["target"] == "local_test"
+    assert report["mutation_performed"] is True
+    assert report["production_mutation_performed"] is False
+    assert report["network_used"] is False
+    assert report["server_backed_ledger"] is False
+    assert set(report["tables"]) == {
+        "object_review_proposals",
+        "object_authority_decisions",
+        "object_authority_states",
+    }
+    with sqlite3.connect(ledger) as connection:
+        table_names = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'object_%'"
+            ).fetchall()
+        }
+        migration_versions = {
+            str(row[0])
+            for row in connection.execute(
+                """
+                SELECT version FROM schema_migrations
+                WHERE version IN (
+                    'agent_knowledge_object_review_proposals.v1',
+                    'agent_knowledge_object_authority_decisions.v1',
+                    'agent_knowledge_object_authority_states.v1'
+                )
+                """
+            ).fetchall()
+        }
+    assert {
+        "object_review_proposals",
+        "object_authority_decisions",
+        "object_authority_states",
+    }.issubset(table_names)
+    assert {
+        "agent_knowledge_object_review_proposals.v1",
+        "agent_knowledge_object_authority_decisions.v1",
+        "agent_knowledge_object_authority_states.v1",
+    }.issubset(migration_versions)
+
+
+def test_neuron_knowledge_object_authority_schema_ensure_accepts_bounded_production_approval(tmp_path, capsys):
+    ledger = tmp_path / "ledger.sqlite"
+    Ledger(ledger)
+    with sqlite3.connect(ledger) as connection:
+        connection.execute("DROP TABLE object_authority_states")
+
+    rc = main(
+        [
+            "object-authority-schema-ensure",
+            "--target",
+            "production",
+            "--ledger",
+            str(ledger),
+            "--approved",
+            "--approval-ref",
+            "sha256:" + "c" * 64,
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["schema_version"] == "object_authority_schema_ensure.v1"
+    assert report["status"] == "ensured"
+    assert report["target"] == "production"
+    assert report["mutation_performed"] is True
+    assert report["production_mutation_performed"] is True
+    assert report["approval_ref_hash_present"] is True
+    assert report["network_used"] is False
+    assert report["server_backed_ledger"] is False
+    assert report["protected_values_returned"] is False
+    with sqlite3.connect(ledger) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='object_authority_states'"
+        ).fetchone()
+
+
+def test_neuron_knowledge_object_authority_schema_ensure_does_not_create_missing_production_file(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.delenv("NEURON_LEDGER_PG_DSN", raising=False)
+    ledger = tmp_path / "missing.sqlite"
+
+    rc = main(
+        [
+            "object-authority-schema-ensure",
+            "--target",
+            "production",
+            "--ledger",
+            str(ledger),
+            "--approved",
+            "--approval-ref",
+            "sha256:" + "d" * 64,
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["schema_version"] == "object_authority_schema_ensure.v1"
+    assert report["status"] == "FAIL"
+    assert report["reason"] == "production_ledger_not_existing_or_server_backed"
+    assert report["mutation_performed"] is False
+    assert report["production_mutation_performed"] is False
+    assert ledger.exists() is False
 
 
 def test_neuron_knowledge_corpus_status_reports_storage_policy(capsys):
@@ -1318,6 +1479,7 @@ def test_neuron_knowledge_couchdb_command_surface_classification():
     transcript_migration_metadata = COMMAND_METADATA["transcript-migration"]
     couchdb_migration_flow_metadata = COMMAND_METADATA["couchdb-migration-flow"]
     legacy_session_memory_metadata = COMMAND_METADATA["neuron-session-memory-build"]
+    object_authority_schema_metadata = COMMAND_METADATA["object-authority-schema-ensure"]
 
     assert set(COMMAND_METADATA).issubset(COMMAND_HANDLERS)
 
@@ -1326,6 +1488,7 @@ def test_neuron_knowledge_couchdb_command_surface_classification():
         "transcript-migration",
         "couchdb-migration-flow",
         "neuron-session-memory-build",
+        "object-authority-schema-ensure",
     ):
         assert command in COMMAND_HANDLERS, f"command '{command}' should exist in COMMAND_HANDLERS"
         assert command in COMMAND_METADATA, f"command '{command}' should exist in COMMAND_METADATA"
@@ -1337,6 +1500,10 @@ def test_neuron_knowledge_couchdb_command_surface_classification():
     assert transcript_migration_metadata["runtime_category"] == "human_gated_migration"
     assert transcript_migration_metadata["deletion_candidate"] is False
     assert transcript_migration_metadata["live_mutation_requires_approval"] is True
+
+    assert object_authority_schema_metadata["runtime_category"] == "human_gated_schema_repair"
+    assert object_authority_schema_metadata["deletion_candidate"] is False
+    assert object_authority_schema_metadata["live_mutation_requires_approval"] is True
 
     assert couchdb_migration_flow_metadata["runtime_category"] == "human_gated_migration"
     assert couchdb_migration_flow_metadata["deletion_candidate"] is False
