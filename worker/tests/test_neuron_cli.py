@@ -2,8 +2,28 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agent_knowledge.cli import BOUNDARY, COMMAND_HANDLERS, main
 from agent_knowledge.llm_brain_core.knowledge_objects import EvidenceRef, KnowledgeEdge
+
+
+REQUIRED_OBJECT_QUERY_ROUTE_CASES = [
+    (
+        "authority_archive_separation",
+        "LBrain source-to-candidate-graph product activation roadmap P5 P6 P7 P8 P9 current gaps",
+        ["docs/specs/roadmap.md"],
+    ),
+    ("code_style_preference", "내 code style과 preference를 보여줘", []),
+    ("temporal_work_recall", "어제 이 repo에서 뭐 했어? 작업 재개하려면 뭐 봐야 해?", []),
+    (
+        "code_change_impact",
+        "이 파일 바꾸면 어떤 테스트/런타임 영향 있어?",
+        ["worker/lib/agent_knowledge/llm_brain_core/objects/runtime_readiness.py"],
+    ),
+    ("html_visualization_preference", "내가 선호하는 HTML review artifact 기준으로 이 산출물을 평가해줘.", []),
+    ("deployment_runtime_truth", "이 PR merge됐어? 배포도 됐어?", []),
+]
 
 
 def _reference_manifest() -> dict:
@@ -358,6 +378,76 @@ def test_neuron_knowledge_object_query_does_not_infer_html_route_for_generic_art
     assert report["object_pack"]["route"] == "authority_archive_separation"
     assert report["object_pack"]["route_trace"]["route"] == "authority_archive_separation"
     assert "accepted_html_preference_missing" not in report["object_pack"]["gaps"]
+
+
+@pytest.mark.parametrize(("route", "query", "current_files"), REQUIRED_OBJECT_QUERY_ROUTE_CASES)
+def test_neuron_knowledge_object_query_required_routes_never_fallback(capsys, route, query, current_files):
+    argv = [
+        "object-query",
+        "--repository",
+        "pureliture/neurons",
+        "--branch",
+        "main",
+        "--query",
+        query,
+        "--consumer",
+        "codex",
+        "--response-mode",
+        "compact",
+    ]
+    for current_file in current_files:
+        argv.extend(["--current-file", current_file])
+
+    rc = main(argv)
+
+    report = json.loads(capsys.readouterr().out)
+    pack = report["object_pack"]
+    assert rc == 0
+    assert report["schema_version"] == "brain_objects_query.v1"
+    assert report["route"] == route
+    assert pack["schema_version"] == "object_pack.v1"
+    assert pack["route"] == route
+    assert pack["route_trace"]["schema_version"] == "object_query_route_trace.v1"
+    assert pack["route_trace"]["route"] == route
+    assert pack["route_trace"]["route_source"] == "inferred"
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+
+
+@pytest.mark.parametrize(("route", "query", "current_files"), REQUIRED_OBJECT_QUERY_ROUTE_CASES)
+def test_neuron_knowledge_object_query_explicit_required_routes_never_fallback(
+    capsys, route, query, current_files
+):
+    argv = [
+        "object-query",
+        "--repository",
+        "pureliture/neurons",
+        "--branch",
+        "main",
+        "--route",
+        route,
+        "--query",
+        query,
+        "--consumer",
+        "codex",
+        "--response-mode",
+        "compact",
+    ]
+    for current_file in current_files:
+        argv.extend(["--current-file", current_file])
+
+    rc = main(argv)
+
+    report = json.loads(capsys.readouterr().out)
+    pack = report["object_pack"]
+    assert rc == 0
+    assert report["schema_version"] == "brain_objects_query.v1"
+    assert report["route"] == route
+    assert pack["schema_version"] == "object_pack.v1"
+    assert pack["route"] == route
+    assert pack["route_trace"]["schema_version"] == "object_query_route_trace.v1"
+    assert pack["route_trace"]["route"] == route
+    assert pack["route_trace"]["route_source"] == "explicit"
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
 
 
 def test_neuron_knowledge_delegates_memory_regeneration_help(capsys):
