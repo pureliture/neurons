@@ -11,6 +11,8 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_evidence_collection_plan,
     build_source_to_candidate_runtime_evidence_packet_template,
     build_source_to_candidate_runtime_collected_shadow_evidence_packet,
+    build_source_to_candidate_runtime_post_deploy_capture_packet,
+    build_source_to_candidate_runtime_post_deploy_capture_readiness_report,
     build_source_to_candidate_runtime_readiness_report,
     build_source_to_candidate_runtime_shadow_readiness_report,
     build_source_to_candidate_runtime_shadow_evidence_packet,
@@ -2545,6 +2547,34 @@ def test_neuron_knowledge_runtime_readiness_cli_normalizes_post_deploy_capture_f
     assert packet["evidence_provenance"]["collection_mode"] == "post_deploy_read_only_smoke"
     assert packet["evidence_provenance"]["network_used"] is True
     assert len(packet["brain_objects_query_smokes"]) == len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+
+
+def test_runtime_readiness_post_deploy_capture_preserves_top_level_mutation_report():
+    capture = _current_session_shadow_evidence_capture()
+    capture["production_mutation_performed"] = True
+
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=capture,
+    )
+
+    assert packet["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert packet["production_mutation_performed"] is True
+
+
+def test_runtime_readiness_post_deploy_capture_fails_when_capture_reports_mutation():
+    capture = _current_session_shadow_evidence_capture()
+    capture["production_mutation_performed"] = True
+
+    report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=capture,
+        expected_commit="c264b46",
+    )
+
+    assert report["schema_version"] == "source_to_candidate_runtime_readiness.v1"
+    assert report["status"] == "FAIL"
+    assert report["production_mutation_performed"] is True
+    assert "live.evidence.provenance" in report["failed_claims"]
+    assert "live_evidence_provenance_mutation_scope_mismatch" in report["gaps"]
 
 
 def test_neuron_knowledge_runtime_readiness_cli_evaluates_shadow_evidence_file(tmp_path, capsys):
