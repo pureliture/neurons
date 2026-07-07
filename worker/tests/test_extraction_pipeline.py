@@ -164,6 +164,105 @@ def test_source_to_candidate_graph_activation_preview_resolves_projection_join_g
     assert "live_projection_join_unproven" in invalid_edge_count["gaps"]
 
 
+def test_source_to_candidate_graph_activation_preview_resolves_approval_and_production_gaps_from_evidence():
+    result = run_source_to_candidate_graph_activation_preview(
+        corpus_status=_source_to_candidate_corpus_status(),
+        project="neurons",
+        runtime_evidence={
+            "approval_board_runtime": {
+                "schema_version": "approval_board_runtime_integration_evidence.v1",
+                "evidence_class": "runtime_review_loop",
+                "status": "pass",
+                "target_scope": "local_test",
+                "decision_count": 1,
+                "authority_write_performed": True,
+                "authority_write_scope": "local_test",
+                "read_after_write_status": "validated",
+                "production_mutation_performed": False,
+            },
+            "production_authority_write": {
+                "schema_version": "object_authority_bounded_execution_evidence.v1",
+                "evidence_class": "runtime_safety_gate",
+                "status": "validated",
+                "approval_ref_hash": "sha256:" + "9" * 64,
+                "scope": "single_project_single_object",
+                "max_objects": 1,
+                "proposal_write_performed": True,
+                "decision_authority_write_performed": True,
+                "authoritative_memory_changed": True,
+                "read_after_write_status": "validated",
+                "rollback_or_supersession_status": "planned",
+                "postcheck_status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
+    )
+
+    assert result["status"] == "PASS_WITH_GAPS"
+    assert result["production_mutation_performed"] is False
+    assert result["runtime_evidence_summary"]["approval_board_runtime_validated"] is True
+    assert result["runtime_evidence_summary"]["production_authority_write_validated"] is True
+    assert result["runtime_evidence_summary"]["production_mutation_performed_by_evidence"] is True
+    assert "approval_board_runtime_integration_unproven" not in result["gaps"]
+    assert "production_authority_write_denied" not in result["gaps"]
+    assert "live_projection_join_unproven" in result["gaps"]
+
+    invalid_hash = run_source_to_candidate_graph_activation_preview(
+        corpus_status=_source_to_candidate_corpus_status(),
+        project="neurons",
+        runtime_evidence={
+            "production_authority_write": {
+                "schema_version": "object_authority_bounded_execution_evidence.v1",
+                "evidence_class": "runtime_safety_gate",
+                "status": "validated",
+                "approval_ref_hash": "sha256:not-a-full-digest",
+                "scope": "single_project_single_object",
+                "max_objects": 1,
+                "proposal_write_performed": True,
+                "decision_authority_write_performed": True,
+                "authoritative_memory_changed": True,
+                "read_after_write_status": "validated",
+                "rollback_or_supersession_status": "planned",
+                "postcheck_status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
+    )
+    assert "production_authority_write_denied" in invalid_hash["gaps"]
+
+    invalid_protected_output = run_source_to_candidate_graph_activation_preview(
+        corpus_status=_source_to_candidate_corpus_status(),
+        project="neurons",
+        runtime_evidence={
+            "production_authority_write": {
+                "schema_version": "object_authority_bounded_execution_evidence.v1",
+                "evidence_class": "runtime_safety_gate",
+                "status": "validated",
+                "approval_ref_hash": "sha256:" + "9" * 64,
+                "scope": "single_project_single_object",
+                "max_objects": 1,
+                "proposal_write_performed": True,
+                "decision_authority_write_performed": True,
+                "authoritative_memory_changed": True,
+                "read_after_write_status": "validated",
+                "rollback_or_supersession_status": "planned",
+                "postcheck_status": "validated",
+                "raw_private_evidence_returned": True,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
+    )
+    assert "production_authority_write_denied" in invalid_protected_output["gaps"]
+
+
 def test_reference_corpus_extraction_preview_creates_deterministic_objects_edges_and_chunk_preview():
     first = run_reference_corpus_extraction_preview(
         _manifest(),

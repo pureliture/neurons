@@ -261,6 +261,7 @@ def run_source_to_candidate_graph_activation_preview(
         source_to_candidate_pass=source_to_candidate_pass,
         runtime_evidence=runtime_evidence,
     )
+    runtime_evidence_summary = _source_to_candidate_runtime_evidence_summary(runtime_evidence)
     result = {
         "schema_version": "source_to_candidate_graph_activation.v1",
         "status": "PASS_WITH_GAPS" if source_to_candidate_pass else "FAIL",
@@ -283,6 +284,7 @@ def run_source_to_candidate_graph_activation_preview(
             "candidate_review_surface": "PASS" if review_surface_pass else "FAIL",
             "authority_no_mutation": "PASS" if no_mutation_pass else "FAIL",
         },
+        "runtime_evidence_summary": runtime_evidence_summary,
         "gaps": gaps,
     }
     ensure_public_safe(result, "SourceToCandidateGraphActivationPreview")
@@ -1808,12 +1810,10 @@ def _source_to_candidate_activation_gaps(
     runtime = runtime_evidence if isinstance(runtime_evidence, Mapping) else {}
     if not _projection_join_runtime_evidence_valid(runtime):
         gaps.append("live_projection_join_unproven")
-    gaps.extend(
-        [
-            "approval_board_runtime_integration_unproven",
-            "production_authority_write_denied",
-        ]
-    )
+    if not _approval_board_runtime_evidence_valid(runtime):
+        gaps.append("approval_board_runtime_integration_unproven")
+    if not _production_authority_write_evidence_valid(runtime):
+        gaps.append("production_authority_write_denied")
     return sorted(set(gaps))
 
 
@@ -1829,11 +1829,78 @@ def _projection_join_runtime_evidence_valid(runtime_evidence: Mapping[str, Any])
     )
 
 
+def _approval_board_runtime_evidence_valid(runtime_evidence: Mapping[str, Any]) -> bool:
+    evidence = runtime_evidence.get("approval_board_runtime")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    return (
+        evidence.get("schema_version") == "approval_board_runtime_integration_evidence.v1"
+        and evidence.get("evidence_class") == "runtime_review_loop"
+        and evidence.get("status") == "pass"
+        and evidence.get("target_scope") == "local_test"
+        and _safe_int(evidence.get("decision_count")) > 0
+        and evidence.get("authority_write_performed") is True
+        and evidence.get("authority_write_scope") == "local_test"
+        and evidence.get("read_after_write_status") == "validated"
+        and evidence.get("production_mutation_performed") is False
+    )
+
+
+def _production_authority_write_evidence_valid(runtime_evidence: Mapping[str, Any]) -> bool:
+    evidence = runtime_evidence.get("production_authority_write")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    return (
+        evidence.get("schema_version") == "object_authority_bounded_execution_evidence.v1"
+        and evidence.get("evidence_class") == "runtime_safety_gate"
+        and evidence.get("status") == "validated"
+        and _is_sha256_digest(evidence.get("approval_ref_hash"))
+        and evidence.get("scope") == "single_project_single_object"
+        and _safe_int(evidence.get("max_objects")) == 1
+        and evidence.get("proposal_write_performed") is True
+        and evidence.get("decision_authority_write_performed") is True
+        and evidence.get("authoritative_memory_changed") is True
+        and evidence.get("read_after_write_status") == "validated"
+        and str(evidence.get("rollback_or_supersession_status") or "") in {"planned", "validated"}
+        and evidence.get("postcheck_status") == "validated"
+        and evidence.get("raw_private_evidence_returned") is False
+        and evidence.get("secret_returned") is False
+        and evidence.get("host_topology_returned") is False
+        and evidence.get("raw_external_ids_returned") is False
+    )
+
+
+def _source_to_candidate_runtime_evidence_summary(runtime_evidence: Mapping[str, Any] | None) -> dict[str, Any]:
+    runtime = runtime_evidence if isinstance(runtime_evidence, Mapping) else {}
+    return {
+        "projection_join_validated": _projection_join_runtime_evidence_valid(runtime),
+        "approval_board_runtime_validated": _approval_board_runtime_evidence_valid(runtime),
+        "production_authority_write_validated": _production_authority_write_evidence_valid(runtime),
+        "production_mutation_performed_by_evidence": _runtime_evidence_reports_production_mutation(runtime),
+    }
+
+
+def _runtime_evidence_reports_production_mutation(runtime_evidence: Mapping[str, Any]) -> bool:
+    production_write = runtime_evidence.get("production_authority_write")
+    production_write = production_write if isinstance(production_write, Mapping) else {}
+    return (
+        production_write.get("proposal_write_performed") is True
+        or production_write.get("decision_authority_write_performed") is True
+        or production_write.get("authoritative_memory_changed") is True
+    )
+
+
 def _safe_int(value: Any) -> int:
     try:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _is_sha256_digest(value: Any) -> bool:
+    text = str(value or "")
+    if not text.startswith("sha256:") or len(text) != 71:
+        return False
+    digest = text.split(":", 1)[1]
+    return all(char in "0123456789abcdef" for char in digest)
 
 
 def _stable_object(obj: Mapping[str, Any]) -> dict[str, Any]:
