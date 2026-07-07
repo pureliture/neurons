@@ -150,7 +150,7 @@ async def _call_tool_mapping(session: Any, name: str, arguments: Mapping[str, An
 def _agent_context_product_from_context_pack(context_pack: Mapping[str, Any]) -> dict[str, Any]:
     pack = _public_safe_mapping(context_pack)
     authority = pack.get("authority") if isinstance(pack.get("authority"), Mapping) else {}
-    product = authority.get("agent_context_product") if isinstance(authority, Mapping) else None
+    product = authority.get("agent_context_product")
     if not isinstance(product, Mapping):
         product = pack.get("agent_context_product")
     if isinstance(product, Mapping):
