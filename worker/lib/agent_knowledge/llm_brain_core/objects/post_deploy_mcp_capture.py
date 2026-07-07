@@ -63,6 +63,22 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
                 "consumer": consumer,
             },
         )
+        context_pack = await _call_tool_mapping(
+            session,
+            "brain_context_resolve",
+            {
+                "repository": repository,
+                "branch": branch,
+                "current_files": [],
+                "current_request": (
+                    "source-to-candidate runtime readiness post-deploy "
+                    "agent context product capture"
+                ),
+                "limit": 8,
+                "response_mode": "full",
+                "consumer": consumer,
+            },
+        )
         smokes = [
             _route_smoke_from_call(
                 route=route,
@@ -96,6 +112,7 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         "schema_version": POST_DEPLOY_MCP_CAPTURE_SCHEMA,
         "tool_names": tool_names,
         "runtime_readiness_plan": _public_safe_mapping(plan),
+        "agent_context_product": _agent_context_product_from_context_pack(context_pack),
         "brain_objects_query_smokes": smokes,
         "deployed_identity": identity,
         "collection": _post_deploy_provenance(),
@@ -128,6 +145,27 @@ async def _call_tool_mapping(session: Any, name: str, arguments: Mapping[str, An
         return {"collector_call_failed": True, "collector_error_type": "McpToolError"}
     structured = getattr(result, "structuredContent", None)
     return _public_safe_mapping(structured)
+
+
+def _agent_context_product_from_context_pack(context_pack: Mapping[str, Any]) -> dict[str, Any]:
+    pack = _public_safe_mapping(context_pack)
+    authority = pack.get("authority") if isinstance(pack.get("authority"), Mapping) else {}
+    product = authority.get("agent_context_product") if isinstance(authority, Mapping) else None
+    if not isinstance(product, Mapping):
+        product = pack.get("agent_context_product")
+    if isinstance(product, Mapping):
+        return _public_safe_mapping(product)
+    return {
+        "schema_version": "",
+        "sections": {},
+        "surface_policy": {"mutation_allowed": False},
+        "missing_evidence_before_promotion": ["agent_context_product_capture_failed"],
+        "tool_hints": [],
+        "collector_error_type": public_safe_text(
+            str(pack.get("collector_error_type") or "missing_agent_context_product"),
+            max_chars=80,
+        ),
+    }
 
 
 def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, Any]:
