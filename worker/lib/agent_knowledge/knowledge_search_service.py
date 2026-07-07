@@ -10,6 +10,16 @@ from .llm_brain_core.document_bridge import RetiredIndexBridgeDocumentBridge
 from .llm_brain_core.graph import GraphMemoryAdapter
 from .llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
 from .llm_brain_core.runtime import build_runtime_brain_service
+from .llm_brain_core.objects.extraction_pipeline import run_source_to_candidate_graph_activation_preview
+from .llm_brain_core.objects.object_packs import apply_approval_board_decisions, apply_candidate_review_edits
+from .llm_brain_core.objects.runtime_readiness import (
+    build_source_to_candidate_runtime_collected_shadow_evidence_packet,
+    build_source_to_candidate_runtime_evidence_collection_plan,
+    build_source_to_candidate_runtime_evidence_packet_template,
+    build_source_to_candidate_runtime_readiness_report,
+    build_source_to_candidate_runtime_shadow_evidence_packet,
+    build_source_to_candidate_runtime_shadow_readiness_report,
+)
 from .memory_read_pipeline import AuthorizedMemoryReader, MemoryReadPipeline, MemorySearchQuery
 from .index_client import RetiredIndexBridgeHttpClient
 from .public_safe_util import ensure_public_safe, public_safe_text
@@ -92,6 +102,7 @@ class KnowledgeSearchService:
         allow_restricted_steward: bool = False,
         allow_steward_auto_accept: bool = False,
         allow_local_test_object_authority_writes: bool = False,
+        allow_production_object_authority_writes: bool = False,
     ):
         self.ledger = ledger
         self.retired_index_bridge = retired_index_bridge
@@ -105,6 +116,7 @@ class KnowledgeSearchService:
         self.allow_restricted_steward = bool(allow_restricted_steward)
         self.allow_steward_auto_accept = bool(allow_steward_auto_accept)
         self.allow_local_test_object_authority_writes = bool(allow_local_test_object_authority_writes)
+        self.allow_production_object_authority_writes = bool(allow_production_object_authority_writes)
         # M8 read cutover: a Qdrant-backed (query, brain_id) -> list[dict] callable
         # that fills brain.query's archive/evidence lanes from the Qdrant searchable
         # mirror. When set it REPLACES the RetiredIndexBridge archive search (which is off in the
@@ -189,6 +201,133 @@ class KnowledgeSearchService:
             consumer=consumer,
         )
         return self._overlay_object_authority_states(result)
+
+    def brain_source_to_candidate_graph(
+        self,
+        *,
+        project: str,
+        corpus_id: str = "",
+        target: str = "production",
+        consumer: str = "unspecified",
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        safe_target = public_safe_text(str(target or "production"), max_chars=80)
+        if safe_target != "local_test":
+            result = {
+                "schema_version": "object_substrate_cli_denied.v1",
+                "status": "denied",
+                "reason": "production_source_to_candidate_graph_requires_later_validation_goal",
+                "mutation_performed": False,
+                "production_mutation_performed": False,
+                "ledger_mutation_performed": False,
+                "network_used": False,
+            }
+            ensure_public_safe(result, "brain_source_to_candidate_graph_denied")
+            return result
+        status = self.ledger.reference_corpus_status(
+            project=public_safe_text(project, max_chars=120),
+            corpus_id=public_safe_text(corpus_id, max_chars=180),
+            limit=limit,
+        )
+        return run_source_to_candidate_graph_activation_preview(
+            corpus_status=status,
+            project=project,
+            consumer=consumer,
+        )
+
+    def brain_candidate_review_edit(
+        self,
+        *,
+        pack: Mapping[str, Any],
+        edits: list[Mapping[str, Any]],
+        reviewer_id: str = "unspecified",
+        target: str = "local_test",
+        mutation_mode: str = "no_mutation",
+    ) -> dict[str, Any]:
+        return apply_candidate_review_edits(
+            pack,
+            edits=edits,
+            reviewer={"id": reviewer_id},
+            target_scope=target,
+            mutation_mode=mutation_mode,
+        )
+
+    def brain_approval_board_decide(
+        self,
+        *,
+        pack: Mapping[str, Any],
+        decisions: list[Mapping[str, Any]],
+        target: str = "production",
+        reviewer_id: str = "unspecified",
+    ) -> dict[str, Any]:
+        return apply_approval_board_decisions(
+            pack,
+            decisions=decisions,
+            reviewer={"id": reviewer_id},
+            ledger_scope=target,
+        )
+
+    def brain_source_to_candidate_runtime_readiness(
+        self,
+        *,
+        live_evidence: Mapping[str, Any] | None = None,
+        normalize_shadow_evidence: Mapping[str, Any] | None = None,
+        shadow_evidence: Mapping[str, Any] | None = None,
+        expected_commit: str = "",
+        evidence_collection_plan: bool = False,
+        evidence_packet_template: bool = False,
+        collect_shadow_evidence: bool = False,
+        repository: str = "",
+        branch: str = "",
+        consumer: str = "codex",
+    ) -> dict[str, Any]:
+        if evidence_collection_plan:
+            return build_source_to_candidate_runtime_evidence_collection_plan(
+                expected_commit=expected_commit,
+                repository=repository,
+                branch=branch,
+                consumer=consumer,
+            )
+        if evidence_packet_template:
+            return build_source_to_candidate_runtime_evidence_packet_template(
+                expected_commit=expected_commit,
+                repository=repository,
+                branch=branch,
+                consumer=consumer,
+            )
+        if collect_shadow_evidence:
+            def route_runner(route: str) -> Mapping[str, Any]:
+                return self.brain_objects_query(
+                    repository=repository,
+                    branch=branch,
+                    query=f"source-to-candidate runtime readiness route smoke: {route}",
+                    current_files=[],
+                    route=route,
+                    limit=5,
+                    response_mode="full",
+                    consumer=consumer,
+                )
+
+            return build_source_to_candidate_runtime_collected_shadow_evidence_packet(
+                expected_commit=expected_commit,
+                repository=repository,
+                branch=branch,
+                consumer=consumer,
+                route_runner=route_runner,
+            )
+        if isinstance(normalize_shadow_evidence, Mapping):
+            return build_source_to_candidate_runtime_shadow_evidence_packet(
+                captured_evidence=normalize_shadow_evidence,
+            )
+        if isinstance(shadow_evidence, Mapping):
+            return build_source_to_candidate_runtime_shadow_readiness_report(
+                captured_evidence=shadow_evidence,
+                expected_commit=expected_commit,
+            )
+        return build_source_to_candidate_runtime_readiness_report(
+            live_evidence=live_evidence,
+            expected_commit=expected_commit,
+        )
 
     def _overlay_object_authority_states(self, result: Mapping[str, Any]) -> dict[str, Any]:
         response = copy.deepcopy(dict(result))
@@ -424,6 +563,8 @@ def _object_authority_state_view(state: Mapping[str, Any]) -> dict[str, str]:
         "decision_type": public_safe_text(str(state.get("decision_type") or ""), max_chars=120),
         "previous_authority_lane": public_safe_text(str(state.get("previous_authority_lane") or ""), max_chars=80),
         "authority_lane": public_safe_text(str(state.get("authority_lane") or ""), max_chars=80),
+        "rollback_of_decision_id": public_safe_text(str(state.get("rollback_of_decision_id") or ""), max_chars=180),
+        "supersedes_decision_id": public_safe_text(str(state.get("supersedes_decision_id") or ""), max_chars=180),
         "updated_at": public_safe_text(str(state.get("updated_at") or ""), max_chars=80),
     }
 

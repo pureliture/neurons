@@ -50,13 +50,18 @@ Final status:
    - `uv run neuron-knowledge object-query --repository neurons --branch <branch> --query <doc cleanup query>`
    - `uv run neuron-knowledge okf-export --root okf`
    - `uv run neuron-knowledge corpus-ingest-plan --project neurons --storage-mode metadata_only --corpus-name palantir-ontology`
+   - `uv run neuron-knowledge source-to-candidate-runtime-readiness --evidence-collection-plan --expected-commit <commit> --repository pureliture/neurons --branch main --consumer codex`
    - `uv run neuron-knowledge corpus-ingest --project neurons --target local_test`
-   - `uv run neuron-knowledge corpus-ingest --project neurons --target production`
+   - denial/no-mutation smoke only: `uv run neuron-knowledge corpus-ingest --project neurons --target production`
 
 4. MCP contract gates
    - run focused JSON-RPC tests for object tools and restricted denial
    - verify `brain_objects_query`, `brain_object_proposal_create`, `brain_review_proposals`, and `brain_object_decision_commit`
-   - expected: local/test proposal writes to local/test ledger; production/restricted decision denies
+   - verify live/readiness `brain_objects_query` route smokes include `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth`
+   - verify live/readiness agent context product includes non-empty `style_preference`, `active_work`, and `required_verification` sections with mutation disabled
+   - verify live/readiness production safety claims for `brain_source_to_candidate_graph`, `brain_approval_board_decide`, `brain_object_proposal_create`, `brain_object_decision_commit`, and `object_authority_gate_policy`
+   - verify `brain_source_to_candidate_runtime_readiness` can return `source_to_candidate_runtime_evidence_collection_plan.v1` for post-deploy read-only evidence collection without network access, production mutation, or protected-value output
+   - expected: local/test proposal writes to local/test ledger; production/restricted decision은 기본 deny이며, branch-local production-scope write는 runtime flag `--allow-object-authority-production-writes`와 read-after-write/rollback-supersession evidence를 포함한 per-call `production_gate`가 모두 있어야만 허용된다
 
 5. LBrain read-path gates
    - use available LBrain MCP read tools if configured
@@ -72,6 +77,7 @@ Final status:
 7. Report
    - write `validation-report.md` in this spec directory.
    - include command evidence, claim statuses, gaps, and final status.
+   - separate evidence collection plan generation from actual deployed/runtime evidence collection.
 
 ## Stop Conditions
 

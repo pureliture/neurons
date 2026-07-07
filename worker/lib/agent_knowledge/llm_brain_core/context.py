@@ -17,7 +17,11 @@ from .context_builder import (
 from .document_bridge import DisabledDocumentBridge, DocumentBridge
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
 from .models import EvidenceRequest
-from .objects.object_packs import build_documentation_cleanup_pack
+from .objects.object_packs import (
+    build_code_change_impact_pack,
+    build_documentation_cleanup_pack,
+    build_runtime_truth_pack,
+)
 from .objects.reference_corpus import default_corpus_policy_status
 from .source_ref import SourceRefResolver
 
@@ -154,6 +158,7 @@ class BrainReadService:
     ) -> dict[str, Any]:
         project_name = project or project_from_repository(repository)
         selected_route = route or _route_for_query(query)
+        route_source = "explicit" if route else "inferred"
         pack = self.brain_context_resolve(
             repository=repository,
             branch=branch,
@@ -169,26 +174,58 @@ class BrainReadService:
                 route=selected_route,
                 consumer=consumer,
             )
-        else:
-            object_pack = {
-                "schema_version": "object_pack.v1",
-                "route": selected_route,
-                "objects": [],
-                "edges": [],
-                "evidence": [],
-                "lanes": {
-                    "accepted_current": [],
-                    "reference_only": [],
-                    "proposal_only": [],
-                    "archive_only": [],
-                    "derived_projection": [],
-                },
-                "verification": {"runtime_verified": [], "runtime_unverified": [], "unverified": []},
-                "recommended_actions": [],
-                "confidence": {"score": 0.0, "basis": ""},
-                "gaps": ["object_pack_route_not_implemented"],
-                "audit": {"consumer": consumer},
+        elif selected_route == "deployment_runtime_truth":
+            object_pack = build_runtime_truth_pack(
+                pull_request={"id": _query_object_ref(query), "merged": False},
+                deployment={"target": "production"},
+                live_evidence=None,
+            )
+            object_pack["audit"] = {
+                "request_hash": pack.get("audit", {}).get("request_hash", ""),
+                "consumer": consumer,
+                "object_pack_route_source": "runtime_truth_pack",
             }
+        elif selected_route == "code_change_impact":
+            object_pack = build_code_change_impact_pack(
+                current_files=current_files,
+                route=selected_route,
+                consumer=consumer,
+            )
+        elif selected_route == "html_visualization_preference":
+            object_pack = _html_visualization_preference_object_pack(
+                pack,
+                route=selected_route,
+                consumer=consumer,
+            )
+        elif selected_route == "code_style_preference":
+            object_pack = _context_authority_object_pack(
+                pack,
+                route=selected_route,
+                pack_names=("preferences", "style"),
+                consumer=consumer,
+            )
+        elif selected_route == "temporal_work_recall":
+            object_pack = _context_authority_object_pack(
+                pack,
+                route=selected_route,
+                pack_names=("current_work", "required_verification"),
+                consumer=consumer,
+            )
+        else:
+            object_pack = _context_authority_object_pack(
+                pack,
+                route=selected_route,
+                pack_names=(
+                    "documentation_cleanup",
+                    "reference_corpus",
+                    "preferences",
+                    "style",
+                    "current_work",
+                    "required_verification",
+                    "do_not_touch_boundaries",
+                ),
+                consumer=consumer,
+            )
         result = {
             "schema_version": "brain_objects_query.v1",
             "route": selected_route,
@@ -197,6 +234,7 @@ class BrainReadService:
                 object_pack,
                 object_types=[str(item) for item in object_types or []],
                 response_mode=response_mode,
+                route_source=route_source,
             ),
         }
         ensure_public_safe(result, "brain_objects_query")
@@ -520,13 +558,62 @@ _project_from_repository = project_from_repository
 
 def _route_for_query(query: str) -> str:
     text = str(query or "").lower()
+    if _is_code_change_impact_query(text):
+        return "code_change_impact"
+    if _is_html_visualization_preference_query(text):
+        return "html_visualization_preference"
+    if any(
+        token in text
+        for token in (
+            "어제",
+            "오늘",
+            "세션",
+            "작업",
+            "뭐 했",
+            "무엇 했",
+            "yesterday",
+            "today",
+            "session",
+            "work unit",
+            "current work",
+            "unfinished",
+            "handoff",
+            "resume",
+        )
+    ):
+        return "temporal_work_recall"
     if "문서" in text or "doc" in text or "stale" in text or "archive" in text:
         return "documentation_cleanup"
     if "merge" in text or "배포" in text or "deploy" in text:
         return "deployment_runtime_truth"
-    if "style" in text or "스타일" in text:
+    if "style" in text or "스타일" in text or "preference" in text or "선호" in text:
         return "code_style_preference"
     return "authority_archive_separation"
+
+
+def _is_code_change_impact_query(text: str) -> bool:
+    if "code change impact" in text:
+        return True
+    file_terms = ("파일", "file", "current file", "current_files", "repo path", "source path")
+    change_terms = ("바꾸", "변경", "수정", "고치", "change", "edit", "touch", "modify")
+    impact_terms = ("영향", "impact", "테스트", "test", "런타임", "runtime", "검증", "verify")
+    return (
+        any(token in text for token in file_terms)
+        and any(token in text for token in change_terms)
+        and any(token in text for token in impact_terms)
+    )
+
+
+def _is_html_visualization_preference_query(text: str) -> bool:
+    visual_medium_terms = (
+        "html",
+        "visualization",
+        "visualisation",
+        "visual",
+        "시각화",
+    )
+    preference_terms = ("preference", "선호", "review", "리뷰", "기준", "평가")
+    return any(term in text for term in visual_medium_terms) and any(term in text for term in preference_terms)
 
 
 def _authority_documents(pack: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -535,11 +622,219 @@ def _authority_documents(pack: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [dict(doc) for doc in documents if isinstance(doc, Mapping)]
 
 
+def _context_authority_object_pack(
+    pack: Mapping[str, Any],
+    *,
+    route: str,
+    pack_names: tuple[str, ...],
+    consumer: str,
+) -> dict[str, Any]:
+    authority = pack.get("authority") if isinstance(pack.get("authority"), Mapping) else {}
+    object_packs = authority.get("object_packs") if isinstance(authority.get("object_packs"), Mapping) else {}
+    merged = _empty_read_object_pack(route=route, consumer=consumer)
+    seen_objects: set[str] = set()
+    seen_edges: set[str] = set()
+    seen_evidence: set[str] = set()
+    seen_actions: set[tuple[str, str]] = set()
+    for name in pack_names:
+        source = object_packs.get(name) if isinstance(object_packs.get(name), Mapping) else {}
+        _merge_object_pack(
+            merged,
+            source,
+            seen_objects=seen_objects,
+            seen_edges=seen_edges,
+            seen_evidence=seen_evidence,
+            seen_actions=seen_actions,
+        )
+    if not merged["objects"]:
+        merged["gaps"].append("context_authority_object_pack_empty")
+    merged["confidence"] = {
+        "score": 0.75 if merged["objects"] else 0.0,
+        "basis": "context_authority_object_packs",
+    }
+    merged["audit"] = {
+        "request_hash": str((pack.get("audit") or {}).get("request_hash") or ""),
+        "consumer": consumer,
+        "object_pack_route_source": "context_authority_object_packs",
+        "source_pack_names": list(pack_names),
+    }
+    ensure_public_safe(merged, "ContextAuthorityObjectPack")
+    return merged
+
+
+def _html_visualization_preference_object_pack(
+    pack: Mapping[str, Any],
+    *,
+    route: str,
+    consumer: str,
+) -> dict[str, Any]:
+    merged = _context_authority_object_pack(
+        pack,
+        route=route,
+        pack_names=("preferences", "style"),
+        consumer=consumer,
+    )
+    relevant_ids = {
+        str(obj.get("object_id") or "")
+        for obj in merged.get("objects", [])
+        if isinstance(obj, Mapping) and _is_html_visualization_preference_object(obj)
+    }
+    merged["objects"] = [
+        dict(obj)
+        for obj in merged.get("objects", [])
+        if isinstance(obj, Mapping) and str(obj.get("object_id") or "") in relevant_ids
+    ]
+    lanes = merged.get("lanes") if isinstance(merged.get("lanes"), Mapping) else {}
+    merged["lanes"] = {
+        str(lane): [
+            dict(obj)
+            for obj in lane_objects
+            if isinstance(obj, Mapping) and str(obj.get("object_id") or "") in relevant_ids
+        ]
+        for lane, lane_objects in lanes.items()
+        if isinstance(lane_objects, list)
+    }
+    merged["recommended_actions"] = [
+        dict(action)
+        for action in merged.get("recommended_actions", [])
+        if isinstance(action, Mapping) and str(action.get("object_id") or "") in relevant_ids
+    ]
+    merged["audit"] = {
+        **dict(merged.get("audit") or {}),
+        "object_pack_route_source": "html_visualization_preference_pack",
+    }
+    if not relevant_ids:
+        merged["gaps"] = [
+            gap
+            for gap in merged.get("gaps", [])
+            if str(gap or "") != "context_authority_object_pack_empty"
+        ]
+        for gap in ("accepted_html_preference_missing", "visualization_preference_missing"):
+            if gap not in merged["gaps"]:
+                merged["gaps"].append(gap)
+    merged["confidence"] = {
+        "score": 0.74 if relevant_ids else 0.0,
+        "basis": "html_visualization_preference_route",
+    }
+    ensure_public_safe(merged, "HtmlVisualizationPreferenceObjectPack")
+    return merged
+
+
+def _is_html_visualization_preference_object(obj: Mapping[str, Any]) -> bool:
+    payload = obj.get("payload") if isinstance(obj.get("payload"), Mapping) else {}
+    text = " ".join(
+        [
+            str(obj.get("title") or ""),
+            str(obj.get("summary") or ""),
+            str(payload.get("scope") or ""),
+            str(payload.get("applies_to") or ""),
+        ]
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "html",
+            "review artifact",
+            "visualization",
+            "visualisation",
+            "visual artifact",
+            "시각화",
+        )
+    )
+
+
+def _empty_read_object_pack(*, route: str, consumer: str) -> dict[str, Any]:
+    return {
+        "schema_version": "object_pack.v1",
+        "route": route,
+        "objects": [],
+        "edges": [],
+        "evidence": [],
+        "lanes": {
+            "accepted_current": [],
+            "accepted_non_current": [],
+            "candidate": [],
+            "reference_only": [],
+            "proposal_only": [],
+            "archive_only": [],
+            "derived_projection": [],
+            "rejected": [],
+        },
+        "verification": {"runtime_verified": [], "runtime_unverified": [], "unverified": []},
+        "recommended_actions": [],
+        "confidence": {"score": 0.0, "basis": ""},
+        "gaps": [],
+        "audit": {"consumer": consumer},
+    }
+
+
+def _merge_object_pack(
+    target: dict[str, Any],
+    source: Mapping[str, Any],
+    *,
+    seen_objects: set[str],
+    seen_edges: set[str],
+    seen_evidence: set[str],
+    seen_actions: set[tuple[str, str]],
+) -> None:
+    for obj in source.get("objects", []) if isinstance(source.get("objects"), list) else []:
+        if not isinstance(obj, Mapping):
+            continue
+        object_id = str(obj.get("object_id") or "")
+        if object_id and object_id in seen_objects:
+            continue
+        if object_id:
+            seen_objects.add(object_id)
+        safe_obj = dict(obj)
+        target["objects"].append(safe_obj)
+        lane = str(safe_obj.get("authority_lane") or "reference_only")
+        target["lanes"].setdefault(lane, []).append(safe_obj)
+    for edge in source.get("edges", []) if isinstance(source.get("edges"), list) else []:
+        if not isinstance(edge, Mapping):
+            continue
+        edge_id = str(edge.get("edge_id") or "")
+        if edge_id and edge_id in seen_edges:
+            continue
+        if edge_id:
+            seen_edges.add(edge_id)
+        target["edges"].append(dict(edge))
+    for evidence in source.get("evidence", []) if isinstance(source.get("evidence"), list) else []:
+        if not isinstance(evidence, Mapping):
+            continue
+        evidence_id = str(evidence.get("evidence_id") or "")
+        if evidence_id and evidence_id in seen_evidence:
+            continue
+        if evidence_id:
+            seen_evidence.add(evidence_id)
+        target["evidence"].append(dict(evidence))
+    verification = source.get("verification") if isinstance(source.get("verification"), Mapping) else {}
+    for lane in ("runtime_verified", "runtime_unverified", "unverified"):
+        values = verification.get(lane) if isinstance(verification.get(lane), list) else []
+        target["verification"].setdefault(lane, []).extend(dict(item) for item in values if isinstance(item, Mapping))
+    for action in source.get("recommended_actions", []) if isinstance(source.get("recommended_actions"), list) else []:
+        if not isinstance(action, Mapping):
+            continue
+        key = (str(action.get("object_id") or ""), str(action.get("action") or ""))
+        if key in seen_actions:
+            continue
+        seen_actions.add(key)
+        target["recommended_actions"].append(dict(action))
+    for gap in source.get("gaps", []) if isinstance(source.get("gaps"), list) else []:
+        safe_gap = str(gap or "")
+        if safe_gap and safe_gap not in target["gaps"]:
+            target["gaps"].append(safe_gap)
+
+
+def _query_object_ref(query: str) -> str:
+    return "query:" + public_safe_text(str(query or "runtime_truth"), max_chars=80)
+
+
 def _object_pack_view(
     pack: Mapping[str, Any],
     *,
     object_types: list[str],
     response_mode: str,
+    route_source: str,
 ) -> dict[str, Any]:
     view = dict(pack)
     wanted = {item for item in object_types if item}
@@ -579,7 +874,59 @@ def _object_pack_view(
             if isinstance(lane_objects, list)
         }
     view["response_mode"] = mode
+    view["route_trace"] = _route_trace_for_view(view, route_source=route_source)
     return view
+
+
+def _route_trace_for_view(view: Mapping[str, Any], *, route_source: str) -> dict[str, Any]:
+    missing_evidence = _missing_evidence_gaps(view.get("gaps"))
+    trace = {
+        "schema_version": "object_query_route_trace.v1",
+        "route": public_safe_text(str(view.get("route") or ""), max_chars=120),
+        "route_source": "explicit" if route_source == "explicit" else "inferred",
+        "selected_source_lanes": _selected_source_lanes(view.get("lanes")),
+        "confidence": dict(view.get("confidence") or {}),
+        "stop_reason": _route_stop_reason(view, missing_evidence=missing_evidence),
+        "missing_evidence": missing_evidence,
+    }
+    ensure_public_safe(trace, "ObjectQueryRouteTrace")
+    return trace
+
+
+def _selected_source_lanes(lanes: Any) -> list[str]:
+    if not isinstance(lanes, Mapping):
+        return []
+    selected = [
+        public_safe_text(str(lane), max_chars=80)
+        for lane, lane_objects in lanes.items()
+        if isinstance(lane_objects, list) and lane_objects
+    ]
+    return sorted(lane for lane in selected if lane)
+
+
+def _missing_evidence_gaps(gaps: Any) -> list[str]:
+    if not isinstance(gaps, list):
+        return []
+    markers = ("evidence", "unverified", "freshness", "missing")
+    missing: list[str] = []
+    for gap in gaps:
+        text = public_safe_text(str(gap or ""), max_chars=180)
+        if text and any(marker in text for marker in markers) and text not in missing:
+            missing.append(text)
+    return missing
+
+
+def _route_stop_reason(view: Mapping[str, Any], *, missing_evidence: list[str]) -> str:
+    if missing_evidence:
+        return "missing_evidence_gap_returned"
+    objects = view.get("objects") if isinstance(view.get("objects"), list) else []
+    actions = view.get("recommended_actions") if isinstance(view.get("recommended_actions"), list) else []
+    gaps = view.get("gaps") if isinstance(view.get("gaps"), list) else []
+    if objects or actions:
+        return "returned_object_pack"
+    if gaps:
+        return "gap_only_response"
+    return "empty_object_pack"
 
 
 def _compact_object(obj: Mapping[str, Any]) -> dict[str, Any]:

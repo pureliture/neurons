@@ -4,7 +4,7 @@ import json
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TextIO
+from typing import Any, TextIO
 
 from .knowledge_search_service import KnowledgeSearchService
 from .llm_brain_core.context import project_from_repository
@@ -15,6 +15,10 @@ from .llm_brain_core.objects.reference_corpus import build_corpus_ingest_plan
 from .mcp_tools import (
     BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
     BRAIN_CORPUS_STATUS_TOOL_NAME,
+    BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+    BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+    BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+    BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
     BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
     BRAIN_DRIFT_EXPLAIN_TOOL_NAME,
     BRAIN_EVIDENCE_GET_TOOL_NAME,
@@ -45,7 +49,7 @@ from .mcp_tools import (
     list_tools,
     tool_contract_registry,
 )
-from .public_safe_util import public_safe_text, short_hash
+from .public_safe_util import public_safe_text, sha256_text, short_hash
 from .session_memory.brain_steward import StewardPermissionError
 
 _STEWARD_TOOL_NAMES = frozenset(
@@ -64,6 +68,23 @@ ToolHandler = Callable[[dict, KnowledgeSearchService], dict]
 ToolDispatch = Callable[[str, dict, KnowledgeSearchService], dict]
 StewardReadProposalDispatch = Callable[[str, dict, object], dict]
 StewardRestrictedDispatch = Callable[[str, dict, object], dict]
+
+_ALLOWED_PRODUCTION_PROPOSAL_TYPES = (
+    "propose_current",
+    "propose_stale",
+    "propose_supersede",
+    "propose_retire",
+    "request_evidence",
+)
+_ALLOWED_PRODUCTION_DECISION_TYPES = (
+    "accept_current",
+    "reject_candidate",
+    "commit_supersession",
+    "commit_stale",
+    "retire",
+    "archive_only",
+    "rollback_decision",
+)
 
 
 @dataclass(frozen=True)
@@ -196,6 +217,13 @@ def _tool_dispatch_registry() -> dict[str, ToolDispatch]:
         (BRAIN_OBJECT_EXPLAIN_TOOL_NAME, _dispatch_brain_object_explain_tool),
         (BRAIN_CORPUS_STATUS_TOOL_NAME, _dispatch_brain_corpus_status_tool),
         (BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME, _dispatch_brain_corpus_ingest_plan_tool),
+        (BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME, _dispatch_brain_source_to_candidate_graph_tool),
+        (BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME, _dispatch_brain_candidate_review_edit_tool),
+        (BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME, _dispatch_brain_approval_board_decide_tool),
+        (
+            BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+            _dispatch_brain_source_to_candidate_runtime_readiness_tool,
+        ),
         (BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME, _dispatch_brain_object_proposal_create_tool),
         (BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME, _dispatch_brain_object_decision_commit_tool),
         (BRAIN_REVIEW_PROPOSALS_TOOL_NAME, _dispatch_brain_review_proposals_tool),
@@ -397,15 +425,126 @@ def _dispatch_brain_corpus_ingest_plan_tool(tool_name: str, arguments: dict, ser
     return _tool_result(result)
 
 
+def _dispatch_brain_source_to_candidate_graph_tool(
+    tool_name: str,
+    arguments: dict,
+    service: KnowledgeSearchService,
+) -> dict:
+    result = service.brain_source_to_candidate_graph(
+        project=_require_non_empty_string(arguments, "project", tool_name=tool_name),
+        corpus_id=str(arguments.get("corpus_id") or ""),
+        target=str(arguments.get("target") or "production"),
+        consumer=_consumer(arguments),
+        limit=_bounded_limit(arguments.get("limit"), default=20, maximum=100),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_candidate_review_edit_tool(
+    tool_name: str,
+    arguments: dict,
+    service: KnowledgeSearchService,
+) -> dict:
+    pack = arguments.get("pack")
+    if not isinstance(pack, dict):
+        raise ValueError(f"{tool_name} requires pack object")
+    edits = arguments.get("edits")
+    if not isinstance(edits, list):
+        raise ValueError(f"{tool_name} requires edits array")
+    result = service.brain_candidate_review_edit(
+        pack=pack,
+        edits=[dict(item) for item in edits if isinstance(item, Mapping)],
+        reviewer_id=str(arguments.get("reviewer_id") or "unspecified"),
+        target=str(arguments.get("target") or "local_test"),
+        mutation_mode=str(arguments.get("mutation_mode") or "no_mutation"),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_approval_board_decide_tool(
+    tool_name: str,
+    arguments: dict,
+    service: KnowledgeSearchService,
+) -> dict:
+    pack = arguments.get("pack")
+    if not isinstance(pack, dict):
+        raise ValueError(f"{tool_name} requires pack object")
+    decisions = arguments.get("decisions")
+    if not isinstance(decisions, list):
+        raise ValueError(f"{tool_name} requires decisions array")
+    result = service.brain_approval_board_decide(
+        pack=pack,
+        decisions=[dict(item) for item in decisions if isinstance(item, Mapping)],
+        target=str(arguments.get("target") or "production"),
+        reviewer_id=str(arguments.get("reviewer_id") or "unspecified"),
+    )
+    return _tool_result(result)
+
+
+def _dispatch_brain_source_to_candidate_runtime_readiness_tool(
+    tool_name: str,
+    arguments: dict,
+    service: KnowledgeSearchService,
+) -> dict:
+    _ = tool_name
+    live_evidence = arguments.get("live_evidence")
+    normalize_shadow_evidence = arguments.get("normalize_shadow_evidence")
+    shadow_evidence = arguments.get("shadow_evidence")
+    result = service.brain_source_to_candidate_runtime_readiness(
+        live_evidence=live_evidence if isinstance(live_evidence, Mapping) else None,
+        normalize_shadow_evidence=normalize_shadow_evidence
+        if isinstance(normalize_shadow_evidence, Mapping)
+        else None,
+        shadow_evidence=shadow_evidence
+        if isinstance(shadow_evidence, Mapping)
+        else None,
+        expected_commit=str(arguments.get("expected_commit") or ""),
+        evidence_collection_plan=arguments.get("evidence_collection_plan") is True,
+        evidence_packet_template=arguments.get("evidence_packet_template") is True,
+        collect_shadow_evidence=arguments.get("collect_shadow_evidence") is True,
+        repository=str(arguments.get("repository") or ""),
+        branch=str(arguments.get("branch") or ""),
+        consumer=str(arguments.get("consumer") or "codex"),
+    )
+    return _tool_result(result)
+
+
 def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
     ledger_scope = str(arguments.get("ledger_scope") or "production")
     if ledger_scope != "local_test":
-        return _tool_result(
-            denied_payload(
-                tool_name,
-                "proposal_write_requires_local_test_ledger_or_later_production_gate",
+        gate = _production_object_authority_gate(arguments, service=service)
+        if not gate["allowed"]:
+            reason = (
+                "proposal_write_requires_local_test_ledger_or_later_production_gate"
+                if not gate["gate_provided"]
+                else "proposal_write_requires_local_test_ledger_or_valid_production_gate"
             )
+            return _tool_result(
+                denied_payload(
+                    tool_name,
+                    reason,
+                    extra={
+                        "production_mutation_performed": False,
+                        "production_promotion_plan": _production_authority_promotion_plan(arguments, gate=gate),
+                    },
+                )
+            )
+        result = ReviewProposal.from_parts(
+            proposal_type=_require_non_empty_string(arguments, "proposal_type", tool_name=tool_name),
+            target_object_id=_require_non_empty_string(arguments, "target_object_id", tool_name=tool_name),
+            reason=_require_non_empty_string(arguments, "reason", tool_name=tool_name),
+            evidence_refs=[str(item) for item in arguments.get("evidence_refs") or []],
+            proposer=_steward_proposer(arguments),
+        ).to_dict(
+            proposal_write_performed=True,
+            proposal_write_target="production_ledger",
         )
+        result["project"] = _project_arg(arguments)
+        result["ledger_scope"] = "production"
+        result["production_mutation_performed"] = True
+        result["production_gate_ref_hash"] = gate["approval_ref_hash"]
+        service.append_object_review_proposal(result)
+        return _tool_result(result)
     if not _local_test_object_authority_writes_allowed(service):
         return _tool_result(
             denied_payload(
@@ -424,6 +563,8 @@ def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict,
         proposal_write_target="local_test_ledger",
     )
     result["project"] = _project_arg(arguments)
+    result["ledger_scope"] = "local_test"
+    result["production_mutation_performed"] = False
     service.append_object_review_proposal(result)
     return _tool_result(result)
 
@@ -431,13 +572,44 @@ def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict,
 def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
     ledger_scope = str(arguments.get("ledger_scope") or "production")
     if ledger_scope != "local_test":
-        return _tool_result(
-            denied_payload(
-                tool_name,
-                "restricted_tool_requires_human_gate",
-                extra={"production_promotion_plan": _production_authority_promotion_plan(arguments)},
+        gate = _production_object_authority_gate(arguments, service=service)
+        if not gate["allowed"]:
+            reason = (
+                "restricted_tool_requires_human_gate"
+                if not gate["gate_provided"]
+                else "restricted_tool_requires_valid_production_gate"
             )
-        )
+            return _tool_result(
+                denied_payload(
+                    tool_name,
+                    reason,
+                    extra={
+                        "production_mutation_performed": False,
+                        "production_promotion_plan": _production_authority_promotion_plan(arguments, gate=gate),
+                    },
+                )
+            )
+        approved_by = _require_non_empty_string(arguments, "approved_by", tool_name=tool_name)
+        decision = AuthorityDecision.from_parts(
+            decision_type=_require_non_empty_string(arguments, "decision_type", tool_name=tool_name),
+            target_object_id=_require_non_empty_string(arguments, "target_object_id", tool_name=tool_name),
+            previous_authority_lane=_require_non_empty_string(arguments, "previous_authority_lane", tool_name=tool_name),
+            new_authority_lane=_require_non_empty_string(arguments, "new_authority_lane", tool_name=tool_name),
+            approved_by="redacted",
+            evidence_refs=[str(item) for item in arguments.get("evidence_refs") or []],
+        ).to_dict(authority_write_performed=True, cache_invalidated=True)
+        decision["decision_id"] = _require_non_empty_string(arguments, "decision_id", tool_name=tool_name)
+        decision["proposal_id"] = _require_non_empty_string(arguments, "proposal_id", tool_name=tool_name)
+        decision["project"] = _project_arg(arguments)
+        decision["decision_reason"] = public_safe_text(str(arguments.get("decision_reason") or ""), max_chars=512)
+        decision["approved_by_hash"] = "sha256:" + short_hash(approved_by, length=24)
+        decision["ledger_scope"] = "production"
+        decision["authority_write_scope"] = "production_ledger"
+        decision["production_mutation_performed"] = True
+        decision["production_gate_ref_hash"] = gate["approval_ref_hash"]
+        _attach_authority_decision_lineage(arguments, decision, tool_name=tool_name)
+        result = service.commit_object_authority_decision(decision)
+        return _tool_result(result)
     if not _local_test_object_authority_writes_allowed(service):
         return _tool_result(
             denied_payload(
@@ -459,8 +631,26 @@ def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict,
     decision["project"] = _project_arg(arguments)
     decision["decision_reason"] = public_safe_text(str(arguments.get("decision_reason") or ""), max_chars=512)
     decision["approved_by_hash"] = "sha256:" + short_hash(approved_by, length=24)
+    decision["ledger_scope"] = "local_test"
+    decision["authority_write_scope"] = "local_test_ledger"
+    decision["production_mutation_performed"] = False
+    _attach_authority_decision_lineage(arguments, decision, tool_name=tool_name)
     result = service.commit_object_authority_decision(decision)
     return _tool_result(result)
+
+
+def _attach_authority_decision_lineage(arguments: Mapping[str, Any], decision: dict[str, Any], *, tool_name: str) -> None:
+    decision_type = str(decision.get("decision_type") or "")
+    rollback_of_decision_id = public_safe_text(str(arguments.get("rollback_of_decision_id") or ""), max_chars=180)
+    supersedes_decision_id = public_safe_text(str(arguments.get("supersedes_decision_id") or ""), max_chars=180)
+    if decision_type == "rollback_decision":
+        if not rollback_of_decision_id:
+            raise ValueError(f"{tool_name} requires rollback_of_decision_id for rollback_decision")
+        decision["rollback_of_decision_id"] = rollback_of_decision_id
+    elif rollback_of_decision_id:
+        decision["rollback_of_decision_id"] = rollback_of_decision_id
+    if supersedes_decision_id:
+        decision["supersedes_decision_id"] = supersedes_decision_id
 
 
 def _local_test_object_authority_writes_allowed(service: KnowledgeSearchService) -> bool:
@@ -469,27 +659,87 @@ def _local_test_object_authority_writes_allowed(service: KnowledgeSearchService)
     )
 
 
-def _production_authority_promotion_plan(arguments: Mapping[str, object]) -> dict:
+def _production_object_authority_gate(arguments: Mapping[str, Any], *, service: KnowledgeSearchService) -> dict[str, Any]:
+    gate = arguments.get("production_gate")
+    gate_provided = isinstance(gate, Mapping)
+    gate = gate if isinstance(gate, Mapping) else {}
+    project = _project_arg(dict(arguments))
+    target_object_id = public_safe_text(str(arguments.get("target_object_id") or ""), max_chars=180)
+    approval_ref = public_safe_text(str(gate.get("approval_ref") or ""), max_chars=160)
+    required_true_fields = (
+        "configured_deployed_mcp_identity_matches_source",
+        "read_after_write_smoke_plan",
+        "rollback_or_supersession_plan",
+        "no_raw_private_evidence",
+    )
+    missing: list[str] = []
+    if not bool(getattr(service, "allow_production_object_authority_writes", False)):
+        missing.append("service_production_object_authority_write_flag")
+    if bool(getattr(service.ledger, "read_only", True)):
+        missing.append("writable_ledger")
+    if gate.get("approved") is not True:
+        missing.append("approved")
+    if not approval_ref:
+        missing.append("approval_ref")
+    if str(gate.get("scope") or "") != "single_project_single_object":
+        missing.append("single_project_single_object_scope")
+    if not project or public_safe_text(str(gate.get("project") or ""), max_chars=120) != project:
+        missing.append("project_scope_match")
+    try:
+        max_objects = int(gate.get("max_objects") or 0)
+    except (TypeError, ValueError):
+        max_objects = 0
+    if max_objects != 1:
+        missing.append("max_objects_1")
+    for field in required_true_fields:
+        if gate.get(field) is not True:
+            missing.append(field)
+    if not target_object_id.startswith("ko:RepoDocument:"):
+        missing.append("allowed_object_class_RepoDocument")
+    if "proposal_type" in arguments:
+        proposal_type = public_safe_text(str(arguments.get("proposal_type") or ""), max_chars=120)
+        if proposal_type not in _ALLOWED_PRODUCTION_PROPOSAL_TYPES:
+            missing.append("allowed_proposal_type")
+    if "decision_type" in arguments:
+        decision_type = public_safe_text(str(arguments.get("decision_type") or ""), max_chars=120)
+        if decision_type not in _ALLOWED_PRODUCTION_DECISION_TYPES:
+            missing.append("allowed_decision_type")
+    allowed = not missing
+    return {
+        "allowed": allowed,
+        "gate_provided": gate_provided,
+        "missing_gate_evidence": missing,
+        "approval_ref_hash": sha256_text(approval_ref) if approval_ref else "",
+        "project": project,
+        "target_object_id": target_object_id,
+    }
+
+
+def _production_authority_promotion_plan(arguments: Mapping[str, object], *, gate: Mapping[str, Any] | None = None) -> dict:
     decision_type = public_safe_text(str(arguments.get("decision_type") or ""), max_chars=120)
+    proposal_type = public_safe_text(str(arguments.get("proposal_type") or ""), max_chars=120)
     proposal_id = public_safe_text(str(arguments.get("proposal_id") or ""), max_chars=180)
     decision_id = public_safe_text(str(arguments.get("decision_id") or ""), max_chars=180)
     project = public_safe_text(str(arguments.get("project") or ""), max_chars=120)
+    gate = gate if isinstance(gate, Mapping) else {}
+    missing_gate_evidence = [str(item) for item in gate.get("missing_gate_evidence") or [] if str(item or "")]
+    mutation_allowed = bool(gate.get("allowed"))
+    production_write_state = "open_with_preapproved_gate" if mutation_allowed else "closed_without_valid_production_gate"
+    if not mutation_allowed and {"approved", "approval_ref"}.intersection(missing_gate_evidence):
+        production_write_state = "closed_without_human_gate"
     return {
         "schema_version": "object_authority_promotion_plan.v1",
-        "production_write_state": "closed_without_human_gate",
-        "mutation_allowed": False,
+        "production_write_state": production_write_state,
+        "mutation_allowed": mutation_allowed,
+        "requested_proposal_type": proposal_type,
         "requested_decision_type": decision_type,
         "requested_proposal_id": proposal_id,
         "requested_decision_id": decision_id,
         "project": project,
+        "missing_gate_evidence": missing_gate_evidence,
         "allowed_object_classes": ["RepoDocument"],
-        "allowed_decision_types": [
-            "accept_current",
-            "commit_stale",
-            "commit_supersession",
-            "retire",
-            "reject_candidate",
-        ],
+        "allowed_proposal_types": list(_ALLOWED_PRODUCTION_PROPOSAL_TYPES),
+        "allowed_decision_types": list(_ALLOWED_PRODUCTION_DECISION_TYPES),
         "reviewer_role": "human_object_authority_reviewer",
         "required_gate_evidence": [
             "configured_deployed_mcp_identity_matches_source",

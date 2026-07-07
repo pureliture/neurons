@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .._util import ensure_public_safe
+from .._util import ensure_public_safe, hash_payload
+from .knowledge_objects import EvidenceRef, KnowledgeEdge, KnowledgeObjectEnvelope
+from .object_packs import (
+    apply_approval_board_decisions,
+    apply_candidate_review_edits,
+    build_candidate_graph_review_pack,
+)
 
 GOLDEN_QUERIES = [
     "어제 이 repo에서 뭐 했어?",
@@ -25,6 +31,23 @@ REQUIRED_QUALITY_AXES = [
     "gap",
     "recommended_action",
 ]
+
+ACTIVATION_SCOPE_PHASES = ("P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9")
+MINIMUM_REVIEW_LOOP_PHASES = ("P2", "P3", "P4")
+PRODUCT_EVIDENCE_PHASES = ("P2", "P6", "P7", "P8", "P9")
+DEFERRED_SCOPE_GAPS = {
+    "future_phase_golden_query_slices_planned",
+    "future_phase_slices_planned",
+}
+
+_LOCAL_VALIDATED_PHASES = {"P2", "P3", "P4", "P6", "P7", "P8", "P9"}
+P9_ALLOWED_TOOL_SAFE_TARGETS = {
+    "brain_objects_query": frozenset({"read_only_object_pack"}),
+    "brain_source_to_candidate_graph": frozenset({"local_test"}),
+    "brain_candidate_review_edit": frozenset({"local_test_pack"}),
+    "brain_approval_board_decide": frozenset({"local_test"}),
+    "brain_source_to_candidate_runtime_readiness": frozenset({"sanitized_evidence_packet"}),
+}
 
 
 def build_baseline_golden_query_report() -> dict[str, Any]:
@@ -73,7 +96,7 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
             evaluator="reference corpus store local/test status and ingest policy checks",
             gaps=[
                 "private_palantir_manifest_ingest_not_performed",
-                "production_ingest_gate_denied",
+                "production_ingest_pilot_not_executed",
             ],
         ),
         _phase_coverage(
@@ -95,8 +118,8 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
             result="PASS_WITH_GAPS",
             evaluator="local/test review queue, authority decision, object query, and object explain checks",
             gaps=[
-                "approved_production_pilot_missing",
-                "production_authority_write_denied",
+                "production_authority_pilot_not_executed",
+                "production_authority_write_evidence_missing",
             ],
         ),
         _phase_coverage(
@@ -116,10 +139,9 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
             title="Session, Device, Project, And Work-Unit 360",
             golden_query_family="temporal repo recall",
             query=GOLDEN_QUERIES[0],
-            result="in_progress",
-            evaluator="session project rollup local/test preview",
+            result="PASS_WITH_GAPS",
+            evaluator="session project rollup local/test preview and handoff pack",
             gaps=[
-                "handoff_pack_not_implemented",
                 "live_multi_device_rollup_unproven",
             ],
         ),
@@ -128,7 +150,7 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
             title="Preference, Style, And Artifact Memory",
             golden_query_family="code style drift",
             query=GOLDEN_QUERIES[8],
-            result="in_progress",
+            result="PASS_WITH_GAPS",
             evaluator="artifact preference pack local/test preview",
             gaps=[
                 "accepted_preference_context_pack_live_unproven",
@@ -140,7 +162,7 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
             title="Runtime Truth, Security, And Deployment Authority",
             golden_query_family="pr merge and deploy truth",
             query=GOLDEN_QUERIES[4],
-            result="in_progress",
+            result="PASS_WITH_GAPS",
             evaluator="runtime authority policy local/test preview",
             gaps=[
                 "live_runtime_rollout_identity_unproven",
@@ -152,7 +174,7 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
             title="Agent Context Productization",
             golden_query_family="agent context productization",
             query=GOLDEN_QUERIES[3],
-            result="in_progress",
+            result="PASS_WITH_GAPS",
             evaluator="consumer-specific compact context pack local/test preview",
             gaps=[
                 "production_consumer_context_pack_live_unproven",
@@ -174,6 +196,322 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
     }
     ensure_public_safe(report, "PhaseGoldenQueryCoverage")
     return report
+
+
+def build_source_to_authority_quality_gate_report() -> dict[str, Any]:
+    review_pack = _source_to_authority_fixture_pack()
+    candidate_object = review_pack["objects"][0]
+    original_edge = review_pack["edges"][0]
+    original_evidence = review_pack["evidence"][0]
+    replacement_evidence = EvidenceRef.from_parts(
+        evidence_type="source_freshness",
+        authority_lane="reference_only",
+        verification_state="freshness_checked",
+        locator={"kind": "relative_repo_path", "value": "docs/specs/lbrain-source-fixture-reviewed.md"},
+        content_hash=hash_payload({"fixture": "source-to-authority-quality-gate-reviewed"}),
+        summary="Reviewer-attached replacement freshness evidence.",
+    )
+    product_surface_checks = _object_native_product_surface_checks()
+    review_eval = evaluate_object_pack_response(
+        "새 자료를 candidate object, edge, evidence로 쪼개서 review surface에 올려줘.",
+        review_pack,
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+    edit_result = apply_candidate_review_edits(
+        review_pack,
+        edits=[
+            {
+                "action": "update_object",
+                "object_id": candidate_object["object_id"],
+                "fields": {
+                    "summary": "Reviewer clarified the candidate claim before promotion.",
+                    "recommended_action": "promote",
+                    "freshness": {"source_checked": True, "state": "freshness_checked"},
+                },
+            },
+            {
+                "action": "add_evidence",
+                "attach_to_object_id": candidate_object["object_id"],
+                "fields": {
+                    "evidence_type": "source_freshness",
+                    "locator": {"kind": "relative_repo_path", "value": "docs/specs/lbrain-source-fixture-reviewed.md"},
+                    "content_hash": hash_payload({"fixture": "source-to-authority-quality-gate-reviewed"}),
+                    "summary": "Reviewer-attached replacement freshness evidence.",
+                    "verification_state": "freshness_checked",
+                },
+            },
+            {
+                "action": "add_edge",
+                "fields": {
+                    "edge_type": "supports",
+                    "from_object_id": candidate_object["object_id"],
+                    "to_object_id": candidate_object["object_id"],
+                    "evidence_refs": [replacement_evidence.evidence_id],
+                },
+            },
+            {"action": "remove_edge", "edge_id": original_edge["edge_id"]},
+            {"action": "remove_evidence", "evidence_id": original_evidence["evidence_id"]},
+        ],
+        reviewer={"id": "quality-gate-reviewer"},
+        target_scope="production",
+        mutation_mode="no_mutation",
+    )
+    edited_pack = edit_result["updated_pack"]
+    edit_eval = evaluate_object_pack_response(
+        "사용자가 candidate object/edge/evidence를 authority mutation 없이 고쳐줘.",
+        edited_pack,
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+    approval_result = apply_approval_board_decisions(
+        edited_pack,
+        decisions=[
+            {
+                "action": "promote",
+                "object_id": candidate_object["object_id"],
+                "reason": "Quality gate local/test approval preview.",
+                "approved_by": "quality-gate-reviewer",
+            }
+        ],
+        reviewer={"id": "quality-gate-reviewer"},
+        ledger_scope="local_test",
+    )
+    authority_pack = approval_result["updated_pack"]
+    authority_eval = evaluate_object_pack_response(
+        "승격된 object를 accepted/current authority read path에서 읽어줘.",
+        authority_pack,
+        required_axes=REQUIRED_QUALITY_AXES,
+    )
+    accepted_current_object = _first_lane_item(authority_pack, "accepted_current")
+    production_denial = apply_approval_board_decisions(
+        edited_pack,
+        decisions=[
+            {
+                "action": "promote",
+                "object_id": candidate_object["object_id"],
+                "reason": "Production promotion must stay gated.",
+                "approved_by": "quality-gate-reviewer",
+            }
+        ],
+        reviewer={"id": "quality-gate-reviewer"},
+        ledger_scope="production",
+    )
+    path_checks = [
+        {
+            "id": "source_to_candidate_graph",
+            "result": _pass_fail(
+                review_eval["passes"]
+                and bool(review_pack["lanes"]["candidate"])
+                and bool(review_pack["edges"])
+                and bool(review_pack["evidence"])
+                and review_pack["authority_write_performed"] is False
+                and review_pack["production_mutation_performed"] is False
+            ),
+            "quality_eval": review_eval,
+            "production_mutation_performed": False,
+        },
+        {
+            "id": "candidate_review_edit",
+            "result": _pass_fail(
+                edit_result["candidate_state_changed"] is True
+                and edit_result["authority_write_performed"] is False
+                and edit_result["production_mutation_performed"] is False
+                and edit_result["mutation_mode"] == "no_mutation"
+                and not edit_result["rejected_edits"]
+                and edit_eval["passes"]
+            ),
+            "quality_eval": edit_eval,
+            "target_scope": str(edit_result.get("target_scope") or ""),
+            "mutation_mode": str(edit_result.get("mutation_mode") or ""),
+            "accepted_edit_actions": [
+                str(item.get("action") or "")
+                for item in edit_result.get("accepted_edits", [])
+                if isinstance(item, Mapping)
+            ],
+            "updated_edge_count": len(edited_pack.get("edges") or []),
+            "updated_evidence_count": len(edited_pack.get("evidence") or []),
+            "production_mutation_performed": False,
+        },
+        {
+            "id": "approval_board_local_test",
+            "result": _pass_fail(
+                approval_result["authority_write_performed"] is True
+                and approval_result["authority_write_scope"] == "local_test"
+                and approval_result["production_mutation_performed"] is False
+                and bool(authority_pack["lanes"]["accepted_current"])
+            ),
+            "authority_write_scope": approval_result["authority_write_scope"],
+            "production_mutation_performed": False,
+        },
+        {
+            "id": "authority_read_after_write",
+            "result": _pass_fail(
+                authority_eval["passes"]
+                and accepted_current_object.get("review_state") == "accepted"
+                and accepted_current_object.get("recommended_action") == "keep"
+            ),
+            "quality_eval": authority_eval,
+            "production_mutation_performed": False,
+        },
+        {
+            "id": "production_decision_denial",
+            "result": _pass_fail(
+                production_denial["permission"] == "denied"
+                and production_denial["production_mutation_performed"] is False
+                and production_denial["authority_write_performed"] is False
+                and production_denial["promotion_plan"]["production_mutation_performed"] is False
+            ),
+            "permission": production_denial["permission"],
+            "reason": production_denial["reason"],
+            "production_mutation_performed": False,
+        },
+    ]
+    hard_failures = [
+        item["id"]
+        for item in [*path_checks, *product_surface_checks]
+        if item["result"] != "PASS"
+    ]
+    local_quality_gate = "blocked" if hard_failures else "green"
+    report = {
+        "schema_version": "source_to_authority_quality_gate_report.v1",
+        "status": "FAIL" if hard_failures else "PASS_WITH_GAPS",
+        "local_quality_gate": local_quality_gate,
+        "release_quality_gate": "blocked" if hard_failures else "not_green",
+        "required_axes": list(REQUIRED_QUALITY_AXES),
+        "path_checks": path_checks,
+        "product_surface_checks": product_surface_checks,
+        "hard_failures": hard_failures,
+        "gaps": [
+            "production_authority_gate_preapproved_not_executed",
+            "live_runtime_read_path_unverified",
+            "production_quality_not_green",
+        ],
+        "production_mutation_performed": False,
+        "production_authoritative_memory_changed": False,
+        "production_approval_gate": "preapproved",
+        "production_mutation_execution": "not_performed_by_local_gate",
+        "local_test_authority_write_performed": approval_result["authority_write_performed"],
+        "authority_write_scope": approval_result["authority_write_scope"],
+    }
+    ensure_public_safe(report, "SourceToAuthorityQualityGateReport")
+    return report
+
+
+def build_product_activation_progress_report() -> dict[str, Any]:
+    phase_coverage = build_phase_golden_query_coverage_report()
+    source_gate = build_source_to_authority_quality_gate_report()
+    product_evidence_summary = _product_evidence_summary()
+    product_evidence_result = evaluate_product_evidence_summary(product_evidence_summary)
+    phases_by_id = {
+        str(item.get("phase") or ""): item
+        for item in phase_coverage.get("phases", [])
+        if isinstance(item, Mapping)
+    }
+    phase_progress = [
+        _activation_phase_progress(phase, phases_by_id.get(phase, {}))
+        for phase in ACTIVATION_SCOPE_PHASES
+    ]
+    minimum_checkpoint = _minimum_review_loop_checkpoint(phase_progress, source_gate)
+    hard_failures = _dedupe(
+        [
+            *[
+                str(item)
+                for item in source_gate.get("hard_failures", [])
+                if str(item or "")
+            ],
+            *[
+                f"{item['phase']}:quality_failed"
+                for item in phase_progress
+                if item.get("quality_result") == "FAIL"
+            ],
+            *[
+                f"{phase}:coverage_missing"
+                for phase in ACTIVATION_SCOPE_PHASES
+                if phase not in phases_by_id
+            ],
+            *product_evidence_result["hard_failures"],
+        ]
+    )
+    blockers = _activation_goal_blockers(
+        phase_coverage=phase_coverage,
+        source_gate=source_gate,
+        phase_progress=phase_progress,
+    )
+    status = "FAIL" if hard_failures else ("PASS_WITH_GAPS" if blockers else "PASS")
+    next_phase = _next_activation_phase(phase_progress)
+    production_ready = (
+        status == "PASS"
+        and source_gate["release_quality_gate"] == "green"
+        and all(item.get("state") in {"production_validated", "complete"} for item in phase_progress)
+    )
+    report = {
+        "schema_version": "lbrain_product_activation_progress.v1",
+        "status": status,
+        "scope_phases": list(ACTIVATION_SCOPE_PHASES),
+        "phase_progress": phase_progress,
+        "product_evidence_summary": product_evidence_summary,
+        "product_evidence_checks": product_evidence_result["checks"],
+        "product_evidence_status": product_evidence_result["status"],
+        "minimum_review_loop_checkpoint": minimum_checkpoint,
+        "next_phase": next_phase,
+        "remaining_phases": _remaining_activation_phases(next_phase),
+        "quality_gate_inputs": {
+            "phase_coverage_status": phase_coverage["status"],
+            "source_to_authority_status": source_gate["status"],
+            "source_to_authority_local_quality_gate": source_gate["local_quality_gate"],
+            "source_to_authority_release_quality_gate": source_gate["release_quality_gate"],
+        },
+        "production_approval_gate": str(source_gate.get("production_approval_gate") or ""),
+        "production_mutation_execution": str(source_gate.get("production_mutation_execution") or ""),
+        "local_quality_gate": str(source_gate.get("local_quality_gate") or ""),
+        "release_quality_gate": "blocked" if hard_failures else source_gate["release_quality_gate"],
+        "goal_completion_blockers": blockers,
+        "hard_failures": hard_failures,
+        "goal_complete": production_ready and not blockers,
+        "production_ready": production_ready,
+        "production_mutation_performed": bool(
+            source_gate.get("production_mutation_performed")
+            or any(item.get("production_mutation_performed") for item in phase_progress)
+            or any(item.get("production_mutation_performed") for item in product_evidence_summary)
+        ),
+        "production_authoritative_memory_changed": bool(
+            source_gate.get("production_authoritative_memory_changed")
+        ),
+    }
+    ensure_public_safe(report, "LBrainProductActivationProgress")
+    return report
+
+
+def evaluate_product_evidence_summary(evidence_summary: list[Mapping[str, Any]]) -> dict[str, Any]:
+    by_phase = {
+        str(item.get("phase") or ""): item
+        for item in evidence_summary
+        if isinstance(item, Mapping)
+    }
+    checks = [_product_evidence_check(phase, by_phase.get(phase, {})) for phase in PRODUCT_EVIDENCE_PHASES]
+    hard_failures = [
+        f"{check['phase']}:product_evidence_failed"
+        for check in checks
+        if check["result"] == "FAIL" and "product_evidence_missing" not in check["failures"]
+    ]
+    hard_failures.extend(
+        f"{check['phase']}:product_evidence_missing"
+        for check in checks
+        if "product_evidence_missing" in check["failures"]
+    )
+    has_gaps = any(check.get("gaps") for check in checks)
+    result = {
+        "schema_version": "lbrain_product_evidence_summary_eval.v1",
+        "status": "FAIL" if hard_failures else ("PASS_WITH_GAPS" if has_gaps else "PASS"),
+        "checks": checks,
+        "hard_failures": hard_failures,
+        "production_mutation_performed": any(
+            bool(item.get("production_mutation_performed"))
+            for item in evidence_summary
+            if isinstance(item, Mapping)
+        ),
+    }
+    ensure_public_safe(result, "LBrainProductEvidenceSummaryEval")
+    return result
 
 
 def evaluate_object_pack_response(
@@ -221,6 +559,984 @@ def evaluate_object_pack_response(
         "checked_axes": checked_axes,
     }
     ensure_public_safe(result, "GoldenQueryEvalResult")
+    return result
+
+
+def _activation_phase_progress(phase: str, coverage: Mapping[str, Any]) -> dict[str, Any]:
+    result = str(coverage.get("result") or "missing")
+    state = _activation_phase_state(phase, result)
+    gaps = [str(gap) for gap in coverage.get("gaps", []) if str(gap or "")]
+    return {
+        "phase": phase,
+        "state": state,
+        "quality_result": result,
+        "golden_query_family": str(coverage.get("golden_query_family") or ""),
+        "evaluator": str(coverage.get("evaluator") or ""),
+        "gaps": gaps,
+        "production_mutation_performed": False,
+        "next_action": _activation_phase_next_action(phase, state, gaps),
+    }
+
+
+def _product_evidence_summary() -> list[dict[str, Any]]:
+    p2 = _p2_reference_corpus_evidence()
+    p6 = _p6_session_project_rollup_evidence()
+    p7 = _p7_preference_artifact_evidence()
+    p8 = _p8_runtime_authority_evidence()
+    p9 = _p9_agent_context_evidence(preference_preview=p7)
+    return [p2, p6, p7, p8, p9]
+
+
+def _product_evidence_check(phase: str, evidence: Mapping[str, Any]) -> dict[str, Any]:
+    failures: list[str] = []
+    gaps: list[str] = []
+    if not evidence:
+        failures.append("product_evidence_missing")
+    elif bool(evidence.get("production_mutation_performed")):
+        if phase != "P2":
+            failures.append(f"{phase.lower()}_production_mutation_performed")
+    if phase == "P2" and evidence:
+        failures.extend(_p2_evidence_failures(evidence))
+        gaps.extend(_p2_evidence_gaps(evidence))
+    elif phase == "P6" and evidence:
+        failures.extend(_p6_evidence_failures(evidence))
+    elif phase == "P7" and evidence:
+        failures.extend(_p7_evidence_failures(evidence))
+    elif phase == "P8" and evidence:
+        failures.extend(_p8_evidence_failures(evidence))
+        gaps.extend(_p8_evidence_gaps(evidence))
+    elif phase == "P9" and evidence:
+        failures.extend(_p9_evidence_failures(evidence))
+    return {
+        "phase": phase,
+        "result": "FAIL" if failures else ("PASS_WITH_GAPS" if gaps else "PASS"),
+        "schema_version": str(evidence.get("schema_version") or ""),
+        "failures": failures,
+        "gaps": _dedupe(gaps),
+    }
+
+
+def _p2_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    status = str(evidence.get("status") or "")
+    if evidence.get("schema_version") != "reference_corpus_production_ingest_readiness.v1":
+        failures.append("p2_schema_mismatch")
+    if evidence.get("status") == "FAIL":
+        failures.append("p2_production_corpus_ingest_failed")
+    if bool(evidence.get("network_used")):
+        failures.append("p2_corpus_ingest_evaluator_used_network")
+    if status == "PASS" and evidence.get("live_evidence_provided") is not True:
+        failures.append("p2_live_evidence_missing_for_pass")
+    if status == "PASS" and evidence.get("production_mutation_performed") is not True:
+        failures.append("p2_production_corpus_ingest_mutation_missing_for_pass")
+    if (
+        evidence.get("live_evidence_provided") is not True
+        and bool(evidence.get("evidence_collection_network_used"))
+    ):
+        failures.append("p2_evidence_collection_claimed_without_live_evidence")
+    if (
+        bool(evidence.get("production_mutation_performed"))
+        and evidence.get("status") != "PASS"
+    ):
+        failures.append("p2_unvalidated_production_corpus_mutation")
+    return failures
+
+
+def _p2_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    return [
+        f"p2_{gap}"
+        for gap in evidence.get("gaps", [])
+        if isinstance(gap, str) and gap
+    ]
+
+
+def _p6_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if evidence.get("schema_version") != "object_extraction_session_project_rollup_preview.v1":
+        failures.append("p6_schema_mismatch")
+    if int(evidence.get("object_count") or 0) < 5:
+        failures.append("p6_session_rollup_incomplete")
+    if int(evidence.get("edge_count") or 0) < 6:
+        failures.append("p6_session_rollup_incomplete")
+    if int(evidence.get("evidence_count") or 0) < 1:
+        failures.append("p6_session_rollup_incomplete")
+    if evidence.get("handoff_pack_schema") != "session_project_handoff_pack.v1":
+        failures.append("p6_handoff_pack_missing")
+    return _dedupe(failures)
+
+
+def _p7_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if evidence.get("schema_version") != "object_extraction_preference_style_preview.v1":
+        failures.append("p7_schema_mismatch")
+    if int(evidence.get("object_count") or 0) < 2:
+        failures.append("p7_preference_style_objects_missing")
+    if int(evidence.get("source_evidence_ref_count") or 0) < 1:
+        failures.append("p7_source_evidence_missing")
+    if evidence.get("artifact_preference_pack_status") != "pass":
+        failures.append("p7_artifact_preference_pack_not_pass")
+    if int(evidence.get("accepted_preference_count") or 0) < 1:
+        failures.append("p7_accepted_preference_missing")
+    return failures
+
+
+def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if evidence.get("schema_version") != "object_extraction_runtime_truth_preview.v1":
+        failures.append("p8_schema_mismatch")
+    if evidence.get("runtime_evidence_collection_plan_schema") != "source_to_candidate_runtime_evidence_collection_plan.v1":
+        failures.append("p8_runtime_evidence_collection_plan_missing")
+    if evidence.get("runtime_evidence_collection_plan_status") != "ready":
+        failures.append("p8_runtime_evidence_collection_plan_not_ready")
+    if evidence.get("runtime_authority_bounded_execution_demote_step_required") is not True:
+        failures.append("p8_runtime_authority_demote_step_gate_missing")
+    if evidence.get("runtime_authority_bounded_execution_required_demote_step") != (
+        "demote_prior_object_to_accepted_non_current_or_archive_only"
+    ):
+        failures.append("p8_runtime_authority_demote_step_name_missing")
+    if bool(evidence.get("runtime_evidence_collection_plan_network_used")):
+        failures.append("p8_runtime_evidence_collection_plan_used_network")
+    if bool(evidence.get("runtime_evidence_collection_plan_mutation_allowed")):
+        failures.append("p8_runtime_evidence_collection_plan_mutation_allowed")
+    if bool(evidence.get("runtime_evidence_collection_plan_production_mutation_performed")):
+        failures.append("p8_runtime_evidence_collection_plan_mutated_production")
+    if evidence.get("runtime_evidence_collection_plan_readiness_claim") != "plan_only_not_runtime_evidence":
+        failures.append("p8_runtime_evidence_collection_plan_claims_live_evidence")
+    if (
+        evidence.get("runtime_evidence_packet_template_schema")
+        != "source_to_candidate_runtime_evidence_packet_template.v1"
+    ):
+        failures.append("p8_runtime_evidence_packet_template_missing")
+    if evidence.get("runtime_evidence_packet_template_status") != "template_ready":
+        failures.append("p8_runtime_evidence_packet_template_not_ready")
+    if bool(evidence.get("runtime_evidence_packet_template_network_used")):
+        failures.append("p8_runtime_evidence_packet_template_used_network")
+    if bool(evidence.get("runtime_evidence_packet_template_mutation_allowed")):
+        failures.append("p8_runtime_evidence_packet_template_mutation_allowed")
+    if bool(evidence.get("runtime_evidence_packet_template_production_mutation_performed")):
+        failures.append("p8_runtime_evidence_packet_template_mutated_production")
+    if evidence.get("runtime_evidence_packet_template_readiness_claim") != "template_only_not_runtime_evidence":
+        failures.append("p8_runtime_evidence_packet_template_claims_live_evidence")
+    if int(evidence.get("runtime_evidence_packet_template_required_field_count") or 0) < 1:
+        failures.append("p8_runtime_evidence_packet_template_fields_missing")
+    if int(evidence.get("runtime_evidence_packet_template_route_count") or 0) < 1:
+        failures.append("p8_runtime_evidence_packet_template_routes_missing")
+    if evidence.get("runtime_evidence_collector_packet_schema") != "source_to_candidate_runtime_evidence.v1":
+        failures.append("p8_runtime_evidence_collector_missing")
+    if int(evidence.get("runtime_evidence_collector_route_count") or 0) < 1:
+        failures.append("p8_runtime_evidence_collector_routes_missing")
+    if bool(evidence.get("runtime_evidence_collector_network_used")):
+        failures.append("p8_runtime_evidence_collector_used_network")
+    if bool(evidence.get("runtime_evidence_collector_production_mutation_performed")):
+        failures.append("p8_runtime_evidence_collector_mutated_production")
+    if evidence.get("runtime_evidence_collector_readiness_claim") != "collector_packet_not_live_evidence":
+        failures.append("p8_runtime_evidence_collector_claims_live_evidence")
+    if evidence.get("runtime_evidence_collector_permission_audit_schema") != (
+        "permission_sensitive_runtime_audit_evidence.v1"
+    ):
+        failures.append("p8_permission_sensitive_audit_collector_missing")
+    if int(evidence.get("runtime_evidence_collector_permission_audit_event_count") or 0) < 2:
+        failures.append("p8_permission_sensitive_audit_events_missing")
+    if evidence.get("runtime_evidence_collector_permission_audit_store_status") != "recorded":
+        failures.append("p8_permission_sensitive_audit_store_not_recorded")
+    if evidence.get("runtime_evidence_collector_agent_context_startup_schema") != (
+        "agent_context_startup_runtime_evidence.v1"
+    ):
+        failures.append("p8_agent_context_startup_collector_missing")
+    if evidence.get("runtime_evidence_collector_agent_context_startup_loaded") is not True:
+        failures.append("p8_agent_context_startup_not_loaded")
+    if evidence.get("runtime_evidence_collector_agent_context_startup_read_path_tool") != "brain_objects_query":
+        failures.append("p8_agent_context_startup_read_path_missing")
+    if int(evidence.get("runtime_evidence_collector_agent_context_startup_route_count") or 0) < 4:
+        failures.append("p8_agent_context_startup_routes_missing")
+    if evidence.get("shadow_route_smoke_request_schema") != "source_to_candidate_runtime_shadow_collection_request.v1":
+        failures.append("p8_shadow_route_smoke_request_missing")
+    if evidence.get("shadow_route_smoke_request_status") != "requested":
+        failures.append("p8_shadow_route_smoke_not_requested")
+    if int(evidence.get("shadow_route_smoke_route_count") or 0) < 1:
+        failures.append("p8_shadow_route_smoke_routes_missing")
+    if bool(evidence.get("shadow_route_smoke_network_used")):
+        failures.append("p8_shadow_route_smoke_used_network")
+    if bool(evidence.get("shadow_route_smoke_mutation_allowed")):
+        failures.append("p8_shadow_route_smoke_mutation_allowed")
+    if bool(evidence.get("shadow_route_smoke_production_mutation_performed")):
+        failures.append("p8_shadow_route_smoke_mutated_production")
+    if evidence.get("shadow_route_smoke_readiness_claim") != "request_only_not_live_evidence":
+        failures.append("p8_shadow_route_smoke_claims_live_evidence")
+    if evidence.get("shadow_collection_registration_schema") != (
+        "source_to_candidate_runtime_shadow_collection_registration.v1"
+    ):
+        failures.append("p8_shadow_collection_registration_missing")
+    if evidence.get("shadow_collection_registration_status") != "registration_ready":
+        failures.append("p8_shadow_collection_registration_not_ready")
+    if evidence.get("shadow_collection_registration_run_status") != "not_run":
+        failures.append("p8_shadow_collection_registration_claims_run")
+    if int(evidence.get("shadow_collection_registration_request_count") or 0) < 1:
+        failures.append("p8_shadow_collection_registration_requests_missing")
+    if int(evidence.get("shadow_collection_registration_route_count") or 0) < 1:
+        failures.append("p8_shadow_collection_registration_routes_missing")
+    if bool(evidence.get("shadow_collection_registration_network_used")):
+        failures.append("p8_shadow_collection_registration_used_network")
+    if bool(evidence.get("shadow_collection_registration_mutation_allowed")):
+        failures.append("p8_shadow_collection_registration_mutation_allowed")
+    if bool(evidence.get("shadow_collection_registration_production_mutation_performed")):
+        failures.append("p8_shadow_collection_registration_mutated_production")
+    if evidence.get("shadow_collection_registration_readiness_claim") != "registration_only_not_runtime_evidence":
+        failures.append("p8_shadow_collection_registration_claims_live_evidence")
+    runtime_evidence_count = int(evidence.get("runtime_verified_count") or 0) + int(
+        evidence.get("runtime_unverified_count") or 0
+    )
+    if runtime_evidence_count < 1:
+        failures.append("p8_runtime_evidence_classification_missing")
+    if evidence.get("source_commit_matches_pr_head") is False:
+        failures.append("p8_source_commit_mismatch_with_pr_head")
+    if evidence.get("permission") != "allowed" or evidence.get("permission_reason") != "approved_scope_present":
+        failures.append("p8_preapproved_scope_missing")
+    if bool(evidence.get("authority_write_performed")):
+        failures.append("p8_authority_write_performed")
+    if bool(evidence.get("production_mutation_performed")):
+        failures.append("p8_production_mutation_performed")
+    return failures
+
+
+def _p8_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    gaps: list[str] = []
+    source_commit_matches_pr_head = evidence.get("source_commit_matches_pr_head")
+    if source_commit_matches_pr_head is not True and source_commit_matches_pr_head is not False:
+        gaps.append("p8_source_commit_matches_pr_head_unverified")
+    if int(evidence.get("runtime_unverified_count") or 0) > 0:
+        gaps.append("p8_runtime_evidence_unverified")
+    if int(evidence.get("runtime_verified_count") or 0) < 1:
+        gaps.append("p8_runtime_verified_evidence_missing")
+    if evidence.get("runtime_evidence_collection_plan_readiness_claim") == "plan_only_not_runtime_evidence":
+        gaps.append("p8_runtime_evidence_collection_plan_not_live_evidence")
+    if evidence.get("runtime_evidence_packet_template_readiness_claim") == "template_only_not_runtime_evidence":
+        gaps.append("p8_runtime_evidence_packet_template_not_live_evidence")
+    if evidence.get("runtime_evidence_collector_readiness_claim") == "collector_packet_not_live_evidence":
+        gaps.append("p8_runtime_evidence_collector_not_live_evidence")
+    if evidence.get("shadow_route_smoke_readiness_claim") == "request_only_not_live_evidence":
+        gaps.append("p8_shadow_route_smoke_collection_pending")
+        gaps.extend(
+            f"p8_shadow_route_smoke_collection_pending:{route}"
+            for route in evidence.get("shadow_route_smoke_pending_routes", [])
+            if isinstance(route, str) and route
+        )
+    if evidence.get("shadow_collection_registration_readiness_claim") == "registration_only_not_runtime_evidence":
+        gaps.append("p8_shadow_collection_run_pending")
+        gaps.extend(
+            f"p8_shadow_collection_run_pending:{route}"
+            for route in evidence.get("shadow_collection_registration_routes", [])
+            if isinstance(route, str) and route
+        )
+    return gaps
+
+
+def _p9_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if evidence.get("schema_version") != "agent_context_product_pack.v1":
+        failures.append("p9_schema_mismatch")
+    section_counts = evidence.get("section_counts") if isinstance(evidence.get("section_counts"), Mapping) else {}
+    tool_hint_count = int(evidence.get("tool_hint_count") or 0)
+    if int(section_counts.get("style_preference") or 0) < 1:
+        failures.append("p9_style_preference_section_missing")
+    if int(section_counts.get("active_work") or 0) < 1:
+        failures.append("p9_active_work_section_missing")
+    if tool_hint_count < 4:
+        failures.append("p9_object_native_tool_hints_missing")
+    if int(evidence.get("tool_hint_safe_target_count") or 0) < tool_hint_count:
+        failures.append("p9_tool_hint_safe_targets_incomplete")
+    if int(evidence.get("unsafe_tool_hint_count") or 0) > 0:
+        failures.append("p9_tool_hint_safety_violations")
+    if bool(evidence.get("mutation_allowed")):
+        failures.append("p9_mutation_allowed")
+    return failures
+
+
+def _p9_tool_hint_safety_summary(tool_hints: Any) -> dict[str, Any]:
+    hints = tool_hints if isinstance(tool_hints, list) else []
+    safe_target_count = 0
+    unsafe_count = 0
+    safety_failures: list[str] = []
+    for hint in hints:
+        if not isinstance(hint, Mapping):
+            unsafe_count += 1
+            safety_failures.append("p9_tool_hint_not_mapping")
+            continue
+        failures = _p9_tool_hint_safety_failures(hint)
+        if failures:
+            unsafe_count += 1
+            safety_failures.extend(failures)
+        if not _p9_tool_hint_safe_target_failures(hint):
+            safe_target_count += 1
+    return {
+        "tool_hint_safe_target_count": safe_target_count,
+        "unsafe_tool_hint_count": unsafe_count,
+        "tool_hint_safety_failures": _dedupe(safety_failures),
+    }
+
+
+def _p9_tool_hint_safety_failures(hint: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    tool_name = str(hint.get("tool") or "")
+    safe_targets = _safe_string_list(hint.get("safe_targets"))
+    blocked_targets = _safe_string_list(hint.get("blocked_targets"))
+    blocked_by = _safe_string_list(hint.get("blocked_by"))
+    if tool_name not in P9_ALLOWED_TOOL_SAFE_TARGETS:
+        failures.append("p9_tool_hint_unknown_tool")
+    if hint.get("suggest_allowed") is not True:
+        failures.append("p9_tool_hint_suggest_not_allowed")
+    if hint.get("execute_allowed") is not False:
+        failures.append("p9_tool_hint_execute_allowed")
+    if hint.get("production_mutation_allowed") is not False:
+        failures.append("p9_tool_hint_production_mutation_allowed")
+    failures.extend(_p9_tool_hint_safe_target_failures(hint))
+    if tool_name == "brain_approval_board_decide" and "approved_scope_required" not in blocked_by:
+        failures.append("p9_tool_hint_approved_scope_blocker_missing")
+    if tool_name == "brain_source_to_candidate_runtime_readiness":
+        if "sanitized_evidence_packet" not in safe_targets:
+            failures.append("p9_tool_hint_sanitized_evidence_target_missing")
+        if "raw_private_runtime_evidence" not in blocked_targets:
+            failures.append("p9_tool_hint_raw_private_blocker_missing")
+    return _dedupe(failures)
+
+
+def _p9_tool_hint_safe_target_failures(hint: Mapping[str, Any]) -> list[str]:
+    tool_name = str(hint.get("tool") or "")
+    safe_targets = _safe_string_list(hint.get("safe_targets"))
+    allowed_targets = P9_ALLOWED_TOOL_SAFE_TARGETS.get(tool_name, frozenset())
+    failures: list[str] = []
+    if not safe_targets:
+        failures.append("p9_tool_hint_safe_targets_missing")
+    if allowed_targets and any(target not in allowed_targets for target in safe_targets):
+        failures.append("p9_tool_hint_safe_targets_not_allowed")
+    return failures
+
+
+def _safe_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item or "")]
+
+
+def _p2_reference_corpus_evidence() -> dict[str, Any]:
+    from .reference_corpus import build_reference_corpus_production_ingest_readiness_report
+
+    report = build_reference_corpus_production_ingest_readiness_report(
+        expected_source_count=65,
+    )
+    return {
+        "phase": "P2",
+        "schema_version": str(report.get("schema_version") or ""),
+        "status": str(report.get("status") or ""),
+        "golden_query_slice": "reference corpus freshness/source authority",
+        "expected_source_count": report.get("expected_source_count"),
+        "live_evidence_provided": bool(report.get("live_evidence_provided")),
+        "evidence_collection_network_used": bool(report.get("evidence_collection_network_used")),
+        "gaps": list(report.get("gaps") or []),
+        "production_mutation_performed": bool(report.get("production_mutation_performed")),
+        "network_used": bool(report.get("network_used")),
+    }
+
+
+def _p6_session_project_rollup_evidence() -> dict[str, Any]:
+    from .extraction_pipeline import run_session_project_rollup_preview
+
+    report = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "session:p6-a",
+                "device_id_hash": "device:this",
+                "provider": "codex",
+                "summary": "P6 rollup fixture session.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["ev:p6:session"],
+            }
+        ],
+        repository="neurons",
+        branch="codex/knowledge-object-review-flow-roadmap",
+        project="neurons",
+        specs=[{"spec_ref": "docs/specs/p6/design.md", "work_unit_id": "work:p6"}],
+        pull_requests=[{"pr_id": "pr:95", "number": 95, "work_unit_id": "work:p6"}],
+        commits=[{"commit_id": "commit:p6", "pull_request_id": "pr:95", "work_unit_id": "work:p6"}],
+        requesting_device_id_hash="device:this",
+        scope="all_devices",
+    )
+    return {
+        "phase": "P6",
+        "schema_version": str(report.get("schema_version") or ""),
+        "status": str(report.get("status") or ""),
+        "golden_query_slice": _golden_slice(report),
+        "object_count": int(report.get("object_count") or 0),
+        "edge_count": int(report.get("edge_count") or 0),
+        "evidence_count": int(report.get("evidence_count") or 0),
+        "handoff_pack_schema": str((report.get("handoff_pack") or {}).get("schema_version") or ""),
+        "gaps": list(report.get("gaps") or []),
+        "production_mutation_performed": bool(report.get("production_mutation_performed")),
+    }
+
+
+def _p7_preference_artifact_evidence() -> dict[str, Any]:
+    from .extraction_pipeline import run_preference_style_extraction_preview
+
+    report = run_preference_style_extraction_preview(
+        memory_cards=[
+            {
+                "memory_id": "mem:p7-html",
+                "card_type": "preference",
+                "summary": "Accepted HTML artifact preference",
+                "confidence": 0.94,
+                "currentness": "current",
+                "review_state": "accepted",
+                "typed_payload": {
+                    "preference": "HTML review artifacts should be information dense.",
+                    "applies_to": "html review artifact",
+                    "reason": "Accepted local fixture preference.",
+                },
+                "source_refs": [{"source_ref_id": "ev:p7:preference"}],
+            },
+            {
+                "memory_id": "mem:p7-style",
+                "card_type": "repo_style",
+                "summary": "Accepted worker test command",
+                "confidence": 0.91,
+                "review_state": "accepted",
+                "typed_payload": {
+                    "claim": "Python worker tests use uv run pytest.",
+                    "repo_scope": "neurons/worker",
+                    "reason": "Repo instructions and verified runs.",
+                    "files": ["worker/tests/test_golden_query_eval.py"],
+                    "commits": ["commit:p7"],
+                },
+            },
+        ],
+        repository="neurons",
+        current_request="review HTML artifact and worker test evidence",
+        current_files=["worker/tests/test_golden_query_eval.py"],
+        artifact_review={
+            "artifact_type": "html_review",
+            "summary": "Information dense HTML review artifact.",
+            "text_metrics": {"word_count": 120},
+        },
+    )
+    artifact_pack = report.get("artifact_preference_pack") if isinstance(report.get("artifact_preference_pack"), Mapping) else {}
+    accepted_count = len((artifact_pack.get("lanes") or {}).get("accepted_current") or [])
+    return {
+        "phase": "P7",
+        "schema_version": str(report.get("schema_version") or ""),
+        "status": str(report.get("status") or ""),
+        "golden_query_slice": _golden_slice(report),
+        "object_count": len(report.get("objects") or []),
+        "source_evidence_ref_count": len(report.get("source_evidence_refs") or []),
+        "artifact_preference_pack_status": "pass" if accepted_count else "pass_with_gaps",
+        "accepted_preference_count": accepted_count,
+        "proposal_preference_count": len((artifact_pack.get("lanes") or {}).get("proposal_only") or []),
+        "artifact_review_check_status": str((report.get("artifact_review_check") or {}).get("status") or ""),
+        "gaps": list(report.get("gaps") or []),
+        "production_mutation_performed": bool(report.get("production_mutation_performed")),
+    }
+
+
+def _p8_runtime_authority_evidence() -> dict[str, Any]:
+    from .extraction_pipeline import run_runtime_truth_extraction_preview
+    from .runtime_readiness import (
+        AGENT_CONTEXT_STARTUP_RUNTIME_SCHEMA,
+        PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA,
+        build_source_to_candidate_runtime_collected_shadow_evidence_packet,
+        build_source_to_candidate_runtime_evidence_collection_plan,
+        build_source_to_candidate_runtime_evidence_packet_template,
+    )
+
+    expected_commit = "e3f6296"
+    report = run_runtime_truth_extraction_preview(
+        pull_request={"id": "pr:95", "merged": False, "head_sha": expected_commit},
+        deployment={
+            "target": "production",
+            "artifact_digest": "sha256:" + "a" * 64,
+            "deployed_source_commit": expected_commit,
+            "private_authority_ref": "redacted-private-authority",
+        },
+        live_evidence=None,
+        ci_statuses=[
+            {"name": "worker pytest", "conclusion": "SUCCESS", "commit_sha": expected_commit},
+            {"name": "gradle-test", "conclusion": "SUCCESS", "commit_sha": expected_commit},
+        ],
+        runtime_surface={
+            "surface_ref": "lbrain-mcp-read-path",
+            "surface_kind": "mcp_http",
+            "object_native_tools": True,
+        },
+        requested_action={"action": "promote_runtime_authority", "target": "production"},
+        actor={"agent": "codex", "role": "agent", "approved_scope": True},
+        consumer="codex",
+    )
+    preview = report.get("pack_preview") if isinstance(report.get("pack_preview"), Mapping) else {}
+    identity = report.get("deployed_artifact_identity") if isinstance(report.get("deployed_artifact_identity"), Mapping) else {}
+    permission = report.get("permission_check") if isinstance(report.get("permission_check"), Mapping) else {}
+    collection_plan = build_source_to_candidate_runtime_evidence_collection_plan(
+        expected_commit=expected_commit,
+        repository="pureliture/neurons",
+        branch="codex/knowledge-object-review-flow-roadmap",
+        consumer="codex",
+    )
+    packet_template = build_source_to_candidate_runtime_evidence_packet_template(
+        expected_commit=expected_commit,
+        repository="pureliture/neurons",
+        branch="codex/knowledge-object-review-flow-roadmap",
+        consumer="codex",
+    )
+    shadow_requests = [
+        item
+        for item in collection_plan.get("shadow_collection_requests", [])
+        if isinstance(item, Mapping) and item.get("request_id") == "shadow_brain_objects_query_route_smoke"
+    ]
+    shadow_request = shadow_requests[0] if shadow_requests else {}
+    shadow_registration = collection_plan.get("shadow_collection_registration")
+    shadow_registration = shadow_registration if isinstance(shadow_registration, Mapping) else {}
+    collector_packet = build_source_to_candidate_runtime_collected_shadow_evidence_packet(
+        expected_commit=expected_commit,
+        repository="pureliture/neurons",
+        branch="codex/knowledge-object-review-flow-roadmap",
+        consumer="codex",
+        route_runner=_p8_branch_local_runtime_route_smoke,
+    )
+    collector = collector_packet.get("collector") if isinstance(collector_packet.get("collector"), Mapping) else {}
+    collector_review_loop = (
+        collector_packet.get("source_to_candidate_review_loop")
+        if isinstance(collector_packet.get("source_to_candidate_review_loop"), Mapping)
+        else {}
+    )
+    collector_review_graph = (
+        collector_review_loop.get("source_to_candidate_graph")
+        if isinstance(collector_review_loop.get("source_to_candidate_graph"), Mapping)
+        else {}
+    )
+    collector_review_edit = (
+        collector_review_loop.get("candidate_review_edit")
+        if isinstance(collector_review_loop.get("candidate_review_edit"), Mapping)
+        else {}
+    )
+    collector_review_decision = (
+        collector_review_loop.get("approval_board_decision")
+        if isinstance(collector_review_loop.get("approval_board_decision"), Mapping)
+        else {}
+    )
+    collector_session_rollup = (
+        collector_packet.get("session_project_rollup_runtime")
+        if isinstance(collector_packet.get("session_project_rollup_runtime"), Mapping)
+        else {}
+    )
+    collector_session_preview = (
+        collector_session_rollup.get("rollup_preview")
+        if isinstance(collector_session_rollup.get("rollup_preview"), Mapping)
+        else {}
+    )
+    collector_session_read_after_write = (
+        collector_session_rollup.get("read_after_write")
+        if isinstance(collector_session_rollup.get("read_after_write"), Mapping)
+        else {}
+    )
+    collector_preference_memory = (
+        collector_packet.get("preference_artifact_memory")
+        if isinstance(collector_packet.get("preference_artifact_memory"), Mapping)
+        else {}
+    )
+    collector_preference_pack = (
+        collector_preference_memory.get("preference_object_pack")
+        if isinstance(collector_preference_memory.get("preference_object_pack"), Mapping)
+        else {}
+    )
+    collector_preference_html_smoke = (
+        collector_preference_memory.get("html_visualization_route_smoke")
+        if isinstance(collector_preference_memory.get("html_visualization_route_smoke"), Mapping)
+        else {}
+    )
+    collector_preference_artifact_check = (
+        collector_preference_memory.get("artifact_review_check")
+        if isinstance(collector_preference_memory.get("artifact_review_check"), Mapping)
+        else {}
+    )
+    collector_permission_audit = (
+        collector_packet.get("permission_sensitive_audit")
+        if isinstance(collector_packet.get("permission_sensitive_audit"), Mapping)
+        else {}
+    )
+    collector_permission_audit_store = (
+        collector_permission_audit.get("audit_store")
+        if isinstance(collector_permission_audit.get("audit_store"), Mapping)
+        else {}
+    )
+    collector_agent_context_startup = (
+        collector_packet.get("agent_context_startup_runtime")
+        if isinstance(collector_packet.get("agent_context_startup_runtime"), Mapping)
+        else {}
+    )
+    collector_startup_context = (
+        collector_agent_context_startup.get("startup_context")
+        if isinstance(collector_agent_context_startup.get("startup_context"), Mapping)
+        else {}
+    )
+    collector_startup_read_path = (
+        collector_agent_context_startup.get("read_path_smoke")
+        if isinstance(collector_agent_context_startup.get("read_path_smoke"), Mapping)
+        else {}
+    )
+    return {
+        "phase": "P8",
+        "schema_version": str(report.get("schema_version") or ""),
+        "status": str(report.get("status") or ""),
+        "golden_query_slice": _golden_slice(report),
+        "object_count": len(report.get("objects") or []),
+        "edge_count": len(report.get("edges") or []),
+        "runtime_verified_count": int(preview.get("runtime_verified_count") or 0),
+        "runtime_unverified_count": int(preview.get("runtime_unverified_count") or 0),
+        "source_commit_matches_pr_head": bool(identity.get("source_commit_matches_pr_head")),
+        "permission": str(permission.get("permission") or ""),
+        "permission_reason": str(permission.get("reason") or ""),
+        "authority_write_performed": bool(permission.get("authority_write_performed")),
+        "runtime_authority_bounded_execution_required_demote_step": (
+            "demote_prior_object_to_accepted_non_current_or_archive_only"
+        ),
+        "runtime_authority_bounded_execution_demote_step_required": True,
+        "runtime_evidence_collection_plan_schema": str(collection_plan.get("schema_version") or ""),
+        "runtime_evidence_collection_plan_status": str(collection_plan.get("status") or ""),
+        "runtime_evidence_collection_plan_required_step_count": len(collection_plan.get("required_steps") or []),
+        "runtime_evidence_collection_plan_network_used": bool(collection_plan.get("network_used")),
+        "runtime_evidence_collection_plan_mutation_allowed": bool(collection_plan.get("mutation_allowed")),
+        "runtime_evidence_collection_plan_production_mutation_performed": bool(
+            collection_plan.get("production_mutation_performed")
+        ),
+        "runtime_evidence_collection_plan_readiness_claim": str(collection_plan.get("readiness_claim") or ""),
+        "runtime_evidence_packet_template_schema": str(packet_template.get("schema_version") or ""),
+        "runtime_evidence_packet_template_status": str(packet_template.get("status") or ""),
+        "runtime_evidence_packet_template_required_field_count": len(
+            packet_template.get("required_packet_fields") or []
+        ),
+        "runtime_evidence_packet_template_route_count": len(packet_template.get("required_routes") or []),
+        "runtime_evidence_packet_template_network_used": bool(packet_template.get("network_used")),
+        "runtime_evidence_packet_template_mutation_allowed": bool(packet_template.get("mutation_allowed")),
+        "runtime_evidence_packet_template_production_mutation_performed": bool(
+            packet_template.get("production_mutation_performed")
+        ),
+        "runtime_evidence_packet_template_readiness_claim": str(packet_template.get("readiness_claim") or ""),
+        "shadow_route_smoke_request_schema": str(shadow_request.get("schema_version") or ""),
+        "shadow_route_smoke_request_status": str(shadow_request.get("status") or ""),
+        "shadow_route_smoke_route_count": len(shadow_request.get("routes") or []),
+        "shadow_route_smoke_pending_routes": [
+            str(route) for route in shadow_request.get("routes", []) if isinstance(route, str) and route
+        ],
+        "shadow_route_smoke_network_used": bool(shadow_request.get("network_used")),
+        "shadow_route_smoke_mutation_allowed": bool(shadow_request.get("mutation_allowed")),
+        "shadow_route_smoke_production_mutation_performed": bool(
+            shadow_request.get("production_mutation_performed")
+        ),
+        "shadow_route_smoke_readiness_claim": str(shadow_request.get("readiness_claim") or ""),
+        "shadow_collection_registration_schema": str(shadow_registration.get("schema_version") or ""),
+        "shadow_collection_registration_status": str(shadow_registration.get("status") or ""),
+        "shadow_collection_registration_run_status": str(shadow_registration.get("run_status") or ""),
+        "shadow_collection_registration_request_count": len(shadow_registration.get("request_ids") or []),
+        "shadow_collection_registration_route_count": len(shadow_registration.get("routes") or []),
+        "shadow_collection_registration_routes": [
+            str(route) for route in shadow_registration.get("routes", []) if isinstance(route, str) and route
+        ],
+        "shadow_collection_registration_network_used": bool(shadow_registration.get("network_used")),
+        "shadow_collection_registration_mutation_allowed": bool(
+            shadow_registration.get("mutation_allowed")
+        ),
+        "shadow_collection_registration_production_mutation_performed": bool(
+            shadow_registration.get("production_mutation_performed")
+        ),
+        "shadow_collection_registration_readiness_claim": str(
+            shadow_registration.get("readiness_claim") or ""
+        ),
+        "runtime_evidence_collector_packet_schema": str(collector_packet.get("schema_version") or ""),
+        "runtime_evidence_collector_route_count": len(collector_packet.get("brain_objects_query_smokes") or []),
+        "runtime_evidence_collector_network_used": bool(
+            (collector_packet.get("evidence_provenance") or {}).get("network_used")
+            if isinstance(collector_packet.get("evidence_provenance"), Mapping)
+            else False
+        ),
+        "runtime_evidence_collector_production_mutation_performed": bool(
+            collector_packet.get("production_mutation_performed")
+        ),
+        "runtime_evidence_collector_readiness_claim": str(collector.get("readiness_claim") or ""),
+        "runtime_evidence_collector_review_loop_schema": str(collector_review_loop.get("schema_version") or ""),
+        "runtime_evidence_collector_review_loop_candidate_count": int(
+            collector_review_graph.get("candidate_count") or 0
+        ),
+        "runtime_evidence_collector_review_loop_edited_count": int(
+            collector_review_edit.get("edited_candidate_count") or 0
+        ),
+        "runtime_evidence_collector_review_loop_decision_count": int(
+            collector_review_decision.get("decision_count") or 0
+        ),
+        "runtime_evidence_collector_review_loop_authority_scope": str(
+            collector_review_decision.get("authority_write_scope") or ""
+        ),
+        "runtime_evidence_collector_session_rollup_schema": str(collector_session_rollup.get("schema_version") or ""),
+        "runtime_evidence_collector_session_rollup_device_count": int(
+            collector_session_preview.get("device_count") or 0
+        ),
+        "runtime_evidence_collector_session_rollup_visible_session_count": int(
+            collector_session_preview.get("visible_session_count") or 0
+        ),
+        "runtime_evidence_collector_session_rollup_read_after_write_status": str(
+            collector_session_read_after_write.get("status") or ""
+        ),
+        "runtime_evidence_collector_preference_artifact_schema": str(
+            collector_preference_memory.get("schema_version") or ""
+        ),
+        "runtime_evidence_collector_preference_accepted_count": int(
+            collector_preference_pack.get("accepted_preference_count") or 0
+        ),
+        "runtime_evidence_collector_preference_proposal_count": int(
+            collector_preference_pack.get("proposal_preference_count") or 0
+        ),
+        "runtime_evidence_collector_preference_html_route": str(
+            collector_preference_html_smoke.get("route") or ""
+        ),
+        "runtime_evidence_collector_preference_artifact_check_status": str(
+            collector_preference_artifact_check.get("status") or ""
+        ),
+        "runtime_evidence_collector_permission_audit_schema": str(
+            collector_permission_audit.get("schema_version") or ""
+        ),
+        "runtime_evidence_collector_permission_audit_expected_schema": PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA,
+        "runtime_evidence_collector_permission_audit_event_count": len(
+            collector_permission_audit.get("audit_events") or []
+        ),
+        "runtime_evidence_collector_permission_audit_store_status": str(
+            collector_permission_audit_store.get("status") or ""
+        ),
+        "runtime_evidence_collector_agent_context_startup_schema": str(
+            collector_agent_context_startup.get("schema_version") or ""
+        ),
+        "runtime_evidence_collector_agent_context_startup_expected_schema": AGENT_CONTEXT_STARTUP_RUNTIME_SCHEMA,
+        "runtime_evidence_collector_agent_context_startup_loaded": (
+            collector_startup_context.get("loaded_on_startup") is True
+        ),
+        "runtime_evidence_collector_agent_context_startup_read_path_tool": str(
+            collector_startup_read_path.get("tool") or ""
+        ),
+        "runtime_evidence_collector_agent_context_startup_route_count": len(
+            collector_startup_read_path.get("routes_checked") or []
+        ),
+        "gaps": list(preview.get("gaps") or []),
+        "production_mutation_performed": bool(report.get("production_mutation_performed")),
+    }
+
+
+def _p8_branch_local_runtime_route_smoke(route: str) -> dict[str, Any]:
+    gaps = ["runtime_evidence_unverified"] if route == "deployment_runtime_truth" else []
+    return {
+        "schema_version": "brain_objects_query.v1",
+        "route": route,
+        "production_mutation_performed": False,
+        "object_pack": {
+            "schema_version": "object_pack.v1",
+            "route": route,
+            "objects": [{"object_id": f"ko:RuntimeRoute:{route}", "object_type": "RuntimeTruth"}],
+            "edges": [],
+            "evidence": [],
+            "lanes": {"candidate": [{"object_id": f"ko:RuntimeRoute:{route}", "object_type": "RuntimeTruth"}]},
+            "recommended_actions": [{"object_id": f"ko:RuntimeRoute:{route}", "action": "request_evidence"}],
+            "gaps": gaps,
+        },
+    }
+
+
+def _p9_agent_context_evidence(*, preference_preview: Mapping[str, Any]) -> dict[str, Any]:
+    from ..context_builder import build_agent_context_product_pack
+
+    preference_object = {
+        "object_id": "ko:ArtifactPreference:p9-html",
+        "object_type": "ArtifactPreference",
+        "title": "HTML review artifacts should be information dense.",
+        "authority_lane": "accepted_current",
+        "recommended_action": "apply_preference",
+    }
+    preference_pack = {
+        "objects": [preference_object],
+        "lanes": {"accepted_current": [preference_object], "proposal_only": []},
+        "gaps": [],
+    }
+    active_work_object = {
+        "object_id": "ko:WorkUnit:p9-active-work",
+        "object_type": "WorkUnit",
+        "title": "Continue source-to-candidate graph product activation",
+        "authority_lane": "reference_only",
+        "recommended_action": "resume",
+    }
+    active_work_pack = {
+        "objects": [active_work_object],
+        "lanes": {"reference_only": [active_work_object]},
+        "gaps": [],
+    }
+    product = build_agent_context_product_pack(
+        consumer="codex",
+        block={
+            "object_packs": {
+                "preferences": preference_pack,
+                "current_work": active_work_pack,
+                "required_verification": {
+                    "objects": [
+                        {
+                            "object_id": "ko:Verification:worker",
+                            "object_type": "VerificationCommand",
+                            "title": "cd worker && uv run pytest -q",
+                            "authority_lane": "candidate",
+                            "recommended_action": "run",
+                        }
+                    ],
+                    "lanes": {"candidate": [{"object_id": "ko:Verification:worker"}]},
+                    "gaps": [],
+                },
+            },
+            "documents": [],
+            "preferences": [{"summary": "HTML review artifacts should be information dense."}],
+            "workflow_contracts": [],
+        },
+        gaps=["runtime_evidence_unverified"],
+        cards=[{"currentness": "current"}],
+    )
+    section_counts = {
+        name: int(section.get("object_count") or 0)
+        for name, section in product.get("sections", {}).items()
+        if isinstance(section, Mapping)
+    }
+    tool_hint_safety = _p9_tool_hint_safety_summary(product.get("tool_hints"))
+    return {
+        "phase": "P9",
+        "schema_version": str(product.get("schema_version") or ""),
+        "status": "pass_with_gaps" if product.get("degraded_mode", {}).get("active") else "pass",
+        "consumer": str(product.get("consumer") or ""),
+        "section_counts": section_counts,
+        "tool_hint_count": len(product.get("tool_hints") or []),
+        "tool_hint_safe_target_count": tool_hint_safety["tool_hint_safe_target_count"],
+        "unsafe_tool_hint_count": tool_hint_safety["unsafe_tool_hint_count"],
+        "tool_hint_safety_failures": tool_hint_safety["tool_hint_safety_failures"],
+        "action_hint_count": len(product.get("action_hints") or []),
+        "mutation_allowed": bool(product.get("surface_policy", {}).get("mutation_allowed")),
+        "degraded_mode_active": bool(product.get("degraded_mode", {}).get("active")),
+        "gaps": list(product.get("degraded_mode", {}).get("gaps") or []),
+        "production_mutation_performed": False,
+    }
+
+
+def _golden_slice(report: Mapping[str, Any]) -> str:
+    evaluator = report.get("evaluator_report") if isinstance(report.get("evaluator_report"), Mapping) else {}
+    return str(evaluator.get("golden_query_slice") or "")
+
+
+def _activation_phase_state(phase: str, quality_result: str) -> str:
+    if quality_result == "FAIL":
+        return "blocked"
+    if phase == "P5":
+        return "in_progress"
+    if phase in _LOCAL_VALIDATED_PHASES and quality_result in {"PASS", "PASS_WITH_GAPS"}:
+        return "local_validated"
+    if quality_result == "PASS":
+        return "local_validated"
+    if quality_result == "missing":
+        return "missing"
+    return "in_progress"
+
+
+def _activation_phase_next_action(phase: str, state: str, gaps: list[str]) -> str:
+    if state == "blocked":
+        return "fix_quality_failure"
+    if phase == "P5":
+        return "keep_continuous_quality_gate_active_until_release_gate_green"
+    if any("production" in gap or "live" in gap for gap in gaps):
+        return "collect_bounded_runtime_or_production_evidence"
+    if state == "local_validated":
+        return "advance_next_phase_with_gap_visible"
+    return "complete_local_phase_slice"
+
+
+def _minimum_review_loop_checkpoint(
+    phase_progress: list[Mapping[str, Any]],
+    source_gate: Mapping[str, Any],
+) -> dict[str, Any]:
+    by_phase = {str(item.get("phase") or ""): item for item in phase_progress}
+    checkpoint_items = [by_phase.get(phase, {}) for phase in MINIMUM_REVIEW_LOOP_PHASES]
+    checkpoint_failures = [
+        str(item.get("phase") or "unknown")
+        for item in checkpoint_items
+        if item.get("quality_result") == "FAIL" or item.get("state") in {"missing", "blocked"}
+    ]
+    gaps = _dedupe(
+        [
+            *[
+                str(gap)
+                for item in checkpoint_items
+                for gap in item.get("gaps", [])
+                if str(gap or "")
+            ],
+            *[
+                str(gap)
+                for gap in source_gate.get("gaps", [])
+                if str(gap or "")
+            ],
+        ]
+    )
+    return {
+        "phases": list(MINIMUM_REVIEW_LOOP_PHASES),
+        "status": "FAIL" if checkpoint_failures else ("PASS_WITH_GAPS" if gaps else "PASS"),
+        "local_product_loop_ready": not checkpoint_failures,
+        "does_not_complete_goal": True,
+        "failures": checkpoint_failures,
+        "gaps": gaps,
+    }
+
+
+def _activation_goal_blockers(
+    *,
+    phase_coverage: Mapping[str, Any],
+    source_gate: Mapping[str, Any],
+    phase_progress: list[Mapping[str, Any]],
+) -> list[str]:
+    blockers = [
+        str(gap)
+        for gap in phase_coverage.get("gaps", [])
+        if str(gap or "") and str(gap) not in DEFERRED_SCOPE_GAPS
+    ]
+    blockers.extend(str(gap) for gap in source_gate.get("gaps", []) if str(gap or ""))
+    for item in phase_progress:
+        blockers.extend(
+            str(gap)
+            for gap in item.get("gaps", [])
+            if str(gap or "") and str(gap) not in DEFERRED_SCOPE_GAPS
+        )
+    if source_gate.get("release_quality_gate") != "green":
+        blockers.append("production_quality_not_green")
+    return _dedupe(blockers)
+
+
+def _next_activation_phase(phase_progress: list[Mapping[str, Any]]) -> str:
+    for item in phase_progress:
+        if item.get("state") == "in_progress":
+            return str(item.get("phase") or "")
+    for item in phase_progress:
+        if item.get("state") not in {"local_validated", "production_validated", "complete"}:
+            return str(item.get("phase") or "")
+    return ""
+
+
+def _remaining_activation_phases(next_phase: str) -> list[str]:
+    if not next_phase or next_phase not in ACTIVATION_SCOPE_PHASES:
+        return []
+    start = ACTIVATION_SCOPE_PHASES.index(next_phase)
+    return list(ACTIVATION_SCOPE_PHASES[start:])
+
+
+def _dedupe(values: list[str] | tuple[str, ...]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
     return result
 
 
@@ -299,7 +1615,182 @@ def _empty_lane_is_stated(lane: str, gaps: list[Any]) -> bool:
 def _is_runtime_claim(query: str, response: Mapping[str, Any]) -> bool:
     route = str(response.get("route") or "").lower()
     text = f"{route} {query}".lower()
-    return any(marker in text for marker in ("runtime", "deploy", "deployment", "배포", "live"))
+    return any(marker in text for marker in ("runtime", "런타임", "deploy", "deployment", "배포", "live"))
+
+
+def _source_to_authority_fixture_pack() -> dict[str, Any]:
+    evidence = EvidenceRef.from_parts(
+        evidence_type="source_freshness",
+        authority_lane="reference_only",
+        verification_state="freshness_checked",
+        locator={"kind": "relative_repo_path", "value": "docs/specs/lbrain-source-fixture.md"},
+        content_hash=hash_payload({"fixture": "source-to-authority-quality-gate"}),
+        summary="Public-safe source fixture with freshness evidence.",
+    )
+    obj = KnowledgeObjectEnvelope.from_parts(
+        object_type="RepoDocument",
+        natural_key="docs/specs/lbrain-source-fixture.md",
+        scope={"project": "neurons"},
+        title="Source-to-authority fixture",
+        summary="AI extracted candidate claim.",
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="freshness_checked",
+        review_state="needs_review",
+        content_hash=hash_payload({"fixture": "candidate-object"}),
+        evidence_refs=[evidence.evidence_id],
+        confidence={"score": 0.82, "basis": "deterministic_quality_gate_fixture"},
+        recommended_action="review",
+        freshness={"source_checked": True, "state": "freshness_checked"},
+        payload={"path_ref": "docs/specs/lbrain-source-fixture.md"},
+    ).to_dict()
+    edge = KnowledgeEdge.from_parts(
+        edge_type="requires_evidence",
+        from_object_id=obj["object_id"],
+        to_object_id=obj["object_id"],
+        evidence_refs=[evidence.evidence_id],
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="freshness_checked",
+        confidence={"score": 0.77, "basis": "deterministic_quality_gate_fixture"},
+        payload={"source": "quality_gate_fixture"},
+    ).to_dict()
+    return build_candidate_graph_review_pack(
+        objects=[obj],
+        edges=[edge],
+        evidence=[evidence.to_view()],
+        extractor="quality_gate_fixture_extractor",
+        reviewer_actions=["promote", "reject", "hold", "request_more_evidence"],
+        consumer="codex",
+    )
+
+
+def _object_native_product_surface_checks() -> list[dict[str, Any]]:
+    from agent_knowledge.mcp_tools import (
+        BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+        BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+        BRAIN_OBJECTS_QUERY_TOOL_NAME,
+        BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+        BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+        tool_registry,
+    )
+
+    registry = tool_registry()
+    return [
+        {
+            "id": "mcp_brain_objects_query_tool",
+            "surface": "mcp",
+            "tool": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+            "result": _pass_fail(
+                _tool_requires_fields(
+                    registry,
+                    BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                    ("repository", "branch", "query"),
+                )
+            ),
+            "read_path": True,
+            "production_mutation_performed": False,
+        },
+        {
+            "id": "mcp_source_to_candidate_graph_tool",
+            "surface": "mcp",
+            "tool": BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+            "result": _pass_fail(
+                _tool_has_target_enum(
+                    registry,
+                    BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+                    ("local_test", "production"),
+                )
+            ),
+            "local_test_preview_allowed": True,
+            "production_target_denied": True,
+            "production_mutation_performed": False,
+        },
+        {
+            "id": "mcp_candidate_review_edit_tool",
+            "surface": "mcp",
+            "tool": BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+            "result": _pass_fail(
+                _tool_requires_fields(
+                    registry,
+                    BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+                    ("pack", "edits"),
+                )
+            ),
+            "authority_write_performed": False,
+            "production_mutation_performed": False,
+        },
+        {
+            "id": "mcp_approval_board_decide_tool",
+            "surface": "mcp",
+            "tool": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+            "result": _pass_fail(
+                _tool_has_target_enum(
+                    registry,
+                    BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                    ("local_test", "production"),
+                )
+                and _tool_requires_fields(registry, BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME, ("pack", "decisions"))
+            ),
+            "local_test_preview_allowed": True,
+            "production_target_denied": True,
+            "production_mutation_performed": False,
+        },
+        {
+            "id": "mcp_source_to_candidate_runtime_readiness_tool",
+            "surface": "mcp",
+            "tool": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+            "result": _pass_fail(
+                _tool_has_properties(
+                    registry,
+                    BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                    ("live_evidence", "expected_commit"),
+                )
+            ),
+            "network_used": False,
+            "production_mutation_performed": False,
+        },
+    ]
+
+
+def _tool_has_target_enum(registry: Mapping[str, Any], tool_name: str, expected: tuple[str, ...]) -> bool:
+    tool = registry.get(tool_name)
+    if not isinstance(tool, Mapping):
+        return False
+    schema = tool.get("inputSchema")
+    properties = schema.get("properties") if isinstance(schema, Mapping) else {}
+    target = properties.get("target") if isinstance(properties, Mapping) else {}
+    return isinstance(target, Mapping) and tuple(target.get("enum") or ()) == expected
+
+
+def _tool_requires_fields(registry: Mapping[str, Any], tool_name: str, expected: tuple[str, ...]) -> bool:
+    tool = registry.get(tool_name)
+    if not isinstance(tool, Mapping):
+        return False
+    schema = tool.get("inputSchema")
+    required = schema.get("required") if isinstance(schema, Mapping) else []
+    return all(field in required for field in expected)
+
+
+def _tool_has_properties(registry: Mapping[str, Any], tool_name: str, expected: tuple[str, ...]) -> bool:
+    tool = registry.get(tool_name)
+    if not isinstance(tool, Mapping):
+        return False
+    schema = tool.get("inputSchema")
+    properties = schema.get("properties") if isinstance(schema, Mapping) else {}
+    return isinstance(properties, Mapping) and all(field in properties for field in expected)
+
+
+def _pass_fail(condition: bool) -> str:
+    return "PASS" if condition else "FAIL"
+
+
+def _first_lane_item(pack: Mapping[str, Any], lane: str) -> dict[str, Any]:
+    lanes = pack.get("lanes") if isinstance(pack.get("lanes"), Mapping) else {}
+    items = lanes.get(lane)
+    if isinstance(items, list) and items and isinstance(items[0], Mapping):
+        return dict(items[0])
+    return {}
 
 
 def _has_runtime_evidence_or_gap(response: Mapping[str, Any], evidence: list[Any], gaps: list[Any]) -> bool:
