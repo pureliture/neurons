@@ -676,6 +676,7 @@ def build_session_project_rollup_shadow_evidence(
             "schema_version": public_safe_text(str(handoff.get("schema_version") or ""), max_chars=80),
             "raw_return_capability": public_safe_text(str(handoff.get("raw_return_capability") or ""), max_chars=80),
             "visible_session_count": _int_value(handoff.get("visible_session_count")),
+            "all_device_session_count": _int_value(handoff.get("all_device_session_count")),
             "object_ref_counts": _object_ref_counts(object_refs),
             "resume_context": {
                 "schema_version": public_safe_text(str(resume.get("schema_version") or ""), max_chars=80),
@@ -1301,6 +1302,8 @@ def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
             "handoff_pack": {
                 "schema_version": SESSION_PROJECT_HANDOFF_SCHEMA,
                 "raw_return_capability": "denied",
+                "visible_session_count": "collector_sets_integer",
+                "all_device_session_count": "collector_sets_integer",
                 "resume_context": {
                     "schema_version": SESSION_PROJECT_RESUME_SCHEMA,
                     "latest_session_ref_present": True,
@@ -2306,6 +2309,15 @@ def _live_session_project_rollup_claim(evidence: Mapping[str, Any]) -> dict[str,
         "visible_session_count": _int_value(preview.get("visible_session_count")),
         "all_device_session_count": _int_value(preview.get("all_device_session_count")),
         "edge_count": _int_value(preview.get("edge_count")),
+        "handoff_visible_session_count": _int_value(handoff.get("visible_session_count")),
+        "handoff_all_device_session_count": _int_value(handoff.get("all_device_session_count")),
+        "handoff_session_ref_count": _int_value(
+            (
+                handoff.get("object_ref_counts")
+                if isinstance(handoff.get("object_ref_counts"), Mapping)
+                else {}
+            ).get("Session")
+        ),
         "read_after_write_status": public_safe_text(str(read_after_write.get("status") or ""), max_chars=80),
         "raw_return_capability": public_safe_text(str(handoff.get("raw_return_capability") or ""), max_chars=80),
         "production_mutation_performed": _session_project_rollup_reports_mutation(
@@ -2344,6 +2356,17 @@ def _session_project_rollup_failures(
         failures.append("session_project_rollup_all_device_count_inconsistent")
     if _int_value(preview.get("device_count")) < 2:
         failures.append("session_project_rollup_multi_device_unproven")
+    handoff_object_ref_counts = (
+        handoff.get("object_ref_counts") if isinstance(handoff.get("object_ref_counts"), Mapping) else {}
+    )
+    preview_visible_session_count = _int_value(preview.get("visible_session_count"))
+    preview_all_device_session_count = _int_value(preview.get("all_device_session_count"))
+    if _int_value(handoff.get("visible_session_count")) != preview_visible_session_count:
+        failures.append("session_project_handoff_visible_session_count_mismatch")
+    if _int_value(handoff.get("all_device_session_count")) != preview_all_device_session_count:
+        failures.append("session_project_handoff_all_device_session_count_mismatch")
+    if _int_value(handoff_object_ref_counts.get("Session")) < preview_visible_session_count:
+        failures.append("session_project_handoff_session_ref_count_mismatch")
     missing_object_types = [
         object_type
         for object_type in REQUIRED_SESSION_PROJECT_OBJECT_TYPES
@@ -2364,6 +2387,8 @@ def _session_project_rollup_failures(
         failures.append("session_project_resume_latest_session_missing")
     if _int_value(resume.get("work_unit_ref_count")) < 1:
         failures.append("session_project_resume_work_unit_missing")
+    if _int_value(handoff_object_ref_counts.get("WorkUnit")) < _int_value(resume.get("work_unit_ref_count")):
+        failures.append("session_project_handoff_work_unit_ref_count_mismatch")
     if read_after_write.get("status") != "validated":
         failures.append("session_project_rollup_read_after_write_missing")
     if read_after_write.get("route") != "temporal_work_recall":

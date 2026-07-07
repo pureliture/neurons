@@ -1041,6 +1041,7 @@ def _session_project_rollup_runtime_evidence() -> dict:
             "schema_version": "session_project_handoff_pack.v1",
             "raw_return_capability": "denied",
             "visible_session_count": 2,
+            "all_device_session_count": 2,
             "object_ref_counts": {"Session": 2, "WorkUnit": 1},
             "resume_context": {
                 "schema_version": "session_project_resume_context.v1",

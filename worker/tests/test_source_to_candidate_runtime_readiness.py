@@ -225,6 +225,7 @@ def _session_project_rollup_runtime_evidence(**overrides):
             "schema_version": "session_project_handoff_pack.v1",
             "raw_return_capability": "denied",
             "visible_session_count": 2,
+            "all_device_session_count": 2,
             "object_ref_counts": {"Session": 2, "WorkUnit": 1},
             "resume_context": {
                 "schema_version": "session_project_resume_context.v1",
@@ -992,6 +993,25 @@ def test_runtime_readiness_fails_when_session_project_rollup_runtime_is_unsafe_o
     assert "session_project_rollup_read_after_write_missing" in report["gaps"]
     assert "session_project_rollup_raw_private_evidence_returned" in report["gaps"]
     assert "session_project_rollup_host_topology_returned" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_session_project_rollup_handoff_counts_do_not_match_preview():
+    rollup_evidence = _session_project_rollup_runtime_evidence()
+    rollup_evidence["handoff_pack"] = {
+        **rollup_evidence["handoff_pack"],
+        "visible_session_count": 1,
+        "object_ref_counts": {"Session": 1, "WorkUnit": 1},
+    }
+    evidence = _sanitized_live_evidence(session_project_rollup_runtime=rollup_evidence)
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    rollup = claims["live.session_project.rollup"]
+    assert rollup["status"] == "failed"
+    assert "session_project_handoff_visible_session_count_mismatch" in report["gaps"]
+    assert "session_project_handoff_session_ref_count_mismatch" in report["gaps"]
 
 
 def test_runtime_readiness_fails_when_preference_artifact_memory_is_unsafe_or_incomplete():
