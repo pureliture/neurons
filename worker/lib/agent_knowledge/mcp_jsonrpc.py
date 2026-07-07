@@ -590,6 +590,7 @@ def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict,
         decision["authority_write_scope"] = "production_ledger"
         decision["production_mutation_performed"] = True
         decision["production_gate_ref_hash"] = gate["approval_ref_hash"]
+        _attach_authority_decision_lineage(arguments, decision, tool_name=tool_name)
         result = service.commit_object_authority_decision(decision)
         return _tool_result(result)
     if not _local_test_object_authority_writes_allowed(service):
@@ -616,8 +617,23 @@ def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict,
     decision["ledger_scope"] = "local_test"
     decision["authority_write_scope"] = "local_test_ledger"
     decision["production_mutation_performed"] = False
+    _attach_authority_decision_lineage(arguments, decision, tool_name=tool_name)
     result = service.commit_object_authority_decision(decision)
     return _tool_result(result)
+
+
+def _attach_authority_decision_lineage(arguments: Mapping[str, Any], decision: dict[str, Any], *, tool_name: str) -> None:
+    decision_type = str(decision.get("decision_type") or "")
+    rollback_of_decision_id = public_safe_text(str(arguments.get("rollback_of_decision_id") or ""), max_chars=180)
+    supersedes_decision_id = public_safe_text(str(arguments.get("supersedes_decision_id") or ""), max_chars=180)
+    if decision_type == "rollback_decision":
+        if not rollback_of_decision_id:
+            raise ValueError(f"{tool_name} requires rollback_of_decision_id for rollback_decision")
+        decision["rollback_of_decision_id"] = rollback_of_decision_id
+    elif rollback_of_decision_id:
+        decision["rollback_of_decision_id"] = rollback_of_decision_id
+    if supersedes_decision_id:
+        decision["supersedes_decision_id"] = supersedes_decision_id
 
 
 def _local_test_object_authority_writes_allowed(service: KnowledgeSearchService) -> bool:
@@ -700,7 +716,9 @@ def _production_authority_promotion_plan(arguments: Mapping[str, object], *, gat
             "commit_stale",
             "commit_supersession",
             "retire",
+            "archive_only",
             "reject_candidate",
+            "rollback_decision",
         ],
         "reviewer_role": "human_object_authority_reviewer",
         "required_gate_evidence": [

@@ -49,6 +49,8 @@ def _reference_corpus_default_policy_status() -> dict:
 def _object_proposal_status_for_decision(decision_type: str, new_authority_lane: str) -> str:
     if decision_type == "reject_candidate" or new_authority_lane == "rejected":
         return "rejected"
+    if decision_type == "rollback_decision":
+        return "rolled_back"
     if decision_type == "commit_stale":
         return "stale"
     if decision_type == "commit_supersession":
@@ -2574,6 +2576,8 @@ class Ledger(
         decision_payload["authority_write_performed"] = True
         decision_payload["authoritative_memory_changed"] = True
         decision_payload["cache_invalidated"] = True
+        rollback_of_decision_id = public_safe_text(str(decision.get("rollback_of_decision_id") or ""), max_chars=180)
+        supersedes_decision_id = public_safe_text(str(decision.get("supersedes_decision_id") or ""), max_chars=180)
         state = {
             "schema_version": "object_authority_state.v1",
             "project": project,
@@ -2586,6 +2590,8 @@ class Ledger(
             "decision_reason": public_safe_text(str(decision.get("decision_reason") or ""), max_chars=512),
             "evidence_refs": list(decision.get("evidence_refs") or []),
             "approved_by_hash": str(decision.get("approved_by_hash") or ""),
+            "rollback_of_decision_id": rollback_of_decision_id,
+            "supersedes_decision_id": supersedes_decision_id,
             "updated_at": now,
         }
         ensure_public_safe(state, "object_authority_state")

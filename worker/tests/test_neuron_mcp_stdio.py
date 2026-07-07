@@ -2507,6 +2507,135 @@ def test_mcp_object_decision_commit_local_test_updates_authority_state_with_audi
     assert queued["items"][0]["status"] == "accepted"
 
 
+def test_mcp_object_authority_rollback_preserves_audit_history(tmp_path: Path):
+    service = _service(tmp_path)
+    target_object_id = "ko:RepoDocument:rollback"
+    promote_proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 104,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Promote reviewed docs SoT.",
+                    "evidence_refs": ["ev:source_hash:rollback-current"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    promote_decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 105,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": promote_proposal["proposal_id"],
+                    "target_object_id": target_object_id,
+                    "decision_type": "accept_current",
+                    "previous_authority_lane": "candidate",
+                    "new_authority_lane": "accepted_current",
+                    "evidence_refs": ["ev:source_hash:rollback-current"],
+                    "decision_reason": "Reviewed local fixture evidence.",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:local-rollback-current",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    rollback_proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 106,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_retire",
+                    "target_object_id": target_object_id,
+                    "reason": "Rollback accepted decision after newer evidence invalidated it.",
+                    "evidence_refs": ["ev:source_hash:rollback-proof"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    rollback_decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 107,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": rollback_proposal["proposal_id"],
+                    "target_object_id": target_object_id,
+                    "decision_type": "rollback_decision",
+                    "previous_authority_lane": "accepted_current",
+                    "new_authority_lane": "archive_only",
+                    "evidence_refs": ["ev:source_hash:rollback-proof"],
+                    "decision_reason": "Rollback without deleting prior audit history.",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:local-rollback-archive",
+                    "rollback_of_decision_id": promote_decision["decision_id"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert rollback_decision["decision_type"] == "rollback_decision"
+    assert rollback_decision["rollback_of_decision_id"] == promote_decision["decision_id"]
+    assert rollback_decision["authority_write_performed"] is True
+    assert rollback_decision["authoritative_memory_changed"] is True
+    state = service.ledger.get_object_authority_state(target_object_id)
+    assert state["authority_lane"] == "archive_only"
+    assert state["decision_type"] == "rollback_decision"
+    assert state["rollback_of_decision_id"] == promote_decision["decision_id"]
+    assert state["decision_reason"] == "Rollback without deleting prior audit history."
+    queued = service.object_review_proposals(project=PROJECT)
+    queued_by_id = {item["proposal_id"]: item for item in queued["items"]}
+    assert queued_by_id[promote_proposal["proposal_id"]]["status"] == "accepted"
+    assert queued_by_id[rollback_proposal["proposal_id"]]["status"] == "rolled_back"
+
+    explained = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 108,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
+                "arguments": {"object_id": target_object_id},
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    assert explained["object"]["authority_lane"] == "archive_only"
+    assert explained["object"]["lifecycle_status"] == "archived"
+    assert explained["authority_state"]["rollback_of_decision_id"] == promote_decision["decision_id"]
+    assert [item["decision_id"] for item in explained["decision_history"]] == [
+        rollback_decision["decision_id"],
+        promote_decision["decision_id"],
+    ]
+
+
 def test_mcp_object_decision_commit_requires_matching_review_proposal(tmp_path: Path):
     service = _service(tmp_path)
     proposal = handle_jsonrpc_message(

@@ -2957,8 +2957,11 @@ def _bounded_execution_failures(
         failures.append("bounded_execution_read_after_write_missing")
     if public_safe_text(str(read_after_write.get("decision_id") or ""), max_chars=180) != decision_id:
         failures.append("bounded_execution_read_after_write_decision_mismatch")
-    if str(rollback.get("status") or "") not in {"planned", "validated"} or not _string_list(rollback.get("path")):
+    rollback_path = _string_list(rollback.get("path"))
+    if str(rollback.get("status") or "") not in {"planned", "validated"} or not rollback_path:
         failures.append("bounded_execution_rollback_or_supersession_missing")
+    elif "demote_prior_object_to_accepted_non_current_or_archive_only" not in rollback_path:
+        failures.append("bounded_execution_demote_prior_object_step_missing")
     if postcheck.get("status") != "validated":
         failures.append("bounded_execution_postcheck_missing")
     if postcheck.get("raw_private_evidence_returned") is not False:

@@ -563,6 +563,8 @@ def _object_authority_state_view(state: Mapping[str, Any]) -> dict[str, str]:
         "decision_type": public_safe_text(str(state.get("decision_type") or ""), max_chars=120),
         "previous_authority_lane": public_safe_text(str(state.get("previous_authority_lane") or ""), max_chars=80),
         "authority_lane": public_safe_text(str(state.get("authority_lane") or ""), max_chars=80),
+        "rollback_of_decision_id": public_safe_text(str(state.get("rollback_of_decision_id") or ""), max_chars=180),
+        "supersedes_decision_id": public_safe_text(str(state.get("supersedes_decision_id") or ""), max_chars=180),
         "updated_at": public_safe_text(str(state.get("updated_at") or ""), max_chars=80),
     }
 
