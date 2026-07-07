@@ -1799,18 +1799,26 @@ def _live_evidence_provenance_claim(evidence: Mapping[str, Any]) -> dict[str, An
             "live_evidence_provenance_raw_external_ids_returned",
         )
     ) else "redacted_only"
+    network_used_for_evidence = provenance.get("network_used") is True
+    live_mode = collection_mode in LIVE_EVIDENCE_COLLECTION_MODES
+    live_mode_gaps = (
+        ["live_evidence_provenance_network_not_used_for_live_mode"]
+        if live_mode and not network_used_for_evidence
+        else []
+    )
+    gaps = _dedupe([*failures, *live_mode_gaps])
     return {
         "claim_id": "live.evidence.provenance",
         "evidence_class": "runtime_evidence_provenance",
-        "status": "failed" if failures else "validated",
+        "status": "failed" if failures else ("not_validated" if live_mode_gaps else "validated"),
         "schema_version": public_safe_text(str(provenance.get("schema_version") or ""), max_chars=80),
         "collection_mode": collection_mode,
         "source": collection_mode,
-        "is_live": collection_mode in LIVE_EVIDENCE_COLLECTION_MODES,
-        "network_used_for_evidence": provenance.get("network_used") is True,
+        "is_live": live_mode and network_used_for_evidence,
+        "network_used_for_evidence": network_used_for_evidence,
         "mutation_scope": mutation_scope,
         "redaction_check": redaction_check,
-        "gaps": failures,
+        "gaps": gaps,
     }
 
 
