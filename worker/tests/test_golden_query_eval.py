@@ -650,6 +650,27 @@ def test_product_activation_progress_keeps_p6_gap_when_rollup_evidence_is_not_li
     assert "p6_session_project_rollup_evidence_not_live" in checks["P6"]["gaps"]
 
 
+def test_product_activation_progress_fails_p6_when_live_provenance_is_not_redacted():
+    evidence = _valid_p6_runtime_evidence(live=True)
+    evidence["evidence_provenance"] = {
+        **evidence["evidence_provenance"],
+        "raw_private_evidence_returned": True,
+    }
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p6 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P6")
+
+    assert report["status"] == "FAIL"
+    assert checks["P6"]["result"] == "FAIL"
+    assert p6["rollup_claim_status"] == "validated"
+    assert p6["evidence_is_live"] is True
+    assert p6["evidence_provenance_status"] == "failed"
+    assert "p6_runtime_readiness_failed" in checks["P6"]["failures"]
+    assert "p6_evidence_provenance_failed" in checks["P6"]["failures"]
+
+
 def test_product_evidence_summary_fails_when_p8_source_commit_mismatches_pr_head():
     progress = build_product_activation_progress_report()
     evidence = [
