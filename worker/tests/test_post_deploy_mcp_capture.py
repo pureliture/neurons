@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_knowledge.cli import main
+from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
 from agent_knowledge.llm_brain_core.objects import object_cli
 from agent_knowledge.llm_brain_core.objects.post_deploy_mcp_capture import (
     collect_source_to_candidate_post_deploy_mcp_capture,
@@ -16,8 +17,51 @@ from agent_knowledge.llm_brain_core.objects.post_deploy_mcp_capture import (
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     EVIDENCE_PROVENANCE_SCHEMA,
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
+    REQUIRED_AGENT_CONTEXT_SECTIONS,
     REQUIRED_RUNTIME_TOOL_NAMES,
+    build_source_to_candidate_runtime_post_deploy_capture_readiness_report,
 )
+
+
+def _fake_agent_context_product(*, consumer: str = "codex") -> dict:
+    missing_evidence = ["runtime_evidence_unverified"]
+    return {
+        "schema_version": "agent_context_product_pack.v1",
+        "consumer": consumer,
+        "sections": {
+            name: {
+                "object_count": 1,
+                "items": [
+                    {
+                        "object_id": f"fixture:{name}",
+                        "object_type": "MemoryCard",
+                        "title": name,
+                        "authority_lane": name,
+                        "recommended_action": "read",
+                    }
+                ],
+                "authority_lanes": [name],
+                "gaps": [],
+            }
+            for name in REQUIRED_AGENT_CONTEXT_SECTIONS
+        },
+        "surface_policy": {
+            "consumer": consumer,
+            "read_only": True,
+            "mutation_allowed": False,
+            "allowed_actions": ["suggest_change", "run_verification", "request_missing_evidence"],
+            "property_omissions": ["raw_body", "raw_source", "private_deploy_value", "secret"],
+        },
+        "degraded_mode": {"active": True, "gaps": missing_evidence},
+        "freshness": {
+            "stale_evidence_visible": False,
+            "stale_memory_count": 0,
+            "no_recent_source": False,
+        },
+        "missing_evidence_before_promotion": missing_evidence,
+        "action_hints": [],
+        "tool_hints": object_native_review_tool_hints(missing_evidence),
+    }
 
 
 class _FakeMcpSession:
@@ -30,7 +74,10 @@ class _FakeMcpSession:
 
     async def list_tools(self):
         return SimpleNamespace(
-            tools=[SimpleNamespace(name=name) for name in REQUIRED_RUNTIME_TOOL_NAMES]
+            tools=[
+                SimpleNamespace(name=name)
+                for name in ("brain_context_resolve", *REQUIRED_RUNTIME_TOOL_NAMES)
+            ]
         )
 
     async def call_tool(self, name: str, arguments: dict):
@@ -43,6 +90,19 @@ class _FakeMcpSession:
                     "collection_mode": "post_deploy_read_only_smoke",
                     "network_used": False,
                     "production_mutation_performed": False,
+                },
+            )
+        if name == "brain_context_resolve":
+            return SimpleNamespace(
+                isError=False,
+                structuredContent={
+                    "schema_version": "llm_brain_context_resolve.v1",
+                    "authority": {
+                        "agent_context_product": _fake_agent_context_product(
+                            consumer=arguments.get("consumer", "codex")
+                        )
+                    },
+                    "private_context_not_returned": True,
                 },
             )
         route = str(arguments.get("route") or "")
@@ -104,8 +164,10 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
     assert seen_urls == ["https://mcp.example.test/mcp"]
     assert session.initialized is True
     assert capture["schema_version"] == "source_to_candidate_runtime_post_deploy_mcp_capture.v1"
-    assert set(capture["tool_names"]) == set(REQUIRED_RUNTIME_TOOL_NAMES)
+    assert set(REQUIRED_RUNTIME_TOOL_NAMES).issubset(set(capture["tool_names"]))
     assert capture["production_mutation_performed"] is False
+    assert capture["agent_context_product"] == _fake_agent_context_product(consumer="codex")
+    assert "private_context_not_returned" not in json.dumps(capture, sort_keys=True)
     assert capture["collection"] == {
         "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
         "collector": "source_to_candidate_post_deploy_mcp_capture",
@@ -138,10 +200,38 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
             "consumer": "codex",
         }
     ]
+    context_calls = [
+        arguments
+        for name, arguments in session.calls
+        if name == "brain_context_resolve"
+    ]
+    assert context_calls == [
+        {
+            "repository": "pureliture/neurons",
+            "branch": "main",
+            "current_files": [],
+            "current_request": (
+                "source-to-candidate runtime readiness post-deploy "
+                "agent context product capture"
+            ),
+            "limit": 8,
+            "response_mode": "full",
+            "consumer": "codex",
+        }
+    ]
     route_calls = [arguments for name, arguments in session.calls if name == "brain_objects_query"]
     assert [arguments["route"] for arguments in route_calls] == list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
     assert all(arguments["response_mode"] == "full" for arguments in route_calls)
     assert all(arguments["consumer"] == "codex" for arguments in route_calls)
+
+    report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=capture,
+        expected_commit="c2b8548",
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["live.agent_context.tool_hints"]["status"] == "validated"
+    assert claims["live.agent_context.product_sections"]["status"] == "validated"
+    assert report["production_ready"] is False
 
 
 def test_collect_post_deploy_mcp_capture_keeps_tool_errors_as_public_safe_gaps():
@@ -169,6 +259,34 @@ def test_collect_post_deploy_mcp_capture_keeps_tool_errors_as_public_safe_gaps()
     assert by_route["temporal_work_recall"]["collector_error_type"] == "McpToolError"
     assert by_route["temporal_work_recall"]["object_pack"]["gaps"] == ["collector_route_smoke_failed"]
     assert by_route["temporal_work_recall"]["production_mutation_performed"] is False
+
+
+def test_collect_post_deploy_mcp_capture_keeps_missing_agent_context_as_public_safe_gap():
+    class _MissingContextSession(_FakeMcpSession):
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "brain_context_resolve":
+                self.calls.append((name, dict(arguments)))
+                return SimpleNamespace(isError=True, structuredContent={})
+            return await super().call_tool(name, arguments)
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield _MissingContextSession()
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    product = capture["agent_context_product"]
+    assert product["schema_version"] == ""
+    assert product["surface_policy"]["mutation_allowed"] is False
+    assert product["missing_evidence_before_promotion"] == ["agent_context_product_capture_failed"]
+    assert product["collector_error_type"] == "McpToolError"
 
 
 def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, capsys, tmp_path):
