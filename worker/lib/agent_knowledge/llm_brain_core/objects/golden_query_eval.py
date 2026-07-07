@@ -34,7 +34,7 @@ REQUIRED_QUALITY_AXES = [
 
 ACTIVATION_SCOPE_PHASES = ("P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9")
 MINIMUM_REVIEW_LOOP_PHASES = ("P2", "P3", "P4")
-PRODUCT_EVIDENCE_PHASES = ("P2", "P6", "P7", "P8", "P9")
+PRODUCT_EVIDENCE_PHASES = ("P2", "P3", "P6", "P7", "P8", "P9")
 DEFERRED_SCOPE_GAPS = {
     "future_phase_golden_query_slices_planned",
     "future_phase_slices_planned",
@@ -580,11 +580,12 @@ def _activation_phase_progress(phase: str, coverage: Mapping[str, Any]) -> dict[
 
 def _product_evidence_summary() -> list[dict[str, Any]]:
     p2 = _p2_reference_corpus_evidence()
+    p3 = _p3_projection_join_evidence()
     p6 = _p6_session_project_rollup_evidence()
     p7 = _p7_preference_artifact_evidence()
     p8 = _p8_runtime_authority_evidence()
     p9 = _p9_agent_context_evidence(preference_preview=p7)
-    return [p2, p6, p7, p8, p9]
+    return [p2, p3, p6, p7, p8, p9]
 
 
 def _product_evidence_check(phase: str, evidence: Mapping[str, Any]) -> dict[str, Any]:
@@ -598,6 +599,9 @@ def _product_evidence_check(phase: str, evidence: Mapping[str, Any]) -> dict[str
     if phase == "P2" and evidence:
         failures.extend(_p2_evidence_failures(evidence))
         gaps.extend(_p2_evidence_gaps(evidence))
+    elif phase == "P3" and evidence:
+        failures.extend(_p3_evidence_failures(evidence))
+        gaps.extend(_p3_evidence_gaps(evidence))
     elif phase == "P6" and evidence:
         failures.extend(_p6_evidence_failures(evidence))
         gaps.extend(_p6_evidence_gaps(evidence))
@@ -651,6 +655,95 @@ def _p2_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
         for gap in evidence.get("gaps", [])
         if isinstance(gap, str) and gap
     ]
+
+
+def _p3_projection_join_evidence() -> dict[str, Any]:
+    from .runtime_readiness import build_source_to_candidate_runtime_readiness_report
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        expected_commit="e3f6296",
+    )
+    claims = {
+        str(item.get("claim_id") or ""): item
+        for item in report.get("claims", [])
+        if isinstance(item, Mapping)
+    }
+    projection = claims.get("live.source_to_candidate.projection_join", {})
+    projection_gaps = [
+        gap
+        for gap in projection.get("gaps", [])
+        if isinstance(gap, str) and gap
+    ]
+    status = _p3_projection_join_product_status(
+        projection_status=str(projection.get("status") or ""),
+        gaps=projection_gaps,
+    )
+    return {
+        "phase": "P3",
+        "schema_version": "source_to_candidate_projection_join_product_evidence.v1",
+        "status": status,
+        "golden_query_slice": "corpus-to-design concept extraction",
+        "runtime_readiness_schema": str(report.get("schema_version") or ""),
+        "runtime_readiness_status": str(report.get("status") or ""),
+        "projection_join_claim_id": str(projection.get("claim_id") or ""),
+        "projection_join_claim_status": str(projection.get("status") or ""),
+        "projection_join_edge_count": int(projection.get("edge_count") or 0),
+        "live_evidence_provided": bool(report.get("live_evidence_provided")),
+        "evidence_is_live": bool(report.get("evidence_is_live")),
+        "production_ready": bool(report.get("production_ready")),
+        "network_used": bool(report.get("network_used")),
+        "gaps": projection_gaps,
+        "production_mutation_performed": bool(report.get("production_mutation_performed")),
+    }
+
+
+def _p3_projection_join_product_status(*, projection_status: str, gaps: list[str]) -> str:
+    if projection_status == "failed":
+        return "FAIL"
+    if projection_status == "validated" and not gaps:
+        return "PASS"
+    return "PASS_WITH_GAPS"
+
+
+def _p3_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if evidence.get("schema_version") != "source_to_candidate_projection_join_product_evidence.v1":
+        failures.append("p3_schema_mismatch")
+    status = str(evidence.get("status") or "")
+    projection_status = str(evidence.get("projection_join_claim_status") or "")
+    if status == "FAIL" or projection_status == "failed":
+        failures.append("p3_projection_join_failed")
+    if status == "PASS" and projection_status != "validated":
+        failures.append("p3_projection_join_missing_for_pass")
+    if status == "PASS" and evidence.get("evidence_is_live") is not True:
+        failures.append("p3_live_evidence_missing_for_pass")
+    if projection_status == "validated" and int(evidence.get("projection_join_edge_count") or 0) < 1:
+        failures.append("p3_projection_join_edge_count_missing")
+    if status == "FAIL" and int(evidence.get("projection_join_edge_count") or 0) < 1:
+        failures.append("p3_projection_join_edge_count_missing")
+    for field, failure in (
+        ("raw_private_evidence_returned", "p3_projection_join_raw_private_evidence_returned"),
+        ("secret_returned", "p3_projection_join_secret_returned"),
+        ("host_topology_returned", "p3_projection_join_host_topology_returned"),
+        ("raw_external_ids_returned", "p3_projection_join_raw_external_ids_returned"),
+    ):
+        if bool(evidence.get(field)):
+            failures.append(failure)
+    return _dedupe(failures)
+
+
+def _p3_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    gaps = [
+        f"p3_{gap}"
+        for gap in evidence.get("gaps", [])
+        if isinstance(gap, str) and gap
+    ]
+    if (
+        evidence.get("projection_join_claim_status") == "validated"
+        and evidence.get("evidence_is_live") is not True
+    ):
+        gaps.append("p3_projection_join_evidence_not_live")
+    return gaps
 
 
 def _p6_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:

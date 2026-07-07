@@ -16,6 +16,20 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
 _REQUIRED_ROUTE_NAMES = list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
 
 
+def _valid_p3_projection_join_evidence():
+    return {
+        "phase": "P3",
+        "schema_version": "source_to_candidate_projection_join_product_evidence.v1",
+        "status": "PASS",
+        "projection_join_claim_status": "validated",
+        "projection_join_edge_count": 2,
+        "evidence_is_live": True,
+        "production_ready": False,
+        "gaps": [],
+        "production_mutation_performed": False,
+    }
+
+
 def test_golden_query_baseline_records_current_low_quality_failures():
     report = build_baseline_golden_query_report()
 
@@ -342,9 +356,11 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert "future_phase_golden_query_slices_planned" not in report["goal_completion_blockers"]
     assert "future_phase_slices_planned" not in report["goal_completion_blockers"]
     checks = {item["phase"]: item for item in report["product_evidence_checks"]}
-    assert set(checks) == {"P2", "P6", "P7", "P8", "P9"}
+    assert set(checks) == {"P2", "P3", "P6", "P7", "P8", "P9"}
     assert checks["P2"]["result"] == "PASS_WITH_GAPS"
     assert "p2_production_corpus_ingest_evidence_unverified" in checks["P2"]["gaps"]
+    assert checks["P3"]["result"] == "PASS_WITH_GAPS"
+    assert "p3_live_graph_qdrant_projection_join_unproven" in checks["P3"]["gaps"]
     assert checks["P6"]["result"] == "PASS_WITH_GAPS"
     assert "p6_live_multi_device_rollup_unproven" in checks["P6"]["gaps"]
     assert checks["P7"]["result"] == "PASS_WITH_GAPS"
@@ -364,9 +380,13 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert "p9_production_consumer_context_pack_live_unproven" in checks["P9"]["gaps"]
     assert "p9_consumer_action_surface_runtime_policy_unproven" in checks["P9"]["gaps"]
     evidence = {item["phase"]: item for item in report["product_evidence_summary"]}
-    assert set(evidence) == {"P2", "P6", "P7", "P8", "P9"}
+    assert set(evidence) == {"P2", "P3", "P6", "P7", "P8", "P9"}
     assert evidence["P2"]["schema_version"] == "reference_corpus_production_ingest_readiness.v1"
     assert evidence["P2"]["production_mutation_performed"] is False
+    assert evidence["P3"]["schema_version"] == "source_to_candidate_projection_join_product_evidence.v1"
+    assert evidence["P3"]["production_mutation_performed"] is False
+    assert evidence["P3"]["projection_join_claim_status"] == "not_validated"
+    assert "live_graph_qdrant_projection_join_unproven" in evidence["P3"]["gaps"]
     assert evidence["P6"]["schema_version"] == "object_extraction_session_project_rollup_preview.v1"
     assert evidence["P6"]["object_count"] >= 5
     assert evidence["P6"]["edge_count"] >= 6
@@ -575,6 +595,7 @@ def test_product_evidence_summary_fails_closed_when_required_phase_evidence_is_m
 
     assert result["status"] == "FAIL"
     assert "P2:product_evidence_missing" in result["hard_failures"]
+    assert "P3:product_evidence_missing" in result["hard_failures"]
     assert "P6:product_evidence_failed" in result["hard_failures"]
     assert "P7:product_evidence_missing" in result["hard_failures"]
     assert "P8:product_evidence_failed" in result["hard_failures"]
@@ -604,6 +625,72 @@ def test_product_evidence_summary_fails_when_p2_claims_pass_without_live_evidenc
     assert "p2_live_evidence_missing_for_pass" in checks["P2"]["failures"]
 
 
+def test_product_evidence_summary_tracks_p3_projection_join_as_first_class_gate():
+    progress = build_product_activation_progress_report()
+    evidence = [
+        {
+            **item,
+            "status": "PASS",
+            "projection_join_claim_status": "validated",
+            "projection_join_edge_count": 2,
+            "evidence_is_live": True,
+            "production_ready": False,
+            "gaps": [],
+        }
+        if item.get("phase") == "P3"
+        else item
+        for item in progress["product_evidence_summary"]
+    ]
+
+    result = evaluate_product_evidence_summary(evidence)
+
+    checks = {item["phase"]: item for item in result["checks"]}
+    assert result["status"] == "PASS_WITH_GAPS"
+    assert "P3:product_evidence_failed" not in result["hard_failures"]
+    assert checks["P3"]["result"] == "PASS"
+    assert checks["P3"]["failures"] == []
+    assert "p3_live_graph_qdrant_projection_join_unproven" not in checks["P3"]["gaps"]
+
+
+def test_product_evidence_summary_fails_when_p3_projection_join_is_unsafe():
+    progress = build_product_activation_progress_report()
+    evidence = [
+        {
+            **item,
+            "status": "FAIL",
+            "projection_join_claim_status": "failed",
+            "projection_join_edge_count": 0,
+            "evidence_is_live": True,
+            "production_mutation_performed": True,
+            "raw_private_evidence_returned": True,
+            "secret_returned": True,
+            "host_topology_returned": True,
+            "raw_external_ids_returned": True,
+            "gaps": [
+                "projection_join_edge_count_missing",
+                "projection_join_production_mutation_performed",
+                "projection_join_raw_private_evidence_returned",
+                "projection_join_secret_returned",
+                "projection_join_host_topology_returned",
+                "projection_join_raw_external_ids_returned",
+            ],
+        }
+        if item.get("phase") == "P3"
+        else item
+        for item in progress["product_evidence_summary"]
+    ]
+
+    result = evaluate_product_evidence_summary(evidence)
+
+    checks = {item["phase"]: item for item in result["checks"]}
+    assert result["status"] == "FAIL"
+    assert "P3:product_evidence_failed" in result["hard_failures"]
+    assert "p3_production_mutation_performed" in checks["P3"]["failures"]
+    assert "p3_projection_join_failed" in checks["P3"]["failures"]
+    assert "p3_projection_join_edge_count_missing" in checks["P3"]["failures"]
+    assert "p3_projection_join_raw_private_evidence_returned" in checks["P3"]["failures"]
+
+
 def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
     result = evaluate_product_evidence_summary(
         [
@@ -614,6 +701,7 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "production_mutation_performed": False,
                 "gaps": ["production_corpus_ingest_evidence_unverified"],
             },
+            _valid_p3_projection_join_evidence(),
             {
                 "phase": "P6",
                 "schema_version": "object_extraction_session_project_rollup_preview.v1",
