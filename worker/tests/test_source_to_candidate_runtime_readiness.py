@@ -40,6 +40,7 @@ def _sanitized_live_evidence(**overrides):
             _brain_objects_query_smoke("temporal_work_recall"),
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
+        "projection_join": _projection_join_runtime_evidence(),
         "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
         "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
         "preference_artifact_memory": _preference_artifact_memory_evidence(),
@@ -155,6 +156,25 @@ def _source_to_candidate_review_loop_evidence(**overrides):
             "authority_lane": "accepted_current",
             "object_count": 1,
         },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+    evidence.update(overrides)
+    return evidence
+
+
+def _projection_join_runtime_evidence(**overrides):
+    evidence = {
+        "schema_version": "object_extraction_projection_join_preview.v1",
+        "evidence_class": "runtime_projection_join",
+        "status": "pass",
+        "edge_count": 2,
+        "production_mutation_performed": False,
         "postcheck": {
             "status": "validated",
             "raw_private_evidence_returned": False,
@@ -555,6 +575,8 @@ def test_runtime_readiness_evidence_collection_plan_is_public_safe_and_read_only
     assert plan["collection_mode"] == "post_deploy_read_only_smoke"
     assert plan["required_tools"] == list(REQUIRED_RUNTIME_TOOL_NAMES)
     assert plan["required_routes"] == list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    assert "probe_projection_join_runtime" in plan["required_steps"]
+    assert plan["gap_mapping"]["probe_projection_join_runtime"] == "live_graph_qdrant_projection_join_unproven"
     assert "probe_source_to_candidate_review_loop" in plan["required_steps"]
     assert plan["gap_mapping"]["probe_source_to_candidate_review_loop"] == "live_source_to_candidate_review_loop_unverified"
     assert plan["shadow_collection_registration"] == {
@@ -652,6 +674,7 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
         "tool_names",
         "agent_context_product",
         "brain_objects_query_smokes",
+        "projection_join",
         "source_to_candidate_review_loop",
         "session_project_rollup_runtime",
         "preference_artifact_memory",
@@ -664,9 +687,15 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
         "evidence_provenance",
     ]
     assert template["packet_field_templates"]["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert "projection_join" in template["required_packet_fields"]
     assert "source_to_candidate_review_loop" in template["required_packet_fields"]
     assert "session_project_rollup_runtime" in template["required_packet_fields"]
     assert template["packet_field_templates"]["evidence_provenance"]["schema_version"] == EVIDENCE_PROVENANCE_SCHEMA
+    assert (
+        template["packet_field_templates"]["projection_join"]["schema_version"]
+        == "object_extraction_projection_join_preview.v1"
+    )
+    assert template["packet_field_templates"]["projection_join"]["production_mutation_performed"] is False
     assert (
         template["packet_field_templates"]["source_to_candidate_review_loop"]["schema_version"]
         == "source_to_candidate_review_loop_evidence.v1"
@@ -732,6 +761,19 @@ def test_runtime_readiness_shadow_evidence_normalizer_builds_public_safe_packet_
     )
 
 
+def test_runtime_readiness_shadow_evidence_normalizer_preserves_projection_join_evidence():
+    capture = _current_session_shadow_evidence_capture()
+    capture["projection_join"] = _projection_join_runtime_evidence(edge_count=4)
+
+    packet = build_source_to_candidate_runtime_shadow_evidence_packet(
+        captured_evidence=capture
+    )
+
+    assert packet["projection_join"]["schema_version"] == "object_extraction_projection_join_preview.v1"
+    assert packet["projection_join"]["edge_count"] == 4
+    assert packet["projection_join"]["production_mutation_performed"] is False
+
+
 def test_runtime_readiness_shadow_evidence_normalized_packet_evaluates_current_session_gaps():
     packet = build_source_to_candidate_runtime_shadow_evidence_packet(
         captured_evidence=_current_session_shadow_evidence_capture()
@@ -783,6 +825,7 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert claims["live.mcp.review_tools_loaded"]["status"] == "not_validated"
     assert claims["live.agent_context.tool_hints"]["status"] == "not_validated"
     assert claims["live.brain_objects_query.route_smokes"]["status"] == "not_validated"
+    assert claims["live.source_to_candidate.projection_join"]["status"] == "not_validated"
     assert claims["live.source_to_candidate.review_loop"]["status"] == "not_validated"
     assert claims["live.session_project.rollup"]["status"] == "not_validated"
     assert claims["live.preference_artifact.memory"]["status"] == "not_validated"
@@ -797,6 +840,7 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert claims["live.evidence.provenance"]["status"] == "not_validated"
     assert "live_mcp_review_tools_unverified" in report["gaps"]
     assert "live_brain_objects_query_route_smokes_unverified" in report["gaps"]
+    assert "live_graph_qdrant_projection_join_unproven" in report["gaps"]
     assert "live_source_to_candidate_review_loop_unverified" in report["gaps"]
     assert "live_session_project_rollup_unverified" in report["gaps"]
     assert "live_multi_device_rollup_unproven" in report["gaps"]
@@ -824,6 +868,8 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.agent_context.tool_hints"]["status"] == "validated"
     assert claims["live.agent_context.product_sections"]["status"] == "validated"
     assert claims["live.brain_objects_query.route_smokes"]["status"] == "validated"
+    assert claims["live.source_to_candidate.projection_join"]["status"] == "validated"
+    assert claims["live.source_to_candidate.projection_join"]["edge_count"] == 2
     assert claims["live.source_to_candidate.review_loop"]["status"] == "validated"
     assert claims["live.source_to_candidate.review_loop"]["candidate_count"] == 3
     assert claims["live.source_to_candidate.review_loop"]["authority_write_scope"] == "local_test"
@@ -883,9 +929,9 @@ def test_runtime_readiness_fails_when_session_project_rollup_runtime_is_unsafe_o
             postcheck={
                 "status": "validated",
                 "raw_private_evidence_returned": True,
-                "secret_returned": False,
+                "secret_returned": True,
                 "host_topology_returned": True,
-                "raw_external_ids_returned": False,
+                "raw_external_ids_returned": True,
             },
         )
     )
@@ -1006,9 +1052,9 @@ def test_runtime_readiness_fails_when_permission_sensitive_audit_is_unsafe_or_in
             postcheck={
                 "status": "validated",
                 "raw_private_evidence_returned": True,
-                "secret_returned": False,
+                "secret_returned": True,
                 "host_topology_returned": True,
-                "raw_external_ids_returned": False,
+                "raw_external_ids_returned": True,
             },
         )
     )
@@ -1745,6 +1791,38 @@ def test_runtime_readiness_fails_when_review_loop_smoke_returns_private_or_incom
     assert "source_to_candidate_review_loop_candidate_review_not_no_mutation" in report["gaps"]
     assert "source_to_candidate_review_loop_rejected_edits_present" in report["gaps"]
     assert "source_to_candidate_review_loop_raw_private_evidence_returned" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_projection_join_evidence_is_unsafe_or_incomplete():
+    evidence = _sanitized_live_evidence(
+        projection_join=_projection_join_runtime_evidence(
+            status="pass",
+            edge_count=0,
+            production_mutation_performed=True,
+            postcheck={
+                "status": "validated",
+                "raw_private_evidence_returned": True,
+                "secret_returned": True,
+                "host_topology_returned": True,
+                "raw_external_ids_returned": True,
+            },
+        )
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    projection = claims["live.source_to_candidate.projection_join"]
+    assert projection["status"] == "failed"
+    assert projection["production_mutation_performed"] is True
+    assert report["production_mutation_performed"] is True
+    assert "projection_join_edge_count_missing" in report["gaps"]
+    assert "projection_join_production_mutation_performed" in report["gaps"]
+    assert "projection_join_raw_private_evidence_returned" in report["gaps"]
+    assert "projection_join_secret_returned" in report["gaps"]
+    assert "projection_join_host_topology_returned" in report["gaps"]
+    assert "projection_join_raw_external_ids_returned" in report["gaps"]
 
 
 def test_runtime_readiness_fails_on_unexpected_production_mutation():
