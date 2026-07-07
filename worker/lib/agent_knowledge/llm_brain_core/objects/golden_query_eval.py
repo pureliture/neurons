@@ -667,6 +667,12 @@ def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
         failures.append("p8_runtime_evidence_collection_plan_missing")
     if evidence.get("runtime_evidence_collection_plan_status") != "ready":
         failures.append("p8_runtime_evidence_collection_plan_not_ready")
+    if evidence.get("runtime_authority_bounded_execution_demote_step_required") is not True:
+        failures.append("p8_runtime_authority_demote_step_gate_missing")
+    if evidence.get("runtime_authority_bounded_execution_required_demote_step") != (
+        "demote_prior_object_to_accepted_non_current_or_archive_only"
+    ):
+        failures.append("p8_runtime_authority_demote_step_name_missing")
     if bool(evidence.get("runtime_evidence_collection_plan_network_used")):
         failures.append("p8_runtime_evidence_collection_plan_used_network")
     if bool(evidence.get("runtime_evidence_collection_plan_mutation_allowed")):
@@ -1095,6 +1101,10 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         "permission": str(permission.get("permission") or ""),
         "permission_reason": str(permission.get("reason") or ""),
         "authority_write_performed": bool(permission.get("authority_write_performed")),
+        "runtime_authority_bounded_execution_required_demote_step": (
+            "demote_prior_object_to_accepted_non_current_or_archive_only"
+        ),
+        "runtime_authority_bounded_execution_demote_step_required": True,
         "runtime_evidence_collection_plan_schema": str(collection_plan.get("schema_version") or ""),
         "runtime_evidence_collection_plan_status": str(collection_plan.get("status") or ""),
         "runtime_evidence_collection_plan_required_step_count": len(collection_plan.get("required_steps") or []),
