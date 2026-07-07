@@ -561,9 +561,21 @@ def golden_query_eval_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--phase-coverage", action="store_true")
     parser.add_argument("--source-to-authority-gate", action="store_true")
     parser.add_argument("--activation-progress", action="store_true")
+    parser.add_argument("--live-evidence-file", default="")
+    parser.add_argument("--post-deploy-capture-file", default="")
     args = parser.parse_args(argv)
     if args.activation_progress:
-        _print_json(build_product_activation_progress_report())
+        live_evidence = None
+        if args.live_evidence_file:
+            live_evidence = _load_json_mapping(args.live_evidence_file, label="live evidence")
+        if args.post_deploy_capture_file:
+            live_evidence = build_source_to_candidate_runtime_post_deploy_capture_packet(
+                captured_evidence=_load_json_mapping(
+                    args.post_deploy_capture_file,
+                    label="post-deploy capture",
+                ),
+            )
+        _print_json(build_product_activation_progress_report(live_evidence=live_evidence))
         return 0
     if args.source_to_authority_gate:
         _print_json(build_source_to_authority_quality_gate_report())
