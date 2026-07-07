@@ -4,13 +4,13 @@
 
 `PASS_WITH_GAPS`
 
-Local implementation, package-level contracts, MCP dispatch tests, CLI smoke tests, production-denial safety gates는 통과했습니다.
+Local implementation, package-level contracts, MCP dispatch tests, CLI smoke tests, production-denial safety gates, and post-#111 deployed/configured route activation smokes는 통과했습니다.
 
-P1 live production activation follow-up는 deployed HTTP MCP runtime 및 user-level configured endpoint를 검증했습니다: object-native read/proposal tools 일부가 노출되고, production proposal/decision calls는 mutation 없이 deny됩니다. 남은 gaps는 분리되어 있습니다: current Codex-session `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 source-delivered source/review/readiness tools는 아직 live MCP runtime에서 증명되지 않았으며, live MCP image가 post-#107 `main` source를 포함하는지는 증명되지 않았습니다.
+P1 live production activation follow-up는 deployed HTTP MCP runtime 및 user-level configured endpoint를 재검증했습니다. PR #111 source fix와 neurons-ops PR #11 desired-state update 이후, deployed/configured `brain_objects_query` six-route read-only smokes는 모두 `brain_objects_query.v1` / `object_pack.v1`을 반환했고 `object_pack_route_not_implemented`나 sanitized internal error로 fallback하지 않았습니다. 남은 gaps는 분리되어 있습니다: source-delivered source/review/readiness tools는 아직 live MCP runtime에서 증명되지 않았고, authority overlay schema는 live DB에서 아직 unavailable로 보고되며, production readiness claim은 P2/P6/P7/P8/P9 live evidence가 더 필요합니다.
 
-PR #73 및 ops deploy-button merge 이후의 이전 recheck는 P1 object-tool availability를 뒷받침하는 historical evidence입니다. PR #95는 2026-07-07에 merge commit `32f4fec`로 `main`에 merged 되었고, PR #97는 2026-07-07에 merge commit `de62106`으로 post-merge roadmap/report source state를 정정한 source/docs-only patch입니다. 이후 PR #103, PR #105, PR #107을 통해 source-side post-deploy capture aliasing, post-deploy capture product evidence gating, P6/P7/P9 product evidence gap surfacing이 merge되었습니다. 현재 recheck 상태는 `PASS_WITH_GAPS`로 유지됩니다: 2026-07-08 KST post-#107 current Codex-session `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 required 6-route smoke가 모두 `object_pack_route_not_implemented`를 반환했습니다. Post-#107 live MCP image identity 및 route behavior는 여전히 unproven 상태입니다.
+PR #73 및 ops deploy-button merge 이후의 이전 recheck는 P1 object-tool availability를 뒷받침하는 historical evidence입니다. PR #95는 2026-07-07에 merge commit `32f4fec`로 `main`에 merged 되었고, PR #97는 2026-07-07에 merge commit `de62106`으로 post-merge roadmap/report source state를 정정한 source/docs-only patch입니다. 이후 PR #103, PR #105, PR #107을 통해 source-side post-deploy capture aliasing, post-deploy capture product evidence gating, P6/P7/P9 product evidence gap surfacing이 merge되었습니다. PR #111은 2026-07-08에 merge commit `d4f121b`로 authority overlay schema gap에서도 object query read path가 fail-open하도록 고쳤고, Jenkins build #18은 source `d4f121bf32c4`에서 MCP HTTP image tag `sha-d4f121bf32c4`를 만들었습니다. neurons-ops PR #11은 desired production image를 `sha-d4f121bf32c4`로 갱신했고 merge commit `901579a`로 Argo production desired state에 반영되었습니다. 현재 recheck 상태는 `PASS_WITH_GAPS`입니다: live rollout/healthz and route activation은 통과했지만 deploy script의 pod-IP `toolsList` transport check는 `gap`으로 남았고, authority overlay schema 및 broader P2/P6/P7/P8/P9 runtime evidence gaps가 남아 있습니다.
 
-PR #95 source-to-candidate activation continuation은 local/test product surface를 P6-P9까지 확장했으며, post-deploy sanitized evidence packet을 평가하는 `source-to-candidate-runtime-readiness` CLI와 `brain_source_to_candidate_runtime_readiness` MCP tool을 source repo에 추가했습니다. 같은 surface는 `source_to_candidate_runtime_evidence_packet_template.v1` packet template도 반환해 external post-deploy runner가 채울 public-safe evidence shape를 제공합니다. 이번 slice는 `--collect-shadow-evidence` / `collect_shadow_evidence=true`를 확장해 branch-local read-only route smokes, local_test source-to-candidate review-loop smoke, local_test P6 session/project/work-unit rollup smoke, local_test P7 preference/artifact memory smoke, local_test P8 permission-sensitive audit smoke, 및 local_test P9 startup/read-path smoke를 evaluator-ready `source_to_candidate_runtime_evidence.v1` packet으로 만들 수 있게 했습니다. 이 collector packet은 `collector_packet_not_live_evidence`, `network_used=false`, `production_mutation_performed=false`를 유지하며 live deployed proof로 승격하지 않습니다. PR #95는 source head `5c301c6`, merge commit `32f4fec`로 merged 되었고, review-follow-up commit `0c70111`이 production gate/type validation 및 corpus ingest approval hash validation을 보강했습니다. Branch-local `neuron-knowledge object-query` CLI도 MCP `brain_objects_query`와 같은 route-aware read-side contract를 사용합니다. Local activation progress는 `product_evidence_status=PASS_WITH_GAPS`로 유지됩니다: P6/P7/P8/P9 product evidence checks는 이제 `p6_live_multi_device_rollup_unproven`, `p7_accepted_preference_context_pack_live_unproven`, `p7_html_artifact_review_live_unproven`, `p8_runtime_evidence_unverified`, `p9_runtime_evidence_unverified`, `p9_production_consumer_context_pack_live_unproven`, `p9_consumer_action_surface_runtime_policy_unproven`을 포함한 live gaps를 보존합니다. Current Codex-session LBrain MCP read path는 `brain_objects_query`를 호출할 수 있지만 post-#107 six-route smoke가 모두 `object_pack_route_not_implemented`를 반환했고, source-delivered source/review/readiness MCP tools와 CLI route parity source는 아직 live MCP image/current session callable registry에 반영되었다고 증명되지 않았습니다. 이 command/tool smoke는 production mutation을 수행하지 않습니다.
+PR #95 source-to-candidate activation continuation은 local/test product surface를 P6-P9까지 확장했으며, post-deploy sanitized evidence packet을 평가하는 `source-to-candidate-runtime-readiness` CLI와 `brain_source_to_candidate_runtime_readiness` MCP tool을 source repo에 추가했습니다. 같은 surface는 `source_to_candidate_runtime_evidence_packet_template.v1` packet template도 반환해 external post-deploy runner가 채울 public-safe evidence shape를 제공합니다. 이번 slice는 `--collect-shadow-evidence` / `collect_shadow_evidence=true`를 확장해 branch-local read-only route smokes, local_test source-to-candidate review-loop smoke, local_test P6 session/project/work-unit rollup smoke, local_test P7 preference/artifact memory smoke, local_test P8 permission-sensitive audit smoke, 및 local_test P9 startup/read-path smoke를 evaluator-ready `source_to_candidate_runtime_evidence.v1` packet으로 만들 수 있게 했습니다. 이 collector packet은 `collector_packet_not_live_evidence`, `network_used=false`, `production_mutation_performed=false`를 유지하며 live deployed proof로 승격하지 않습니다. PR #95는 source head `5c301c6`, merge commit `32f4fec`로 merged 되었고, review-follow-up commit `0c70111`이 production gate/type validation 및 corpus ingest approval hash validation을 보강했습니다. Branch-local `neuron-knowledge object-query` CLI도 MCP `brain_objects_query`와 같은 route-aware read-side contract를 사용합니다. Local activation progress는 `product_evidence_status=PASS_WITH_GAPS`로 유지됩니다: P6/P7/P8/P9 product evidence checks는 이제 `p6_live_multi_device_rollup_unproven`, `p7_accepted_preference_context_pack_live_unproven`, `p7_html_artifact_review_live_unproven`, `p8_runtime_evidence_unverified`, `p9_runtime_evidence_unverified`, `p9_production_consumer_context_pack_live_unproven`, `p9_consumer_action_surface_runtime_policy_unproven`을 포함한 live gaps를 보존합니다. Current Codex-session LBrain MCP read path now returns implemented object packs for all six required `brain_objects_query` routes after the #111/#11 rollout, but source-delivered source/review/readiness MCP tools and broader P6-P9 runtime evidence are still not proven in the current session callable registry. 이 command/tool smoke는 production mutation을 수행하지 않습니다.
 
 이번 continuation은 FR8 `code_change_impact` branch-local route를 추가했습니다. 해당 route는 "이 파일 바꾸면 어떤 테스트/런타임 영향 있어?"류 질문을 `RepoFile`, `VerificationCommand`, `RuntimeSurface`, `McpTool` object pack과 `validated_by`, `requires_live_evidence`, `exposes_tool` edges로 반환하고, `live_runtime_impact_unverified`, `source_freshness_unverified`, `production_mutation_forbidden` gaps를 유지합니다. 이는 local/branch evidence이며, deployed MCP image나 live runtime route proof로 승격하지 않았습니다.
 
@@ -30,7 +30,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 이번 continuation은 P9 runtime readiness에 `live.agent_context.startup_read_path` claim도 추가했습니다. 이 claim은 sanitized `agent_context_startup_runtime_evidence.v1` packet에서 startup-loaded agent context product, required sections, mutation-disabled surface policy, read-only `brain_objects_query` route smoke, no direct execution, no production mutation, raw-private context blocking, approval-scope enforcement, degraded/stale disclosure, and public-safe postcheck를 검증합니다. Evidence packet이 없으면 `live_agent_context_startup_unverified` 및 `production_startup_read_path_unproven` gaps를 반환하고, unsafe startup/read-path/runtime enforcement evidence는 fail-closed 처리합니다. 이는 branch-local evaluator gate이며 live P9 startup/read-path proof 자체가 아닙니다.
 
-Latest current-session configured MCP read-path packet evaluation populated the public-safe evidence template from direct `mcp__lbrain.brain_objects_query` calls and then evaluated it with source-delivered runtime readiness. Result: `status=PASS_WITH_GAPS`, `failed_claims=[]`, `live_evidence_provided=true`, `evidence_is_live=true`, `production_ready=false`, `production_mutation_performed=false`, evaluator `network_used=false`, and evidence-side `evidence_collection_network_used=true`. Route smoke gaps are explicit: 2026-07-08 KST post-#107 read-only smokes for all six required routes returned `object_pack_route_not_implemented`; after adding source-side CLI/MCP matrix guards, the configured `mcp__lbrain.brain_objects_query` recheck still returned `object_pack_route_not_implemented` for all six routes. Local collector smoke still generates a local `source_to_candidate_runtime_evidence.v1` packet whose route-smoke claim validates with `failed_claims=[]`, but that packet uses `collection_mode=local_test_replay` and `collector_packet_not_live_evidence`, so it does not close deployed/live proof. Remaining gaps include missing source-delivered source/review/readiness tools in live MCP, missing live agent-context sections, expected post-#107 source/image identity unverified, production-denial smokes unverified, and bounded production authority execution unverified. This is current read-path evidence of the gap plus local collector readiness, not production readiness.
+Latest current-session configured MCP read-path recheck was repeated after PR #111 and neurons-ops PR #11. Result: each required route returned `brain_objects_query.v1` with `object_pack.v1`, the requested route matched, no `object_pack_route_not_implemented` gap was returned, no sanitized internal error was returned, and `production_mutation_performed=false`. This closes the P1 six-route object-pack activation proof for the deployed/configured read path, but it does not make the product production-ready: authority overlay schema availability, source/review/readiness tool exposure, live agent-context sections, production-denial smokes for source-to-candidate tools, bounded production authority execution, and P2/P6/P7/P8/P9 runtime evidence remain gaps.
 
 ## Validated
 
@@ -240,12 +240,15 @@ Latest current-session configured MCP read-path packet evaluation populated the 
 ### lbrain.current-read-path
 
 - status: `validated`
-- evidence: LBrain MCP `memory_authority_pack_read(repository=pureliture/neurons)` and current-session six-route `brain_objects_query` smoke for `repository=pureliture/neurons`, `branch=main`
+- evidence: current-session six-route `brain_objects_query` smoke for `repository=pureliture/neurons`, `branch=main`, repeated after PR #111 source merge and neurons-ops PR #11 rollout
 - result:
   - accepted/current authority pack count: 7
   - current authority includes live mutation requiring separate gates
-  - `brain_objects_query` is callable in the current Codex session; retry-normalized route smokes for all six required routes returned `object_pack_route_not_implemented`
-  - runtime evidence remains `runtime_evidence_unverified`
+  - `brain_objects_query` is callable in the current Codex session
+  - all six required routes returned `brain_objects_query.v1` / `object_pack.v1` with the requested route matched
+  - no route returned `object_pack_route_not_implemented` or sanitized internal error
+  - route responses remained read-only with `production_mutation_performed=false`
+  - remaining route gaps include public-safe missing-evidence ids such as `authority_state_overlay_unavailable`, `context_authority_object_pack_empty`, `accepted_html_preference_missing`, `visualization_preference_missing`, `runtime_evidence_unverified`, `live_runtime_impact_unverified`, `source_freshness_unverified`, and `production_mutation_forbidden`
 
 ### live.production.http-mcp-object-tools-loaded
 
@@ -274,14 +277,16 @@ Latest current-session configured MCP read-path packet evaluation populated the 
 
 ### live.production.deployed-version-identity
 
-- status: `validated_for_object_tools` / `gap_for_current_main_identity`
-- evidence: redacted deployed MCP image identity check, Git ancestry check, source main check, and latest GitOps desired-state recheck.
+- status: `validated_for_post_111_mcp_http_route_fix` / `PASS_WITH_GAPS`
+- evidence: source merge, Jenkins image build, GitOps desired-state update, production sync, live deployment image tag, and route smokes.
 - result:
-  - public source `origin/main` contains PR #73.
-  - redacted private evidence showed the deployed MCP image identity was sufficient for object-tool availability, but not sufficient to prove current-source-main/#73 identity.
-  - latest desired-state recheck still did not provide current-source-main MCP image identity.
-  - this public report intentionally omits raw ops revision, live image identity, and runtime-status values; those belong in `neurons-ops` or private evidence storage.
-  - current shell could not directly re-read live runtime controller status, so desired-state evidence was not upgraded into a live rollout identity claim.
+  - public source `origin/main` contains PR #111 merge commit `d4f121b`.
+  - Jenkins build #18 produced MCP HTTP image tag `sha-d4f121bf32c4` from source `d4f121bf32c4`.
+  - neurons-ops PR #11 updated the production desired image to `sha-d4f121bf32c4` and merged at `901579a`.
+  - production sync reported Argo `Synced/Healthy`, rollout passed, and healthz passed.
+  - the live deployment reports image tag `sha-d4f121bf32c4`, ready replica count 1, and restart count 0.
+  - deploy-script `toolsList=gap` remains a transport gap in that script's pod-IP check; a cluster-internal probe separately verified the live MCP tools list.
+  - this public report intentionally omits raw host topology, secret material, raw private evidence, and raw external dataset/document ids.
 
 ## Denied As Expected
 
@@ -311,15 +316,15 @@ Latest current-session configured MCP read-path packet evaluation populated the 
   - local Codex MCP allowlist source has been updated to include object-native tool names.
   - standalone smoke against the configured endpoint exposes and calls object-native tools successfully.
   - current Codex `mcp__lbrain` callable namespace can call `brain_objects_query`.
-  - current Codex `mcp__lbrain.brain_objects_query` retry-normalized six-route smoke returned `object_pack_route_not_implemented` for all required routes.
+  - post-#111 current Codex `mcp__lbrain.brain_objects_query` six-route smoke returned implemented object packs for all required routes.
   - branch-local `brain_source_to_candidate_graph`, `brain_candidate_review_edit`, `brain_approval_board_decide`, and `brain_source_to_candidate_runtime_readiness` are not callable from the current session namespace.
 
 ### configured.codex-mcp.runtime-verified-answers
 
-- status: `not_validated`
-- reason: `current_session_route_and_source_tool_gaps`
-- evidence: configured Codex namespace can now run `brain_objects_query`, but 2026-07-08 KST post-#107 read-only smokes for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, `code_change_impact`, `html_visualization_preference`, and `deployment_runtime_truth` returned `object_pack_route_not_implemented`, and the source-delivered source/review/readiness tools are not loaded in this session.
-- interpretation: this is treated as deployment/read-path lag when the evidence packet does not prove the expected source commit is deployed. The runtime-readiness evaluator still exposes `brain_objects_query_route_unimplemented:deployment_runtime_truth` and `shadow_route_smoke_not_implemented:deployment_runtime_truth`; if a packet claims the expected commit is deployed while the route still returns the fallback gap, the claim is `FAIL`.
+- status: `PASS_WITH_GAPS`
+- reason: `route_activation_validated_broader_runtime_answers_unvalidated`
+- evidence: configured Codex namespace can now run `brain_objects_query`, and post-#111 read-only smokes for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, `code_change_impact`, `html_visualization_preference`, and `deployment_runtime_truth` all returned `brain_objects_query.v1` / `object_pack.v1` without `object_pack_route_not_implemented`; source-delivered source/review/readiness tools are still not loaded in this session.
+- interpretation: route activation is proven for the configured read path, but answer quality and production readiness remain `PASS_WITH_GAPS` because the returned packs still carry explicit missing-evidence gaps and the broader source-to-candidate/P6/P7/P8/P9 runtime evidence packets are not supplied.
 
 ### live.production.pr95-source-inclusion
 
@@ -350,13 +355,15 @@ Latest current-session configured MCP read-path packet evaluation populated the 
 ### live.production.brain-objects-query-route-smokes
 
 - status: `PASS_WITH_GAPS`
-- reason: `configured_read_path_route_smokes_do_not_return_object_packs`
+- reason: `route_activation_validated_authority_overlay_and_runtime_evidence_gaps_remain`
 - evidence:
   - local readiness report expects read-only live `brain_objects_query` smoke for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, `code_change_impact`, `html_visualization_preference`, and `deployment_runtime_truth`.
-  - current Codex-session `mcp__lbrain.brain_objects_query` was called read-only for all six required routes.
-  - initial `authority_archive_separation` call returned a sanitized internal error, then retry returned a public-safe `brain_objects_query.v1` envelope.
-  - retry-normalized smokes for all six required routes returned `object_pack_route_not_implemented`.
-  - source-delivered source/review/readiness tools and deployed post-#107 source/image identity remain unproven in live MCP, so this does not close production readiness.
+  - post-#111 deployed cluster-internal probe and current Codex-session `mcp__lbrain.brain_objects_query` were called read-only for all six required routes.
+  - all six routes returned `brain_objects_query.v1` / `object_pack.v1` with the requested route matched.
+  - no call returned `object_pack_route_not_implemented` or sanitized internal error.
+  - responses reported `production_mutation_performed=false`.
+  - remaining route gaps include `authority_state_overlay_unavailable` on routes that need the live authority overlay, plus expected domain gaps such as missing accepted HTML preference, runtime evidence, source freshness, and production mutation forbiddance.
+  - source-delivered source/review/readiness tools, P6/P7/P8/P9 live evidence, and bounded production authority execution remain unproven in live MCP, so this does not close production readiness.
 
 ### live.production.source-to-candidate-denial-smokes
 
@@ -368,26 +375,27 @@ Latest current-session configured MCP read-path packet evaluation populated the 
 
 ### live.production.current-main-image-identity
 
-- status: `not_validated`
-- reason: `live_mcp_image_not_current_source_main`
+- status: `validated_for_post_111_route_fix` / `PASS_WITH_GAPS`
+- reason: `post_111_image_deployed_broader_product_readiness_unvalidated`
 - evidence:
-  - public source `origin/main` includes PR #107 merge commit `fa42134`.
-  - redacted live MCP image proof remains below post-#107 current-source-main identity.
-  - latest GitOps desired-state recheck still does not show a post-#107 current-source-main MCP image.
-  - direct live runtime controller status could not be re-read from this shell, so no stronger live rollout identity evidence was captured.
-  - this does not invalidate the object-native P1 tool proof, but it prevents claiming that the post-#107 current-main source is deployed in MCP.
+  - public source `origin/main` includes PR #111 merge commit `d4f121b`.
+  - Jenkins build #18 tied MCP HTTP image tag `sha-d4f121bf32c4` to source `d4f121bf32c4`.
+  - neurons-ops desired state merge `901579a` points production MCP HTTP at image tag `sha-d4f121bf32c4`.
+  - production rollout/healthz passed, and live deployment status reports the same image tag with no restart regression.
+  - cluster-internal tools/list and six-route probes pass.
+  - this validates the image/source identity needed for the #111 route fix; it does not validate P2 corpus ingest, P6 multi-device rollup, P7 accepted preference context, P8 bounded production authority execution, or P9 startup/read-path runtime enforcement.
 
 ### live.current-session.shadow-evidence-packet
 
 - status: `PASS_WITH_GAPS`
 - evidence:
   - current Codex-session `mcp__lbrain.brain_objects_query` was called read-only for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, `code_change_impact`, `html_visualization_preference`, and `deployment_runtime_truth`.
-  - 2026-07-08 KST post-#107 recheck calls returned public-safe `brain_objects_query.v1` envelopes for all six routes.
-  - all six required routes returned `object_pack_route_not_implemented`.
-  - a sanitized `source_to_candidate_runtime_evidence.v1` packet was evaluated locally with expected post-#107 source/image identity left unproven.
-  - source-delivered normalizer `build_source_to_candidate_runtime_shadow_evidence_packet` and CLI/MCP surfaces can now turn that sanitized shadow capture shape into reusable `source_to_candidate_runtime_evidence.v1` packet input without network calls or mutation.
-  - source-delivered evaluator `build_source_to_candidate_runtime_shadow_readiness_report`, CLI `--shadow-evidence-file`, and MCP `shadow_evidence` can now normalize and evaluate the same sanitized capture in one read-only step.
-  - source-delivered post-deploy capture aliases `--normalize-post-deploy-capture-file`, `--post-deploy-capture-file`, MCP `normalize_post_deploy_capture`, and MCP `post_deploy_capture` route the same sanitized capture through the fail-closed normalizer/evaluator without production mutation.
+  - 2026-07-08 KST post-#107 recheck calls originally returned public-safe `brain_objects_query.v1` envelopes with `object_pack_route_not_implemented`; this historical route gap was superseded by PR #111 and neurons-ops PR #11.
+  - post-#111 recheck calls returned implemented object packs for all six routes and no sanitized internal error.
+  - a sanitized `source_to_candidate_runtime_evidence.v1` packet shape can be evaluated locally, but the latest direct route proof is not the same as a complete P2-P9 production readiness packet.
+  - source repo normalizer `build_source_to_candidate_runtime_shadow_evidence_packet` and source-delivered CLI/MCP code paths can turn that sanitized shadow capture shape into reusable `source_to_candidate_runtime_evidence.v1` packet input without network calls or mutation.
+  - source repo evaluator `build_source_to_candidate_runtime_shadow_readiness_report`, CLI `--shadow-evidence-file`, and MCP `shadow_evidence` code paths can normalize and evaluate the same sanitized capture in one read-only step.
+  - source repo post-deploy capture aliases `--normalize-post-deploy-capture-file`, `--post-deploy-capture-file`, MCP `normalize_post_deploy_capture`, and MCP `post_deploy_capture` route the same sanitized capture through the fail-closed normalizer/evaluator without production mutation; this does not mean those MCP tools are callable in the current session.
 - result:
   - `failed_claims=[]`
   - `live_evidence_provided=true`
@@ -398,17 +406,18 @@ Latest current-session configured MCP read-path packet evaluation populated the 
   - P7 preference/artifact gaps include `live_preference_artifact_memory_unverified` and `accepted_preference_context_pack_live_unproven`
   - P8 audit gaps include `permission_sensitive_audit_unverified`
   - P9 startup/read-path gaps include `live_agent_context_startup_unverified` and `production_startup_read_path_unproven`
-  - route gaps include unimplemented object-pack routes for all six required routes
+  - route activation gap is closed for six required `brain_objects_query` routes
+  - remaining route/output gaps include authority overlay availability and expected missing-evidence/domain gaps
   - `production_mutation_performed=false`
   - evaluator `network_used=false`
   - evidence-side `evidence_collection_network_used=true`
   - evidence provenance redaction check is `redacted_only`
-- interpretation: this normalized packet/report proves the current configured read path is still behind the post-#107 source route/tool contract. It does not prove #107 is deployed, and it does not mutate production ledger, corpus, graph, or runtime state.
+- interpretation: the configured read path is no longer behind the six-route object-pack contract, but the normalized packet/report still cannot be promoted to production readiness without source/review/readiness tool exposure, P6/P7/P8/P9 live evidence, and bounded production authority execution evidence. It does not mutate production ledger, corpus, graph, or authority state.
 
 ## Gaps
 
-- Current Codex session's `mcp__lbrain` read path can call `brain_objects_query`, but source-delivered source/review/readiness tools must be deployed/reloaded before P3/P4/P9 runtime-readiness claims can be runtime-verified.
-- P1/P6/P7/P8/P9 remain `PASS_WITH_GAPS` until live `brain_objects_query` route smokes return implemented object packs for authority/archive, style/preference, temporal work recall, code-change impact, HTML/visualization preference, and deployment/runtime truth, until a live `session_project_rollup_runtime` packet validates P6 multi-device rollup evidence, and until a live `preference_artifact_memory` packet validates P7 preference/artifact memory evidence.
+- Current Codex session's `mcp__lbrain` read path can call `brain_objects_query`, and six required routes now return implemented object packs. Source-delivered source/review/readiness tools still must be deployed/reloaded before P3/P4/P9 runtime-readiness claims can be runtime-verified.
+- P1 six-route read activation is validated, but P1/P6/P7/P8/P9 remain `PASS_WITH_GAPS` until authority overlay schema availability is closed, a live `session_project_rollup_runtime` packet validates P6 multi-device rollup evidence, and a live `preference_artifact_memory` packet validates P7 preference/artifact memory evidence.
 - P8 evidence packet template is branch-local handoff metadata only. It remains `template_only_not_runtime_evidence`; the latest current-session packet populated from the configured read path validates the gap state, and the branch-local normalizer/evaluator makes that packet shape reusable, but it is not a passing deployed-readiness packet.
 - P8 post-deploy capture aliases are source-side handoff ergonomics only. They reduce the chance that an ops runner has to use branch-local `shadow` wording, but they still require sanitized live route smokes, deployed identity, provenance, and no-mutation proof before any `PASS` claim.
 - P8 product evidence gate now records post-deploy capture alias packet/report metadata and fails closed if that alias claims production readiness, skips network-use provenance for post-deploy mode, or reports production mutation.
@@ -422,8 +431,8 @@ Latest current-session configured MCP read-path packet evaluation populated the 
 - P8 bounded production authority execution has branch-local/sanitized packet validation, including protected-output postcheck rejection, but it remains a gap for production readiness until a deployed/live execution packet with postcheck and rollback/supersession evidence is attached.
 - P2 bounded production corpus ingest has branch-local/sanitized packet validation, but it remains a gap for production readiness until a deployed/live corpus-ingest packet with approval, read-after-write, rollback/deletion, postcheck, and provenance evidence is attached.
 - Post-deploy runtime readiness evidence must include sanitized provenance. Missing provenance is a validation failure for injected evidence packets, and missing live evidence remains `PASS_WITH_GAPS`.
-- Live MCP image identity must move to a source revision containing PR #107 before claiming the current source-to-candidate activation and product-evidence gap-surfacing contract is deployed in MCP.
-- Direct live Kubernetes/Argo status access must be available, or equivalent redacted live evidence must be supplied, before desired-state GitOps evidence is described as live rollout evidence.
+- Live MCP image identity now includes the PR #111 route fix, but source-to-candidate review/readiness tools and P6-P9 production-runtime evidence remain unproven.
+- Deploy-script `toolsList=gap` remains a script transport gap; cluster-internal tools/list probe supplies the runtime tool-list proof for this slice.
 - Reference corpus store remains not configured; local CLI correctly reports planned/no mutation rather than pretending ingest completed.
 - Golden query baseline remains red by design; future goal must evaluate the new object-pack answers against those queries after deployment.
 
@@ -440,4 +449,4 @@ Latest current-session configured MCP read-path packet evaluation populated the 
 
 ## Conclusion
 
-Implementation은 local 및 contract scope에서 검증되었고 safety gates는 fail-closed로 동작합니다. 결과는 `PASS_WITH_GAPS`로 유지됩니다. PR #95부터 PR #107까지의 source deliveries는 source/contracts/docs를 갱신했지만 deploy/live runtime proof는 아닙니다. Collector packet은 route-smoke, local_test source-to-candidate review-loop, P6 session/project/work-unit rollup, P7 preference/artifact memory, P8 permission audit, P9 startup/read-path packet 생성/평가 준비도를 높였지만 live deployed proof는 아닙니다. 현재 Codex session의 `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 retry-normalized six-route smoke가 모두 `object_pack_route_not_implemented`를 반환했고, source-delivered source/review/readiness tools, post-#107 live MCP image identity, 및 deployed/live bounded production authority execution evidence가 live runtime에서 증명되지 않았기 때문입니다.
+Implementation은 local 및 contract scope에서 검증되었고 safety gates는 fail-closed로 동작합니다. 결과는 `PASS_WITH_GAPS`로 유지됩니다. PR #95부터 PR #107까지의 source deliveries는 source/contracts/docs를 갱신했고, PR #111과 neurons-ops PR #11은 post-#107 route fallback 문제를 배포 경로에서 닫았습니다. Collector packet은 route-smoke, local_test source-to-candidate review-loop, P6 session/project/work-unit rollup, P7 preference/artifact memory, P8 permission audit, P9 startup/read-path packet 생성/평가 준비도를 높였고, current configured/deployed `brain_objects_query` six-route proof는 이제 implemented object packs를 반환합니다. 하지만 source/review/readiness MCP tools, authority overlay schema, P2 corpus ingest, P6 multi-device rollup, P7 accepted preference context, P8 bounded production authority execution/permission audit, and P9 startup/read-path runtime enforcement are not fully proven live yet. Therefore this is route activation `PASS_WITH_GAPS`, not production readiness `PASS`.
