@@ -345,8 +345,11 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert set(checks) == {"P2", "P6", "P7", "P8", "P9"}
     assert checks["P2"]["result"] == "PASS_WITH_GAPS"
     assert "p2_production_corpus_ingest_evidence_unverified" in checks["P2"]["gaps"]
-    assert checks["P6"]["result"] == "PASS"
-    assert checks["P7"]["result"] == "PASS"
+    assert checks["P6"]["result"] == "PASS_WITH_GAPS"
+    assert "p6_live_multi_device_rollup_unproven" in checks["P6"]["gaps"]
+    assert checks["P7"]["result"] == "PASS_WITH_GAPS"
+    assert "p7_accepted_preference_context_pack_live_unproven" in checks["P7"]["gaps"]
+    assert "p7_html_artifact_review_live_unproven" in checks["P7"]["gaps"]
     assert checks["P8"]["result"] == "PASS_WITH_GAPS"
     assert "p8_runtime_evidence_unverified" in checks["P8"]["gaps"]
     assert "p8_runtime_evidence_collection_plan_not_live_evidence" in checks["P8"]["gaps"]
@@ -356,7 +359,10 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert "p8_shadow_route_smoke_collection_pending:deployment_runtime_truth" in checks["P8"]["gaps"]
     assert "p8_shadow_collection_run_pending" in checks["P8"]["gaps"]
     assert "p8_shadow_collection_run_pending:deployment_runtime_truth" in checks["P8"]["gaps"]
-    assert checks["P9"]["result"] == "PASS"
+    assert checks["P9"]["result"] == "PASS_WITH_GAPS"
+    assert "p9_runtime_evidence_unverified" in checks["P9"]["gaps"]
+    assert "p9_production_consumer_context_pack_live_unproven" in checks["P9"]["gaps"]
+    assert "p9_consumer_action_surface_runtime_policy_unproven" in checks["P9"]["gaps"]
     evidence = {item["phase"]: item for item in report["product_evidence_summary"]}
     assert set(evidence) == {"P2", "P6", "P7", "P8", "P9"}
     assert evidence["P2"]["schema_version"] == "reference_corpus_production_ingest_readiness.v1"
@@ -365,8 +371,11 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert evidence["P6"]["object_count"] >= 5
     assert evidence["P6"]["edge_count"] >= 6
     assert evidence["P6"]["evidence_count"] >= 1
+    assert "live_multi_device_rollup_unproven" in evidence["P6"]["gaps"]
     assert evidence["P7"]["schema_version"] == "object_extraction_preference_style_preview.v1"
     assert evidence["P7"]["artifact_preference_pack_status"] == "pass"
+    assert "accepted_preference_context_pack_live_unproven" in evidence["P7"]["gaps"]
+    assert "html_artifact_review_live_unproven" in evidence["P7"]["gaps"]
     assert evidence["P8"]["schema_version"] == "object_extraction_runtime_truth_preview.v1"
     assert evidence["P8"]["runtime_unverified_count"] == 1
     assert evidence["P8"]["source_commit_matches_pr_head"] is True
@@ -496,6 +505,8 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert evidence["P9"]["tool_hint_safe_target_count"] >= 5
     assert evidence["P9"]["unsafe_tool_hint_count"] == 0
     assert evidence["P9"]["mutation_allowed"] is False
+    assert "production_consumer_context_pack_live_unproven" in evidence["P9"]["gaps"]
+    assert "consumer_action_surface_runtime_policy_unproven" in evidence["P9"]["gaps"]
     assert all(item["production_mutation_performed"] is False for item in evidence.values())
 
     phase_progress = {item["phase"]: item for item in report["phase_progress"]}
