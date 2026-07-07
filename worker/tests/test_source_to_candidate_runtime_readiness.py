@@ -38,6 +38,8 @@ def _sanitized_live_evidence(**overrides):
             _brain_objects_query_smoke("authority_archive_separation"),
             _brain_objects_query_smoke("code_style_preference"),
             _brain_objects_query_smoke("temporal_work_recall"),
+            _brain_objects_query_smoke("code_change_impact"),
+            _brain_objects_query_smoke("html_visualization_preference"),
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
         "projection_join": _projection_join_runtime_evidence(),
@@ -739,6 +741,39 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
     assert "raw_document_id" in template["forbidden_outputs"]
 
 
+def test_runtime_evidence_contract_plan_template_and_shadow_routes_stay_in_sync():
+    plan = build_source_to_candidate_runtime_evidence_collection_plan(
+        expected_commit="7218cb2",
+        repository="pureliture/neurons",
+        branch="main",
+        consumer="codex",
+    )
+    template = build_source_to_candidate_runtime_evidence_packet_template(
+        expected_commit="7218cb2",
+        repository="pureliture/neurons",
+        branch="main",
+        consumer="codex",
+    )
+    required_routes = list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+
+    assert plan["required_routes"] == required_routes
+    assert template["required_routes"] == required_routes
+    assert plan["shadow_collection_requests"][0]["routes"] == required_routes
+    assert plan["shadow_collection_registration"]["routes"] == required_routes
+    assert [
+        item["route"]
+        for item in template["packet_field_templates"]["brain_objects_query_smokes"]
+    ] == required_routes
+    assert plan["shadow_collection_requests"][0]["expected_gaps_if_not_collected"] == [
+        f"shadow_route_smoke_collection_pending:{route}"
+        for route in required_routes
+    ]
+    assert plan["shadow_collection_registration"]["expected_gaps_if_not_run"] == [
+        f"shadow_collection_run_pending:{route}"
+        for route in required_routes
+    ]
+
+
 def test_runtime_readiness_shadow_evidence_normalizer_builds_public_safe_packet_without_mutation():
     packet = build_source_to_candidate_runtime_shadow_evidence_packet(
         captured_evidence=_current_session_shadow_evidence_capture()
@@ -817,6 +852,9 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
 
     assert report["schema_version"] == "source_to_candidate_runtime_readiness.v1"
     assert report["status"] == "PASS_WITH_GAPS"
+    assert report["evidence_is_live"] is False
+    assert report["production_ready"] is False
+    assert report["production_readiness"] == "not_ready"
     assert report["production_mutation_performed"] is False
     assert report["network_used"] is False
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
@@ -862,6 +900,9 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     )
 
     assert report["status"] == "PASS"
+    assert report["evidence_is_live"] is False
+    assert report["production_ready"] is False
+    assert report["production_readiness"] == "not_ready_local_or_sanitized_evidence_only"
     assert report["gaps"] == []
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     assert claims["live.mcp.review_tools_loaded"]["status"] == "validated"
@@ -1271,8 +1312,9 @@ def test_runtime_readiness_reports_bounded_execution_gate_hash_mismatch():
     assert "bounded_execution_gate_hash_mismatch" in report["gaps"]
 
 
-def test_runtime_readiness_keeps_fr8_route_out_of_required_live_smokes_until_deployed():
-    assert "code_change_impact" not in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+def test_runtime_readiness_requires_p5_p7_routes_for_post_deploy_live_smokes():
+    assert "code_change_impact" in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+    assert "html_visualization_preference" in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
 
 
 def test_runtime_readiness_fails_when_agent_context_tool_hint_allows_execution_or_mutation():
@@ -1535,11 +1577,18 @@ def test_runtime_readiness_keeps_missing_route_gaps_visible_when_route_smoke_fai
     route_claim = claims["live.brain_objects_query.route_smokes"]
     assert route_claim["status"] == "failed"
     assert route_claim["route_fallback_interpretation"] == "fail_expected_deployed_identity"
-    assert route_claim["missing_routes"] == ["code_style_preference", "temporal_work_recall"]
+    assert route_claim["missing_routes"] == [
+        "code_style_preference",
+        "temporal_work_recall",
+        "code_change_impact",
+        "html_visualization_preference",
+    ]
     assert "brain_objects_query_route_unimplemented:authority_archive_separation" in report["gaps"]
     assert "shadow_route_smoke_not_implemented:authority_archive_separation" in report["gaps"]
     assert "live_brain_objects_query_route_missing:code_style_preference" in report["gaps"]
     assert "live_brain_objects_query_route_missing:temporal_work_recall" in report["gaps"]
+    assert "live_brain_objects_query_route_missing:code_change_impact" in report["gaps"]
+    assert "live_brain_objects_query_route_missing:html_visualization_preference" in report["gaps"]
 
 
 def test_runtime_readiness_requires_temporal_work_recall_live_smoke():

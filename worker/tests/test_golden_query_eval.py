@@ -9,6 +9,11 @@ from agent_knowledge.llm_brain_core.golden_query_eval import (
     evaluate_product_evidence_summary,
 )
 from agent_knowledge.llm_brain_core.object_packs import build_code_change_impact_pack
+from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
+    REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
+)
+
+_REQUIRED_ROUTE_NAMES = list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
 
 
 def test_golden_query_baseline_records_current_low_quality_failures():
@@ -392,14 +397,14 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
         == "template_only_not_runtime_evidence"
     )
     assert evidence["P8"]["runtime_evidence_packet_template_required_field_count"] >= 8
-    assert evidence["P8"]["runtime_evidence_packet_template_route_count"] == 4
+    assert evidence["P8"]["runtime_evidence_packet_template_route_count"] == len(_REQUIRED_ROUTE_NAMES)
     assert (
         evidence["P8"]["shadow_route_smoke_request_schema"]
         == "source_to_candidate_runtime_shadow_collection_request.v1"
     )
     assert evidence["P8"]["shadow_route_smoke_request_status"] == "requested"
-    assert evidence["P8"]["shadow_route_smoke_route_count"] == 4
-    assert "deployment_runtime_truth" in evidence["P8"]["shadow_route_smoke_pending_routes"]
+    assert evidence["P8"]["shadow_route_smoke_route_count"] == len(_REQUIRED_ROUTE_NAMES)
+    assert set(evidence["P8"]["shadow_route_smoke_pending_routes"]) == set(_REQUIRED_ROUTE_NAMES)
     assert evidence["P8"]["shadow_route_smoke_network_used"] is False
     assert evidence["P8"]["shadow_route_smoke_mutation_allowed"] is False
     assert evidence["P8"]["shadow_route_smoke_production_mutation_performed"] is False
@@ -411,8 +416,8 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert evidence["P8"]["shadow_collection_registration_status"] == "registration_ready"
     assert evidence["P8"]["shadow_collection_registration_run_status"] == "not_run"
     assert evidence["P8"]["shadow_collection_registration_request_count"] == 1
-    assert evidence["P8"]["shadow_collection_registration_route_count"] == 4
-    assert "deployment_runtime_truth" in evidence["P8"]["shadow_collection_registration_routes"]
+    assert evidence["P8"]["shadow_collection_registration_route_count"] == len(_REQUIRED_ROUTE_NAMES)
+    assert set(evidence["P8"]["shadow_collection_registration_routes"]) == set(_REQUIRED_ROUTE_NAMES)
     assert evidence["P8"]["shadow_collection_registration_network_used"] is False
     assert evidence["P8"]["shadow_collection_registration_mutation_allowed"] is False
     assert evidence["P8"]["shadow_collection_registration_production_mutation_performed"] is False
@@ -424,7 +429,7 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
         evidence["P8"]["runtime_evidence_collector_packet_schema"]
         == "source_to_candidate_runtime_evidence.v1"
     )
-    assert evidence["P8"]["runtime_evidence_collector_route_count"] == 4
+    assert evidence["P8"]["runtime_evidence_collector_route_count"] == len(_REQUIRED_ROUTE_NAMES)
     assert evidence["P8"]["runtime_evidence_collector_network_used"] is False
     assert evidence["P8"]["runtime_evidence_collector_production_mutation_performed"] is False
     assert (
@@ -466,7 +471,9 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     )
     assert evidence["P8"]["runtime_evidence_collector_agent_context_startup_loaded"] is True
     assert evidence["P8"]["runtime_evidence_collector_agent_context_startup_read_path_tool"] == "brain_objects_query"
-    assert evidence["P8"]["runtime_evidence_collector_agent_context_startup_route_count"] == 4
+    assert evidence["P8"]["runtime_evidence_collector_agent_context_startup_route_count"] == len(
+        _REQUIRED_ROUTE_NAMES
+    )
     assert evidence["P9"]["schema_version"] == "agent_context_product_pack.v1"
     assert evidence["P9"]["section_counts"]["style_preference"] >= 1
     assert evidence["P9"]["section_counts"]["active_work"] >= 1
@@ -602,16 +609,11 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "runtime_evidence_packet_template_production_mutation_performed": False,
                 "runtime_evidence_packet_template_readiness_claim": "template_only_not_runtime_evidence",
                 "runtime_evidence_packet_template_required_field_count": 9,
-                "runtime_evidence_packet_template_route_count": 4,
+                "runtime_evidence_packet_template_route_count": len(_REQUIRED_ROUTE_NAMES),
                 "shadow_route_smoke_request_schema": "source_to_candidate_runtime_shadow_collection_request.v1",
                 "shadow_route_smoke_request_status": "requested",
-                "shadow_route_smoke_route_count": 4,
-                "shadow_route_smoke_pending_routes": [
-                    "authority_archive_separation",
-                    "code_style_preference",
-                    "temporal_work_recall",
-                    "deployment_runtime_truth",
-                ],
+                "shadow_route_smoke_route_count": len(_REQUIRED_ROUTE_NAMES),
+                "shadow_route_smoke_pending_routes": list(_REQUIRED_ROUTE_NAMES),
                 "shadow_route_smoke_network_used": False,
                 "shadow_route_smoke_mutation_allowed": False,
                 "shadow_route_smoke_production_mutation_performed": False,
@@ -620,19 +622,14 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "shadow_collection_registration_status": "registration_ready",
                 "shadow_collection_registration_run_status": "not_run",
                 "shadow_collection_registration_request_count": 1,
-                "shadow_collection_registration_route_count": 4,
-                "shadow_collection_registration_routes": [
-                    "authority_archive_separation",
-                    "code_style_preference",
-                    "temporal_work_recall",
-                    "deployment_runtime_truth",
-                ],
+                "shadow_collection_registration_route_count": len(_REQUIRED_ROUTE_NAMES),
+                "shadow_collection_registration_routes": list(_REQUIRED_ROUTE_NAMES),
                 "shadow_collection_registration_network_used": False,
                 "shadow_collection_registration_mutation_allowed": False,
                 "shadow_collection_registration_production_mutation_performed": False,
                 "shadow_collection_registration_readiness_claim": "registration_only_not_runtime_evidence",
                 "runtime_evidence_collector_packet_schema": "source_to_candidate_runtime_evidence.v1",
-                "runtime_evidence_collector_route_count": 4,
+                "runtime_evidence_collector_route_count": len(_REQUIRED_ROUTE_NAMES),
                 "runtime_evidence_collector_network_used": False,
                 "runtime_evidence_collector_production_mutation_performed": False,
                 "runtime_evidence_collector_readiness_claim": "collector_packet_not_live_evidence",
@@ -656,7 +653,7 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "runtime_evidence_collector_agent_context_startup_schema": "agent_context_startup_runtime_evidence.v1",
                 "runtime_evidence_collector_agent_context_startup_loaded": True,
                 "runtime_evidence_collector_agent_context_startup_read_path_tool": "brain_objects_query",
-                "runtime_evidence_collector_agent_context_startup_route_count": 4,
+                "runtime_evidence_collector_agent_context_startup_route_count": len(_REQUIRED_ROUTE_NAMES),
                 "production_mutation_performed": False,
             },
             {
@@ -682,15 +679,15 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
         "p8_runtime_evidence_packet_template_not_live_evidence",
         "p8_runtime_evidence_collector_not_live_evidence",
         "p8_shadow_route_smoke_collection_pending",
-        "p8_shadow_route_smoke_collection_pending:authority_archive_separation",
-        "p8_shadow_route_smoke_collection_pending:code_style_preference",
-        "p8_shadow_route_smoke_collection_pending:temporal_work_recall",
-        "p8_shadow_route_smoke_collection_pending:deployment_runtime_truth",
+        *[
+            f"p8_shadow_route_smoke_collection_pending:{route}"
+            for route in _REQUIRED_ROUTE_NAMES
+        ],
         "p8_shadow_collection_run_pending",
-        "p8_shadow_collection_run_pending:authority_archive_separation",
-        "p8_shadow_collection_run_pending:code_style_preference",
-        "p8_shadow_collection_run_pending:temporal_work_recall",
-        "p8_shadow_collection_run_pending:deployment_runtime_truth",
+        *[
+            f"p8_shadow_collection_run_pending:{route}"
+            for route in _REQUIRED_ROUTE_NAMES
+        ],
     ]
 
 
@@ -739,13 +736,8 @@ def test_product_evidence_summary_fails_when_p8_collection_plan_is_missing_or_mu
                 "runtime_evidence_packet_template_route_count": 0,
                 "shadow_route_smoke_request_schema": "source_to_candidate_runtime_shadow_collection_request.v1",
                 "shadow_route_smoke_request_status": "requested",
-                "shadow_route_smoke_route_count": 4,
-                "shadow_route_smoke_pending_routes": [
-                    "authority_archive_separation",
-                    "code_style_preference",
-                    "temporal_work_recall",
-                    "deployment_runtime_truth",
-                ],
+                "shadow_route_smoke_route_count": len(_REQUIRED_ROUTE_NAMES),
+                "shadow_route_smoke_pending_routes": list(_REQUIRED_ROUTE_NAMES),
                 "shadow_route_smoke_network_used": True,
                 "shadow_route_smoke_mutation_allowed": True,
                 "shadow_route_smoke_production_mutation_performed": True,

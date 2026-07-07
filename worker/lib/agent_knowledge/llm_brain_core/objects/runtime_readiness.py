@@ -20,6 +20,8 @@ REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES = (
     "authority_archive_separation",
     "code_style_preference",
     "temporal_work_recall",
+    "code_change_impact",
+    "html_visualization_preference",
     "deployment_runtime_truth",
 )
 REQUIRED_AGENT_CONTEXT_SECTIONS = (
@@ -1692,14 +1694,24 @@ def build_source_to_candidate_runtime_readiness_report(
     provenance_claim = next(
         claim for claim in claims if claim["claim_id"] == "live.evidence.provenance"
     )
+    status = "FAIL" if failed else ("PASS_WITH_GAPS" if gaps else "PASS")
+    evidence_is_live = provenance_claim.get("is_live") is True
+    production_ready = status == "PASS" and evidence_is_live
     report = {
         "schema_version": "source_to_candidate_runtime_readiness.v1",
-        "status": "FAIL" if failed else ("PASS_WITH_GAPS" if gaps else "PASS"),
+        "status": status,
         "claims": claims,
         "failed_claims": failed,
         "gaps": gaps,
         "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
         "live_evidence_provided": bool(evidence),
+        "evidence_is_live": evidence_is_live,
+        "production_ready": production_ready,
+        "production_readiness": (
+            "ready"
+            if production_ready
+            else ("not_ready_local_or_sanitized_evidence_only" if status == "PASS" else "not_ready")
+        ),
         "production_mutation_performed": any(_claim_reports_mutation(claim) for claim in claims),
         "network_used": False,
         "evidence_collection_network_used": provenance_claim.get("network_used_for_evidence") is True,
