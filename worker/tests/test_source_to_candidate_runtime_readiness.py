@@ -2520,6 +2520,33 @@ def test_neuron_knowledge_runtime_readiness_cli_normalizes_shadow_evidence_file(
     assert len(packet["brain_objects_query_smokes"]) == len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
 
 
+def test_neuron_knowledge_runtime_readiness_cli_normalizes_post_deploy_capture_file(tmp_path, capsys):
+    capture_file = tmp_path / "post-deploy-capture.json"
+    capture_file.write_text(
+        json.dumps(_current_session_shadow_evidence_capture()),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "source-to-candidate-runtime-readiness",
+                "--normalize-post-deploy-capture-file",
+                str(capture_file),
+            ]
+        )
+        == 0
+    )
+
+    packet = json.loads(capsys.readouterr().out)
+    assert packet["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert packet["production_mutation_performed"] is False
+    assert packet["evidence_provenance"]["schema_version"] == EVIDENCE_PROVENANCE_SCHEMA
+    assert packet["evidence_provenance"]["collection_mode"] == "post_deploy_read_only_smoke"
+    assert packet["evidence_provenance"]["network_used"] is True
+    assert len(packet["brain_objects_query_smokes"]) == len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+
+
 def test_neuron_knowledge_runtime_readiness_cli_evaluates_shadow_evidence_file(tmp_path, capsys):
     capture_file = tmp_path / "shadow-evidence-capture.json"
     capture_file.write_text(
@@ -2547,5 +2574,37 @@ def test_neuron_knowledge_runtime_readiness_cli_evaluates_shadow_evidence_file(t
     assert report["live_evidence_provided"] is True
     assert report["production_mutation_performed"] is False
     assert report["evidence_collection_network_used"] is True
+    for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES:
+        assert f"shadow_route_smoke_not_implemented:{route}" in report["gaps"]
+
+
+def test_neuron_knowledge_runtime_readiness_cli_evaluates_post_deploy_capture_file(tmp_path, capsys):
+    capture_file = tmp_path / "post-deploy-capture.json"
+    capture_file.write_text(
+        json.dumps(_current_session_shadow_evidence_capture()),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "source-to-candidate-runtime-readiness",
+                "--post-deploy-capture-file",
+                str(capture_file),
+                "--expected-commit",
+                "c264b46",
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == "source_to_candidate_runtime_readiness.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["failed_claims"] == []
+    assert report["live_evidence_provided"] is True
+    assert report["production_mutation_performed"] is False
+    assert report["evidence_collection_network_used"] is True
+    assert report["evidence_provenance"]["is_live"] is True
     for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES:
         assert f"shadow_route_smoke_not_implemented:{route}" in report["gaps"]

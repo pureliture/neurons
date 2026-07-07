@@ -409,11 +409,14 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
         "production",
     ]
     readiness_schema = tools[BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME]["inputSchema"]
+    assert readiness_schema["additionalProperties"] is False
     assert readiness_schema["properties"]["live_evidence"]["type"] == "object"
     assert readiness_schema["properties"]["expected_commit"]["type"] == "string"
     assert readiness_schema["properties"]["evidence_collection_plan"]["type"] == "boolean"
     assert readiness_schema["properties"]["evidence_packet_template"]["type"] == "boolean"
     assert readiness_schema["properties"]["collect_shadow_evidence"]["type"] == "boolean"
+    assert readiness_schema["properties"]["normalize_post_deploy_capture"]["type"] == "object"
+    assert readiness_schema["properties"]["post_deploy_capture"]["type"] == "object"
     assert readiness_schema["properties"]["normalize_shadow_evidence"]["type"] == "object"
     assert readiness_schema["properties"]["shadow_evidence"]["type"] == "object"
     assert readiness_schema["properties"]["repository"]["type"] == "string"
@@ -660,6 +663,32 @@ def test_mcp_source_to_candidate_runtime_readiness_normalizes_shadow_evidence(tm
     assert len(packet["brain_objects_query_smokes"]) == 6
 
 
+def test_mcp_source_to_candidate_runtime_readiness_normalizes_post_deploy_capture(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 125,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "normalize_post_deploy_capture": _shadow_runtime_evidence_capture(),
+                },
+            },
+        },
+        service,
+    )
+
+    packet = response["result"]["structuredContent"]
+    assert packet["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert packet["production_mutation_performed"] is False
+    assert packet["evidence_provenance"]["collection_mode"] == "post_deploy_read_only_smoke"
+    assert packet["evidence_provenance"]["network_used"] is True
+    assert len(packet["brain_objects_query_smokes"]) == 6
+
+
 def test_mcp_source_to_candidate_runtime_readiness_evaluates_shadow_evidence(tmp_path: Path):
     service = _service(tmp_path)
 
@@ -687,6 +716,37 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_shadow_evidence(tmp
     assert report["production_mutation_performed"] is False
     assert report["network_used"] is False
     assert report["evidence_collection_network_used"] is True
+    assert "shadow_route_smoke_not_implemented:deployment_runtime_truth" in report["gaps"]
+
+
+def test_mcp_source_to_candidate_runtime_readiness_evaluates_post_deploy_capture(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 126,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "post_deploy_capture": _shadow_runtime_evidence_capture(),
+                    "expected_commit": "c264b46",
+                },
+            },
+        },
+        service,
+    )
+
+    report = response["result"]["structuredContent"]
+    assert report["schema_version"] == "source_to_candidate_runtime_readiness.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["failed_claims"] == []
+    assert report["live_evidence_provided"] is True
+    assert report["production_mutation_performed"] is False
+    assert report["network_used"] is False
+    assert report["evidence_collection_network_used"] is True
+    assert report["evidence_provenance"]["is_live"] is True
     assert "shadow_route_smoke_not_implemented:deployment_runtime_truth" in report["gaps"]
 
 
