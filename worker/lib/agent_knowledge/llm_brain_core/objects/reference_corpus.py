@@ -337,7 +337,7 @@ def _production_corpus_ingest_approval_claim(evidence: Mapping[str, Any]) -> dic
     failures: list[str] = []
     if approval.get("approved") is not True:
         failures.append("production_corpus_ingest_approval_missing")
-    if not str(approval.get("approval_ref_hash") or "").startswith("sha256:"):
+    if not _is_sha256_ref(approval.get("approval_ref_hash")):
         failures.append("production_corpus_ingest_approval_ref_hash_missing")
     if approval.get("scope") != "single_project_single_corpus":
         failures.append("production_corpus_ingest_scope_not_single_corpus")
@@ -353,6 +353,14 @@ def _production_corpus_ingest_approval_claim(evidence: Mapping[str, Any]) -> dic
         "production_mutation_performed": False,
         "gaps": _dedupe(failures),
     }
+
+
+def _is_sha256_ref(value: Any) -> bool:
+    try:
+        require_sha256(str(value or ""), "approval_ref_hash")
+    except ValueError:
+        return False
+    return True
 
 
 def _production_corpus_ingest_corpus_claim(

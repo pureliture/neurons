@@ -69,6 +69,23 @@ ToolDispatch = Callable[[str, dict, KnowledgeSearchService], dict]
 StewardReadProposalDispatch = Callable[[str, dict, object], dict]
 StewardRestrictedDispatch = Callable[[str, dict, object], dict]
 
+_ALLOWED_PRODUCTION_PROPOSAL_TYPES = (
+    "propose_current",
+    "propose_stale",
+    "propose_supersede",
+    "propose_retire",
+    "request_evidence",
+)
+_ALLOWED_PRODUCTION_DECISION_TYPES = (
+    "accept_current",
+    "reject_candidate",
+    "commit_supersession",
+    "commit_stale",
+    "retire",
+    "archive_only",
+    "rollback_decision",
+)
+
 
 @dataclass(frozen=True)
 class ToolRuntimeContract:
@@ -679,6 +696,14 @@ def _production_object_authority_gate(arguments: Mapping[str, Any], *, service: 
             missing.append(field)
     if not target_object_id.startswith("ko:RepoDocument:"):
         missing.append("allowed_object_class_RepoDocument")
+    if "proposal_type" in arguments:
+        proposal_type = public_safe_text(str(arguments.get("proposal_type") or ""), max_chars=120)
+        if proposal_type not in _ALLOWED_PRODUCTION_PROPOSAL_TYPES:
+            missing.append("allowed_proposal_type")
+    if "decision_type" in arguments:
+        decision_type = public_safe_text(str(arguments.get("decision_type") or ""), max_chars=120)
+        if decision_type not in _ALLOWED_PRODUCTION_DECISION_TYPES:
+            missing.append("allowed_decision_type")
     allowed = not missing
     return {
         "allowed": allowed,
@@ -692,6 +717,7 @@ def _production_object_authority_gate(arguments: Mapping[str, Any], *, service: 
 
 def _production_authority_promotion_plan(arguments: Mapping[str, object], *, gate: Mapping[str, Any] | None = None) -> dict:
     decision_type = public_safe_text(str(arguments.get("decision_type") or ""), max_chars=120)
+    proposal_type = public_safe_text(str(arguments.get("proposal_type") or ""), max_chars=120)
     proposal_id = public_safe_text(str(arguments.get("proposal_id") or ""), max_chars=180)
     decision_id = public_safe_text(str(arguments.get("decision_id") or ""), max_chars=180)
     project = public_safe_text(str(arguments.get("project") or ""), max_chars=120)
@@ -705,21 +731,15 @@ def _production_authority_promotion_plan(arguments: Mapping[str, object], *, gat
         "schema_version": "object_authority_promotion_plan.v1",
         "production_write_state": production_write_state,
         "mutation_allowed": mutation_allowed,
+        "requested_proposal_type": proposal_type,
         "requested_decision_type": decision_type,
         "requested_proposal_id": proposal_id,
         "requested_decision_id": decision_id,
         "project": project,
         "missing_gate_evidence": missing_gate_evidence,
         "allowed_object_classes": ["RepoDocument"],
-        "allowed_decision_types": [
-            "accept_current",
-            "commit_stale",
-            "commit_supersession",
-            "retire",
-            "archive_only",
-            "reject_candidate",
-            "rollback_decision",
-        ],
+        "allowed_proposal_types": list(_ALLOWED_PRODUCTION_PROPOSAL_TYPES),
+        "allowed_decision_types": list(_ALLOWED_PRODUCTION_DECISION_TYPES),
         "reviewer_role": "human_object_authority_reviewer",
         "required_gate_evidence": [
             "configured_deployed_mcp_identity_matches_source",

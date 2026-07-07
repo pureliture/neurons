@@ -241,6 +241,31 @@ def test_reference_corpus_production_ingest_readiness_accepts_bounded_evidence_p
     assert claims["production.corpus_ingest.read_after_write"]["status"] == "validated"
 
 
+def test_reference_corpus_production_ingest_readiness_rejects_truncated_approval_hash():
+    evidence = _bounded_production_corpus_ingest_evidence(
+        approval={
+            "approved": True,
+            "approval_ref_hash": "sha256:not-a-full-digest",
+            "scope": "single_project_single_corpus",
+            "project": "neurons",
+            "max_corpora": 1,
+            "no_raw_body_returned": True,
+        }
+    )
+
+    report = build_reference_corpus_production_ingest_readiness_report(
+        live_evidence=evidence,
+        expected_manifest_hash="sha256:" + "a" * 64,
+        expected_source_count=65,
+    )
+
+    assert report["status"] == "FAIL"
+    assert "production.corpus_ingest.approval" in report["failed_claims"]
+    assert "production_corpus_ingest_approval_ref_hash_missing" in report["gaps"]
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["production.corpus_ingest.approval"]["status"] == "failed"
+
+
 def test_reference_corpus_production_ingest_readiness_fails_on_raw_body_or_authority_write():
     evidence = _bounded_production_corpus_ingest_evidence(
         ingest={
