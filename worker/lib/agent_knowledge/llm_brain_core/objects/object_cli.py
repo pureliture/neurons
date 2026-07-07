@@ -10,6 +10,7 @@ import yaml
 
 from ...ledger import Ledger
 
+from .._util import require_sha256
 from ..context import BrainReadService
 from .golden_query_eval import (
     build_baseline_golden_query_report,
@@ -267,6 +268,88 @@ def corpus_ingest_readiness_main(argv: list[str] | None = None) -> int:
     )
     _print_json(report)
     return 1 if report["status"] == "FAIL" else 0
+
+
+def object_authority_schema_ensure_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="neuron-knowledge object-authority-schema-ensure")
+    parser.add_argument("--target", choices=["local_test", "production"], default="local_test")
+    parser.add_argument("--ledger", default="")
+    parser.add_argument("--approved", action="store_true")
+    parser.add_argument("--approval-ref", default="")
+    args = parser.parse_args(argv)
+    production = args.target == "production"
+    if production:
+        missing = []
+        if not args.approved:
+            missing.append("approved")
+        try:
+            approval_ref = require_sha256(args.approval_ref, "approval_ref")
+        except ValueError:
+            approval_ref = ""
+            missing.append("approval_ref_sha256")
+        if missing:
+            _print_json(
+                {
+                    "schema_version": "object_authority_schema_ensure.v1",
+                    "status": "denied",
+                    "reason": "production_object_authority_schema_ensure_requires_approval",
+                    "target": "production",
+                    "missing": missing,
+                    "mutation_performed": False,
+                    "production_mutation_performed": False,
+                    "network_used": False,
+                }
+            )
+            return 1
+    else:
+        approval_ref = ""
+    ledger_path = _configured_reference_corpus_ledger(args.ledger)
+    if not ledger_path:
+        _print_json(
+            {
+                "schema_version": "object_authority_schema_ensure.v1",
+                "status": "FAIL",
+                "reason": "ledger_not_configured",
+                "target": args.target,
+                "mutation_performed": False,
+                "production_mutation_performed": False,
+                "network_used": False,
+            }
+        )
+        return 1
+    if production and not os.environ.get("NEURON_LEDGER_PG_DSN", "") and not Path(ledger_path).exists():
+        _print_json(
+            {
+                "schema_version": "object_authority_schema_ensure.v1",
+                "status": "FAIL",
+                "reason": "production_ledger_not_existing_or_server_backed",
+                "target": "production",
+                "mutation_performed": False,
+                "production_mutation_performed": False,
+                "network_used": False,
+            }
+        )
+        return 1
+    try:
+        result = Ledger(Path(ledger_path), initialize_schema=False).ensure_object_authority_schema()
+    except Exception as exc:
+        _print_json(
+            {
+                "schema_version": "object_authority_schema_ensure.v1",
+                "status": "FAIL",
+                "reason": f"ledger_schema_ensure_failed:{type(exc).__name__}",
+                "target": args.target,
+                "mutation_performed": False,
+                "production_mutation_performed": False,
+                "network_used": False,
+            }
+        )
+        return 1
+    result["target"] = args.target
+    result["production_mutation_performed"] = production
+    result["approval_ref_hash_present"] = bool(approval_ref)
+    _print_json(result)
+    return 0
 
 
 def source_to_candidate_graph_main(argv: list[str] | None = None) -> int:
