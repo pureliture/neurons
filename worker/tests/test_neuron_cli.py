@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from agent_knowledge.cli import BOUNDARY, COMMAND_HANDLERS, main
+from agent_knowledge.llm_brain_core.knowledge_objects import EvidenceRef, KnowledgeEdge
 
 
 def _reference_manifest() -> dict:
@@ -90,7 +91,11 @@ def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
         "corpus-status",
         "corpus-ingest-plan",
         "corpus-ingest",
+        "source-to-candidate-graph",
+        "candidate-review-edit",
+        "approval-board-decide",
         "golden-query-eval",
+        "source-to-candidate-runtime-readiness",
         "okf-export",
         "brain-regression-gate",
         "couchdb-migration-flow",
@@ -121,6 +126,238 @@ def test_neuron_knowledge_pending_server_command_fails_closed(capsys):
     assert report["destination"] == "neurons"
     assert report["mutation_performed"] is False
     assert report["network_used"] is False
+
+
+def test_neuron_knowledge_object_query_defaults_to_authority_archive_route(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "codex/knowledge-object-review-flow-roadmap",
+            "--query",
+            "LBrain source-to-candidate-graph product activation roadmap P5 P6 P7 P8 P9 current gaps",
+            "--current-file",
+            "docs/specs/roadmap.md",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["schema_version"] == "brain_objects_query.v1"
+    assert report["route"] == "authority_archive_separation"
+    assert report["object_pack"]["schema_version"] == "object_pack.v1"
+    assert report["object_pack"]["route"] == "authority_archive_separation"
+    assert "object_pack_route_not_implemented" not in report["object_pack"]["gaps"]
+    assert report["object_pack"]["route_trace"]["route"] == "authority_archive_separation"
+    assert report["object_pack"]["route_trace"]["route_source"] == "inferred"
+    assert "reference_only" in report["object_pack"]["route_trace"]["selected_source_lanes"]
+    assert report["object_pack"]["route_trace"]["stop_reason"] == "returned_object_pack"
+
+
+def test_neuron_knowledge_object_query_accepts_explicit_route(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--route",
+            "code_style_preference",
+            "--query",
+            "문서 정리 질문이어도 명시 route가 우선이어야 한다",
+            "--consumer",
+            "codex",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["route"] == "code_style_preference"
+    assert report["response_mode"] == "compact"
+    assert report["object_pack"]["route"] == "code_style_preference"
+    assert report["object_pack"]["audit"]["consumer"] == "codex"
+    assert "object_pack_route_not_implemented" not in report["object_pack"]["gaps"]
+
+
+def test_neuron_knowledge_object_query_accepts_explicit_html_visualization_route(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--route",
+            "html_visualization_preference",
+            "--query",
+            "문서 정리 질문이어도 명시 route가 우선이어야 한다",
+            "--consumer",
+            "codex",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    pack = report["object_pack"]
+    assert rc == 0
+    assert report["route"] == "html_visualization_preference"
+    assert pack["route"] == "html_visualization_preference"
+    assert pack["route_trace"]["route_source"] == "explicit"
+    assert pack["route_trace"]["missing_evidence"] == [
+        "accepted_html_preference_missing",
+        "visualization_preference_missing",
+    ]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+
+
+def test_neuron_knowledge_object_query_infers_temporal_route(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--query",
+            "어제 이 repo에서 뭐 했어? 작업 재개하려면 뭐 봐야 해?",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["route"] == "temporal_work_recall"
+    assert report["object_pack"]["route"] == "temporal_work_recall"
+    assert report["object_pack"]["audit"]["source_pack_names"] == ["current_work", "required_verification"]
+    assert "object_pack_route_not_implemented" not in report["object_pack"]["gaps"]
+
+
+def test_neuron_knowledge_object_query_infers_deployment_route_with_runtime_gap(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--query",
+            "이 PR merge됐어? 배포도 됐어?",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["route"] == "deployment_runtime_truth"
+    assert report["object_pack"]["route"] == "deployment_runtime_truth"
+    assert "runtime_evidence_unverified" in report["object_pack"]["gaps"]
+    assert "object_pack_route_not_implemented" not in report["object_pack"]["gaps"]
+    assert report["object_pack"]["route_trace"]["missing_evidence"] == ["runtime_evidence_unverified"]
+    assert report["object_pack"]["route_trace"]["stop_reason"] == "missing_evidence_gap_returned"
+
+
+def test_neuron_knowledge_object_query_infers_code_change_impact_route(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--query",
+            "이 파일 바꾸면 어떤 테스트/런타임 영향 있어?",
+            "--current-file",
+            "worker/lib/agent_knowledge/llm_brain_core/objects/runtime_readiness.py",
+            "--consumer",
+            "codex",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    pack = report["object_pack"]
+    object_types = {obj["object_type"] for obj in pack["objects"]}
+    assert rc == 0
+    assert report["route"] == "code_change_impact"
+    assert pack["route"] == "code_change_impact"
+    assert {"RepoFile", "VerificationCommand", "RuntimeSurface"} <= object_types
+    assert "live_runtime_impact_unverified" in pack["gaps"]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert pack["route_trace"]["route"] == "code_change_impact"
+    assert pack["route_trace"]["selected_source_lanes"] == ["candidate", "reference_only"]
+    assert pack["route_trace"]["missing_evidence"] == [
+        "live_runtime_impact_unverified",
+        "source_freshness_unverified",
+    ]
+
+
+def test_neuron_knowledge_object_query_infers_html_visualization_preference_route(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--query",
+            "내가 선호하는 HTML review artifact 기준으로 이 산출물을 평가해줘.",
+            "--consumer",
+            "codex",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    pack = report["object_pack"]
+    assert rc == 0
+    assert report["route"] == "html_visualization_preference"
+    assert pack["route"] == "html_visualization_preference"
+    assert "accepted_html_preference_missing" in pack["gaps"]
+    assert "visualization_preference_missing" in pack["gaps"]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert pack["route_trace"]["route"] == "html_visualization_preference"
+    assert pack["route_trace"]["stop_reason"] == "missing_evidence_gap_returned"
+    assert pack["route_trace"]["missing_evidence"] == [
+        "accepted_html_preference_missing",
+        "visualization_preference_missing",
+    ]
+
+
+def test_neuron_knowledge_object_query_does_not_infer_html_route_for_generic_artifact_review(capsys):
+    rc = main(
+        [
+            "object-query",
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--query",
+            "이 산출물을 평가해줘.",
+            "--consumer",
+            "codex",
+            "--response-mode",
+            "compact",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["route"] == "authority_archive_separation"
+    assert report["object_pack"]["route"] == "authority_archive_separation"
+    assert report["object_pack"]["route_trace"]["route"] == "authority_archive_separation"
+    assert "accepted_html_preference_missing" not in report["object_pack"]["gaps"]
 
 
 def test_neuron_knowledge_delegates_memory_regeneration_help(capsys):
@@ -173,6 +410,87 @@ def test_neuron_knowledge_corpus_ingest_production_denied_even_with_configured_l
     assert report["status"] == "denied"
     assert report["mutation_performed"] is False
     assert ledger.exists() is False
+
+
+def test_neuron_knowledge_corpus_ingest_readiness_accepts_bounded_evidence_file(tmp_path, capsys):
+    evidence_file = tmp_path / "production-corpus-ingest-evidence.json"
+    evidence_file.write_text(
+        json.dumps(
+            {
+                "schema_version": "reference_corpus_production_ingest_evidence.v1",
+                "approval": {
+                    "approved": True,
+                    "approval_ref_hash": "sha256:" + "b" * 64,
+                    "scope": "single_project_single_corpus",
+                    "project": "neurons",
+                    "max_corpora": 1,
+                    "no_raw_body_returned": True,
+                },
+                "corpus": {
+                    "corpus_id": "rc:palantir-ontology",
+                    "manifest_hash": "sha256:" + "a" * 64,
+                    "source_count": 65,
+                    "storage_mode": "managed_snapshot",
+                    "authority_lane": "reference_only",
+                    "raw_body_policy": "no_raw_return_by_default",
+                },
+                "ingest": {
+                    "target": "production_corpus_store",
+                    "ledger_scope": "production",
+                    "corpus_write_performed": True,
+                    "production_mutation_performed": True,
+                    "authority_write_performed": False,
+                },
+                "read_after_write": {
+                    "status": "validated",
+                    "corpus_id": "rc:palantir-ontology",
+                    "manifest_hash": "sha256:" + "a" * 64,
+                    "source_count": 65,
+                },
+                "rollback_or_deletion": {
+                    "status": "planned",
+                    "path": ["delete_snapshot_keep_metadata"],
+                },
+                "postcheck": {
+                    "status": "validated",
+                    "raw_body_returned": False,
+                    "secret_returned": False,
+                    "host_topology_returned": False,
+                    "raw_external_ids_returned": False,
+                },
+                "evidence_provenance": {
+                    "schema_version": "reference_corpus_production_ingest_evidence_provenance.v1",
+                    "collection_mode": "post_deploy_bounded_production_ingest",
+                    "network_used": True,
+                    "mutation_scope": "bounded_production_corpus_ingest",
+                    "raw_private_evidence_returned": False,
+                    "secret_returned": False,
+                    "host_topology_returned": False,
+                    "raw_external_ids_returned": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "corpus-ingest-readiness",
+            "--evidence-file",
+            str(evidence_file),
+            "--expected-manifest-hash",
+            "sha256:" + "a" * 64,
+            "--expected-source-count",
+            "65",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["schema_version"] == "reference_corpus_production_ingest_readiness.v1"
+    assert report["status"] == "PASS"
+    assert report["production_mutation_performed"] is True
+    assert report["evidence_collection_network_used"] is True
 
 
 def test_neuron_knowledge_corpus_status_reports_storage_policy(capsys):
@@ -390,6 +708,361 @@ def test_neuron_knowledge_corpus_ingest_and_status_use_configured_local_test_led
     assert status["gaps"] == []
 
 
+def test_neuron_knowledge_source_to_candidate_graph_uses_configured_local_test_store(
+    tmp_path,
+    capsys,
+):
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "ledger.sqlite"
+    manifest.write_text(json.dumps(_reference_manifest()), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "corpus-ingest",
+                "--project",
+                "neurons",
+                "--target",
+                "local_test",
+                "--ledger",
+                str(ledger),
+                "--manifest-file",
+                str(manifest),
+                "--storage-mode",
+                "managed_snapshot",
+            ]
+        )
+        == 0
+    )
+    ingest = json.loads(capsys.readouterr().out)
+
+    rc = main(
+        [
+            "source-to-candidate-graph",
+            "--project",
+            "neurons",
+            "--target",
+            "local_test",
+            "--ledger",
+            str(ledger),
+            "--corpus-id",
+            ingest["corpus_id"],
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["schema_version"] == "source_to_candidate_graph_activation.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["production_mutation_performed"] is False
+    assert report["ledger_mutation_performed"] is False
+    assert report["input_store"]["corpus_id"] == ingest["corpus_id"]
+    assert report["candidate_graph_review_pack"]["route"] == "candidate_graph_review"
+    assert report["candidate_graph_review_pack"]["production_mutation_performed"] is False
+    assert report["candidate_graph_review_pack"]["authority_write_performed"] is False
+    assert report["candidate_graph_review_pack"]["minimal_edit_surface"]["supported"] is True
+    assert report["candidate_graph_review_pack"]["lanes"]["candidate"]
+    assert report["candidate_graph_review_pack"]["lanes"]["accepted_current"] == []
+    assert report["candidate_graph_review_pack"]["raw_body_return_capability"] == "denied"
+    assert report["quality_gate"]["source_to_candidate_graph"] == "PASS"
+    assert "live_projection_join_unproven" in report["gaps"]
+    assert all(
+        item["raw_return_capability"] == "denied"
+        for item in report["candidate_graph_review_pack"]["evidence"]
+    )
+
+
+def test_neuron_knowledge_source_to_candidate_graph_denies_production_without_mutation(
+    tmp_path,
+    capsys,
+):
+    ledger = tmp_path / "ledger.sqlite"
+
+    rc = main(
+        [
+            "source-to-candidate-graph",
+            "--project",
+            "neurons",
+            "--target",
+            "production",
+            "--ledger",
+            str(ledger),
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["schema_version"] == "object_substrate_cli_denied.v1"
+    assert report["status"] == "denied"
+    assert report["mutation_performed"] is False
+    assert report["production_mutation_performed"] is False
+    assert ledger.exists() is False
+
+
+def test_neuron_knowledge_source_to_candidate_graph_does_not_create_missing_local_store(
+    tmp_path,
+    capsys,
+):
+    ledger = tmp_path / "missing-ledger.sqlite"
+
+    rc = main(
+        [
+            "source-to-candidate-graph",
+            "--project",
+            "neurons",
+            "--target",
+            "local_test",
+            "--ledger",
+            str(ledger),
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["schema_version"] == "source_to_candidate_graph_activation.v1"
+    assert report["status"] == "FAIL"
+    assert report["production_mutation_performed"] is False
+    assert report["ledger_mutation_performed"] is False
+    assert "reference_corpus_store_missing" in report["gaps"]
+    assert ledger.exists() is False
+
+
+def test_neuron_knowledge_candidate_review_and_approval_board_cli_chain_local_test(
+    tmp_path,
+    capsys,
+):
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "ledger.sqlite"
+    manifest.write_text(json.dumps(_reference_manifest()), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "corpus-ingest",
+                "--project",
+                "neurons",
+                "--target",
+                "local_test",
+                "--ledger",
+                str(ledger),
+                "--manifest-file",
+                str(manifest),
+                "--storage-mode",
+                "managed_snapshot",
+            ]
+        )
+        == 0
+    )
+    ingest = json.loads(capsys.readouterr().out)
+    assert (
+        main(
+            [
+                "source-to-candidate-graph",
+                "--project",
+                "neurons",
+                "--target",
+                "local_test",
+                "--ledger",
+                str(ledger),
+                "--corpus-id",
+                ingest["corpus_id"],
+            ]
+        )
+        == 0
+    )
+    graph = json.loads(capsys.readouterr().out)
+    pack_file = tmp_path / "candidate-pack.json"
+    candidate_pack = graph["candidate_graph_review_pack"]
+    pack_file.write_text(json.dumps(candidate_pack), encoding="utf-8")
+    candidate_id = candidate_pack["lanes"]["candidate"][0]["object_id"]
+    original_edge_id = candidate_pack["edges"][0]["edge_id"]
+    original_evidence_id = candidate_pack["evidence"][0]["evidence_id"]
+    added_evidence = EvidenceRef.from_parts(
+        evidence_type="source_hash",
+        authority_lane="reference_only",
+        verification_state="source_hash_verified",
+        locator={"kind": "relative_repo_path", "value": "docs/review-evidence.md"},
+        content_hash="sha256:" + "8" * 64,
+        summary="Reviewer attached CLI transport evidence.",
+    )
+    added_edge = KnowledgeEdge.from_parts(
+        edge_type="review_supports",
+        from_object_id=candidate_id,
+        to_object_id=candidate_id,
+        evidence_refs=[added_evidence.evidence_id],
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="unverified",
+    )
+    edits_file = tmp_path / "candidate-edits.json"
+    edits_file.write_text(
+        json.dumps(
+            [
+                {
+                    "action": "update_object",
+                    "object_id": candidate_id,
+                    "fields": {
+                        "summary": "Reviewer clarified this candidate before local approval.",
+                        "recommended_action": "promote",
+                    },
+                },
+                {
+                    "action": "add_evidence",
+                    "attach_to_object_id": candidate_id,
+                    "fields": {
+                        "evidence_type": "source_hash",
+                        "locator": {"kind": "relative_repo_path", "value": "docs/review-evidence.md"},
+                        "content_hash": "sha256:" + "8" * 64,
+                        "summary": "Reviewer attached CLI transport evidence.",
+                    },
+                },
+                {
+                    "action": "add_edge",
+                    "fields": {
+                        "edge_type": "review_supports",
+                        "from_object_id": candidate_id,
+                        "to_object_id": candidate_id,
+                        "evidence_refs": [added_evidence.evidence_id],
+                    },
+                },
+                {"action": "remove_edge", "edge_id": original_edge_id},
+                {"action": "remove_evidence", "evidence_id": original_evidence_id},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "candidate-review-edit",
+                "--target",
+                "production",
+                "--mutation-mode",
+                "no_mutation",
+                "--pack-file",
+                str(pack_file),
+                "--edits-file",
+                str(edits_file),
+                "--reviewer-id",
+                "reviewer-local",
+            ]
+        )
+        == 0
+    )
+    edit_result = json.loads(capsys.readouterr().out)
+    assert edit_result["schema_version"] == "candidate_review_edit_result.v1"
+    assert edit_result["permission"] == "allowed"
+    assert edit_result["target_scope"] == "production"
+    assert edit_result["mutation_mode"] == "no_mutation"
+    assert edit_result["candidate_state_changed"] is True
+    assert edit_result["authority_write_performed"] is False
+    assert edit_result["production_mutation_performed"] is False
+    assert edit_result["updated_pack"]["lanes"]["accepted_current"] == []
+    assert edit_result["rejected_edits"] == []
+    assert [item["action"] for item in edit_result["accepted_edits"]] == [
+        "update_object",
+        "add_evidence",
+        "add_edge",
+        "remove_edge",
+        "remove_evidence",
+    ]
+    assert added_evidence.evidence_id in {
+        item["evidence_id"] for item in edit_result["updated_pack"]["evidence"]
+    }
+    assert original_evidence_id not in {
+        item["evidence_id"] for item in edit_result["updated_pack"]["evidence"]
+    }
+    assert added_edge.edge_id in {item["edge_id"] for item in edit_result["updated_pack"]["edges"]}
+    assert original_edge_id not in {item["edge_id"] for item in edit_result["updated_pack"]["edges"]}
+    edited_pack_file = tmp_path / "edited-candidate-pack.json"
+    edited_pack_file.write_text(json.dumps(edit_result["updated_pack"]), encoding="utf-8")
+    decisions_file = tmp_path / "approval-decisions.json"
+    decisions_file.write_text(
+        json.dumps(
+            [
+                {
+                    "action": "promote",
+                    "object_id": candidate_id,
+                    "reason": "Local test approval board preview.",
+                    "approved_by": "reviewer-local",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "approval-board-decide",
+                "--target",
+                "local_test",
+                "--pack-file",
+                str(edited_pack_file),
+                "--decisions-file",
+                str(decisions_file),
+                "--reviewer-id",
+                "reviewer-local",
+            ]
+        )
+        == 0
+    )
+    decision_result = json.loads(capsys.readouterr().out)
+    assert decision_result["schema_version"] == "approval_board_decision_result.v1"
+    assert decision_result["permission"] == "allowed"
+    assert decision_result["authority_write_scope"] == "local_test"
+    assert decision_result["production_mutation_performed"] is False
+    assert decision_result["updated_pack"]["lanes"]["accepted_current"][0]["object_id"] == candidate_id
+
+
+def test_neuron_knowledge_approval_board_cli_denies_production_without_mutation(
+    tmp_path,
+    capsys,
+):
+    pack_file = tmp_path / "candidate-pack.json"
+    decisions_file = tmp_path / "approval-decisions.json"
+    pack_file.write_text(
+        json.dumps(
+            {
+                "schema_version": "object_pack.v1",
+                "route": "candidate_graph_review",
+                "candidate_graph_hash": "sha256:" + "5" * 64,
+                "objects": [],
+                "edges": [],
+                "evidence": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    decisions_file.write_text(
+        json.dumps([{"action": "promote", "object_id": "ko:ReferenceDocument:test"}]),
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "approval-board-decide",
+            "--target",
+            "production",
+            "--pack-file",
+            str(pack_file),
+            "--decisions-file",
+            str(decisions_file),
+            "--reviewer-id",
+            "reviewer-local",
+        ]
+    )
+
+    result = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert result["schema_version"] == "approval_board_decision_result.v1"
+    assert result["permission"] == "denied"
+    assert result["production_mutation_performed"] is False
+    assert result["authority_write_performed"] is False
+    assert result["promotion_plan"]["production_mutation_performed"] is False
+
+
 def test_neuron_knowledge_golden_query_eval_baseline(capsys):
     assert main(["golden-query-eval", "--baseline"]) == 0
 
@@ -405,6 +1078,28 @@ def test_neuron_knowledge_golden_query_eval_phase_coverage(capsys):
     assert report["schema_version"] == "knowledge_object_phase_golden_query_coverage.v1"
     assert report["status"] == "PASS_WITH_GAPS"
     assert report["release_quality_gate"] == "not_green"
+
+
+def test_neuron_knowledge_golden_query_eval_source_to_authority_gate(capsys):
+    assert main(["golden-query-eval", "--source-to-authority-gate"]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == "source_to_authority_quality_gate_report.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["release_quality_gate"] == "not_green"
+    assert report["production_mutation_performed"] is False
+
+
+def test_neuron_knowledge_golden_query_eval_activation_progress(capsys):
+    assert main(["golden-query-eval", "--activation-progress"]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == "lbrain_product_activation_progress.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["scope_phases"] == ["P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9"]
+    assert report["next_phase"] == "P5"
+    assert report["release_quality_gate"] == "not_green"
+    assert report["production_mutation_performed"] is False
 
 
 def test_neuron_knowledge_memory_regeneration_live_args_fail_closed(tmp_path, capsys):

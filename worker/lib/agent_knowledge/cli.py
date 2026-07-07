@@ -99,7 +99,12 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "corpus-status": llm_brain_object_cli.corpus_status_main,
     "corpus-ingest-plan": llm_brain_object_cli.corpus_ingest_plan_main,
     "corpus-ingest": llm_brain_object_cli.corpus_ingest_main,
+    "corpus-ingest-readiness": llm_brain_object_cli.corpus_ingest_readiness_main,
+    "source-to-candidate-graph": llm_brain_object_cli.source_to_candidate_graph_main,
+    "candidate-review-edit": llm_brain_object_cli.candidate_review_edit_main,
+    "approval-board-decide": llm_brain_object_cli.approval_board_decide_main,
     "golden-query-eval": llm_brain_object_cli.golden_query_eval_main,
+    "source-to-candidate-runtime-readiness": llm_brain_object_cli.source_to_candidate_runtime_readiness_main,
     "okf-export": llm_brain_object_cli.okf_export_main,
     "brain-regression-gate": llm_brain_regression_gate_cli.main,
     "brain-export": llm_brain_portable_cli.export_main,
@@ -170,6 +175,7 @@ def _build_recall_service(args) -> KnowledgeSearchService:
         steward_write_enabled = bool(
             getattr(args, "allow_steward_proposals", False)
             or getattr(args, "allow_steward_review_commit", False)
+            or getattr(args, "allow_object_authority_production_writes", False)
         )
         if steward_write_enabled:
             # MCP steward write runtimes attach to an existing production ledger.
@@ -205,6 +211,9 @@ def _build_recall_service(args) -> KnowledgeSearchService:
         mirror_search=mirror_search,
         allow_restricted_steward=bool(getattr(args, "allow_steward_review_commit", False)),
         allow_steward_auto_accept=False,
+        allow_production_object_authority_writes=bool(
+            getattr(args, "allow_object_authority_production_writes", False)
+        ),
     )
 
 
@@ -226,6 +235,11 @@ def _add_recall_service_arguments(parser) -> None:
         "--allow-steward-review-commit",
         action="store_true",
         help="enable human-gated Brain Steward review commits approve/reject/supersede/stale; auto-accept remains disabled",
+    )
+    parser.add_argument(
+        "--allow-object-authority-production-writes",
+        action="store_true",
+        help="enable explicitly gated object authority production writes; every write still requires a per-call production_gate",
     )
 
 

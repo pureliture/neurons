@@ -23,6 +23,9 @@ OBJECT_PARITY_SYMBOLS: dict[str, tuple[str, ...]] = {
         "memory_card_to_knowledge_object",
     ),
     "object_packs": (
+        "apply_approval_board_decisions",
+        "apply_candidate_review_edits",
+        "build_candidate_graph_review_pack",
         "build_documentation_cleanup_pack",
         "build_agent_context_object_packs",
     ),
@@ -45,6 +48,8 @@ OBJECT_PARITY_SYMBOLS: dict[str, tuple[str, ...]] = {
     ),
     "golden_query_eval": (
         "build_baseline_golden_query_report",
+        "build_product_activation_progress_report",
+        "build_source_to_authority_quality_gate_report",
         "evaluate_object_pack_response",
     ),
     "okf_export": (

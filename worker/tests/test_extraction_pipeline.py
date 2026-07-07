@@ -10,6 +10,7 @@ from agent_knowledge.llm_brain_core.objects.extraction_pipeline import (
     run_runtime_truth_extraction_preview,
     run_session_detail_extraction_preview,
     run_session_project_rollup_preview,
+    run_source_to_candidate_graph_activation_preview,
     run_work_unit_extraction_preview,
 )
 
@@ -41,6 +42,37 @@ def _manifest():
     }
 
 
+def _source_to_candidate_corpus_status():
+    return {
+        "schema_version": "brain_corpus_status.v1",
+        "corpus_id": "rc:test-source-to-candidate",
+        "source_count": 2,
+        "reference_object_count": 2,
+        "extraction_run_count": 1,
+        "storage_modes": {"managed_snapshot": 2},
+        "manifest_hashes": ["sha256:" + "8" * 64],
+        "document_sources": [
+            {
+                "source_id": "source-a",
+                "title": "Source A",
+                "content_hash": "sha256:" + "1" * 64,
+                "source_url_status": "verified",
+                "verification_state": "source_hash_verified",
+                "normalized_path_ref": "sources/source-a.md",
+            },
+            {
+                "source_id": "source-b",
+                "title": "Source B",
+                "content_hash": "sha256:" + "2" * 64,
+                "source_url_status": "verified",
+                "verification_state": "source_hash_verified",
+                "normalized_path_ref": "sources/source-b.md",
+            },
+        ],
+        "gaps": [],
+    }
+
+
 def test_extractor_registry_reports_implemented_and_gap_extractors():
     report = build_extractor_registry_report()
 
@@ -51,6 +83,12 @@ def test_extractor_registry_reports_implemented_and_gap_extractors():
     assert by_name["reference_corpus_manifest"]["output_object_types"] == [
         "ReferenceCorpus",
         "ReferenceDocument",
+    ]
+    assert by_name["source_to_candidate_graph"]["status"] == "implemented"
+    assert by_name["source_to_candidate_graph"]["output_object_types"] == [
+        "ReferenceCorpus",
+        "ReferenceDocument",
+        "CandidateGraphReviewPack",
     ]
     assert by_name["repo_document_cleanup"]["status"] == "implemented"
     assert by_name["repo_document_cleanup"]["gaps"] == []
@@ -88,6 +126,141 @@ def test_extractor_registry_reports_implemented_and_gap_extractors():
     ]
     assert by_name["session_detail"]["status"] == "implemented"
     assert by_name["session_detail"]["output_object_types"] == ["Session"]
+
+
+def test_source_to_candidate_graph_activation_preview_resolves_projection_join_gap_when_evidence_present():
+    result = run_source_to_candidate_graph_activation_preview(
+        corpus_status=_source_to_candidate_corpus_status(),
+        project="neurons",
+        runtime_evidence={
+            "projection_join": {
+                "schema_version": "object_extraction_projection_join_preview.v1",
+                "evidence_class": "runtime_projection_join",
+                "status": "pass",
+                "edge_count": 1,
+                "production_mutation_performed": False,
+            }
+        },
+    )
+
+    assert result["status"] == "PASS_WITH_GAPS"
+    assert "live_projection_join_unproven" not in result["gaps"]
+    assert "approval_board_runtime_integration_unproven" in result["gaps"]
+    assert "production_authority_write_denied" in result["gaps"]
+
+    invalid_edge_count = run_source_to_candidate_graph_activation_preview(
+        corpus_status=_source_to_candidate_corpus_status(),
+        project="neurons",
+        runtime_evidence={
+            "projection_join": {
+                "schema_version": "object_extraction_projection_join_preview.v1",
+                "evidence_class": "runtime_projection_join",
+                "status": "pass",
+                "edge_count": "unknown",
+                "production_mutation_performed": False,
+            }
+        },
+    )
+    assert "live_projection_join_unproven" in invalid_edge_count["gaps"]
+
+
+def test_source_to_candidate_graph_activation_preview_resolves_approval_and_production_gaps_from_evidence():
+    result = run_source_to_candidate_graph_activation_preview(
+        corpus_status=_source_to_candidate_corpus_status(),
+        project="neurons",
+        runtime_evidence={
+            "approval_board_runtime": {
+                "schema_version": "approval_board_runtime_integration_evidence.v1",
+                "evidence_class": "runtime_review_loop",
+                "status": "pass",
+                "target_scope": "local_test",
+                "decision_count": 1,
+                "authority_write_performed": True,
+                "authority_write_scope": "local_test",
+                "read_after_write_status": "validated",
+                "production_mutation_performed": False,
+            },
+            "production_authority_write": {
+                "schema_version": "object_authority_bounded_execution_evidence.v1",
+                "evidence_class": "runtime_safety_gate",
+                "status": "validated",
+                "approval_ref_hash": "sha256:" + "9" * 64,
+                "scope": "single_project_single_object",
+                "max_objects": 1,
+                "proposal_write_performed": True,
+                "decision_authority_write_performed": True,
+                "authoritative_memory_changed": True,
+                "read_after_write_status": "validated",
+                "rollback_or_supersession_status": "planned",
+                "postcheck_status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
+    )
+
+    assert result["status"] == "PASS_WITH_GAPS"
+    assert result["production_mutation_performed"] is False
+    assert result["runtime_evidence_summary"]["approval_board_runtime_validated"] is True
+    assert result["runtime_evidence_summary"]["production_authority_write_validated"] is True
+    assert result["runtime_evidence_summary"]["production_mutation_performed_by_evidence"] is True
+    assert "approval_board_runtime_integration_unproven" not in result["gaps"]
+    assert "production_authority_write_denied" not in result["gaps"]
+    assert "live_projection_join_unproven" in result["gaps"]
+
+    invalid_hash = run_source_to_candidate_graph_activation_preview(
+        corpus_status=_source_to_candidate_corpus_status(),
+        project="neurons",
+        runtime_evidence={
+            "production_authority_write": {
+                "schema_version": "object_authority_bounded_execution_evidence.v1",
+                "evidence_class": "runtime_safety_gate",
+                "status": "validated",
+                "approval_ref_hash": "sha256:not-a-full-digest",
+                "scope": "single_project_single_object",
+                "max_objects": 1,
+                "proposal_write_performed": True,
+                "decision_authority_write_performed": True,
+                "authoritative_memory_changed": True,
+                "read_after_write_status": "validated",
+                "rollback_or_supersession_status": "planned",
+                "postcheck_status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
+    )
+    assert "production_authority_write_denied" in invalid_hash["gaps"]
+
+    invalid_protected_output = run_source_to_candidate_graph_activation_preview(
+        corpus_status=_source_to_candidate_corpus_status(),
+        project="neurons",
+        runtime_evidence={
+            "production_authority_write": {
+                "schema_version": "object_authority_bounded_execution_evidence.v1",
+                "evidence_class": "runtime_safety_gate",
+                "status": "validated",
+                "approval_ref_hash": "sha256:" + "9" * 64,
+                "scope": "single_project_single_object",
+                "max_objects": 1,
+                "proposal_write_performed": True,
+                "decision_authority_write_performed": True,
+                "authoritative_memory_changed": True,
+                "read_after_write_status": "validated",
+                "rollback_or_supersession_status": "planned",
+                "postcheck_status": "validated",
+                "raw_private_evidence_returned": True,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
+    )
+    assert "production_authority_write_denied" in invalid_protected_output["gaps"]
 
 
 def test_reference_corpus_extraction_preview_creates_deterministic_objects_edges_and_chunk_preview():
@@ -1092,9 +1265,54 @@ def test_session_project_rollup_preview_builds_safe_handoff_pack():
     assert handoff["object_refs"]["Session"]
     assert handoff["object_refs"]["WorkUnit"]
     assert handoff["object_refs"]["PullRequest"]
+    resume = handoff["resume_context"]
+    assert resume["schema_version"] == "session_project_resume_context.v1"
+    assert resume["active_branch"] == "codex/p6"
+    assert resume["latest_session"]["object_id"] == handoff["object_refs"]["Session"][0]["object_id"]
+    assert resume["work_unit_refs"] == handoff["object_refs"]["WorkUnit"]
+    assert resume["linked_refs"]["Spec"] == handoff["object_refs"]["Spec"]
+    assert resume["linked_refs"]["PullRequest"] == handoff["object_refs"]["PullRequest"]
+    assert resume["linked_refs"]["Commit"] == handoff["object_refs"]["Commit"]
+    assert "raw_session_body_ignored" in resume["local_test_gaps"]
+    assert resume["live_gaps"] == ["live_multi_device_rollup_unproven"]
+    assert resume["production_mutation_performed"] is False
     assert "raw_session_body_ignored" in handoff["gaps"]
     assert "verify_live_multi_device_rollup" in handoff["recommended_next_actions"]
     assert "SOURCE_BODY_SENTINEL" not in str(handoff)
+
+
+def test_session_project_rollup_preview_latest_session_by_observed_at():
+    result = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "sha256:session-new",
+                "device_id_hash": "sha256:device-one",
+                "provider": "codex",
+                "summary": "Newer session arrived first.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["commit:new"],
+                "observed_at": "2026-07-07T02:00:00+00:00",
+            },
+            {
+                "session_id_hash": "sha256:session-old",
+                "device_id_hash": "sha256:device-one",
+                "provider": "codex",
+                "summary": "Older session arrived second.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["commit:old"],
+                "observed_at": "2026-07-07T01:00:00+00:00",
+            },
+        ],
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+    )
+
+    handoff = result["handoff_pack"]
+    assert handoff["object_refs"]["Session"][0]["observed_at"] == "2026-07-07T02:00:00+00:00"
+    assert handoff["object_refs"]["Session"][1]["observed_at"] == "2026-07-07T01:00:00+00:00"
+    assert handoff["resume_context"]["latest_session"]["title"] == "sha256:session-new"
+    assert handoff["resume_context"]["latest_session"]["observed_at"] == "2026-07-07T02:00:00+00:00"
 
 
 def test_pr_commit_extraction_preview_maps_pr_commits_and_tests_without_runtime_inference():

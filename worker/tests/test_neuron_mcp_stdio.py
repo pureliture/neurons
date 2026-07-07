@@ -23,6 +23,10 @@ from agent_knowledge.mcp_server import (
     BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
     BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
     BRAIN_OBJECTS_QUERY_TOOL_NAME,
+    BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+    BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+    BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+    BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
     BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
     BRAIN_CORPUS_STATUS_TOOL_NAME,
     BRAIN_REVIEW_PROPOSALS_TOOL_NAME,
@@ -45,8 +49,11 @@ from agent_knowledge import mcp_tools
 from agent_knowledge.mcp_tools import tool_contract_registry, tool_registry, tool_names
 from agent_knowledge.session_memory.memory_card import build_memory_candidate
 from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
+from agent_knowledge.llm_brain_core.context import BrainReadService
+from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
 from agent_knowledge.llm_brain_core.ledger_adapter import LedgerSourceRefCatalog
 from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
+from agent_knowledge.llm_brain_core.knowledge_objects import EvidenceRef, KnowledgeEdge
 from agent_knowledge.llm_brain_core.models import CONTEXT_PACK_SCHEMA_VERSION, OntologyEpisode
 from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
 from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
@@ -87,6 +94,91 @@ def _source_span(**overrides):
     }
     span.update(overrides)
     return span
+
+
+def _accepted_task_card(memory_id: str, *, next_action: str, project: str = PROJECT) -> dict:
+    summary = f"Resume fixture {memory_id}"
+    return {
+        "memory_id": memory_id,
+        "brain_id": f"/project/{project}",
+        "card_type": "task",
+        "scope": "project",
+        "project": project,
+        "provider": "codex",
+        "title": summary,
+        "summary": summary,
+        "render_text": summary,
+        "lifecycle_state": "accepted",
+        "judgment_state": "none",
+        "status": "accepted",
+        "approval_state": "approved",
+        "governance_tier": "medium",
+        "freshness": "current",
+        "currentness": "current",
+        "confidence": 0.9,
+        "confidence_basis": "temporal work recall fixture",
+        "source_refs": [{"source_ref_id": "src_neuron_mcp", "content_hash": _h("task-source")}],
+        "evidence_refs": [],
+        "evidence_hashes": [_h(memory_id)],
+        "derived_from": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflicts": [],
+        "active_until": "",
+        "updated_at": "2026-07-06T00:00:00Z",
+        "typed_payload": {
+            "task_state": summary,
+            "next_action": next_action,
+            "blocker": "",
+            "owner_hint": project,
+            "status": "open",
+        },
+    }
+
+
+def _accepted_preference_card(
+    memory_id: str,
+    *,
+    preference: str,
+    applies_to: str,
+    project: str = PROJECT,
+) -> dict:
+    return {
+        "memory_id": memory_id,
+        "brain_id": f"/project/{project}",
+        "card_type": "preference",
+        "scope": "project",
+        "project": project,
+        "provider": "codex",
+        "title": preference,
+        "summary": preference,
+        "render_text": preference,
+        "lifecycle_state": "accepted",
+        "judgment_state": "none",
+        "status": "accepted",
+        "approval_state": "approved",
+        "governance_tier": "medium",
+        "freshness": "current",
+        "currentness": "current",
+        "confidence": 0.93,
+        "confidence_basis": "accepted preference fixture",
+        "source_refs": [{"source_ref_id": "src_neuron_mcp", "content_hash": _h(memory_id)}],
+        "evidence_refs": [],
+        "evidence_hashes": [_h(memory_id)],
+        "derived_from": [],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflicts": [],
+        "active_until": "",
+        "updated_at": "2026-07-06T00:00:00Z",
+        "typed_payload": {
+            "preference": preference,
+            "applies_to": applies_to,
+            "explicitness": "explicit",
+            "repeated_count": 1,
+            "confirmation_status": "confirmed",
+        },
+    }
 
 
 def _reference_manifest() -> dict:
@@ -276,6 +368,10 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
         BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
         BRAIN_CORPUS_STATUS_TOOL_NAME,
         BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
+        BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+        BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+        BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+        BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
         BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
         BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
         BRAIN_REVIEW_PROPOSALS_TOOL_NAME,
@@ -286,6 +382,9 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
         "local_test",
         "production",
     ]
+    assert "project" in tools[BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME]["inputSchema"]["properties"]
+    assert "production_gate" in tools[BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME]["inputSchema"]["properties"]
+    assert "production_gate" in tools[BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME]["inputSchema"]["properties"]
     assert tools[BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME]["inputSchema"]["required"] == [
         "proposal_id",
         "decision_type",
@@ -300,6 +399,1207 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
     assert "expected_source_url_count" in corpus_plan_properties
     assert "expected_manual_text_without_url_count" in corpus_plan_properties
     assert "expected_source_type_counts" in corpus_plan_properties
+    assert tools[BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME]["inputSchema"]["properties"]["target"]["enum"] == [
+        "local_test",
+        "production",
+    ]
+    assert tools[BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME]["inputSchema"]["properties"]["target"]["enum"] == [
+        "local_test",
+        "production",
+    ]
+    readiness_schema = tools[BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME]["inputSchema"]
+    assert readiness_schema["properties"]["live_evidence"]["type"] == "object"
+    assert readiness_schema["properties"]["expected_commit"]["type"] == "string"
+    assert readiness_schema["properties"]["evidence_collection_plan"]["type"] == "boolean"
+    assert readiness_schema["properties"]["evidence_packet_template"]["type"] == "boolean"
+    assert readiness_schema["properties"]["collect_shadow_evidence"]["type"] == "boolean"
+    assert readiness_schema["properties"]["normalize_shadow_evidence"]["type"] == "object"
+    assert readiness_schema["properties"]["shadow_evidence"]["type"] == "object"
+    assert readiness_schema["properties"]["repository"]["type"] == "string"
+    assert readiness_schema["properties"]["branch"]["type"] == "string"
+    assert readiness_schema["properties"]["consumer"]["type"] == "string"
+
+
+def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_without_mutation(tmp_path: Path):
+    service = _service(tmp_path)
+    tools = {tool["name"]: tool for tool in list_tools()}
+    evidence = {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "tool_names": [
+            BRAIN_OBJECTS_QUERY_TOOL_NAME,
+            BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+            BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+            BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+            BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+        ],
+        "agent_context_product": {
+            "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
+            "sections": {
+                "style_preference": {"object_count": 1},
+                "active_work": {"object_count": 1},
+                "required_verification": {"object_count": 1},
+            },
+            "degraded_mode": {"active": True, "gaps": ["runtime_evidence_unverified"]},
+            "missing_evidence_before_promotion": ["runtime_evidence_unverified"],
+            "surface_policy": {"mutation_allowed": False},
+            "tool_hints": object_native_review_tool_hints([]),
+        },
+        "brain_objects_query_smokes": [
+            _brain_objects_query_smoke("authority_archive_separation"),
+            _brain_objects_query_smoke("code_style_preference"),
+            _brain_objects_query_smoke("temporal_work_recall"),
+            _brain_objects_query_smoke("code_change_impact"),
+            _brain_objects_query_smoke("html_visualization_preference"),
+            _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
+        ],
+        "projection_join": _projection_join_runtime_evidence(),
+        "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
+        "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
+        "preference_artifact_memory": _preference_artifact_memory_evidence(),
+        "permission_sensitive_audit": _permission_sensitive_audit_evidence(),
+        "agent_context_startup_runtime": _agent_context_startup_runtime_evidence(),
+        "production_denials": {
+            BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
+                "status": "denied",
+                "production_mutation_performed": False,
+                "mutation_performed": False,
+            },
+            BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME: {
+                "permission": "denied",
+                "production_mutation_performed": False,
+                "authority_write_performed": False,
+            },
+            BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: {
+                "status": "denied",
+                "production_mutation_performed": False,
+                "proposal_write_performed": False,
+                "authority_write_performed": False,
+            },
+            BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: {
+                "permission": "denied",
+                "production_mutation_performed": False,
+                "decision_write_performed": False,
+                "authority_write_performed": False,
+            },
+        },
+        "tool_schemas": {
+            BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: tools[BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME],
+            BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: tools[BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME],
+        },
+        "production_authority_gate": {
+            "runtime_flag": "--allow-object-authority-production-writes",
+            "default_enabled": False,
+            "per_call_gate_required": True,
+            "production_mutation_performed": False,
+        },
+        "deployed_identity": {
+            "contains_expected_commit": True,
+            "identity_source": "redacted_live_runtime_evidence",
+        },
+        "evidence_provenance": _runtime_evidence_provenance(
+            collection_mode="post_deploy_read_only_smoke",
+            mutation_scope="none",
+            network_used=True,
+        ),
+    }
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 120,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "live_evidence": evidence,
+                    "expected_commit": "d38bcfa",
+                },
+            },
+        },
+        service,
+    )
+
+    report = response["result"]["structuredContent"]
+    assert report["schema_version"] == "source_to_candidate_runtime_readiness.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["production_mutation_performed"] is False
+    assert report["network_used"] is False
+    assert report["evidence_collection_network_used"] is True
+    assert "bounded_production_authority_execution_unverified" in report["gaps"]
+    assert "live_session_project_rollup_unverified" not in report["gaps"]
+
+
+def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_plan(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 120,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "evidence_collection_plan": True,
+                    "expected_commit": "d38bcfa",
+                    "repository": "pureliture/neurons",
+                    "branch": "main",
+                    "consumer": "codex",
+                },
+            },
+        },
+        service,
+    )
+
+    plan = response["result"]["structuredContent"]
+    assert plan["schema_version"] == "source_to_candidate_runtime_evidence_collection_plan.v1"
+    assert plan["expected_commit"] == "d38bcfa"
+    assert plan["repository"] == "pureliture/neurons"
+    assert plan["branch"] == "main"
+    assert plan["consumer"] == "codex"
+    assert plan["network_used"] is False
+    assert plan["production_mutation_performed"] is False
+    assert plan["mutation_allowed"] is False
+    assert "probe_session_project_rollup_runtime" in plan["required_steps"]
+    assert plan["gap_mapping"]["probe_session_project_rollup_runtime"] == "live_session_project_rollup_unverified"
+    registration = plan["shadow_collection_registration"]
+    assert registration["schema_version"] == "source_to_candidate_runtime_shadow_collection_registration.v1"
+    assert registration["status"] == "registration_ready"
+    assert registration["run_status"] == "not_run"
+    assert registration["request_ids"] == ["shadow_brain_objects_query_route_smoke"]
+    assert registration["readiness_claim"] == "registration_only_not_runtime_evidence"
+
+
+def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_template(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 121,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "evidence_packet_template": True,
+                    "expected_commit": "d38bcfa",
+                    "repository": "pureliture/neurons",
+                    "branch": "main",
+                    "consumer": "codex",
+                },
+            },
+        },
+        service,
+    )
+
+    template = response["result"]["structuredContent"]
+    assert template["schema_version"] == "source_to_candidate_runtime_evidence_packet_template.v1"
+    assert template["status"] == "template_ready"
+    assert template["output_schema"] == "source_to_candidate_runtime_evidence.v1"
+    assert template["expected_commit"] == "d38bcfa"
+    assert template["repository"] == "pureliture/neurons"
+    assert template["branch"] == "main"
+    assert template["consumer"] == "codex"
+    assert template["network_used"] is False
+    assert template["mutation_allowed"] is False
+    assert template["production_mutation_performed"] is False
+    assert template["readiness_claim"] == "template_only_not_runtime_evidence"
+    assert template["packet_field_templates"]["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert "session_project_rollup_runtime" in template["required_packet_fields"]
+    assert (
+        template["packet_field_templates"]["session_project_rollup_runtime"]["schema_version"]
+        == "session_project_rollup_runtime_evidence.v1"
+    )
+    assert "preference_artifact_memory" in template["required_packet_fields"]
+    assert (
+        template["packet_field_templates"]["preference_artifact_memory"]["schema_version"]
+        == "preference_artifact_memory_runtime_evidence.v1"
+    )
+    assert "permission_sensitive_audit" in template["required_packet_fields"]
+    assert (
+        template["packet_field_templates"]["permission_sensitive_audit"]["schema_version"]
+        == "permission_sensitive_runtime_audit_evidence.v1"
+    )
+    assert "agent_context_startup_runtime" in template["required_packet_fields"]
+    assert (
+        template["packet_field_templates"]["agent_context_startup_runtime"]["schema_version"]
+        == "agent_context_startup_runtime_evidence.v1"
+    )
+    assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == 6
+
+
+def test_mcp_source_to_candidate_runtime_readiness_normalizes_shadow_evidence(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 122,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "normalize_shadow_evidence": _shadow_runtime_evidence_capture(),
+                },
+            },
+        },
+        service,
+    )
+
+    packet = response["result"]["structuredContent"]
+    assert packet["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert packet["production_mutation_performed"] is False
+    assert (
+        packet["evidence_provenance"]["schema_version"]
+        == "source_to_candidate_runtime_evidence_provenance.v1"
+    )
+    assert packet["evidence_provenance"]["collection_mode"] == "post_deploy_read_only_smoke"
+    assert packet["evidence_provenance"]["network_used"] is True
+    assert len(packet["brain_objects_query_smokes"]) == 6
+
+
+def test_mcp_source_to_candidate_runtime_readiness_evaluates_shadow_evidence(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 123,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "shadow_evidence": _shadow_runtime_evidence_capture(),
+                    "expected_commit": "c264b46",
+                },
+            },
+        },
+        service,
+    )
+
+    report = response["result"]["structuredContent"]
+    assert report["schema_version"] == "source_to_candidate_runtime_readiness.v1"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["failed_claims"] == []
+    assert report["live_evidence_provided"] is True
+    assert report["production_mutation_performed"] is False
+    assert report["network_used"] is False
+    assert report["evidence_collection_network_used"] is True
+    assert "shadow_route_smoke_not_implemented:deployment_runtime_truth" in report["gaps"]
+
+
+def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 124,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "collect_shadow_evidence": True,
+                    "repository": "pureliture/neurons",
+                    "branch": "codex/knowledge-object-review-flow-roadmap",
+                    "consumer": "codex",
+                },
+            },
+        },
+        service,
+    )
+
+    packet = response["result"]["structuredContent"]
+    assert packet["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert packet["production_mutation_performed"] is False
+    assert packet["collector"]["readiness_claim"] == "collector_packet_not_live_evidence"
+    assert packet["evidence_provenance"]["collection_mode"] == "local_test_replay"
+    assert packet["evidence_provenance"]["network_used"] is False
+    assert packet["source_to_candidate_review_loop"]["schema_version"] == "source_to_candidate_review_loop_evidence.v1"
+    assert packet["source_to_candidate_review_loop"]["source_to_candidate_graph"]["target_scope"] == "local_test"
+    assert packet["source_to_candidate_review_loop"]["candidate_review_edit"]["mutation_mode"] == "no_mutation"
+    assert (
+        packet["source_to_candidate_review_loop"]["approval_board_decision"]["authority_write_scope"]
+        == "local_test"
+    )
+    assert packet["session_project_rollup_runtime"]["schema_version"] == "session_project_rollup_runtime_evidence.v1"
+    assert packet["session_project_rollup_runtime"]["rollup_preview"]["scope"] == "all_devices"
+    assert packet["session_project_rollup_runtime"]["rollup_preview"]["device_count"] >= 2
+    assert packet["preference_artifact_memory"]["schema_version"] == "preference_artifact_memory_runtime_evidence.v1"
+    assert packet["preference_artifact_memory"]["preference_object_pack"]["accepted_preference_count"] >= 1
+    assert packet["preference_artifact_memory"]["preference_object_pack"]["proposal_preference_count"] >= 1
+    assert packet["preference_artifact_memory"]["html_visualization_route_smoke"]["route"] == "html_visualization_preference"
+    assert packet["preference_artifact_memory"]["artifact_review_check"]["raw_artifact_body_returned"] is False
+    assert packet["permission_sensitive_audit"]["schema_version"] == "permission_sensitive_runtime_audit_evidence.v1"
+    assert len(packet["permission_sensitive_audit"]["audit_events"]) == 2
+    assert {event["action"] for event in packet["permission_sensitive_audit"]["audit_events"]} == {
+        BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+        BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+    }
+    assert all(
+        event["permission"] == "denied"
+        and event["authority_write_performed"] is False
+        and event["production_mutation_performed"] is False
+        for event in packet["permission_sensitive_audit"]["audit_events"]
+    )
+    assert packet["permission_sensitive_audit"]["audit_store"]["status"] == "recorded"
+    assert packet["agent_context_startup_runtime"]["schema_version"] == "agent_context_startup_runtime_evidence.v1"
+    assert packet["agent_context_startup_runtime"]["startup_context"]["loaded_on_startup"] is True
+    assert packet["agent_context_startup_runtime"]["startup_context"]["surface_policy"]["mutation_allowed"] is False
+    assert packet["agent_context_startup_runtime"]["read_path_smoke"]["tool"] == BRAIN_OBJECTS_QUERY_TOOL_NAME
+    assert packet["agent_context_startup_runtime"]["read_path_smoke"]["read_only"] is True
+    assert packet["agent_context_startup_runtime"]["runtime_enforcement"]["raw_private_context_blocked"] is True
+    assert len(packet["brain_objects_query_smokes"]) == 6
+    assert all(
+        "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])
+        for smoke in packet["brain_objects_query_smokes"]
+    )
+
+
+def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None) -> dict:
+    return {
+        "schema_version": "brain_objects_query.v1",
+        "route": route,
+        "production_mutation_performed": False,
+        "object_pack": {
+            "schema_version": "object_pack.v1",
+            "route": route,
+            "objects": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}],
+            "lanes": {"candidate": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}]},
+            "recommended_actions": [{"object_id": f"ko:test:{route}", "action": "review"}],
+            "gaps": list(gaps or []),
+        },
+    }
+
+
+def _runtime_evidence_provenance(
+    *,
+    collection_mode: str,
+    mutation_scope: str,
+    network_used: bool,
+) -> dict:
+    return {
+        "schema_version": "source_to_candidate_runtime_evidence_provenance.v1",
+        "collection_mode": collection_mode,
+        "collector": "redacted_operator_or_agent",
+        "network_used": network_used,
+        "mutation_scope": mutation_scope,
+        "raw_private_evidence_returned": False,
+        "secret_returned": False,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": False,
+    }
+
+
+def _shadow_runtime_evidence_capture() -> dict:
+    return {
+        "tool_names": [BRAIN_CONTEXT_RESOLVE_TOOL_NAME, BRAIN_OBJECTS_QUERY_TOOL_NAME],
+        "agent_context_product": {
+            "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
+            "sections": {
+                "style_preference": {"object_count": 0},
+                "active_work": {"object_count": 0},
+                "required_verification": {"object_count": 1},
+            },
+            "surface_policy": {"mutation_allowed": False},
+            "degraded_mode": {"active": True, "gaps": ["runtime_evidence_unverified"]},
+            "missing_evidence_before_promotion": ["runtime_evidence_unverified"],
+            "tool_hints": [],
+        },
+        "brain_objects_query_smokes": [
+            _brain_objects_query_smoke(
+                "authority_archive_separation",
+                gaps=["object_pack_route_not_implemented"],
+            ),
+            _brain_objects_query_smoke(
+                "code_style_preference",
+                gaps=["object_pack_route_not_implemented"],
+            ),
+            _brain_objects_query_smoke(
+                "temporal_work_recall",
+                gaps=["object_pack_route_not_implemented"],
+            ),
+            _brain_objects_query_smoke(
+                "code_change_impact",
+                gaps=["object_pack_route_not_implemented"],
+            ),
+            _brain_objects_query_smoke(
+                "html_visualization_preference",
+                gaps=["object_pack_route_not_implemented"],
+            ),
+            _brain_objects_query_smoke(
+                "deployment_runtime_truth",
+                gaps=["object_pack_route_not_implemented"],
+            ),
+        ],
+        "deployed_identity": {
+            "contains_expected_commit": False,
+            "identity_source": "current_codex_session_configured_mcp_namespace",
+        },
+        "collection": {
+            "collection_mode": "post_deploy_read_only_smoke",
+            "network_used": True,
+            "mutation_scope": "none",
+        },
+    }
+
+
+def _runtime_readiness_complete_evidence(
+    *,
+    production_authority_execution: dict | None = None,
+) -> dict:
+    tools = {tool["name"]: tool for tool in list_tools()}
+    evidence = {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "tool_names": [
+            BRAIN_OBJECTS_QUERY_TOOL_NAME,
+            BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+            BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+            BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+            BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+        ],
+        "agent_context_product": {
+            "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
+            "sections": {
+                "style_preference": {"object_count": 1},
+                "active_work": {"object_count": 1},
+                "required_verification": {"object_count": 1},
+            },
+            "degraded_mode": {"active": True, "gaps": ["runtime_evidence_unverified"]},
+            "missing_evidence_before_promotion": ["runtime_evidence_unverified"],
+            "surface_policy": {"mutation_allowed": False},
+            "tool_hints": object_native_review_tool_hints([]),
+        },
+        "brain_objects_query_smokes": [
+            _brain_objects_query_smoke("authority_archive_separation"),
+            _brain_objects_query_smoke("code_style_preference"),
+            _brain_objects_query_smoke("temporal_work_recall"),
+            _brain_objects_query_smoke("code_change_impact"),
+            _brain_objects_query_smoke("html_visualization_preference"),
+            _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
+        ],
+        "projection_join": _projection_join_runtime_evidence(),
+        "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
+        "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
+        "preference_artifact_memory": _preference_artifact_memory_evidence(),
+        "permission_sensitive_audit": _permission_sensitive_audit_evidence(),
+        "agent_context_startup_runtime": _agent_context_startup_runtime_evidence(),
+        "production_denials": {
+            BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
+                "status": "denied",
+                "production_mutation_performed": False,
+                "mutation_performed": False,
+            },
+            BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME: {
+                "permission": "denied",
+                "production_mutation_performed": False,
+                "authority_write_performed": False,
+            },
+            BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: {
+                "status": "denied",
+                "production_mutation_performed": False,
+                "proposal_write_performed": False,
+                "authority_write_performed": False,
+            },
+            BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: {
+                "permission": "denied",
+                "production_mutation_performed": False,
+                "decision_write_performed": False,
+                "authority_write_performed": False,
+            },
+        },
+        "tool_schemas": {
+            BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: tools[BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME],
+            BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: tools[BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME],
+        },
+        "production_authority_gate": {
+            "runtime_flag": "--allow-object-authority-production-writes",
+            "default_enabled": False,
+            "per_call_gate_required": True,
+            "production_mutation_performed": False,
+        },
+        "deployed_identity": {
+            "contains_expected_commit": True,
+            "identity_source": "redacted_live_runtime_evidence",
+        },
+        "evidence_provenance": _runtime_evidence_provenance(
+            collection_mode="local_test_replay",
+            mutation_scope="bounded_production_authority_execution"
+            if production_authority_execution is not None
+            else "none",
+            network_used=False,
+        ),
+    }
+    if production_authority_execution is not None:
+        evidence["production_authority_execution"] = production_authority_execution
+    return evidence
+
+
+def _projection_join_runtime_evidence() -> dict:
+    return {
+        "schema_version": "object_extraction_projection_join_preview.v1",
+        "evidence_class": "runtime_projection_join",
+        "status": "pass",
+        "edge_count": 2,
+        "production_mutation_performed": False,
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+
+
+def _source_to_candidate_review_loop_evidence() -> dict:
+    return {
+        "schema_version": "source_to_candidate_review_loop_evidence.v1",
+        "source_to_candidate_graph": {
+            "schema_version": "source_to_candidate_graph_activation.v1",
+            "status": "PASS_WITH_GAPS",
+            "target_scope": "local_test",
+            "pack_type": "candidate_graph_review",
+            "candidate_count": 3,
+            "accepted_count": 0,
+            "quality_gate": {"source_to_candidate_graph": "PASS"},
+            "production_mutation_performed": False,
+            "mutation_performed": False,
+        },
+        "candidate_review_edit": {
+            "schema_version": "candidate_review_edit_result.v1",
+            "status": "PASS",
+            "target_scope": "local_test",
+            "mutation_mode": "no_mutation",
+            "edited_candidate_count": 3,
+            "rejected_edit_count": 0,
+            "production_mutation_performed": False,
+            "authority_write_performed": False,
+        },
+        "approval_board_decision": {
+            "schema_version": "approval_board_decision_result.v1",
+            "status": "PASS",
+            "ledger_scope": "local_test",
+            "authority_write_scope": "local_test",
+            "decision_count": 1,
+            "authority_write_performed": True,
+            "production_mutation_performed": False,
+        },
+        "read_after_write": {
+            "status": "validated",
+            "object_pack_schema": "object_pack.v1",
+            "route": "authority_archive_separation",
+            "authority_lane": "accepted_current",
+            "object_count": 1,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+
+
+def _session_project_rollup_runtime_evidence() -> dict:
+    return {
+        "schema_version": "session_project_rollup_runtime_evidence.v1",
+        "rollup_preview": {
+            "schema_version": "object_extraction_session_project_rollup_preview.v1",
+            "status": "pass",
+            "scope": "all_devices",
+            "object_type_counts": {
+                "Device": 2,
+                "Session": 2,
+                "Repository": 1,
+                "Branch": 1,
+                "WorkUnit": 1,
+            },
+            "edge_types": [
+                "repository_has_branch",
+                "session_on_device",
+                "device_has_session",
+                "session_in_repository",
+                "repository_has_session",
+                "session_on_branch",
+                "branch_has_session",
+                "part_of_work_unit",
+                "work_unit_has_session",
+            ],
+            "object_count": 7,
+            "edge_count": 12,
+            "visible_session_count": 2,
+            "all_device_session_count": 2,
+            "device_count": 2,
+            "production_mutation_performed": False,
+        },
+        "handoff_pack": {
+            "schema_version": "session_project_handoff_pack.v1",
+            "raw_return_capability": "denied",
+            "visible_session_count": 2,
+            "all_device_session_count": 2,
+            "object_ref_counts": {"Session": 2, "WorkUnit": 1},
+            "resume_context": {
+                "schema_version": "session_project_resume_context.v1",
+                "latest_session_ref_present": True,
+                "work_unit_ref_count": 1,
+                "production_mutation_performed": False,
+            },
+        },
+        "read_after_write": {
+            "status": "validated",
+            "route": "temporal_work_recall",
+            "object_pack_schema": "object_pack.v1",
+            "object_types": ["WorkUnit"],
+            "object_count": 1,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+
+
+def _preference_artifact_memory_evidence() -> dict:
+    accepted_object = {
+        "object_id": "ko:ArtifactPreference:html-review-density",
+        "object_type": "ArtifactPreference",
+        "authority_lane": "accepted_current",
+    }
+    proposal_object = {
+        "object_id": "ko:ArtifactPreference:visualization-proposal",
+        "object_type": "ArtifactPreference",
+        "authority_lane": "proposal_only",
+    }
+    return {
+        "schema_version": "preference_artifact_memory_runtime_evidence.v1",
+        "preference_object_pack": {
+            "schema_version": "object_pack.v1",
+            "route": "code_style_preference",
+            "accepted_preference_count": 1,
+            "proposal_preference_count": 1,
+            "objects": [accepted_object, proposal_object],
+            "lanes": {
+                "accepted_current": [accepted_object],
+                "proposal_only": [proposal_object],
+            },
+            "recommended_actions": [
+                {"object_id": accepted_object["object_id"], "action": "apply_preference"},
+                {"object_id": proposal_object["object_id"], "action": "review_inferred_preference"},
+            ],
+            "gaps": [],
+            "production_mutation_performed": False,
+        },
+        "html_visualization_route_smoke": {
+            "schema_version": "brain_objects_query.v1",
+            "route": "html_visualization_preference",
+            "production_mutation_performed": False,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": "html_visualization_preference",
+                "objects": [accepted_object],
+                "lanes": {"accepted_current": [accepted_object]},
+                "recommended_actions": [
+                    {"object_id": accepted_object["object_id"], "action": "apply_preference"}
+                ],
+                "gaps": [],
+            },
+        },
+        "agent_context_preference_section": {
+            "schema_version": "agent_context_product_pack.v1",
+            "section": "style_preference",
+            "object_count": 1,
+            "accepted_preference_count": 1,
+            "surface_policy": {"mutation_allowed": False},
+        },
+        "artifact_review_check": {
+            "schema_version": "artifact_review_preference_check.v1",
+            "status": "pass",
+            "ui_required": False,
+            "raw_artifact_body_returned": False,
+            "assertions": ["accepted_html_preference_available"],
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+
+
+def _permission_sensitive_audit_evidence() -> dict:
+    event_base = {
+        "schema_version": "runtime_permission_audit_event.v1",
+        "event_type": "permission_sensitive_runtime_action",
+        "ledger_scope": "production",
+        "permission": "denied",
+        "authority_write_performed": False,
+        "production_mutation_performed": False,
+        "actor_ref_hash": "sha256:" + "c" * 64,
+        "request_hash": "sha256:" + "d" * 64,
+        "protected_values_returned": False,
+        "raw_private_evidence_returned": False,
+        "secret_returned": False,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": False,
+    }
+    return {
+        "schema_version": "permission_sensitive_runtime_audit_evidence.v1",
+        "audit_events": [
+            {**event_base, "action": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME},
+            {**event_base, "action": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME},
+        ],
+        "audit_store": {
+            "status": "recorded",
+            "event_count": 2,
+            "production_mutation_performed": False,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+
+
+def _agent_context_startup_runtime_evidence() -> dict:
+    return {
+        "schema_version": "agent_context_startup_runtime_evidence.v1",
+        "startup_context": {
+            "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
+            "loaded_on_startup": True,
+            "section_counts": {
+                "style_preference": 1,
+                "active_work": 1,
+                "required_verification": 1,
+            },
+            "surface_policy": {"mutation_allowed": False},
+            "degraded_gap_disclosure_present": True,
+            "missing_evidence_before_promotion_present": True,
+        },
+        "read_path_smoke": {
+            "tool": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+            "read_only": True,
+            "routes_checked": [
+                "authority_archive_separation",
+                "code_style_preference",
+                "temporal_work_recall",
+                "code_change_impact",
+                "html_visualization_preference",
+                "deployment_runtime_truth",
+            ],
+            "production_mutation_performed": False,
+        },
+        "runtime_enforcement": {
+            "direct_execution_allowed": False,
+            "production_mutation_allowed": False,
+            "raw_private_context_blocked": True,
+            "approval_scope_blocker_enforced": True,
+            "stale_or_degraded_disclosure_present": True,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+
+
+def _production_authority_execution_from_smoke(
+    *,
+    proposal: dict,
+    decision: dict,
+    state: dict,
+    queued_item: dict,
+) -> dict:
+    target_object_id = proposal["target_object_id"]
+    return {
+        "schema_version": "object_authority_bounded_execution_evidence.v1",
+        "approval": {
+            "approved": True,
+            "approval_ref_hash": proposal["production_gate_ref_hash"],
+            "scope": "single_project_single_object",
+            "project": proposal["project"],
+            "max_objects": 1,
+        },
+        "proposal": {
+            "proposal_write_performed": proposal["proposal_write_performed"],
+            "proposal_write_target": proposal["proposal_write_target"],
+            "authority_write_performed": proposal["authority_write_performed"],
+            "production_mutation_performed": proposal["production_mutation_performed"],
+            "ledger_scope": proposal["ledger_scope"],
+            "target_object_id": target_object_id,
+            "production_gate_ref_hash": proposal["production_gate_ref_hash"],
+        },
+        "decision": {
+            "authority_write_performed": decision["authority_write_performed"],
+            "authoritative_memory_changed": decision["authoritative_memory_changed"],
+            "production_mutation_performed": decision["production_mutation_performed"],
+            "authority_write_scope": decision["authority_write_scope"],
+            "ledger_scope": decision["ledger_scope"],
+            "target_object_id": decision["target_object_id"],
+            "decision_id": decision["decision_id"],
+            "production_gate_ref_hash": decision["production_gate_ref_hash"],
+        },
+        "read_after_write": {
+            "status": "validated",
+            "target_object_id": target_object_id,
+            "authority_lane": state["authority_lane"],
+            "decision_id": state["decision_id"],
+        },
+        "rollback_or_supersession": {
+            "status": "planned",
+            "path": [
+                "write_new_authority_decision_preserving_audit_history",
+                "demote_prior_object_to_accepted_non_current_or_archive_only",
+                "verify_brain_objects_query_read_after_write",
+            ],
+        },
+        "postcheck": {
+            "status": "validated",
+            "review_queue_status": queued_item["status"],
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "scope": {
+            "project": proposal["project"],
+            "object_ids": [target_object_id],
+            "max_objects": 1,
+            "allowed_object_classes": ["RepoDocument"],
+        },
+    }
+
+
+def test_mcp_source_to_candidate_runtime_readiness_accepts_bounded_execution_evidence_from_local_production_gate_simulation(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    production_gate = {
+        "approved": True,
+        "approval_ref": "preapproved-user-gate-2026-07-06",
+        "scope": "single_project_single_object",
+        "project": PROJECT,
+        "max_objects": 1,
+        "configured_deployed_mcp_identity_matches_source": True,
+        "read_after_write_smoke_plan": True,
+        "rollback_or_supersession_plan": True,
+        "no_raw_private_evidence": True,
+    }
+    target_object_id = "ko:RepoDocument:production-gate-runtime-readiness"
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 121,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Bounded production proposal smoke for runtime readiness.",
+                    "evidence_refs": ["github_pr:95", "git_commit:73d5f6a"],
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 122,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "reject_candidate",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "rejected",
+                    "approved_by": "preapproved-user-gate-2026-07-06",
+                    "decision_id": "decision:production-runtime-readiness",
+                    "decision_reason": "Bounded production decision smoke rejects the candidate.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    state = service.ledger.get_object_authority_state(target_object_id)
+    queued_item = service.object_review_proposals(project=PROJECT)["items"][0]
+    evidence = _runtime_readiness_complete_evidence(
+        production_authority_execution=_production_authority_execution_from_smoke(
+            proposal=proposal,
+            decision=decision,
+            state=state,
+            queued_item=queued_item,
+        )
+    )
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 123,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "live_evidence": evidence,
+                    "expected_commit": "73d5f6a",
+                },
+            },
+        },
+        service,
+    )
+
+    report = response["result"]["structuredContent"]
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert report["status"] == "PASS"
+    assert report["production_mutation_performed"] is True
+    assert claims["live.production.object_authority_bounded_execution"]["status"] == "validated"
+    assert claims["live.production.object_authority_bounded_execution"]["read_after_write_status"] == "validated"
+    assert "bounded_production_authority_execution_unverified" not in report["gaps"]
+
+
+def test_mcp_source_to_candidate_runtime_readiness_without_evidence_preserves_live_gaps(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 120,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {"expected_commit": "d38bcfa"},
+            },
+        },
+        service,
+    )
+
+    report = response["result"]["structuredContent"]
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["live_evidence_provided"] is False
+    assert report["production_mutation_performed"] is False
+    assert "live_mcp_review_tools_unverified" in report["gaps"]
+
+
+def test_mcp_source_to_candidate_graph_and_review_approval_preview_roundtrip(tmp_path: Path):
+    service = _service(tmp_path)
+    bundle = reference_corpus_objects_from_manifest(
+        _reference_manifest(),
+        project=PROJECT,
+        storage_mode="managed_snapshot",
+    )
+    ingest = service.ledger.upsert_reference_corpus_bundle(bundle, project=PROJECT)
+
+    graph_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 121,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+                "arguments": {
+                    "project": PROJECT,
+                    "target": "local_test",
+                    "corpus_id": ingest["corpus_id"],
+                    "consumer": "codex",
+                },
+            },
+        },
+        service,
+    )
+
+    graph = graph_response["result"]["structuredContent"]
+    assert graph["schema_version"] == "source_to_candidate_graph_activation.v1"
+    assert graph["status"] == "PASS_WITH_GAPS"
+    assert graph["production_mutation_performed"] is False
+    assert graph["ledger_mutation_performed"] is False
+    assert graph["candidate_graph_review_pack"]["route"] == "candidate_graph_review"
+    assert graph["candidate_graph_review_pack"]["lanes"]["candidate"]
+    candidate_id = graph["candidate_graph_review_pack"]["lanes"]["candidate"][0]["object_id"]
+    original_edge_id = graph["candidate_graph_review_pack"]["edges"][0]["edge_id"]
+    original_evidence_id = graph["candidate_graph_review_pack"]["evidence"][0]["evidence_id"]
+    added_evidence = EvidenceRef.from_parts(
+        evidence_type="source_hash",
+        authority_lane="reference_only",
+        verification_state="source_hash_verified",
+        locator={"kind": "relative_repo_path", "value": "docs/mcp-review-evidence.md"},
+        content_hash="sha256:" + "9" * 64,
+        summary="Reviewer attached MCP transport evidence.",
+    )
+    added_edge = KnowledgeEdge.from_parts(
+        edge_type="review_supports",
+        from_object_id=candidate_id,
+        to_object_id=candidate_id,
+        evidence_refs=[added_evidence.evidence_id],
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="unverified",
+    )
+
+    edit_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 122,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+                "arguments": {
+                    "pack": graph["candidate_graph_review_pack"],
+                    "target": "production",
+                    "mutation_mode": "no_mutation",
+                    "edits": [
+                        {
+                            "action": "update_object",
+                            "object_id": candidate_id,
+                            "fields": {
+                                "summary": "Reviewer clarified candidate from MCP preview.",
+                                "recommended_action": "promote",
+                            },
+                        },
+                        {
+                            "action": "add_evidence",
+                            "attach_to_object_id": candidate_id,
+                            "fields": {
+                                "evidence_type": "source_hash",
+                                "locator": {"kind": "relative_repo_path", "value": "docs/mcp-review-evidence.md"},
+                                "content_hash": "sha256:" + "9" * 64,
+                                "summary": "Reviewer attached MCP transport evidence.",
+                            },
+                        },
+                        {
+                            "action": "add_edge",
+                            "fields": {
+                                "edge_type": "review_supports",
+                                "from_object_id": candidate_id,
+                                "to_object_id": candidate_id,
+                                "evidence_refs": [added_evidence.evidence_id],
+                            },
+                        },
+                        {"action": "remove_edge", "edge_id": original_edge_id},
+                        {"action": "remove_evidence", "evidence_id": original_evidence_id},
+                    ],
+                    "reviewer_id": "reviewer-local",
+                },
+            },
+        },
+        service,
+    )
+    edit_result = edit_response["result"]["structuredContent"]
+    assert edit_result["schema_version"] == "candidate_review_edit_result.v1"
+    assert edit_result["permission"] == "allowed"
+    assert edit_result["target_scope"] == "production"
+    assert edit_result["mutation_mode"] == "no_mutation"
+    assert edit_result["candidate_state_changed"] is True
+    assert edit_result["authority_write_performed"] is False
+    assert edit_result["production_mutation_performed"] is False
+    assert edit_result["rejected_edits"] == []
+    assert [item["action"] for item in edit_result["accepted_edits"]] == [
+        "update_object",
+        "add_evidence",
+        "add_edge",
+        "remove_edge",
+        "remove_evidence",
+    ]
+    assert added_evidence.evidence_id in {
+        item["evidence_id"] for item in edit_result["updated_pack"]["evidence"]
+    }
+    assert original_evidence_id not in {
+        item["evidence_id"] for item in edit_result["updated_pack"]["evidence"]
+    }
+    assert added_edge.edge_id in {item["edge_id"] for item in edit_result["updated_pack"]["edges"]}
+    assert original_edge_id not in {item["edge_id"] for item in edit_result["updated_pack"]["edges"]}
+
+    decision_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 123,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "local_test",
+                    "pack": edit_result["updated_pack"],
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": candidate_id,
+                            "reason": "MCP local test approval preview.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "reviewer_id": "reviewer-local",
+                },
+            },
+        },
+        service,
+    )
+    decision_result = decision_response["result"]["structuredContent"]
+    assert decision_result["schema_version"] == "approval_board_decision_result.v1"
+    assert decision_result["permission"] == "allowed"
+    assert decision_result["authority_write_scope"] == "local_test"
+    assert decision_result["production_mutation_performed"] is False
+    assert decision_result["updated_pack"]["lanes"]["accepted_current"][0]["object_id"] == candidate_id
+
+
+def test_mcp_approval_board_preview_denies_production_without_mutation(tmp_path: Path):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 124,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": {
+                        "schema_version": "object_pack.v1",
+                        "route": "candidate_graph_review",
+                        "candidate_graph_hash": "sha256:" + "6" * 64,
+                        "objects": [],
+                        "edges": [],
+                        "evidence": [],
+                    },
+                    "decisions": [{"action": "promote", "object_id": "ko:ReferenceDocument:test"}],
+                    "reviewer_id": "reviewer-local",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["schema_version"] == "approval_board_decision_result.v1"
+    assert result["permission"] == "denied"
+    assert result["production_mutation_performed"] is False
+    assert result["authority_write_performed"] is False
+    assert result["promotion_plan"]["production_mutation_performed"] is False
 
 
 def test_project_deriving_brain_tool_schemas_allow_repository():
@@ -396,6 +1696,385 @@ def test_mcp_brain_objects_query_applies_object_type_filter_and_response_mode(tm
     assert result["object_pack"]["objects"] == []
 
 
+def test_mcp_brain_objects_query_default_route_returns_agent_context_objects(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "LBrain source-to-candidate-graph product activation roadmap P5 P6 P7 P8 P9 current gaps",
+                    "current_files": ["docs/specs/roadmap.md"],
+                    "consumer": "codex",
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    assert result["route"] == "authority_archive_separation"
+    assert pack["objects"]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert pack["recommended_actions"]
+    assert {obj["object_type"] for obj in pack["objects"]} >= {"ArtifactPreference", "Test", "ToolHandoffContext"}
+    assert pack["audit"]["object_pack_route_source"] == "context_authority_object_packs"
+    assert pack["route_trace"]["route"] == "authority_archive_separation"
+    assert "reference_only" in pack["route_trace"]["selected_source_lanes"]
+    assert pack["route_trace"]["route_source"] == "inferred"
+    assert pack["route_trace"]["stop_reason"] == "returned_object_pack"
+    assert isinstance(pack["route_trace"]["missing_evidence"], list)
+    assert pack["response_mode"] == "compact"
+
+
+def test_mcp_brain_objects_query_temporal_route_returns_current_work_objects(tmp_path: Path):
+    service = _service(tmp_path)
+    service.ledger.upsert_llm_brain_memory_card(
+        _accepted_task_card(
+            "mem_temporal_work_recall",
+            next_action="Continue P6 temporal repo recall object query route",
+        )
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "어제 이 repo에서 뭐 했어? 작업 재개하려면 뭐 봐야 해?",
+                    "current_files": ["docs/specs/roadmap.md"],
+                    "consumer": "codex",
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    assert result["route"] == "temporal_work_recall"
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert any(obj["object_type"] == "WorkUnit" for obj in pack["objects"])
+    assert any("P6 temporal repo recall" in obj["title"] for obj in pack["objects"])
+    assert pack["recommended_actions"]
+    assert pack["audit"]["source_pack_names"] == ["current_work", "required_verification"]
+    assert pack["response_mode"] == "compact"
+
+
+def test_mcp_brain_objects_query_style_route_uses_preference_objects(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "내 code style과 preference를 보여줘",
+                    "current_files": ["worker/tests/test_neuron_mcp_stdio.py"],
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    assert result["route"] == "code_style_preference"
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert any(obj["object_type"] == "ArtifactPreference" for obj in pack["objects"])
+
+
+def test_mcp_brain_objects_query_html_visualization_route_uses_artifact_preferences(tmp_path: Path):
+    service = _service(tmp_path)
+    service.ledger.upsert_llm_brain_memory_card(
+        _accepted_preference_card(
+            "mem_html_review_preference",
+            preference="HTML review artifacts should be information dense.",
+            applies_to="html review artifact",
+        )
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "내가 선호하는 HTML review artifact 기준으로 이 산출물을 평가해줘.",
+                    "current_files": [],
+                    "consumer": "codex",
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    assert result["route"] == "html_visualization_preference"
+    assert pack["route"] == "html_visualization_preference"
+    assert any(obj["object_type"] == "ArtifactPreference" for obj in pack["objects"])
+    assert any("HTML review artifacts should be information dense." in obj["title"] for obj in pack["objects"])
+    assert "accepted_html_preference_missing" not in pack["gaps"]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert pack["route_trace"]["selected_source_lanes"] == ["reference_only"]
+    assert pack["route_trace"]["stop_reason"] == "returned_object_pack"
+
+
+def test_mcp_brain_objects_query_html_visualization_route_can_be_explicit(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "route": "html_visualization_preference",
+                    "query": "문서 정리 질문이어도 명시 route가 우선이어야 한다",
+                    "current_files": [],
+                    "consumer": "codex",
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    assert result["route"] == "html_visualization_preference"
+    assert pack["route_trace"]["route_source"] == "explicit"
+    assert pack["route_trace"]["missing_evidence"] == [
+        "accepted_html_preference_missing",
+        "visualization_preference_missing",
+    ]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+
+
+def test_mcp_brain_objects_query_html_visualization_route_filters_unrelated_preferences(tmp_path: Path):
+    service = _service(tmp_path)
+    service.ledger.upsert_llm_brain_memory_card(
+        _accepted_preference_card(
+            "mem_html_review_preference",
+            preference="HTML review artifacts should be information dense.",
+            applies_to="html review artifact",
+        )
+    )
+    service.ledger.upsert_llm_brain_memory_card(
+        _accepted_preference_card(
+            "mem_commit_preference",
+            preference="Commit messages should be concise.",
+            applies_to="commit message",
+        )
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "내가 선호하는 HTML review artifact 기준으로 이 산출물을 평가해줘.",
+                    "current_files": [],
+                    "consumer": "codex",
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    titles = [obj["title"] for obj in result["object_pack"]["objects"]]
+    assert result["route"] == "html_visualization_preference"
+    assert any("HTML review artifacts should be information dense." in title for title in titles)
+    assert all("Commit messages should be concise." not in title for title in titles)
+
+
+def test_mcp_html_preference_memory_card_rejects_private_preference_text_before_route(tmp_path: Path):
+    service = _service(tmp_path)
+
+    with pytest.raises(ValueError, match="forbidden private/source content") as excinfo:
+        service.ledger.upsert_llm_brain_memory_card(
+            _accepted_preference_card(
+                "mem_html_private_preference",
+                preference="HTML artifact note at /Users/example/private with API_KEY=secret",
+                applies_to="html review artifact",
+            )
+        )
+
+    assert "/Users/example" not in str(excinfo.value)
+    assert "API_KEY=secret" not in str(excinfo.value)
+
+
+def test_brain_objects_query_html_visualization_route_rejects_private_pack_text():
+    service = BrainReadService()
+    raw_text = "HTML artifact note at /Users/example/private with API_KEY=secret"
+    obj = {
+        "object_id": "ko:test:html-private",
+        "object_type": "ArtifactPreference",
+        "title": raw_text,
+        "summary": raw_text,
+        "authority_lane": "reference_only",
+        "payload": {"applies_to": "html review artifact"},
+    }
+
+    class _ResolvedContext:
+        def to_dict(self) -> dict:
+            return {
+                "authority": {
+                    "object_packs": {
+                        "preferences": {
+                            "schema_version": "object_pack.v1",
+                            "route": "code_style_preference",
+                            "objects": [obj],
+                            "edges": [],
+                            "evidence": [],
+                            "lanes": {"reference_only": [obj]},
+                            "verification": {},
+                            "gaps": [],
+                            "recommended_actions": [{"object_id": obj["object_id"], "action": "review"}],
+                        },
+                        "style": {
+                            "schema_version": "object_pack.v1",
+                            "route": "code_style_preference",
+                            "objects": [],
+                            "edges": [],
+                            "evidence": [],
+                            "lanes": {},
+                            "verification": {},
+                            "gaps": [],
+                            "recommended_actions": [],
+                        },
+                    }
+                },
+                "audit": {"request_hash": "sha256:" + "1" * 64},
+            }
+
+    service.brain_context_resolve = lambda **_: _ResolvedContext()  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match="private or raw") as excinfo:
+        service.brain_objects_query(
+            repository=FIXTURE_REPOSITORY,
+            branch=FIXTURE_BRANCH,
+            route="html_visualization_preference",
+            query="내가 선호하는 HTML review artifact 기준으로 이 산출물을 평가해줘.",
+            current_files=[],
+            consumer="codex",
+            response_mode="compact",
+        )
+
+    assert "/Users/example" not in str(excinfo.value)
+    assert "API_KEY=secret" not in str(excinfo.value)
+
+
+def test_mcp_brain_objects_query_deploy_route_returns_runtime_gap_pack(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "이 PR merge됐어? 배포도 됐어?",
+                    "current_files": [],
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    assert result["route"] == "deployment_runtime_truth"
+    assert any(obj["object_type"] == "PullRequest" for obj in pack["objects"])
+    assert "runtime_evidence_unverified" in pack["gaps"]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+
+
+def test_mcp_brain_objects_query_code_change_impact_route_returns_impact_pack(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "이 파일 바꾸면 어떤 테스트/런타임 영향 있어?",
+                    "current_files": [
+                        "worker/lib/agent_knowledge/llm_brain_core/objects/runtime_readiness.py"
+                    ],
+                    "consumer": "codex",
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    object_types = {obj["object_type"] for obj in pack["objects"]}
+    assert result["route"] == "code_change_impact"
+    assert {"RepoFile", "VerificationCommand", "RuntimeSurface"} <= object_types
+    assert any(edge["edge_type"] == "validated_by" for edge in pack["edges"])
+    assert any(edge["edge_type"] == "requires_live_evidence" for edge in pack["edges"])
+    assert "live_runtime_impact_unverified" in pack["gaps"]
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert pack["route_trace"] == {
+        "schema_version": "object_query_route_trace.v1",
+        "route": "code_change_impact",
+        "route_source": "inferred",
+        "selected_source_lanes": ["candidate", "reference_only"],
+        "confidence": pack["confidence"],
+        "stop_reason": "missing_evidence_gap_returned",
+        "missing_evidence": [
+            "live_runtime_impact_unverified",
+            "source_freshness_unverified",
+        ],
+    }
+    assert pack["response_mode"] == "compact"
+
+
 def test_mcp_object_proposal_create_local_test_and_production_denial(tmp_path: Path):
     service = _service(tmp_path)
     local = handle_jsonrpc_message(
@@ -455,8 +2134,181 @@ def test_mcp_object_proposal_create_local_test_and_production_denial(tmp_path: P
     assert queued["count"] == 1
     assert queued["items"][0]["proposal_id"] == local["proposal_id"]
     assert denied["permission"] == "denied"
+    assert denied["reason"] == "proposal_write_requires_local_test_ledger_or_later_production_gate"
     assert denied["proposal_write_performed"] is False
     assert denied["authoritative_memory_changed"] is False
+
+
+def test_mcp_object_authority_production_gate_writes_single_object_with_postcheck(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    production_gate = {
+        "approved": True,
+        "approval_ref": "preapproved-user-gate-2026-07-06",
+        "scope": "single_project_single_object",
+        "project": PROJECT,
+        "max_objects": 1,
+        "configured_deployed_mcp_identity_matches_source": True,
+        "read_after_write_smoke_plan": True,
+        "rollback_or_supersession_plan": True,
+        "no_raw_private_evidence": True,
+    }
+    target_object_id = "ko:RepoDocument:production-gate-smoke"
+    missing_gate = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 105,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Production write still needs per-call gate.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert missing_gate["permission"] == "denied"
+    assert missing_gate["reason"] == "proposal_write_requires_local_test_ledger_or_later_production_gate"
+    assert missing_gate["proposal_write_performed"] is False
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+
+    invalid_proposal_type = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 106,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "force_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Raw JSON-RPC must not bypass production proposal type policy.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert invalid_proposal_type["permission"] == "denied"
+    assert invalid_proposal_type["reason"] == "proposal_write_requires_local_test_ledger_or_valid_production_gate"
+    assert invalid_proposal_type["proposal_write_performed"] is False
+    assert invalid_proposal_type["production_promotion_plan"]["requested_proposal_type"] == "force_current"
+    assert "allowed_proposal_type" in invalid_proposal_type["production_promotion_plan"]["missing_gate_evidence"]
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 107,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Bounded production proposal smoke.",
+                    "evidence_refs": ["github_pr:95", "git_commit:f8bbb42"],
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert proposal["ledger_scope"] == "production"
+    assert proposal["proposal_write_performed"] is True
+    assert proposal["proposal_write_target"] == "production_ledger"
+    assert proposal["production_mutation_performed"] is True
+    assert proposal["authority_write_performed"] is False
+    assert proposal["production_gate_ref_hash"].startswith("sha256:")
+    assert len(proposal["production_gate_ref_hash"]) == 71
+    assert all(char in "0123456789abcdef" for char in proposal["production_gate_ref_hash"].split(":", 1)[1])
+    assert service.object_review_proposals(project=PROJECT)["count"] == 1
+
+    invalid_decision_type = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 108,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "force_current",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "accepted_current",
+                    "approved_by": "preapproved-user-gate-2026-07-06",
+                    "decision_id": "decision:production-gate-invalid-type",
+                    "decision_reason": "Raw JSON-RPC must not bypass production decision type policy.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert invalid_decision_type["permission"] == "denied"
+    assert invalid_decision_type["reason"] == "restricted_tool_requires_valid_production_gate"
+    assert invalid_decision_type["authority_write_performed"] is False
+    assert invalid_decision_type["production_promotion_plan"]["requested_decision_type"] == "force_current"
+    assert "allowed_decision_type" in invalid_decision_type["production_promotion_plan"]["missing_gate_evidence"]
+    assert service.ledger.get_object_authority_state(target_object_id) == {}
+
+    decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 109,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "reject_candidate",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "rejected",
+                    "approved_by": "preapproved-user-gate-2026-07-06",
+                    "decision_id": "decision:production-gate-smoke",
+                    "decision_reason": "Bounded production decision smoke rejects the candidate.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert decision["ledger_scope"] == "production"
+    assert decision["authority_write_scope"] == "production_ledger"
+    assert decision["authority_write_performed"] is True
+    assert decision["authoritative_memory_changed"] is True
+    assert decision["production_mutation_performed"] is True
+    assert decision["production_gate_ref_hash"] == proposal["production_gate_ref_hash"]
+    assert len(decision["production_gate_ref_hash"]) == 71
+    state = service.ledger.get_object_authority_state(target_object_id)
+    assert state["authority_lane"] == "rejected"
+    assert state["decision_id"] == "decision:production-gate-smoke"
+    queued = service.object_review_proposals(project=PROJECT)
+    assert queued["items"][0]["status"] == "rejected"
+    assert queued["items"][0]["decision_id"] == "decision:production-gate-smoke"
 
 
 def test_mcp_corpus_ingest_plan_reports_manifest_ref_gap(tmp_path: Path):
@@ -606,6 +2458,7 @@ def test_mcp_object_decision_commit_is_restricted_denied_by_default(tmp_path: Pa
     )["result"]["structuredContent"]
 
     assert result["permission"] == "denied"
+    assert result["reason"] == "restricted_tool_requires_human_gate"
     assert result["authority_write_performed"] is False
     assert result["authoritative_memory_changed"] is False
     plan = result["production_promotion_plan"]
@@ -754,6 +2607,135 @@ def test_mcp_object_decision_commit_local_test_updates_authority_state_with_audi
     assert decisions[0]["approved_by_hash"] == decision["approved_by_hash"]
     queued = service.object_review_proposals(project=PROJECT)
     assert queued["items"][0]["status"] == "accepted"
+
+
+def test_mcp_object_authority_rollback_preserves_audit_history(tmp_path: Path):
+    service = _service(tmp_path)
+    target_object_id = "ko:RepoDocument:rollback"
+    promote_proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 104,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Promote reviewed docs SoT.",
+                    "evidence_refs": ["ev:source_hash:rollback-current"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    promote_decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 105,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": promote_proposal["proposal_id"],
+                    "target_object_id": target_object_id,
+                    "decision_type": "accept_current",
+                    "previous_authority_lane": "candidate",
+                    "new_authority_lane": "accepted_current",
+                    "evidence_refs": ["ev:source_hash:rollback-current"],
+                    "decision_reason": "Reviewed local fixture evidence.",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:local-rollback-current",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    rollback_proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 106,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_retire",
+                    "target_object_id": target_object_id,
+                    "reason": "Rollback accepted decision after newer evidence invalidated it.",
+                    "evidence_refs": ["ev:source_hash:rollback-proof"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    rollback_decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 107,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": rollback_proposal["proposal_id"],
+                    "target_object_id": target_object_id,
+                    "decision_type": "rollback_decision",
+                    "previous_authority_lane": "accepted_current",
+                    "new_authority_lane": "archive_only",
+                    "evidence_refs": ["ev:source_hash:rollback-proof"],
+                    "decision_reason": "Rollback without deleting prior audit history.",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:local-rollback-archive",
+                    "rollback_of_decision_id": promote_decision["decision_id"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert rollback_decision["decision_type"] == "rollback_decision"
+    assert rollback_decision["rollback_of_decision_id"] == promote_decision["decision_id"]
+    assert rollback_decision["authority_write_performed"] is True
+    assert rollback_decision["authoritative_memory_changed"] is True
+    state = service.ledger.get_object_authority_state(target_object_id)
+    assert state["authority_lane"] == "archive_only"
+    assert state["decision_type"] == "rollback_decision"
+    assert state["rollback_of_decision_id"] == promote_decision["decision_id"]
+    assert state["decision_reason"] == "Rollback without deleting prior audit history."
+    queued = service.object_review_proposals(project=PROJECT)
+    queued_by_id = {item["proposal_id"]: item for item in queued["items"]}
+    assert queued_by_id[promote_proposal["proposal_id"]]["status"] == "accepted"
+    assert queued_by_id[rollback_proposal["proposal_id"]]["status"] == "rolled_back"
+
+    explained = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 108,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
+                "arguments": {"object_id": target_object_id},
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    assert explained["object"]["authority_lane"] == "archive_only"
+    assert explained["object"]["lifecycle_status"] == "archived"
+    assert explained["authority_state"]["rollback_of_decision_id"] == promote_decision["decision_id"]
+    assert [item["decision_id"] for item in explained["decision_history"]] == [
+        rollback_decision["decision_id"],
+        promote_decision["decision_id"],
+    ]
 
 
 def test_mcp_object_decision_commit_requires_matching_review_proposal(tmp_path: Path):
