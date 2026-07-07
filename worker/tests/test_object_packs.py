@@ -390,6 +390,123 @@ def test_candidate_review_edits_add_and_remove_edges_and_evidence_without_author
     assert updated_pack["candidate_graph_hash"] != pack["candidate_graph_hash"]
 
 
+def test_candidate_review_edits_update_edge_endpoint_requires_candidate_objects_and_keeps_edge_refs():
+    evidence = EvidenceRef.from_parts(
+        evidence_type="source_hash",
+        authority_lane="reference_only",
+        verification_state="source_hash_verified",
+        locator={"kind": "relative_repo_path", "value": "docs/edge-retarget.md"},
+        content_hash="sha256:" + "e" * 64,
+        summary="Edge retarget source material hash.",
+    )
+    source = KnowledgeObjectEnvelope.from_parts(
+        object_type="RepoDocument",
+        natural_key="docs/source.md",
+        scope={"project": "neurons"},
+        title="Source doc",
+        summary="Source endpoint.",
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="unverified",
+        review_state="needs_review",
+        content_hash="sha256:" + "1" * 64,
+        evidence_refs=[evidence.evidence_id],
+        recommended_action="review",
+        payload={"path_ref": "docs/source.md"},
+    ).to_dict()
+    old_target = KnowledgeObjectEnvelope.from_parts(
+        object_type="RepoDocument",
+        natural_key="docs/old-target.md",
+        scope={"project": "neurons"},
+        title="Old target doc",
+        summary="Old target endpoint.",
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="unverified",
+        review_state="needs_review",
+        content_hash="sha256:" + "2" * 64,
+        evidence_refs=[evidence.evidence_id],
+        recommended_action="review",
+        payload={"path_ref": "docs/old-target.md"},
+    ).to_dict()
+    new_target = KnowledgeObjectEnvelope.from_parts(
+        object_type="RepoDocument",
+        natural_key="docs/new-target.md",
+        scope={"project": "neurons"},
+        title="New target doc",
+        summary="New target endpoint.",
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="unverified",
+        review_state="needs_review",
+        content_hash="sha256:" + "3" * 64,
+        evidence_refs=[evidence.evidence_id],
+        recommended_action="review",
+        payload={"path_ref": "docs/new-target.md"},
+    ).to_dict()
+    original_edge = KnowledgeEdge.from_parts(
+        edge_type="supports",
+        from_object_id=source["object_id"],
+        to_object_id=old_target["object_id"],
+        evidence_refs=[evidence.evidence_id],
+        lifecycle_status="proposed",
+        authority_lane="candidate",
+        verification_state="unverified",
+    ).to_dict()
+    source["edge_refs"] = [original_edge["edge_id"]]
+    old_target["edge_refs"] = [original_edge["edge_id"]]
+    pack = build_candidate_graph_review_pack(
+        objects=[source, old_target, new_target],
+        edges=[original_edge],
+        evidence=[evidence.to_view()],
+        extractor="fixture_ai_extractor",
+    )
+
+    missing_result = apply_candidate_review_edits(
+        pack,
+        edits=[
+            {
+                "action": "update_edge",
+                "edge_id": original_edge["edge_id"],
+                "fields": {"to_object_id": "ko:RepoDocument:missing-endpoint"},
+            }
+        ],
+        reviewer={"id": "human-reviewer"},
+    )
+
+    assert missing_result["candidate_state_changed"] is False
+    assert missing_result["rejected_edits"] == [
+        {
+            "action": "update_edge",
+            "edge_id": original_edge["edge_id"],
+            "to_object_id": "ko:RepoDocument:missing-endpoint",
+            "reason": "candidate_edge_endpoint_not_found",
+        }
+    ]
+
+    retarget_result = apply_candidate_review_edits(
+        pack,
+        edits=[
+            {
+                "action": "update_edge",
+                "edge_id": original_edge["edge_id"],
+                "fields": {"to_object_id": new_target["object_id"]},
+            }
+        ],
+        reviewer={"id": "human-reviewer"},
+    )
+
+    updated_pack = retarget_result["updated_pack"]
+    updated_edge = updated_pack["edges"][0]
+    objects_by_id = {obj["object_id"]: obj for obj in updated_pack["objects"]}
+    assert retarget_result["rejected_edits"] == []
+    assert updated_edge["to_object_id"] == new_target["object_id"]
+    assert updated_edge["edge_id"] != original_edge["edge_id"]
+    assert objects_by_id[source["object_id"]]["edge_refs"] == [updated_edge["edge_id"]]
+    assert objects_by_id[old_target["object_id"]]["edge_refs"] == []
+    assert objects_by_id[new_target["object_id"]]["edge_refs"] == [updated_edge["edge_id"]]
+
+
 def test_candidate_review_edits_reject_non_candidate_authority_lanes():
     evidence = EvidenceRef.from_parts(
         evidence_type="source_hash",

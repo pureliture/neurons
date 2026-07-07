@@ -748,6 +748,7 @@ def apply_candidate_review_edits(
             _apply_edge_edit(
                 edit=edit,
                 edge_by_id=edge_by_id,
+                object_by_id=object_by_id,
                 objects=objects,
                 accepted_edits=accepted_edits,
                 rejected_edits=rejected_edits,
@@ -1089,6 +1090,7 @@ def _apply_edge_edit(
     *,
     edit: Mapping[str, Any],
     edge_by_id: dict[str, dict[str, Any]],
+    object_by_id: dict[str, dict[str, Any]],
     objects: list[Any],
     accepted_edits: list[dict[str, Any]],
     rejected_edits: list[dict[str, Any]],
@@ -1109,6 +1111,33 @@ def _apply_edge_edit(
         )
         return
     fields = edit.get("fields") if isinstance(edit.get("fields"), Mapping) else {}
+    for endpoint_field in ("from_object_id", "to_object_id"):
+        if endpoint_field not in fields:
+            continue
+        endpoint_id = _safe_edit_value(endpoint_field, fields.get(endpoint_field))
+        endpoint = object_by_id.get(str(endpoint_id or ""))
+        if endpoint is None:
+            rejected_edits.append(
+                {
+                    "action": action,
+                    "edge_id": edge_id,
+                    endpoint_field: endpoint_id,
+                    "reason": "candidate_edge_endpoint_not_found",
+                }
+            )
+            return
+        if not _candidate_lane_editable(endpoint):
+            rejected_edits.append(
+                {
+                    "action": action,
+                    "edge_id": edge_id,
+                    endpoint_field: endpoint_id,
+                    "reason": "candidate_review_edit_requires_candidate_lane",
+                }
+            )
+            return
+    old_from_object_id = str(target.get("from_object_id") or "")
+    old_to_object_id = str(target.get("to_object_id") or "")
     changed_fields: list[str] = []
     for field, value in fields.items():
         field_name = public_safe_text(str(field or ""), max_chars=80)
@@ -1141,7 +1170,16 @@ def _apply_edge_edit(
         if new_edge_id != old_edge_id:
             edge_by_id.pop(old_edge_id, None)
             edge_by_id[new_edge_id] = target
-            _replace_object_edge_ref((obj for obj in objects if isinstance(obj, dict)), old_edge_id, new_edge_id)
+        _sync_object_edge_endpoint_refs(
+            (obj for obj in objects if isinstance(obj, dict)),
+            old_edge_id=old_edge_id,
+            new_edge_id=new_edge_id,
+            old_endpoint_ids={old_from_object_id, old_to_object_id},
+            new_endpoint_ids={
+                str(target.get("from_object_id") or ""),
+                str(target.get("to_object_id") or ""),
+            },
+        )
         accepted_edits.append(
             {
                 "action": action,
@@ -1540,6 +1578,35 @@ def _replace_object_edge_ref(objects: Any, old_edge_id: str, new_edge_id: str) -
             continue
         refs = [str(item) for item in obj.get("edge_refs") or [] if item]
         obj["edge_refs"] = [new_edge_id if ref == old_edge_id else ref for ref in refs]
+
+
+def _sync_object_edge_endpoint_refs(
+    objects: Any,
+    *,
+    old_edge_id: str,
+    new_edge_id: str,
+    old_endpoint_ids: set[str],
+    new_endpoint_ids: set[str],
+) -> None:
+    if not old_edge_id or not new_edge_id:
+        return
+    old_ids = {str(item) for item in old_endpoint_ids if str(item or "")}
+    new_ids = {str(item) for item in new_endpoint_ids if str(item or "")}
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        object_id = str(obj.get("object_id") or "")
+        refs = [str(item) for item in obj.get("edge_refs") or [] if item]
+        refs = [new_edge_id if ref == old_edge_id else ref for ref in refs]
+        if object_id not in new_ids:
+            refs = [ref for ref in refs if ref != new_edge_id]
+        else:
+            refs = [ref for ref in refs if ref != old_edge_id]
+            if new_edge_id not in refs:
+                refs.append(new_edge_id)
+        if object_id in old_ids - new_ids:
+            refs = [ref for ref in refs if ref not in {old_edge_id, new_edge_id}]
+        obj["edge_refs"] = list(dict.fromkeys(refs))
 
 
 def _rebuild_edge_map(edge_by_id: dict[str, dict[str, Any]], edges: list[Any]) -> None:

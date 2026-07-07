@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from .._util import ensure_public_safe, hash_payload, public_safe_text
@@ -1919,6 +1920,9 @@ def _stable_object(obj: Mapping[str, Any]) -> dict[str, Any]:
         "source_refs",
         "evidence_refs",
         "edge_refs",
+        "observed_at",
+        "valid_from",
+        "valid_to",
         "confidence",
         "recommended_action",
         "freshness",
@@ -2487,6 +2491,10 @@ def _session_object(
             }
         ),
         evidence_refs=evidence_refs,
+        observed_at=public_safe_text(
+            str(session.get("observed_at") or session.get("timestamp") or session.get("updated_at") or ""),
+            max_chars=80,
+        ),
         confidence={"score": 0.68 if evidence_refs else 0.25, "basis": "session_metadata_evidence"},
         recommended_action="review",
         payload={
@@ -2800,14 +2808,17 @@ def _session_project_handoff_pack(
     object_refs: dict[str, list[dict[str, str]]] = {}
     for obj in objects:
         object_type = public_safe_text(str(obj.get("object_type") or "KnowledgeObject"), max_chars=80)
-        object_refs.setdefault(object_type, []).append(
-            {
-                "object_id": public_safe_text(str(obj.get("object_id") or ""), max_chars=180),
-                "title": public_safe_text(str(obj.get("title") or ""), max_chars=180),
-                "authority_lane": public_safe_text(str(obj.get("authority_lane") or ""), max_chars=80),
-                "recommended_action": public_safe_text(str(obj.get("recommended_action") or ""), max_chars=80),
-            }
-        )
+        ref = {
+            "object_id": public_safe_text(str(obj.get("object_id") or ""), max_chars=180),
+            "title": public_safe_text(str(obj.get("title") or ""), max_chars=180),
+            "authority_lane": public_safe_text(str(obj.get("authority_lane") or ""), max_chars=80),
+            "recommended_action": public_safe_text(str(obj.get("recommended_action") or ""), max_chars=80),
+        }
+        for timestamp_field in ("observed_at", "valid_from", "valid_to"):
+            timestamp = public_safe_text(str(obj.get(timestamp_field) or ""), max_chars=80)
+            if timestamp:
+                ref[timestamp_field] = timestamp
+        object_refs.setdefault(object_type, []).append(ref)
     edge_type_counts: dict[str, int] = {}
     for edge in edges:
         edge_type = public_safe_text(str(edge.get("edge_type") or ""), max_chars=120)
@@ -2879,7 +2890,38 @@ def _latest_object_ref(object_refs: Mapping[str, list[dict[str, str]]], object_t
     refs = object_refs.get(object_type) or []
     if not refs:
         return {}
-    return dict(refs[-1])
+    if not any(_object_ref_timestamp(ref)[0] for ref in refs):
+        return dict(refs[-1])
+    _, latest_ref = max(
+        enumerate(refs),
+        key=lambda item: (*_object_ref_timestamp(item[1]), item[0]),
+    )
+    return dict(latest_ref)
+
+
+def _object_ref_timestamp(ref: Mapping[str, Any]) -> tuple[int, str]:
+    for field in ("observed_at", "valid_from", "valid_to", "updated_at", "created_at", "timestamp"):
+        text = str(ref.get(field) or "")
+        if not text:
+            continue
+        parsed = _parse_public_iso_timestamp(text)
+        if parsed is not None:
+            return (1, parsed.astimezone(timezone.utc).isoformat())
+        return (1, text)
+    return (0, "")
+
+
+def _parse_public_iso_timestamp(value: str) -> datetime | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _session_detail_gaps(
