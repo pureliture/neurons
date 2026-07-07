@@ -8,9 +8,9 @@ Local implementation, package-level contracts, MCP dispatch tests, CLI smoke tes
 
 P1 live production activation follow-up는 deployed HTTP MCP runtime 및 user-level configured endpoint를 검증했습니다: object-native read/proposal tools 일부가 노출되고, production proposal/decision calls는 mutation 없이 deny됩니다. 남은 gaps는 분리되어 있습니다: current Codex-session `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 branch-local source/review/readiness tools는 아직 노출하지 않으며, live MCP image가 #95 source-to-candidate activation branch를 포함하는지는 증명되지 않았습니다.
 
-PR #73 및 ops deploy-button merge 이후의 이전 recheck는 P1 object-tool availability를 뒷받침하는 historical evidence입니다. 현재 #95 continuation 기준 최신 recheck는 `PASS_WITH_GAPS`로 유지됩니다: current Codex-session `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 required route smokes for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth` all returned `object_pack_route_not_implemented`, and #95 branch-local MCP tools 및 image identity는 증명되지 않은 상태입니다.
+PR #73 및 ops deploy-button merge 이후의 이전 recheck는 P1 object-tool availability를 뒷받침하는 historical evidence입니다. 현재 #95 continuation 기준 최신 recheck는 `PASS_WITH_GAPS`로 유지됩니다: current Codex-session `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 required 6-route smoke 중 `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `html_visualization_preference` returned `object_pack_route_not_implemented`, while `code_change_impact` and `deployment_runtime_truth` returned sanitized internal errors. #95 branch-local source/review/readiness MCP tools and image identity remain unproven.
 
-PR #95 source-to-candidate activation continuation은 local/test product surface를 P6-P9까지 확장했으며, post-deploy sanitized evidence packet을 평가하는 `source-to-candidate-runtime-readiness` CLI와 `brain_source_to_candidate_runtime_readiness` MCP tool을 branch-local로 추가했습니다. 같은 surface는 `source_to_candidate_runtime_evidence_packet_template.v1` packet template도 반환해 external post-deploy runner가 채울 public-safe evidence shape를 제공합니다. 이번 slice는 `--collect-shadow-evidence` / `collect_shadow_evidence=true`를 확장해 branch-local read-only route smokes, local_test source-to-candidate review-loop smoke, local_test P6 session/project/work-unit rollup smoke, local_test P7 preference/artifact memory smoke, local_test P8 permission-sensitive audit smoke, and local_test P9 startup/read-path smoke를 evaluator-ready `source_to_candidate_runtime_evidence.v1` packet으로 만들 수 있게 했습니다. 이 collector packet은 `collector_packet_not_live_evidence`, `network_used=false`, `production_mutation_performed=false`를 유지하며 live deployed proof로 승격하지 않습니다. PR은 draft/open이며, branch-local `neuron-knowledge object-query` CLI도 MCP `brain_objects_query`와 같은 route-aware read-side contract를 사용합니다. Local activation progress는 `product_evidence_status=PASS_WITH_GAPS`로 유지됩니다: P8 runtime evidence는 `runtime_unverified_count=1`, `runtime_verified_count=0`이므로 `PASS`가 아니라 `PASS_WITH_GAPS`입니다. Current Codex-session LBrain MCP read path는 `brain_objects_query`를 호출할 수 있지만 `deployment_runtime_truth` route는 `object_pack_route_not_implemented`를 반환했고, branch-local source/review/readiness MCP tools와 CLI route parity source는 아직 live MCP image/current session callable registry에 반영되었다고 증명되지 않았습니다. 이 branch-local command/tool smoke는 network나 production mutation을 수행하지 않습니다.
+PR #95 source-to-candidate activation continuation은 local/test product surface를 P6-P9까지 확장했으며, post-deploy sanitized evidence packet을 평가하는 `source-to-candidate-runtime-readiness` CLI와 `brain_source_to_candidate_runtime_readiness` MCP tool을 branch-local로 추가했습니다. 같은 surface는 `source_to_candidate_runtime_evidence_packet_template.v1` packet template도 반환해 external post-deploy runner가 채울 public-safe evidence shape를 제공합니다. 이번 slice는 `--collect-shadow-evidence` / `collect_shadow_evidence=true`를 확장해 branch-local read-only route smokes, local_test source-to-candidate review-loop smoke, local_test P6 session/project/work-unit rollup smoke, local_test P7 preference/artifact memory smoke, local_test P8 permission-sensitive audit smoke, and local_test P9 startup/read-path smoke를 evaluator-ready `source_to_candidate_runtime_evidence.v1` packet으로 만들 수 있게 했습니다. 이 collector packet은 `collector_packet_not_live_evidence`, `network_used=false`, `production_mutation_performed=false`를 유지하며 live deployed proof로 승격하지 않습니다. PR은 draft/open이며, branch-local `neuron-knowledge object-query` CLI도 MCP `brain_objects_query`와 같은 route-aware read-side contract를 사용합니다. Local activation progress는 `product_evidence_status=PASS_WITH_GAPS`로 유지됩니다: P8 runtime evidence는 `runtime_unverified_count=1`, `runtime_verified_count=0`이므로 `PASS`가 아니라 `PASS_WITH_GAPS`입니다. Current Codex-session LBrain MCP read path는 `brain_objects_query`를 호출할 수 있지만 six-route smoke 중 네 route는 `object_pack_route_not_implemented`, 두 route는 sanitized internal error를 반환했고, branch-local source/review/readiness MCP tools와 CLI route parity source는 아직 live MCP image/current session callable registry에 반영되었다고 증명되지 않았습니다. 이 branch-local command/tool smoke는 production mutation을 수행하지 않습니다.
 
 이번 continuation은 FR8 `code_change_impact` branch-local route를 추가했습니다. 해당 route는 "이 파일 바꾸면 어떤 테스트/런타임 영향 있어?"류 질문을 `RepoFile`, `VerificationCommand`, `RuntimeSurface`, `McpTool` object pack과 `validated_by`, `requires_live_evidence`, `exposes_tool` edges로 반환하고, `live_runtime_impact_unverified`, `source_freshness_unverified`, `production_mutation_forbidden` gaps를 유지합니다. 이는 local/branch evidence이며, deployed MCP image나 live runtime route proof로 승격하지 않았습니다.
 
@@ -30,7 +30,7 @@ PR #95 source-to-candidate activation continuation은 local/test product surface
 
 이번 continuation은 P9 runtime readiness에 `live.agent_context.startup_read_path` claim도 추가했습니다. 이 claim은 sanitized `agent_context_startup_runtime_evidence.v1` packet에서 startup-loaded agent context product, required sections, mutation-disabled surface policy, read-only `brain_objects_query` route smoke, no direct execution, no production mutation, raw-private context blocking, approval-scope enforcement, degraded/stale disclosure, and public-safe postcheck를 검증합니다. Evidence packet이 없으면 `live_agent_context_startup_unverified` 및 `production_startup_read_path_unproven` gaps를 반환하고, unsafe startup/read-path/runtime enforcement evidence는 fail-closed 처리합니다. 이는 branch-local evaluator gate이며 live P9 startup/read-path proof 자체가 아닙니다.
 
-Latest current-session shadow packet evaluation populated the public-safe evidence template from the configured `mcp__lbrain` read path and then evaluated it with branch-local runtime readiness. Result: `status=PASS_WITH_GAPS`, `failed_claims=[]`, `production_mutation_performed=false`, evaluator `network_used=false`, evidence-side `evidence_collection_network_used=true`, and `redaction_check=redacted_only`. Branch-local collector smoke now also generates a local `source_to_candidate_runtime_evidence.v1` packet whose route-smoke claim validates with `failed_claims=[]`, but that packet uses `collection_mode=local_test_replay` and `collector_packet_not_live_evidence`, so it does not close deployed/live proof. Remaining gaps include missing branch-local source/review/readiness tools in live MCP, missing live agent-context sections, expected branch commit identity unverified, production-denial smokes unverified, and bounded production authority execution unverified. This is current read-path evidence of the gap plus local collector readiness, not production readiness.
+Latest current-session configured MCP read-path packet evaluation populated the public-safe evidence template from direct `mcp__lbrain.brain_objects_query` calls and then evaluated it with branch-local runtime readiness. Result: `status=PASS_WITH_GAPS`, `failed_claims=[]`, `live_evidence_provided=true`, `evidence_is_live=true`, `production_ready=false`, `production_mutation_performed=false`, evaluator `network_used=false`, and evidence-side `evidence_collection_network_used=true`. Route smoke gaps are explicit: `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `html_visualization_preference` returned `object_pack_route_not_implemented`; `code_change_impact` and `deployment_runtime_truth` returned sanitized internal errors. Branch-local collector smoke still generates a local `source_to_candidate_runtime_evidence.v1` packet whose route-smoke claim validates with `failed_claims=[]`, but that packet uses `collection_mode=local_test_replay` and `collector_packet_not_live_evidence`, so it does not close deployed/live proof. Remaining gaps include missing branch-local source/review/readiness tools in live MCP, missing live agent-context sections, expected branch commit identity unverified, production-denial smokes unverified, and bounded production authority execution unverified. This is current read-path evidence of the gap plus local collector readiness, not production readiness.
 
 ## Validated
 
@@ -233,11 +233,11 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
 ### lbrain.current-read-path
 
 - status: `validated`
-- evidence: LBrain MCP `memory_authority_pack_read(repository=pureliture/neurons)` and current-session `brain_objects_query(route=deployment_runtime_truth, repository=pureliture/neurons, branch=codex/knowledge-object-review-flow-roadmap)`
+- evidence: LBrain MCP `memory_authority_pack_read(repository=pureliture/neurons)` and current-session six-route `brain_objects_query` smoke for `repository=pureliture/neurons`, `branch=main`
 - result:
   - accepted/current authority pack count: 7
   - current authority includes live mutation requiring separate gates
-  - `brain_objects_query` is callable in the current Codex session, but `deployment_runtime_truth` returned `object_pack_route_not_implemented`
+  - `brain_objects_query` is callable in the current Codex session; four route smokes returned `object_pack_route_not_implemented`, and `code_change_impact` plus `deployment_runtime_truth` returned sanitized internal errors
   - runtime evidence remains `runtime_evidence_unverified`
 
 ### live.production.http-mcp-object-tools-loaded
@@ -304,7 +304,7 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
   - local Codex MCP allowlist source has been updated to include object-native tool names.
   - standalone smoke against the configured endpoint exposes and calls object-native tools successfully.
   - current Codex `mcp__lbrain` callable namespace can call `brain_objects_query`.
-  - current Codex `mcp__lbrain.brain_objects_query(route=deployment_runtime_truth)` returned `object_pack_route_not_implemented`.
+  - current Codex `mcp__lbrain.brain_objects_query` six-route smoke returned four `object_pack_route_not_implemented` results and two sanitized internal errors.
   - branch-local `brain_source_to_candidate_graph`, `brain_candidate_review_edit`, `brain_approval_board_decide`, and `brain_source_to_candidate_runtime_readiness` are not callable from the current session namespace.
 
 ### configured.codex-mcp.runtime-verified-answers
@@ -341,13 +341,14 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
 
 ### live.production.brain-objects-query-route-smokes
 
-- status: `not_validated`
-- reason: `live_evidence_packet_not_supplied`
+- status: `PASS_WITH_GAPS`
+- reason: `configured_read_path_route_smokes_do_not_return_object_packs`
 - evidence:
-  - local readiness report expects read-only live `brain_objects_query` smoke for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth`.
-  - `code_change_impact` is validated only as branch-local FR8 route evidence in this slice and is not yet promoted into the required live route-smoke set.
-  - `html_visualization_preference` is validated only as branch-local P7 route evidence in this slice and is not yet promoted into the required live route-smoke set.
-  - current branch-local smoke did not contact live MCP and therefore reports `live_brain_objects_query_route_smokes_unverified`.
+  - local readiness report expects read-only live `brain_objects_query` smoke for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, `code_change_impact`, `html_visualization_preference`, and `deployment_runtime_truth`.
+  - current Codex-session `mcp__lbrain.brain_objects_query` was called read-only for all six required routes.
+  - `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `html_visualization_preference` returned `object_pack_route_not_implemented`.
+  - `code_change_impact` and `deployment_runtime_truth` returned sanitized internal errors.
+  - branch-local source/review/readiness tools and deployed source/image identity remain unproven, so this does not close production readiness.
 
 ### live.production.source-to-candidate-denial-smokes
 
@@ -372,20 +373,23 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
 
 - status: `PASS_WITH_GAPS`
 - evidence:
-  - current Codex-session `mcp__lbrain.brain_objects_query` was called read-only for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `deployment_runtime_truth`.
-  - all four route smokes returned `object_pack_route_not_implemented`.
+  - current Codex-session `mcp__lbrain.brain_objects_query` was called read-only for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, `code_change_impact`, `html_visualization_preference`, and `deployment_runtime_truth`.
+  - four route smokes returned `object_pack_route_not_implemented`: `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, and `html_visualization_preference`.
+  - two route smokes returned sanitized internal errors: `code_change_impact` and `deployment_runtime_truth`.
   - a sanitized `source_to_candidate_runtime_evidence.v1` packet was evaluated locally with expected branch commit identity left unproven.
   - branch-local normalizer `build_source_to_candidate_runtime_shadow_evidence_packet` and CLI/MCP surfaces can now turn that sanitized shadow capture shape into reusable `source_to_candidate_runtime_evidence.v1` packet input without network calls or mutation.
   - branch-local evaluator `build_source_to_candidate_runtime_shadow_readiness_report`, CLI `--shadow-evidence-file`, and MCP `shadow_evidence` can now normalize and evaluate the same sanitized capture in one read-only step.
 - result:
   - `failed_claims=[]`
-  - `gap_count=38`
+  - `live_evidence_provided=true`
+  - `evidence_is_live=true`
+  - `production_ready=false`
   - missing tools include `brain_source_to_candidate_graph`, `brain_candidate_review_edit`, `brain_approval_board_decide`, and `brain_source_to_candidate_runtime_readiness`
   - P6 rollup gaps include `live_session_project_rollup_unverified` and `live_multi_device_rollup_unproven`
   - P7 preference/artifact gaps include `live_preference_artifact_memory_unverified` and `accepted_preference_context_pack_live_unproven`
   - P8 audit gaps include `permission_sensitive_audit_unverified`
   - P9 startup/read-path gaps include `live_agent_context_startup_unverified` and `production_startup_read_path_unproven`
-  - route gaps include `brain_objects_query_route_unimplemented:<route>` and `shadow_route_smoke_not_implemented:<route>` for all four required routes
+  - route gaps include unimplemented object-pack routes for four required routes and sanitized internal-error route failures for two required routes
   - `production_mutation_performed=false`
   - evaluator `network_used=false`
   - evidence-side `evidence_collection_network_used=true`
@@ -395,7 +399,7 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
 ## Gaps
 
 - Current Codex session's `mcp__lbrain` read path can call `brain_objects_query`, but branch-local source/review/readiness tools must be deployed/reloaded before P3/P4/P9 runtime-readiness claims can be runtime-verified.
-- P1/P6/P7/P8/P9 remain `PASS_WITH_GAPS` until live `brain_objects_query` route smokes return implemented object packs for authority/archive, style/preference, temporal work recall, and deployment/runtime truth, until a live `session_project_rollup_runtime` packet validates P6 multi-device rollup evidence, and until a live `preference_artifact_memory` packet validates P7 preference/artifact memory evidence.
+- P1/P6/P7/P8/P9 remain `PASS_WITH_GAPS` until live `brain_objects_query` route smokes return implemented object packs for authority/archive, style/preference, temporal work recall, code-change impact, HTML/visualization preference, and deployment/runtime truth, until a live `session_project_rollup_runtime` packet validates P6 multi-device rollup evidence, and until a live `preference_artifact_memory` packet validates P7 preference/artifact memory evidence.
 - P8 evidence packet template is branch-local handoff metadata only. It remains `template_only_not_runtime_evidence`; the latest current-session packet populated from the configured read path validates the gap state, and the branch-local normalizer/evaluator makes that packet shape reusable, but it is not a passing deployed-readiness packet.
 - P8 collector packet generation is branch-local read-only evidence preparation only. It can create a public-safe `source_to_candidate_runtime_evidence.v1` packet from local route smokes plus local_test source-to-candidate review-loop, P6 session/project/work-unit rollup, P7 preference/artifact memory, P8 permission audit, and P9 startup/read-path smokes and validate that shape, but it remains `collector_packet_not_live_evidence` until the same packet shape is populated from deployed/configured live evidence with source/image identity proof.
 - P8 shadow collection registration artifact is branch-local request metadata only. It records the external post-deploy runner handoff shape and remains `registration_only_not_runtime_evidence`; until a deployed post-rollout runner collects a passing sanitized evidence packet, route smokes remain run-pending gaps.
@@ -425,4 +429,4 @@ Latest current-session shadow packet evaluation populated the public-safe eviden
 
 ## Conclusion
 
-Implementation은 local 및 contract scope에서 검증되었고 safety gates는 fail-closed로 동작합니다. 결과는 `PASS_WITH_GAPS`로 유지됩니다. Branch-local collector packet은 route-smoke, local_test source-to-candidate review-loop, P6 session/project/work-unit rollup, P7 preference/artifact memory, P8 permission audit, and P9 startup/read-path packet 생성/평가 준비도를 높였지만 live deployed proof는 아닙니다. 현재 Codex session의 `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 필요한 runtime truth route가 아직 구현된 live object pack을 반환하지 않고, branch-local source/review/readiness tools, P7 HTML/visualization route, PR #95 image identity, 및 deployed/live bounded production authority execution evidence가 live runtime에서 증명되지 않았기 때문입니다.
+Implementation은 local 및 contract scope에서 검증되었고 safety gates는 fail-closed로 동작합니다. 결과는 `PASS_WITH_GAPS`로 유지됩니다. Branch-local collector packet은 route-smoke, local_test source-to-candidate review-loop, P6 session/project/work-unit rollup, P7 preference/artifact memory, P8 permission audit, and P9 startup/read-path packet 생성/평가 준비도를 높였지만 live deployed proof는 아닙니다. 현재 Codex session의 `mcp__lbrain` read path는 `brain_objects_query`를 호출할 수 있지만 six-route smoke 중 네 route는 `object_pack_route_not_implemented`, 두 route는 sanitized internal error를 반환했고, branch-local source/review/readiness tools, PR #95 image identity, 및 deployed/live bounded production authority execution evidence가 live runtime에서 증명되지 않았기 때문입니다.
