@@ -1273,6 +1273,9 @@ def _production_authority_execution_from_smoke(
             "status": "validated",
             "review_queue_status": queued_item["status"],
             "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
         },
         "scope": {
             "project": proposal["project"],
