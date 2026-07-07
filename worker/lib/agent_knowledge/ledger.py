@@ -29,6 +29,62 @@ _READ_ONLY_SQL_KEYWORD_RE = re.compile(
 _READ_ONLY_SQL_ALLOWED_KEYWORDS = {"EXPLAIN", "PRAGMA", "SELECT"}
 _READ_ONLY_SQL_CTE_FINAL_KEYWORDS = {"SELECT"}
 
+_OBJECT_AUTHORITY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS object_review_proposals (
+    proposal_id TEXT PRIMARY KEY,
+    project TEXT NOT NULL DEFAULT '',
+    proposal_type TEXT NOT NULL,
+    target_object_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    proposal_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_object_review_proposals_project_status
+    ON object_review_proposals(project, status, updated_at);
+CREATE TABLE IF NOT EXISTS object_authority_decisions (
+    decision_id TEXT PRIMARY KEY,
+    project TEXT NOT NULL DEFAULT '',
+    proposal_id TEXT NOT NULL,
+    target_object_id TEXT NOT NULL,
+    decision_type TEXT NOT NULL,
+    previous_authority_lane TEXT NOT NULL,
+    new_authority_lane TEXT NOT NULL,
+    decision_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_object_authority_decisions_target_created
+    ON object_authority_decisions(target_object_id, created_at);
+CREATE TABLE IF NOT EXISTS object_authority_states (
+    target_object_id TEXT PRIMARY KEY,
+    project TEXT NOT NULL DEFAULT '',
+    authority_lane TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    proposal_id TEXT NOT NULL,
+    decision_reason TEXT NOT NULL DEFAULT '',
+    state_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_object_authority_states_project_lane
+    ON object_authority_states(project, authority_lane, updated_at);
+"""
+
+_SCHEMA_MIGRATIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+"""
+
+_OBJECT_AUTHORITY_SCHEMA_MIGRATIONS = """
+INSERT INTO schema_migrations(version, applied_at)
+VALUES ('agent_knowledge_object_review_proposals.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
+INSERT INTO schema_migrations(version, applied_at)
+VALUES ('agent_knowledge_object_authority_decisions.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
+INSERT INTO schema_migrations(version, applied_at)
+VALUES ('agent_knowledge_object_authority_states.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
+"""
+
 
 def _reference_corpus_default_policy_status() -> dict:
     return {
@@ -864,6 +920,37 @@ class Ledger(
             return _ReadOnlyLedgerConnection(connection)
         return connection
 
+    def ensure_object_authority_schema(self) -> dict:
+        if self.read_only:
+            raise sqlite3.OperationalError("read-only ledger는 object authority schema ensure를 허용하지 않습니다")
+        with self._connect(configure_journal=True) as connection:
+            connection.executescript(
+                _SCHEMA_MIGRATIONS_SCHEMA
+                + _OBJECT_AUTHORITY_SCHEMA
+                + _OBJECT_AUTHORITY_SCHEMA_MIGRATIONS
+            )
+        server_backed_ledger = not bool(getattr(self._db_adapter, "is_file_backed", True))
+        result = {
+            "schema_version": "object_authority_schema_ensure.v1",
+            "status": "ensured",
+            "tables": [
+                "object_review_proposals",
+                "object_authority_decisions",
+                "object_authority_states",
+            ],
+            "schema_migrations": [
+                "agent_knowledge_object_review_proposals.v1",
+                "agent_knowledge_object_authority_decisions.v1",
+                "agent_knowledge_object_authority_states.v1",
+            ],
+            "mutation_performed": True,
+            "network_used": server_backed_ledger,
+            "server_backed_ledger": server_backed_ledger,
+            "protected_values_returned": False,
+        }
+        ensure_public_safe(result, "object_authority_schema_ensure")
+        return result
+
     @contextmanager
     def _transaction(self):
         if self.read_only:
@@ -1402,43 +1489,9 @@ class Ledger(
                 );
                 CREATE INDEX IF NOT EXISTS idx_memory_gc_audit_kind_created
                     ON memory_gc_audit(gc_kind, created_at);
-                CREATE TABLE IF NOT EXISTS object_review_proposals (
-                    proposal_id TEXT PRIMARY KEY,
-                    project TEXT NOT NULL DEFAULT '',
-                    proposal_type TEXT NOT NULL,
-                    target_object_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    proposal_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_object_review_proposals_project_status
-                    ON object_review_proposals(project, status, updated_at);
-                CREATE TABLE IF NOT EXISTS object_authority_decisions (
-                    decision_id TEXT PRIMARY KEY,
-                    project TEXT NOT NULL DEFAULT '',
-                    proposal_id TEXT NOT NULL,
-                    target_object_id TEXT NOT NULL,
-                    decision_type TEXT NOT NULL,
-                    previous_authority_lane TEXT NOT NULL,
-                    new_authority_lane TEXT NOT NULL,
-                    decision_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_object_authority_decisions_target_created
-                    ON object_authority_decisions(target_object_id, created_at);
-                CREATE TABLE IF NOT EXISTS object_authority_states (
-                    target_object_id TEXT PRIMARY KEY,
-                    project TEXT NOT NULL DEFAULT '',
-                    authority_lane TEXT NOT NULL,
-                    decision_id TEXT NOT NULL,
-                    proposal_id TEXT NOT NULL,
-                    decision_reason TEXT NOT NULL DEFAULT '',
-                    state_json TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_object_authority_states_project_lane
-                    ON object_authority_states(project, authority_lane, updated_at);
+                """
+                + _OBJECT_AUTHORITY_SCHEMA
+                + """
                 CREATE TABLE IF NOT EXISTS reference_corpus_bundles (
                     corpus_id TEXT PRIMARY KEY,
                     project TEXT NOT NULL DEFAULT '',
@@ -1525,10 +1578,9 @@ class Ledger(
                 );
                 CREATE INDEX IF NOT EXISTS idx_reference_corpus_runs_project_corpus
                     ON reference_corpus_extraction_runs(project, corpus_id, updated_at);
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version TEXT PRIMARY KEY,
-                    applied_at TEXT NOT NULL
-                );
+                """
+                + _SCHEMA_MIGRATIONS_SCHEMA
+                + """
                 INSERT INTO schema_migrations(version, applied_at)
                 VALUES ('agent_knowledge_ledger.v2', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
@@ -1567,10 +1619,9 @@ class Ledger(
                 VALUES ('agent_knowledge_qdrant_collections.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
                 VALUES ('agent_knowledge_graph_projection_state.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
-                INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_object_review_proposals.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
-                INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_object_authority_decisions.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
+                """
+                + _OBJECT_AUTHORITY_SCHEMA_MIGRATIONS
+                + """
                 INSERT INTO schema_migrations(version, applied_at)
                 VALUES ('agent_knowledge_reference_corpus_bundles.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
