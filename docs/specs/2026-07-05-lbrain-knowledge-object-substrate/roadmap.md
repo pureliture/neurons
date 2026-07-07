@@ -652,6 +652,7 @@ Current local/test evidence:
 - P2 evidence summary includes `reference_corpus_production_ingest_readiness.v1`; without supplied live evidence it remains `PASS_WITH_GAPS`, `live_evidence_provided=false`, `production_mutation_performed=false`, and `production_corpus_ingest_evidence_unverified`
 - P3 evidence summary includes `source_to_candidate_projection_join_product_evidence.v1`; without supplied live projection evidence it remains `PASS_WITH_GAPS`, `projection_join_claim_status=not_validated`, `evidence_is_live=false`, `production_mutation_performed=false`, `production_ready=false`, and `live_graph_qdrant_projection_join_unproven`
 - P6 evidence summary includes `object_extraction_session_project_rollup_preview.v1`, `object_count=8`, `edge_count=16`, `evidence_count=1`, and `session_project_handoff_pack.v1`
+- `golden-query-eval --activation-progress` can now accept `--live-evidence-file` or `--post-deploy-capture-file`, so a supplied sanitized live P6 runtime packet can be reflected in CLI product evidence while local replay and mutating captures remain fail-closed/gap-preserving
 - P7 evidence summary includes `object_extraction_preference_style_preview.v1`, accepted artifact preference pack status `pass`, and source evidence refs without raw body
 - P8 evidence summary keeps merge/deploy/runtime separated with `runtime_unverified_count=1`, `runtime_verified_count=0`, production promotion `permission=allowed`, `permission_reason=approved_scope_present`, `authority_write_performed=false`, a post-deploy evidence packet template, a shadow route-smoke request for `authority_archive_separation`, `code_style_preference`, `temporal_work_recall`, `code_change_impact`, `html_visualization_preference`, and `deployment_runtime_truth`, and a branch-local collector packet that validates route-smoke plus local_test review-loop, P6 session/project/work-unit rollup, P7 preference/artifact memory, P8 permission-sensitive audit, and P9 startup/read-path packet shape without claiming live evidence
 - P8 product evidence treats absent source/image identity as `p8_source_commit_matches_pr_head_unverified` gap but explicit `source_commit_matches_pr_head=false` as `p8_source_commit_mismatch_with_pr_head` hard failure, so image/source mismatch cannot be hidden behind `PASS_WITH_GAPS`
@@ -789,6 +790,7 @@ Current local/test evidence:
 - P6 runtime readiness now cross-checks handoff `visible_session_count`, `all_device_session_count`, `Session` ref count, and `WorkUnit` ref count against the preview/resume evidence so a partial handoff cannot pass as a complete project rollup
 - missing P6 runtime packet evidence remains `PASS_WITH_GAPS` with `live_session_project_rollup_unverified` and `live_multi_device_rollup_unproven`; unsafe or incomplete supplied evidence fails closed
 - activation progress product evidence now accepts a sanitized live P6 runtime packet and removes `p6_live_multi_device_rollup_unproven` only when `live.session_project.rollup` is validated and evidence provenance is live; local replay evidence keeps `p6_session_project_rollup_evidence_not_live`
+- activation progress CLI now accepts `--live-evidence-file` and `--post-deploy-capture-file`, reusing the post-deploy normalizer so a runner-supplied sanitized packet can update P6 product evidence without claiming that plan/template/local replay evidence is live
 - local path sentinels and source bodies are not returned
 - P5 phase coverage now marks P6 as `PASS_WITH_GAPS` with `live_multi_device_rollup_unproven`, not `handoff_pack_not_implemented`
 - P5 product evidence checks now also mark P6 as `PASS_WITH_GAPS` with `p6_live_multi_device_rollup_unproven` until deployed/live multi-device rollup evidence is attached
@@ -812,6 +814,14 @@ Current local/test evidence:
 - P6/golden/runtime adjacent result: `87 passed, 1 warning`
 - P6/CLI/MCP adjacent evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py tests/test_source_to_candidate_runtime_readiness.py tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py`
 - P6/CLI/MCP adjacent result: `256 passed, 1 warning`
+- P6 activation-progress CLI evidence: `cd worker && uv run pytest -q tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_activation_progress_accepts_live_evidence_file tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_activation_progress_keeps_local_replay_gap tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_activation_progress_accepts_post_deploy_capture_file tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_activation_progress_fails_mutating_post_deploy_capture`
+- P6 activation-progress CLI result: `4 passed, 1 warning`
+- P6 activation-progress focused evidence: `cd worker && uv run pytest -q tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_activation_progress tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_activation_progress_accepts_live_evidence_file tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_activation_progress_keeps_local_replay_gap tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_activation_progress_accepts_post_deploy_capture_file tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_activation_progress_fails_mutating_post_deploy_capture tests/test_golden_query_eval.py::test_product_activation_progress_closes_p6_gap_with_live_session_project_rollup_evidence tests/test_golden_query_eval.py::test_product_activation_progress_keeps_p6_gap_when_rollup_evidence_is_not_live tests/test_golden_query_eval.py::test_product_activation_progress_fails_p6_when_live_provenance_is_not_redacted`
+- P6 activation-progress focused result: `8 passed, 1 warning`
+- P6 activation-progress adjacent evidence: `cd worker && uv run pytest -q tests/test_neuron_cli.py tests/test_golden_query_eval.py tests/test_source_to_candidate_runtime_readiness.py`
+- P6 activation-progress adjacent result: `153 passed, 1 warning`
+- P6 activation-progress CLI smoke: `cd worker && uv run neuron-knowledge golden-query-eval --activation-progress`
+- P6 activation-progress CLI smoke result: `status=PASS_WITH_GAPS`, `production_ready=false`, `production_mutation_performed=false`, P6 gap `p6_live_multi_device_rollup_unproven` remains visible without supplied live evidence
 - phase coverage evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
 - phase coverage result: `1 passed, 1 warning`
 - source-to-authority strengthened review-edit gate evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_source_to_authority_quality_gate_covers_review_approval_and_read_path_without_production_mutation`
@@ -819,14 +829,14 @@ Current local/test evidence:
 - adjacent regression evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py tests/test_neuron_mcp_stdio.py tests/test_neuron_cli.py tests/test_extraction_pipeline.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
 - adjacent regression result: `234 passed, 1 warning`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1734 passed, 9 skipped, 1 warning`
+- worker regression result: `1738 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 
 Remaining gaps:
 
 - local/test P6 gate evidence is present for same-device/all-device fixture rollups, safe handoff/resume context generation, and bidirectional linked metadata edges
-- branch-local runtime readiness and activation progress can now validate or reject a sanitized P6 live rollup evidence packet, but that packet has not been collected from deployed runtime
+- branch-local runtime readiness and activation progress CLI can now validate or reject a sanitized P6 live rollup evidence packet, but that packet has not been collected from deployed runtime
 - PR/commit/test provenance is covered only by local/test metadata fixtures, not live repository history
 - live multi-device/project rollup evidence is unproven
 
