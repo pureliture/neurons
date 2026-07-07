@@ -186,6 +186,7 @@ def run_reference_corpus_extraction_preview(
                     "extractor": "reference_corpus_manifest",
                     "strategy": "manifest_summary_v1",
                 },
+                observed_at=str(bundle["corpus"].get("observed_at") or ""),
             ).to_dict()
         )
         for obj in document_objects
@@ -1691,6 +1692,7 @@ def _corpus_object(corpus: Mapping[str, Any], *, project: str) -> KnowledgeObjec
         confidence={"score": 0.65, "basis": "manifest_hash"},
         recommended_action="use_as_reference",
         freshness={"policy": corpus.get("freshness_policy", "")},
+        observed_at=public_safe_text(str(corpus.get("observed_at") or ""), max_chars=80),
         payload={
             "corpus_id": corpus_id,
             "storage_mode": public_safe_text(str(corpus.get("storage_mode") or ""), max_chars=80),

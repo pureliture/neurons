@@ -1,3 +1,5 @@
+from time import sleep
+
 from agent_knowledge.llm_brain_core.objects.extraction_pipeline import (
     build_extractor_registry_report,
     run_documentation_cleanup_strategy_comparison,
@@ -269,6 +271,7 @@ def test_reference_corpus_extraction_preview_creates_deterministic_objects_edges
         project="neurons",
         storage_mode="managed_snapshot",
     )
+    sleep(1.1)
     second = run_reference_corpus_extraction_preview(
         _manifest(),
         project="neurons",
