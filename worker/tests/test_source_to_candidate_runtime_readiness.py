@@ -481,7 +481,7 @@ def _object_authority_tool_schema():
 
 def _production_authority_execution_evidence(**overrides):
     target_object_id = "ko:RepoDocument:production-gate-smoke"
-    approval_ref_hash = "sha256:" + "a" * 24
+    approval_ref_hash = "sha256:" + "a" * 64
     evidence = {
         "schema_version": "object_authority_bounded_execution_evidence.v1",
         "approval": {
@@ -528,6 +528,9 @@ def _production_authority_execution_evidence(**overrides):
             "status": "validated",
             "review_queue_status": "rejected",
             "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
         },
         "scope": {
             "project": "workspace-index-advisor",
@@ -1326,6 +1329,31 @@ def test_runtime_readiness_fails_when_bounded_production_execution_evidence_is_i
     assert "bounded_execution_max_objects_not_one" in report["gaps"]
     assert "bounded_execution_read_after_write_missing" in report["gaps"]
     assert "bounded_execution_raw_private_evidence_returned" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_bounded_execution_postcheck_returns_forbidden_outputs():
+    evidence = _sanitized_live_evidence(
+        production_authority_execution=_production_authority_execution_evidence(
+            postcheck={
+                "status": "validated",
+                "review_queue_status": "rejected",
+                "raw_private_evidence_returned": False,
+                "secret_returned": True,
+                "host_topology_returned": True,
+                "raw_external_ids_returned": True,
+            },
+        )
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    execution = claims["live.production.object_authority_bounded_execution"]
+    assert execution["status"] == "failed"
+    assert "bounded_execution_secret_returned" in report["gaps"]
+    assert "bounded_execution_host_topology_returned" in report["gaps"]
+    assert "bounded_execution_raw_external_ids_returned" in report["gaps"]
 
 
 def test_runtime_readiness_requires_bounded_execution_demote_step():

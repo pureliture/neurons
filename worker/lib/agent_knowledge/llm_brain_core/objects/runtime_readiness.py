@@ -3076,7 +3076,7 @@ def _bounded_execution_failures(
         failures.append("bounded_execution_schema_mismatch")
     if approval.get("approved") is not True:
         failures.append("bounded_execution_approval_missing")
-    if not approval_ref_hash.startswith("sha256:"):
+    if not _is_sha256_hash_ref(approval_ref_hash):
         failures.append("bounded_execution_approval_ref_hash_missing")
     if str(approval.get("scope") or "") != "single_project_single_object":
         failures.append("bounded_execution_scope_not_single_project_single_object")
@@ -3117,8 +3117,14 @@ def _bounded_execution_failures(
         failures.append("bounded_execution_demote_prior_object_step_missing")
     if postcheck.get("status") != "validated":
         failures.append("bounded_execution_postcheck_missing")
-    if postcheck.get("raw_private_evidence_returned") is not False:
-        failures.append("bounded_execution_raw_private_evidence_returned")
+    for field, gap in (
+        ("raw_private_evidence_returned", "bounded_execution_raw_private_evidence_returned"),
+        ("secret_returned", "bounded_execution_secret_returned"),
+        ("host_topology_returned", "bounded_execution_host_topology_returned"),
+        ("raw_external_ids_returned", "bounded_execution_raw_external_ids_returned"),
+    ):
+        if postcheck.get(field) is not False:
+            failures.append(gap)
     return _dedupe(failures)
 
 
