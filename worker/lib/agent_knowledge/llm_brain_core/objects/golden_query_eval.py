@@ -731,6 +731,18 @@ def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
         failures.append("p8_runtime_evidence_collector_mutated_production")
     if evidence.get("runtime_evidence_collector_readiness_claim") != "collector_packet_not_live_evidence":
         failures.append("p8_runtime_evidence_collector_claims_live_evidence")
+    if evidence.get("runtime_evidence_post_deploy_capture_packet_schema") != "source_to_candidate_runtime_evidence.v1":
+        failures.append("p8_post_deploy_capture_packet_missing")
+    if evidence.get("runtime_evidence_post_deploy_capture_collection_mode") != "post_deploy_read_only_smoke":
+        failures.append("p8_post_deploy_capture_collection_mode_missing")
+    if evidence.get("runtime_evidence_post_deploy_capture_network_used") is not True:
+        failures.append("p8_post_deploy_capture_network_not_used")
+    if bool(evidence.get("runtime_evidence_post_deploy_capture_production_mutation_performed")):
+        failures.append("p8_post_deploy_capture_mutated_production")
+    if evidence.get("runtime_evidence_post_deploy_capture_report_status") != "PASS_WITH_GAPS":
+        failures.append("p8_post_deploy_capture_unexpected_report_status")
+    if bool(evidence.get("runtime_evidence_post_deploy_capture_production_ready")):
+        failures.append("p8_post_deploy_capture_claims_production_ready")
     if evidence.get("runtime_evidence_collector_permission_audit_schema") != (
         "permission_sensitive_runtime_audit_evidence.v1"
     ):
@@ -1041,9 +1053,12 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
     from .runtime_readiness import (
         AGENT_CONTEXT_STARTUP_RUNTIME_SCHEMA,
         PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA,
+        REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
         build_source_to_candidate_runtime_collected_shadow_evidence_packet,
         build_source_to_candidate_runtime_evidence_collection_plan,
         build_source_to_candidate_runtime_evidence_packet_template,
+        build_source_to_candidate_runtime_post_deploy_capture_packet,
+        build_source_to_candidate_runtime_post_deploy_capture_readiness_report,
     )
 
     expected_commit = "e3f6296"
@@ -1100,6 +1115,41 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
         route_runner=_p8_branch_local_runtime_route_smoke,
     )
     collector = collector_packet.get("collector") if isinstance(collector_packet.get("collector"), Mapping) else {}
+    post_deploy_capture = {
+        "tool_names": [
+            "brain_objects_query",
+            "brain_source_to_candidate_graph",
+            "brain_candidate_review_edit",
+            "brain_approval_board_decide",
+            "brain_source_to_candidate_runtime_readiness",
+        ],
+        "brain_objects_query_smokes": [
+            _p8_branch_local_runtime_route_smoke(route)
+            for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+        ],
+        "deployed_identity": {
+            "contains_expected_commit": False,
+            "identity_source": "redacted_post_deploy_capture_without_image_identity",
+        },
+        "collection": {
+            "collection_mode": "post_deploy_read_only_smoke",
+            "network_used": True,
+            "mutation_scope": "none",
+        },
+        "production_mutation_performed": False,
+    }
+    post_deploy_packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=post_deploy_capture,
+    )
+    post_deploy_report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=post_deploy_capture,
+        expected_commit=expected_commit,
+    )
+    post_deploy_provenance = (
+        post_deploy_packet.get("evidence_provenance")
+        if isinstance(post_deploy_packet.get("evidence_provenance"), Mapping)
+        else {}
+    )
     collector_review_loop = (
         collector_packet.get("source_to_candidate_review_loop")
         if isinstance(collector_packet.get("source_to_candidate_review_loop"), Mapping)
@@ -1259,6 +1309,18 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
             collector_packet.get("production_mutation_performed")
         ),
         "runtime_evidence_collector_readiness_claim": str(collector.get("readiness_claim") or ""),
+        "runtime_evidence_post_deploy_capture_packet_schema": str(post_deploy_packet.get("schema_version") or ""),
+        "runtime_evidence_post_deploy_capture_collection_mode": str(
+            post_deploy_provenance.get("collection_mode") or ""
+        ),
+        "runtime_evidence_post_deploy_capture_network_used": bool(post_deploy_provenance.get("network_used")),
+        "runtime_evidence_post_deploy_capture_production_mutation_performed": bool(
+            post_deploy_packet.get("production_mutation_performed")
+        ),
+        "runtime_evidence_post_deploy_capture_report_status": str(post_deploy_report.get("status") or ""),
+        "runtime_evidence_post_deploy_capture_production_ready": bool(
+            post_deploy_report.get("production_ready")
+        ),
         "runtime_evidence_collector_review_loop_schema": str(collector_review_loop.get("schema_version") or ""),
         "runtime_evidence_collector_review_loop_candidate_count": int(
             collector_review_graph.get("candidate_count") or 0
