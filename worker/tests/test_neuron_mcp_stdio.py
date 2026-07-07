@@ -451,6 +451,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
             _brain_objects_query_smoke("temporal_work_recall"),
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
+        "projection_join": _projection_join_runtime_evidence(),
         "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
         "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
         "preference_artifact_memory": _preference_artifact_memory_evidence(),
@@ -868,6 +869,7 @@ def _runtime_readiness_complete_evidence(
             _brain_objects_query_smoke("temporal_work_recall"),
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
+        "projection_join": _projection_join_runtime_evidence(),
         "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
         "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
         "preference_artifact_memory": _preference_artifact_memory_evidence(),
@@ -922,6 +924,23 @@ def _runtime_readiness_complete_evidence(
     if production_authority_execution is not None:
         evidence["production_authority_execution"] = production_authority_execution
     return evidence
+
+
+def _projection_join_runtime_evidence() -> dict:
+    return {
+        "schema_version": "object_extraction_projection_join_preview.v1",
+        "evidence_class": "runtime_projection_join",
+        "status": "pass",
+        "edge_count": 2,
+        "production_mutation_performed": False,
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
 
 
 def _source_to_candidate_review_loop_evidence() -> dict:

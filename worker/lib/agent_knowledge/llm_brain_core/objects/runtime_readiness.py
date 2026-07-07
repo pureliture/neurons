@@ -43,6 +43,7 @@ OBJECT_AUTHORITY_PRODUCTION_RUNTIME_FLAG = "--allow-object-authority-production-
 PERMISSION_SENSITIVE_AGENT_CONTEXT_TOOLS = ("brain_approval_board_decide",)
 RUNTIME_READINESS_AGENT_CONTEXT_TOOL = "brain_source_to_candidate_runtime_readiness"
 EVIDENCE_PROVENANCE_SCHEMA = "source_to_candidate_runtime_evidence_provenance.v1"
+PROJECTION_JOIN_RUNTIME_SCHEMA = "object_extraction_projection_join_preview.v1"
 SESSION_PROJECT_ROLLUP_RUNTIME_SCHEMA = "session_project_rollup_runtime_evidence.v1"
 SESSION_PROJECT_ROLLUP_PREVIEW_SCHEMA = "object_extraction_session_project_rollup_preview.v1"
 SESSION_PROJECT_HANDOFF_SCHEMA = "session_project_handoff_pack.v1"
@@ -92,6 +93,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
         "collect_mcp_tool_inventory",
         "collect_agent_context_product",
         "probe_brain_objects_query_routes",
+        "probe_projection_join_runtime",
         "probe_source_to_candidate_review_loop",
         "probe_session_project_rollup_runtime",
         "probe_preference_artifact_memory_runtime",
@@ -156,6 +158,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
             "collect_mcp_tool_inventory": "live_mcp_review_tools_unverified",
             "collect_agent_context_product": "live_agent_context_product_sections_unverified",
             "probe_brain_objects_query_routes": "live_brain_objects_query_route_smokes_unverified",
+            "probe_projection_join_runtime": "live_graph_qdrant_projection_join_unproven",
             "probe_source_to_candidate_review_loop": "live_source_to_candidate_review_loop_unverified",
             "probe_session_project_rollup_runtime": "live_session_project_rollup_unverified",
             "probe_preference_artifact_memory_runtime": "live_preference_artifact_memory_unverified",
@@ -217,6 +220,7 @@ def build_source_to_candidate_runtime_evidence_packet_template(
             "tool_names",
             "agent_context_product",
             "brain_objects_query_smokes",
+            "projection_join",
             "source_to_candidate_review_loop",
             "session_project_rollup_runtime",
             "preference_artifact_memory",
@@ -252,6 +256,7 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         "tool_names": _string_list(captured.get("tool_names")),
         "agent_context_product": _public_safe_mapping(captured.get("agent_context_product")),
         "brain_objects_query_smokes": _public_safe_mapping_list(captured.get("brain_objects_query_smokes")),
+        "projection_join": _public_safe_mapping(captured.get("projection_join")),
         "source_to_candidate_review_loop": _public_safe_mapping(captured.get("source_to_candidate_review_loop")),
         "session_project_rollup_runtime": _public_safe_mapping(captured.get("session_project_rollup_runtime")),
         "preference_artifact_memory": _public_safe_mapping(captured.get("preference_artifact_memory")),
@@ -1226,6 +1231,20 @@ def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
             }
             for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
         ],
+        "projection_join": {
+            "schema_version": PROJECTION_JOIN_RUNTIME_SCHEMA,
+            "evidence_class": "runtime_projection_join",
+            "status": "pass",
+            "edge_count": "collector_sets_integer",
+            "production_mutation_performed": False,
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
         "source_to_candidate_review_loop": {
             "schema_version": "source_to_candidate_review_loop_evidence.v1",
             "source_to_candidate_graph": {
@@ -1517,6 +1536,19 @@ def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
             "production_mutation_performed": False,
         },
         {
+            "step_id": "probe_projection_join_runtime",
+            "evidence_field": "projection_join",
+            "required_values": [
+                PROJECTION_JOIN_RUNTIME_SCHEMA,
+                "runtime_projection_join",
+                "edge_count>0",
+                "redacted_postcheck",
+            ],
+            "safe_target": "sanitized_graph_qdrant_projection_join_read_path",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
             "step_id": "probe_source_to_candidate_review_loop",
             "evidence_field": "source_to_candidate_review_loop",
             "required_values": [
@@ -1636,6 +1668,7 @@ def build_source_to_candidate_runtime_readiness_report(
         _live_agent_context_tool_hints_claim(evidence),
         _live_agent_context_product_sections_claim(evidence),
         _live_brain_objects_query_route_smokes_claim(evidence),
+        _live_source_to_candidate_projection_join_claim(evidence),
         _live_source_to_candidate_review_loop_claim(evidence),
         _live_session_project_rollup_claim(evidence),
         _live_preference_artifact_memory_claim(evidence),
@@ -2057,6 +2090,72 @@ def _live_source_to_candidate_review_loop_claim(evidence: Mapping[str, Any]) -> 
         "production_mutation_performed": mutation_performed,
         "gaps": failures,
     }
+
+
+def _live_source_to_candidate_projection_join_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    projection = evidence.get("projection_join")
+    projection = projection if isinstance(projection, Mapping) else {}
+    if not projection:
+        return {
+            "claim_id": "live.source_to_candidate.projection_join",
+            "evidence_class": "runtime_read_path",
+            "status": "not_validated",
+            "schema_version": "",
+            "edge_count": 0,
+            "production_mutation_performed": False,
+            "gaps": ["live_graph_qdrant_projection_join_unproven"],
+        }
+    postcheck = projection.get("postcheck") if isinstance(projection.get("postcheck"), Mapping) else {}
+    failures = _projection_join_failures(projection=projection, postcheck=postcheck)
+    mutation_performed = _projection_join_reports_mutation(projection)
+    return {
+        "claim_id": "live.source_to_candidate.projection_join",
+        "evidence_class": "runtime_read_path",
+        "status": "failed" if failures else "validated",
+        "schema_version": public_safe_text(str(projection.get("schema_version") or ""), max_chars=80),
+        "evidence_class_observed": public_safe_text(str(projection.get("evidence_class") or ""), max_chars=80),
+        "runtime_status": public_safe_text(str(projection.get("status") or ""), max_chars=80),
+        "edge_count": _int_value(projection.get("edge_count")),
+        "postcheck_status": public_safe_text(str(postcheck.get("status") or ""), max_chars=80),
+        "production_mutation_performed": mutation_performed,
+        "gaps": failures,
+    }
+
+
+def _projection_join_failures(
+    *,
+    projection: Mapping[str, Any],
+    postcheck: Mapping[str, Any],
+) -> list[str]:
+    failures: list[str] = []
+    if projection.get("schema_version") != PROJECTION_JOIN_RUNTIME_SCHEMA:
+        failures.append("projection_join_schema_mismatch")
+    if projection.get("evidence_class") != "runtime_projection_join":
+        failures.append("projection_join_evidence_class_mismatch")
+    if projection.get("status") != "pass":
+        failures.append("projection_join_status_not_pass")
+    if _int_value(projection.get("edge_count")) < 1:
+        failures.append("projection_join_edge_count_missing")
+    if _projection_join_reports_mutation(projection):
+        failures.append("projection_join_production_mutation_performed")
+    if postcheck.get("status") != "validated":
+        failures.append("projection_join_postcheck_missing")
+    for field, gap in (
+        ("raw_private_evidence_returned", "projection_join_raw_private_evidence_returned"),
+        ("secret_returned", "projection_join_secret_returned"),
+        ("host_topology_returned", "projection_join_host_topology_returned"),
+        ("raw_external_ids_returned", "projection_join_raw_external_ids_returned"),
+    ):
+        if postcheck.get(field) is not False:
+            failures.append(gap)
+    return _dedupe(failures)
+
+
+def _projection_join_reports_mutation(projection: Mapping[str, Any]) -> bool:
+    return (
+        projection.get("production_mutation_performed") is True
+        or projection.get("mutation_performed") is True
+    )
 
 
 def _source_to_candidate_review_loop_failures(
