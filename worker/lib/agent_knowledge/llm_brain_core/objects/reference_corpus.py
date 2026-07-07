@@ -25,7 +25,7 @@ def default_corpus_policy_status() -> dict[str, Any]:
         "supported_storage_modes": sorted(STORAGE_MODES),
         "raw_body_policy": dict(RAW_BODY_POLICY),
         "source_rights_policy": "operator_attested_reference_use",
-        "production_ingest_gate": "denied_without_later_approval",
+        "production_ingest_gate": "approved_bounded_cli_gate_required",
     }
 
 
@@ -287,6 +287,97 @@ def build_reference_corpus_production_ingest_readiness_report(
     }
     ensure_public_safe(report, "ReferenceCorpusProductionIngestReadiness")
     return report
+
+
+def build_reference_corpus_production_ingest_evidence(
+    *,
+    project: str,
+    bundle: Mapping[str, Any],
+    write_result: Mapping[str, Any],
+    read_after_write_status: Mapping[str, Any],
+    approval_ref_hash: str,
+    evidence_collection_network_used: bool = False,
+) -> dict[str, Any]:
+    corpus = bundle.get("corpus")
+    corpus = corpus if isinstance(corpus, Mapping) else {}
+    manifest_hash = public_safe_text(str(corpus.get("manifest_ref") or ""), max_chars=120)
+    corpus_id = public_safe_text(str(corpus.get("corpus_id") or write_result.get("corpus_id") or ""), max_chars=180)
+    source_count = _int_value(write_result.get("source_count") or corpus.get("source_count"))
+    read_source_count = _int_value(read_after_write_status.get("source_count"))
+    manifest_hashes = read_after_write_status.get("manifest_hashes")
+    manifest_hashes = manifest_hashes if isinstance(manifest_hashes, list) else []
+    status_schema = public_safe_text(str(read_after_write_status.get("schema_version") or ""), max_chars=80)
+    observed_manifest_hashes = [public_safe_text(str(item), max_chars=120) for item in manifest_hashes]
+    read_after_write_validated = (
+        status_schema == "brain_corpus_status.v1"
+        and read_source_count == source_count
+        and manifest_hash in observed_manifest_hashes
+    )
+    evidence = {
+        "schema_version": PRODUCTION_CORPUS_INGEST_EVIDENCE_SCHEMA,
+        "approval": {
+            "approved": True,
+            "approval_ref_hash": require_sha256(str(approval_ref_hash or ""), "approval_ref_hash"),
+            "scope": "single_project_single_corpus",
+            "project": public_safe_text(project, max_chars=120),
+            "max_corpora": 1,
+            "no_raw_body_returned": True,
+        },
+        "corpus": {
+            "corpus_id": corpus_id,
+            "manifest_hash": manifest_hash,
+            "source_count": source_count,
+            "storage_mode": public_safe_text(str(corpus.get("storage_mode") or ""), max_chars=80),
+            "authority_lane": "reference_only",
+            "raw_body_policy": "no_raw_return_by_default",
+        },
+        "ingest": {
+            "target": "production_corpus_store",
+            "ledger_scope": "production",
+            "corpus_write_performed": write_result.get("mutation_performed") is True,
+            "production_mutation_performed": True,
+            "authority_write_performed": False,
+            "write_schema_version": public_safe_text(str(write_result.get("schema_version") or ""), max_chars=120),
+            "write_count": _int_value(write_result.get("write_count")),
+            "document_source_count": _int_value(write_result.get("document_source_count")),
+            "snapshot_count": _int_value(write_result.get("snapshot_count")),
+            "chunk_count": _int_value(write_result.get("chunk_count")),
+            "extraction_run_count": _int_value(write_result.get("extraction_run_count")),
+        },
+        "read_after_write": {
+            "status": "validated" if read_after_write_validated else "failed",
+            "corpus_id": corpus_id,
+            "manifest_hash": manifest_hash,
+            "source_count": read_source_count,
+        },
+        "rollback_or_deletion": {
+            "status": "planned",
+            "path": ["delete_snapshot_keep_metadata"],
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_body_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "evidence_provenance": {
+            "schema_version": PRODUCTION_CORPUS_INGEST_PROVENANCE_SCHEMA,
+            "collection_mode": PRODUCTION_CORPUS_INGEST_COLLECTION_MODE,
+            "network_used": bool(evidence_collection_network_used),
+            "mutation_scope": PRODUCTION_CORPUS_INGEST_MUTATION_SCOPE,
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "mutation_performed": True,
+        "production_mutation_performed": True,
+        "authority_write_performed": False,
+        "protected_values_returned": False,
+    }
+    ensure_public_safe(evidence, "ReferenceCorpusProductionIngestEvidence")
+    return evidence
 
 
 def _production_corpus_ingest_missing_claim() -> dict[str, Any]:
