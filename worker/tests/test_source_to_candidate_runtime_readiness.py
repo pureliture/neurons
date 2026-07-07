@@ -1213,6 +1213,25 @@ def test_runtime_readiness_fails_when_evidence_provenance_hides_bounded_mutation
     assert "live_evidence_provenance_mutation_scope_mismatch" in report["gaps"]
 
 
+def test_runtime_readiness_fails_when_read_only_provenance_claims_bounded_mutation_scope():
+    evidence = _sanitized_live_evidence(
+        evidence_provenance=_evidence_provenance(
+            collection_mode="post_deploy_read_only_smoke",
+            mutation_scope="bounded_production_authority_execution",
+            network_used=True,
+        )
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    assert report["production_ready"] is False
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    provenance = claims["live.evidence.provenance"]
+    assert provenance["status"] == "failed"
+    assert "live_evidence_provenance_read_only_mode_mutation_scope_mismatch" in report["gaps"]
+
+
 def test_runtime_readiness_fails_when_evidence_provenance_reports_private_or_topology_values():
     evidence = _sanitized_live_evidence(
         evidence_provenance=_evidence_provenance(
