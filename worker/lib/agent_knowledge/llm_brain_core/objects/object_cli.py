@@ -68,6 +68,12 @@ def _load_json_list(path: str, *, label: str) -> list[dict[str, Any]]:
     return [dict(item) for item in loaded if isinstance(item, dict)]
 
 
+def _manifest_with_corpus_name(manifest: dict[str, Any], corpus_name: str) -> dict[str, Any]:
+    if not corpus_name:
+        return manifest
+    return {**manifest, "corpus_name": corpus_name}
+
+
 def _parse_expected_source_type_counts(values: list[str], parser: argparse.ArgumentParser) -> dict[str, int]:
     counts: dict[str, int] = {}
     for value in values:
@@ -182,7 +188,7 @@ def corpus_ingest_plan_main(argv: list[str] | None = None) -> int:
         choices=["external_object_store", "managed_snapshot", "metadata_only"],
         default="metadata_only",
     )
-    parser.add_argument("--corpus-name", default="reference-corpus")
+    parser.add_argument("--corpus-name", default="")
     parser.add_argument("--manifest-file", default="")
     parser.add_argument("--expect-source-count", type=_non_negative_int, default=None)
     parser.add_argument("--expect-source-url-count", type=_non_negative_int, default=None)
@@ -192,8 +198,9 @@ def corpus_ingest_plan_main(argv: list[str] | None = None) -> int:
     manifest = (
         _load_manifest(args.manifest_file)
         if args.manifest_file
-        else {"corpus_name": args.corpus_name, "sources": []}
+        else {"corpus_name": args.corpus_name or "reference-corpus", "sources": []}
     )
+    manifest = _manifest_with_corpus_name(manifest, args.corpus_name)
     report = build_corpus_ingest_plan(
         manifest,
         project=args.project,
@@ -213,6 +220,7 @@ def corpus_ingest_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target", choices=["local_test", "production"], default="local_test")
     parser.add_argument("--ledger", default="")
     parser.add_argument("--manifest-file", default="")
+    parser.add_argument("--corpus-name", default="")
     parser.add_argument("--approved", action="store_true")
     parser.add_argument("--approval-ref", default="")
     parser.add_argument(
@@ -287,7 +295,7 @@ def corpus_ingest_main(argv: list[str] | None = None) -> int:
         )
         return 1
     if ledger_path and args.manifest_file:
-        manifest = _load_manifest(args.manifest_file)
+        manifest = _manifest_with_corpus_name(_load_manifest(args.manifest_file), args.corpus_name)
         plan = build_corpus_ingest_plan(
             manifest,
             project=args.project,
