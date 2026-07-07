@@ -62,6 +62,82 @@ def _palantir_full_count_manifest() -> dict:
     return {"corpus_name": "palantir-ontology", "sources": sources}
 
 
+def _valid_p6_runtime_evidence(*, live: bool = True) -> dict:
+    return {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "session_project_rollup_runtime": {
+            "schema_version": "session_project_rollup_runtime_evidence.v1",
+            "rollup_preview": {
+                "schema_version": "object_extraction_session_project_rollup_preview.v1",
+                "status": "pass",
+                "scope": "all_devices",
+                "object_type_counts": {
+                    "Device": 2,
+                    "Session": 2,
+                    "Repository": 1,
+                    "Branch": 1,
+                    "WorkUnit": 1,
+                },
+                "edge_types": [
+                    "repository_has_branch",
+                    "session_on_device",
+                    "device_has_session",
+                    "session_in_repository",
+                    "repository_has_session",
+                    "session_on_branch",
+                    "branch_has_session",
+                    "part_of_work_unit",
+                    "work_unit_has_session",
+                ],
+                "object_count": 7,
+                "edge_count": 12,
+                "visible_session_count": 2,
+                "all_device_session_count": 2,
+                "device_count": 2,
+                "production_mutation_performed": False,
+            },
+            "handoff_pack": {
+                "schema_version": "session_project_handoff_pack.v1",
+                "raw_return_capability": "denied",
+                "visible_session_count": 2,
+                "all_device_session_count": 2,
+                "object_ref_counts": {"Session": 2, "WorkUnit": 1},
+                "resume_context": {
+                    "schema_version": "session_project_resume_context.v1",
+                    "latest_session_ref_present": True,
+                    "work_unit_ref_count": 1,
+                    "production_mutation_performed": False,
+                },
+            },
+            "read_after_write": {
+                "status": "validated",
+                "route": "temporal_work_recall",
+                "object_pack_schema": "object_pack.v1",
+                "object_types": ["WorkUnit"],
+                "object_count": 1,
+            },
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
+        "evidence_provenance": {
+            "schema_version": "source_to_candidate_runtime_evidence_provenance.v1",
+            "collection_mode": "post_deploy_read_only_smoke" if live else "local_test_replay",
+            "mutation_scope": "none",
+            "network_used": live,
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": False,
+    }
+
+
 def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
     assert main(["--help"]) == 0
     output = capsys.readouterr().out
@@ -1534,6 +1610,122 @@ def test_neuron_knowledge_golden_query_eval_activation_progress(capsys):
     assert report["next_phase"] == "P5"
     assert report["release_quality_gate"] == "not_green"
     assert report["production_mutation_performed"] is False
+
+
+def test_neuron_knowledge_golden_query_eval_activation_progress_accepts_live_evidence_file(
+    tmp_path, capsys
+):
+    evidence_file = tmp_path / "p6-live-evidence.json"
+    evidence_file.write_text(json.dumps(_valid_p6_runtime_evidence(live=True)), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "golden-query-eval",
+                "--activation-progress",
+                "--live-evidence-file",
+                str(evidence_file),
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p6 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P6")
+
+    assert checks["P6"]["result"] == "PASS"
+    assert "p6_live_multi_device_rollup_unproven" not in checks["P6"]["gaps"]
+    assert p6["rollup_claim_status"] == "validated"
+    assert p6["evidence_is_live"] is True
+    assert p6["production_mutation_performed"] is False
+    assert report["production_ready"] is False
+    assert report["production_mutation_performed"] is False
+
+
+def test_neuron_knowledge_golden_query_eval_activation_progress_keeps_local_replay_gap(
+    tmp_path, capsys
+):
+    evidence_file = tmp_path / "p6-local-replay-evidence.json"
+    evidence_file.write_text(json.dumps(_valid_p6_runtime_evidence(live=False)), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "golden-query-eval",
+                "--activation-progress",
+                "--live-evidence-file",
+                str(evidence_file),
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p6 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P6")
+
+    assert p6["rollup_claim_status"] == "validated"
+    assert p6["evidence_is_live"] is False
+    assert checks["P6"]["result"] == "PASS_WITH_GAPS"
+    assert "p6_session_project_rollup_evidence_not_live" in checks["P6"]["gaps"]
+
+
+def test_neuron_knowledge_golden_query_eval_activation_progress_accepts_post_deploy_capture_file(
+    tmp_path, capsys
+):
+    capture_file = tmp_path / "p6-post-deploy-capture.json"
+    capture_file.write_text(json.dumps(_valid_p6_runtime_evidence(live=True)), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "golden-query-eval",
+                "--activation-progress",
+                "--post-deploy-capture-file",
+                str(capture_file),
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p6 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P6")
+
+    assert checks["P6"]["result"] == "PASS"
+    assert p6["evidence_provenance_status"] == "validated"
+    assert p6["evidence_is_live"] is True
+    assert report["production_mutation_performed"] is False
+
+
+def test_neuron_knowledge_golden_query_eval_activation_progress_fails_mutating_post_deploy_capture(
+    tmp_path, capsys
+):
+    capture = _valid_p6_runtime_evidence(live=True)
+    capture["production_mutation_performed"] = True
+    capture_file = tmp_path / "mutating-post-deploy-capture.json"
+    capture_file.write_text(json.dumps(capture), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "golden-query-eval",
+                "--activation-progress",
+                "--post-deploy-capture-file",
+                str(capture_file),
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+
+    assert report["status"] == "FAIL"
+    assert report["production_mutation_performed"] is True
+    assert checks["P6"]["result"] == "FAIL"
+    assert "p6_production_mutation_performed" in checks["P6"]["failures"]
 
 
 def test_neuron_knowledge_memory_regeneration_live_args_fail_closed(tmp_path, capsys):
