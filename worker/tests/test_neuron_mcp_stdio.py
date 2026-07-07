@@ -2179,10 +2179,38 @@ def test_mcp_object_authority_production_gate_writes_single_object_with_postchec
     assert missing_gate["proposal_write_performed"] is False
     assert service.object_review_proposals(project=PROJECT)["count"] == 0
 
-    proposal = handle_jsonrpc_message(
+    invalid_proposal_type = handle_jsonrpc_message(
         {
             "jsonrpc": "2.0",
             "id": 106,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "force_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Raw JSON-RPC must not bypass production proposal type policy.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert invalid_proposal_type["permission"] == "denied"
+    assert invalid_proposal_type["reason"] == "proposal_write_requires_local_test_ledger_or_valid_production_gate"
+    assert invalid_proposal_type["proposal_write_performed"] is False
+    assert invalid_proposal_type["production_promotion_plan"]["requested_proposal_type"] == "force_current"
+    assert "allowed_proposal_type" in invalid_proposal_type["production_promotion_plan"]["missing_gate_evidence"]
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 107,
             "method": "tools/call",
             "params": {
                 "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
@@ -2211,10 +2239,42 @@ def test_mcp_object_authority_production_gate_writes_single_object_with_postchec
     assert all(char in "0123456789abcdef" for char in proposal["production_gate_ref_hash"].split(":", 1)[1])
     assert service.object_review_proposals(project=PROJECT)["count"] == 1
 
+    invalid_decision_type = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 108,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "force_current",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "accepted_current",
+                    "approved_by": "preapproved-user-gate-2026-07-06",
+                    "decision_id": "decision:production-gate-invalid-type",
+                    "decision_reason": "Raw JSON-RPC must not bypass production decision type policy.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert invalid_decision_type["permission"] == "denied"
+    assert invalid_decision_type["reason"] == "restricted_tool_requires_valid_production_gate"
+    assert invalid_decision_type["authority_write_performed"] is False
+    assert invalid_decision_type["production_promotion_plan"]["requested_decision_type"] == "force_current"
+    assert "allowed_decision_type" in invalid_decision_type["production_promotion_plan"]["missing_gate_evidence"]
+    assert service.ledger.get_object_authority_state(target_object_id) == {}
+
     decision = handle_jsonrpc_message(
         {
             "jsonrpc": "2.0",
-            "id": 107,
+            "id": 109,
             "method": "tools/call",
             "params": {
                 "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
