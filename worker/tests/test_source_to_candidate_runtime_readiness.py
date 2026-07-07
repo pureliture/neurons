@@ -1252,6 +1252,29 @@ def test_runtime_readiness_fails_when_read_only_provenance_claims_bounded_mutati
     assert "live_evidence_provenance_read_only_mode_mutation_scope_mismatch" in report["gaps"]
 
 
+def test_runtime_readiness_post_deploy_mode_without_network_does_not_claim_live_or_ready():
+    evidence = _sanitized_live_evidence(
+        evidence_provenance=_evidence_provenance(
+            collection_mode="post_deploy_read_only_smoke",
+            mutation_scope="none",
+            network_used=False,
+        ),
+        production_authority_execution={},
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["evidence_is_live"] is False
+    assert report["production_ready"] is False
+    assert report["production_readiness"] == "not_ready"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    provenance = claims["live.evidence.provenance"]
+    assert provenance["status"] == "not_validated"
+    assert provenance["is_live"] is False
+    assert "live_evidence_provenance_network_not_used_for_live_mode" in report["gaps"]
+
+
 def test_runtime_readiness_fails_when_evidence_provenance_reports_private_or_topology_values():
     evidence = _sanitized_live_evidence(
         evidence_provenance=_evidence_provenance(
