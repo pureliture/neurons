@@ -41,6 +41,13 @@ DEFERRED_SCOPE_GAPS = {
 }
 
 _LOCAL_VALIDATED_PHASES = {"P2", "P3", "P4", "P6", "P7", "P8", "P9"}
+P9_ALLOWED_TOOL_SAFE_TARGETS = {
+    "brain_objects_query": frozenset({"read_only_object_pack"}),
+    "brain_source_to_candidate_graph": frozenset({"local_test"}),
+    "brain_candidate_review_edit": frozenset({"local_test_pack"}),
+    "brain_approval_board_decide": frozenset({"local_test"}),
+    "brain_source_to_candidate_runtime_readiness": frozenset({"sanitized_evidence_packet"}),
+}
 
 
 def build_baseline_golden_query_report() -> dict[str, Any]:
@@ -825,15 +832,86 @@ def _p9_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     if evidence.get("schema_version") != "agent_context_product_pack.v1":
         failures.append("p9_schema_mismatch")
     section_counts = evidence.get("section_counts") if isinstance(evidence.get("section_counts"), Mapping) else {}
+    tool_hint_count = int(evidence.get("tool_hint_count") or 0)
     if int(section_counts.get("style_preference") or 0) < 1:
         failures.append("p9_style_preference_section_missing")
     if int(section_counts.get("active_work") or 0) < 1:
         failures.append("p9_active_work_section_missing")
-    if int(evidence.get("tool_hint_count") or 0) < 4:
+    if tool_hint_count < 4:
         failures.append("p9_object_native_tool_hints_missing")
+    if int(evidence.get("tool_hint_safe_target_count") or 0) < tool_hint_count:
+        failures.append("p9_tool_hint_safe_targets_incomplete")
+    if int(evidence.get("unsafe_tool_hint_count") or 0) > 0:
+        failures.append("p9_tool_hint_safety_violations")
     if bool(evidence.get("mutation_allowed")):
         failures.append("p9_mutation_allowed")
     return failures
+
+
+def _p9_tool_hint_safety_summary(tool_hints: Any) -> dict[str, Any]:
+    hints = tool_hints if isinstance(tool_hints, list) else []
+    safe_target_count = 0
+    unsafe_count = 0
+    safety_failures: list[str] = []
+    for hint in hints:
+        if not isinstance(hint, Mapping):
+            unsafe_count += 1
+            safety_failures.append("p9_tool_hint_not_mapping")
+            continue
+        failures = _p9_tool_hint_safety_failures(hint)
+        if failures:
+            unsafe_count += 1
+            safety_failures.extend(failures)
+        if not _p9_tool_hint_safe_target_failures(hint):
+            safe_target_count += 1
+    return {
+        "tool_hint_safe_target_count": safe_target_count,
+        "unsafe_tool_hint_count": unsafe_count,
+        "tool_hint_safety_failures": _dedupe(safety_failures),
+    }
+
+
+def _p9_tool_hint_safety_failures(hint: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    tool_name = str(hint.get("tool") or "")
+    safe_targets = _safe_string_list(hint.get("safe_targets"))
+    blocked_targets = _safe_string_list(hint.get("blocked_targets"))
+    blocked_by = _safe_string_list(hint.get("blocked_by"))
+    if tool_name not in P9_ALLOWED_TOOL_SAFE_TARGETS:
+        failures.append("p9_tool_hint_unknown_tool")
+    if hint.get("suggest_allowed") is not True:
+        failures.append("p9_tool_hint_suggest_not_allowed")
+    if hint.get("execute_allowed") is not False:
+        failures.append("p9_tool_hint_execute_allowed")
+    if hint.get("production_mutation_allowed") is not False:
+        failures.append("p9_tool_hint_production_mutation_allowed")
+    failures.extend(_p9_tool_hint_safe_target_failures(hint))
+    if tool_name == "brain_approval_board_decide" and "approved_scope_required" not in blocked_by:
+        failures.append("p9_tool_hint_approved_scope_blocker_missing")
+    if tool_name == "brain_source_to_candidate_runtime_readiness":
+        if "sanitized_evidence_packet" not in safe_targets:
+            failures.append("p9_tool_hint_sanitized_evidence_target_missing")
+        if "raw_private_runtime_evidence" not in blocked_targets:
+            failures.append("p9_tool_hint_raw_private_blocker_missing")
+    return _dedupe(failures)
+
+
+def _p9_tool_hint_safe_target_failures(hint: Mapping[str, Any]) -> list[str]:
+    tool_name = str(hint.get("tool") or "")
+    safe_targets = _safe_string_list(hint.get("safe_targets"))
+    allowed_targets = P9_ALLOWED_TOOL_SAFE_TARGETS.get(tool_name, frozenset())
+    failures: list[str] = []
+    if not safe_targets:
+        failures.append("p9_tool_hint_safe_targets_missing")
+    if allowed_targets and any(target not in allowed_targets for target in safe_targets):
+        failures.append("p9_tool_hint_safe_targets_not_allowed")
+    return failures
+
+
+def _safe_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item or "")]
 
 
 def _p2_reference_corpus_evidence() -> dict[str, Any]:
@@ -1321,6 +1399,7 @@ def _p9_agent_context_evidence(*, preference_preview: Mapping[str, Any]) -> dict
         for name, section in product.get("sections", {}).items()
         if isinstance(section, Mapping)
     }
+    tool_hint_safety = _p9_tool_hint_safety_summary(product.get("tool_hints"))
     return {
         "phase": "P9",
         "schema_version": str(product.get("schema_version") or ""),
@@ -1328,6 +1407,9 @@ def _p9_agent_context_evidence(*, preference_preview: Mapping[str, Any]) -> dict
         "consumer": str(product.get("consumer") or ""),
         "section_counts": section_counts,
         "tool_hint_count": len(product.get("tool_hints") or []),
+        "tool_hint_safe_target_count": tool_hint_safety["tool_hint_safe_target_count"],
+        "unsafe_tool_hint_count": tool_hint_safety["unsafe_tool_hint_count"],
+        "tool_hint_safety_failures": tool_hint_safety["tool_hint_safety_failures"],
         "action_hint_count": len(product.get("action_hints") or []),
         "mutation_allowed": bool(product.get("surface_policy", {}).get("mutation_allowed")),
         "degraded_mode_active": bool(product.get("degraded_mode", {}).get("active")),
