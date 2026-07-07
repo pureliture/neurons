@@ -555,6 +555,27 @@ def test_product_evidence_summary_fails_closed_when_required_phase_evidence_is_m
     assert "p8_production_mutation_performed" in checks["P8"]["failures"]
 
 
+def test_product_evidence_summary_fails_when_p2_claims_pass_without_live_evidence():
+    result = evaluate_product_evidence_summary(
+        [
+            {
+                "phase": "P2",
+                "schema_version": "reference_corpus_production_ingest_readiness.v1",
+                "status": "PASS",
+                "live_evidence_provided": False,
+                "production_mutation_performed": True,
+                "network_used": False,
+                "gaps": [],
+            }
+        ]
+    )
+
+    checks = {item["phase"]: item for item in result["checks"]}
+    assert result["status"] == "FAIL"
+    assert "P2:product_evidence_failed" in result["hard_failures"]
+    assert "p2_live_evidence_missing_for_pass" in checks["P2"]["failures"]
+
+
 def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
     result = evaluate_product_evidence_summary(
         [
