@@ -806,12 +806,12 @@ Current local/test evidence:
 - runtime readiness P6 packet gate result: `5 passed, 1 warning`
 - runtime/MCP P6 packet gate adjacent evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_without_mutation tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_plan tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_template tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_accepts_bounded_execution_evidence_from_local_production_gate_simulation tests/test_neuron_mcp_stdio.py::test_mcp_source_to_candidate_runtime_readiness_without_evidence_preserves_live_gaps`
 - runtime/MCP P6 packet gate adjacent result: `43 passed, 1 warning`
-- P6 product evidence bridge evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_product_activation_progress_closes_p6_gap_with_live_session_project_rollup_evidence tests/test_golden_query_eval.py::test_product_activation_progress_keeps_p6_gap_when_rollup_evidence_is_not_live tests/test_golden_query_eval.py::test_product_evidence_summary_fails_when_p6_claims_pass_without_live_evidence`
-- P6 product evidence bridge result: `3 passed, 1 warning`
+- P6 product evidence bridge evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_product_activation_progress_closes_p6_gap_with_live_session_project_rollup_evidence tests/test_golden_query_eval.py::test_product_activation_progress_keeps_p6_gap_when_rollup_evidence_is_not_live tests/test_golden_query_eval.py::test_product_activation_progress_fails_p6_when_live_provenance_is_not_redacted tests/test_golden_query_eval.py::test_product_evidence_summary_fails_when_p6_claims_pass_without_live_evidence`
+- P6 product evidence bridge result: `4 passed, 1 warning`
 - P6/golden/runtime adjacent evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py tests/test_source_to_candidate_runtime_readiness.py tests/test_neuron_cli.py::test_neuron_knowledge_golden_query_eval_activation_progress`
 - P6/golden/runtime adjacent result: `87 passed, 1 warning`
 - P6/CLI/MCP adjacent evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py tests/test_source_to_candidate_runtime_readiness.py tests/test_neuron_cli.py tests/test_neuron_mcp_stdio.py`
-- P6/CLI/MCP adjacent result: `255 passed, 1 warning`
+- P6/CLI/MCP adjacent result: `256 passed, 1 warning`
 - phase coverage evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_pass_with_gaps_not_green`
 - phase coverage result: `1 passed, 1 warning`
 - source-to-authority strengthened review-edit gate evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_source_to_authority_quality_gate_covers_review_approval_and_read_path_without_production_mutation`
@@ -819,7 +819,7 @@ Current local/test evidence:
 - adjacent regression evidence: `cd worker && uv run pytest -q tests/test_source_to_candidate_runtime_readiness.py tests/test_neuron_mcp_stdio.py tests/test_neuron_cli.py tests/test_extraction_pipeline.py tests/test_golden_query_eval.py tests/test_llm_brain_core_objects_subpackage.py`
 - adjacent regression result: `234 passed, 1 warning`
 - worker regression evidence: `cd worker && uv run pytest -q`
-- worker regression result: `1733 passed, 9 skipped, 1 warning`
+- worker regression result: `1734 passed, 9 skipped, 1 warning`
 - root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - root regression result: `BUILD SUCCESSFUL`
 

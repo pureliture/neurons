@@ -758,10 +758,16 @@ def _p6_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     rollup_status = str(evidence.get("rollup_claim_status") or "")
     if status == "FAIL" or rollup_status == "failed":
         failures.append("p6_session_rollup_runtime_failed")
+    if evidence.get("runtime_readiness_status") == "FAIL":
+        failures.append("p6_runtime_readiness_failed")
+    if evidence.get("evidence_provenance_status") == "failed":
+        failures.append("p6_evidence_provenance_failed")
     if status == "PASS" and rollup_status and rollup_status != "validated":
         failures.append("p6_session_rollup_missing_for_pass")
     if status == "PASS" and evidence.get("evidence_is_live") is not True:
         failures.append("p6_live_evidence_missing_for_pass")
+    if status == "PASS" and evidence.get("evidence_provenance_status") != "validated":
+        failures.append("p6_evidence_provenance_not_validated")
     if int(evidence.get("object_count") or 0) < 5:
         failures.append("p6_session_rollup_incomplete")
     if int(evidence.get("edge_count") or 0) < 6:
@@ -776,7 +782,7 @@ def _p6_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
 def _p6_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
     gaps = [
         f"p6_{gap}"
-        for gap in evidence.get("gaps", [])
+        for gap in (evidence.get("gaps") or [])
         if isinstance(gap, str) and gap
     ]
     if (
@@ -1145,10 +1151,11 @@ def _p6_live_session_project_rollup_evidence(
     report = build_source_to_candidate_runtime_readiness_report(live_evidence=live_evidence)
     claims = {
         str(item.get("claim_id") or ""): item
-        for item in report.get("claims", [])
+        for item in (report.get("claims") or [])
         if isinstance(item, Mapping)
     }
     claim = claims.get("live.session_project.rollup", {})
+    provenance_claim = claims.get("live.evidence.provenance", {})
     rollup = live_evidence.get("session_project_rollup_runtime")
     rollup = rollup if isinstance(rollup, Mapping) else {}
     preview = rollup.get("rollup_preview") if isinstance(rollup.get("rollup_preview"), Mapping) else {}
@@ -1161,14 +1168,18 @@ def _p6_live_session_project_rollup_evidence(
     )
     claim_gaps = [
         gap
-        for gap in claim.get("gaps", [])
+        for gap in (claim.get("gaps") or [])
         if isinstance(gap, str) and gap
     ]
     evidence_is_live = bool(report.get("evidence_is_live"))
     claim_status = str(claim.get("status") or "not_validated")
+    provenance_status = str(provenance_claim.get("status") or "not_validated")
+    runtime_readiness_status = str(report.get("status") or "")
     status = _p6_session_project_rollup_product_status(
         claim_status=claim_status,
         evidence_is_live=evidence_is_live,
+        provenance_status=provenance_status,
+        runtime_readiness_status=runtime_readiness_status,
         gaps=claim_gaps,
     )
     evidence_count = 1 if rollup else 0
@@ -1180,9 +1191,10 @@ def _p6_live_session_project_rollup_evidence(
         "status": status,
         "golden_query_slice": "temporal repo recall",
         "runtime_readiness_schema": str(report.get("schema_version") or ""),
-        "runtime_readiness_status": str(report.get("status") or ""),
+        "runtime_readiness_status": runtime_readiness_status,
         "rollup_claim_id": str(claim.get("claim_id") or ""),
         "rollup_claim_status": claim_status,
+        "evidence_provenance_status": provenance_status,
         "live_evidence_provided": bool(report.get("live_evidence_provided")),
         "evidence_is_live": evidence_is_live,
         "production_ready": bool(report.get("production_ready")),
@@ -1205,11 +1217,21 @@ def _p6_live_session_project_rollup_evidence(
 
 
 def _p6_session_project_rollup_product_status(
-    *, claim_status: str, evidence_is_live: bool, gaps: list[str]
+    *,
+    claim_status: str,
+    evidence_is_live: bool,
+    provenance_status: str,
+    runtime_readiness_status: str,
+    gaps: list[str],
 ) -> str:
-    if claim_status == "failed":
+    if claim_status == "failed" or provenance_status == "failed" or runtime_readiness_status == "FAIL":
         return "FAIL"
-    if claim_status == "validated" and evidence_is_live and not gaps:
+    if (
+        claim_status == "validated"
+        and evidence_is_live
+        and provenance_status == "validated"
+        and not gaps
+    ):
         return "PASS"
     return "PASS_WITH_GAPS"
 
@@ -1835,8 +1857,9 @@ def _remaining_activation_phases(next_phase: str) -> list[str]:
 
 
 def _positive_int(value: Any, *, default: int = 0) -> int:
+    candidate = default if value is None or value == "" else value
     try:
-        number = int(value)
+        number = int(candidate)
     except (TypeError, ValueError):
         number = default
     return max(0, number)
