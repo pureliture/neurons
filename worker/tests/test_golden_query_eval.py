@@ -259,6 +259,7 @@ def test_source_to_authority_quality_gate_covers_review_approval_and_read_path_w
 
     assert report["schema_version"] == "source_to_authority_quality_gate_report.v1"
     assert report["status"] == "PASS_WITH_GAPS"
+    assert report["local_quality_gate"] == "green"
     assert report["release_quality_gate"] == "not_green"
     assert report["production_mutation_performed"] is False
     assert report["production_approval_gate"] == "preapproved"
@@ -323,6 +324,7 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert report["status"] == "PASS_WITH_GAPS"
     assert report["goal_complete"] is False
     assert report["production_ready"] is False
+    assert report["local_quality_gate"] == "green"
     assert report["release_quality_gate"] == "not_green"
     assert report["production_mutation_performed"] is False
     assert report["production_approval_gate"] == "preapproved"
@@ -333,6 +335,7 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert report["next_phase"] == "P5"
     assert set(report["remaining_phases"]) >= {"P5", "P6", "P7", "P8", "P9"}
     assert report["hard_failures"] == []
+    assert report["quality_gate_inputs"]["source_to_authority_local_quality_gate"] == "green"
     assert report["product_evidence_status"] == "PASS_WITH_GAPS"
     assert "production_quality_not_green" in report["goal_completion_blockers"]
     assert "live_runtime_read_path_unverified" in report["goal_completion_blockers"]
