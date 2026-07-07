@@ -370,6 +370,11 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
         == "source_to_candidate_runtime_evidence_collection_plan.v1"
     )
     assert evidence["P8"]["runtime_evidence_collection_plan_status"] == "ready"
+    assert (
+        evidence["P8"]["runtime_authority_bounded_execution_required_demote_step"]
+        == "demote_prior_object_to_accepted_non_current_or_archive_only"
+    )
+    assert evidence["P8"]["runtime_authority_bounded_execution_demote_step_required"] is True
     assert evidence["P8"]["runtime_evidence_collection_plan_network_used"] is False
     assert evidence["P8"]["runtime_evidence_collection_plan_mutation_allowed"] is False
     assert evidence["P8"]["runtime_evidence_collection_plan_production_mutation_performed"] is False
@@ -580,6 +585,10 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "permission": "allowed",
                 "permission_reason": "approved_scope_present",
                 "authority_write_performed": False,
+                "runtime_authority_bounded_execution_required_demote_step": (
+                    "demote_prior_object_to_accepted_non_current_or_archive_only"
+                ),
+                "runtime_authority_bounded_execution_demote_step_required": True,
                 "runtime_evidence_collection_plan_schema": "source_to_candidate_runtime_evidence_collection_plan.v1",
                 "runtime_evidence_collection_plan_status": "ready",
                 "runtime_evidence_collection_plan_network_used": False,
