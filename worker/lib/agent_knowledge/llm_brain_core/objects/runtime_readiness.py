@@ -294,7 +294,8 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
             "host_topology_returned": _provenance_flag(provenance, "host_topology_returned"),
             "raw_external_ids_returned": _provenance_flag(provenance, "raw_external_ids_returned"),
         },
-        "production_mutation_performed": False,
+        "production_mutation_performed": captured.get("production_mutation_performed") is True
+        or captured.get("mutation_performed") is True,
     }
     ensure_public_safe(packet, "SourceToCandidateRuntimeShadowEvidencePacket")
     return packet
@@ -1808,11 +1809,12 @@ def _live_evidence_provenance_claim(evidence: Mapping[str, Any]) -> dict[str, An
         }
     collection_mode = public_safe_text(str(provenance.get("collection_mode") or ""), max_chars=80)
     mutation_scope = public_safe_text(str(provenance.get("mutation_scope") or ""), max_chars=80)
+    execution_reports_mutation = _evidence_execution_reports_mutation(evidence)
     failures = _evidence_provenance_failures(
         provenance=provenance,
         collection_mode=collection_mode,
         mutation_scope=mutation_scope,
-        execution_reports_mutation=_evidence_execution_reports_mutation(evidence),
+        execution_reports_mutation=execution_reports_mutation,
     )
     redaction_check = "forbidden_fields_present" if any(
         gap
@@ -1842,6 +1844,7 @@ def _live_evidence_provenance_claim(evidence: Mapping[str, Any]) -> dict[str, An
         "is_live": live_mode and network_used_for_evidence,
         "network_used_for_evidence": network_used_for_evidence,
         "mutation_scope": mutation_scope,
+        "production_mutation_performed": execution_reports_mutation,
         "redaction_check": redaction_check,
         "gaps": gaps,
     }
@@ -1883,7 +1886,11 @@ def _evidence_execution_reports_mutation(evidence: Mapping[str, Any]) -> bool:
     execution = execution if isinstance(execution, Mapping) else {}
     proposal = execution.get("proposal") if isinstance(execution.get("proposal"), Mapping) else {}
     decision = execution.get("decision") if isinstance(execution.get("decision"), Mapping) else {}
-    return _bounded_execution_reports_mutation(proposal, decision)
+    return (
+        evidence.get("production_mutation_performed") is True
+        or evidence.get("mutation_performed") is True
+        or _bounded_execution_reports_mutation(proposal, decision)
+    )
 
 
 def _report_evidence_provenance(claim: Mapping[str, Any]) -> dict[str, Any]:

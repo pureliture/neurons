@@ -440,6 +440,18 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
         == "collector_packet_not_live_evidence"
     )
     assert (
+        evidence["P8"]["runtime_evidence_post_deploy_capture_packet_schema"]
+        == "source_to_candidate_runtime_evidence.v1"
+    )
+    assert (
+        evidence["P8"]["runtime_evidence_post_deploy_capture_collection_mode"]
+        == "post_deploy_read_only_smoke"
+    )
+    assert evidence["P8"]["runtime_evidence_post_deploy_capture_network_used"] is True
+    assert evidence["P8"]["runtime_evidence_post_deploy_capture_production_mutation_performed"] is False
+    assert evidence["P8"]["runtime_evidence_post_deploy_capture_report_status"] == "PASS_WITH_GAPS"
+    assert evidence["P8"]["runtime_evidence_post_deploy_capture_production_ready"] is False
+    assert (
         evidence["P8"]["runtime_evidence_collector_review_loop_schema"]
         == "source_to_candidate_review_loop_evidence.v1"
     )
@@ -659,6 +671,12 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "runtime_evidence_collector_network_used": False,
                 "runtime_evidence_collector_production_mutation_performed": False,
                 "runtime_evidence_collector_readiness_claim": "collector_packet_not_live_evidence",
+                "runtime_evidence_post_deploy_capture_packet_schema": "source_to_candidate_runtime_evidence.v1",
+                "runtime_evidence_post_deploy_capture_collection_mode": "post_deploy_read_only_smoke",
+                "runtime_evidence_post_deploy_capture_network_used": True,
+                "runtime_evidence_post_deploy_capture_production_mutation_performed": False,
+                "runtime_evidence_post_deploy_capture_report_status": "PASS_WITH_GAPS",
+                "runtime_evidence_post_deploy_capture_production_ready": False,
                 "runtime_evidence_collector_review_loop_schema": "source_to_candidate_review_loop_evidence.v1",
                 "runtime_evidence_collector_review_loop_candidate_count": 2,
                 "runtime_evidence_collector_review_loop_edited_count": 1,
@@ -780,6 +798,12 @@ def test_product_evidence_summary_fails_when_p8_collection_plan_is_missing_or_mu
                 "shadow_collection_registration_mutation_allowed": True,
                 "shadow_collection_registration_production_mutation_performed": True,
                 "shadow_collection_registration_readiness_claim": "runtime_verified",
+                "runtime_evidence_post_deploy_capture_packet_schema": "not_runtime_evidence",
+                "runtime_evidence_post_deploy_capture_collection_mode": "local_test_replay",
+                "runtime_evidence_post_deploy_capture_network_used": False,
+                "runtime_evidence_post_deploy_capture_production_mutation_performed": True,
+                "runtime_evidence_post_deploy_capture_report_status": "PASS",
+                "runtime_evidence_post_deploy_capture_production_ready": True,
                 "production_mutation_performed": False,
             },
             {
@@ -806,6 +830,12 @@ def test_product_evidence_summary_fails_when_p8_collection_plan_is_missing_or_mu
     assert "p8_runtime_evidence_packet_template_used_network" in checks["P8"]["failures"]
     assert "p8_runtime_evidence_packet_template_mutation_allowed" in checks["P8"]["failures"]
     assert "p8_runtime_evidence_packet_template_mutated_production" in checks["P8"]["failures"]
+    assert "p8_post_deploy_capture_packet_missing" in checks["P8"]["failures"]
+    assert "p8_post_deploy_capture_collection_mode_missing" in checks["P8"]["failures"]
+    assert "p8_post_deploy_capture_network_not_used" in checks["P8"]["failures"]
+    assert "p8_post_deploy_capture_mutated_production" in checks["P8"]["failures"]
+    assert "p8_post_deploy_capture_unexpected_report_status" in checks["P8"]["failures"]
+    assert "p8_post_deploy_capture_claims_production_ready" in checks["P8"]["failures"]
     assert "p8_runtime_evidence_packet_template_claims_live_evidence" in checks["P8"]["failures"]
     assert "p8_runtime_evidence_packet_template_fields_missing" in checks["P8"]["failures"]
     assert "p8_runtime_evidence_packet_template_routes_missing" in checks["P8"]["failures"]
