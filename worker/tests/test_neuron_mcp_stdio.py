@@ -449,6 +449,8 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
             _brain_objects_query_smoke("authority_archive_separation"),
             _brain_objects_query_smoke("code_style_preference"),
             _brain_objects_query_smoke("temporal_work_recall"),
+            _brain_objects_query_smoke("code_change_impact"),
+            _brain_objects_query_smoke("html_visualization_preference"),
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
         "projection_join": _projection_join_runtime_evidence(),
@@ -624,7 +626,7 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_templ
         template["packet_field_templates"]["agent_context_startup_runtime"]["schema_version"]
         == "agent_context_startup_runtime_evidence.v1"
     )
-    assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == 4
+    assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == 6
 
 
 def test_mcp_source_to_candidate_runtime_readiness_normalizes_shadow_evidence(tmp_path: Path):
@@ -654,7 +656,7 @@ def test_mcp_source_to_candidate_runtime_readiness_normalizes_shadow_evidence(tm
     )
     assert packet["evidence_provenance"]["collection_mode"] == "post_deploy_read_only_smoke"
     assert packet["evidence_provenance"]["network_used"] is True
-    assert len(packet["brain_objects_query_smokes"]) == 4
+    assert len(packet["brain_objects_query_smokes"]) == 6
 
 
 def test_mcp_source_to_candidate_runtime_readiness_evaluates_shadow_evidence(tmp_path: Path):
@@ -748,7 +750,7 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_
     assert packet["agent_context_startup_runtime"]["read_path_smoke"]["tool"] == BRAIN_OBJECTS_QUERY_TOOL_NAME
     assert packet["agent_context_startup_runtime"]["read_path_smoke"]["read_only"] is True
     assert packet["agent_context_startup_runtime"]["runtime_enforcement"]["raw_private_context_blocked"] is True
-    assert len(packet["brain_objects_query_smokes"]) == 4
+    assert len(packet["brain_objects_query_smokes"]) == 6
     assert all(
         "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])
         for smoke in packet["brain_objects_query_smokes"]
@@ -820,6 +822,14 @@ def _shadow_runtime_evidence_capture() -> dict:
                 gaps=["object_pack_route_not_implemented"],
             ),
             _brain_objects_query_smoke(
+                "code_change_impact",
+                gaps=["object_pack_route_not_implemented"],
+            ),
+            _brain_objects_query_smoke(
+                "html_visualization_preference",
+                gaps=["object_pack_route_not_implemented"],
+            ),
+            _brain_objects_query_smoke(
                 "deployment_runtime_truth",
                 gaps=["object_pack_route_not_implemented"],
             ),
@@ -867,6 +877,8 @@ def _runtime_readiness_complete_evidence(
             _brain_objects_query_smoke("authority_archive_separation"),
             _brain_objects_query_smoke("code_style_preference"),
             _brain_objects_query_smoke("temporal_work_recall"),
+            _brain_objects_query_smoke("code_change_impact"),
+            _brain_objects_query_smoke("html_visualization_preference"),
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
         "projection_join": _projection_join_runtime_evidence(),
@@ -1183,6 +1195,8 @@ def _agent_context_startup_runtime_evidence() -> dict:
                 "authority_archive_separation",
                 "code_style_preference",
                 "temporal_work_recall",
+                "code_change_impact",
+                "html_visualization_preference",
                 "deployment_runtime_truth",
             ],
             "production_mutation_performed": False,
