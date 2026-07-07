@@ -607,12 +607,22 @@ def _product_evidence_check(phase: str, evidence: Mapping[str, Any]) -> dict[str
 
 def _p2_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     failures: list[str] = []
+    status = str(evidence.get("status") or "")
     if evidence.get("schema_version") != "reference_corpus_production_ingest_readiness.v1":
         failures.append("p2_schema_mismatch")
     if evidence.get("status") == "FAIL":
         failures.append("p2_production_corpus_ingest_failed")
     if bool(evidence.get("network_used")):
         failures.append("p2_corpus_ingest_evaluator_used_network")
+    if status == "PASS" and evidence.get("live_evidence_provided") is not True:
+        failures.append("p2_live_evidence_missing_for_pass")
+    if status == "PASS" and evidence.get("production_mutation_performed") is not True:
+        failures.append("p2_production_corpus_ingest_mutation_missing_for_pass")
+    if (
+        evidence.get("live_evidence_provided") is not True
+        and bool(evidence.get("evidence_collection_network_used"))
+    ):
+        failures.append("p2_evidence_collection_claimed_without_live_evidence")
     if (
         bool(evidence.get("production_mutation_performed"))
         and evidence.get("status") != "PASS"
