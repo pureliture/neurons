@@ -57,7 +57,7 @@ from agent_knowledge.llm_brain_core.knowledge_objects import EvidenceRef, Knowle
 from agent_knowledge.llm_brain_core.models import CONTEXT_PACK_SCHEMA_VERSION, OntologyEpisode
 from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
 from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
-from test_neuron_cli import REQUIRED_OBJECT_QUERY_ROUTE_CASES
+from object_query_route_cases import REQUIRED_OBJECT_QUERY_ROUTE_CASES
 
 PROJECT = "workspace-index-advisor"
 FIXTURE_REPOSITORY = PROJECT
