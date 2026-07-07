@@ -349,7 +349,14 @@ class KnowledgeSearchService:
             return response
         objects = [dict(obj) for obj in object_pack.get("objects", []) if isinstance(obj, Mapping)]
         object_ids = [str(obj.get("object_id") or "") for obj in objects if obj.get("object_id")]
-        states = self.ledger.get_object_authority_states(object_ids) if object_ids else {}
+        try:
+            states = self.ledger.get_object_authority_states(object_ids) if object_ids else {}
+            overlay_status = "available"
+            overlay_error_type = ""
+        except Exception as exc:  # noqa: BLE001 - read path must survive optional live overlay schema gaps.
+            states = {}
+            overlay_status = "unavailable"
+            overlay_error_type = public_safe_text(type(exc).__name__, max_chars=80)
         overlay_count = 0
         for obj in objects:
             object_id = str(obj.get("object_id") or "")
@@ -368,6 +375,13 @@ class KnowledgeSearchService:
             ]
         audit = dict(object_pack.get("audit") or {})
         audit["authority_state_overlay_count"] = overlay_count
+        audit["authority_state_overlay_status"] = overlay_status
+        if overlay_error_type:
+            audit["authority_state_overlay_error_type"] = overlay_error_type
+            gaps = list(object_pack.get("gaps") or [])
+            if "authority_state_overlay_unavailable" not in gaps:
+                gaps.append("authority_state_overlay_unavailable")
+            object_pack["gaps"] = gaps
         object_pack["audit"] = audit
         ensure_public_safe(response, "brain_objects_query_authority_overlay")
         return response

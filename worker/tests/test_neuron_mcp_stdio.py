@@ -2136,6 +2136,52 @@ def test_mcp_brain_objects_query_code_change_impact_route_returns_impact_pack(tm
     assert pack["response_mode"] == "compact"
 
 
+def test_mcp_brain_objects_query_returns_pack_when_authority_overlay_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    service = _service(tmp_path)
+
+    def raise_schema_gap(_object_ids):
+        raise RuntimeError("object authority state table unavailable")
+
+    monkeypatch.setattr(service.ledger, "get_object_authority_states", raise_schema_gap)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "route": "code_change_impact",
+                    "query": "이 파일 바꾸면 어떤 테스트/런타임 영향 있어?",
+                    "current_files": [
+                        "worker/lib/agent_knowledge/llm_brain_core/context.py"
+                    ],
+                    "consumer": "codex",
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    pack = result["object_pack"]
+    assert result["schema_version"] == "brain_objects_query.v1"
+    assert result["route"] == "code_change_impact"
+    assert pack["schema_version"] == "object_pack.v1"
+    assert pack["route"] == "code_change_impact"
+    assert "object_pack_route_not_implemented" not in pack["gaps"]
+    assert "authority_state_overlay_unavailable" in pack["gaps"]
+    assert pack["audit"]["authority_state_overlay_count"] == 0
+    assert pack["audit"]["authority_state_overlay_status"] == "unavailable"
+    assert pack["audit"]["authority_state_overlay_error_type"] == "RuntimeError"
+
+
 @pytest.mark.parametrize(
     ("route", "query", "current_files"),
     REQUIRED_OBJECT_QUERY_ROUTE_CASES,
