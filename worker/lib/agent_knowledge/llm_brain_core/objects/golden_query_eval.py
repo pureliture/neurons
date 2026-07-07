@@ -370,9 +370,11 @@ def build_source_to_authority_quality_gate_report() -> dict[str, Any]:
         for item in [*path_checks, *product_surface_checks]
         if item["result"] != "PASS"
     ]
+    local_quality_gate = "blocked" if hard_failures else "green"
     report = {
         "schema_version": "source_to_authority_quality_gate_report.v1",
         "status": "FAIL" if hard_failures else "PASS_WITH_GAPS",
+        "local_quality_gate": local_quality_gate,
         "release_quality_gate": "blocked" if hard_failures else "not_green",
         "required_axes": list(REQUIRED_QUALITY_AXES),
         "path_checks": path_checks,
@@ -455,10 +457,12 @@ def build_product_activation_progress_report() -> dict[str, Any]:
         "quality_gate_inputs": {
             "phase_coverage_status": phase_coverage["status"],
             "source_to_authority_status": source_gate["status"],
+            "source_to_authority_local_quality_gate": source_gate["local_quality_gate"],
             "source_to_authority_release_quality_gate": source_gate["release_quality_gate"],
         },
         "production_approval_gate": str(source_gate.get("production_approval_gate") or ""),
         "production_mutation_execution": str(source_gate.get("production_mutation_execution") or ""),
+        "local_quality_gate": str(source_gate.get("local_quality_gate") or ""),
         "release_quality_gate": "blocked" if hard_failures else source_gate["release_quality_gate"],
         "goal_completion_blockers": blockers,
         "hard_failures": hard_failures,
