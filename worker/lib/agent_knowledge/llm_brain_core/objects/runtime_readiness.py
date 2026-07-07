@@ -1818,6 +1818,8 @@ def _evidence_provenance_failures(
         failures.append("live_evidence_provenance_source_unknown")
     if mutation_scope not in ALLOWED_EVIDENCE_MUTATION_SCOPES:
         failures.append("live_evidence_provenance_mutation_scope_unknown")
+    if collection_mode == "post_deploy_read_only_smoke" and mutation_scope != "none":
+        failures.append("live_evidence_provenance_read_only_mode_mutation_scope_mismatch")
     if execution_reports_mutation and mutation_scope != "bounded_production_authority_execution":
         failures.append("live_evidence_provenance_mutation_scope_mismatch")
     if not execution_reports_mutation and mutation_scope != "none":
