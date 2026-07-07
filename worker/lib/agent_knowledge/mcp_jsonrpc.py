@@ -49,7 +49,7 @@ from .mcp_tools import (
     list_tools,
     tool_contract_registry,
 )
-from .public_safe_util import public_safe_text, short_hash
+from .public_safe_util import public_safe_text, sha256_text, short_hash
 from .session_memory.brain_steward import StewardPermissionError
 
 _STEWARD_TOOL_NAMES = frozenset(
@@ -684,7 +684,7 @@ def _production_object_authority_gate(arguments: Mapping[str, Any], *, service: 
         "allowed": allowed,
         "gate_provided": gate_provided,
         "missing_gate_evidence": missing,
-        "approval_ref_hash": "sha256:" + short_hash(approval_ref, length=24) if approval_ref else "",
+        "approval_ref_hash": sha256_text(approval_ref) if approval_ref else "",
         "project": project,
         "target_object_id": target_object_id,
     }

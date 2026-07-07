@@ -2203,6 +2203,9 @@ def test_mcp_object_authority_production_gate_writes_single_object_with_postchec
     assert proposal["proposal_write_target"] == "production_ledger"
     assert proposal["production_mutation_performed"] is True
     assert proposal["authority_write_performed"] is False
+    assert proposal["production_gate_ref_hash"].startswith("sha256:")
+    assert len(proposal["production_gate_ref_hash"]) == 71
+    assert all(char in "0123456789abcdef" for char in proposal["production_gate_ref_hash"].split(":", 1)[1])
     assert service.object_review_proposals(project=PROJECT)["count"] == 1
 
     decision = handle_jsonrpc_message(
@@ -2235,6 +2238,8 @@ def test_mcp_object_authority_production_gate_writes_single_object_with_postchec
     assert decision["authority_write_performed"] is True
     assert decision["authoritative_memory_changed"] is True
     assert decision["production_mutation_performed"] is True
+    assert decision["production_gate_ref_hash"] == proposal["production_gate_ref_hash"]
+    assert len(decision["production_gate_ref_hash"]) == 71
     state = service.ledger.get_object_authority_state(target_object_id)
     assert state["authority_lane"] == "rejected"
     assert state["decision_id"] == "decision:production-gate-smoke"

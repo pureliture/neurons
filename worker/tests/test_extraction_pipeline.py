@@ -1281,6 +1281,40 @@ def test_session_project_rollup_preview_builds_safe_handoff_pack():
     assert "SOURCE_BODY_SENTINEL" not in str(handoff)
 
 
+def test_session_project_rollup_preview_latest_session_by_observed_at():
+    result = run_session_project_rollup_preview(
+        sessions=[
+            {
+                "session_id_hash": "sha256:session-new",
+                "device_id_hash": "sha256:device-one",
+                "provider": "codex",
+                "summary": "Newer session arrived first.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["commit:new"],
+                "observed_at": "2026-07-07T02:00:00+00:00",
+            },
+            {
+                "session_id_hash": "sha256:session-old",
+                "device_id_hash": "sha256:device-one",
+                "provider": "codex",
+                "summary": "Older session arrived second.",
+                "work_unit_id": "work:p6",
+                "evidence_refs": ["commit:old"],
+                "observed_at": "2026-07-07T01:00:00+00:00",
+            },
+        ],
+        repository="neurons",
+        branch="codex/p6",
+        project="neurons",
+    )
+
+    handoff = result["handoff_pack"]
+    assert handoff["object_refs"]["Session"][0]["observed_at"] == "2026-07-07T02:00:00+00:00"
+    assert handoff["object_refs"]["Session"][1]["observed_at"] == "2026-07-07T01:00:00+00:00"
+    assert handoff["resume_context"]["latest_session"]["title"] == "sha256:session-new"
+    assert handoff["resume_context"]["latest_session"]["observed_at"] == "2026-07-07T02:00:00+00:00"
+
+
 def test_pr_commit_extraction_preview_maps_pr_commits_and_tests_without_runtime_inference():
     result = run_pr_commit_extraction_preview(
         pull_request={
