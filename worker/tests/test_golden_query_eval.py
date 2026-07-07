@@ -478,6 +478,8 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert evidence["P9"]["section_counts"]["style_preference"] >= 1
     assert evidence["P9"]["section_counts"]["active_work"] >= 1
     assert evidence["P9"]["tool_hint_count"] >= 5
+    assert evidence["P9"]["tool_hint_safe_target_count"] >= 5
+    assert evidence["P9"]["unsafe_tool_hint_count"] == 0
     assert evidence["P9"]["mutation_allowed"] is False
     assert all(item["production_mutation_performed"] is False for item in evidence.values())
 
@@ -682,6 +684,8 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "schema_version": "agent_context_product_pack.v1",
                 "section_counts": {"style_preference": 1, "active_work": 1},
                 "tool_hint_count": 5,
+                "tool_hint_safe_target_count": 5,
+                "unsafe_tool_hint_count": 0,
                 "mutation_allowed": False,
                 "production_mutation_performed": False,
             },
@@ -780,6 +784,8 @@ def test_product_evidence_summary_fails_when_p8_collection_plan_is_missing_or_mu
                 "schema_version": "agent_context_product_pack.v1",
                 "section_counts": {"style_preference": 1, "active_work": 1},
                 "tool_hint_count": 5,
+                "tool_hint_safe_target_count": 5,
+                "unsafe_tool_hint_count": 0,
                 "mutation_allowed": False,
                 "production_mutation_performed": False,
             },
@@ -849,6 +855,8 @@ def test_product_evidence_summary_fails_when_p9_active_work_is_missing():
                 "schema_version": "agent_context_product_pack.v1",
                 "section_counts": {"style_preference": 1, "active_work": 0},
                 "tool_hint_count": 5,
+                "tool_hint_safe_target_count": 5,
+                "unsafe_tool_hint_count": 0,
                 "mutation_allowed": False,
                 "production_mutation_performed": False,
             },
@@ -859,3 +867,25 @@ def test_product_evidence_summary_fails_when_p9_active_work_is_missing():
     assert result["status"] == "FAIL"
     assert "P9:product_evidence_failed" in result["hard_failures"]
     assert "p9_active_work_section_missing" in checks["P9"]["failures"]
+
+
+def test_product_evidence_summary_fails_when_p9_tool_hints_are_unsafe():
+    result = evaluate_product_evidence_summary(
+        [
+            {
+                "phase": "P9",
+                "schema_version": "agent_context_product_pack.v1",
+                "section_counts": {"style_preference": 1, "active_work": 1},
+                "tool_hint_count": 5,
+                "tool_hint_safe_target_count": 5,
+                "unsafe_tool_hint_count": 1,
+                "mutation_allowed": False,
+                "production_mutation_performed": False,
+            },
+        ]
+    )
+
+    checks = {item["phase"]: item for item in result["checks"]}
+    assert checks["P9"]["result"] == "FAIL"
+    assert "P9:product_evidence_failed" in result["hard_failures"]
+    assert "p9_tool_hint_safety_violations" in checks["P9"]["failures"]
