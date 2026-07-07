@@ -446,15 +446,18 @@ def test_neuron_knowledge_delegates_session_private_sync_help(capsys):
     assert "usage: session-memory-private-sync" in capsys.readouterr().out
 
 
-def test_neuron_knowledge_corpus_ingest_production_target_denied(capsys):
+def test_neuron_knowledge_corpus_ingest_production_target_requires_bounded_approval(capsys):
     rc = main(["corpus-ingest", "--project", "neurons", "--target", "production"])
 
     report = json.loads(capsys.readouterr().out)
     assert rc == 1
-    assert report["schema_version"] == "object_substrate_cli_denied.v1"
+    assert report["schema_version"] == "reference_corpus_ingest.v1"
     assert report["status"] == "denied"
     assert report["mutation_performed"] is False
-    assert report["reason"] == "production_corpus_ingest_requires_later_validation_goal"
+    assert report["production_mutation_performed"] is False
+    assert report["authority_write_performed"] is False
+    assert report["reason"] == "production_corpus_ingest_requires_bounded_approval"
+    assert set(report["missing"]) == {"approved", "approval_ref_sha256", "manifest_file"}
 
 
 def test_neuron_knowledge_corpus_ingest_production_denied_even_with_configured_ledger_env(
@@ -485,6 +488,174 @@ def test_neuron_knowledge_corpus_ingest_production_denied_even_with_configured_l
     assert rc == 1
     assert report["status"] == "denied"
     assert report["mutation_performed"] is False
+    assert report["production_mutation_performed"] is False
+    assert ledger.exists() is False
+
+
+def test_neuron_knowledge_corpus_ingest_production_approved_writes_evidence_and_readiness(
+    tmp_path,
+    capsys,
+):
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "ledger.sqlite"
+    manifest.write_text(json.dumps(_reference_manifest()), encoding="utf-8")
+    Ledger(ledger)
+
+    rc = main(
+        [
+            "corpus-ingest",
+            "--project",
+            "neurons",
+            "--target",
+            "production",
+            "--ledger",
+            str(ledger),
+            "--manifest-file",
+            str(manifest),
+            "--storage-mode",
+            "managed_snapshot",
+            "--approved",
+            "--approval-ref",
+            "sha256:" + "e" * 64,
+            "--expect-source-count",
+            "2",
+            "--expect-source-url-count",
+            "1",
+            "--expect-manual-text-without-url-count",
+            "1",
+            "--expect-source-type-count",
+            "WEB_PAGE=1",
+            "--expect-source-type-count",
+            "TEXT=1",
+        ]
+    )
+
+    evidence = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert evidence["schema_version"] == "reference_corpus_production_ingest_evidence.v1"
+    assert evidence["production_mutation_performed"] is True
+    assert evidence["authority_write_performed"] is False
+    assert evidence["protected_values_returned"] is False
+    assert evidence["approval"]["approval_ref_hash"] == "sha256:" + "e" * 64
+    assert evidence["approval"]["scope"] == "single_project_single_corpus"
+    assert evidence["corpus"]["source_count"] == 2
+    assert evidence["corpus"]["storage_mode"] == "managed_snapshot"
+    assert evidence["corpus"]["raw_body_policy"] == "no_raw_return_by_default"
+    assert evidence["ingest"]["target"] == "production_corpus_store"
+    assert evidence["ingest"]["corpus_write_performed"] is True
+    assert evidence["ingest"]["authority_write_performed"] is False
+    assert evidence["read_after_write"]["status"] == "validated"
+    assert evidence["postcheck"]["raw_body_returned"] is False
+    assert evidence["postcheck"]["raw_external_ids_returned"] is False
+    assert evidence["evidence_provenance"]["network_used"] is False
+    assert evidence["evidence_provenance"]["mutation_scope"] == "bounded_production_corpus_ingest"
+
+    evidence_file = tmp_path / "production-corpus-ingest-evidence.json"
+    evidence_file.write_text(json.dumps(evidence), encoding="utf-8")
+    rc = main(
+        [
+            "corpus-ingest-readiness",
+            "--evidence-file",
+            str(evidence_file),
+            "--expected-manifest-hash",
+            evidence["corpus"]["manifest_hash"],
+            "--expected-corpus-id",
+            evidence["corpus"]["corpus_id"],
+            "--expected-source-count",
+            "2",
+        ]
+    )
+    readiness = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert readiness["status"] == "PASS"
+    assert readiness["production_mutation_performed"] is True
+
+    assert main(["corpus-status", "--project", "neurons", "--ledger", str(ledger)]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["source_count"] == 2
+    assert status["corpus_count"] == 1
+    assert status["storage_modes"] == {"managed_snapshot": 2}
+    assert status["production_ingest_gate"] == "approved_bounded_cli_gate_required"
+
+
+def test_neuron_knowledge_corpus_ingest_production_count_gate_fails_before_write(
+    tmp_path,
+    capsys,
+):
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "ledger.sqlite"
+    manifest.write_text(json.dumps(_reference_manifest()), encoding="utf-8")
+    Ledger(ledger)
+
+    rc = main(
+        [
+            "corpus-ingest",
+            "--project",
+            "neurons",
+            "--target",
+            "production",
+            "--ledger",
+            str(ledger),
+            "--manifest-file",
+            str(manifest),
+            "--storage-mode",
+            "managed_snapshot",
+            "--approved",
+            "--approval-ref",
+            "sha256:" + "f" * 64,
+            "--expect-source-count",
+            "3",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "FAIL"
+    assert report["reason"] == "production_corpus_ingest_count_gate_failed"
+    assert report["mutation_performed"] is False
+    assert report["production_mutation_performed"] is False
+    assert report["authority_write_performed"] is False
+
+    assert main(["corpus-status", "--project", "neurons", "--ledger", str(ledger)]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["source_count"] == 0
+    assert status["gaps"] == ["reference_corpus_store_empty"]
+
+
+def test_neuron_knowledge_corpus_ingest_production_approved_does_not_create_missing_file(
+    tmp_path,
+    capsys,
+):
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "missing.sqlite"
+    manifest.write_text(json.dumps(_reference_manifest()), encoding="utf-8")
+
+    rc = main(
+        [
+            "corpus-ingest",
+            "--project",
+            "neurons",
+            "--target",
+            "production",
+            "--ledger",
+            str(ledger),
+            "--manifest-file",
+            str(manifest),
+            "--storage-mode",
+            "managed_snapshot",
+            "--approved",
+            "--approval-ref",
+            "sha256:" + "a" * 64,
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["schema_version"] == "reference_corpus_ingest.v1"
+    assert report["status"] == "FAIL"
+    assert report["reason"] == "production_ledger_not_existing_or_server_backed"
+    assert report["mutation_performed"] is False
+    assert report["production_mutation_performed"] is False
     assert ledger.exists() is False
 
 

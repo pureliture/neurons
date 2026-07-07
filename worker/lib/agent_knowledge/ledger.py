@@ -98,7 +98,7 @@ def _reference_corpus_default_policy_status() -> dict:
             "license_source_rights": "operator_attested",
         },
         "source_rights_policy": "operator_attested_reference_use",
-        "production_ingest_gate": "denied_without_later_approval",
+        "production_ingest_gate": "approved_bounded_cli_gate_required",
     }
 
 

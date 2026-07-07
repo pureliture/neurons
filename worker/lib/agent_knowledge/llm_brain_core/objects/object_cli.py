@@ -10,7 +10,7 @@ import yaml
 
 from ...ledger import Ledger
 
-from .._util import require_sha256
+from .._util import ensure_public_safe, require_sha256
 from ..context import BrainReadService
 from .golden_query_eval import (
     build_baseline_golden_query_report,
@@ -23,6 +23,7 @@ from .okf_export import build_okf_bundle
 from .object_packs import apply_approval_board_decisions, apply_candidate_review_edits, build_documentation_cleanup_pack
 from .reference_corpus import (
     build_corpus_ingest_plan,
+    build_reference_corpus_production_ingest_evidence,
     build_reference_corpus_production_ingest_readiness_report,
     default_corpus_policy_status,
     reference_corpus_objects_from_manifest,
@@ -95,6 +96,10 @@ def _non_negative_int(value: str) -> int:
 
 def _configured_reference_corpus_ledger(arg_value: str) -> str:
     return str(arg_value or os.environ.get(REFERENCE_CORPUS_LEDGER_ENV, "")).strip()
+
+
+def _ledger_is_server_backed(ledger: Ledger) -> bool:
+    return not bool(getattr(ledger._db_adapter, "is_file_backed", True))
 
 
 def object_query_main(argv: list[str] | None = None) -> int:
@@ -208,33 +213,131 @@ def corpus_ingest_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target", choices=["local_test", "production"], default="local_test")
     parser.add_argument("--ledger", default="")
     parser.add_argument("--manifest-file", default="")
+    parser.add_argument("--approved", action="store_true")
+    parser.add_argument("--approval-ref", default="")
     parser.add_argument(
         "--storage-mode",
         choices=["external_object_store", "managed_snapshot", "metadata_only"],
         default="metadata_only",
     )
+    parser.add_argument("--expect-source-count", type=_non_negative_int, default=None)
+    parser.add_argument("--expect-source-url-count", type=_non_negative_int, default=None)
+    parser.add_argument("--expect-manual-text-without-url-count", type=_non_negative_int, default=None)
+    parser.add_argument("--expect-source-type-count", action="append", default=[])
     args = parser.parse_args(argv)
-    if args.target == "production":
+    production = args.target == "production"
+    if production:
+        missing = []
+        if not args.approved:
+            missing.append("approved")
+        try:
+            approval_ref = require_sha256(args.approval_ref, "approval_ref")
+        except ValueError:
+            approval_ref = ""
+            missing.append("approval_ref_sha256")
+        if not args.manifest_file:
+            missing.append("manifest_file")
+        if missing:
+            _print_json(
+                {
+                    "schema_version": "reference_corpus_ingest.v1",
+                    "status": "denied",
+                    "reason": "production_corpus_ingest_requires_bounded_approval",
+                    "target": "production",
+                    "missing": missing,
+                    "mutation_performed": False,
+                    "production_mutation_performed": False,
+                    "authority_write_performed": False,
+                    "network_used": False,
+                    "protected_values_returned": False,
+                }
+            )
+            return 1
+    else:
+        approval_ref = ""
+    ledger_path = _configured_reference_corpus_ledger(args.ledger)
+    if production and not ledger_path:
         _print_json(
             {
-                "schema_version": "object_substrate_cli_denied.v1",
-                "status": "denied",
-                "reason": "production_corpus_ingest_requires_later_validation_goal",
+                "schema_version": "reference_corpus_ingest.v1",
+                "status": "FAIL",
+                "reason": "ledger_not_configured",
+                "target": "production",
                 "mutation_performed": False,
+                "production_mutation_performed": False,
+                "authority_write_performed": False,
                 "network_used": False,
+                "protected_values_returned": False,
             }
         )
         return 1
-    ledger_path = _configured_reference_corpus_ledger(args.ledger)
+    if production and not os.environ.get("NEURON_LEDGER_PG_DSN", "") and not Path(ledger_path).exists():
+        _print_json(
+            {
+                "schema_version": "reference_corpus_ingest.v1",
+                "status": "FAIL",
+                "reason": "production_ledger_not_existing_or_server_backed",
+                "target": "production",
+                "mutation_performed": False,
+                "production_mutation_performed": False,
+                "authority_write_performed": False,
+                "network_used": False,
+                "protected_values_returned": False,
+            }
+        )
+        return 1
     if ledger_path and args.manifest_file:
         manifest = _load_manifest(args.manifest_file)
+        plan = build_corpus_ingest_plan(
+            manifest,
+            project=args.project,
+            storage_mode=args.storage_mode,
+            expected_source_count=args.expect_source_count,
+            expected_source_url_count=args.expect_source_url_count,
+            expected_manual_text_without_url_count=args.expect_manual_text_without_url_count,
+            expected_source_type_counts=_parse_expected_source_type_counts(args.expect_source_type_count, parser),
+        )
+        if production and plan["count_gate_status"] == "fail":
+            report = {
+                "schema_version": "reference_corpus_ingest.v1",
+                "status": "FAIL",
+                "reason": "production_corpus_ingest_count_gate_failed",
+                "target": "production",
+                "count_gate_status": plan["count_gate_status"],
+                "count_gate_gaps": plan["count_gate_gaps"],
+                "mutation_performed": False,
+                "production_mutation_performed": False,
+                "authority_write_performed": False,
+                "network_used": False,
+                "protected_values_returned": False,
+            }
+            ensure_public_safe(report, "ReferenceCorpusProductionIngestDenied")
+            _print_json(report)
+            return 1
         bundle = reference_corpus_objects_from_manifest(
             manifest,
             project=args.project,
             storage_mode=args.storage_mode,
         )
-        _print_json(Ledger(Path(ledger_path)).upsert_reference_corpus_bundle(bundle, project=args.project))
-        return 0
+        ledger = Ledger(Path(ledger_path))
+        write_result = ledger.upsert_reference_corpus_bundle(bundle, project=args.project)
+        if not production:
+            _print_json(write_result)
+            return 0
+        read_after_write = ledger.reference_corpus_status(
+            project=args.project,
+            corpus_id=str(write_result.get("corpus_id") or ""),
+        )
+        evidence = build_reference_corpus_production_ingest_evidence(
+            project=args.project,
+            bundle=bundle,
+            write_result=write_result,
+            read_after_write_status=read_after_write,
+            approval_ref_hash=approval_ref,
+            evidence_collection_network_used=_ledger_is_server_backed(ledger),
+        )
+        _print_json(evidence)
+        return 0 if evidence["read_after_write"]["status"] == "validated" else 1
     _print_json(
         {
             "schema_version": "reference_corpus_ingest.v1",
