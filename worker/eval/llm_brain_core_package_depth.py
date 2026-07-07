@@ -81,6 +81,7 @@ OBJECT_SUBPACKAGE_MODULES = frozenset({
     "object_cli",
     "object_packs",
     "okf_export",
+    "post_deploy_mcp_capture",
     "reference_corpus",
     "runtime_readiness",
 })
