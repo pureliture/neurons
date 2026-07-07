@@ -38,6 +38,7 @@ PRODUCTION_DENIAL_CLAIMS = (
     ("live.production.object_decision_denial", "brain_object_decision_commit"),
 )
 OBJECT_AUTHORITY_PRODUCTION_GATE_TOOLS = (
+    "brain_approval_board_decide",
     "brain_object_proposal_create",
     "brain_object_decision_commit",
 )

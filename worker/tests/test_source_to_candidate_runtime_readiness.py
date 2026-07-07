@@ -80,6 +80,7 @@ def _sanitized_live_evidence(**overrides):
             "identity_source": "redacted_live_runtime_evidence",
         },
         "tool_schemas": {
+            "brain_approval_board_decide": _object_authority_tool_schema(),
             "brain_object_proposal_create": _object_authority_tool_schema(),
             "brain_object_decision_commit": _object_authority_tool_schema(),
         },
@@ -345,12 +346,13 @@ def _permission_sensitive_audit_evidence(**overrides):
     evidence = {
         "schema_version": "permission_sensitive_runtime_audit_evidence.v1",
         "audit_events": [
+            {**event_base, "action": "brain_approval_board_decide"},
             {**event_base, "action": "brain_object_proposal_create"},
             {**event_base, "action": "brain_object_decision_commit"},
         ],
         "audit_store": {
             "status": "recorded",
-            "event_count": 2,
+            "event_count": 3,
             "production_mutation_performed": False,
         },
         "postcheck": {
@@ -927,7 +929,7 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.preference_artifact.memory"]["accepted_preference_count"] == 1
     assert claims["live.preference_artifact.memory"]["html_route_status"] == "validated"
     assert claims["live.production.permission_sensitive_audit"]["status"] == "validated"
-    assert claims["live.production.permission_sensitive_audit"]["event_count"] == 2
+    assert claims["live.production.permission_sensitive_audit"]["event_count"] == 3
     assert claims["live.agent_context.startup_read_path"]["status"] == "validated"
     assert claims["live.agent_context.startup_read_path"]["startup_loaded"] is True
     assert "temporal_work_recall" in claims["live.brain_objects_query.route_smokes"]["required_routes"]
@@ -1534,6 +1536,7 @@ def test_runtime_readiness_fails_when_runtime_readiness_hint_omits_sanitized_tar
 def test_runtime_readiness_fails_when_object_authority_gate_schema_is_missing():
     evidence = _sanitized_live_evidence(
         tool_schemas={
+            "brain_approval_board_decide": _object_authority_tool_schema(),
             "brain_object_proposal_create": {
                 "inputSchema": {
                     "type": "object",
@@ -1559,6 +1562,7 @@ def test_runtime_readiness_fails_when_object_authority_gate_schema_is_partial():
     gate_properties.pop("approval_ref")
     evidence = _sanitized_live_evidence(
         tool_schemas={
+            "brain_approval_board_decide": _object_authority_tool_schema(),
             "brain_object_proposal_create": partial_schema,
             "brain_object_decision_commit": _object_authority_tool_schema(),
         }
@@ -1593,6 +1597,7 @@ def test_runtime_readiness_fails_when_object_authority_runtime_opt_in_is_unsafe(
 def test_runtime_readiness_reports_schema_and_runtime_gate_failures_together():
     evidence = _sanitized_live_evidence(
         tool_schemas={
+            "brain_approval_board_decide": _object_authority_tool_schema(),
             "brain_object_proposal_create": {
                 "inputSchema": {
                     "type": "object",
@@ -2356,8 +2361,9 @@ def test_runtime_readiness_collector_includes_permission_sensitive_audit_shadow_
 
     audit = packet["permission_sensitive_audit"]
     assert audit["schema_version"] == "permission_sensitive_runtime_audit_evidence.v1"
-    assert len(audit["audit_events"]) == 2
+    assert len(audit["audit_events"]) == 3
     assert {event["action"] for event in audit["audit_events"]} == {
+        "brain_approval_board_decide",
         "brain_object_proposal_create",
         "brain_object_decision_commit",
     }
@@ -2382,7 +2388,7 @@ def test_runtime_readiness_collector_includes_permission_sensitive_audit_shadow_
     report = build_source_to_candidate_runtime_readiness_report(live_evidence=packet)
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     assert claims["live.production.permission_sensitive_audit"]["status"] == "validated"
-    assert claims["live.production.permission_sensitive_audit"]["event_count"] == 2
+    assert claims["live.production.permission_sensitive_audit"]["event_count"] == 3
     assert "permission_sensitive_audit_unverified" not in report["gaps"]
     assert report["status"] == "PASS_WITH_GAPS"
 
@@ -2475,7 +2481,7 @@ def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys)
     assert packet["preference_artifact_memory"]["preference_object_pack"]["accepted_preference_count"] >= 1
     assert packet["preference_artifact_memory"]["artifact_review_check"]["status"] == "pass"
     assert packet["permission_sensitive_audit"]["schema_version"] == "permission_sensitive_runtime_audit_evidence.v1"
-    assert len(packet["permission_sensitive_audit"]["audit_events"]) == 2
+    assert len(packet["permission_sensitive_audit"]["audit_events"]) == 3
     assert packet["permission_sensitive_audit"]["audit_store"]["status"] == "recorded"
     assert packet["agent_context_startup_runtime"]["schema_version"] == "agent_context_startup_runtime_evidence.v1"
     assert packet["agent_context_startup_runtime"]["startup_context"]["loaded_on_startup"] is True

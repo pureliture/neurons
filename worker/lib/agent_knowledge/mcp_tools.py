@@ -428,7 +428,7 @@ def list_tools() -> list[dict]:
         },
         {
             "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
-            "description": "candidate_graph_review pack에 approval-board decisions preview를 적용한다. production target은 no-mutation으로 거부된다.",
+            "description": "candidate_graph_review pack에 approval-board decisions preview를 적용한다. production target은 explicit gate/runtime opt-in 없이는 no-mutation으로 거부된다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -436,6 +436,7 @@ def list_tools() -> list[dict]:
                     "decisions": {"type": "array", "items": {"type": "object"}, "default": []},
                     "target": {"type": "string", "enum": ["local_test", "production"], "default": "production"},
                     "reviewer_id": {"type": "string", "default": "unspecified"},
+                    **_PRODUCTION_GATE_PROPERTY,
                 },
                 "required": ["pack", "decisions"],
                 "additionalProperties": False,
