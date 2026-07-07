@@ -493,7 +493,15 @@ def list_tools() -> list[dict]:
                     "proposal_id": {"type": "string"},
                     "decision_type": {
                         "type": "string",
-                        "enum": ["accept_current", "reject_candidate", "commit_supersession", "commit_stale", "retire"],
+                        "enum": [
+                            "accept_current",
+                            "reject_candidate",
+                            "commit_supersession",
+                            "commit_stale",
+                            "retire",
+                            "archive_only",
+                            "rollback_decision",
+                        ],
                     },
                     "target_object_id": {"type": "string"},
                     "previous_authority_lane": {
@@ -523,6 +531,8 @@ def list_tools() -> list[dict]:
                         ],
                     },
                     "evidence_refs": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "rollback_of_decision_id": {"type": "string"},
+                    "supersedes_decision_id": {"type": "string"},
                     "decision_reason": {"type": "string"},
                     "approved_by": {"type": "string"},
                     "decision_id": {"type": "string"},
