@@ -81,7 +81,75 @@ def _runtime_projection_join_evidence(*, edge_count: int = 2) -> dict:
     }
 
 
-def _runtime_collected_packet(*, live: bool = False) -> dict:
+def _session_project_rollup_runtime_evidence() -> dict:
+    return {
+        "schema_version": "session_project_rollup_runtime_evidence.v1",
+        "rollup_preview": {
+            "schema_version": "object_extraction_session_project_rollup_preview.v1",
+            "status": "pass",
+            "scope": "all_devices",
+            "object_type_counts": {
+                "Device": 2,
+                "Session": 2,
+                "Repository": 1,
+                "Branch": 1,
+                "WorkUnit": 1,
+            },
+            "edge_types": [
+                "repository_has_branch",
+                "session_on_device",
+                "device_has_session",
+                "session_in_repository",
+                "repository_has_session",
+                "session_on_branch",
+                "branch_has_session",
+                "part_of_work_unit",
+                "work_unit_has_session",
+            ],
+            "object_count": 7,
+            "edge_count": 12,
+            "visible_session_count": 2,
+            "all_device_session_count": 2,
+            "device_count": 2,
+            "production_mutation_performed": False,
+        },
+        "handoff_pack": {
+            "schema_version": "session_project_handoff_pack.v1",
+            "raw_return_capability": "denied",
+            "visible_session_count": 2,
+            "all_device_session_count": 2,
+            "object_ref_counts": {"Session": 2, "WorkUnit": 1},
+            "resume_context": {
+                "schema_version": "session_project_resume_context.v1",
+                "latest_session_ref_present": True,
+                "work_unit_ref_count": 1,
+                "production_mutation_performed": False,
+            },
+        },
+        "read_after_write": {
+            "status": "validated",
+            "route": "temporal_work_recall",
+            "object_pack_schema": "object_pack.v1",
+            "object_types": ["WorkUnit"],
+            "object_count": 1,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+
+
+def _runtime_collected_packet(
+    *,
+    live: bool = False,
+    session_project_rollup: bool = False,
+    production_mutation_performed: bool = False,
+    provenance_overrides: dict | None = None,
+) -> dict:
     packet = {
         "schema_version": "source_to_candidate_runtime_evidence.v1",
         "projection_join": _runtime_projection_join_evidence(),
@@ -95,8 +163,11 @@ def _runtime_collected_packet(*, live: bool = False) -> dict:
             "host_topology_returned": False,
             "raw_external_ids_returned": False,
         },
-        "production_mutation_performed": False,
+        "production_mutation_performed": production_mutation_performed,
     }
+    packet["evidence_provenance"].update(provenance_overrides or {})
+    if session_project_rollup:
+        packet["session_project_rollup_runtime"] = _session_project_rollup_runtime_evidence()
     if not live:
         packet["collector"] = {
             "schema_version": "source_to_candidate_runtime_evidence_collector.v1",
@@ -127,7 +198,10 @@ class _FakeMcpSession:
             if arguments.get("collect_shadow_evidence") is True:
                 return SimpleNamespace(
                     isError=False,
-                    structuredContent=_runtime_collected_packet(live=False),
+                    structuredContent=_runtime_collected_packet(
+                        live=False,
+                        session_project_rollup=True,
+                    ),
                 )
             return SimpleNamespace(
                 isError=False,
@@ -213,6 +287,7 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
     assert set(REQUIRED_RUNTIME_TOOL_NAMES).issubset(set(capture["tool_names"]))
     assert capture["production_mutation_performed"] is False
     assert "projection_join" not in capture
+    assert "session_project_rollup_runtime" not in capture
     assert capture["runtime_collected_packet"] == {
         "schema_version": "source_to_candidate_runtime_evidence.v1",
         "collector_readiness_claim": "collector_packet_not_live_evidence",
@@ -220,6 +295,12 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
         "projection_join_schema": "object_extraction_projection_join_preview.v1",
         "projection_join_edge_count": 2,
         "projection_join_promoted_to_live_evidence": False,
+        "session_project_rollup_present": True,
+        "session_project_rollup_schema": "session_project_rollup_runtime_evidence.v1",
+        "session_project_rollup_preview_schema": "object_extraction_session_project_rollup_preview.v1",
+        "session_project_rollup_device_count": 2,
+        "session_project_rollup_work_unit_count": 1,
+        "session_project_rollup_promoted_to_live_evidence": False,
         "evidence_collection_mode": "local_test_replay",
         "evidence_collection_network_used": False,
         "production_mutation_performed": False,
@@ -301,6 +382,121 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
     assert claims["live.source_to_candidate.projection_join"]["status"] == "not_validated"
     assert "live_graph_qdrant_projection_join_unproven" in report["gaps"]
     assert report["production_ready"] is False
+
+
+def test_collect_post_deploy_mcp_capture_promotes_live_p6_rollup_from_read_only_runtime():
+    class _LiveP6RollupSession(_FakeMcpSession):
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "brain_source_to_candidate_runtime_readiness" and arguments.get("collect_shadow_evidence") is True:
+                self.calls.append((name, dict(arguments)))
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=_runtime_collected_packet(
+                        live=True,
+                        session_project_rollup=True,
+                    ),
+                )
+            return await super().call_tool(name, arguments)
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield _LiveP6RollupSession()
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            expected_commit="c2b8548",
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_artifact_identity_summary",
+            },
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert capture["runtime_collected_packet"]["session_project_rollup_present"] is True
+    assert (
+        capture["runtime_collected_packet"]["session_project_rollup_schema"]
+        == "session_project_rollup_runtime_evidence.v1"
+    )
+    assert (
+        capture["runtime_collected_packet"]["session_project_rollup_promoted_to_live_evidence"]
+        is True
+    )
+    assert capture["session_project_rollup_runtime"]["schema_version"] == (
+        "session_project_rollup_runtime_evidence.v1"
+    )
+    assert capture["session_project_rollup_runtime"]["rollup_preview"]["scope"] == "all_devices"
+    assert capture["session_project_rollup_runtime"]["read_after_write"]["route"] == (
+        "temporal_work_recall"
+    )
+    assert capture["production_mutation_performed"] is False
+
+    report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=capture,
+        expected_commit="c2b8548",
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["live.session_project.rollup"]["status"] == "validated"
+    assert "live_session_project_rollup_unverified" not in report["gaps"]
+    assert "live_multi_device_rollup_unproven" not in report["gaps"]
+    assert report["production_ready"] is False
+
+
+def test_collect_post_deploy_mcp_capture_preserves_runtime_mutation_and_protected_output_flags():
+    class _UnsafeRuntimePacketSession(_FakeMcpSession):
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "brain_source_to_candidate_runtime_readiness" and arguments.get("collect_shadow_evidence") is True:
+                self.calls.append((name, dict(arguments)))
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=_runtime_collected_packet(
+                        live=True,
+                        session_project_rollup=True,
+                        production_mutation_performed=True,
+                        provenance_overrides={
+                            "mutation_scope": "bounded_production_authority_execution",
+                            "raw_private_evidence_returned": True,
+                        },
+                    ),
+                )
+            return await super().call_tool(name, arguments)
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield _UnsafeRuntimePacketSession()
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            expected_commit="c2b8548",
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert capture["production_mutation_performed"] is True
+    assert capture["collection"]["mutation_scope"] == "bounded_production_authority_execution"
+    assert capture["collection"]["raw_private_evidence_returned"] is True
+    assert "projection_join" not in capture
+    assert "session_project_rollup_runtime" not in capture
+    assert (
+        capture["runtime_collected_packet"]["session_project_rollup_promoted_to_live_evidence"]
+        is False
+    )
+
+    report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=capture,
+        expected_commit="c2b8548",
+    )
+    assert report["status"] == "FAIL"
+    assert report["production_mutation_performed"] is True
+    assert "live.evidence.provenance" in report["failed_claims"]
+    assert "live_evidence_provenance_read_only_mode_mutation_scope_mismatch" in report["gaps"]
+    assert "live_evidence_provenance_raw_private_evidence_returned" in report["gaps"]
 
 
 def test_collect_post_deploy_mcp_capture_promotes_live_projection_join_from_read_only_runtime():
