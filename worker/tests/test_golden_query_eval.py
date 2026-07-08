@@ -1099,6 +1099,45 @@ def test_product_activation_progress_keeps_p8_live_gap_for_local_replay_runtime_
     assert report["production_mutation_performed"] is False
 
 
+def test_product_activation_progress_treats_unproven_p8_identity_as_gap_not_mismatch():
+    evidence = _valid_p6_p7_p8_runtime_evidence(live=False)
+    evidence["deployed_identity"] = {
+        "contains_expected_commit": False,
+        "identity_source": "collector_not_deployed_identity_proof",
+    }
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p8 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P8")
+
+    assert checks["P8"]["result"] == "PASS_WITH_GAPS"
+    assert "p8_source_commit_mismatch_with_pr_head" not in checks["P8"]["failures"]
+    assert "p8_live_deployed_identity_expected_commit_unverified" in checks["P8"]["gaps"]
+    assert p8["deployed_identity_claim_status"] == "not_validated"
+    assert p8["source_commit_matches_pr_head"] is None
+    assert p8["production_mutation_performed"] is False
+
+
+def test_product_activation_progress_scopes_p8_no_mutation_to_permission_audit_claim():
+    evidence = _valid_p6_p7_p8_runtime_evidence(live=True)
+    replacement = _valid_p4_replacement_current_runtime_evidence(live=True)
+    evidence["production_authority_replacement_current"] = replacement[
+        "production_authority_replacement_current"
+    ]
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p8 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P8")
+
+    assert checks["P8"]["result"] == "PASS"
+    assert "p8_production_mutation_performed" not in checks["P8"]["failures"]
+    assert p8["permission_audit_claim_status"] == "validated"
+    assert p8["production_mutation_performed"] is False
+    assert report["production_mutation_performed"] is True
+
+
 def test_product_activation_progress_fails_p8_when_permission_audit_returns_protected_values():
     evidence = _valid_p6_p7_p8_runtime_evidence(live=True)
     event = evidence["permission_sensitive_audit"]["audit_events"][0]
