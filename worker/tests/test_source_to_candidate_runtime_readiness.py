@@ -96,6 +96,7 @@ def _sanitized_live_evidence(**overrides):
             network_used=False,
         ),
         "production_authority_execution": _production_authority_execution_evidence(),
+        "production_authority_replacement_current": _production_authority_replacement_current_evidence(),
     }
     evidence.update(overrides)
     return evidence
@@ -540,6 +541,82 @@ def _production_authority_execution_evidence(**overrides):
             "project": "workspace-index-advisor",
             "object_ids": [target_object_id],
             "max_objects": 1,
+            "allowed_object_classes": ["RepoDocument"],
+        },
+    }
+    evidence.update(overrides)
+    return evidence
+
+
+def _production_authority_replacement_current_evidence(**overrides):
+    approval_ref_hash = "sha256:" + "c" * 64
+    evidence = {
+        "schema_version": "object_authority_replacement_current_evidence.v1",
+        "approval": {
+            "approved": True,
+            "approval_ref_hash": approval_ref_hash,
+            "scope": "single_project_replacement_current",
+            "project": "workspace-index-advisor",
+            "max_objects": 2,
+        },
+        "prior_current": {
+            "target_object_id": "ko:RepoDocument:replacement-prior-current",
+            "proposal_write_performed": True,
+            "proposal_write_target": "production_ledger",
+            "decision_type": "commit_supersession",
+            "authority_write_performed": True,
+            "authoritative_memory_changed": True,
+            "production_mutation_performed": True,
+            "previous_authority_lane": "accepted_current",
+            "new_authority_lane": "accepted_non_current",
+            "ledger_scope": "production",
+            "authority_write_scope": "production_ledger",
+            "decision_id": "decision:p4-replacement-prior",
+            "supersedes_decision_id": "decision:p4-replacement-successor",
+            "production_gate_ref_hash": approval_ref_hash,
+        },
+        "successor_current": {
+            "target_object_id": "ko:RepoDocument:replacement-successor-current",
+            "proposal_write_performed": True,
+            "proposal_write_target": "production_ledger",
+            "decision_type": "accept_current",
+            "authority_write_performed": True,
+            "authoritative_memory_changed": True,
+            "production_mutation_performed": True,
+            "previous_authority_lane": "candidate",
+            "new_authority_lane": "accepted_current",
+            "ledger_scope": "production",
+            "authority_write_scope": "production_ledger",
+            "decision_id": "decision:p4-replacement-successor",
+            "supersedes_decision_id": "decision:p4-replacement-prior",
+            "production_gate_ref_hash": approval_ref_hash,
+        },
+        "read_after_write": {
+            "status": "validated",
+            "prior_authority_lane": "accepted_non_current",
+            "successor_authority_lane": "accepted_current",
+            "prior_decision_id": "decision:p4-replacement-prior",
+            "successor_decision_id": "decision:p4-replacement-successor",
+        },
+        "replacement_path": [
+            "demote_prior_object_to_accepted_non_current_or_archive_only",
+            "promote_successor_object_to_accepted_current",
+            "verify_brain_objects_query_read_after_write",
+        ],
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "scope": {
+            "project": "workspace-index-advisor",
+            "object_ids": [
+                "ko:RepoDocument:replacement-prior-current",
+                "ko:RepoDocument:replacement-successor-current",
+            ],
+            "max_objects": 2,
             "allowed_object_classes": ["RepoDocument"],
         },
     }
@@ -1267,6 +1344,7 @@ def test_runtime_readiness_post_deploy_mode_without_network_does_not_claim_live_
             network_used=False,
         ),
         production_authority_execution={},
+        production_authority_replacement_current={},
     )
 
     report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
@@ -1380,6 +1458,91 @@ def test_runtime_readiness_requires_bounded_execution_demote_step():
     execution = claims["live.production.object_authority_bounded_execution"]
     assert execution["status"] == "failed"
     assert "bounded_execution_demote_prior_object_step_missing" in report["gaps"]
+
+
+def test_runtime_readiness_validates_replacement_current_execution_evidence():
+    evidence = _sanitized_live_evidence(
+        production_authority_replacement_current=_production_authority_replacement_current_evidence(),
+        evidence_provenance=_evidence_provenance(
+            collection_mode="redacted_operator_packet",
+            mutation_scope="bounded_production_authority_execution",
+            network_used=True,
+        ),
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    replacement = claims["live.production.object_authority_replacement_current"]
+    assert replacement["status"] == "validated"
+    assert replacement["production_mutation_performed"] is True
+    assert replacement["prior_authority_lane"] == "accepted_non_current"
+    assert replacement["successor_authority_lane"] == "accepted_current"
+    assert "replacement_current_execution_unverified" not in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_replacement_current_skips_prior_demote():
+    evidence = _sanitized_live_evidence(
+        production_authority_replacement_current=_production_authority_replacement_current_evidence(
+            prior_current={
+                "target_object_id": "ko:RepoDocument:replacement-prior-current",
+                "proposal_write_performed": True,
+                "proposal_write_target": "production_ledger",
+                "decision_type": "accept_current",
+                "authority_write_performed": True,
+                "authoritative_memory_changed": True,
+                "production_mutation_performed": True,
+                "previous_authority_lane": "accepted_current",
+                "new_authority_lane": "accepted_current",
+                "ledger_scope": "production",
+                "authority_write_scope": "production_ledger",
+                "decision_id": "decision:p4-replacement-prior",
+                "production_gate_ref_hash": "sha256:" + "c" * 64,
+            },
+            read_after_write={
+                "status": "validated",
+                "prior_authority_lane": "accepted_current",
+                "successor_authority_lane": "accepted_current",
+                "prior_decision_id": "decision:p4-replacement-prior",
+                "successor_decision_id": "decision:p4-replacement-successor",
+            },
+        ),
+        evidence_provenance=_evidence_provenance(
+            collection_mode="redacted_operator_packet",
+            mutation_scope="bounded_production_authority_execution",
+            network_used=True,
+        ),
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    replacement = claims["live.production.object_authority_replacement_current"]
+    assert report["status"] == "FAIL"
+    assert replacement["status"] == "failed"
+    assert "replacement_prior_not_demoted" in report["gaps"]
+    assert "replacement_read_after_write_prior_not_demoted" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_replacement_current_project_scope_mismatches():
+    replacement = _production_authority_replacement_current_evidence()
+    replacement["scope"] = {**replacement["scope"], "project": "other-project"}
+    evidence = _sanitized_live_evidence(
+        production_authority_replacement_current=replacement,
+        evidence_provenance=_evidence_provenance(
+            collection_mode="redacted_operator_packet",
+            mutation_scope="bounded_production_authority_execution",
+            network_used=True,
+        ),
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    replacement_claim = claims["live.production.object_authority_replacement_current"]
+    assert report["status"] == "FAIL"
+    assert replacement_claim["status"] == "failed"
+    assert "replacement_project_mismatch" in report["gaps"]
 
 
 def test_runtime_readiness_reports_bounded_execution_gate_hash_mismatch():
@@ -1664,6 +1827,7 @@ def test_runtime_readiness_marks_current_session_unimplemented_route_as_gap_with
             network_used=True,
         ),
         production_authority_execution={},
+        production_authority_replacement_current={},
     )
 
     report = build_source_to_candidate_runtime_readiness_report(
@@ -1786,6 +1950,7 @@ def test_runtime_readiness_breaks_partial_live_evidence_into_actionable_gap_ids(
             network_used=True,
         ),
         production_authority_execution={},
+        production_authority_replacement_current={},
     )
 
     report = build_source_to_candidate_runtime_readiness_report(
