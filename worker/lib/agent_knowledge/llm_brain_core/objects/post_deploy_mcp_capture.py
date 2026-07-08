@@ -121,6 +121,7 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
             "identity_source": "post_deploy_mcp_capture_missing_deployed_identity",
         }
     )
+    provenance = _post_deploy_provenance(runtime_packet)
     capture = {
         "schema_version": POST_DEPLOY_MCP_CAPTURE_SCHEMA,
         "tool_names": tool_names,
@@ -129,13 +130,16 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         "agent_context_product": _agent_context_product_from_context_pack(context_pack),
         "brain_objects_query_smokes": smokes,
         "deployed_identity": identity,
-        "collection": _post_deploy_provenance(),
-        "evidence_provenance": _post_deploy_provenance(),
-        "production_mutation_performed": False,
+        "collection": provenance,
+        "evidence_provenance": provenance,
+        "production_mutation_performed": _runtime_packet_reports_mutation(runtime_packet),
     }
     projection_join = _live_projection_join_from_runtime_packet(runtime_packet)
     if projection_join:
         capture["projection_join"] = projection_join
+    session_project_rollup = _live_session_project_rollup_from_runtime_packet(runtime_packet)
+    if session_project_rollup:
+        capture["session_project_rollup_runtime"] = session_project_rollup
     ensure_public_safe(capture, "SourceToCandidatePostDeployMcpCapture")
     return capture
 
@@ -250,14 +254,42 @@ def _runtime_collected_packet_summary(packet: Mapping[str, Any]) -> dict[str, An
         if isinstance(safe_packet.get("projection_join"), Mapping)
         else {}
     )
-    promoted = bool(_live_projection_join_from_runtime_packet(safe_packet))
+    rollup = (
+        safe_packet.get("session_project_rollup_runtime")
+        if isinstance(safe_packet.get("session_project_rollup_runtime"), Mapping)
+        else {}
+    )
+    rollup_preview = (
+        rollup.get("rollup_preview") if isinstance(rollup.get("rollup_preview"), Mapping) else {}
+    )
+    object_type_counts = (
+        rollup_preview.get("object_type_counts")
+        if isinstance(rollup_preview.get("object_type_counts"), Mapping)
+        else {}
+    )
+    projection_promoted = bool(_live_projection_join_from_runtime_packet(safe_packet))
+    session_project_rollup_promoted = bool(
+        _live_session_project_rollup_from_runtime_packet(safe_packet)
+    )
     summary = {
         "schema_version": public_safe_text(str(safe_packet.get("schema_version") or ""), max_chars=80),
         "collector_readiness_claim": public_safe_text(str(collector.get("readiness_claim") or ""), max_chars=120),
         "projection_join_present": bool(projection),
         "projection_join_schema": public_safe_text(str(projection.get("schema_version") or ""), max_chars=80),
         "projection_join_edge_count": _safe_int(projection.get("edge_count")),
-        "projection_join_promoted_to_live_evidence": promoted,
+        "projection_join_promoted_to_live_evidence": projection_promoted,
+        "session_project_rollup_present": bool(rollup),
+        "session_project_rollup_schema": public_safe_text(
+            str(rollup.get("schema_version") or ""),
+            max_chars=80,
+        ),
+        "session_project_rollup_preview_schema": public_safe_text(
+            str(rollup_preview.get("schema_version") or ""),
+            max_chars=80,
+        ),
+        "session_project_rollup_device_count": _safe_int(rollup_preview.get("device_count")),
+        "session_project_rollup_work_unit_count": _safe_int(object_type_counts.get("WorkUnit")),
+        "session_project_rollup_promoted_to_live_evidence": session_project_rollup_promoted,
         "evidence_collection_mode": public_safe_text(str(provenance.get("collection_mode") or ""), max_chars=80),
         "evidence_collection_network_used": provenance.get("network_used") is True,
         "production_mutation_performed": safe_packet.get("production_mutation_performed") is True,
@@ -283,13 +315,37 @@ def _live_projection_join_from_runtime_packet(packet: Mapping[str, Any]) -> dict
         return {}
     if provenance.get("network_used") is not True:
         return {}
-    if safe_packet.get("production_mutation_performed") is True:
+    if _runtime_packet_reports_mutation(safe_packet):
         return {}
     if str(projection.get("status") or "") != "pass":
         return {}
     live_projection = _public_safe_mapping(projection)
     ensure_public_safe(live_projection, "SourceToCandidatePostDeployProjectionJoin")
     return live_projection
+
+
+def _live_session_project_rollup_from_runtime_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
+    safe_packet = _public_safe_mapping(packet)
+    rollup = safe_packet.get("session_project_rollup_runtime")
+    if not isinstance(rollup, Mapping):
+        return {}
+    collector = safe_packet.get("collector") if isinstance(safe_packet.get("collector"), Mapping) else {}
+    if str(collector.get("readiness_claim") or "") == "collector_packet_not_live_evidence":
+        return {}
+    provenance = (
+        safe_packet.get("evidence_provenance")
+        if isinstance(safe_packet.get("evidence_provenance"), Mapping)
+        else {}
+    )
+    if str(provenance.get("collection_mode") or "") != "post_deploy_read_only_smoke":
+        return {}
+    if provenance.get("network_used") is not True:
+        return {}
+    if _runtime_packet_reports_mutation(safe_packet):
+        return {}
+    live_rollup = _public_safe_mapping(rollup)
+    ensure_public_safe(live_rollup, "SourceToCandidatePostDeploySessionProjectRollup")
+    return live_rollup
 
 
 def _safe_int(value: Any) -> int:
@@ -299,17 +355,42 @@ def _safe_int(value: Any) -> int:
         return 0
 
 
-def _post_deploy_provenance() -> dict[str, Any]:
+def _runtime_packet_reports_mutation(packet: Mapping[str, Any]) -> bool:
+    safe_packet = _public_safe_mapping(packet)
+    provenance = (
+        safe_packet.get("evidence_provenance")
+        if isinstance(safe_packet.get("evidence_provenance"), Mapping)
+        else {}
+    )
+    mutation_scope = public_safe_text(str(provenance.get("mutation_scope") or ""), max_chars=80)
+    return (
+        safe_packet.get("production_mutation_performed") is True
+        or safe_packet.get("mutation_performed") is True
+        or bool(mutation_scope and mutation_scope != "none")
+    )
+
+
+def _post_deploy_provenance(runtime_packet: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    safe_packet = _public_safe_mapping(runtime_packet or {})
+    runtime_provenance = (
+        safe_packet.get("evidence_provenance")
+        if isinstance(safe_packet.get("evidence_provenance"), Mapping)
+        else {}
+    )
+    mutation_scope = public_safe_text(
+        str(runtime_provenance.get("mutation_scope") or "none"),
+        max_chars=80,
+    )
     return {
         "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
         "collector": "source_to_candidate_post_deploy_mcp_capture",
         "collection_mode": "post_deploy_read_only_smoke",
         "network_used": True,
-        "mutation_scope": "none",
-        "raw_private_evidence_returned": False,
-        "secret_returned": False,
-        "host_topology_returned": False,
-        "raw_external_ids_returned": False,
+        "mutation_scope": mutation_scope,
+        "raw_private_evidence_returned": runtime_provenance.get("raw_private_evidence_returned") is True,
+        "secret_returned": runtime_provenance.get("secret_returned") is True,
+        "host_topology_returned": runtime_provenance.get("host_topology_returned") is True,
+        "raw_external_ids_returned": runtime_provenance.get("raw_external_ids_returned") is True,
     }
 
 
