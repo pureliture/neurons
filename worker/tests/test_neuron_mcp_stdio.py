@@ -1398,6 +1398,7 @@ def _agent_context_startup_runtime_evidence() -> dict:
             "consumer": "codex",
             "loaded_on_startup": True,
             "section_counts": {
+                "current_authority": 1,
                 "style_preference": 1,
                 "active_work": 1,
                 "required_verification": 1,
