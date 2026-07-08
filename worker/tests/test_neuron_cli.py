@@ -1699,6 +1699,72 @@ def test_neuron_knowledge_golden_query_eval_activation_progress_accepts_post_dep
     assert report["production_mutation_performed"] is False
 
 
+def test_neuron_knowledge_golden_query_eval_activation_progress_treats_partial_post_deploy_capture_as_gap(
+    tmp_path, capsys
+):
+    capture = _valid_p6_runtime_evidence(live=True)
+    capture.pop("session_project_rollup_runtime")
+    capture_file = tmp_path / "partial-post-deploy-capture.json"
+    capture_file.write_text(json.dumps(capture), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "golden-query-eval",
+                "--activation-progress",
+                "--post-deploy-capture-file",
+                str(capture_file),
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p6 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P6")
+
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert checks["P6"]["result"] == "PASS_WITH_GAPS"
+    assert checks["P6"]["failures"] == []
+    assert "p6_live_session_project_rollup_unverified" in checks["P6"]["gaps"]
+    assert "p6_live_multi_device_rollup_unproven" in checks["P6"]["gaps"]
+    assert "p6_session_rollup_incomplete" not in checks["P6"]["failures"]
+    assert "p6_handoff_pack_missing" not in checks["P6"]["failures"]
+    assert p6["rollup_claim_status"] == "not_validated"
+    assert p6["evidence_is_live"] is True
+    assert p6["evidence_count"] == 0
+    assert report["production_mutation_performed"] is False
+
+
+def test_neuron_knowledge_golden_query_eval_activation_progress_fails_empty_p6_post_deploy_capture(
+    tmp_path, capsys
+):
+    capture = _valid_p6_runtime_evidence(live=True)
+    capture["session_project_rollup_runtime"] = {}
+    capture_file = tmp_path / "empty-p6-post-deploy-capture.json"
+    capture_file.write_text(json.dumps(capture), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "golden-query-eval",
+                "--activation-progress",
+                "--post-deploy-capture-file",
+                str(capture_file),
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+
+    assert report["status"] == "FAIL"
+    assert checks["P6"]["result"] == "FAIL"
+    assert "p6_session_rollup_incomplete" in checks["P6"]["failures"]
+    assert "p6_handoff_pack_missing" in checks["P6"]["failures"]
+
+
 def test_neuron_knowledge_golden_query_eval_activation_progress_fails_mutating_post_deploy_capture(
     tmp_path, capsys
 ):

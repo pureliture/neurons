@@ -2583,6 +2583,19 @@ def test_runtime_readiness_post_deploy_capture_fails_when_capture_reports_mutati
     assert "live_evidence_provenance_mutation_scope_mismatch" in report["gaps"]
 
 
+def test_runtime_readiness_post_deploy_capture_fails_empty_session_project_rollup_runtime():
+    capture = _sanitized_live_evidence(session_project_rollup_runtime={})
+
+    report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=capture,
+        expected_commit="c264b46",
+    )
+
+    assert report["status"] == "FAIL"
+    assert "live.session_project.rollup" in report["failed_claims"]
+    assert "session_project_rollup_runtime_empty_or_invalid" in report["gaps"]
+
+
 def test_neuron_knowledge_runtime_readiness_cli_evaluates_shadow_evidence_file(tmp_path, capsys):
     capture_file = tmp_path / "shadow-evidence-capture.json"
     capture_file.write_text(
