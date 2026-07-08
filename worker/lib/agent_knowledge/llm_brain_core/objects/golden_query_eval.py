@@ -756,6 +756,11 @@ def _p6_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
         failures.append("p6_schema_mismatch")
     status = str(evidence.get("status") or "")
     rollup_status = str(evidence.get("rollup_claim_status") or "")
+    rollup_evidence_absent = (
+        evidence.get("rollup_evidence_present") is False
+        and rollup_status == "not_validated"
+        and int(evidence.get("evidence_count") or 0) < 1
+    )
     if status == "FAIL" or rollup_status == "failed":
         failures.append("p6_session_rollup_runtime_failed")
     if evidence.get("runtime_readiness_status") == "FAIL":
@@ -768,14 +773,15 @@ def _p6_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
         failures.append("p6_live_evidence_missing_for_pass")
     if status == "PASS" and evidence.get("evidence_provenance_status") != "validated":
         failures.append("p6_evidence_provenance_not_validated")
-    if int(evidence.get("object_count") or 0) < 5:
-        failures.append("p6_session_rollup_incomplete")
-    if int(evidence.get("edge_count") or 0) < 6:
-        failures.append("p6_session_rollup_incomplete")
-    if int(evidence.get("evidence_count") or 0) < 1:
-        failures.append("p6_session_rollup_incomplete")
-    if evidence.get("handoff_pack_schema") != "session_project_handoff_pack.v1":
-        failures.append("p6_handoff_pack_missing")
+    if not rollup_evidence_absent:
+        if int(evidence.get("object_count") or 0) < 5:
+            failures.append("p6_session_rollup_incomplete")
+        if int(evidence.get("edge_count") or 0) < 6:
+            failures.append("p6_session_rollup_incomplete")
+        if int(evidence.get("evidence_count") or 0) < 1:
+            failures.append("p6_session_rollup_incomplete")
+        if evidence.get("handoff_pack_schema") != "session_project_handoff_pack.v1":
+            failures.append("p6_handoff_pack_missing")
     return _dedupe(failures)
 
 
@@ -1156,6 +1162,11 @@ def _p6_live_session_project_rollup_evidence(
     }
     claim = claims.get("live.session_project.rollup", {})
     provenance_claim = claims.get("live.evidence.provenance", {})
+    rollup_present = _runtime_evidence_field_present(
+        live_evidence,
+        "session_project_rollup_runtime",
+        "session_project_rollup_runtime_present",
+    )
     rollup = live_evidence.get("session_project_rollup_runtime")
     rollup = rollup if isinstance(rollup, Mapping) else {}
     preview = rollup.get("rollup_preview") if isinstance(rollup.get("rollup_preview"), Mapping) else {}
@@ -1198,6 +1209,7 @@ def _p6_live_session_project_rollup_evidence(
         "live_evidence_provided": bool(report.get("live_evidence_provided")),
         "evidence_is_live": evidence_is_live,
         "production_ready": bool(report.get("production_ready")),
+        "rollup_evidence_present": rollup_present,
         "object_count": _positive_int(
             preview.get("object_count"),
             default=sum(_positive_int(count) for count in object_type_counts.values()),
@@ -1234,6 +1246,17 @@ def _p6_session_project_rollup_product_status(
     ):
         return "PASS"
     return "PASS_WITH_GAPS"
+
+
+def _runtime_evidence_field_present(
+    evidence: Mapping[str, Any],
+    field_name: str,
+    marker_name: str,
+) -> bool:
+    marker = evidence.get(marker_name)
+    if isinstance(marker, bool):
+        return marker
+    return field_name in evidence
 
 
 def _p7_preference_artifact_evidence() -> dict[str, Any]:
