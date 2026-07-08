@@ -8,6 +8,7 @@ from agent_knowledge.llm_brain_core.golden_query_eval import (
     evaluate_object_pack_response,
     evaluate_product_evidence_summary,
 )
+from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
 from agent_knowledge.llm_brain_core.object_packs import build_code_change_impact_pack
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     EVIDENCE_PROVENANCE_SCHEMA,
@@ -419,6 +420,69 @@ def _valid_p6_p7_p8_runtime_evidence(*, live: bool = True):
     evidence["permission_sensitive_audit"] = p8["permission_sensitive_audit"]
     evidence["deployed_identity"] = p8["deployed_identity"]
     evidence["evidence_provenance"] = p8["evidence_provenance"]
+    return evidence
+
+
+def _valid_p9_agent_context_product(*, style_count: int = 1, active_count: int = 1):
+    return {
+        "schema_version": "agent_context_product_pack.v1",
+        "consumer": "codex",
+        "sections": {
+            "style_preference": {"object_count": style_count},
+            "active_work": {"object_count": active_count},
+            "required_verification": {"object_count": 1},
+        },
+        "surface_policy": {"mutation_allowed": False},
+        "degraded_mode": {"active": False, "gaps": []},
+        "missing_evidence_before_promotion": [],
+        "tool_hints": object_native_review_tool_hints([]),
+    }
+
+
+def _valid_p9_startup_runtime_evidence(*, style_count: int = 1, active_count: int = 1):
+    return {
+        "schema_version": "agent_context_startup_runtime_evidence.v1",
+        "startup_context": {
+            "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
+            "loaded_on_startup": True,
+            "section_counts": {
+                "style_preference": style_count,
+                "active_work": active_count,
+                "required_verification": 1,
+            },
+            "surface_policy": {"mutation_allowed": False},
+            "degraded_gap_disclosure_present": True,
+            "missing_evidence_before_promotion_present": True,
+        },
+        "read_path_smoke": {
+            "tool": "brain_objects_query",
+            "read_only": True,
+            "routes_checked": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
+            "production_mutation_performed": False,
+        },
+        "runtime_enforcement": {
+            "direct_execution_allowed": False,
+            "production_mutation_allowed": False,
+            "raw_private_context_blocked": True,
+            "approval_scope_blocker_enforced": True,
+            "stale_or_degraded_disclosure_present": True,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": False,
+    }
+
+
+def _valid_p6_p7_p8_p9_runtime_evidence(*, live: bool = True):
+    evidence = _valid_p6_p7_p8_runtime_evidence(live=live)
+    evidence["agent_context_product"] = _valid_p9_agent_context_product()
+    evidence["agent_context_startup_runtime"] = _valid_p9_startup_runtime_evidence()
     return evidence
 
 
@@ -1160,6 +1224,98 @@ def test_product_activation_progress_fails_p8_when_permission_audit_returns_prot
     assert p8["permission_audit_claim_status"] == "failed"
     assert p8["production_mutation_performed"] is False
     assert report["production_mutation_performed"] is False
+
+
+def test_product_activation_progress_closes_p9_gap_with_live_agent_context_evidence():
+    report = build_product_activation_progress_report(
+        live_evidence=_valid_p6_p7_p8_p9_runtime_evidence(live=True)
+    )
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p9 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P9")
+    phase_progress = {item["phase"]: item for item in report["phase_progress"]}
+
+    assert checks["P9"]["result"] == "PASS"
+    assert phase_progress["P9"]["quality_result"] == "PASS"
+    assert phase_progress["P9"]["gaps"] == []
+    assert p9["evidence_source"] == "live_agent_context_packet"
+    assert p9["product_sections_claim_status"] == "validated"
+    assert p9["tool_hints_claim_status"] == "validated"
+    assert p9["startup_read_path_claim_status"] == "validated"
+    assert p9["evidence_provenance_status"] == "validated"
+    assert p9["evidence_is_live"] is True
+    assert p9["section_counts"]["style_preference"] == 1
+    assert p9["section_counts"]["active_work"] == 1
+    assert p9["production_mutation_performed"] is False
+    assert report["production_ready"] is False
+
+
+def test_product_activation_progress_keeps_p9_gap_for_empty_live_agent_context_sections():
+    evidence = _valid_p6_p7_p8_p9_runtime_evidence(live=True)
+    evidence["agent_context_product"] = _valid_p9_agent_context_product(
+        style_count=0,
+        active_count=0,
+    )
+    evidence["agent_context_startup_runtime"] = _valid_p9_startup_runtime_evidence(
+        style_count=0,
+        active_count=0,
+    )
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p9 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P9")
+
+    assert checks["P9"]["result"] == "PASS_WITH_GAPS"
+    assert "p9_live_agent_context_section_missing:style_preference" in checks["P9"]["gaps"]
+    assert "p9_live_agent_context_section_missing:active_work" in checks["P9"]["gaps"]
+    assert "p9_agent_context_startup_section_missing:style_preference" in checks["P9"]["gaps"]
+    assert "p9_agent_context_startup_section_missing:active_work" in checks["P9"]["gaps"]
+    assert p9["product_sections_claim_status"] == "not_validated"
+    assert p9["startup_read_path_claim_status"] == "failed"
+    assert p9["section_counts"]["style_preference"] == 0
+    assert p9["section_counts"]["active_work"] == 0
+    assert p9["production_mutation_performed"] is False
+    assert report["production_ready"] is False
+
+
+def test_product_activation_progress_keeps_p9_live_gap_for_local_agent_context_replay():
+    report = build_product_activation_progress_report(
+        live_evidence=_valid_p6_p7_p8_p9_runtime_evidence(live=False)
+    )
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p9 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P9")
+
+    assert checks["P9"]["result"] == "PASS_WITH_GAPS"
+    assert "p9_agent_context_evidence_not_live" in checks["P9"]["gaps"]
+    assert p9["product_sections_claim_status"] == "validated"
+    assert p9["startup_read_path_claim_status"] == "validated"
+    assert p9["evidence_is_live"] is False
+    assert report["production_ready"] is False
+
+
+def test_product_activation_progress_fails_p9_when_agent_context_tool_hint_is_unsafe():
+    evidence = _valid_p6_p7_p8_p9_runtime_evidence(live=True)
+    for hint in evidence["agent_context_product"]["tool_hints"]:
+        if hint["tool"] == "brain_approval_board_decide":
+            hint["execute_allowed"] = True
+            hint["production_mutation_allowed"] = True
+            hint["safe_targets"] = ["production"]
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p9 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P9")
+
+    assert report["status"] == "FAIL"
+    assert checks["P9"]["result"] == "FAIL"
+    assert "p9_agent_context_tool_hints_failed" in checks["P9"]["failures"]
+    assert "p9_brain_approval_board_decide_tool_hint_execute_allowed" in checks["P9"]["gaps"]
+    assert "p9_brain_approval_board_decide_tool_hint_production_mutation_allowed" in checks["P9"]["gaps"]
+    assert "p9_brain_approval_board_decide_tool_hint_safe_targets_not_allowed" in checks["P9"]["gaps"]
+    assert p9["tool_hints_claim_status"] == "failed"
+    assert report["production_ready"] is False
 
 
 def test_product_activation_progress_closes_p3_gap_with_live_projection_join_evidence():
