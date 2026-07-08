@@ -2096,9 +2096,11 @@ def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dic
     identity_status = str(identity_claim.get("status") or "not_validated")
     provenance_status = _p8_scoped_provenance_status(provenance_claim)
     authority_write_performed = permission_claim.get("production_mutation_performed") is True
+    desired_state_mutation_performed = desired_state_claim.get("production_mutation_performed") is True
     production_mutation_performed = bool(
         authority_write_performed
         or permission_claim.get("production_mutation_performed") is True
+        or desired_state_mutation_performed
     )
     status = _p8_runtime_authority_product_status(
         permission_status=permission_status,
@@ -2130,6 +2132,7 @@ def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dic
         ),
         "gitops_desired_state_source": str(desired_state_claim.get("desired_state_source") or ""),
         "gitops_desired_state_target_revision": str(desired_state_claim.get("target_revision") or ""),
+        "gitops_desired_state_mutation_performed": desired_state_mutation_performed,
         "deployed_identity_claim_status": identity_status,
         "source_commit_matches_pr_head": source_commit_matches,
         "deployed_identity_source": str(identity_claim.get("identity_source") or ""),
