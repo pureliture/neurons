@@ -98,6 +98,47 @@ def test_runtime_truth_pack_requires_typed_runtime_verified_evidence():
     assert typed["verification"]["runtime_verified"][0]["evidence_id"] == "ev:runtime:stable"
 
 
+def test_agent_context_object_packs_marks_current_preferences_as_accepted_current():
+    packs = build_agent_context_object_packs(
+        documents=[],
+        preferences=[
+            {
+                "rule": "Use concise Korean status updates.",
+                "currentness": "current",
+                "evidence_refs": ["mem_pref"],
+            },
+            {
+                "rule": "Candidate visualization preference.",
+                "currentness": "unknown",
+                "evidence_refs": ["mem_candidate"],
+            },
+            {
+                "rule": "Use stale verbose status updates.",
+                "currentness": "stale",
+                "evidence_refs": ["mem_stale"],
+            },
+        ],
+        style_profile={"claims": [{"claim": "Repository prefers compact summaries."}]},
+        current_work=[],
+        required_verification=[],
+        guardrails=[],
+    )
+
+    preference_pack = packs["preferences"]
+    style_pack = packs["style"]
+    assert [obj["title"] for obj in preference_pack["lanes"]["accepted_current"]] == [
+        "Use concise Korean status updates."
+    ]
+    assert [obj["title"] for obj in preference_pack["lanes"]["proposal_only"]] == [
+        "Candidate visualization preference."
+    ]
+    assert "Use stale verbose status updates." not in [
+        obj["title"] for obj in preference_pack["objects"]
+    ]
+    assert style_pack["lanes"]["accepted_current"] == []
+    assert style_pack["lanes"]["reference_only"][0]["title"] == "Repository prefers compact summaries."
+
+
 def test_candidate_graph_review_pack_exposes_editable_review_surface_without_authority_write():
     evidence = EvidenceRef.from_parts(
         evidence_type="source_hash",

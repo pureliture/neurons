@@ -418,5 +418,55 @@ def test_agent_context_product_pack_discloses_reference_only_current_authority_g
     )
 
 
+def test_agent_context_product_pack_discloses_reference_only_style_preference_gap():
+    product = build_agent_context_product_pack(
+        consumer="codex",
+        block={
+            "object_packs": {
+                "documentation_cleanup": {
+                    "lanes": {
+                        "accepted_current": [{"object_id": "obj:doc"}],
+                    },
+                    "objects": [
+                        {
+                            "object_id": "obj:doc",
+                            "object_type": "RepoDocument",
+                            "title": "README.md",
+                            "authority_lane": "accepted_current",
+                            "recommended_action": "keep",
+                        },
+                    ],
+                },
+                "style": {
+                    "lanes": {
+                        "reference_only": [{"object_id": "obj:style"}],
+                    },
+                    "objects": [
+                        {
+                            "object_id": "obj:style",
+                            "object_type": "StyleRule",
+                            "title": "Repository prefers compact summaries.",
+                            "authority_lane": "reference_only",
+                            "recommended_action": "review",
+                        },
+                    ],
+                },
+            },
+        },
+        gaps=[],
+        cards=[],
+    )
+
+    section = product["sections"]["style_preference"]
+    assert section["object_count"] == 1
+    assert section["authority_lanes"] == ["reference_only"]
+    assert "agent_context_style_preference_accepted_current_missing" in section["gaps"]
+    assert "agent_context_style_preference_accepted_current_missing" in product["degraded_mode"]["gaps"]
+    assert (
+        "agent_context_style_preference_accepted_current_missing"
+        in product["missing_evidence_before_promotion"]
+    )
+
+
 def test_needs_runtime_evidence_handles_missing_current_request():
     assert needs_runtime_evidence(None, ["deploy/status.md"]) is True

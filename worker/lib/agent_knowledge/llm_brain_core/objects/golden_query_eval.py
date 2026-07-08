@@ -1205,6 +1205,7 @@ _P9_LIVE_GAP_ONLY_VALUES = frozenset(
         "live_agent_context_product_sections_unverified",
         "live_agent_context_current_authority_missing",
         "live_agent_context_current_authority_accepted_current_missing",
+        "live_agent_context_style_preference_accepted_current_missing",
         "live_agent_context_startup_unverified",
         "production_startup_read_path_unproven",
         "production_consumer_context_pack_live_unproven",

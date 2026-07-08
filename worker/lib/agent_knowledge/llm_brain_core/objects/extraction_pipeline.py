@@ -995,7 +995,6 @@ def _object_search_text(obj: Mapping[str, Any]) -> str:
     text = " ".join(
         [
             str(obj.get("title") or ""),
-            str(obj.get("summary") or ""),
             str(payload.get("scope") or ""),
             str(payload.get("repo_scope") or ""),
         ]

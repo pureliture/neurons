@@ -51,11 +51,15 @@ def _fake_agent_context_product(*, consumer: str = "codex") -> dict:
                             "object_id": f"fixture:{name}",
                             "object_type": "MemoryCard",
                             "title": name,
-                            "authority_lane": name,
+                            "authority_lane": (
+                                "accepted_current" if name == "style_preference" else name
+                            ),
                             "recommended_action": "read",
                         }
                     ],
-                    "authority_lanes": [name],
+                    "authority_lanes": [
+                        "accepted_current" if name == "style_preference" else name
+                    ],
                     "gaps": [],
                 }
                 for name in REQUIRED_AGENT_CONTEXT_SECTIONS
