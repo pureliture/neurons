@@ -604,7 +604,7 @@ def _product_evidence_summary(
     p4 = _p4_replacement_current_evidence(live_evidence=live_evidence)
     p6 = _p6_session_project_rollup_evidence(live_evidence=live_evidence)
     p7 = _p7_preference_artifact_evidence(live_evidence=live_evidence)
-    p8 = _p8_runtime_authority_evidence()
+    p8 = _p8_runtime_authority_evidence(live_evidence=live_evidence)
     p9 = _p9_agent_context_evidence(preference_preview=p7)
     return [p2, p3, p4, p6, p7, p8, p9]
 
@@ -962,6 +962,8 @@ def _p7_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
 
 
 def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
+    if evidence.get("evidence_source") == "live_runtime_authority_packet":
+        return _p8_live_runtime_authority_failures(evidence)
     failures: list[str] = []
     if evidence.get("schema_version") != "object_extraction_runtime_truth_preview.v1":
         failures.append("p8_schema_mismatch")
@@ -1093,6 +1095,8 @@ def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
 
 
 def _p8_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    if evidence.get("evidence_source") == "live_runtime_authority_packet":
+        return _p8_live_runtime_authority_gaps(evidence)
     gaps: list[str] = []
     source_commit_matches_pr_head = evidence.get("source_commit_matches_pr_head")
     if source_commit_matches_pr_head is not True and source_commit_matches_pr_head is not False:
@@ -1122,6 +1126,43 @@ def _p8_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
             if isinstance(route, str) and route
         )
     return gaps
+
+
+def _p8_live_runtime_authority_failures(evidence: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if evidence.get("schema_version") != "object_extraction_runtime_truth_preview.v1":
+        failures.append("p8_schema_mismatch")
+    if evidence.get("status") == "FAIL":
+        failures.append("p8_runtime_authority_live_failed")
+    if evidence.get("runtime_readiness_status") == "FAIL":
+        failures.append("p8_runtime_readiness_failed")
+    if evidence.get("permission_audit_claim_status") == "failed":
+        failures.append("p8_permission_sensitive_audit_runtime_failed")
+    if evidence.get("evidence_provenance_status") == "failed":
+        failures.append("p8_evidence_provenance_failed")
+    if evidence.get("source_commit_matches_pr_head") is False:
+        failures.append("p8_source_commit_mismatch_with_pr_head")
+    if bool(evidence.get("authority_write_performed")):
+        failures.append("p8_authority_write_performed")
+    if bool(evidence.get("production_mutation_performed")):
+        failures.append("p8_production_mutation_performed")
+    return _dedupe(failures)
+
+
+def _p8_live_runtime_authority_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    gaps = [
+        f"p8_{gap}"
+        for gap in evidence.get("gaps", [])
+        if isinstance(gap, str) and gap
+    ]
+    if evidence.get("source_commit_matches_pr_head") is None:
+        gaps.append("p8_source_commit_matches_pr_head_unverified")
+    if (
+        evidence.get("permission_audit_claim_status") == "validated"
+        and evidence.get("evidence_is_live") is not True
+    ):
+        gaps.append("p8_runtime_authority_evidence_not_live")
+    return _dedupe(gaps)
 
 
 def _p9_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
@@ -1594,7 +1635,14 @@ def _p7_preference_artifact_product_status(
     return "PASS_WITH_GAPS"
 
 
-def _p8_runtime_authority_evidence() -> dict[str, Any]:
+def _p8_runtime_authority_evidence(
+    *, live_evidence: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    if live_evidence:
+        live_summary = _p8_live_runtime_authority_evidence(live_evidence)
+        if live_summary:
+            return live_summary
+
     from .extraction_pipeline import run_runtime_truth_extraction_preview
     from .runtime_readiness import (
         AGENT_CONTEXT_STARTUP_RUNTIME_SCHEMA,
@@ -1933,6 +1981,114 @@ def _p8_runtime_authority_evidence() -> dict[str, Any]:
     }
 
 
+def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dict[str, Any]:
+    from .runtime_readiness import build_source_to_candidate_runtime_readiness_report
+
+    identity = live_evidence.get("deployed_identity")
+    identity = identity if isinstance(identity, Mapping) else {}
+    audit = live_evidence.get("permission_sensitive_audit")
+    audit = audit if isinstance(audit, Mapping) else {}
+    if not identity and not audit:
+        return {}
+
+    expected_commit = str(live_evidence.get("expected_commit") or "")
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=live_evidence,
+        expected_commit=expected_commit,
+    )
+    claims = {
+        str(item.get("claim_id") or ""): item
+        for item in (report.get("claims") or [])
+        if isinstance(item, Mapping)
+    }
+    permission_claim = claims.get("live.production.permission_sensitive_audit", {})
+    identity_claim = claims.get("live.deployed_identity.includes_expected_commit", {})
+    provenance_claim = claims.get("live.evidence.provenance", {})
+    p8_claims = [permission_claim, identity_claim, provenance_claim]
+    claim_gaps = _dedupe(
+        gap
+        for claim in p8_claims
+        for gap in (claim.get("gaps") or [])
+        if isinstance(gap, str) and gap
+    )
+    evidence_is_live = bool(report.get("evidence_is_live"))
+    permission_status = str(permission_claim.get("status") or "not_validated")
+    identity_status = str(identity_claim.get("status") or "not_validated")
+    provenance_status = str(provenance_claim.get("status") or "not_validated")
+    authority_write_performed = permission_claim.get("production_mutation_performed") is True
+    production_mutation_performed = bool(
+        report.get("production_mutation_performed")
+        or authority_write_performed
+        or provenance_claim.get("production_mutation_performed")
+        or live_evidence.get("production_mutation_performed") is True
+        or live_evidence.get("mutation_performed") is True
+    )
+    status = _p8_runtime_authority_product_status(
+        permission_status=permission_status,
+        identity_status=identity_status,
+        provenance_status=provenance_status,
+        evidence_is_live=evidence_is_live,
+        production_mutation_performed=production_mutation_performed,
+        gaps=claim_gaps,
+    )
+    source_commit_matches = None
+    if identity:
+        source_commit_matches = identity.get("contains_expected_commit") is True
+    return {
+        "phase": "P8",
+        "schema_version": "object_extraction_runtime_truth_preview.v1",
+        "evidence_source": "live_runtime_authority_packet",
+        "status": status,
+        "golden_query_slice": "pr merge and deploy truth",
+        "runtime_readiness_schema": str(report.get("schema_version") or ""),
+        "runtime_readiness_status": str(report.get("status") or ""),
+        "live_evidence_provided": bool(report.get("live_evidence_provided")),
+        "evidence_is_live": evidence_is_live,
+        "production_ready": False,
+        "permission_audit_claim_status": permission_status,
+        "permission_audit_event_count": int(permission_claim.get("event_count") or 0),
+        "permission_audit_store_status": str(permission_claim.get("audit_store_status") or ""),
+        "deployed_identity_claim_status": identity_status,
+        "source_commit_matches_pr_head": source_commit_matches,
+        "deployed_identity_source": str(identity_claim.get("identity_source") or ""),
+        "evidence_provenance_status": provenance_status,
+        "evidence_collection_mode": str(provenance_claim.get("collection_mode") or ""),
+        "evidence_collection_network_used": provenance_claim.get("network_used_for_evidence") is True,
+        "evidence_mutation_scope": str(provenance_claim.get("mutation_scope") or ""),
+        "evidence_redaction_check": str(provenance_claim.get("redaction_check") or ""),
+        "authority_write_performed": authority_write_performed,
+        "production_mutation_performed": production_mutation_performed,
+        "gaps": claim_gaps,
+    }
+
+
+def _p8_runtime_authority_product_status(
+    *,
+    permission_status: str,
+    identity_status: str,
+    provenance_status: str,
+    evidence_is_live: bool,
+    production_mutation_performed: bool,
+    gaps: list[str],
+) -> str:
+    if (
+        permission_status == "failed"
+        or identity_status == "failed"
+        or provenance_status == "failed"
+        or production_mutation_performed
+    ):
+        return "FAIL"
+    if (
+        permission_status == "validated"
+        and identity_status == "validated"
+        and provenance_status == "validated"
+        and evidence_is_live
+        and not gaps
+    ):
+        return "PASS"
+    return "PASS_WITH_GAPS"
+
+
 def _p8_branch_local_runtime_route_smoke(route: str) -> dict[str, Any]:
     gaps = ["runtime_evidence_unverified"] if route == "deployment_runtime_truth" else []
     return {
@@ -2095,6 +2251,10 @@ def _apply_product_evidence_to_phase_progress(
         "P7": {
             "accepted_preference_context_pack_live_unproven",
             "html_artifact_review_live_unproven",
+        },
+        "P8": {
+            "live_runtime_rollout_identity_unproven",
+            "production_permission_audit_live_unproven",
         },
     }
     adjusted: list[dict[str, Any]] = []

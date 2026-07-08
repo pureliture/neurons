@@ -978,6 +978,43 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert "live_evidence_provenance_unverified" in report["gaps"]
 
 
+def test_runtime_readiness_does_not_treat_deployed_identity_as_permission_audit():
+    evidence = {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "deployed_identity": {
+            "contains_expected_commit": True,
+            "identity_source": "redacted_artifact_identity_summary",
+        },
+        "evidence_provenance": {
+            "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
+            "collection_mode": "post_deploy_read_only_smoke",
+            "mutation_scope": "none",
+            "network_used": True,
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": False,
+    }
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit="7218cb2",
+    )
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["evidence_is_live"] is True
+    assert report["production_ready"] is False
+    assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "validated"
+    assert claims["live.production.permission_sensitive_audit"]["status"] == "not_validated"
+    assert claims["live.evidence.provenance"]["status"] == "validated"
+    assert "permission_sensitive_audit_unverified" in report["gaps"]
+    assert "live_deployed_identity_unverified" not in report["gaps"]
+    assert report["production_mutation_performed"] is False
+
+
 def test_runtime_readiness_passes_with_sanitized_live_evidence():
     report = build_source_to_candidate_runtime_readiness_report(
         live_evidence=_sanitized_live_evidence(),
