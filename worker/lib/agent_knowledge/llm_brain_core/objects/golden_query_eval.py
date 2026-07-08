@@ -605,7 +605,7 @@ def _product_evidence_summary(
     p6 = _p6_session_project_rollup_evidence(live_evidence=live_evidence)
     p7 = _p7_preference_artifact_evidence(live_evidence=live_evidence)
     p8 = _p8_runtime_authority_evidence(live_evidence=live_evidence)
-    p9 = _p9_agent_context_evidence(preference_preview=p7)
+    p9 = _p9_agent_context_evidence(preference_preview=p7, live_evidence=live_evidence)
     return [p2, p3, p4, p6, p7, p8, p9]
 
 
@@ -1164,6 +1164,8 @@ def _p8_live_runtime_authority_gaps(evidence: Mapping[str, Any]) -> list[str]:
 
 
 def _p9_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
+    if evidence.get("evidence_source") == "live_agent_context_packet":
+        return _p9_live_agent_context_failures(evidence)
     failures: list[str] = []
     if evidence.get("schema_version") != "agent_context_product_pack.v1":
         failures.append("p9_schema_mismatch")
@@ -1185,11 +1187,76 @@ def _p9_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
 
 
 def _p9_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    if evidence.get("evidence_source") == "live_agent_context_packet":
+        return _p9_live_agent_context_prefixed_gaps(evidence)
     return [
         f"p9_{gap}"
         for gap in evidence.get("gaps", [])
         if isinstance(gap, str) and gap
     ]
+
+
+_P9_LIVE_GAP_ONLY_PREFIXES = (
+    "live_agent_context_section_missing:",
+    "agent_context_startup_section_missing:",
+)
+_P9_LIVE_GAP_ONLY_VALUES = frozenset(
+    {
+        "live_agent_context_product_sections_unverified",
+        "live_agent_context_startup_unverified",
+        "production_startup_read_path_unproven",
+        "production_consumer_context_pack_live_unproven",
+        "consumer_action_surface_runtime_policy_unproven",
+        "agent_context_evidence_not_live",
+    }
+)
+
+
+def _p9_live_agent_context_failures(evidence: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if evidence.get("schema_version") != "agent_context_product_pack.v1":
+        failures.append("p9_schema_mismatch")
+    if evidence.get("tool_hints_claim_status") == "failed":
+        failures.append("p9_agent_context_tool_hints_failed")
+    if (
+        evidence.get("product_sections_claim_status") == "failed"
+        and _p9_live_has_blocking_gap(evidence)
+    ):
+        failures.append("p9_agent_context_product_sections_failed")
+    if (
+        evidence.get("startup_read_path_claim_status") == "failed"
+        and _p9_live_has_blocking_gap(evidence)
+    ):
+        failures.append("p9_agent_context_startup_read_path_failed")
+    if evidence.get("evidence_provenance_status") == "failed":
+        failures.append("p9_evidence_provenance_failed")
+    if bool(evidence.get("production_mutation_performed")):
+        failures.append("p9_production_mutation_performed")
+    return _dedupe(failures)
+
+
+def _p9_live_agent_context_prefixed_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    return [
+        f"p9_{gap}"
+        for gap in evidence.get("gaps", [])
+        if isinstance(gap, str) and gap
+    ]
+
+
+def _p9_live_has_blocking_gap(evidence: Mapping[str, Any]) -> bool:
+    return any(
+        _p9_live_gap_is_blocking(gap)
+        for gap in evidence.get("gaps", [])
+        if isinstance(gap, str) and gap
+    )
+
+
+def _p9_live_gap_is_blocking(gap: str) -> bool:
+    if gap in _P9_LIVE_GAP_ONLY_VALUES:
+        return False
+    if any(gap.startswith(prefix) for prefix in _P9_LIVE_GAP_ONLY_PREFIXES):
+        return False
+    return True
 
 
 def _p9_tool_hint_safety_summary(tool_hints: Any) -> dict[str, Any]:
@@ -2144,7 +2211,17 @@ def _p8_branch_local_runtime_route_smoke(route: str) -> dict[str, Any]:
     }
 
 
-def _p9_agent_context_evidence(*, preference_preview: Mapping[str, Any]) -> dict[str, Any]:
+def _p9_agent_context_evidence(
+    *,
+    preference_preview: Mapping[str, Any],
+    live_evidence: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if live_evidence and (
+        isinstance(live_evidence.get("agent_context_product"), Mapping)
+        or isinstance(live_evidence.get("agent_context_startup_runtime"), Mapping)
+    ):
+        return _p9_live_agent_context_evidence(live_evidence)
+
     from ..context_builder import build_agent_context_product_pack
 
     preference_object = {
@@ -2232,6 +2309,145 @@ def _p9_agent_context_evidence(*, preference_preview: Mapping[str, Any]) -> dict
     }
 
 
+def _p9_live_agent_context_evidence(live_evidence: Mapping[str, Any]) -> dict[str, Any]:
+    from .runtime_readiness import build_source_to_candidate_runtime_readiness_report
+
+    product = live_evidence.get("agent_context_product")
+    product = product if isinstance(product, Mapping) else {}
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=live_evidence,
+        expected_commit=str(live_evidence.get("expected_commit") or ""),
+    )
+    claims = {
+        str(item.get("claim_id") or ""): item
+        for item in (report.get("claims") or [])
+        if isinstance(item, Mapping)
+    }
+    tool_hints = claims.get("live.agent_context.tool_hints", {})
+    product_sections = claims.get("live.agent_context.product_sections", {})
+    startup = claims.get("live.agent_context.startup_read_path", {})
+    provenance = claims.get("live.evidence.provenance", {})
+    section_counts = _p9_live_section_counts(live_evidence)
+    tool_hint_safety = _p9_tool_hint_safety_summary(product.get("tool_hints"))
+    claim_gaps = _dedupe(
+        gap
+        for claim in (tool_hints, product_sections, startup, provenance)
+        for gap in claim.get("gaps", [])
+        if isinstance(gap, str) and gap
+    )
+    evidence_is_live = bool(report.get("evidence_is_live"))
+    status = _p9_live_agent_context_product_status(
+        tool_hints_status=str(tool_hints.get("status") or "not_validated"),
+        product_sections_status=str(product_sections.get("status") or "not_validated"),
+        startup_status=str(startup.get("status") or "not_validated"),
+        provenance_status=str(provenance.get("status") or "not_validated"),
+        evidence_is_live=evidence_is_live,
+        production_mutation_performed=bool(startup.get("production_mutation_performed")),
+        gaps=claim_gaps,
+    )
+    return {
+        "phase": "P9",
+        "schema_version": "agent_context_product_pack.v1",
+        "evidence_source": "live_agent_context_packet",
+        "status": status,
+        "consumer": str(product_sections.get("consumer") or ""),
+        "section_counts": section_counts,
+        "tool_hint_count": len(product.get("tool_hints") or []),
+        "tool_hint_safe_target_count": tool_hint_safety["tool_hint_safe_target_count"],
+        "unsafe_tool_hint_count": tool_hint_safety["unsafe_tool_hint_count"],
+        "tool_hint_safety_failures": [
+            f"p9_{gap}" for gap in (tool_hints.get("unsafe_tool_hints") or []) if isinstance(gap, str) and gap
+        ],
+        "action_hint_count": len(product.get("action_hints") or []),
+        "mutation_allowed": product_sections.get("mutation_allowed") is True,
+        "runtime_readiness_schema": str(report.get("schema_version") or ""),
+        "runtime_readiness_status": str(report.get("status") or ""),
+        "live_evidence_provided": bool(report.get("live_evidence_provided")),
+        "evidence_is_live": evidence_is_live,
+        "production_ready": False,
+        "tool_hints_claim_status": str(tool_hints.get("status") or "not_validated"),
+        "product_sections_claim_status": str(product_sections.get("status") or "not_validated"),
+        "startup_read_path_claim_status": str(startup.get("status") or "not_validated"),
+        "evidence_provenance_status": str(provenance.get("status") or "not_validated"),
+        "startup_loaded": startup.get("startup_loaded") is True,
+        "read_path_tool": str(startup.get("read_path_tool") or ""),
+        "routes_checked": list(startup.get("routes_checked") or []),
+        "degraded_mode_active": bool(claim_gaps or not evidence_is_live),
+        "gaps": _p9_live_agent_context_gaps(
+            claim_gaps=claim_gaps,
+            evidence_is_live=evidence_is_live,
+            product_sections_status=str(product_sections.get("status") or "not_validated"),
+            startup_status=str(startup.get("status") or "not_validated"),
+        ),
+        "production_mutation_performed": bool(startup.get("production_mutation_performed")),
+    }
+
+
+def _p9_live_section_counts(live_evidence: Mapping[str, Any]) -> dict[str, int]:
+    product = live_evidence.get("agent_context_product")
+    product = product if isinstance(product, Mapping) else {}
+    sections = product.get("sections") if isinstance(product.get("sections"), Mapping) else {}
+    counts: dict[str, int] = {}
+    for section in ("style_preference", "active_work", "required_verification"):
+        value = sections.get(section)
+        if isinstance(value, Mapping):
+            counts[section] = int(value.get("object_count") or 0)
+    startup = live_evidence.get("agent_context_startup_runtime")
+    startup = startup if isinstance(startup, Mapping) else {}
+    context = startup.get("startup_context") if isinstance(startup.get("startup_context"), Mapping) else {}
+    startup_counts = context.get("section_counts") if isinstance(context.get("section_counts"), Mapping) else {}
+    for section in ("style_preference", "active_work", "required_verification"):
+        if section not in counts:
+            counts[section] = int(startup_counts.get(section) or 0)
+    return counts
+
+
+def _p9_live_agent_context_gaps(
+    *,
+    claim_gaps: list[str],
+    evidence_is_live: bool,
+    product_sections_status: str,
+    startup_status: str,
+) -> list[str]:
+    gaps = list(claim_gaps)
+    if product_sections_status != "validated":
+        gaps.append("production_consumer_context_pack_live_unproven")
+    if startup_status != "validated":
+        gaps.append("consumer_action_surface_runtime_policy_unproven")
+    if not evidence_is_live:
+        gaps.append("agent_context_evidence_not_live")
+    return _dedupe(gaps)
+
+
+def _p9_live_agent_context_product_status(
+    *,
+    tool_hints_status: str,
+    product_sections_status: str,
+    startup_status: str,
+    provenance_status: str,
+    evidence_is_live: bool,
+    production_mutation_performed: bool,
+    gaps: list[str],
+) -> str:
+    if (
+        tool_hints_status == "failed"
+        or provenance_status == "failed"
+        or production_mutation_performed
+        or any(_p9_live_gap_is_blocking(gap) for gap in gaps)
+    ):
+        return "FAIL"
+    if (
+        tool_hints_status == "validated"
+        and product_sections_status == "validated"
+        and startup_status == "validated"
+        and provenance_status == "validated"
+        and evidence_is_live
+        and not gaps
+    ):
+        return "PASS"
+    return "PASS_WITH_GAPS"
+
+
 def _golden_slice(report: Mapping[str, Any]) -> str:
     evaluator = report.get("evaluator_report") if isinstance(report.get("evaluator_report"), Mapping) else {}
     return str(evaluator.get("golden_query_slice") or "")
@@ -2291,6 +2507,10 @@ def _apply_product_evidence_to_phase_progress(
         "P8": {
             "live_runtime_rollout_identity_unproven",
             "production_permission_audit_live_unproven",
+        },
+        "P9": {
+            "production_consumer_context_pack_live_unproven",
+            "consumer_action_surface_runtime_policy_unproven",
         },
     }
     adjusted: list[dict[str, Any]] = []
