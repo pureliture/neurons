@@ -61,6 +61,12 @@ AGENT_CONTEXT_REQUIRED_SECTION_GAPS = {
     "active_work": "agent_context_active_work_missing",
     "required_verification": "agent_context_required_verification_missing",
 }
+AGENT_CONTEXT_CURRENT_AUTHORITY_SECTION = "current_authority"
+AGENT_CONTEXT_REQUIRED_AUTHORITY_LANE = "accepted_current"
+AGENT_CONTEXT_CURRENT_AUTHORITY_MISSING_GAP = "agent_context_current_authority_missing"
+AGENT_CONTEXT_CURRENT_AUTHORITY_ACCEPTED_CURRENT_MISSING_GAP = (
+    "agent_context_current_authority_accepted_current_missing"
+)
 
 
 class ContextPackBuilder:
@@ -369,14 +375,37 @@ def required_agent_context_section_gaps(sections: Mapping[str, Any]) -> dict[str
     gaps: dict[str, str] = {}
     for section_name, gap in AGENT_CONTEXT_REQUIRED_SECTION_GAPS.items():
         section = sections.get(section_name)
-        object_count = section.get("object_count") if isinstance(section, Mapping) else 0
-        try:
-            count = int(object_count or 0)
-        except (TypeError, ValueError):
-            count = 0
+        count = _agent_context_section_object_count(section)
         if count < 1:
             gaps[section_name] = gap
+    authority_section = sections.get(AGENT_CONTEXT_CURRENT_AUTHORITY_SECTION)
+    authority_count = _agent_context_section_object_count(authority_section)
+    authority_lanes = _agent_context_section_authority_lanes(authority_section)
+    if authority_count < 1:
+        gaps[AGENT_CONTEXT_CURRENT_AUTHORITY_SECTION] = AGENT_CONTEXT_CURRENT_AUTHORITY_MISSING_GAP
+    elif AGENT_CONTEXT_REQUIRED_AUTHORITY_LANE not in authority_lanes:
+        gaps[AGENT_CONTEXT_CURRENT_AUTHORITY_SECTION] = (
+            AGENT_CONTEXT_CURRENT_AUTHORITY_ACCEPTED_CURRENT_MISSING_GAP
+        )
     return gaps
+
+
+def _agent_context_section_object_count(section: Any) -> int:
+    if not isinstance(section, Mapping):
+        return 0
+    try:
+        return int(section.get("object_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _agent_context_section_authority_lanes(section: Any) -> set[str]:
+    if not isinstance(section, Mapping):
+        return set()
+    lanes = section.get("authority_lanes")
+    if not isinstance(lanes, list):
+        return set()
+    return {str(lane) for lane in lanes if str(lane or "")}
 
 
 def missing_evidence_before_promotion(gaps: list[str]) -> list[str]:

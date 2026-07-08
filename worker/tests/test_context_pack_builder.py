@@ -211,18 +211,22 @@ def test_builder_adds_consumer_specific_compact_agent_context_pack_with_safe_act
         ]
         assert product["surface_policy"]["mutation_allowed"] is False
         assert product["sections"]["reference_objects"]["object_count"] >= 1
+        expected_blockers = [
+            "runtime_evidence_unverified",
+            "agent_context_current_authority_accepted_current_missing",
+        ]
         assert product["action_hints"] == [
             {
                 "action": "request_missing_evidence",
                 "suggest_allowed": True,
                 "execute_allowed": False,
-                "blocked_by": ["runtime_evidence_unverified"],
+                "blocked_by": expected_blockers,
             },
             {
                 "action": "promote_authority",
                 "suggest_allowed": True,
                 "execute_allowed": False,
-                "blocked_by": ["approved_scope_required", "runtime_evidence_unverified"],
+                "blocked_by": ["approved_scope_required", *expected_blockers],
             },
         ]
         tool_hints = {item["tool"]: item for item in product["tool_hints"]}
@@ -245,7 +249,7 @@ def test_builder_adds_consumer_specific_compact_agent_context_pack_with_safe_act
         assert "accepted_current_authority" in tool_hints["brain_candidate_review_edit"]["blocked_targets"]
         assert tool_hints["brain_approval_board_decide"]["blocked_by"] == [
             "approved_scope_required",
-            "runtime_evidence_unverified",
+            *expected_blockers,
         ]
         assert tool_hints["brain_approval_board_decide"]["production_mutation_allowed"] is False
         readiness_hint = tool_hints["brain_source_to_candidate_runtime_readiness"]
@@ -370,6 +374,48 @@ def test_agent_context_product_pack_defensively_compacts_dynamic_object_packs():
     assert section["object_count"] == 1
     assert section["items"][0]["title"] == "Current preference"
     assert section["gaps"] == []
+
+
+def test_agent_context_product_pack_discloses_reference_only_current_authority_gap():
+    product = build_agent_context_product_pack(
+        consumer="codex",
+        block={
+            "object_packs": {
+                "documentation_cleanup": {
+                    "lanes": {
+                        "accepted_current": [],
+                        "reference_only": [{"object_id": "obj:doc"}],
+                    },
+                    "gaps": ["accepted_current documents empty"],
+                    "objects": [
+                        {
+                            "object_id": "obj:doc",
+                            "object_type": "RepoDocument",
+                            "title": "docs/specs/roadmap.md",
+                            "authority_lane": "reference_only",
+                            "recommended_action": "review",
+                        },
+                    ],
+                },
+            },
+        },
+        gaps=[],
+        cards=[],
+    )
+
+    section = product["sections"]["current_authority"]
+    assert section["object_count"] == 1
+    assert section["authority_lanes"] == ["reference_only"]
+    assert "agent_context_current_authority_accepted_current_missing" in section["gaps"]
+    assert "agent_context_current_authority_accepted_current_missing" in product["degraded_mode"]["gaps"]
+    assert (
+        "agent_context_current_authority_accepted_current_missing"
+        in product["missing_evidence_before_promotion"]
+    )
+    assert (
+        "agent_context_current_authority_accepted_current_missing"
+        in product["action_hints"][1]["blocked_by"]
+    )
 
 
 def test_needs_runtime_evidence_handles_missing_current_request():
