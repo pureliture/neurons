@@ -1821,6 +1821,7 @@ def build_source_to_candidate_runtime_readiness_report(
         _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
         _live_object_authority_production_gate_policy_claim(evidence),
         _live_object_authority_bounded_execution_claim(evidence),
+        _live_object_authority_replacement_current_claim(evidence),
         *[
             _production_denial_claim(evidence, claim_id=claim_id, tool_name=tool_name)
             for claim_id, tool_name in PRODUCTION_DENIAL_CLAIMS
@@ -1992,10 +1993,13 @@ def _evidence_execution_reports_mutation(evidence: Mapping[str, Any]) -> bool:
     execution = execution if isinstance(execution, Mapping) else {}
     proposal = execution.get("proposal") if isinstance(execution.get("proposal"), Mapping) else {}
     decision = execution.get("decision") if isinstance(execution.get("decision"), Mapping) else {}
+    replacement = evidence.get("production_authority_replacement_current")
+    replacement = replacement if isinstance(replacement, Mapping) else {}
     return (
         evidence.get("production_mutation_performed") is True
         or evidence.get("mutation_performed") is True
         or _bounded_execution_reports_mutation(proposal, decision)
+        or _replacement_current_reports_mutation(replacement)
     )
 
 
@@ -3307,6 +3311,195 @@ def _bounded_execution_reports_mutation(proposal: Mapping[str, Any], decision: M
         or proposal.get("proposal_write_performed") is True
         or decision.get("production_mutation_performed") is True
         or decision.get("authority_write_performed") is True
+    )
+
+
+def _live_object_authority_replacement_current_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    replacement = evidence.get("production_authority_replacement_current")
+    replacement = replacement if isinstance(replacement, Mapping) else {}
+    if not replacement:
+        return {
+            "claim_id": "live.production.object_authority_replacement_current",
+            "evidence_class": "runtime_safety_gate",
+            "status": "not_validated",
+            "production_mutation_performed": False,
+            "gaps": [],
+        }
+    approval = replacement.get("approval") if isinstance(replacement.get("approval"), Mapping) else {}
+    prior = replacement.get("prior_current") if isinstance(replacement.get("prior_current"), Mapping) else {}
+    successor = (
+        replacement.get("successor_current")
+        if isinstance(replacement.get("successor_current"), Mapping)
+        else {}
+    )
+    read_after_write = (
+        replacement.get("read_after_write")
+        if isinstance(replacement.get("read_after_write"), Mapping)
+        else {}
+    )
+    postcheck = replacement.get("postcheck") if isinstance(replacement.get("postcheck"), Mapping) else {}
+    scope = replacement.get("scope") if isinstance(replacement.get("scope"), Mapping) else {}
+    approval_ref_hash = public_safe_text(str(approval.get("approval_ref_hash") or ""), max_chars=120)
+    prior_target = public_safe_text(str(prior.get("target_object_id") or ""), max_chars=180)
+    successor_target = public_safe_text(str(successor.get("target_object_id") or ""), max_chars=180)
+    prior_decision_id = public_safe_text(str(prior.get("decision_id") or ""), max_chars=180)
+    successor_decision_id = public_safe_text(str(successor.get("decision_id") or ""), max_chars=180)
+    object_ids = _string_list(scope.get("object_ids"))
+    replacement_path = _string_list(replacement.get("replacement_path"))
+    allowed_object_classes = set(_string_list(scope.get("allowed_object_classes")))
+    failures = _replacement_current_failures(
+        replacement=replacement,
+        approval=approval,
+        prior=prior,
+        successor=successor,
+        read_after_write=read_after_write,
+        postcheck=postcheck,
+        scope=scope,
+        approval_ref_hash=approval_ref_hash,
+        prior_target=prior_target,
+        successor_target=successor_target,
+        prior_decision_id=prior_decision_id,
+        successor_decision_id=successor_decision_id,
+        object_ids=object_ids,
+        replacement_path=replacement_path,
+        allowed_object_classes=allowed_object_classes,
+    )
+    return {
+        "claim_id": "live.production.object_authority_replacement_current",
+        "evidence_class": "runtime_safety_gate",
+        "status": "failed" if failures else "validated",
+        "schema_version": public_safe_text(str(replacement.get("schema_version") or ""), max_chars=80),
+        "prior_target_object_id": prior_target,
+        "successor_target_object_id": successor_target,
+        "prior_authority_lane": public_safe_text(str(prior.get("new_authority_lane") or ""), max_chars=80),
+        "successor_authority_lane": public_safe_text(str(successor.get("new_authority_lane") or ""), max_chars=80),
+        "read_after_write_status": public_safe_text(str(read_after_write.get("status") or ""), max_chars=80),
+        "postcheck_status": public_safe_text(str(postcheck.get("status") or ""), max_chars=80),
+        "object_count": len(object_ids),
+        "production_mutation_performed": _replacement_current_reports_mutation(replacement),
+        "gaps": failures,
+    }
+
+
+def _replacement_current_failures(
+    *,
+    replacement: Mapping[str, Any],
+    approval: Mapping[str, Any],
+    prior: Mapping[str, Any],
+    successor: Mapping[str, Any],
+    read_after_write: Mapping[str, Any],
+    postcheck: Mapping[str, Any],
+    scope: Mapping[str, Any],
+    approval_ref_hash: str,
+    prior_target: str,
+    successor_target: str,
+    prior_decision_id: str,
+    successor_decision_id: str,
+    object_ids: list[str],
+    replacement_path: list[str],
+    allowed_object_classes: set[str],
+) -> list[str]:
+    failures: list[str] = []
+    if replacement.get("schema_version") != "object_authority_replacement_current_evidence.v1":
+        failures.append("replacement_current_schema_mismatch")
+    if approval.get("approved") is not True:
+        failures.append("replacement_approval_missing")
+    if not _is_sha256_hash_ref(approval_ref_hash):
+        failures.append("replacement_approval_ref_hash_missing")
+    if str(approval.get("scope") or "") != "single_project_replacement_current":
+        failures.append("replacement_scope_not_single_project_replacement_current")
+    approval_project = str(approval.get("project") or "")
+    scope_project = str(scope.get("project") or "")
+    if not approval_project:
+        failures.append("replacement_approval_project_missing")
+    if not scope_project:
+        failures.append("replacement_scope_project_missing")
+    elif approval_project != scope_project:
+        failures.append("replacement_project_mismatch")
+    if _int_value(approval.get("max_objects")) != 2 or _int_value(scope.get("max_objects")) != 2:
+        failures.append("replacement_max_objects_not_two")
+    if len(object_ids) != 2:
+        failures.append("replacement_object_count_not_two")
+    if not prior_target or not successor_target or prior_target == successor_target:
+        failures.append("replacement_target_pair_invalid")
+    if prior_target and prior_target not in object_ids:
+        failures.append("replacement_prior_target_not_in_scope")
+    if successor_target and successor_target not in object_ids:
+        failures.append("replacement_successor_target_not_in_scope")
+    if any(target and not target.startswith("ko:RepoDocument:") for target in (prior_target, successor_target)):
+        failures.append("replacement_object_class_not_allowed")
+    if "RepoDocument" not in allowed_object_classes:
+        failures.append("replacement_allowed_object_class_missing")
+    if prior.get("proposal_write_performed") is not True or successor.get("proposal_write_performed") is not True:
+        failures.append("replacement_proposal_write_missing")
+    if prior.get("proposal_write_target") != "production_ledger" or successor.get("proposal_write_target") != "production_ledger":
+        failures.append("replacement_proposal_target_not_production")
+    if prior.get("ledger_scope") != "production" or successor.get("ledger_scope") != "production":
+        failures.append("replacement_ledger_scope_not_production")
+    if prior.get("authority_write_scope") != "production_ledger" or successor.get("authority_write_scope") != "production_ledger":
+        failures.append("replacement_decision_scope_not_production")
+    if prior.get("production_gate_ref_hash") != approval_ref_hash or successor.get("production_gate_ref_hash") != approval_ref_hash:
+        failures.append("replacement_gate_hash_mismatch")
+    if prior.get("decision_type") != "commit_supersession":
+        failures.append("replacement_prior_decision_not_supersession")
+    if prior.get("previous_authority_lane") != "accepted_current" or prior.get("new_authority_lane") not in {
+        "accepted_non_current",
+        "archive_only",
+    }:
+        failures.append("replacement_prior_not_demoted")
+    if successor.get("decision_type") != "accept_current":
+        failures.append("replacement_successor_decision_not_accept_current")
+    if successor.get("new_authority_lane") != "accepted_current":
+        failures.append("replacement_successor_not_current")
+    lineage_valid = (
+        successor.get("supersedes_decision_id") == prior_decision_id
+        or prior.get("supersedes_decision_id") == successor_decision_id
+    )
+    if not lineage_valid:
+        failures.append("replacement_successor_lineage_missing")
+    if prior.get("authority_write_performed") is not True or successor.get("authority_write_performed") is not True:
+        failures.append("replacement_decision_write_missing")
+    if prior.get("authoritative_memory_changed") is not True or successor.get("authoritative_memory_changed") is not True:
+        failures.append("replacement_authoritative_memory_not_changed")
+    if read_after_write.get("status") != "validated":
+        failures.append("replacement_read_after_write_missing")
+    if read_after_write.get("prior_decision_id") != prior_decision_id or read_after_write.get("successor_decision_id") != successor_decision_id:
+        failures.append("replacement_read_after_write_decision_mismatch")
+    if read_after_write.get("prior_authority_lane") not in {"accepted_non_current", "archive_only"}:
+        failures.append("replacement_read_after_write_prior_not_demoted")
+    if read_after_write.get("successor_authority_lane") != "accepted_current":
+        failures.append("replacement_read_after_write_successor_not_current")
+    if "demote_prior_object_to_accepted_non_current_or_archive_only" not in replacement_path:
+        failures.append("replacement_demote_prior_object_step_missing")
+    if "promote_successor_object_to_accepted_current" not in replacement_path:
+        failures.append("replacement_promote_successor_step_missing")
+    if postcheck.get("status") != "validated":
+        failures.append("replacement_postcheck_missing")
+    for field, gap in (
+        ("raw_private_evidence_returned", "replacement_raw_private_evidence_returned"),
+        ("secret_returned", "replacement_secret_returned"),
+        ("host_topology_returned", "replacement_host_topology_returned"),
+        ("raw_external_ids_returned", "replacement_raw_external_ids_returned"),
+    ):
+        if postcheck.get(field) is not False:
+            failures.append(gap)
+    return _dedupe(failures)
+
+
+def _replacement_current_reports_mutation(replacement: Mapping[str, Any]) -> bool:
+    prior = replacement.get("prior_current") if isinstance(replacement.get("prior_current"), Mapping) else {}
+    successor = (
+        replacement.get("successor_current")
+        if isinstance(replacement.get("successor_current"), Mapping)
+        else {}
+    )
+    return (
+        prior.get("production_mutation_performed") is True
+        or prior.get("proposal_write_performed") is True
+        or prior.get("authority_write_performed") is True
+        or successor.get("production_mutation_performed") is True
+        or successor.get("proposal_write_performed") is True
+        or successor.get("authority_write_performed") is True
     )
 
 
