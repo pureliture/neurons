@@ -18,6 +18,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Deployed operator/capture CLI support. This installs the MCP client library
+# without implying that the image should run the HTTP MCP server.
+mcp-client = ["mcp>=1.28.0"]
 # Streamable HTTP MCP transport (옵션). 기본 worker 이미지는 이 extra 없이 빌드되며
 # (trim 철학 보존), mcp-http 서비스만 별도 빌드에서 설치한다. 하한은 설치-검증 게이트에서
 # 실측 확정한 1.28.0으로 핀한다(StreamableHTTPSessionManager + low-level Server
