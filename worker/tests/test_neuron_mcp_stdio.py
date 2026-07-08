@@ -560,6 +560,13 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
             "contains_expected_commit": True,
             "identity_source": "redacted_live_runtime_evidence",
         },
+        "gitops_desired_state": {
+            "schema_version": "gitops_desired_state_identity.v1",
+            "images_include_expected_commit": True,
+            "desired_state_source": "sanitized_ops_manifest_summary",
+            "target_revision": "main",
+            "production_mutation_performed": False,
+        },
         "evidence_provenance": _runtime_evidence_provenance(
             collection_mode="post_deploy_read_only_smoke",
             mutation_scope="none",
@@ -688,6 +695,11 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_templ
     assert (
         template["packet_field_templates"]["agent_context_startup_runtime"]["schema_version"]
         == "agent_context_startup_runtime_evidence.v1"
+    )
+    assert "gitops_desired_state" in template["required_packet_fields"]
+    assert (
+        template["packet_field_templates"]["gitops_desired_state"]["schema_version"]
+        == "gitops_desired_state_identity.v1"
     )
     assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == 6
 
@@ -1119,6 +1131,13 @@ def _runtime_readiness_complete_evidence(
         "deployed_identity": {
             "contains_expected_commit": True,
             "identity_source": "redacted_live_runtime_evidence",
+        },
+        "gitops_desired_state": {
+            "schema_version": "gitops_desired_state_identity.v1",
+            "images_include_expected_commit": True,
+            "desired_state_source": "sanitized_ops_manifest_summary",
+            "target_revision": "main",
+            "production_mutation_performed": False,
         },
         "evidence_provenance": _runtime_evidence_provenance(
             collection_mode="local_test_replay",
