@@ -64,6 +64,47 @@ def _fake_agent_context_product(*, consumer: str = "codex") -> dict:
     }
 
 
+def _runtime_projection_join_evidence(*, edge_count: int = 2) -> dict:
+    return {
+        "schema_version": "object_extraction_projection_join_preview.v1",
+        "evidence_class": "runtime_projection_join",
+        "status": "pass",
+        "edge_count": edge_count,
+        "production_mutation_performed": False,
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+
+
+def _runtime_collected_packet(*, live: bool = False) -> dict:
+    packet = {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "projection_join": _runtime_projection_join_evidence(),
+        "evidence_provenance": {
+            "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
+            "collection_mode": "post_deploy_read_only_smoke" if live else "local_test_replay",
+            "network_used": live,
+            "mutation_scope": "none",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": False,
+    }
+    if not live:
+        packet["collector"] = {
+            "schema_version": "source_to_candidate_runtime_evidence_collector.v1",
+            "readiness_claim": "collector_packet_not_live_evidence",
+        }
+    return packet
+
+
 class _FakeMcpSession:
     def __init__(self) -> None:
         self.initialized = False
@@ -83,6 +124,11 @@ class _FakeMcpSession:
     async def call_tool(self, name: str, arguments: dict):
         self.calls.append((name, dict(arguments)))
         if name == "brain_source_to_candidate_runtime_readiness":
+            if arguments.get("collect_shadow_evidence") is True:
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=_runtime_collected_packet(live=False),
+                )
             return SimpleNamespace(
                 isError=False,
                 structuredContent={
@@ -166,6 +212,18 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
     assert capture["schema_version"] == "source_to_candidate_runtime_post_deploy_mcp_capture.v1"
     assert set(REQUIRED_RUNTIME_TOOL_NAMES).issubset(set(capture["tool_names"]))
     assert capture["production_mutation_performed"] is False
+    assert "projection_join" not in capture
+    assert capture["runtime_collected_packet"] == {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "collector_readiness_claim": "collector_packet_not_live_evidence",
+        "projection_join_present": True,
+        "projection_join_schema": "object_extraction_projection_join_preview.v1",
+        "projection_join_edge_count": 2,
+        "projection_join_promoted_to_live_evidence": False,
+        "evidence_collection_mode": "local_test_replay",
+        "evidence_collection_network_used": False,
+        "production_mutation_performed": False,
+    }
     assert capture["agent_context_product"] == _fake_agent_context_product(consumer="codex")
     assert "private_context_not_returned" not in json.dumps(capture, sort_keys=True)
     assert capture["collection"] == {
@@ -198,6 +256,15 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
             "repository": "pureliture/neurons",
             "branch": "main",
             "consumer": "codex",
+        },
+        {
+            "collect_shadow_evidence": True,
+            "expected_commit": "c2b8548",
+            "repository": "pureliture/neurons",
+            "branch": "main",
+            "consumer": "codex",
+            "evidence_collection_mode": "post_deploy_read_only_smoke",
+            "evidence_collection_network_used": True,
         }
     ]
     context_calls = [
@@ -231,6 +298,53 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     assert claims["live.agent_context.tool_hints"]["status"] == "validated"
     assert claims["live.agent_context.product_sections"]["status"] == "validated"
+    assert claims["live.source_to_candidate.projection_join"]["status"] == "not_validated"
+    assert "live_graph_qdrant_projection_join_unproven" in report["gaps"]
+    assert report["production_ready"] is False
+
+
+def test_collect_post_deploy_mcp_capture_promotes_live_projection_join_from_read_only_runtime():
+    class _LiveProjectionJoinSession(_FakeMcpSession):
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "brain_source_to_candidate_runtime_readiness" and arguments.get("collect_shadow_evidence") is True:
+                self.calls.append((name, dict(arguments)))
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=_runtime_collected_packet(live=True),
+                )
+            return await super().call_tool(name, arguments)
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield _LiveProjectionJoinSession()
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            expected_commit="c2b8548",
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_artifact_identity_summary",
+            },
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert capture["runtime_collected_packet"]["projection_join_promoted_to_live_evidence"] is True
+    assert capture["projection_join"]["schema_version"] == "object_extraction_projection_join_preview.v1"
+    assert capture["projection_join"]["evidence_class"] == "runtime_projection_join"
+    assert capture["projection_join"]["edge_count"] == 2
+    assert capture["projection_join"]["production_mutation_performed"] is False
+
+    report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=capture,
+        expected_commit="c2b8548",
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["live.source_to_candidate.projection_join"]["status"] == "validated"
+    assert "live_graph_qdrant_projection_join_unproven" not in report["gaps"]
     assert report["production_ready"] is False
 
 

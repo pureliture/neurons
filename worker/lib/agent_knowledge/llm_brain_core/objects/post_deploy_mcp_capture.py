@@ -63,6 +63,19 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
                 "consumer": consumer,
             },
         )
+        runtime_packet = await _call_tool_mapping(
+            session,
+            RUNTIME_READINESS_AGENT_CONTEXT_TOOL,
+            {
+                "collect_shadow_evidence": True,
+                "expected_commit": expected_commit,
+                "repository": repository,
+                "branch": branch,
+                "consumer": consumer,
+                "evidence_collection_mode": "post_deploy_read_only_smoke",
+                "evidence_collection_network_used": True,
+            },
+        )
         context_pack = await _call_tool_mapping(
             session,
             "brain_context_resolve",
@@ -112,6 +125,7 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         "schema_version": POST_DEPLOY_MCP_CAPTURE_SCHEMA,
         "tool_names": tool_names,
         "runtime_readiness_plan": _public_safe_mapping(plan),
+        "runtime_collected_packet": _runtime_collected_packet_summary(runtime_packet),
         "agent_context_product": _agent_context_product_from_context_pack(context_pack),
         "brain_objects_query_smokes": smokes,
         "deployed_identity": identity,
@@ -119,6 +133,9 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         "evidence_provenance": _post_deploy_provenance(),
         "production_mutation_performed": False,
     }
+    projection_join = _live_projection_join_from_runtime_packet(runtime_packet)
+    if projection_join:
+        capture["projection_join"] = projection_join
     ensure_public_safe(capture, "SourceToCandidatePostDeployMcpCapture")
     return capture
 
@@ -218,6 +235,68 @@ def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, A
     smoke["object_pack"] = object_pack
     ensure_public_safe(smoke, "SourceToCandidatePostDeployMcpRouteSmoke")
     return smoke
+
+
+def _runtime_collected_packet_summary(packet: Mapping[str, Any]) -> dict[str, Any]:
+    safe_packet = _public_safe_mapping(packet)
+    collector = safe_packet.get("collector") if isinstance(safe_packet.get("collector"), Mapping) else {}
+    provenance = (
+        safe_packet.get("evidence_provenance")
+        if isinstance(safe_packet.get("evidence_provenance"), Mapping)
+        else {}
+    )
+    projection = (
+        safe_packet.get("projection_join")
+        if isinstance(safe_packet.get("projection_join"), Mapping)
+        else {}
+    )
+    promoted = bool(_live_projection_join_from_runtime_packet(safe_packet))
+    summary = {
+        "schema_version": public_safe_text(str(safe_packet.get("schema_version") or ""), max_chars=80),
+        "collector_readiness_claim": public_safe_text(str(collector.get("readiness_claim") or ""), max_chars=120),
+        "projection_join_present": bool(projection),
+        "projection_join_schema": public_safe_text(str(projection.get("schema_version") or ""), max_chars=80),
+        "projection_join_edge_count": _safe_int(projection.get("edge_count")),
+        "projection_join_promoted_to_live_evidence": promoted,
+        "evidence_collection_mode": public_safe_text(str(provenance.get("collection_mode") or ""), max_chars=80),
+        "evidence_collection_network_used": provenance.get("network_used") is True,
+        "production_mutation_performed": safe_packet.get("production_mutation_performed") is True,
+    }
+    ensure_public_safe(summary, "SourceToCandidatePostDeployRuntimePacketSummary")
+    return summary
+
+
+def _live_projection_join_from_runtime_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
+    safe_packet = _public_safe_mapping(packet)
+    projection = safe_packet.get("projection_join")
+    if not isinstance(projection, Mapping):
+        return {}
+    collector = safe_packet.get("collector") if isinstance(safe_packet.get("collector"), Mapping) else {}
+    if str(collector.get("readiness_claim") or "") == "collector_packet_not_live_evidence":
+        return {}
+    provenance = (
+        safe_packet.get("evidence_provenance")
+        if isinstance(safe_packet.get("evidence_provenance"), Mapping)
+        else {}
+    )
+    if str(provenance.get("collection_mode") or "") != "post_deploy_read_only_smoke":
+        return {}
+    if provenance.get("network_used") is not True:
+        return {}
+    if safe_packet.get("production_mutation_performed") is True:
+        return {}
+    if str(projection.get("status") or "") != "pass":
+        return {}
+    live_projection = _public_safe_mapping(projection)
+    ensure_public_safe(live_projection, "SourceToCandidatePostDeployProjectionJoin")
+    return live_projection
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _post_deploy_provenance() -> dict[str, Any]:
