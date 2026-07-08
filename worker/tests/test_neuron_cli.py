@@ -138,6 +138,37 @@ def _valid_p6_runtime_evidence(*, live: bool = True) -> dict:
     }
 
 
+def _valid_p3_post_deploy_capture(*, live: bool = True) -> dict:
+    return {
+        "schema_version": "source_to_candidate_runtime_post_deploy_mcp_capture.v1",
+        "projection_join": {
+            "schema_version": "object_extraction_projection_join_preview.v1",
+            "evidence_class": "runtime_projection_join",
+            "status": "pass",
+            "edge_count": 2,
+            "production_mutation_performed": False,
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
+        "evidence_provenance": {
+            "schema_version": "source_to_candidate_runtime_evidence_provenance.v1",
+            "collection_mode": "post_deploy_read_only_smoke" if live else "local_test_replay",
+            "mutation_scope": "none",
+            "network_used": live,
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": False,
+    }
+
+
 def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
     assert main(["--help"]) == 0
     output = capsys.readouterr().out
@@ -1697,6 +1728,42 @@ def test_neuron_knowledge_golden_query_eval_activation_progress_accepts_post_dep
     assert p6["evidence_provenance_status"] == "validated"
     assert p6["evidence_is_live"] is True
     assert report["production_mutation_performed"] is False
+
+
+def test_neuron_knowledge_golden_query_eval_activation_progress_closes_p3_post_deploy_gap(
+    tmp_path, capsys
+):
+    capture_file = tmp_path / "p3-post-deploy-capture.json"
+    capture_file.write_text(
+        json.dumps(_valid_p3_post_deploy_capture(live=True)),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "golden-query-eval",
+                "--activation-progress",
+                "--post-deploy-capture-file",
+                str(capture_file),
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p3 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P3")
+    phase_progress = {item["phase"]: item for item in report["phase_progress"]}
+
+    assert checks["P3"]["result"] == "PASS"
+    assert p3["projection_join_claim_status"] == "validated"
+    assert p3["projection_join_edge_count"] == 2
+    assert p3["evidence_is_live"] is True
+    assert p3["network_used"] is True
+    assert p3["evidence_collection_network_used"] is True
+    assert "p3_live_graph_qdrant_projection_join_unproven" not in checks["P3"]["gaps"]
+    assert "live_graph_qdrant_projection_join_unproven" not in phase_progress["P3"]["gaps"]
 
 
 def test_neuron_knowledge_golden_query_eval_activation_progress_treats_partial_post_deploy_capture_as_gap(

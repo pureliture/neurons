@@ -412,6 +412,10 @@ def build_product_activation_progress_report(
         _activation_phase_progress(phase, phases_by_id.get(phase, {}))
         for phase in ACTIVATION_SCOPE_PHASES
     ]
+    phase_progress = _apply_product_evidence_to_phase_progress(
+        phase_progress,
+        product_evidence_result=product_evidence_result,
+    )
     minimum_checkpoint = _minimum_review_loop_checkpoint(phase_progress, source_gate)
     hard_failures = _dedupe(
         [
@@ -584,7 +588,7 @@ def _product_evidence_summary(
     *, live_evidence: Mapping[str, Any] | None = None
 ) -> list[dict[str, Any]]:
     p2 = _p2_reference_corpus_evidence()
-    p3 = _p3_projection_join_evidence()
+    p3 = _p3_projection_join_evidence(live_evidence=live_evidence)
     p6 = _p6_session_project_rollup_evidence(live_evidence=live_evidence)
     p7 = _p7_preference_artifact_evidence()
     p8 = _p8_runtime_authority_evidence()
@@ -661,11 +665,14 @@ def _p2_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _p3_projection_join_evidence() -> dict[str, Any]:
+def _p3_projection_join_evidence(
+    *, live_evidence: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     from .runtime_readiness import build_source_to_candidate_runtime_readiness_report
 
     report = build_source_to_candidate_runtime_readiness_report(
-        expected_commit="e3f6296",
+        live_evidence=live_evidence,
+        expected_commit=_p3_expected_commit(live_evidence),
     )
     claims = {
         str(item.get("claim_id") or ""): item
@@ -695,10 +702,26 @@ def _p3_projection_join_evidence() -> dict[str, Any]:
         "live_evidence_provided": bool(report.get("live_evidence_provided")),
         "evidence_is_live": bool(report.get("evidence_is_live")),
         "production_ready": bool(report.get("production_ready")),
-        "network_used": bool(report.get("network_used")),
+        "network_used": bool(
+            report.get("network_used") or report.get("evidence_collection_network_used")
+        ),
+        "evidence_collection_network_used": bool(
+            report.get("evidence_collection_network_used")
+        ),
         "gaps": projection_gaps,
         "production_mutation_performed": bool(report.get("production_mutation_performed")),
     }
+
+
+def _p3_expected_commit(live_evidence: Mapping[str, Any] | None) -> str:
+    evidence = live_evidence if isinstance(live_evidence, Mapping) else {}
+    identity = evidence.get("deployed_identity")
+    identity = identity if isinstance(identity, Mapping) else {}
+    for key in ("source_merge_commit", "source_commit", "merge_commit"):
+        value = identity.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _p3_projection_join_product_status(*, projection_status: str, gaps: list[str]) -> str:
@@ -1801,6 +1824,43 @@ def _activation_phase_next_action(phase: str, state: str, gaps: list[str]) -> st
     if state == "local_validated":
         return "advance_next_phase_with_gap_visible"
     return "complete_local_phase_slice"
+
+
+def _apply_product_evidence_to_phase_progress(
+    phase_progress: list[dict[str, Any]],
+    *,
+    product_evidence_result: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    checks = {
+        str(item.get("phase") or ""): item
+        for item in product_evidence_result.get("checks", [])
+        if isinstance(item, Mapping)
+    }
+    p3_check = checks.get("P3", {})
+    if p3_check.get("result") != "PASS":
+        return phase_progress
+    adjusted: list[dict[str, Any]] = []
+    for item in phase_progress:
+        if item.get("phase") != "P3":
+            adjusted.append(item)
+            continue
+        gaps = [
+            gap
+            for gap in item.get("gaps", [])
+            if gap != "live_graph_qdrant_projection_join_unproven"
+        ]
+        updated = {
+            **item,
+            "gaps": gaps,
+            "quality_result": "PASS" if not gaps else item.get("quality_result"),
+        }
+        updated["next_action"] = _activation_phase_next_action(
+            "P3",
+            str(updated.get("state") or ""),
+            gaps,
+        )
+        adjusted.append(updated)
+    return adjusted
 
 
 def _minimum_review_loop_checkpoint(
