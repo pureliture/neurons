@@ -29,21 +29,37 @@ def _fake_agent_context_product(*, consumer: str = "codex") -> dict:
         "schema_version": "agent_context_product_pack.v1",
         "consumer": consumer,
         "sections": {
-            name: {
+            "current_authority": {
                 "object_count": 1,
                 "items": [
                     {
-                        "object_id": f"fixture:{name}",
-                        "object_type": "MemoryCard",
-                        "title": name,
-                        "authority_lane": name,
-                        "recommended_action": "read",
+                        "object_id": "fixture:current_authority",
+                        "object_type": "RepoDocument",
+                        "title": "current_authority",
+                        "authority_lane": "accepted_current",
+                        "recommended_action": "keep",
                     }
                 ],
-                "authority_lanes": [name],
+                "authority_lanes": ["accepted_current"],
                 "gaps": [],
-            }
-            for name in REQUIRED_AGENT_CONTEXT_SECTIONS
+            },
+            **{
+                name: {
+                    "object_count": 1,
+                    "items": [
+                        {
+                            "object_id": f"fixture:{name}",
+                            "object_type": "MemoryCard",
+                            "title": name,
+                            "authority_lane": name,
+                            "recommended_action": "read",
+                        }
+                    ],
+                    "authority_lanes": [name],
+                    "gaps": [],
+                }
+                for name in REQUIRED_AGENT_CONTEXT_SECTIONS
+            },
         },
         "surface_policy": {
             "consumer": consumer,

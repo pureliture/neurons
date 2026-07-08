@@ -1203,6 +1203,8 @@ _P9_LIVE_GAP_ONLY_PREFIXES = (
 _P9_LIVE_GAP_ONLY_VALUES = frozenset(
     {
         "live_agent_context_product_sections_unverified",
+        "live_agent_context_current_authority_missing",
+        "live_agent_context_current_authority_accepted_current_missing",
         "live_agent_context_startup_unverified",
         "production_startup_read_path_unproven",
         "production_consumer_context_pack_live_unproven",
@@ -2405,7 +2407,7 @@ def _p9_live_section_counts(live_evidence: Mapping[str, Any]) -> dict[str, int]:
     product = product if isinstance(product, Mapping) else {}
     sections = product.get("sections") if isinstance(product.get("sections"), Mapping) else {}
     counts: dict[str, int] = {}
-    for section in ("style_preference", "active_work", "required_verification"):
+    for section in ("current_authority", "style_preference", "active_work", "required_verification"):
         value = sections.get(section)
         if isinstance(value, Mapping):
             counts[section] = int(value.get("object_count") or 0)
@@ -2413,7 +2415,7 @@ def _p9_live_section_counts(live_evidence: Mapping[str, Any]) -> dict[str, int]:
     startup = startup if isinstance(startup, Mapping) else {}
     context = startup.get("startup_context") if isinstance(startup.get("startup_context"), Mapping) else {}
     startup_counts = context.get("section_counts") if isinstance(context.get("section_counts"), Mapping) else {}
-    for section in ("style_preference", "active_work", "required_verification"):
+    for section in ("current_authority", "style_preference", "active_work", "required_verification"):
         if section not in counts:
             counts[section] = int(startup_counts.get(section) or 0)
     return counts

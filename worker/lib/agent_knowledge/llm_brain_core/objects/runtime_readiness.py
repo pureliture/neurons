@@ -29,6 +29,8 @@ REQUIRED_AGENT_CONTEXT_SECTIONS = (
     "active_work",
     "required_verification",
 )
+REQUIRED_AGENT_CONTEXT_AUTHORITY_SECTION = "current_authority"
+REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE = "accepted_current"
 REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA = "agent_context_product_pack.v1"
 ALLOWED_AGENT_CONTEXT_CONSUMERS = ("codex", "claude-code", "gemini", "hermes")
 PRODUCTION_DENIAL_CLAIMS = (
@@ -2099,6 +2101,16 @@ def _live_agent_context_product_sections_claim(evidence: Mapping[str, Any]) -> d
         for name in REQUIRED_AGENT_CONTEXT_SECTIONS
         if _section_object_count(sections.get(name)) < 1
     ]
+    current_authority = sections.get(REQUIRED_AGENT_CONTEXT_AUTHORITY_SECTION)
+    current_authority_object_count = _section_object_count(current_authority)
+    current_authority_authority_lanes = _section_authority_lanes(current_authority)
+    current_authority_gaps: list[str] = []
+    if current_authority_object_count < 1:
+        current_authority_gaps.append("live_agent_context_current_authority_missing")
+    elif REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE not in current_authority_authority_lanes:
+        current_authority_gaps.append(
+            "live_agent_context_current_authority_accepted_current_missing"
+        )
     mutation_allowed = (
         product.get("surface_policy") if isinstance(product.get("surface_policy"), Mapping) else {}
     ).get("mutation_allowed")
@@ -2110,6 +2122,10 @@ def _live_agent_context_product_sections_claim(evidence: Mapping[str, Any]) -> d
         "consumer": public_safe_text(str(product.get("consumer") or ""), max_chars=80),
         "required_sections": list(REQUIRED_AGENT_CONTEXT_SECTIONS),
         "missing_sections": missing,
+        "required_authority_section": REQUIRED_AGENT_CONTEXT_AUTHORITY_SECTION,
+        "required_authority_lane": REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE,
+        "current_authority_object_count": current_authority_object_count,
+        "current_authority_authority_lanes": current_authority_authority_lanes,
         "mutation_allowed": bool(mutation_allowed),
     }
     if contract_failures:
@@ -2126,13 +2142,20 @@ def _live_agent_context_product_sections_claim(evidence: Mapping[str, Any]) -> d
         }
     return {
         **base,
-        "status": "not_validated" if missing else "validated",
-        "gaps": [
-            "live_agent_context_product_sections_unverified",
-            *_named_gaps("live_agent_context_section_missing", missing),
-        ]
-        if missing
-        else [],
+        "status": "not_validated" if missing or current_authority_gaps else "validated",
+        "gaps": _dedupe(
+            [
+                *(
+                    [
+                        "live_agent_context_product_sections_unverified",
+                        *_named_gaps("live_agent_context_section_missing", missing),
+                    ]
+                    if missing
+                    else []
+                ),
+                *current_authority_gaps,
+            ]
+        ),
     }
 
 
@@ -3656,6 +3679,12 @@ def _section_object_count(section: Any) -> int:
         return int(section.get("object_count") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _section_authority_lanes(section: Any) -> list[str]:
+    if not isinstance(section, Mapping):
+        return []
+    return _string_list(section.get("authority_lanes"))
 
 
 def _brain_objects_query_smoke_failures(route: str, smoke: Mapping[str, Any]) -> list[str]:
