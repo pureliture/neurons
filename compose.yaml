@@ -231,7 +231,9 @@ services:
 
   llm-brain-tools:
     profiles: ["llm-brain-core"]
-    build: ./worker
+    build:
+      context: ./worker
+      dockerfile: Dockerfile.tools
     restart: unless-stopped
     command: ["sleep", "infinity"]
     environment:
