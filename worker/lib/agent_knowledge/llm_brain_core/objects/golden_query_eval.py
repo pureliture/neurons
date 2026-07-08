@@ -1162,6 +1162,11 @@ def _p6_live_session_project_rollup_evidence(
     }
     claim = claims.get("live.session_project.rollup", {})
     provenance_claim = claims.get("live.evidence.provenance", {})
+    rollup_present = _runtime_evidence_field_present(
+        live_evidence,
+        "session_project_rollup_runtime",
+        "session_project_rollup_runtime_present",
+    )
     rollup = live_evidence.get("session_project_rollup_runtime")
     rollup = rollup if isinstance(rollup, Mapping) else {}
     preview = rollup.get("rollup_preview") if isinstance(rollup.get("rollup_preview"), Mapping) else {}
@@ -1204,7 +1209,7 @@ def _p6_live_session_project_rollup_evidence(
         "live_evidence_provided": bool(report.get("live_evidence_provided")),
         "evidence_is_live": evidence_is_live,
         "production_ready": bool(report.get("production_ready")),
-        "rollup_evidence_present": bool(rollup),
+        "rollup_evidence_present": rollup_present,
         "object_count": _positive_int(
             preview.get("object_count"),
             default=sum(_positive_int(count) for count in object_type_counts.values()),
@@ -1241,6 +1246,17 @@ def _p6_session_project_rollup_product_status(
     ):
         return "PASS"
     return "PASS_WITH_GAPS"
+
+
+def _runtime_evidence_field_present(
+    evidence: Mapping[str, Any],
+    field_name: str,
+    marker_name: str,
+) -> bool:
+    marker = evidence.get(marker_name)
+    if isinstance(marker, bool):
+        return marker
+    return field_name in evidence
 
 
 def _p7_preference_artifact_evidence() -> dict[str, Any]:
