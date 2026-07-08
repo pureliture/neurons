@@ -31,6 +31,7 @@ REQUIRED_AGENT_CONTEXT_SECTIONS = (
 )
 REQUIRED_AGENT_CONTEXT_AUTHORITY_SECTION = "current_authority"
 REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE = "accepted_current"
+REQUIRED_AGENT_CONTEXT_STYLE_PREFERENCE_SECTION = "style_preference"
 REQUIRED_AGENT_CONTEXT_STARTUP_SECTIONS = (
     REQUIRED_AGENT_CONTEXT_AUTHORITY_SECTION,
     *REQUIRED_AGENT_CONTEXT_SECTIONS,
@@ -2116,6 +2117,17 @@ def _live_agent_context_product_sections_claim(evidence: Mapping[str, Any]) -> d
         current_authority_gaps.append(
             "live_agent_context_current_authority_accepted_current_missing"
         )
+    style_preference = sections.get(REQUIRED_AGENT_CONTEXT_STYLE_PREFERENCE_SECTION)
+    style_preference_object_count = _section_object_count(style_preference)
+    style_preference_authority_lanes = _section_authority_lanes(style_preference)
+    style_preference_gaps: list[str] = []
+    if (
+        style_preference_object_count >= 1
+        and REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE not in style_preference_authority_lanes
+    ):
+        style_preference_gaps.append(
+            "live_agent_context_style_preference_accepted_current_missing"
+        )
     mutation_allowed = (
         product.get("surface_policy") if isinstance(product.get("surface_policy"), Mapping) else {}
     ).get("mutation_allowed")
@@ -2131,6 +2143,8 @@ def _live_agent_context_product_sections_claim(evidence: Mapping[str, Any]) -> d
         "required_authority_lane": REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE,
         "current_authority_object_count": current_authority_object_count,
         "current_authority_authority_lanes": current_authority_authority_lanes,
+        "style_preference_object_count": style_preference_object_count,
+        "style_preference_authority_lanes": style_preference_authority_lanes,
         "mutation_allowed": bool(mutation_allowed),
     }
     if contract_failures:
@@ -2147,7 +2161,9 @@ def _live_agent_context_product_sections_claim(evidence: Mapping[str, Any]) -> d
         }
     return {
         **base,
-        "status": "not_validated" if missing or current_authority_gaps else "validated",
+        "status": "not_validated"
+        if missing or current_authority_gaps or style_preference_gaps
+        else "validated",
         "gaps": _dedupe(
             [
                 *(
@@ -2159,6 +2175,7 @@ def _live_agent_context_product_sections_claim(evidence: Mapping[str, Any]) -> d
                     else []
                 ),
                 *current_authority_gaps,
+                *style_preference_gaps,
             ]
         ),
     }

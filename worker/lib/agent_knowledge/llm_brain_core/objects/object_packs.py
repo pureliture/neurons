@@ -1655,6 +1655,49 @@ def _simple_pack(route: str, titles: list[str], object_type: str) -> dict[str, A
     return pack
 
 
+def _preference_pack(preferences: list[Mapping[str, Any]]) -> dict[str, Any]:
+    pack = _empty_pack("code_style_preference")
+    for item in preferences:
+        if not isinstance(item, Mapping):
+            continue
+        currentness = str(item.get("currentness") or "unknown")
+        if currentness in NON_CURRENT_AUTHORITY:
+            continue
+        title = str(item.get("rule") or item.get("title") or "")
+        if not title:
+            continue
+        lane = "accepted_current" if currentness == "current" else "proposal_only"
+        action = "apply_preference" if lane == "accepted_current" else "review_inferred_preference"
+        obj = KnowledgeObjectEnvelope.from_parts(
+            object_type="ArtifactPreference",
+            natural_key=title,
+            scope={"project": "neurons"},
+            title=title,
+            summary=str(item.get("reason") or title),
+            lifecycle_status="current" if lane == "accepted_current" else "proposed",
+            authority_lane=lane,
+            verification_state="source_hash_verified" if lane == "accepted_current" else "unverified",
+            review_state="accepted" if lane == "accepted_current" else "needs_review",
+            content_hash=hash_payload(["code_style_preference", title, currentness]),
+            recommended_action=action,
+            payload={
+                "scope": public_safe_text(str(item.get("scope") or ""), max_chars=180),
+                "currentness": public_safe_text(currentness, max_chars=80),
+            },
+        ).to_dict()
+        pack["objects"].append(obj)
+        pack["lanes"][lane].append(obj)
+        pack["recommended_actions"].append({"object_id": obj["object_id"], "action": action})
+    if not pack["lanes"]["accepted_current"]:
+        pack["gaps"].append("accepted_current preferences empty")
+        pack["gaps"].append("review_preference_proposals_needed")
+    pack["confidence"] = {
+        "score": 0.8 if pack["lanes"]["accepted_current"] else 0.4 if pack["objects"] else 0.0,
+        "basis": "preference_authority_pack",
+    }
+    return pack
+
+
 def _reference_document_pack_from_documentation(documentation_pack: Mapping[str, Any]) -> dict[str, Any]:
     pack = _empty_pack("reference_corpus_research")
     source_objects = documentation_pack.get("objects") if isinstance(documentation_pack.get("objects"), (list, tuple)) else []
@@ -1681,16 +1724,11 @@ def build_agent_context_object_packs(
     guardrails: list[str],
 ) -> dict[str, dict[str, Any]]:
     documentation_pack = build_documentation_cleanup_pack(documents=documents)
-    preference_titles = [
-        str(item.get("rule") or item.get("title") or "")
-        for item in preferences
-        if item and str(item.get("currentness") or "") not in NON_CURRENT_AUTHORITY
-    ]
     style_titles = [str(item.get("claim") or "") for item in style_profile.get("claims") or []]
     packs = {
         "documentation_cleanup": documentation_pack,
         "reference_corpus": _reference_document_pack_from_documentation(documentation_pack),
-        "preferences": _simple_pack("code_style_preference", preference_titles, "ArtifactPreference"),
+        "preferences": _preference_pack(preferences),
         "style": _simple_pack("code_style_preference", style_titles, "StyleRule"),
         "current_work": _simple_pack("temporal_work_recall", list(current_work), "WorkUnit"),
         "required_verification": _simple_pack("required_verification", list(required_verification), "Test"),

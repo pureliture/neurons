@@ -437,6 +437,7 @@ def _valid_p9_agent_context_product(
     active_count: int = 1,
     current_authority_count: int = 1,
     current_authority_lanes: tuple[str, ...] = ("accepted_current",),
+    style_authority_lanes: tuple[str, ...] = ("accepted_current",),
 ):
     return {
         "schema_version": "agent_context_product_pack.v1",
@@ -446,7 +447,10 @@ def _valid_p9_agent_context_product(
                 "object_count": current_authority_count,
                 "authority_lanes": list(current_authority_lanes),
             },
-            "style_preference": {"object_count": style_count},
+            "style_preference": {
+                "object_count": style_count,
+                "authority_lanes": list(style_authority_lanes),
+            },
             "active_work": {"object_count": active_count},
             "required_verification": {"object_count": 1},
         },
@@ -1404,6 +1408,28 @@ def test_product_activation_progress_keeps_p9_gap_for_reference_only_current_aut
     )
     assert p9["product_sections_claim_status"] == "not_validated"
     assert p9["section_counts"]["current_authority"] == 1
+    assert p9["production_mutation_performed"] is False
+    assert report["production_ready"] is False
+
+
+def test_product_activation_progress_keeps_p9_gap_for_reference_only_style_preference():
+    evidence = _valid_p6_p7_p8_p9_runtime_evidence(live=True)
+    evidence["agent_context_product"] = _valid_p9_agent_context_product(
+        style_authority_lanes=("reference_only",),
+    )
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p9 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P9")
+
+    assert checks["P9"]["result"] == "PASS_WITH_GAPS"
+    assert (
+        "p9_live_agent_context_style_preference_accepted_current_missing"
+        in checks["P9"]["gaps"]
+    )
+    assert p9["product_sections_claim_status"] == "not_validated"
+    assert p9["section_counts"]["style_preference"] == 1
     assert p9["production_mutation_performed"] is False
     assert report["production_ready"] is False
 
