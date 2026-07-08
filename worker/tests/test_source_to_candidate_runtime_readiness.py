@@ -28,7 +28,7 @@ def _sanitized_live_evidence(**overrides):
             "consumer": "codex",
             "sections": {
                 "current_authority": {"object_count": 1, "authority_lanes": ["accepted_current"]},
-                "style_preference": {"object_count": 1},
+                "style_preference": {"object_count": 1, "authority_lanes": ["accepted_current"]},
                 "active_work": {"object_count": 1},
                 "required_verification": {"object_count": 1},
             },
@@ -2151,7 +2151,7 @@ def test_runtime_readiness_requires_live_agent_context_product_sections():
             "surface_policy": {"mutation_allowed": False},
             "sections": {
                 "current_authority": {"object_count": 1, "authority_lanes": ["accepted_current"]},
-                "style_preference": {"object_count": 1},
+                "style_preference": {"object_count": 1, "authority_lanes": ["accepted_current"]},
                 "active_work": {"object_count": 0},
                 "required_verification": {"object_count": 1},
             },
@@ -2196,6 +2196,36 @@ def test_runtime_readiness_requires_live_agent_context_current_authority_accepte
     assert section_claim["current_authority_authority_lanes"] == ["reference_only"]
     assert "live_agent_context_current_authority_accepted_current_missing" in section_claim["gaps"]
     assert "live_agent_context_current_authority_accepted_current_missing" in report["gaps"]
+
+
+def test_runtime_readiness_requires_live_agent_context_style_preference_accepted_current():
+    evidence = _sanitized_live_evidence(
+        agent_context_product={
+            "schema_version": "agent_context_product_pack.v1",
+            "consumer": "codex",
+            "tool_hints": _safe_tool_hints(),
+            "degraded_mode": {"active": True, "gaps": ["runtime_evidence_unverified"]},
+            "missing_evidence_before_promotion": ["runtime_evidence_unverified"],
+            "surface_policy": {"mutation_allowed": False},
+            "sections": {
+                "current_authority": {"object_count": 1, "authority_lanes": ["accepted_current"]},
+                "style_preference": {"object_count": 1, "authority_lanes": ["reference_only"]},
+                "active_work": {"object_count": 1},
+                "required_verification": {"object_count": 1},
+            },
+        },
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "PASS_WITH_GAPS"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    section_claim = claims["live.agent_context.product_sections"]
+    assert section_claim["status"] == "not_validated"
+    assert section_claim["style_preference_object_count"] == 1
+    assert section_claim["style_preference_authority_lanes"] == ["reference_only"]
+    assert "live_agent_context_style_preference_accepted_current_missing" in section_claim["gaps"]
+    assert "live_agent_context_style_preference_accepted_current_missing" in report["gaps"]
 
 
 def test_runtime_readiness_fails_when_live_agent_context_product_contract_is_incomplete():

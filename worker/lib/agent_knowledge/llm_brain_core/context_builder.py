@@ -67,6 +67,10 @@ AGENT_CONTEXT_CURRENT_AUTHORITY_MISSING_GAP = "agent_context_current_authority_m
 AGENT_CONTEXT_CURRENT_AUTHORITY_ACCEPTED_CURRENT_MISSING_GAP = (
     "agent_context_current_authority_accepted_current_missing"
 )
+AGENT_CONTEXT_STYLE_PREFERENCE_SECTION = "style_preference"
+AGENT_CONTEXT_STYLE_PREFERENCE_ACCEPTED_CURRENT_MISSING_GAP = (
+    "agent_context_style_preference_accepted_current_missing"
+)
 
 
 class ContextPackBuilder:
@@ -351,6 +355,8 @@ def compact_section(
                 continue
             if len(items) >= max_items:
                 break
+            if obj.get("authority_lane"):
+                lanes.add(str(obj.get("authority_lane") or ""))
             items.append(
                 {
                     "object_id": public_safe_text(str(obj.get("object_id") or ""), max_chars=180),
@@ -378,6 +384,13 @@ def required_agent_context_section_gaps(sections: Mapping[str, Any]) -> dict[str
         count = _agent_context_section_object_count(section)
         if count < 1:
             gaps[section_name] = gap
+    style_section = sections.get(AGENT_CONTEXT_STYLE_PREFERENCE_SECTION)
+    style_count = _agent_context_section_object_count(style_section)
+    style_lanes = _agent_context_section_authority_lanes(style_section)
+    if style_count >= 1 and AGENT_CONTEXT_REQUIRED_AUTHORITY_LANE not in style_lanes:
+        gaps[AGENT_CONTEXT_STYLE_PREFERENCE_SECTION] = (
+            AGENT_CONTEXT_STYLE_PREFERENCE_ACCEPTED_CURRENT_MISSING_GAP
+        )
     authority_section = sections.get(AGENT_CONTEXT_CURRENT_AUTHORITY_SECTION)
     authority_count = _agent_context_section_object_count(authority_section)
     authority_lanes = _agent_context_section_authority_lanes(authority_section)
