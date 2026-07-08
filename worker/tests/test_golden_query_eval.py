@@ -1250,6 +1250,30 @@ def test_product_activation_progress_fails_when_gitops_desired_state_mismatches_
     assert report["production_mutation_performed"] is False
 
 
+def test_product_activation_progress_propagates_gitops_desired_state_mutation_flag():
+    evidence = _valid_p6_p7_p8_runtime_evidence(live=True)
+    evidence["gitops_desired_state"] = {
+        "schema_version": "gitops_desired_state_identity.v1",
+        "images_include_expected_commit": True,
+        "desired_state_source": "sanitized_ops_manifest_summary",
+        "target_revision": "main",
+        "production_mutation_performed": True,
+    }
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p8 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P8")
+
+    assert checks["P8"]["result"] == "FAIL"
+    assert "p8_production_mutation_performed" in checks["P8"]["failures"]
+    assert "p8_gitops_desired_state_mutated_production" in checks["P8"]["gaps"]
+    assert p8["gitops_desired_state_claim_status"] == "failed"
+    assert p8["gitops_desired_state_mutation_performed"] is True
+    assert p8["production_mutation_performed"] is True
+    assert report["production_mutation_performed"] is True
+
+
 def test_product_activation_progress_scopes_p8_no_mutation_to_permission_audit_claim():
     evidence = _valid_p6_p7_p8_runtime_evidence(live=True)
     replacement = _valid_p4_replacement_current_runtime_evidence(live=True)
