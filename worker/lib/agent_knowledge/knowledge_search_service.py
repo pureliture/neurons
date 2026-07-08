@@ -10,7 +10,10 @@ from .llm_brain_core.document_bridge import RetiredIndexBridgeDocumentBridge
 from .llm_brain_core.graph import GraphMemoryAdapter
 from .llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
 from .llm_brain_core.runtime import build_runtime_brain_service
-from .llm_brain_core.objects.extraction_pipeline import run_source_to_candidate_graph_activation_preview
+from .llm_brain_core.objects.extraction_pipeline import (
+    run_graph_search_projection_join_preview,
+    run_source_to_candidate_graph_activation_preview,
+)
 from .llm_brain_core.objects.knowledge_objects import AuthorityDecision, ReviewProposal
 from .llm_brain_core.objects.object_packs import apply_approval_board_decisions, apply_candidate_review_edits
 from .llm_brain_core.objects.runtime_readiness import (
@@ -530,6 +533,8 @@ class KnowledgeSearchService:
         evidence_collection_plan: bool = False,
         evidence_packet_template: bool = False,
         collect_shadow_evidence: bool = False,
+        evidence_collection_mode: str = "local_test_replay",
+        evidence_collection_network_used: bool = False,
         repository: str = "",
         branch: str = "",
         consumer: str = "codex",
@@ -561,12 +566,25 @@ class KnowledgeSearchService:
                     consumer=consumer,
                 )
 
+            collection_mode = public_safe_text(str(evidence_collection_mode or "local_test_replay"), max_chars=80)
+            network_used = bool(evidence_collection_network_used)
+            projection_join_runner = None
+            if collection_mode == "post_deploy_read_only_smoke" and network_used:
+                projection_join_runner = lambda: self._projection_join_runtime_read_path_evidence(
+                    repository=repository,
+                    branch=branch,
+                    project=repository.rsplit("/", 1)[-1] if repository else "neurons",
+                    consumer=consumer,
+                )
             return build_source_to_candidate_runtime_collected_shadow_evidence_packet(
                 expected_commit=expected_commit,
                 repository=repository,
                 branch=branch,
                 consumer=consumer,
                 route_runner=route_runner,
+                projection_join_runner=projection_join_runner,
+                collection_mode=collection_mode,
+                network_used=network_used,
             )
         if isinstance(normalize_post_deploy_capture, Mapping):
             return build_source_to_candidate_runtime_post_deploy_capture_packet(
@@ -590,6 +608,123 @@ class KnowledgeSearchService:
             live_evidence=live_evidence,
             expected_commit=expected_commit,
         )
+
+    def _projection_join_runtime_read_path_evidence(
+        self,
+        *,
+        repository: str,
+        branch: str,
+        project: str,
+        consumer: str,
+    ) -> dict[str, Any]:
+        safe_repository = public_safe_text(repository or "pureliture/neurons", max_chars=120)
+        safe_project = public_safe_text(project or "neurons", max_chars=120)
+        query = public_safe_text(
+            f"{safe_repository} {branch or 'main'} source candidate graph projection join {consumer or 'codex'}",
+            max_chars=240,
+        )
+        target_object_id = "ko:RuntimeProjectionJoinProbe:" + short_hash(f"{safe_repository}:{safe_project}:{query}")
+        target_object = {
+            "object_id": target_object_id,
+            "object_type": "RuntimeProjectionJoinProbe",
+            "title": "Runtime projection join read-path probe",
+            "summary": "Public-safe candidate target for graph/search projection join evidence.",
+            "authority_lane": "candidate",
+            "verification_state": "runtime_unverified",
+            "review_state": "needs_review",
+        }
+        brain_id = f"/project/{safe_project}"
+        projection_hits: list[dict[str, Any]] = []
+        graph_status = "not_configured"
+        graph_detail_count = 0
+        if self.graph_adapter is not None:
+            try:
+                graph_result = self.graph_adapter.search_context(
+                    brain_id=brain_id,
+                    query=query,
+                    limit=3,
+                )
+                graph_status = public_safe_text(str(getattr(graph_result, "status", "") or ""), max_chars=80)
+                graph_detail_count = len(getattr(graph_result, "details", ()) or ())
+                for index, episode in enumerate(getattr(graph_result, "episodes", ()) or [], start=1):
+                    projection_hits.append(
+                        {
+                            "hit_id": f"graph:{short_hash(str(getattr(episode, 'episode_id', '') or index))}",
+                            "source": "graph",
+                            "object_ref": target_object_id,
+                            "summary": public_safe_text(_episode_projection_summary(episode), max_chars=280),
+                            "score": 0.72,
+                        }
+                    )
+            except Exception as exc:  # pragma: no cover - defensive live read guard
+                graph_status = public_safe_text(f"error:{type(exc).__name__}", max_chars=80)
+        qdrant_status = "not_configured"
+        if self._mirror_search is not None:
+            try:
+                qdrant_hits = self._mirror_search(query, brain_id)
+                qdrant_status = "available"
+                for index, hit in enumerate(qdrant_hits or [], start=1):
+                    if not isinstance(hit, Mapping):
+                        continue
+                    projection_hits.append(
+                        {
+                            "hit_id": f"qdrant:{short_hash(str(hit.get('memory_id') or hit.get('content_hash') or index))}",
+                            "source": "search",
+                            "object_ref": target_object_id,
+                            "summary": public_safe_text(str(hit.get("summary") or "Derived search mirror hit."), max_chars=280),
+                            "score": _safe_float(hit.get("score"), default=0.64),
+                        }
+                    )
+            except Exception as exc:  # pragma: no cover - defensive live read guard
+                qdrant_status = public_safe_text(f"error:{type(exc).__name__}", max_chars=80)
+        preview = run_graph_search_projection_join_preview(
+            objects=[target_object],
+            projection_hits=projection_hits,
+            repository=safe_repository,
+        )
+        graph_hit_count = int(preview.get("pack_preview", {}).get("graph_hit_count") or 0)
+        search_hit_count = int(preview.get("pack_preview", {}).get("search_hit_count") or 0)
+        gaps = [str(gap) for gap in preview.get("gaps") or [] if gap]
+        if graph_hit_count < 1:
+            gaps.append("graph_projection_hit_missing")
+        if search_hit_count < 1:
+            gaps.append("qdrant_projection_hit_missing")
+        if graph_status not in {"available", "degraded"}:
+            gaps.append("graph_projection_read_unavailable")
+        if qdrant_status != "available":
+            gaps.append("qdrant_projection_read_unavailable")
+        gaps = sorted(set(public_safe_text(gap, max_chars=120) for gap in gaps))
+        status = "pass" if int(preview.get("edge_count") or 0) > 0 and not gaps else "pass_with_gaps"
+        preview["status"] = status
+        preview["gaps"] = gaps
+        preview["evidence_class"] = "runtime_projection_join"
+        preview["runtime_read_path"] = {
+            "schema_version": "projection_join_runtime_read_path.v1",
+            "graph_status": graph_status,
+            "graph_detail_count": graph_detail_count,
+            "graph_hit_count": graph_hit_count,
+            "qdrant_status": qdrant_status,
+            "qdrant_hit_count": search_hit_count,
+            "production_mutation_performed": False,
+        }
+        preview["postcheck"] = {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        }
+        evaluator = preview.get("evaluator_report")
+        if isinstance(evaluator, dict):
+            evaluator["passes"] = status == "pass"
+            evaluator["failures"] = [] if status == "pass" else gaps or ["projection_join_missing"]
+            evaluator["gaps"] = gaps
+        for strategy in preview.get("strategy_comparison") or []:
+            if isinstance(strategy, dict) and strategy.get("selected") is True:
+                strategy["status"] = status
+                strategy["gaps"] = gaps
+        ensure_public_safe(preview, "ProjectionJoinRuntimeReadPathEvidence")
+        return preview
 
     def _overlay_object_authority_states(self, result: Mapping[str, Any]) -> dict[str, Any]:
         response = copy.deepcopy(dict(result))
@@ -818,6 +953,31 @@ class KnowledgeSearchService:
 
 def _knowledge_search_public_limit(limit: int) -> int:
     return max(1, min(10, int(limit)))
+
+
+def _episode_projection_summary(episode: Any) -> str:
+    payload = getattr(episode, "payload", {})
+    payload = payload if isinstance(payload, Mapping) else {}
+    summary = (
+        payload.get("summary")
+        or payload.get("title")
+        or payload.get("fact")
+        or getattr(episode, "entity_type", "")
+        or "Derived graph projection hit."
+    )
+    return public_safe_text(str(summary), max_chars=280)
+
+
+def _safe_float(value: Any, *, default: float = 0.0) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return default
+    if score < 0:
+        return 0.0
+    if score > 1:
+        return 1.0
+    return score
 
 
 def _apply_object_authority_state(obj: dict[str, Any], state: Mapping[str, Any]) -> None:

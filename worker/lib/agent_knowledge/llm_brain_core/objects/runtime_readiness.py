@@ -349,6 +349,7 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
     consumer: str = "codex",
     expected_commit: str = "",
     route_runner: Callable[[str], Mapping[str, Any]],
+    projection_join_runner: Callable[[], Mapping[str, Any]] | None = None,
     review_loop_runner: Callable[[], Mapping[str, Any]] | None = None,
     session_project_rollup_runner: Callable[[], Mapping[str, Any]] | None = None,
     preference_artifact_memory_runner: Callable[[], Mapping[str, Any]] | None = None,
@@ -364,6 +365,10 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
         _collect_brain_objects_query_route_smoke(route_runner, route)
         for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
     ]
+    projection_join = _collect_projection_join_shadow(
+        projection_join_runner,
+        repository=repository,
+    )
     review_loop = _collect_source_to_candidate_review_loop_shadow(review_loop_runner)
     session_project_rollup = _collect_session_project_rollup_shadow(
         session_project_rollup_runner,
@@ -381,10 +386,18 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
         agent_context_startup_runner,
         consumer=consumer,
     )
+    safe_collection_mode = public_safe_text(str(collection_mode or "local_test_replay"), max_chars=80)
+    packet_is_runtime_evidence = safe_collection_mode in LIVE_EVIDENCE_COLLECTION_MODES and network_used is True
+    readiness_claim = (
+        "runtime_read_path_evidence"
+        if packet_is_runtime_evidence
+        else "collector_packet_not_live_evidence"
+    )
     capture = {
         "schema_version": "source_to_candidate_runtime_shadow_capture.v1",
         "tool_names": _string_list(tool_names) or list(REQUIRED_RUNTIME_TOOL_NAMES),
         "brain_objects_query_smokes": smokes,
+        "projection_join": projection_join,
         "source_to_candidate_review_loop": review_loop,
         "session_project_rollup_runtime": session_project_rollup,
         "preference_artifact_memory": preference_artifact_memory,
@@ -403,6 +416,9 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
             "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
             "routes_collected": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
             "route_failure_count": sum(1 for smoke in smokes if "collector_route_smoke_failed" in _smoke_gaps(smoke)),
+            "projection_join_collected": bool(projection_join),
+            "projection_join_schema": public_safe_text(str(projection_join.get("schema_version") or ""), max_chars=80),
+            "projection_join_edge_count": _int_value(projection_join.get("edge_count")),
             "review_loop_collected": bool(review_loop),
             "review_loop_schema": public_safe_text(str(review_loop.get("schema_version") or ""), max_chars=80),
             "session_project_rollup_collected": bool(session_project_rollup),
@@ -428,11 +444,11 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
             "network_used": network_used is True,
             "mutation_allowed": False,
             "production_mutation_performed": False,
-            "readiness_claim": "collector_packet_not_live_evidence",
+            "readiness_claim": readiness_claim,
         },
         "evidence_provenance": {
             "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
-            "collection_mode": public_safe_text(str(collection_mode or "local_test_replay"), max_chars=80),
+            "collection_mode": safe_collection_mode,
             "network_used": network_used is True,
             "mutation_scope": "none",
             "raw_private_evidence_returned": False,
@@ -446,6 +462,94 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
     packet["collector"] = capture["collector"]
     ensure_public_safe(packet, "SourceToCandidateRuntimeCollectedShadowEvidencePacket")
     return packet
+
+
+def build_source_to_candidate_projection_join_shadow_evidence(
+    *,
+    repository: str = "neurons",
+) -> dict[str, Any]:
+    """Build branch-local projection join evidence without graph/search mutation."""
+
+    from .extraction_pipeline import run_graph_search_projection_join_preview
+
+    target_object_id = "ko:RepoDocument:projection-join-shadow-target"
+    preview = run_graph_search_projection_join_preview(
+        objects=[
+            {
+                "object_id": target_object_id,
+                "object_type": "RepoDocument",
+                "title": "Projection join shadow target",
+                "summary": "Public-safe source-to-candidate projection join target.",
+                "authority_lane": "candidate",
+                "verification_state": "source_hash_verified",
+                "review_state": "needs_review",
+            }
+        ],
+        projection_hits=[
+            {
+                "hit_id": "projection-hit:graph-shadow",
+                "source": "graph",
+                "object_ref": target_object_id,
+                "summary": "Derived graph projection hit for the shadow target.",
+                "score": 0.86,
+            },
+            {
+                "hit_id": "projection-hit:qdrant-shadow",
+                "source": "search",
+                "object_ref": target_object_id,
+                "summary": "Derived search projection hit for the shadow target.",
+                "score": 0.82,
+            },
+        ],
+        repository=repository or "neurons",
+    )
+    evidence = {
+        **preview,
+        "evidence_class": "runtime_projection_join",
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+    ensure_public_safe(evidence, "SourceToCandidateProjectionJoinShadowEvidence")
+    return evidence
+
+
+def _collect_projection_join_shadow(
+    projection_join_runner: Callable[[], Mapping[str, Any]] | None,
+    *,
+    repository: str = "neurons",
+) -> dict[str, Any]:
+    try:
+        raw = (
+            projection_join_runner()
+            if projection_join_runner is not None
+            else build_source_to_candidate_projection_join_shadow_evidence(
+                repository=repository or "neurons",
+            )
+        )
+    except Exception as exc:  # pragma: no cover - defensive public-safe guard
+        raw = {
+            "schema_version": PROJECTION_JOIN_RUNTIME_SCHEMA,
+            "evidence_class": "runtime_projection_join",
+            "collector_error_type": public_safe_text(type(exc).__name__, max_chars=80),
+            "status": "pass_with_gaps",
+            "edge_count": 0,
+            "production_mutation_performed": False,
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        }
+    evidence = _public_safe_mapping(raw)
+    ensure_public_safe(evidence, "CollectedProjectionJoinShadowEvidence")
+    return evidence
 
 
 def build_source_to_candidate_review_loop_shadow_evidence(
@@ -2194,6 +2298,9 @@ def _projection_join_failures(
     postcheck: Mapping[str, Any],
 ) -> list[str]:
     failures: list[str] = []
+    collector_error_type = public_safe_text(str(projection.get("collector_error_type") or ""), max_chars=80)
+    if collector_error_type:
+        failures.append(f"projection_join_collector_error:{collector_error_type}")
     if projection.get("schema_version") != PROJECTION_JOIN_RUNTIME_SCHEMA:
         failures.append("projection_join_schema_mismatch")
     if projection.get("evidence_class") != "runtime_projection_join":
