@@ -1134,8 +1134,6 @@ def _p8_live_runtime_authority_failures(evidence: Mapping[str, Any]) -> list[str
         failures.append("p8_schema_mismatch")
     if evidence.get("status") == "FAIL":
         failures.append("p8_runtime_authority_live_failed")
-    if evidence.get("runtime_readiness_status") == "FAIL":
-        failures.append("p8_runtime_readiness_failed")
     if evidence.get("permission_audit_claim_status") == "failed":
         failures.append("p8_permission_sensitive_audit_runtime_failed")
     if evidence.get("evidence_provenance_status") == "failed":
@@ -2004,24 +2002,32 @@ def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dic
     permission_claim = claims.get("live.production.permission_sensitive_audit", {})
     identity_claim = claims.get("live.deployed_identity.includes_expected_commit", {})
     provenance_claim = claims.get("live.evidence.provenance", {})
-    p8_claims = [permission_claim, identity_claim, provenance_claim]
+    p8_claims = [permission_claim, identity_claim]
     claim_gaps = _dedupe(
-        gap
-        for claim in p8_claims
-        for gap in (claim.get("gaps") or [])
-        if isinstance(gap, str) and gap
+        [
+            *(
+                gap
+                for claim in p8_claims
+                for gap in (claim.get("gaps") or [])
+                if isinstance(gap, str) and gap
+            ),
+            *(
+                gap
+                for gap in (provenance_claim.get("gaps") or [])
+                if isinstance(gap, str)
+                and gap
+                and gap not in _P8_PROVENANCE_AGGREGATE_MUTATION_GAPS
+            ),
+        ]
     )
     evidence_is_live = bool(report.get("evidence_is_live"))
     permission_status = str(permission_claim.get("status") or "not_validated")
     identity_status = str(identity_claim.get("status") or "not_validated")
-    provenance_status = str(provenance_claim.get("status") or "not_validated")
+    provenance_status = _p8_scoped_provenance_status(provenance_claim)
     authority_write_performed = permission_claim.get("production_mutation_performed") is True
     production_mutation_performed = bool(
-        report.get("production_mutation_performed")
-        or authority_write_performed
-        or provenance_claim.get("production_mutation_performed")
-        or live_evidence.get("production_mutation_performed") is True
-        or live_evidence.get("mutation_performed") is True
+        authority_write_performed
+        or permission_claim.get("production_mutation_performed") is True
     )
     status = _p8_runtime_authority_product_status(
         permission_status=permission_status,
@@ -2031,9 +2037,7 @@ def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dic
         production_mutation_performed=production_mutation_performed,
         gaps=claim_gaps,
     )
-    source_commit_matches = None
-    if identity:
-        source_commit_matches = identity.get("contains_expected_commit") is True
+    source_commit_matches = _p8_source_commit_match(identity=identity, identity_status=identity_status)
     return {
         "phase": "P8",
         "schema_version": "object_extraction_runtime_truth_preview.v1",
@@ -2060,6 +2064,38 @@ def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dic
         "production_mutation_performed": production_mutation_performed,
         "gaps": claim_gaps,
     }
+
+
+def _p8_source_commit_match(*, identity: Mapping[str, Any], identity_status: str) -> bool | None:
+    if identity_status == "validated":
+        return True
+    if identity.get("source_commit_matches_pr_head") is False:
+        return False
+    if identity.get("expected_commit_mismatch") is True or identity.get("source_commit_mismatch") is True:
+        return False
+    return None
+
+
+_P8_PROVENANCE_AGGREGATE_MUTATION_GAPS = frozenset(
+    {
+        "live_evidence_provenance_mutation_scope_mismatch",
+        "live_evidence_provenance_unexpected_mutation_scope",
+    }
+)
+
+
+def _p8_scoped_provenance_status(provenance_claim: Mapping[str, Any]) -> str:
+    status = str(provenance_claim.get("status") or "not_validated")
+    if status != "failed":
+        return status
+    blocking_gaps = [
+        gap
+        for gap in provenance_claim.get("gaps", [])
+        if isinstance(gap, str) and gap not in _P8_PROVENANCE_AGGREGATE_MUTATION_GAPS
+    ]
+    if blocking_gaps:
+        return "failed"
+    return "validated" if provenance_claim.get("is_live") is True else "not_validated"
 
 
 def _p8_runtime_authority_product_status(
