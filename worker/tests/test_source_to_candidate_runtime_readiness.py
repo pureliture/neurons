@@ -315,6 +315,7 @@ def _preference_artifact_memory_evidence(**overrides):
             "section": "style_preference",
             "object_count": 1,
             "accepted_preference_count": 1,
+            "authority_lanes": ["accepted_current"],
             "surface_policy": {"mutation_allowed": False},
         },
         "artifact_review_check": {
@@ -1269,6 +1270,7 @@ def test_runtime_readiness_fails_when_preference_artifact_memory_is_unsafe_or_in
                 "section": "style_preference",
                 "object_count": 0,
                 "accepted_preference_count": 0,
+                "authority_lanes": [],
                 "surface_policy": {"mutation_allowed": True},
             },
             artifact_review_check={
@@ -1299,6 +1301,7 @@ def test_runtime_readiness_fails_when_preference_artifact_memory_is_unsafe_or_in
     assert "preference_artifact_proposal_lane_missing" in report["gaps"]
     assert "preference_artifact_html_route_unimplemented" in report["gaps"]
     assert "preference_artifact_agent_context_missing" in report["gaps"]
+    assert "preference_artifact_agent_context_accepted_current_missing" in report["gaps"]
     assert "preference_artifact_agent_context_mutation_allowed" in report["gaps"]
     assert "preference_artifact_review_check_failed" in report["gaps"]
     assert "preference_artifact_review_check_required_ui" in report["gaps"]
@@ -2763,6 +2766,9 @@ def test_runtime_readiness_collector_includes_preference_artifact_memory_shadow_
     assert preference["preference_object_pack"]["proposal_preference_count"] >= 1
     assert preference["html_visualization_route_smoke"]["route"] == "html_visualization_preference"
     assert preference["agent_context_preference_section"]["section"] == "style_preference"
+    assert preference["agent_context_preference_section"]["authority_lanes"] == [
+        "accepted_current"
+    ]
     assert preference["artifact_review_check"]["status"] == "pass"
     assert preference["artifact_review_check"]["ui_required"] is False
     assert preference["artifact_review_check"]["raw_artifact_body_returned"] is False
@@ -2776,6 +2782,75 @@ def test_runtime_readiness_collector_includes_preference_artifact_memory_shadow_
     assert "live_preference_artifact_memory_unverified" not in report["gaps"]
     assert "accepted_preference_context_pack_live_unproven" not in report["gaps"]
     assert report["status"] == "PASS_WITH_GAPS"
+
+
+def test_runtime_readiness_fails_when_preference_artifact_context_lacks_accepted_current_lane():
+    evidence = _sanitized_live_evidence(
+        preference_artifact_memory=_preference_artifact_memory_evidence(
+            agent_context_preference_section={
+                "schema_version": "agent_context_product_pack.v1",
+                "section": "style_preference",
+                "object_count": 1,
+                "accepted_preference_count": 1,
+                "authority_lanes": ["reference_only"],
+                "surface_policy": {"mutation_allowed": False},
+            },
+        ),
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    preference = claims["live.preference_artifact.memory"]
+    assert report["status"] == "FAIL"
+    assert preference["status"] == "failed"
+    assert preference["agent_context_authority_lanes"] == ["reference_only"]
+    assert "preference_artifact_agent_context_accepted_current_missing" in preference["gaps"]
+    assert "preference_artifact_agent_context_accepted_current_missing" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_preference_artifact_count_lacks_accepted_current_lane():
+    evidence = _sanitized_live_evidence(
+        preference_artifact_memory=_preference_artifact_memory_evidence(
+            preference_object_pack={
+                "schema_version": "object_pack.v1",
+                "route": "code_style_preference",
+                "accepted_preference_count": 1,
+                "proposal_preference_count": 1,
+                "objects": [
+                    {
+                        "object_id": "ko:ArtifactPreference:html-review-density",
+                        "object_type": "ArtifactPreference",
+                        "authority_lane": "reference_only",
+                    }
+                ],
+                "lanes": {
+                    "accepted_current": [],
+                    "proposal_only": [
+                        {
+                            "object_id": "ko:ArtifactPreference:visualization-proposal",
+                            "object_type": "ArtifactPreference",
+                            "authority_lane": "proposal_only",
+                        }
+                    ],
+                },
+                "recommended_actions": [],
+                "gaps": [],
+                "production_mutation_performed": False,
+            },
+        ),
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    preference = claims["live.preference_artifact.memory"]
+    assert report["status"] == "FAIL"
+    assert preference["status"] == "failed"
+    assert preference["accepted_preference_count"] == 1
+    assert preference["accepted_current_lane_count"] == 0
+    assert "preference_artifact_accepted_current_lane_missing" in preference["gaps"]
+    assert "preference_artifact_accepted_current_lane_missing" in report["gaps"]
 
 
 def test_runtime_readiness_collector_includes_permission_sensitive_audit_shadow_evidence():
