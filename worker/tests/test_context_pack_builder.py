@@ -255,6 +255,43 @@ def test_builder_adds_consumer_specific_compact_agent_context_pack_with_safe_act
         assert "raw_private_runtime_evidence" in readiness_hint["blocked_targets"]
 
 
+def test_builder_marks_empty_required_agent_context_sections_as_actionable_gaps():
+    pack = ContextPackBuilder().build(
+        brain_id="/project/neurons",
+        repository="neurons",
+        branch="main",
+        current_files=["docs/specs/roadmap.md"],
+        current_request="P9 agent context status",
+        artifacts=[],
+        cards=[],
+        graph_result=GraphMemoryResult(status="available"),
+        incidents=(),
+        bridge_status={"status": "disabled", "authority": "bridge", "details": []},
+        bridge_evidence=(),
+        consumer="codex",
+    ).to_dict()
+
+    product = pack["authority"]["agent_context_product"]
+    style_section = product["sections"]["style_preference"]
+    active_work_section = product["sections"]["active_work"]
+    section_gaps = [
+        "agent_context_style_preference_missing",
+        "agent_context_active_work_missing",
+    ]
+
+    assert style_section["object_count"] == 0
+    assert active_work_section["object_count"] == 0
+    assert "agent_context_style_preference_missing" in style_section["gaps"]
+    assert "agent_context_active_work_missing" in active_work_section["gaps"]
+    assert all(gap in product["degraded_mode"]["gaps"] for gap in section_gaps)
+    assert all(gap in product["missing_evidence_before_promotion"] for gap in section_gaps)
+    request_hint = next(
+        item for item in product["action_hints"] if item["action"] == "request_missing_evidence"
+    )
+    assert all(gap in request_hint["blocked_by"] for gap in section_gaps)
+    assert product["surface_policy"]["mutation_allowed"] is False
+
+
 def test_builder_filters_stale_preference_from_compact_style_guidance():
     builder = ContextPackBuilder()
     cards = [
