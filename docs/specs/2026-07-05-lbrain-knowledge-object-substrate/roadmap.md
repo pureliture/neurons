@@ -1081,6 +1081,14 @@ Local validation evidence:
 - degraded agent context full worker result: `1778 passed, 9 skipped, 1 warning`
 - degraded agent context root evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
 - degraded agent context root result: `BUILD SUCCESSFUL`
+- P9 live agent-context evidence-consumption gate: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_product_activation_progress_closes_p9_gap_with_live_agent_context_evidence tests/test_golden_query_eval.py::test_product_activation_progress_keeps_p9_gap_for_empty_live_agent_context_sections tests/test_golden_query_eval.py::test_product_activation_progress_keeps_p9_live_gap_for_local_agent_context_replay tests/test_golden_query_eval.py::test_product_activation_progress_fails_p9_when_agent_context_tool_hint_is_unsafe`
+- P9 live agent-context evidence-consumption result: `4 passed, 1 warning`
+- P9 live agent-context adjacent activation/runtime regression evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py tests/test_source_to_candidate_runtime_readiness.py tests/test_neuron_cli.py`
+- P9 live agent-context adjacent activation/runtime regression result: `179 passed, 1 warning`
+- P9 live agent-context full worker evidence: `cd worker && uv run pytest -q`
+- P9 live agent-context full worker result: `1782 passed, 9 skipped, 1 warning`
+- P9 live agent-context root evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
+- P9 live agent-context root result: `BUILD SUCCESSFUL`
 
 Implemented local/test scope:
 
@@ -1107,6 +1115,7 @@ Implemented local/test scope:
 - runtime readiness surfaces `live.evidence.provenance` so agent context/product-readiness checks can distinguish evaluator-local no-network execution from external live evidence collection
 - runtime readiness exposes a plan/template mode for agents and operators to collect the missing post-deploy evidence without performing production mutation or returning protected values
 - degraded `agent_context_product_pack.v1` now turns empty required sections into actionable gaps: `agent_context_style_preference_missing`, `agent_context_active_work_missing`, and `agent_context_required_verification_missing` are attached to the relevant section, product degraded gaps, missing-evidence-before-promotion blockers, and `request_missing_evidence` action hints instead of leaving a silent empty section
+- activation progress now consumes supplied P9 live agent-context evidence through `live.agent_context.tool_hints`, `live.agent_context.product_sections`, `live.agent_context.startup_read_path`, and `live.evidence.provenance`; complete live evidence can close the P9 phase gaps, empty required sections remain `PASS_WITH_GAPS`, local replay keeps `p9_agent_context_evidence_not_live`, and unsafe tool/startup/protected-output evidence fails closed
 
 Remaining gaps:
 
