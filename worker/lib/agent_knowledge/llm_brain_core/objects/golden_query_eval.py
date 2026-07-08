@@ -34,7 +34,7 @@ REQUIRED_QUALITY_AXES = [
 
 ACTIVATION_SCOPE_PHASES = ("P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9")
 MINIMUM_REVIEW_LOOP_PHASES = ("P2", "P3", "P4")
-PRODUCT_EVIDENCE_PHASES = ("P2", "P3", "P6", "P7", "P8", "P9")
+PRODUCT_EVIDENCE_PHASES = ("P2", "P3", "P4", "P6", "P7", "P8", "P9")
 DEFERRED_SCOPE_GAPS = {
     "future_phase_golden_query_slices_planned",
     "future_phase_slices_planned",
@@ -442,6 +442,16 @@ def build_product_activation_progress_report(
         source_gate=source_gate,
         phase_progress=phase_progress,
     )
+    if any(
+        item.get("phase") == "P4" and item.get("result") == "PASS"
+        for item in product_evidence_result.get("checks", [])
+        if isinstance(item, Mapping)
+    ):
+        blockers = [
+            blocker
+            for blocker in blockers
+            if blocker != "production_authority_gate_preapproved_not_executed"
+        ]
     status = "FAIL" if hard_failures else ("PASS_WITH_GAPS" if blockers else "PASS")
     next_phase = _next_activation_phase(phase_progress)
     production_ready = (
@@ -476,6 +486,13 @@ def build_product_activation_progress_report(
         "production_ready": production_ready,
         "production_mutation_performed": bool(
             source_gate.get("production_mutation_performed")
+            or (
+                isinstance(live_evidence, Mapping)
+                and (
+                    live_evidence.get("production_mutation_performed") is True
+                    or live_evidence.get("mutation_performed") is True
+                )
+            )
             or any(item.get("production_mutation_performed") for item in phase_progress)
             or any(item.get("production_mutation_performed") for item in product_evidence_summary)
         ),
@@ -589,11 +606,12 @@ def _product_evidence_summary(
 ) -> list[dict[str, Any]]:
     p2 = _p2_reference_corpus_evidence()
     p3 = _p3_projection_join_evidence(live_evidence=live_evidence)
+    p4 = _p4_replacement_current_evidence(live_evidence=live_evidence)
     p6 = _p6_session_project_rollup_evidence(live_evidence=live_evidence)
     p7 = _p7_preference_artifact_evidence()
     p8 = _p8_runtime_authority_evidence()
     p9 = _p9_agent_context_evidence(preference_preview=p7)
-    return [p2, p3, p6, p7, p8, p9]
+    return [p2, p3, p4, p6, p7, p8, p9]
 
 
 def _product_evidence_check(phase: str, evidence: Mapping[str, Any]) -> dict[str, Any]:
@@ -602,7 +620,7 @@ def _product_evidence_check(phase: str, evidence: Mapping[str, Any]) -> dict[str
     if not evidence:
         failures.append("product_evidence_missing")
     elif bool(evidence.get("production_mutation_performed")):
-        if phase != "P2":
+        if phase not in {"P2", "P4"}:
             failures.append(f"{phase.lower()}_production_mutation_performed")
     if phase == "P2" and evidence:
         failures.extend(_p2_evidence_failures(evidence))
@@ -610,6 +628,9 @@ def _product_evidence_check(phase: str, evidence: Mapping[str, Any]) -> dict[str
     elif phase == "P3" and evidence:
         failures.extend(_p3_evidence_failures(evidence))
         gaps.extend(_p3_evidence_gaps(evidence))
+    elif phase == "P4" and evidence:
+        failures.extend(_p4_evidence_failures(evidence))
+        gaps.extend(_p4_evidence_gaps(evidence))
     elif phase == "P6" and evidence:
         failures.extend(_p6_evidence_failures(evidence))
         gaps.extend(_p6_evidence_gaps(evidence))
@@ -709,7 +730,7 @@ def _p3_projection_join_evidence(
             report.get("evidence_collection_network_used")
         ),
         "gaps": projection_gaps,
-        "production_mutation_performed": bool(report.get("production_mutation_performed")),
+        "production_mutation_performed": bool(projection.get("production_mutation_performed")),
     }
 
 
@@ -771,6 +792,94 @@ def _p3_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
     ):
         gaps.append("p3_projection_join_evidence_not_live")
     return gaps
+
+
+def _p4_replacement_current_evidence(
+    *, live_evidence: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    from .runtime_readiness import build_source_to_candidate_runtime_readiness_report
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=live_evidence)
+    claims = {
+        str(claim.get("claim_id") or ""): claim
+        for claim in report.get("claims", [])
+        if isinstance(claim, Mapping)
+    }
+    replacement = claims.get("live.production.object_authority_replacement_current", {})
+    replacement = replacement if isinstance(replacement, Mapping) else {}
+    provenance = claims.get("live.evidence.provenance", {})
+    provenance = provenance if isinstance(provenance, Mapping) else {}
+    gaps = [
+        str(gap)
+        for gap in replacement.get("gaps", [])
+        if isinstance(gap, str) and gap
+    ]
+    if replacement.get("status") != "validated":
+        gaps.extend(
+            str(gap)
+            for gap in report.get("gaps", [])
+            if isinstance(gap, str)
+            and (gap.startswith("replacement_") or gap == "replacement_current_execution_unverified")
+        )
+    return {
+        "phase": "P4",
+        "schema_version": "object_authority_replacement_current_product_evidence.v1",
+        "status": str(report.get("status") or ""),
+        "replacement_claim_status": str(replacement.get("status") or "not_validated"),
+        "prior_authority_lane": str(replacement.get("prior_authority_lane") or ""),
+        "successor_authority_lane": str(replacement.get("successor_authority_lane") or ""),
+        "read_after_write_status": str(replacement.get("read_after_write_status") or ""),
+        "postcheck_status": str(replacement.get("postcheck_status") or ""),
+        "object_count": int(replacement.get("object_count") or 0),
+        "live_evidence_provided": bool(live_evidence),
+        "evidence_is_live": provenance.get("is_live") is True,
+        "network_used": report.get("network_used") is True,
+        "evidence_collection_network_used": report.get("evidence_collection_network_used") is True,
+        "production_mutation_performed": replacement.get("production_mutation_performed") is True,
+        "production_ready": report.get("production_ready") is True,
+        "runtime_readiness_failed": str(report.get("status") or "") == "FAIL",
+        "evidence_provenance_status": str(provenance.get("status") or ""),
+        "gaps": _dedupe(gaps),
+    }
+
+
+def _p4_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if evidence.get("schema_version") != "object_authority_replacement_current_product_evidence.v1":
+        failures.append("p4_schema_mismatch")
+    if evidence.get("runtime_readiness_failed") is True:
+        failures.append("p4_runtime_readiness_failed")
+    if evidence.get("replacement_claim_status") == "failed":
+        failures.append("p4_replacement_current_failed")
+    if evidence.get("evidence_provenance_status") == "failed":
+        failures.append("p4_evidence_provenance_failed")
+    if evidence.get("replacement_claim_status") == "validated":
+        if evidence.get("evidence_is_live") is not True:
+            failures.append("p4_replacement_current_not_live")
+        if evidence.get("production_mutation_performed") is not True:
+            failures.append("p4_replacement_current_mutation_missing")
+        if evidence.get("prior_authority_lane") not in {"accepted_non_current", "archive_only"}:
+            failures.append("p4_prior_current_not_demoted")
+        if evidence.get("successor_authority_lane") != "accepted_current":
+            failures.append("p4_successor_not_current")
+        if evidence.get("read_after_write_status") != "validated":
+            failures.append("p4_read_after_write_missing")
+        if evidence.get("postcheck_status") != "validated":
+            failures.append("p4_postcheck_missing")
+        if int(evidence.get("object_count") or 0) != 2:
+            failures.append("p4_replacement_object_count_not_two")
+    return _dedupe(failures)
+
+
+def _p4_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
+    gaps = [
+        f"p4_{gap}"
+        for gap in (evidence.get("gaps") or [])
+        if isinstance(gap, str) and gap
+    ]
+    if evidence.get("replacement_claim_status") == "not_validated":
+        gaps.append("p4_replacement_current_execution_unverified")
+    return _dedupe(gaps)
 
 
 def _p6_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
@@ -1246,8 +1355,16 @@ def _p6_live_session_project_rollup_evidence(
         "read_after_write_status": str(claim.get("read_after_write_status") or read_after_write.get("status") or ""),
         "raw_return_capability": str(claim.get("raw_return_capability") or handoff.get("raw_return_capability") or ""),
         "gaps": claim_gaps,
-        "production_mutation_performed": bool(claim.get("production_mutation_performed"))
-        or bool(report.get("production_mutation_performed")),
+        "production_mutation_performed": bool(
+            claim.get("production_mutation_performed")
+            or (
+                rollup_present
+                and (
+                    live_evidence.get("production_mutation_performed") is True
+                    or live_evidence.get("mutation_performed") is True
+                )
+            )
+        ),
     }
 
 
@@ -1836,26 +1953,33 @@ def _apply_product_evidence_to_phase_progress(
         for item in product_evidence_result.get("checks", [])
         if isinstance(item, Mapping)
     }
-    p3_check = checks.get("P3", {})
-    if p3_check.get("result") != "PASS":
-        return phase_progress
+    removable_gaps_by_phase = {
+        "P3": {"live_graph_qdrant_projection_join_unproven"},
+        "P4": {
+            "production_authority_pilot_not_executed",
+            "production_authority_write_evidence_missing",
+        },
+    }
     adjusted: list[dict[str, Any]] = []
     for item in phase_progress:
-        if item.get("phase") != "P3":
+        phase = str(item.get("phase") or "")
+        check = checks.get(phase, {})
+        removable = removable_gaps_by_phase.get(phase, set())
+        if check.get("result") != "PASS" or not removable:
             adjusted.append(item)
             continue
-        gaps = [
-            gap
-            for gap in item.get("gaps", [])
-            if gap != "live_graph_qdrant_projection_join_unproven"
-        ]
+        gaps = [gap for gap in item.get("gaps", []) if gap not in removable]
         updated = {
             **item,
             "gaps": gaps,
             "quality_result": "PASS" if not gaps else item.get("quality_result"),
+            "production_mutation_performed": (
+                bool(item.get("production_mutation_performed"))
+                or check.get("phase") == "P4"
+            ),
         }
         updated["next_action"] = _activation_phase_next_action(
-            "P3",
+            phase,
             str(updated.get("state") or ""),
             gaps,
         )

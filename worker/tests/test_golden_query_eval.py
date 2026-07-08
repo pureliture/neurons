@@ -31,6 +31,29 @@ def _valid_p3_projection_join_evidence():
     }
 
 
+def _valid_p4_replacement_current_product_evidence():
+    return {
+        "phase": "P4",
+        "schema_version": "object_authority_replacement_current_product_evidence.v1",
+        "status": "PASS",
+        "replacement_claim_status": "validated",
+        "prior_authority_lane": "accepted_non_current",
+        "successor_authority_lane": "accepted_current",
+        "read_after_write_status": "validated",
+        "postcheck_status": "validated",
+        "object_count": 2,
+        "live_evidence_provided": True,
+        "evidence_is_live": True,
+        "network_used": True,
+        "evidence_collection_network_used": True,
+        "production_mutation_performed": True,
+        "production_ready": False,
+        "runtime_readiness_failed": False,
+        "evidence_provenance_status": "validated",
+        "gaps": [],
+    }
+
+
 def _valid_p3_runtime_evidence(*, live: bool = True):
     return {
         "schema_version": "source_to_candidate_runtime_evidence.v1",
@@ -59,6 +82,94 @@ def _valid_p3_runtime_evidence(*, live: bool = True):
             "raw_external_ids_returned": False,
         },
         "production_mutation_performed": False,
+    }
+
+
+def _valid_p4_replacement_current_runtime_evidence(*, live: bool = True):
+    approval_ref_hash = "sha256:" + "c" * 64
+    return {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "production_authority_replacement_current": {
+            "schema_version": "object_authority_replacement_current_evidence.v1",
+            "approval": {
+                "approved": True,
+                "approval_ref_hash": approval_ref_hash,
+                "scope": "single_project_replacement_current",
+                "project": "workspace-index-advisor",
+                "max_objects": 2,
+            },
+            "prior_current": {
+                "target_object_id": "ko:RepoDocument:replacement-prior-current",
+                "proposal_write_performed": True,
+                "proposal_write_target": "production_ledger",
+                "decision_type": "commit_supersession",
+                "authority_write_performed": True,
+                "authoritative_memory_changed": True,
+                "production_mutation_performed": True,
+                "previous_authority_lane": "accepted_current",
+                "new_authority_lane": "accepted_non_current",
+                "ledger_scope": "production",
+                "authority_write_scope": "production_ledger",
+                "decision_id": "decision:p4-replacement-prior",
+                "supersedes_decision_id": "decision:p4-replacement-successor",
+                "production_gate_ref_hash": approval_ref_hash,
+            },
+            "successor_current": {
+                "target_object_id": "ko:RepoDocument:replacement-successor-current",
+                "proposal_write_performed": True,
+                "proposal_write_target": "production_ledger",
+                "decision_type": "accept_current",
+                "authority_write_performed": True,
+                "authoritative_memory_changed": True,
+                "production_mutation_performed": True,
+                "previous_authority_lane": "candidate",
+                "new_authority_lane": "accepted_current",
+                "ledger_scope": "production",
+                "authority_write_scope": "production_ledger",
+                "decision_id": "decision:p4-replacement-successor",
+                "supersedes_decision_id": "decision:p4-replacement-prior",
+                "production_gate_ref_hash": approval_ref_hash,
+            },
+            "read_after_write": {
+                "status": "validated",
+                "prior_authority_lane": "accepted_non_current",
+                "successor_authority_lane": "accepted_current",
+                "prior_decision_id": "decision:p4-replacement-prior",
+                "successor_decision_id": "decision:p4-replacement-successor",
+            },
+            "replacement_path": [
+                "demote_prior_object_to_accepted_non_current_or_archive_only",
+                "promote_successor_object_to_accepted_current",
+                "verify_brain_objects_query_read_after_write",
+            ],
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+            "scope": {
+                "project": "workspace-index-advisor",
+                "object_ids": [
+                    "ko:RepoDocument:replacement-prior-current",
+                    "ko:RepoDocument:replacement-successor-current",
+                ],
+                "max_objects": 2,
+                "allowed_object_classes": ["RepoDocument"],
+            },
+        },
+        "evidence_provenance": {
+            "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
+            "collection_mode": "redacted_operator_packet" if live else "local_test_replay",
+            "mutation_scope": "bounded_production_authority_execution",
+            "network_used": live,
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": True,
     }
 
 
@@ -464,11 +575,13 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert "future_phase_golden_query_slices_planned" not in report["goal_completion_blockers"]
     assert "future_phase_slices_planned" not in report["goal_completion_blockers"]
     checks = {item["phase"]: item for item in report["product_evidence_checks"]}
-    assert set(checks) == {"P2", "P3", "P6", "P7", "P8", "P9"}
+    assert set(checks) == {"P2", "P3", "P4", "P6", "P7", "P8", "P9"}
     assert checks["P2"]["result"] == "PASS_WITH_GAPS"
     assert "p2_production_corpus_ingest_evidence_unverified" in checks["P2"]["gaps"]
     assert checks["P3"]["result"] == "PASS_WITH_GAPS"
     assert "p3_live_graph_qdrant_projection_join_unproven" in checks["P3"]["gaps"]
+    assert checks["P4"]["result"] == "PASS_WITH_GAPS"
+    assert "p4_replacement_current_execution_unverified" in checks["P4"]["gaps"]
     assert checks["P6"]["result"] == "PASS_WITH_GAPS"
     assert "p6_live_multi_device_rollup_unproven" in checks["P6"]["gaps"]
     assert checks["P7"]["result"] == "PASS_WITH_GAPS"
@@ -488,7 +601,7 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert "p9_production_consumer_context_pack_live_unproven" in checks["P9"]["gaps"]
     assert "p9_consumer_action_surface_runtime_policy_unproven" in checks["P9"]["gaps"]
     evidence = {item["phase"]: item for item in report["product_evidence_summary"]}
-    assert set(evidence) == {"P2", "P3", "P6", "P7", "P8", "P9"}
+    assert set(evidence) == {"P2", "P3", "P4", "P6", "P7", "P8", "P9"}
     assert evidence["P2"]["schema_version"] == "reference_corpus_production_ingest_readiness.v1"
     assert evidence["P2"]["production_mutation_performed"] is False
     assert evidence["P3"]["schema_version"] == "source_to_candidate_projection_join_product_evidence.v1"
@@ -687,6 +800,30 @@ def test_product_activation_progress_closes_p3_gap_with_live_projection_join_evi
     assert "live_graph_qdrant_projection_join_unproven" not in phase_progress["P3"]["gaps"]
     assert "live_graph_qdrant_projection_join_unproven" not in report["goal_completion_blockers"]
     assert report["production_mutation_performed"] is False
+
+
+def test_product_activation_progress_closes_p4_gap_with_live_replacement_current_evidence():
+    report = build_product_activation_progress_report(
+        live_evidence=_valid_p4_replacement_current_runtime_evidence(live=True)
+    )
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p4 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P4")
+    phase_progress = {item["phase"]: item for item in report["phase_progress"]}
+
+    assert checks["P4"]["result"] == "PASS"
+    assert p4["replacement_claim_status"] == "validated"
+    assert p4["prior_authority_lane"] == "accepted_non_current"
+    assert p4["successor_authority_lane"] == "accepted_current"
+    assert p4["evidence_is_live"] is True
+    assert p4["production_mutation_performed"] is True
+    assert phase_progress["P4"]["quality_result"] == "PASS"
+    assert "production_authority_pilot_not_executed" not in phase_progress["P4"]["gaps"]
+    assert "production_authority_write_evidence_missing" not in phase_progress["P4"]["gaps"]
+    assert "production_authority_pilot_not_executed" not in report["goal_completion_blockers"]
+    assert "production_authority_write_evidence_missing" not in report["goal_completion_blockers"]
+    assert report["production_mutation_performed"] is True
+    assert report["production_ready"] is False
 
 
 def test_product_activation_progress_keeps_p6_gap_when_rollup_evidence_is_not_live():
@@ -913,6 +1050,7 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "gaps": ["production_corpus_ingest_evidence_unverified"],
             },
             _valid_p3_projection_join_evidence(),
+            _valid_p4_replacement_current_product_evidence(),
             {
                 "phase": "P6",
                 "schema_version": "object_extraction_session_project_rollup_preview.v1",
