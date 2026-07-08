@@ -1,0 +1,38 @@
+# Operator tools container for LLM-Brain runtime checks and one-shot commands.
+#
+# Unlike the base worker image, this image includes the MCP client dependency so
+# post-deploy read-only capture can run from the tools surface. It still does not
+# start or expose the MCP HTTP server.
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY lib ./lib
+
+RUN pip install --no-cache-dir ".[mcp-client]" \
+    && pip install --no-cache-dir "qdrant-client>=1.10" "openai>=1.0"
+
+RUN python - <<'PY'
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+from agent_knowledge.llm_brain_core.objects.post_deploy_mcp_capture import (
+    validate_post_deploy_mcp_url,
+)
+
+assert ClientSession is not None
+assert streamablehttp_client is not None
+assert validate_post_deploy_mcp_url("http://127.0.0.1:8765/mcp") == "http://127.0.0.1:8765/mcp"
+PY
+
+RUN useradd --create-home --shell /usr/sbin/nologin appuser \
+    && mkdir -p /var/lib/agent-knowledge/llm-brain \
+    && chown -R appuser:appuser /var/lib/agent-knowledge
+
+USER appuser
+
+CMD ["sleep", "infinity"]

@@ -2054,6 +2054,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+mcp-client = [
+    { name = "mcp" },
+]
 mcp-http = [
     { name = "mcp" },
 ]
@@ -2071,6 +2074,7 @@ dev = [
 requires-dist = [
     { name = "docling", marker = "extra == 'searchable-mirror'", specifier = ">=2" },
     { name = "graphiti-core", specifier = ">=0.29.2" },
+    { name = "mcp", marker = "extra == 'mcp-client'", specifier = ">=1.28.0" },
     { name = "mcp", marker = "extra == 'mcp-http'", specifier = ">=1.28.0" },
     { name = "nats-py", specifier = ">=2.6" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
@@ -2078,7 +2082,7 @@ requires-dist = [
     { name = "qdrant-client", marker = "extra == 'searchable-mirror'", specifier = ">=1.10" },
     { name = "sqlalchemy", specifier = ">=2.0.51" },
 ]
-provides-extras = ["mcp-http", "searchable-mirror"]
+provides-extras = ["mcp-client", "mcp-http", "searchable-mirror"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8" }]
