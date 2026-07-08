@@ -13,6 +13,12 @@ from .runtime_readiness import (
 )
 
 POST_DEPLOY_MCP_CAPTURE_SCHEMA = "source_to_candidate_runtime_post_deploy_mcp_capture.v1"
+PROTECTED_OUTPUT_FLAGS = (
+    "raw_private_evidence_returned",
+    "secret_returned",
+    "host_topology_returned",
+    "raw_external_ids_returned",
+)
 
 
 def validate_post_deploy_mcp_url(mcp_url: str) -> str:
@@ -140,6 +146,9 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
     session_project_rollup = _live_session_project_rollup_from_runtime_packet(runtime_packet)
     if session_project_rollup:
         capture["session_project_rollup_runtime"] = session_project_rollup
+    preference_artifact_memory = _live_preference_artifact_memory_from_runtime_packet(runtime_packet)
+    if preference_artifact_memory:
+        capture["preference_artifact_memory"] = preference_artifact_memory
     ensure_public_safe(capture, "SourceToCandidatePostDeployMcpCapture")
     return capture
 
@@ -267,9 +276,27 @@ def _runtime_collected_packet_summary(packet: Mapping[str, Any]) -> dict[str, An
         if isinstance(rollup_preview.get("object_type_counts"), Mapping)
         else {}
     )
+    preference = (
+        safe_packet.get("preference_artifact_memory")
+        if isinstance(safe_packet.get("preference_artifact_memory"), Mapping)
+        else {}
+    )
+    preference_pack = (
+        preference.get("preference_object_pack")
+        if isinstance(preference.get("preference_object_pack"), Mapping)
+        else {}
+    )
+    artifact_check = (
+        preference.get("artifact_review_check")
+        if isinstance(preference.get("artifact_review_check"), Mapping)
+        else {}
+    )
     projection_promoted = bool(_live_projection_join_from_runtime_packet(safe_packet))
     session_project_rollup_promoted = bool(
         _live_session_project_rollup_from_runtime_packet(safe_packet)
+    )
+    preference_artifact_memory_promoted = bool(
+        _live_preference_artifact_memory_from_runtime_packet(safe_packet)
     )
     summary = {
         "schema_version": public_safe_text(str(safe_packet.get("schema_version") or ""), max_chars=80),
@@ -290,6 +317,24 @@ def _runtime_collected_packet_summary(packet: Mapping[str, Any]) -> dict[str, An
         "session_project_rollup_device_count": _safe_int(rollup_preview.get("device_count")),
         "session_project_rollup_work_unit_count": _safe_int(object_type_counts.get("WorkUnit")),
         "session_project_rollup_promoted_to_live_evidence": session_project_rollup_promoted,
+        "preference_artifact_memory_present": bool(preference),
+        "preference_artifact_memory_schema": public_safe_text(
+            str(preference.get("schema_version") or ""),
+            max_chars=80,
+        ),
+        "preference_artifact_accepted_preference_count": _safe_int(
+            preference_pack.get("accepted_preference_count")
+        ),
+        "preference_artifact_proposal_preference_count": _safe_int(
+            preference_pack.get("proposal_preference_count")
+        ),
+        "preference_artifact_review_check_status": public_safe_text(
+            str(artifact_check.get("status") or ""),
+            max_chars=80,
+        ),
+        "preference_artifact_memory_promoted_to_live_evidence": (
+            preference_artifact_memory_promoted
+        ),
         "evidence_collection_mode": public_safe_text(str(provenance.get("collection_mode") or ""), max_chars=80),
         "evidence_collection_network_used": provenance.get("network_used") is True,
         "production_mutation_performed": safe_packet.get("production_mutation_performed") is True,
@@ -317,6 +362,10 @@ def _live_projection_join_from_runtime_packet(packet: Mapping[str, Any]) -> dict
         return {}
     if _runtime_packet_reports_mutation(safe_packet):
         return {}
+    if _runtime_packet_reports_protected_output(safe_packet):
+        return {}
+    if _postcheck_reports_protected_output(projection):
+        return {}
     if str(projection.get("status") or "") != "pass":
         return {}
     live_projection = _public_safe_mapping(projection)
@@ -343,9 +392,50 @@ def _live_session_project_rollup_from_runtime_packet(packet: Mapping[str, Any]) 
         return {}
     if _runtime_packet_reports_mutation(safe_packet):
         return {}
+    if _runtime_packet_reports_protected_output(safe_packet):
+        return {}
+    if _postcheck_reports_protected_output(rollup):
+        return {}
     live_rollup = _public_safe_mapping(rollup)
     ensure_public_safe(live_rollup, "SourceToCandidatePostDeploySessionProjectRollup")
     return live_rollup
+
+
+def _live_preference_artifact_memory_from_runtime_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
+    safe_packet = _public_safe_mapping(packet)
+    preference = safe_packet.get("preference_artifact_memory")
+    if not isinstance(preference, Mapping):
+        return {}
+    if str(preference.get("evidence_class") or "") != "runtime_preference_artifact_memory":
+        return {}
+    collector = safe_packet.get("collector") if isinstance(safe_packet.get("collector"), Mapping) else {}
+    if str(collector.get("readiness_claim") or "") == "collector_packet_not_live_evidence":
+        return {}
+    provenance = (
+        safe_packet.get("evidence_provenance")
+        if isinstance(safe_packet.get("evidence_provenance"), Mapping)
+        else {}
+    )
+    if str(provenance.get("collection_mode") or "") != "post_deploy_read_only_smoke":
+        return {}
+    if provenance.get("network_used") is not True:
+        return {}
+    if _runtime_packet_reports_mutation(safe_packet):
+        return {}
+    if _runtime_packet_reports_protected_output(safe_packet):
+        return {}
+    if _postcheck_reports_protected_output(preference):
+        return {}
+    artifact_check = (
+        preference.get("artifact_review_check")
+        if isinstance(preference.get("artifact_review_check"), Mapping)
+        else {}
+    )
+    if artifact_check.get("raw_artifact_body_returned") is not False:
+        return {}
+    live_preference = _public_safe_mapping(preference)
+    ensure_public_safe(live_preference, "SourceToCandidatePostDeployPreferenceArtifactMemory")
+    return live_preference
 
 
 def _safe_int(value: Any) -> int:
@@ -368,6 +458,26 @@ def _runtime_packet_reports_mutation(packet: Mapping[str, Any]) -> bool:
         or safe_packet.get("mutation_performed") is True
         or bool(mutation_scope and mutation_scope != "none")
     )
+
+
+def _runtime_packet_reports_protected_output(packet: Mapping[str, Any]) -> bool:
+    safe_packet = _public_safe_mapping(packet)
+    provenance = (
+        safe_packet.get("evidence_provenance")
+        if isinstance(safe_packet.get("evidence_provenance"), Mapping)
+        else {}
+    )
+    return any(
+        safe_packet.get(field) is True or provenance.get(field) is True
+        for field in PROTECTED_OUTPUT_FLAGS
+    )
+
+
+def _postcheck_reports_protected_output(evidence: Mapping[str, Any]) -> bool:
+    postcheck = evidence.get("postcheck") if isinstance(evidence.get("postcheck"), Mapping) else {}
+    if postcheck.get("status") != "validated":
+        return True
+    return any(postcheck.get(field) is not False for field in PROTECTED_OUTPUT_FLAGS)
 
 
 def _post_deploy_provenance(runtime_packet: Mapping[str, Any] | None = None) -> dict[str, Any]:
