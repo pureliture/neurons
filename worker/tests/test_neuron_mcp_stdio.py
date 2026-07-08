@@ -498,6 +498,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
             "schema_version": "agent_context_product_pack.v1",
             "consumer": "codex",
             "sections": {
+                "current_authority": {"object_count": 1, "authority_lanes": ["accepted_current"]},
                 "style_preference": {"object_count": 1},
                 "active_work": {"object_count": 1},
                 "required_verification": {"object_count": 1},
@@ -1070,6 +1071,7 @@ def _runtime_readiness_complete_evidence(
             "schema_version": "agent_context_product_pack.v1",
             "consumer": "codex",
             "sections": {
+                "current_authority": {"object_count": 1, "authority_lanes": ["accepted_current"]},
                 "style_preference": {"object_count": 1},
                 "active_work": {"object_count": 1},
                 "required_verification": {"object_count": 1},
