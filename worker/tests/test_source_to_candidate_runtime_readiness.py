@@ -2151,8 +2151,18 @@ def test_runtime_readiness_collector_builds_shadow_evidence_packet_without_mutat
     assert packet["production_mutation_performed"] is False
     assert packet["collector"]["readiness_claim"] == "collector_packet_not_live_evidence"
     assert packet["collector"]["routes_collected"] == list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    assert packet["collector"]["projection_join_collected"] is True
+    assert packet["collector"]["projection_join_schema"] == "object_extraction_projection_join_preview.v1"
+    assert packet["collector"]["projection_join_edge_count"] >= 1
     assert packet["evidence_provenance"]["collection_mode"] == "local_test_replay"
     assert packet["evidence_provenance"]["network_used"] is False
+    projection_join = packet["projection_join"]
+    assert projection_join["schema_version"] == "object_extraction_projection_join_preview.v1"
+    assert projection_join["evidence_class"] == "runtime_projection_join"
+    assert projection_join["status"] == "pass"
+    assert projection_join["edge_count"] >= 1
+    assert projection_join["production_mutation_performed"] is False
+    assert projection_join["postcheck"]["status"] == "validated"
     assert len(packet["brain_objects_query_smokes"]) == len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
     assert all(
         "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])
@@ -2160,6 +2170,48 @@ def test_runtime_readiness_collector_builds_shadow_evidence_packet_without_mutat
     )
     report = build_source_to_candidate_runtime_readiness_report(live_evidence=packet)
     assert "live.brain_objects_query.route_smokes" not in report["failed_claims"]
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["live.source_to_candidate.projection_join"]["status"] == "validated"
+    assert "live_graph_qdrant_projection_join_unproven" not in report["gaps"]
+
+
+def test_runtime_readiness_collector_reports_projection_join_errors_public_safely():
+    def route_runner(route: str) -> dict:
+        return {
+            "schema_version": "brain_objects_query.v1",
+            "route": route,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": route,
+                "objects": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}],
+                "lanes": {"candidate": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}]},
+                "recommended_actions": [{"object_id": f"ko:test:{route}", "action": "request_evidence"}],
+                "gaps": [],
+            },
+            "production_mutation_performed": False,
+        }
+
+    def broken_projection_join() -> dict:
+        raise RuntimeError("raw private path should not be returned")
+
+    packet = build_source_to_candidate_runtime_collected_shadow_evidence_packet(
+        repository="pureliture/neurons",
+        branch="codex/knowledge-object-review-flow-roadmap",
+        consumer="codex",
+        route_runner=route_runner,
+        projection_join_runner=broken_projection_join,
+    )
+
+    projection_join = packet["projection_join"]
+    assert projection_join["collector_error_type"] == "RuntimeError"
+    assert projection_join["production_mutation_performed"] is False
+    assert "raw private path" not in json.dumps(packet)
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=packet)
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["live.source_to_candidate.projection_join"]["status"] == "failed"
+    assert "projection_join_collector_error:RuntimeError" in report["gaps"]
+    assert report["status"] == "FAIL"
 
 
 def test_runtime_readiness_collector_includes_review_loop_shadow_evidence_without_live_claim():

@@ -468,6 +468,11 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
     assert readiness_schema["properties"]["evidence_collection_plan"]["type"] == "boolean"
     assert readiness_schema["properties"]["evidence_packet_template"]["type"] == "boolean"
     assert readiness_schema["properties"]["collect_shadow_evidence"]["type"] == "boolean"
+    assert readiness_schema["properties"]["evidence_collection_mode"]["enum"] == [
+        "local_test_replay",
+        "post_deploy_read_only_smoke",
+    ]
+    assert readiness_schema["properties"]["evidence_collection_network_used"]["type"] == "boolean"
     assert readiness_schema["properties"]["normalize_post_deploy_capture"]["type"] == "object"
     assert readiness_schema["properties"]["post_deploy_capture"]["type"] == "object"
     assert readiness_schema["properties"]["normalize_shadow_evidence"]["type"] == "object"
@@ -831,6 +836,15 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_
     assert packet["collector"]["readiness_claim"] == "collector_packet_not_live_evidence"
     assert packet["evidence_provenance"]["collection_mode"] == "local_test_replay"
     assert packet["evidence_provenance"]["network_used"] is False
+    assert packet["collector"]["projection_join_collected"] is True
+    assert packet["collector"]["projection_join_schema"] == "object_extraction_projection_join_preview.v1"
+    assert packet["collector"]["projection_join_edge_count"] >= 1
+    assert packet["projection_join"]["schema_version"] == "object_extraction_projection_join_preview.v1"
+    assert packet["projection_join"]["evidence_class"] == "runtime_projection_join"
+    assert packet["projection_join"]["status"] == "pass"
+    assert packet["projection_join"]["edge_count"] >= 1
+    assert packet["projection_join"]["production_mutation_performed"] is False
+    assert packet["projection_join"]["postcheck"]["status"] == "validated"
     assert packet["source_to_candidate_review_loop"]["schema_version"] == "source_to_candidate_review_loop_evidence.v1"
     assert packet["source_to_candidate_review_loop"]["source_to_candidate_graph"]["target_scope"] == "local_test"
     assert packet["source_to_candidate_review_loop"]["candidate_review_edit"]["mutation_mode"] == "no_mutation"
@@ -871,6 +885,70 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_
         "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])
         for smoke in packet["brain_objects_query_smokes"]
     )
+
+
+def test_mcp_source_to_candidate_runtime_readiness_collects_live_projection_join_read_path(tmp_path: Path):
+    graph = FakeGraphMemoryAdapter(
+        [
+            _episode(
+                "RepoDocument",
+                "projection-join-graph-hit",
+                {
+                    "brain_id": "/project/neurons",
+                    "summary": "Graph projection hit for source-to-candidate join.",
+                },
+            )
+        ]
+    )
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
+        dataset_ids=[],
+        graph_adapter=graph,
+        mirror_search=lambda query, brain_id: [
+            {
+                "memory_id": "qdrant-hit-1",
+                "summary": "Qdrant projection hit for source-to-candidate join.",
+                "score": 0.81,
+            }
+        ],
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 125,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "collect_shadow_evidence": True,
+                    "evidence_collection_mode": "post_deploy_read_only_smoke",
+                    "evidence_collection_network_used": True,
+                    "repository": "pureliture/neurons",
+                    "branch": "main",
+                    "consumer": "codex",
+                },
+            },
+        },
+        service,
+    )
+
+    packet = response["result"]["structuredContent"]
+    assert packet["collector"]["readiness_claim"] == "runtime_read_path_evidence"
+    assert packet["evidence_provenance"]["collection_mode"] == "post_deploy_read_only_smoke"
+    assert packet["evidence_provenance"]["network_used"] is True
+    projection = packet["projection_join"]
+    assert projection["schema_version"] == "object_extraction_projection_join_preview.v1"
+    assert projection["evidence_class"] == "runtime_projection_join"
+    assert projection["status"] == "pass"
+    assert projection["edge_count"] >= 2
+    assert projection["runtime_read_path"]["graph_hit_count"] >= 1
+    assert projection["runtime_read_path"]["qdrant_hit_count"] >= 1
+    assert projection["production_mutation_performed"] is False
+    assert projection["postcheck"]["status"] == "validated"
+    assert "graph_projection_hit_missing" not in projection["gaps"]
+    assert "qdrant_projection_hit_missing" not in projection["gaps"]
 
 
 def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None) -> dict:
