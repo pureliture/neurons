@@ -1333,6 +1333,7 @@ def _preference_artifact_memory_evidence() -> dict:
             "section": "style_preference",
             "object_count": 1,
             "accepted_preference_count": 1,
+            "authority_lanes": ["accepted_current"],
             "surface_policy": {"mutation_allowed": False},
         },
         "artifact_review_check": {

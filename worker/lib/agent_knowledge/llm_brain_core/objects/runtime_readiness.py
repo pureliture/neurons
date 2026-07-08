@@ -1048,6 +1048,7 @@ def build_preference_artifact_memory_shadow_evidence(
             "section": "style_preference",
             "object_count": len(accepted),
             "accepted_preference_count": len(accepted),
+            "authority_lanes": [REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE] if accepted else [],
             "surface_policy": {"mutation_allowed": False},
         },
         "artifact_review_check": safe_artifact_check,
@@ -1107,6 +1108,7 @@ def _collect_preference_artifact_memory_shadow(
                 "section": "style_preference",
                 "object_count": 0,
                 "accepted_preference_count": 0,
+                "authority_lanes": [],
                 "surface_policy": {"mutation_allowed": False},
             },
             "artifact_review_check": {
@@ -1496,6 +1498,7 @@ def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
                 "schema_version": REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA,
                 "section": "style_preference",
                 "accepted_preference_count": "collector_sets_integer",
+                "required_authority_lane": REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE,
                 "surface_policy": {"mutation_allowed": False},
             },
             "artifact_review_check": {
@@ -2732,9 +2735,14 @@ def _live_preference_artifact_memory_claim(evidence: Mapping[str, Any]) -> dict[
         "schema_version": public_safe_text(str(preference.get("schema_version") or ""), max_chars=80),
         "preference_pack_schema": public_safe_text(str(pack.get("schema_version") or ""), max_chars=80),
         "accepted_preference_count": _int_value(pack.get("accepted_preference_count")),
+        "accepted_current_lane_count": _pack_lane_object_count(
+            pack,
+            REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE,
+        ),
         "proposal_preference_count": _int_value(pack.get("proposal_preference_count")),
         "html_route_status": "failed" if _html_preference_route_unimplemented(html_smoke, html_pack) else "validated",
         "agent_context_object_count": _int_value(context.get("object_count")),
+        "agent_context_authority_lanes": _section_authority_lanes(context),
         "artifact_review_check_status": public_safe_text(str(artifact_check.get("status") or ""), max_chars=80),
         "production_mutation_performed": _preference_artifact_memory_reports_mutation(
             preference=preference,
@@ -2767,6 +2775,12 @@ def _preference_artifact_memory_failures(
         failures.append("preference_artifact_pack_route_mismatch")
     if _int_value(pack.get("accepted_preference_count")) < 1:
         failures.append("preference_artifact_accepted_preference_missing")
+    if not _pack_lane_contains_object_type(
+        pack,
+        REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE,
+        "ArtifactPreference",
+    ):
+        failures.append("preference_artifact_accepted_current_lane_missing")
     if _int_value(pack.get("proposal_preference_count")) < 1:
         failures.append("preference_artifact_proposal_lane_missing")
     if not _pack_contains_object_type(pack, "ArtifactPreference"):
@@ -2791,6 +2805,8 @@ def _preference_artifact_memory_failures(
         failures.append("preference_artifact_agent_context_section_mismatch")
     if _int_value(context.get("object_count")) < 1 or _int_value(context.get("accepted_preference_count")) < 1:
         failures.append("preference_artifact_agent_context_missing")
+    if REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE not in _section_authority_lanes(context):
+        failures.append("preference_artifact_agent_context_accepted_current_missing")
     policy = context.get("surface_policy") if isinstance(context.get("surface_policy"), Mapping) else {}
     if policy.get("mutation_allowed") is not False:
         failures.append("preference_artifact_agent_context_mutation_allowed")
@@ -2834,6 +2850,23 @@ def _html_preference_route_unimplemented(html_smoke: Mapping[str, Any], html_pac
 def _pack_contains_object_type(pack: Mapping[str, Any], object_type: str) -> bool:
     objects = pack.get("objects") if isinstance(pack.get("objects"), list) else []
     return any(isinstance(obj, Mapping) and obj.get("object_type") == object_type for obj in objects)
+
+
+def _pack_lane_object_count(pack: Mapping[str, Any], lane: str) -> int:
+    lanes = pack.get("lanes") if isinstance(pack.get("lanes"), Mapping) else {}
+    objects = lanes.get(lane) if isinstance(lanes.get(lane), list) else []
+    return sum(1 for obj in objects if isinstance(obj, Mapping))
+
+
+def _pack_lane_contains_object_type(pack: Mapping[str, Any], lane: str, object_type: str) -> bool:
+    lanes = pack.get("lanes") if isinstance(pack.get("lanes"), Mapping) else {}
+    objects = lanes.get(lane) if isinstance(lanes.get(lane), list) else []
+    return any(
+        isinstance(obj, Mapping)
+        and obj.get("object_type") == object_type
+        and obj.get("authority_lane") == lane
+        for obj in objects
+    )
 
 
 def _preference_artifact_memory_reports_mutation(
