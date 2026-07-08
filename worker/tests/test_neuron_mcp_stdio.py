@@ -499,7 +499,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
             "consumer": "codex",
             "sections": {
                 "current_authority": {"object_count": 1, "authority_lanes": ["accepted_current"]},
-                "style_preference": {"object_count": 1},
+                "style_preference": {"object_count": 1, "authority_lanes": ["accepted_current"]},
                 "active_work": {"object_count": 1},
                 "required_verification": {"object_count": 1},
             },
@@ -1072,7 +1072,7 @@ def _runtime_readiness_complete_evidence(
             "consumer": "codex",
             "sections": {
                 "current_authority": {"object_count": 1, "authority_lanes": ["accepted_current"]},
-                "style_preference": {"object_count": 1},
+                "style_preference": {"object_count": 1, "authority_lanes": ["accepted_current"]},
                 "active_work": {"object_count": 1},
                 "required_verification": {"object_count": 1},
             },
@@ -2279,7 +2279,7 @@ def test_mcp_brain_objects_query_html_visualization_route_uses_artifact_preferen
     assert any("HTML review artifacts should be information dense." in obj["title"] for obj in pack["objects"])
     assert "accepted_html_preference_missing" not in pack["gaps"]
     assert "object_pack_route_not_implemented" not in pack["gaps"]
-    assert pack["route_trace"]["selected_source_lanes"] == ["reference_only"]
+    assert pack["route_trace"]["selected_source_lanes"] == ["accepted_current"]
     assert pack["route_trace"]["stop_reason"] == "returned_object_pack"
 
 
