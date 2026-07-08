@@ -341,6 +341,87 @@ def _valid_p6_p7_runtime_evidence(*, live: bool = True):
     return evidence
 
 
+def _permission_sensitive_audit_runtime_evidence() -> dict:
+    event_base = {
+        "schema_version": "runtime_permission_audit_event.v1",
+        "event_type": "permission_sensitive_runtime_action",
+        "ledger_scope": "production",
+        "permission": "denied",
+        "authority_write_performed": False,
+        "production_mutation_performed": False,
+        "protected_values_returned": False,
+        "raw_private_evidence_returned": False,
+        "secret_returned": False,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": False,
+    }
+    tools = (
+        "brain_approval_board_decide",
+        "brain_object_proposal_create",
+        "brain_object_decision_commit",
+    )
+    events = [
+        {
+            **event_base,
+            "action": tool_name,
+            "actor_ref_hash": "sha256:" + "a" * 64,
+            "request_hash": "sha256:" + f"{index:x}" * 64,
+        }
+        for index, tool_name in enumerate(tools, start=1)
+    ]
+    return {
+        "schema_version": "permission_sensitive_runtime_audit_evidence.v1",
+        "audit_events": events,
+        "audit_store": {
+            "status": "recorded",
+            "event_count": len(events),
+            "production_mutation_performed": False,
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": False,
+    }
+
+
+def _valid_p8_runtime_evidence(*, live: bool = True):
+    expected_commit = "bec7b38"
+    return {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "expected_commit": expected_commit,
+        "permission_sensitive_audit": _permission_sensitive_audit_runtime_evidence(),
+        "deployed_identity": {
+            "contains_expected_commit": True,
+            "identity_source": "redacted_artifact_identity_summary",
+        },
+        "evidence_provenance": {
+            "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
+            "collection_mode": "post_deploy_read_only_smoke" if live else "local_test_replay",
+            "mutation_scope": "none",
+            "network_used": live,
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": False,
+    }
+
+
+def _valid_p6_p7_p8_runtime_evidence(*, live: bool = True):
+    evidence = _valid_p6_p7_runtime_evidence(live=live)
+    p8 = _valid_p8_runtime_evidence(live=live)
+    evidence["expected_commit"] = p8["expected_commit"]
+    evidence["permission_sensitive_audit"] = p8["permission_sensitive_audit"]
+    evidence["deployed_identity"] = p8["deployed_identity"]
+    evidence["evidence_provenance"] = p8["evidence_provenance"]
+    return evidence
+
+
 def test_golden_query_baseline_records_current_low_quality_failures():
     report = build_baseline_golden_query_report()
 
@@ -950,6 +1031,96 @@ def test_product_activation_progress_fails_p7_when_artifact_review_returns_raw_b
     assert p7["preference_claim_status"] == "failed"
     assert p7["artifact_review_check_status"] == "pass"
     assert p7["production_mutation_performed"] is False
+
+
+def test_product_activation_progress_closes_p8_gap_with_live_runtime_authority_evidence():
+    report = build_product_activation_progress_report(
+        live_evidence=_valid_p6_p7_p8_runtime_evidence(live=True)
+    )
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p8 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P8")
+    phase_progress = {item["phase"]: item for item in report["phase_progress"]}
+
+    assert checks["P6"]["result"] == "PASS"
+    assert checks["P7"]["result"] == "PASS"
+    assert checks["P8"]["result"] == "PASS"
+    assert phase_progress["P8"]["quality_result"] == "PASS"
+    assert phase_progress["P8"]["gaps"] == []
+    assert report["next_phase"] == "P9"
+    assert report["remaining_phases"] == ["P9"]
+    assert p8["evidence_source"] == "live_runtime_authority_packet"
+    assert p8["permission_audit_claim_status"] == "validated"
+    assert p8["deployed_identity_claim_status"] == "validated"
+    assert p8["evidence_provenance_status"] == "validated"
+    assert p8["evidence_is_live"] is True
+    assert p8["permission_audit_event_count"] == 3
+    assert p8["permission_audit_store_status"] == "recorded"
+    assert p8["source_commit_matches_pr_head"] is True
+    assert p8["production_mutation_performed"] is False
+    assert report["production_mutation_performed"] is False
+    assert report["production_ready"] is False
+
+
+def test_product_activation_progress_keeps_p8_permission_audit_gap_when_identity_only():
+    evidence = _valid_p6_p7_runtime_evidence(live=True)
+    p8 = _valid_p8_runtime_evidence(live=True)
+    evidence["expected_commit"] = p8["expected_commit"]
+    evidence["deployed_identity"] = p8["deployed_identity"]
+    evidence["evidence_provenance"] = p8["evidence_provenance"]
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p8_summary = next(item for item in report["product_evidence_summary"] if item["phase"] == "P8")
+
+    assert checks["P8"]["result"] == "PASS_WITH_GAPS"
+    assert "p8_permission_sensitive_audit_unverified" in checks["P8"]["gaps"]
+    assert p8_summary["deployed_identity_claim_status"] == "validated"
+    assert p8_summary["permission_audit_claim_status"] == "not_validated"
+    assert p8_summary["source_commit_matches_pr_head"] is True
+    assert report["next_phase"] == "P8"
+    assert report["production_mutation_performed"] is False
+
+
+def test_product_activation_progress_keeps_p8_live_gap_for_local_replay_runtime_authority_evidence():
+    report = build_product_activation_progress_report(
+        live_evidence=_valid_p6_p7_p8_runtime_evidence(live=False)
+    )
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p8 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P8")
+
+    assert checks["P8"]["result"] == "PASS_WITH_GAPS"
+    assert "p8_runtime_authority_evidence_not_live" in checks["P8"]["gaps"]
+    assert p8["permission_audit_claim_status"] == "validated"
+    assert p8["deployed_identity_claim_status"] == "validated"
+    assert p8["evidence_is_live"] is False
+    assert report["production_mutation_performed"] is False
+
+
+def test_product_activation_progress_fails_p8_when_permission_audit_returns_protected_values():
+    evidence = _valid_p6_p7_p8_runtime_evidence(live=True)
+    event = evidence["permission_sensitive_audit"]["audit_events"][0]
+    event["protected_values_returned"] = True
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p8 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P8")
+
+    assert report["status"] == "FAIL"
+    assert report["release_quality_gate"] == "blocked"
+    assert checks["P8"]["result"] == "FAIL"
+    assert "p8_runtime_authority_live_failed" in checks["P8"]["failures"]
+    assert "p8_permission_sensitive_audit_runtime_failed" in checks["P8"]["failures"]
+    assert (
+        "p8_permission_sensitive_audit_protected_values_returned:brain_approval_board_decide"
+        in checks["P8"]["gaps"]
+    )
+    assert p8["permission_audit_claim_status"] == "failed"
+    assert p8["production_mutation_performed"] is False
+    assert report["production_mutation_performed"] is False
 
 
 def test_product_activation_progress_closes_p3_gap_with_live_projection_join_evidence():
