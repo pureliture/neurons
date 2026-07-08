@@ -138,6 +138,82 @@ def _valid_p6_runtime_evidence(*, live: bool = True) -> dict:
     }
 
 
+def _preference_artifact_memory_runtime_evidence() -> dict:
+    accepted_object = {
+        "object_id": "ko:ArtifactPreference:html-review-density",
+        "object_type": "ArtifactPreference",
+        "authority_lane": "accepted_current",
+    }
+    proposal_object = {
+        "object_id": "ko:ArtifactPreference:visualization-proposal",
+        "object_type": "ArtifactPreference",
+        "authority_lane": "proposal_only",
+    }
+    return {
+        "schema_version": "preference_artifact_memory_runtime_evidence.v1",
+        "evidence_class": "runtime_preference_artifact_memory",
+        "preference_object_pack": {
+            "schema_version": "object_pack.v1",
+            "route": "code_style_preference",
+            "accepted_preference_count": 1,
+            "proposal_preference_count": 1,
+            "objects": [accepted_object, proposal_object],
+            "lanes": {
+                "accepted_current": [accepted_object],
+                "proposal_only": [proposal_object],
+            },
+            "recommended_actions": [
+                {"object_id": accepted_object["object_id"], "action": "apply_preference"},
+                {"object_id": proposal_object["object_id"], "action": "review_inferred_preference"},
+            ],
+            "gaps": [],
+            "production_mutation_performed": False,
+        },
+        "html_visualization_route_smoke": {
+            "schema_version": "brain_objects_query.v1",
+            "route": "html_visualization_preference",
+            "production_mutation_performed": False,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": "html_visualization_preference",
+                "objects": [accepted_object],
+                "lanes": {"accepted_current": [accepted_object]},
+                "recommended_actions": [
+                    {"object_id": accepted_object["object_id"], "action": "apply_preference"}
+                ],
+                "gaps": [],
+            },
+        },
+        "agent_context_preference_section": {
+            "schema_version": "agent_context_product_pack.v1",
+            "section": "style_preference",
+            "object_count": 1,
+            "accepted_preference_count": 1,
+            "surface_policy": {"mutation_allowed": False},
+        },
+        "artifact_review_check": {
+            "schema_version": "artifact_review_preference_check.v1",
+            "status": "pass",
+            "ui_required": False,
+            "raw_artifact_body_returned": False,
+            "assertions": ["accepted_html_preference_available"],
+        },
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+    }
+
+
+def _valid_p6_p7_runtime_evidence(*, live: bool = True) -> dict:
+    evidence = _valid_p6_runtime_evidence(live=live)
+    evidence["preference_artifact_memory"] = _preference_artifact_memory_runtime_evidence()
+    return evidence
+
+
 def _valid_p3_post_deploy_capture(*, live: bool = True) -> dict:
     return {
         "schema_version": "source_to_candidate_runtime_post_deploy_mcp_capture.v1",
@@ -1728,6 +1804,49 @@ def test_neuron_knowledge_golden_query_eval_activation_progress_accepts_post_dep
     assert p6["evidence_provenance_status"] == "validated"
     assert p6["evidence_is_live"] is True
     assert report["production_mutation_performed"] is False
+
+
+def test_neuron_knowledge_golden_query_eval_activation_progress_closes_p7_post_deploy_gap(
+    tmp_path, capsys
+):
+    capture_file = tmp_path / "p6-p7-post-deploy-capture.json"
+    capture_file.write_text(json.dumps(_valid_p6_p7_runtime_evidence(live=True)), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "golden-query-eval",
+                "--activation-progress",
+                "--post-deploy-capture-file",
+                str(capture_file),
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p7 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P7")
+    phase_progress = {item["phase"]: item for item in report["phase_progress"]}
+
+    assert checks["P6"]["result"] == "PASS"
+    assert checks["P7"]["result"] == "PASS"
+    assert "p7_accepted_preference_context_pack_live_unproven" not in checks["P7"]["gaps"]
+    assert "p7_html_artifact_review_live_unproven" not in checks["P7"]["gaps"]
+    assert phase_progress["P7"]["quality_result"] == "PASS"
+    assert phase_progress["P7"]["gaps"] == []
+    assert report["next_phase"] == "P8"
+    assert report["remaining_phases"] == ["P8", "P9"]
+    assert p7["preference_claim_status"] == "validated"
+    assert p7["evidence_provenance_status"] == "validated"
+    assert p7["evidence_is_live"] is True
+    assert p7["accepted_preference_count"] == 1
+    assert p7["proposal_preference_count"] == 1
+    assert p7["html_route_status"] == "validated"
+    assert p7["artifact_review_check_status"] == "pass"
+    assert p7["production_mutation_performed"] is False
+    assert report["production_mutation_performed"] is False
+    assert report["production_ready"] is False
 
 
 def test_neuron_knowledge_golden_query_eval_activation_progress_closes_p3_post_deploy_gap(
