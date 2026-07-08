@@ -298,6 +298,9 @@ def _runtime_collected_packet_summary(packet: Mapping[str, Any]) -> dict[str, An
     preference_artifact_memory_promoted = bool(
         _live_preference_artifact_memory_from_runtime_packet(safe_packet)
     )
+    preference_artifact_memory_blockers = _preference_artifact_memory_promotion_blockers(
+        safe_packet
+    )
     summary = {
         "schema_version": public_safe_text(str(safe_packet.get("schema_version") or ""), max_chars=80),
         "collector_readiness_claim": public_safe_text(str(collector.get("readiness_claim") or ""), max_chars=120),
@@ -335,6 +338,7 @@ def _runtime_collected_packet_summary(packet: Mapping[str, Any]) -> dict[str, An
         "preference_artifact_memory_promoted_to_live_evidence": (
             preference_artifact_memory_promoted
         ),
+        "preference_artifact_memory_promotion_blockers": preference_artifact_memory_blockers,
         "evidence_collection_mode": public_safe_text(str(provenance.get("collection_mode") or ""), max_chars=80),
         "evidence_collection_network_used": provenance.get("network_used") is True,
         "production_mutation_performed": safe_packet.get("production_mutation_performed") is True,
@@ -403,39 +407,76 @@ def _live_session_project_rollup_from_runtime_packet(packet: Mapping[str, Any]) 
 
 def _live_preference_artifact_memory_from_runtime_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
     safe_packet = _public_safe_mapping(packet)
+    if _preference_artifact_memory_promotion_blockers(safe_packet):
+        return {}
     preference = safe_packet.get("preference_artifact_memory")
     if not isinstance(preference, Mapping):
         return {}
+    live_preference = _public_safe_mapping(preference)
+    ensure_public_safe(live_preference, "SourceToCandidatePostDeployPreferenceArtifactMemory")
+    return live_preference
+
+
+def _preference_artifact_memory_promotion_blockers(packet: Mapping[str, Any]) -> list[str]:
+    safe_packet = _public_safe_mapping(packet)
+    preference = safe_packet.get("preference_artifact_memory")
+    if not isinstance(preference, Mapping):
+        return ["preference_artifact_memory_missing"]
     if str(preference.get("evidence_class") or "") != "runtime_preference_artifact_memory":
-        return {}
+        return ["preference_artifact_memory_evidence_class_missing"]
     collector = safe_packet.get("collector") if isinstance(safe_packet.get("collector"), Mapping) else {}
     if str(collector.get("readiness_claim") or "") == "collector_packet_not_live_evidence":
-        return {}
+        return ["collector_packet_not_live_evidence"]
     provenance = (
         safe_packet.get("evidence_provenance")
         if isinstance(safe_packet.get("evidence_provenance"), Mapping)
         else {}
     )
     if str(provenance.get("collection_mode") or "") != "post_deploy_read_only_smoke":
-        return {}
+        return ["preference_artifact_memory_not_post_deploy_read_only_smoke"]
     if provenance.get("network_used") is not True:
-        return {}
+        return ["preference_artifact_memory_network_not_used"]
     if _runtime_packet_reports_mutation(safe_packet):
-        return {}
+        return ["preference_artifact_memory_mutation_reported"]
     if _runtime_packet_reports_protected_output(safe_packet):
-        return {}
+        return ["preference_artifact_memory_protected_output_reported"]
     if _postcheck_reports_protected_output(preference):
-        return {}
+        return ["preference_artifact_memory_postcheck_protected_output"]
+    if not _preference_artifact_has_accepted_current_lane(preference):
+        return ["preference_artifact_accepted_current_lane_missing"]
     artifact_check = (
         preference.get("artifact_review_check")
         if isinstance(preference.get("artifact_review_check"), Mapping)
         else {}
     )
     if artifact_check.get("raw_artifact_body_returned") is not False:
-        return {}
-    live_preference = _public_safe_mapping(preference)
-    ensure_public_safe(live_preference, "SourceToCandidatePostDeployPreferenceArtifactMemory")
-    return live_preference
+        return ["preference_artifact_raw_artifact_body_returned"]
+    context = (
+        preference.get("agent_context_preference_section")
+        if isinstance(preference.get("agent_context_preference_section"), Mapping)
+        else {}
+    )
+    lanes = context.get("authority_lanes") if isinstance(context.get("authority_lanes"), list) else []
+    safe_lanes = [public_safe_text(str(lane or ""), max_chars=80) for lane in lanes if lane]
+    if "accepted_current" not in safe_lanes:
+        return ["preference_artifact_agent_context_accepted_current_missing"]
+    return []
+
+
+def _preference_artifact_has_accepted_current_lane(preference: Mapping[str, Any]) -> bool:
+    pack = (
+        preference.get("preference_object_pack")
+        if isinstance(preference.get("preference_object_pack"), Mapping)
+        else {}
+    )
+    lanes = pack.get("lanes") if isinstance(pack.get("lanes"), Mapping) else {}
+    accepted = lanes.get("accepted_current") if isinstance(lanes.get("accepted_current"), list) else []
+    return any(
+        isinstance(obj, Mapping)
+        and obj.get("object_type") == "ArtifactPreference"
+        and obj.get("authority_lane") == "accepted_current"
+        for obj in accepted
+    )
 
 
 def _safe_int(value: Any) -> int:

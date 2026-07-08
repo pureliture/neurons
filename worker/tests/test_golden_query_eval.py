@@ -303,6 +303,7 @@ def _valid_p7_runtime_evidence(*, live: bool = True):
                 "section": "style_preference",
                 "object_count": 1,
                 "accepted_preference_count": 1,
+                "authority_lanes": ["accepted_current"],
                 "surface_policy": {"mutation_allowed": False},
             },
             "artifact_review_check": {
@@ -1081,6 +1082,30 @@ def test_product_activation_progress_closes_p7_gap_with_live_preference_artifact
     assert p7["artifact_review_check_status"] == "pass"
     assert p7["production_mutation_performed"] is False
     assert report["production_mutation_performed"] is False
+    assert report["production_ready"] is False
+
+
+def test_product_activation_progress_fails_p7_when_preference_context_lacks_accepted_current_lane():
+    evidence = _valid_p6_p7_runtime_evidence(live=True)
+    evidence["preference_artifact_memory"]["agent_context_preference_section"] = {
+        "schema_version": "agent_context_product_pack.v1",
+        "section": "style_preference",
+        "object_count": 1,
+        "accepted_preference_count": 1,
+        "authority_lanes": ["reference_only"],
+        "surface_policy": {"mutation_allowed": False},
+    }
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p7 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P7")
+    assert checks["P7"]["result"] == "FAIL"
+    assert (
+        "p7_preference_artifact_agent_context_accepted_current_missing"
+        in checks["P7"]["gaps"]
+    )
+    assert p7["preference_claim_status"] == "failed"
     assert report["production_ready"] is False
 
 
