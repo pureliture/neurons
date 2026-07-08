@@ -453,6 +453,12 @@ def list_tools() -> list[dict]:
                     "evidence_collection_plan": {"type": "boolean", "default": False},
                     "evidence_packet_template": {"type": "boolean", "default": False},
                     "collect_shadow_evidence": {"type": "boolean", "default": False},
+                    "evidence_collection_mode": {
+                        "type": "string",
+                        "enum": ["local_test_replay", "post_deploy_read_only_smoke"],
+                        "default": "local_test_replay",
+                    },
+                    "evidence_collection_network_used": {"type": "boolean", "default": False},
                     "normalize_post_deploy_capture": {"type": "object", "default": {}},
                     "post_deploy_capture": {"type": "object", "default": {}},
                     "normalize_shadow_evidence": {"type": "object", "default": {}},
