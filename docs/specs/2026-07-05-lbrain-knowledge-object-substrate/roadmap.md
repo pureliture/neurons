@@ -1071,6 +1071,16 @@ Local validation evidence:
 - runtime/MCP startup/read-path packet gate adjacent result: `46 passed, 1 warning`
 - phase coverage gate: `cd worker && uv run pytest -q tests/test_golden_query_eval.py::test_phase_golden_query_coverage_reports_green_release_gate_with_gaps`
 - phase coverage result: `1 passed, 1 warning`
+- degraded agent context actionability gate: `cd worker && uv run pytest -q tests/test_context_pack_builder.py::test_builder_marks_empty_required_agent_context_sections_as_actionable_gaps`
+- degraded agent context actionability result: `1 passed, 1 warning`
+- degraded agent context adjacent regression evidence: `cd worker && uv run pytest -q tests/test_context_pack_builder.py tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_requires_live_agent_context_product_sections tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_fails_when_live_agent_context_product_contract_is_incomplete tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_fails_when_live_agent_context_allows_mutation tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_fails_when_agent_context_startup_runtime_is_unsafe_or_incomplete`
+- degraded agent context adjacent regression result: `12 passed, 1 warning`
+- degraded context MCP/CLI read-surface regression evidence: `cd worker && uv run pytest -q tests/test_context_pack_builder.py tests/test_neuron_mcp_stdio.py tests/test_neuron_cli.py`
+- degraded context MCP/CLI read-surface regression result: `187 passed, 1 warning`
+- degraded agent context full worker evidence: `cd worker && uv run pytest -q`
+- degraded agent context full worker result: `1778 passed, 9 skipped, 1 warning`
+- degraded agent context root evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
+- degraded agent context root result: `BUILD SUCCESSFUL`
 
 Implemented local/test scope:
 
@@ -1096,6 +1106,7 @@ Implemented local/test scope:
 - runtime readiness surfaces `live.production.object_authority_bounded_execution` so agent context/product-readiness checks can distinguish preapproved authority mutation from actual bounded execution evidence
 - runtime readiness surfaces `live.evidence.provenance` so agent context/product-readiness checks can distinguish evaluator-local no-network execution from external live evidence collection
 - runtime readiness exposes a plan/template mode for agents and operators to collect the missing post-deploy evidence without performing production mutation or returning protected values
+- degraded `agent_context_product_pack.v1` now turns empty required sections into actionable gaps: `agent_context_style_preference_missing`, `agent_context_active_work_missing`, and `agent_context_required_verification_missing` are attached to the relevant section, product degraded gaps, missing-evidence-before-promotion blockers, and `request_missing_evidence` action hints instead of leaving a silent empty section
 
 Remaining gaps:
 

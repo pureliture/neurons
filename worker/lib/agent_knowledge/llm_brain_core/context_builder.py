@@ -56,6 +56,11 @@ OBJECT_NATIVE_REVIEW_TOOL_NAMES = {
     "approval_board_decide": "brain_approval_board_decide",
     "runtime_readiness": "brain_source_to_candidate_runtime_readiness",
 }
+AGENT_CONTEXT_REQUIRED_SECTION_GAPS = {
+    "style_preference": "agent_context_style_preference_missing",
+    "active_work": "agent_context_active_work_missing",
+    "required_verification": "agent_context_required_verification_missing",
+}
 
 
 class ContextPackBuilder:
@@ -247,44 +252,53 @@ def build_agent_context_product_pack(
     safe_consumer = normalize_context_consumer(consumer)
     policy = AGENT_CONTEXT_SURFACE_POLICIES[safe_consumer]
     object_packs = block.get("object_packs") if isinstance(block.get("object_packs"), Mapping) else {}
-    missing_evidence = missing_evidence_before_promotion(gaps)
+    base_missing_evidence = missing_evidence_before_promotion(gaps)
     stale_count = stale_memory_count(cards)
+    sections = {
+        "current_authority": compact_section(
+            object_packs,
+            names=("documentation_cleanup",),
+            max_items=int(policy["max_section_items"]),
+        ),
+        "reference_objects": compact_section(
+            object_packs,
+            names=("reference_corpus",),
+            max_items=int(policy["max_section_items"]),
+        ),
+        "style_preference": compact_section(
+            object_packs,
+            names=("preferences", "style"),
+            max_items=int(policy["max_section_items"]),
+        ),
+        "active_work": compact_section(
+            object_packs,
+            names=("current_work",),
+            max_items=int(policy["max_section_items"]),
+        ),
+        "guardrails": compact_section(
+            object_packs,
+            names=("do_not_touch_boundaries",),
+            max_items=int(policy["max_section_items"]),
+        ),
+        "required_verification": compact_section(
+            object_packs,
+            names=("required_verification",),
+            max_items=int(policy["max_section_items"]),
+            missing_evidence=base_missing_evidence,
+        ),
+    }
+    section_gaps = required_agent_context_section_gaps(sections)
+    for section_name, gap in section_gaps.items():
+        section = sections.get(section_name)
+        if isinstance(section, dict):
+            section["gaps"] = dedupe_public_strings([*section.get("gaps", []), gap])
+    effective_gaps = dedupe_public_strings([*gaps, *section_gaps.values()])
+    missing_evidence = missing_evidence_before_promotion(effective_gaps)
+    sections["required_verification"]["missing_evidence_before_promotion"] = list(missing_evidence)
     pack = {
         "schema_version": "agent_context_product_pack.v1",
         "consumer": safe_consumer,
-        "sections": {
-            "current_authority": compact_section(
-                object_packs,
-                names=("documentation_cleanup",),
-                max_items=int(policy["max_section_items"]),
-            ),
-            "reference_objects": compact_section(
-                object_packs,
-                names=("reference_corpus",),
-                max_items=int(policy["max_section_items"]),
-            ),
-            "style_preference": compact_section(
-                object_packs,
-                names=("preferences", "style"),
-                max_items=int(policy["max_section_items"]),
-            ),
-            "active_work": compact_section(
-                object_packs,
-                names=("current_work",),
-                max_items=int(policy["max_section_items"]),
-            ),
-            "guardrails": compact_section(
-                object_packs,
-                names=("do_not_touch_boundaries",),
-                max_items=int(policy["max_section_items"]),
-            ),
-            "required_verification": compact_section(
-                object_packs,
-                names=("required_verification",),
-                max_items=int(policy["max_section_items"]),
-                missing_evidence=missing_evidence,
-            ),
-        },
+        "sections": sections,
         "surface_policy": {
             "consumer": safe_consumer,
             "read_only": True,
@@ -293,8 +307,8 @@ def build_agent_context_product_pack(
             "property_omissions": list(AGENT_CONTEXT_PROPERTY_OMISSIONS),
         },
         "degraded_mode": {
-            "active": bool(gaps or stale_count),
-            "gaps": list(gaps),
+            "active": bool(effective_gaps or stale_count),
+            "gaps": list(effective_gaps),
         },
         "freshness": {
             "stale_evidence_visible": bool(stale_count),
@@ -351,8 +365,40 @@ def compact_section(
     return section
 
 
+def required_agent_context_section_gaps(sections: Mapping[str, Any]) -> dict[str, str]:
+    gaps: dict[str, str] = {}
+    for section_name, gap in AGENT_CONTEXT_REQUIRED_SECTION_GAPS.items():
+        section = sections.get(section_name)
+        object_count = section.get("object_count") if isinstance(section, Mapping) else 0
+        try:
+            count = int(object_count or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count < 1:
+            gaps[section_name] = gap
+    return gaps
+
+
 def missing_evidence_before_promotion(gaps: list[str]) -> list[str]:
-    return [gap for gap in gaps if "evidence" in gap or gap.endswith("_unverified")]
+    return [
+        gap
+        for gap in gaps
+        if "evidence" in gap
+        or gap.endswith("_unverified")
+        or (gap.startswith("agent_context_") and gap.endswith("_missing"))
+    ]
+
+
+def dedupe_public_strings(values: list[Any]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = public_safe_text(str(value or ""), max_chars=160)
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
 
 
 def stale_memory_count(cards: list[dict[str, Any]]) -> int:
