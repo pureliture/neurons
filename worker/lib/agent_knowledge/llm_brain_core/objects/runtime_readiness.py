@@ -31,6 +31,10 @@ REQUIRED_AGENT_CONTEXT_SECTIONS = (
 )
 REQUIRED_AGENT_CONTEXT_AUTHORITY_SECTION = "current_authority"
 REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE = "accepted_current"
+REQUIRED_AGENT_CONTEXT_STARTUP_SECTIONS = (
+    REQUIRED_AGENT_CONTEXT_AUTHORITY_SECTION,
+    *REQUIRED_AGENT_CONTEXT_SECTIONS,
+)
 REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA = "agent_context_product_pack.v1"
 ALLOWED_AGENT_CONTEXT_CONSUMERS = ("codex", "claude-code", "gemini", "hermes")
 PRODUCTION_DENIAL_CLAIMS = (
@@ -1218,6 +1222,7 @@ def build_agent_context_startup_shadow_evidence(
             "consumer": safe_consumer,
             "loaded_on_startup": True,
             "section_counts": {
+                "current_authority": 1,
                 "style_preference": 1,
                 "active_work": 1,
                 "required_verification": 1,
@@ -1546,7 +1551,7 @@ def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
                 "schema_version": REQUIRED_AGENT_CONTEXT_PRODUCT_SCHEMA,
                 "consumer": "collector_sets_allowed_consumer",
                 "loaded_on_startup": True,
-                "required_sections": list(REQUIRED_AGENT_CONTEXT_SECTIONS),
+                "required_sections": list(REQUIRED_AGENT_CONTEXT_STARTUP_SECTIONS),
                 "surface_policy": {"mutation_allowed": False},
                 "degraded_gap_disclosure_present": True,
                 "missing_evidence_before_promotion_present": True,
@@ -3032,7 +3037,7 @@ def _agent_context_startup_failures(
     section_counts = context.get("section_counts") if isinstance(context.get("section_counts"), Mapping) else {}
     missing_sections = [
         section
-        for section in REQUIRED_AGENT_CONTEXT_SECTIONS
+        for section in REQUIRED_AGENT_CONTEXT_STARTUP_SECTIONS
         if _int_value(section_counts.get(section)) < 1
     ]
     failures.extend(_named_gaps("agent_context_startup_section_missing", missing_sections))

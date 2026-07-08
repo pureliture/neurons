@@ -384,6 +384,7 @@ def _agent_context_startup_runtime_evidence(**overrides):
             "consumer": "codex",
             "loaded_on_startup": True,
             "section_counts": {
+                "current_authority": 1,
                 "style_preference": 1,
                 "active_work": 1,
                 "required_verification": 1,
@@ -811,6 +812,12 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
     assert (
         template["packet_field_templates"]["agent_context_startup_runtime"]["schema_version"]
         == "agent_context_startup_runtime_evidence.v1"
+    )
+    assert (
+        "current_authority"
+        in template["packet_field_templates"]["agent_context_startup_runtime"]["startup_context"][
+            "required_sections"
+        ]
     )
     assert template["packet_field_templates"]["evidence_provenance"]["mutation_scope"] == "none"
     assert template["packet_field_templates"]["evidence_provenance"]["network_used"] == "collector_sets_boolean"
@@ -1416,6 +1423,35 @@ def test_runtime_readiness_fails_when_agent_context_startup_runtime_is_unsafe_or
     assert "agent_context_startup_raw_private_evidence_returned" in report["gaps"]
     assert "agent_context_startup_host_topology_returned" in report["gaps"]
     assert "agent_context_startup_raw_external_ids_returned" in report["gaps"]
+
+
+def test_runtime_readiness_fails_when_agent_context_startup_omits_current_authority():
+    evidence = _sanitized_live_evidence(
+        agent_context_startup_runtime=_agent_context_startup_runtime_evidence(
+            startup_context={
+                "schema_version": "agent_context_product_pack.v1",
+                "consumer": "codex",
+                "loaded_on_startup": True,
+                "section_counts": {
+                    "style_preference": 1,
+                    "active_work": 1,
+                    "required_verification": 1,
+                },
+                "surface_policy": {"mutation_allowed": False},
+                "degraded_gap_disclosure_present": True,
+                "missing_evidence_before_promotion_present": True,
+            },
+        )
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    startup = claims["live.agent_context.startup_read_path"]
+    assert startup["status"] == "failed"
+    assert "agent_context_startup_section_missing:current_authority" in startup["gaps"]
+    assert "agent_context_startup_section_missing:current_authority" in report["gaps"]
 
 
 def test_runtime_readiness_fails_when_live_evidence_provenance_is_missing():
@@ -2804,6 +2840,7 @@ def test_runtime_readiness_collector_includes_agent_context_startup_shadow_evide
     startup = packet["agent_context_startup_runtime"]
     assert startup["schema_version"] == "agent_context_startup_runtime_evidence.v1"
     assert startup["startup_context"]["loaded_on_startup"] is True
+    assert startup["startup_context"]["section_counts"]["current_authority"] >= 1
     assert startup["startup_context"]["section_counts"]["style_preference"] >= 1
     assert startup["startup_context"]["section_counts"]["active_work"] >= 1
     assert startup["startup_context"]["surface_policy"]["mutation_allowed"] is False
@@ -2865,6 +2902,7 @@ def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys)
     assert packet["permission_sensitive_audit"]["audit_store"]["status"] == "recorded"
     assert packet["agent_context_startup_runtime"]["schema_version"] == "agent_context_startup_runtime_evidence.v1"
     assert packet["agent_context_startup_runtime"]["startup_context"]["loaded_on_startup"] is True
+    assert packet["agent_context_startup_runtime"]["startup_context"]["section_counts"]["current_authority"] >= 1
     assert packet["agent_context_startup_runtime"]["read_path_smoke"]["tool"] == "brain_objects_query"
     assert packet["agent_context_startup_runtime"]["runtime_enforcement"]["production_mutation_allowed"] is False
     assert len(packet["brain_objects_query_smokes"]) == len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
