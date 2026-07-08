@@ -31,6 +31,37 @@ def _valid_p3_projection_join_evidence():
     }
 
 
+def _valid_p3_runtime_evidence(*, live: bool = True):
+    return {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "projection_join": {
+            "schema_version": "object_extraction_projection_join_preview.v1",
+            "evidence_class": "runtime_projection_join",
+            "status": "pass",
+            "edge_count": 2,
+            "production_mutation_performed": False,
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
+        "evidence_provenance": {
+            "schema_version": "source_to_candidate_runtime_evidence_provenance.v1",
+            "collection_mode": "post_deploy_read_only_smoke" if live else "local_test_replay",
+            "mutation_scope": "none",
+            "network_used": live,
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": False,
+    }
+
+
 def _valid_p6_runtime_evidence(*, live: bool = True):
     return {
         "schema_version": "source_to_candidate_runtime_evidence.v1",
@@ -633,6 +664,29 @@ def test_product_activation_progress_closes_p6_gap_with_live_session_project_rol
     assert p6["production_mutation_performed"] is False
     assert report["production_mutation_performed"] is False
     assert report["production_ready"] is False
+
+
+def test_product_activation_progress_closes_p3_gap_with_live_projection_join_evidence():
+    report = build_product_activation_progress_report(
+        live_evidence=_valid_p3_runtime_evidence(live=True)
+    )
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p3 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P3")
+    phase_progress = {item["phase"]: item for item in report["phase_progress"]}
+
+    assert checks["P3"]["result"] == "PASS"
+    assert "p3_live_graph_qdrant_projection_join_unproven" not in checks["P3"]["gaps"]
+    assert p3["projection_join_claim_status"] == "validated"
+    assert p3["projection_join_edge_count"] == 2
+    assert p3["live_evidence_provided"] is True
+    assert p3["evidence_is_live"] is True
+    assert p3["network_used"] is True
+    assert p3["evidence_collection_network_used"] is True
+    assert p3["production_mutation_performed"] is False
+    assert "live_graph_qdrant_projection_join_unproven" not in phase_progress["P3"]["gaps"]
+    assert "live_graph_qdrant_projection_join_unproven" not in report["goal_completion_blockers"]
+    assert report["production_mutation_performed"] is False
 
 
 def test_product_activation_progress_keeps_p6_gap_when_rollup_evidence_is_not_live():
