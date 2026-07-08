@@ -214,6 +214,7 @@ def _preference_artifact_memory_evidence() -> dict:
             "section": "style_preference",
             "object_count": 1,
             "accepted_preference_count": 1,
+            "authority_lanes": ["accepted_current"],
             "surface_policy": {"mutation_allowed": False},
         },
         "artifact_review_check": {
@@ -402,6 +403,7 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
         "preference_artifact_proposal_preference_count": 1,
         "preference_artifact_review_check_status": "pass",
         "preference_artifact_memory_promoted_to_live_evidence": False,
+        "preference_artifact_memory_promotion_blockers": ["collector_packet_not_live_evidence"],
         "evidence_collection_mode": "local_test_replay",
         "evidence_collection_network_used": False,
         "production_mutation_performed": False,
@@ -586,6 +588,7 @@ def test_collect_post_deploy_mcp_capture_promotes_live_p7_preference_artifact_me
         capture["runtime_collected_packet"]["preference_artifact_memory_promoted_to_live_evidence"]
         is True
     )
+    assert capture["runtime_collected_packet"]["preference_artifact_memory_promotion_blockers"] == []
     assert capture["preference_artifact_memory"]["schema_version"] == (
         "preference_artifact_memory_runtime_evidence.v1"
     )
@@ -651,6 +654,9 @@ def test_collect_post_deploy_mcp_capture_blocks_promotions_when_runtime_reports_
         capture["runtime_collected_packet"]["preference_artifact_memory_promoted_to_live_evidence"]
         is False
     )
+    assert capture["runtime_collected_packet"]["preference_artifact_memory_promotion_blockers"] == [
+        "preference_artifact_memory_protected_output_reported"
+    ]
 
     report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
         captured_evidence=capture,
@@ -695,6 +701,9 @@ def test_collect_post_deploy_mcp_capture_blocks_p7_promotion_when_artifact_body_
         capture["runtime_collected_packet"]["preference_artifact_memory_promoted_to_live_evidence"]
         is False
     )
+    assert capture["runtime_collected_packet"]["preference_artifact_memory_promotion_blockers"] == [
+        "preference_artifact_raw_artifact_body_returned"
+    ]
     assert "preference_artifact_memory" not in capture
     assert capture["runtime_collected_packet"]["projection_join_promoted_to_live_evidence"] is True
     assert capture["projection_join"]["schema_version"] == "object_extraction_projection_join_preview.v1"
@@ -733,8 +742,93 @@ def test_collect_post_deploy_mcp_capture_blocks_p7_promotion_without_runtime_evi
         capture["runtime_collected_packet"]["preference_artifact_memory_promoted_to_live_evidence"]
         is False
     )
+    assert capture["runtime_collected_packet"]["preference_artifact_memory_promotion_blockers"] == [
+        "preference_artifact_memory_evidence_class_missing"
+    ]
     assert "preference_artifact_memory" not in capture
     assert capture["runtime_collected_packet"]["projection_join_promoted_to_live_evidence"] is True
+    assert capture["production_mutation_performed"] is False
+
+
+def test_collect_post_deploy_mcp_capture_blocks_p7_promotion_without_accepted_current_context_lane():
+    class _ReferenceOnlyPreferenceRuntimePacketSession(_FakeMcpSession):
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "brain_source_to_candidate_runtime_readiness" and arguments.get("collect_shadow_evidence") is True:
+                self.calls.append((name, dict(arguments)))
+                packet = _runtime_collected_packet(
+                    live=True,
+                    preference_artifact_memory=True,
+                )
+                packet["preference_artifact_memory"]["agent_context_preference_section"][
+                    "authority_lanes"
+                ] = ["reference_only"]
+                return SimpleNamespace(isError=False, structuredContent=packet)
+            return await super().call_tool(name, arguments)
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield _ReferenceOnlyPreferenceRuntimePacketSession()
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            expected_commit="c2b8548",
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert capture["runtime_collected_packet"]["preference_artifact_memory_present"] is True
+    assert (
+        capture["runtime_collected_packet"]["preference_artifact_memory_promoted_to_live_evidence"]
+        is False
+    )
+    assert capture["runtime_collected_packet"]["preference_artifact_memory_promotion_blockers"] == [
+        "preference_artifact_agent_context_accepted_current_missing"
+    ]
+    assert "preference_artifact_memory" not in capture
+    assert capture["production_mutation_performed"] is False
+
+
+def test_collect_post_deploy_mcp_capture_blocks_p7_promotion_when_count_lacks_accepted_current_lane():
+    class _CountOnlyPreferenceRuntimePacketSession(_FakeMcpSession):
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "brain_source_to_candidate_runtime_readiness" and arguments.get("collect_shadow_evidence") is True:
+                self.calls.append((name, dict(arguments)))
+                packet = _runtime_collected_packet(
+                    live=True,
+                    preference_artifact_memory=True,
+                )
+                packet["preference_artifact_memory"]["preference_object_pack"]["lanes"][
+                    "accepted_current"
+                ] = []
+                return SimpleNamespace(isError=False, structuredContent=packet)
+            return await super().call_tool(name, arguments)
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield _CountOnlyPreferenceRuntimePacketSession()
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            expected_commit="c2b8548",
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert capture["runtime_collected_packet"]["preference_artifact_accepted_preference_count"] == 1
+    assert (
+        capture["runtime_collected_packet"]["preference_artifact_memory_promoted_to_live_evidence"]
+        is False
+    )
+    assert capture["runtime_collected_packet"]["preference_artifact_memory_promotion_blockers"] == [
+        "preference_artifact_accepted_current_lane_missing"
+    ]
+    assert "preference_artifact_memory" not in capture
     assert capture["production_mutation_performed"] is False
 
 
@@ -786,6 +880,9 @@ def test_collect_post_deploy_mcp_capture_preserves_runtime_mutation_and_protecte
         capture["runtime_collected_packet"]["preference_artifact_memory_promoted_to_live_evidence"]
         is False
     )
+    assert capture["runtime_collected_packet"]["preference_artifact_memory_promotion_blockers"] == [
+        "preference_artifact_memory_mutation_reported"
+    ]
 
     report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
         captured_evidence=capture,
