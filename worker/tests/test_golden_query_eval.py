@@ -1408,6 +1408,26 @@ def test_product_activation_progress_keeps_p9_gap_for_reference_only_current_aut
     assert report["production_ready"] is False
 
 
+def test_product_activation_progress_keeps_p9_gap_when_startup_omits_current_authority():
+    evidence = _valid_p6_p7_p8_p9_runtime_evidence(live=True)
+    evidence["agent_context_startup_runtime"] = _valid_p9_startup_runtime_evidence(
+        current_authority_count=0,
+    )
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p9 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P9")
+
+    assert checks["P9"]["result"] == "PASS_WITH_GAPS"
+    assert "p9_agent_context_startup_section_missing:current_authority" in checks["P9"]["gaps"]
+    assert "p9_consumer_action_surface_runtime_policy_unproven" in checks["P9"]["gaps"]
+    assert p9["product_sections_claim_status"] == "validated"
+    assert p9["startup_read_path_claim_status"] == "failed"
+    assert p9["production_mutation_performed"] is False
+    assert report["production_ready"] is False
+
+
 def test_product_activation_progress_keeps_p9_live_gap_for_local_agent_context_replay():
     report = build_product_activation_progress_report(
         live_evidence=_valid_p6_p7_p8_p9_runtime_evidence(live=False)
