@@ -399,6 +399,13 @@ def _valid_p8_runtime_evidence(*, live: bool = True):
             "contains_expected_commit": True,
             "identity_source": "redacted_artifact_identity_summary",
         },
+        "gitops_desired_state": {
+            "schema_version": "gitops_desired_state_identity.v1",
+            "images_include_expected_commit": True,
+            "desired_state_source": "sanitized_ops_manifest_summary",
+            "target_revision": "main",
+            "production_mutation_performed": False,
+        },
         "evidence_provenance": {
             "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
             "collection_mode": "post_deploy_read_only_smoke" if live else "local_test_replay",
@@ -418,6 +425,7 @@ def _valid_p6_p7_p8_runtime_evidence(*, live: bool = True):
     p8 = _valid_p8_runtime_evidence(live=live)
     evidence["expected_commit"] = p8["expected_commit"]
     evidence["permission_sensitive_audit"] = p8["permission_sensitive_audit"]
+    evidence["gitops_desired_state"] = p8["gitops_desired_state"]
     evidence["deployed_identity"] = p8["deployed_identity"]
     evidence["evidence_provenance"] = p8["evidence_provenance"]
     return evidence
@@ -1181,6 +1189,65 @@ def test_product_activation_progress_treats_unproven_p8_identity_as_gap_not_mism
     assert p8["deployed_identity_claim_status"] == "not_validated"
     assert p8["source_commit_matches_pr_head"] is None
     assert p8["production_mutation_performed"] is False
+
+
+def test_product_activation_progress_surfaces_gitops_desired_state_without_closing_p8_runtime():
+    evidence = _valid_p6_p7_runtime_evidence(live=True)
+    evidence["expected_commit"] = "e290495"
+    evidence["gitops_desired_state"] = {
+        "schema_version": "gitops_desired_state_identity.v1",
+        "images_include_expected_commit": True,
+        "desired_state_source": "sanitized_ops_manifest_summary",
+        "target_revision": "main",
+        "production_mutation_performed": False,
+    }
+    evidence["evidence_provenance"] = {
+        "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
+        "collection_mode": "post_deploy_read_only_smoke",
+        "mutation_scope": "none",
+        "network_used": True,
+        "raw_private_evidence_returned": False,
+        "secret_returned": False,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": False,
+    }
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p8 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P8")
+
+    assert checks["P8"]["result"] == "PASS_WITH_GAPS"
+    assert "p8_live_deployed_identity_unverified" in checks["P8"]["gaps"]
+    assert "p8_permission_sensitive_audit_unverified" in checks["P8"]["gaps"]
+    assert p8["gitops_desired_state_claim_status"] == "validated"
+    assert p8["gitops_desired_state_matches_expected_commit"] is True
+    assert p8["deployed_identity_claim_status"] == "not_validated"
+    assert p8["production_mutation_performed"] is False
+    assert report["next_phase"] == "P8"
+
+
+def test_product_activation_progress_fails_when_gitops_desired_state_mismatches_expected_commit():
+    evidence = _valid_p6_p7_p8_runtime_evidence(live=True)
+    evidence["gitops_desired_state"] = {
+        "schema_version": "gitops_desired_state_identity.v1",
+        "images_include_expected_commit": False,
+        "desired_state_source": "sanitized_ops_manifest_summary",
+        "target_revision": "main",
+        "production_mutation_performed": False,
+    }
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p8 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P8")
+
+    assert checks["P8"]["result"] == "FAIL"
+    assert "p8_runtime_authority_live_failed" in checks["P8"]["failures"]
+    assert "p8_gitops_desired_state_expected_commit_mismatch" in checks["P8"]["gaps"]
+    assert p8["gitops_desired_state_claim_status"] == "failed"
+    assert report["release_quality_gate"] == "blocked"
+    assert report["production_mutation_performed"] is False
 
 
 def test_product_activation_progress_scopes_p8_no_mutation_to_permission_audit_claim():
