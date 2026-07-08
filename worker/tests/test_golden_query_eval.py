@@ -453,15 +453,18 @@ def test_code_change_impact_pack_passes_strict_axes_with_runtime_gap():
     assert result["passes"] is True
 
 
-def test_phase_golden_query_coverage_reports_pass_with_gaps_not_green():
+def test_phase_golden_query_coverage_reports_green_release_gate_with_gaps():
     report = build_phase_golden_query_coverage_report()
 
     assert report["schema_version"] == "knowledge_object_phase_golden_query_coverage.v1"
     assert report["status"] == "PASS_WITH_GAPS"
-    assert report["release_quality_gate"] == "not_green"
+    assert report["release_quality_gate"] == "green"
+    assert "production_quality_not_green" not in report["gaps"]
     phases = {item["phase"]: item for item in report["phases"]}
     assert set(phases) >= {"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10"}
     assert phases["P1"]["result"] == "PASS_WITH_GAPS"
+    assert phases["P5"]["result"] == "PASS"
+    assert phases["P5"]["gaps"] == []
     assert phases["P4"]["golden_query_family"] == "review queue and authority promotion"
     assert phases["P4"]["result"] == "PASS_WITH_GAPS"
     assert phases["P4"]["required_axes"] == [
@@ -493,7 +496,7 @@ def test_source_to_authority_quality_gate_covers_review_approval_and_read_path_w
     assert report["schema_version"] == "source_to_authority_quality_gate_report.v1"
     assert report["status"] == "PASS_WITH_GAPS"
     assert report["local_quality_gate"] == "green"
-    assert report["release_quality_gate"] == "not_green"
+    assert report["release_quality_gate"] == "green"
     assert report["production_mutation_performed"] is False
     assert report["production_approval_gate"] == "preapproved"
     assert report["production_mutation_execution"] == "not_performed_by_local_gate"
@@ -548,6 +551,7 @@ def test_source_to_authority_quality_gate_covers_review_approval_and_read_path_w
     assert surface_checks["mcp_source_to_candidate_runtime_readiness_tool"]["network_used"] is False
     assert surface_checks["mcp_source_to_candidate_runtime_readiness_tool"]["production_mutation_performed"] is False
     assert "production_authority_gate_preapproved_not_executed" in report["gaps"]
+    assert "production_quality_not_green" not in report["gaps"]
 
 
 def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
@@ -558,19 +562,19 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert report["goal_complete"] is False
     assert report["production_ready"] is False
     assert report["local_quality_gate"] == "green"
-    assert report["release_quality_gate"] == "not_green"
+    assert report["release_quality_gate"] == "green"
     assert report["production_mutation_performed"] is False
     assert report["production_approval_gate"] == "preapproved"
     assert report["production_mutation_execution"] == "not_performed_by_local_gate"
     assert report["scope_phases"] == ["P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9"]
     assert report["minimum_review_loop_checkpoint"]["phases"] == ["P2", "P3", "P4"]
     assert report["minimum_review_loop_checkpoint"]["status"] == "PASS_WITH_GAPS"
-    assert report["next_phase"] == "P5"
-    assert set(report["remaining_phases"]) >= {"P5", "P6", "P7", "P8", "P9"}
+    assert report["next_phase"] == "P6"
+    assert report["remaining_phases"] == ["P6", "P7", "P8", "P9"]
     assert report["hard_failures"] == []
     assert report["quality_gate_inputs"]["source_to_authority_local_quality_gate"] == "green"
     assert report["product_evidence_status"] == "PASS_WITH_GAPS"
-    assert "production_quality_not_green" in report["goal_completion_blockers"]
+    assert "production_quality_not_green" not in report["goal_completion_blockers"]
     assert "live_runtime_read_path_unverified" in report["goal_completion_blockers"]
     assert "future_phase_golden_query_slices_planned" not in report["goal_completion_blockers"]
     assert "future_phase_slices_planned" not in report["goal_completion_blockers"]
@@ -752,7 +756,9 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
 
     phase_progress = {item["phase"]: item for item in report["phase_progress"]}
     assert phase_progress["P4"]["quality_result"] == "PASS_WITH_GAPS"
-    assert phase_progress["P5"]["state"] == "in_progress"
+    assert phase_progress["P5"]["state"] == "local_validated"
+    assert phase_progress["P5"]["quality_result"] == "PASS"
+    assert phase_progress["P5"]["gaps"] == []
     assert phase_progress["P6"]["state"] == "local_validated"
     assert phase_progress["P9"]["state"] == "local_validated"
 
@@ -767,6 +773,11 @@ def test_product_activation_progress_closes_p6_gap_with_live_session_project_rol
 
     assert checks["P6"]["result"] == "PASS"
     assert "p6_live_multi_device_rollup_unproven" not in checks["P6"]["gaps"]
+    phase_progress = {item["phase"]: item for item in report["phase_progress"]}
+    assert phase_progress["P6"]["quality_result"] == "PASS"
+    assert phase_progress["P6"]["gaps"] == []
+    assert report["next_phase"] == "P7"
+    assert report["remaining_phases"] == ["P7", "P8", "P9"]
     assert p6["rollup_claim_status"] == "validated"
     assert p6["live_evidence_provided"] is True
     assert p6["evidence_is_live"] is True
