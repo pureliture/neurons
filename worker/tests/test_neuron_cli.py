@@ -1736,6 +1736,35 @@ def test_neuron_knowledge_golden_query_eval_activation_progress_treats_partial_p
     assert report["production_mutation_performed"] is False
 
 
+def test_neuron_knowledge_golden_query_eval_activation_progress_fails_empty_p6_post_deploy_capture(
+    tmp_path, capsys
+):
+    capture = _valid_p6_runtime_evidence(live=True)
+    capture["session_project_rollup_runtime"] = {}
+    capture_file = tmp_path / "empty-p6-post-deploy-capture.json"
+    capture_file.write_text(json.dumps(capture), encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "golden-query-eval",
+                "--activation-progress",
+                "--post-deploy-capture-file",
+                str(capture_file),
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+
+    assert report["status"] == "FAIL"
+    assert checks["P6"]["result"] == "FAIL"
+    assert "p6_session_rollup_incomplete" in checks["P6"]["failures"]
+    assert "p6_handoff_pack_missing" in checks["P6"]["failures"]
+
+
 def test_neuron_knowledge_golden_query_eval_activation_progress_fails_mutating_post_deploy_capture(
     tmp_path, capsys
 ):

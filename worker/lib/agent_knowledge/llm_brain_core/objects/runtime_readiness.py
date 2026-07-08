@@ -269,6 +269,7 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         "projection_join": _public_safe_mapping(captured.get("projection_join")),
         "source_to_candidate_review_loop": _public_safe_mapping(captured.get("source_to_candidate_review_loop")),
         "session_project_rollup_runtime": _public_safe_mapping(captured.get("session_project_rollup_runtime")),
+        "session_project_rollup_runtime_present": "session_project_rollup_runtime" in captured,
         "preference_artifact_memory": _public_safe_mapping(captured.get("preference_artifact_memory")),
         "permission_sensitive_audit": _public_safe_mapping(captured.get("permission_sensitive_audit")),
         "agent_context_startup_runtime": _public_safe_mapping(captured.get("agent_context_startup_runtime")),
@@ -2301,9 +2302,30 @@ def _source_to_candidate_review_loop_reports_mutation(
 
 
 def _live_session_project_rollup_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    rollup_present = _runtime_evidence_field_present(
+        evidence,
+        "session_project_rollup_runtime",
+        "session_project_rollup_runtime_present",
+    )
     rollup = evidence.get("session_project_rollup_runtime")
     rollup = rollup if isinstance(rollup, Mapping) else {}
     if not rollup:
+        if rollup_present:
+            return {
+                "claim_id": "live.session_project.rollup",
+                "evidence_class": "runtime_read_path",
+                "status": "failed",
+                "schema_version": "",
+                "device_count": 0,
+                "visible_session_count": 0,
+                "all_device_session_count": 0,
+                "read_after_write_status": "",
+                "production_mutation_performed": False,
+                "gaps": [
+                    "session_project_rollup_runtime_empty_or_invalid",
+                    "live_multi_device_rollup_unproven",
+                ],
+            }
         return {
             "claim_id": "live.session_project.rollup",
             "evidence_class": "runtime_read_path",
@@ -2368,6 +2390,17 @@ def _live_session_project_rollup_claim(evidence: Mapping[str, Any]) -> dict[str,
         ),
         "gaps": failures,
     }
+
+
+def _runtime_evidence_field_present(
+    evidence: Mapping[str, Any],
+    field_name: str,
+    marker_name: str,
+) -> bool:
+    marker = evidence.get(marker_name)
+    if isinstance(marker, bool):
+        return marker
+    return field_name in evidence
 
 
 def _session_project_rollup_failures(
