@@ -249,6 +249,98 @@ def _valid_p6_runtime_evidence(*, live: bool = True):
     }
 
 
+def _valid_p7_runtime_evidence(*, live: bool = True):
+    accepted_object = {
+        "object_id": "ko:ArtifactPreference:html-review-density",
+        "object_type": "ArtifactPreference",
+        "authority_lane": "accepted_current",
+    }
+    proposal_object = {
+        "object_id": "ko:ArtifactPreference:visualization-proposal",
+        "object_type": "ArtifactPreference",
+        "authority_lane": "proposal_only",
+    }
+    return {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "preference_artifact_memory": {
+            "schema_version": "preference_artifact_memory_runtime_evidence.v1",
+            "evidence_class": "runtime_preference_artifact_memory",
+            "preference_object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": "code_style_preference",
+                "accepted_preference_count": 1,
+                "proposal_preference_count": 1,
+                "objects": [accepted_object, proposal_object],
+                "lanes": {
+                    "accepted_current": [accepted_object],
+                    "proposal_only": [proposal_object],
+                },
+                "recommended_actions": [
+                    {"object_id": accepted_object["object_id"], "action": "apply_preference"},
+                    {"object_id": proposal_object["object_id"], "action": "review_inferred_preference"},
+                ],
+                "gaps": [],
+                "production_mutation_performed": False,
+            },
+            "html_visualization_route_smoke": {
+                "schema_version": "brain_objects_query.v1",
+                "route": "html_visualization_preference",
+                "production_mutation_performed": False,
+                "object_pack": {
+                    "schema_version": "object_pack.v1",
+                    "route": "html_visualization_preference",
+                    "objects": [accepted_object],
+                    "lanes": {"accepted_current": [accepted_object]},
+                    "recommended_actions": [
+                        {"object_id": accepted_object["object_id"], "action": "apply_preference"}
+                    ],
+                    "gaps": [],
+                },
+            },
+            "agent_context_preference_section": {
+                "schema_version": "agent_context_product_pack.v1",
+                "section": "style_preference",
+                "object_count": 1,
+                "accepted_preference_count": 1,
+                "surface_policy": {"mutation_allowed": False},
+            },
+            "artifact_review_check": {
+                "schema_version": "artifact_review_preference_check.v1",
+                "status": "pass",
+                "ui_required": False,
+                "raw_artifact_body_returned": False,
+                "assertions": ["accepted_html_preference_available"],
+            },
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
+        "evidence_provenance": {
+            "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
+            "collection_mode": "post_deploy_read_only_smoke" if live else "local_test_replay",
+            "mutation_scope": "none",
+            "network_used": live,
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": False,
+    }
+
+
+def _valid_p6_p7_runtime_evidence(*, live: bool = True):
+    evidence = _valid_p6_runtime_evidence(live=live)
+    evidence["preference_artifact_memory"] = _valid_p7_runtime_evidence(live=live)[
+        "preference_artifact_memory"
+    ]
+    return evidence
+
+
 def test_golden_query_baseline_records_current_low_quality_failures():
     report = build_baseline_golden_query_report()
 
@@ -788,6 +880,76 @@ def test_product_activation_progress_closes_p6_gap_with_live_session_project_rol
     assert p6["production_mutation_performed"] is False
     assert report["production_mutation_performed"] is False
     assert report["production_ready"] is False
+
+
+def test_product_activation_progress_closes_p7_gap_with_live_preference_artifact_evidence():
+    report = build_product_activation_progress_report(
+        live_evidence=_valid_p6_p7_runtime_evidence(live=True)
+    )
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p7 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P7")
+    phase_progress = {item["phase"]: item for item in report["phase_progress"]}
+
+    assert checks["P6"]["result"] == "PASS"
+    assert checks["P7"]["result"] == "PASS"
+    assert "p7_accepted_preference_context_pack_live_unproven" not in checks["P7"]["gaps"]
+    assert "p7_html_artifact_review_live_unproven" not in checks["P7"]["gaps"]
+    assert phase_progress["P7"]["quality_result"] == "PASS"
+    assert phase_progress["P7"]["gaps"] == []
+    assert report["next_phase"] == "P8"
+    assert report["remaining_phases"] == ["P8", "P9"]
+    assert p7["preference_claim_status"] == "validated"
+    assert p7["live_evidence_provided"] is True
+    assert p7["evidence_is_live"] is True
+    assert p7["accepted_preference_count"] == 1
+    assert p7["proposal_preference_count"] == 1
+    assert p7["html_route_status"] == "validated"
+    assert p7["artifact_review_check_status"] == "pass"
+    assert p7["production_mutation_performed"] is False
+    assert report["production_mutation_performed"] is False
+    assert report["production_ready"] is False
+
+
+def test_product_activation_progress_keeps_p7_gap_without_runtime_preference_evidence_class():
+    evidence = _valid_p6_p7_runtime_evidence(live=True)
+    evidence["preference_artifact_memory"].pop("evidence_class")
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p7 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P7")
+
+    assert checks["P6"]["result"] == "PASS"
+    assert checks["P7"]["result"] == "PASS_WITH_GAPS"
+    assert "p7_accepted_preference_context_pack_live_unproven" in checks["P7"]["gaps"]
+    assert "p7_html_artifact_review_live_unproven" in checks["P7"]["gaps"]
+    assert report["next_phase"] == "P7"
+    assert report["remaining_phases"] == ["P7", "P8", "P9"]
+    assert "preference_claim_status" not in p7
+    assert p7["production_mutation_performed"] is False
+    assert report["production_mutation_performed"] is False
+
+
+def test_product_activation_progress_fails_p7_when_artifact_review_returns_raw_body():
+    evidence = _valid_p6_p7_runtime_evidence(live=True)
+    preference = evidence["preference_artifact_memory"]
+    preference["artifact_review_check"]["raw_artifact_body_returned"] = True
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p7 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P7")
+
+    assert report["status"] == "FAIL"
+    assert report["release_quality_gate"] == "blocked"
+    assert checks["P7"]["result"] == "FAIL"
+    assert "p7_preference_artifact_runtime_failed" in checks["P7"]["failures"]
+    assert "p7_runtime_readiness_failed" in checks["P7"]["failures"]
+    assert "p7_preference_artifact_raw_artifact_body_returned" in checks["P7"]["gaps"]
+    assert p7["preference_claim_status"] == "failed"
+    assert p7["artifact_review_check_status"] == "pass"
+    assert p7["production_mutation_performed"] is False
 
 
 def test_product_activation_progress_closes_p3_gap_with_live_projection_join_evidence():
