@@ -53,6 +53,7 @@ ALLOWED_AGENT_CONTEXT_TOOL_SAFE_TARGETS = {
     "brain_source_to_candidate_runtime_readiness": frozenset({"sanitized_evidence_packet"}),
 }
 EVIDENCE_PROVENANCE_SCHEMA = "source_to_candidate_runtime_evidence_provenance.v1"
+GITOPS_DESIRED_STATE_SCHEMA = "gitops_desired_state_identity.v1"
 PROJECTION_JOIN_RUNTIME_SCHEMA = "object_extraction_projection_join_preview.v1"
 SESSION_PROJECT_ROLLUP_RUNTIME_SCHEMA = "session_project_rollup_runtime_evidence.v1"
 SESSION_PROJECT_ROLLUP_PREVIEW_SCHEMA = "object_extraction_session_project_rollup_preview.v1"
@@ -109,6 +110,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
         "probe_preference_artifact_memory_runtime",
         "collect_permission_sensitive_audit_runtime",
         "probe_agent_context_startup_runtime",
+        "collect_gitops_desired_state",
         "collect_deployed_identity",
         "probe_production_no_mutation_denials",
         "collect_object_authority_gate_policy",
@@ -174,6 +176,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
             "probe_preference_artifact_memory_runtime": "live_preference_artifact_memory_unverified",
             "collect_permission_sensitive_audit_runtime": "permission_sensitive_audit_unverified",
             "probe_agent_context_startup_runtime": "live_agent_context_startup_unverified",
+            "collect_gitops_desired_state": "gitops_desired_state_unverified",
             "collect_deployed_identity": "live_deployed_identity_unverified",
             "probe_production_no_mutation_denials": "production_denial_smokes_unverified",
             "collect_object_authority_gate_policy": "live_object_authority_gate_policy_unverified",
@@ -236,6 +239,7 @@ def build_source_to_candidate_runtime_evidence_packet_template(
             "preference_artifact_memory",
             "permission_sensitive_audit",
             "agent_context_startup_runtime",
+            "gitops_desired_state",
             "deployed_identity",
             "production_denials",
             "tool_schemas",
@@ -273,6 +277,7 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         "preference_artifact_memory": _public_safe_mapping(captured.get("preference_artifact_memory")),
         "permission_sensitive_audit": _public_safe_mapping(captured.get("permission_sensitive_audit")),
         "agent_context_startup_runtime": _public_safe_mapping(captured.get("agent_context_startup_runtime")),
+        "gitops_desired_state": _public_safe_mapping(captured.get("gitops_desired_state")),
         "deployed_identity": _public_safe_mapping(captured.get("deployed_identity")),
         "production_denials": _public_safe_mapping(captured.get("production_denials")),
         "tool_schemas": _public_safe_mapping(captured.get("tool_schemas")),
@@ -1565,6 +1570,13 @@ def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
                 "raw_external_ids_returned": False,
             },
         },
+        "gitops_desired_state": {
+            "schema_version": GITOPS_DESIRED_STATE_SCHEMA,
+            "images_include_expected_commit": "collector_sets_boolean",
+            "desired_state_source": "sanitized_ops_manifest_summary",
+            "target_revision": "collector_sets_public_ref",
+            "production_mutation_performed": False,
+        },
         "deployed_identity": {
             "contains_expected_commit": "collector_sets_boolean",
             "identity_source": "redacted_artifact_identity_summary",
@@ -1764,6 +1776,14 @@ def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
             "production_mutation_performed": False,
         },
         {
+            "step_id": "collect_gitops_desired_state",
+            "evidence_field": "gitops_desired_state",
+            "required_values": [GITOPS_DESIRED_STATE_SCHEMA, "images_include_expected_commit"],
+            "safe_target": "sanitized_ops_gitops_desired_state_summary",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
             "step_id": "collect_deployed_identity",
             "evidence_field": "deployed_identity",
             "required_values": ["contains_expected_commit"],
@@ -1818,6 +1838,7 @@ def build_source_to_candidate_runtime_readiness_report(
         _live_preference_artifact_memory_claim(evidence),
         _live_permission_sensitive_audit_claim(evidence),
         _live_agent_context_startup_claim(evidence),
+        _gitops_desired_state_claim(evidence, expected_commit=expected_commit),
         _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
         _live_object_authority_production_gate_policy_claim(evidence),
         _live_object_authority_bounded_execution_claim(evidence),
@@ -3048,6 +3069,43 @@ def _agent_context_startup_reports_mutation(
         or read_path.get("production_mutation_performed") is True
         or enforcement.get("production_mutation_allowed") is True
     )
+
+
+def _gitops_desired_state_claim(evidence: Mapping[str, Any], *, expected_commit: str) -> dict[str, Any]:
+    desired = evidence.get("gitops_desired_state")
+    desired = desired if isinstance(desired, Mapping) else {}
+    schema = str(desired.get("schema_version") or "")
+    has_expected = desired.get("images_include_expected_commit") is True
+    explicit_mismatch = desired.get("images_include_expected_commit") is False and bool(desired)
+    mutation_performed = desired.get("production_mutation_performed") is True
+    gaps: list[str] = []
+    if not desired:
+        gaps.append("gitops_desired_state_unverified")
+    elif schema != GITOPS_DESIRED_STATE_SCHEMA:
+        gaps.append("gitops_desired_state_schema_mismatch")
+    elif explicit_mismatch:
+        gaps.append("gitops_desired_state_expected_commit_mismatch")
+    elif not has_expected:
+        gaps.append("gitops_desired_state_expected_commit_unverified")
+    if mutation_performed:
+        gaps.append("gitops_desired_state_mutated_production")
+    failed = bool(desired) and (
+        schema != GITOPS_DESIRED_STATE_SCHEMA or explicit_mismatch or mutation_performed
+    )
+    return {
+        "claim_id": "ops.gitops_desired_state.includes_expected_commit",
+        "evidence_class": "gitops_desired_state_identity",
+        "status": "failed" if failed else ("validated" if has_expected else "not_validated"),
+        "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
+        "desired_state_source": public_safe_text(
+            str(desired.get("desired_state_source") or ""),
+            max_chars=160,
+        ),
+        "target_revision": public_safe_text(str(desired.get("target_revision") or ""), max_chars=120),
+        "images_include_expected_commit": has_expected,
+        "production_mutation_performed": mutation_performed,
+        "gaps": gaps,
+    }
 
 
 def _live_deployed_identity_claim(evidence: Mapping[str, Any], *, expected_commit: str) -> dict[str, Any]:

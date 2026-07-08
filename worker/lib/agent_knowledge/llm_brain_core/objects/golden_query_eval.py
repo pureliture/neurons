@@ -2053,7 +2053,9 @@ def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dic
     identity = identity if isinstance(identity, Mapping) else {}
     audit = live_evidence.get("permission_sensitive_audit")
     audit = audit if isinstance(audit, Mapping) else {}
-    if not identity and not audit:
+    desired_state = live_evidence.get("gitops_desired_state")
+    desired_state = desired_state if isinstance(desired_state, Mapping) else {}
+    if not identity and not audit and not desired_state:
         return {}
 
     expected_commit = str(live_evidence.get("expected_commit") or "")
@@ -2067,9 +2069,10 @@ def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dic
         if isinstance(item, Mapping)
     }
     permission_claim = claims.get("live.production.permission_sensitive_audit", {})
+    desired_state_claim = claims.get("ops.gitops_desired_state.includes_expected_commit", {})
     identity_claim = claims.get("live.deployed_identity.includes_expected_commit", {})
     provenance_claim = claims.get("live.evidence.provenance", {})
-    p8_claims = [permission_claim, identity_claim]
+    p8_claims = [permission_claim, desired_state_claim, identity_claim]
     claim_gaps = _dedupe(
         [
             *(
@@ -2089,6 +2092,7 @@ def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dic
     )
     evidence_is_live = bool(report.get("evidence_is_live"))
     permission_status = str(permission_claim.get("status") or "not_validated")
+    desired_state_status = str(desired_state_claim.get("status") or "not_validated")
     identity_status = str(identity_claim.get("status") or "not_validated")
     provenance_status = _p8_scoped_provenance_status(provenance_claim)
     authority_write_performed = permission_claim.get("production_mutation_performed") is True
@@ -2098,6 +2102,7 @@ def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dic
     )
     status = _p8_runtime_authority_product_status(
         permission_status=permission_status,
+        desired_state_status=desired_state_status,
         identity_status=identity_status,
         provenance_status=provenance_status,
         evidence_is_live=evidence_is_live,
@@ -2119,6 +2124,12 @@ def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dic
         "permission_audit_claim_status": permission_status,
         "permission_audit_event_count": int(permission_claim.get("event_count") or 0),
         "permission_audit_store_status": str(permission_claim.get("audit_store_status") or ""),
+        "gitops_desired_state_claim_status": desired_state_status,
+        "gitops_desired_state_matches_expected_commit": (
+            desired_state_claim.get("images_include_expected_commit") is True
+        ),
+        "gitops_desired_state_source": str(desired_state_claim.get("desired_state_source") or ""),
+        "gitops_desired_state_target_revision": str(desired_state_claim.get("target_revision") or ""),
         "deployed_identity_claim_status": identity_status,
         "source_commit_matches_pr_head": source_commit_matches,
         "deployed_identity_source": str(identity_claim.get("identity_source") or ""),
@@ -2168,6 +2179,7 @@ def _p8_scoped_provenance_status(provenance_claim: Mapping[str, Any]) -> str:
 def _p8_runtime_authority_product_status(
     *,
     permission_status: str,
+    desired_state_status: str,
     identity_status: str,
     provenance_status: str,
     evidence_is_live: bool,
@@ -2176,6 +2188,7 @@ def _p8_runtime_authority_product_status(
 ) -> str:
     if (
         permission_status == "failed"
+        or desired_state_status == "failed"
         or identity_status == "failed"
         or provenance_status == "failed"
         or production_mutation_performed
@@ -2183,6 +2196,7 @@ def _p8_runtime_authority_product_status(
         return "FAIL"
     if (
         permission_status == "validated"
+        and desired_state_status == "validated"
         and identity_status == "validated"
         and provenance_status == "validated"
         and evidence_is_live

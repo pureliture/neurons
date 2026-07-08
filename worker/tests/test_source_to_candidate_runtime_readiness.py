@@ -79,6 +79,13 @@ def _sanitized_live_evidence(**overrides):
             "contains_expected_commit": True,
             "identity_source": "redacted_live_runtime_evidence",
         },
+        "gitops_desired_state": {
+            "schema_version": "gitops_desired_state_identity.v1",
+            "images_include_expected_commit": True,
+            "desired_state_source": "sanitized_ops_manifest_summary",
+            "target_revision": "main",
+            "production_mutation_performed": False,
+        },
         "tool_schemas": {
             "brain_approval_board_decide": _object_authority_tool_schema(),
             "brain_object_proposal_create": _object_authority_tool_schema(),
@@ -767,6 +774,7 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
         "preference_artifact_memory",
         "permission_sensitive_audit",
         "agent_context_startup_runtime",
+        "gitops_desired_state",
         "deployed_identity",
         "production_denials",
         "tool_schemas",
@@ -976,6 +984,92 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert "live_object_authority_gate_policy_unverified" in report["gaps"]
     assert "bounded_production_authority_execution_unverified" in report["gaps"]
     assert "live_evidence_provenance_unverified" in report["gaps"]
+
+
+def test_runtime_readiness_plan_requests_gitops_desired_state_separately_from_deployed_identity():
+    plan = build_source_to_candidate_runtime_evidence_collection_plan(
+        expected_commit="7218cb2",
+        repository="pureliture/neurons",
+        branch="main",
+        consumer="codex",
+    )
+    template = build_source_to_candidate_runtime_evidence_packet_template(
+        expected_commit="7218cb2",
+        repository="pureliture/neurons",
+        branch="main",
+        consumer="codex",
+    )
+
+    assert "collect_gitops_desired_state" in plan["required_steps"]
+    assert plan["gap_mapping"]["collect_gitops_desired_state"] == "gitops_desired_state_unverified"
+    assert "gitops_desired_state" in template["required_packet_fields"]
+    assert (
+        template["packet_field_templates"]["gitops_desired_state"]["schema_version"]
+        == "gitops_desired_state_identity.v1"
+    )
+
+
+def test_runtime_readiness_gitops_desired_state_does_not_replace_deployed_identity():
+    evidence = {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "gitops_desired_state": {
+            "schema_version": "gitops_desired_state_identity.v1",
+            "images_include_expected_commit": True,
+            "desired_state_source": "sanitized_ops_manifest_summary",
+            "target_revision": "main",
+            "production_mutation_performed": False,
+        },
+        "evidence_provenance": _evidence_provenance(
+            collection_mode="post_deploy_read_only_smoke",
+            mutation_scope="none",
+            network_used=True,
+        ),
+        "production_mutation_performed": False,
+    }
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit="7218cb2",
+    )
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert claims["ops.gitops_desired_state.includes_expected_commit"]["status"] == "validated"
+    assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "not_validated"
+    assert "gitops_desired_state_unverified" not in report["gaps"]
+    assert "live_deployed_identity_unverified" in report["gaps"]
+    assert report["production_mutation_performed"] is False
+
+
+def test_runtime_readiness_fails_when_gitops_desired_state_mismatches_expected_commit():
+    evidence = {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "gitops_desired_state": {
+            "schema_version": "gitops_desired_state_identity.v1",
+            "images_include_expected_commit": False,
+            "desired_state_source": "sanitized_ops_manifest_summary",
+            "target_revision": "main",
+            "production_mutation_performed": False,
+        },
+        "evidence_provenance": _evidence_provenance(
+            collection_mode="post_deploy_read_only_smoke",
+            mutation_scope="none",
+            network_used=True,
+        ),
+        "production_mutation_performed": False,
+    }
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit="7218cb2",
+    )
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert report["status"] == "FAIL"
+    assert "ops.gitops_desired_state.includes_expected_commit" in report["failed_claims"]
+    assert claims["ops.gitops_desired_state.includes_expected_commit"]["status"] == "failed"
+    assert "gitops_desired_state_expected_commit_mismatch" in report["gaps"]
+    assert report["production_mutation_performed"] is False
 
 
 def test_runtime_readiness_does_not_treat_deployed_identity_as_permission_audit():
