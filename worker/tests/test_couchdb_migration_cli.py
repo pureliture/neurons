@@ -219,6 +219,18 @@ def test_enumerate_and_extract_cwd_grok(tmp_path):
     assert found == [so_t]
     assert extract_cwd("grok", so_t) == ""
     assert _grok_project_from_path(so_t) == "neurons"
+    # Earlier path segment named "sessions" must not steal the layout index.
+    nested = (
+        tmp_path
+        / "sessions"
+        / "home"
+        / "sessions"
+        / quote("/Users/x/Projects/dendrite", safe="")
+        / "sess-n"
+        / "updates.jsonl"
+    )
+    _grok_updates_jsonl(nested, session_id="sess-n")
+    assert _grok_project_from_path(nested) == "dendrite"
 
 
 def test_run_migration_grok_project_from_encoded_cwd_not_basename(tmp_path):

@@ -147,9 +147,10 @@ def _grok_observed_at(record: dict, params: dict) -> str:
     raw_ts = record.get("timestamp")
     if isinstance(raw_ts, (int, float)) and raw_ts > 0:
         # Grok top-level timestamp is usually unix seconds; treat large values as ms.
+        # Use raw_ts * 1000 before int() so fractional seconds keep ms precision.
         if raw_ts > 10_000_000_000:
             return _unix_ms_to_iso(int(raw_ts))
-        return _unix_ms_to_iso(int(raw_ts) * 1000)
+        return _unix_ms_to_iso(int(raw_ts * 1000))
     if isinstance(raw_ts, str) and raw_ts:
         return raw_ts
     return ""
@@ -280,7 +281,8 @@ def _coerce_exit_code(value) -> int | None:
         if not text:
             return None
         try:
-            return int(text, 10)
+            # Accept "1", "1.0" (some serializers emit float-shaped strings).
+            return int(float(text))
         except ValueError:
             return None
     return None

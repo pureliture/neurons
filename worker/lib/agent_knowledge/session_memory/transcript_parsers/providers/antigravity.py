@@ -16,6 +16,20 @@ def _parse_antigravity_native_jsonl(
 ) -> ParsedTranscript:
     records = _load_jsonl_source(path)
     session_id = _antigravity_session_id_from_path(path)
+    if not session_id:
+        # Resolve session identity before any turn hashes so early turns are not
+        # orphaned under sha256("antigravity:") when the id appears mid-stream.
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            session_id = str(
+                record.get("conversationId")
+                or record.get("conversation_id")
+                or record.get("session_id")
+                or ""
+            )
+            if session_id:
+                break
     session_hash = _sha256(f"antigravity:{session_id}")
     turns: list[TranscriptTurn] = []
     tool_events: list[TranscriptToolEvent] = []
@@ -23,9 +37,6 @@ def _parse_antigravity_native_jsonl(
     ended_at = ""
 
     for record in records:
-        if not session_id:
-            session_id = str(record.get("conversationId") or record.get("conversation_id") or record.get("session_id") or "")
-            session_hash = _sha256(f"antigravity:{session_id}")
         text = str(record.get("content") or "")
         raw_tool_calls = record.get("tool_calls")
         tool_calls = raw_tool_calls if isinstance(raw_tool_calls, list) else []

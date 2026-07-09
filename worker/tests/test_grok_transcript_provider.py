@@ -32,6 +32,10 @@ from agent_knowledge.session_memory.transcript_parsers import (
     extract_tool_evidence,
     parse_transcript_source,
 )
+from agent_knowledge.session_memory.transcript_parsers.providers.grok import (
+    _coerce_exit_code,
+    _grok_observed_at,
+)
 
 
 def _sha256(value: str) -> str:
@@ -287,6 +291,20 @@ def test_grok_tool_name_not_overwritten_by_later_title(tmp_path):
     assert records
     assert all(r.tool_name == "run_terminal_command" for r in records)
     assert any(r.outcome in {"fail", "error"} or r.category == "test_result" for r in records)
+
+
+def test_grok_timestamp_float_seconds_path_is_stable():
+    # Fractional unix seconds must use int(raw * 1000) (review follow-up).
+    observed = _grok_observed_at({"timestamp": 1_700_000_000.5}, {})
+    assert observed  # non-empty ISO
+    assert "T" in observed and observed.endswith("Z")
+
+
+def test_coerce_exit_code_accepts_float_shaped_strings():
+    assert _coerce_exit_code("1.0") == 1
+    assert _coerce_exit_code("0.0") == 0
+    assert _coerce_exit_code("2") == 2
+    assert _coerce_exit_code(None) is None
 
 
 def test_grok_parser_version_wired_into_packed_metadata():

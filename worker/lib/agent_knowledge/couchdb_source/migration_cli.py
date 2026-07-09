@@ -131,14 +131,11 @@ def _grok_project_from_path(path: Path) -> str:
     if path.name != "updates.jsonl":
         return ""
     parts = [part for part in path.parts if part]
-    lower = [part.lower() for part in parts]
-    if "sessions" not in lower:
+    # Prefer trailing layout sessions/<encoded-cwd>/<session-id>/updates.jsonl
+    # so an earlier path segment named "sessions" cannot steal the index.
+    if len(parts) < 4 or parts[-4].lower() != "sessions":
         return ""
-    sessions_index = lower.index("sessions")
-    # sessions / <encoded-cwd> / <session-id> / updates.jsonl
-    if sessions_index + 3 >= len(parts):
-        return ""
-    encoded_cwd = parts[sessions_index + 1]
+    encoded_cwd = parts[-3]
     decoded = unquote(encoded_cwd)
     if not decoded or decoded == encoded_cwd:
         return ""
