@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import quote
 
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.migration_cli import (
+    MIGRATION_PROVIDERS,
+    _grok_project_from_path,
     convert_gemini_json_to_fixture,
+    default_source_roots,
     enumerate_provider_files,
     extract_cwd,
     main,
@@ -145,3 +149,106 @@ def test_transcript_migration_live_run_requires_approval_before_store_setup(caps
     assert report["reason"] == "approval is required"
     assert report["mutation_performed"] is False
     assert report["network_used"] is False
+
+
+def _grok_updates_jsonl(path: Path, *, session_id: str = "gs1") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps({
+            "timestamp": 1_700_000_000,
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "user_message_chunk",
+                    "content": {"type": "text", "text": "hi"},
+                },
+            },
+        }),
+        json.dumps({
+            "timestamp": 1_700_000_001,
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {"sessionUpdate": "turn_completed"},
+            },
+        }),
+        json.dumps({
+            "timestamp": 1_700_000_002,
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "ok"},
+                },
+            },
+        }),
+        json.dumps({
+            "timestamp": 1_700_000_003,
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {"sessionUpdate": "turn_completed"},
+            },
+        }),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_migration_providers_includes_grok():
+    assert "grok" in MIGRATION_PROVIDERS
+    assert "grok" in default_source_roots()
+
+
+def test_enumerate_and_extract_cwd_grok(tmp_path):
+    root = tmp_path / "sessions"
+    encoded = quote("/Users/x/Projects/neurons", safe="")
+    so_t = root / encoded / "sess-a" / "updates.jsonl"
+    _grok_updates_jsonl(so_t, session_id="sess-a")
+    # non-SoT jsonl must not be enumerated
+    other = root / encoded / "sess-a" / "chat_history.jsonl"
+    other.write_text("{}\n", encoding="utf-8")
+    # symlink SoT skipped
+    link = root / encoded / "sess-b" / "updates.jsonl"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(so_t)
+
+    found = enumerate_provider_files("grok", root)
+    assert found == [so_t]
+    assert extract_cwd("grok", so_t) == ""
+    assert _grok_project_from_path(so_t) == "neurons"
+
+
+def test_run_migration_grok_project_from_encoded_cwd_not_basename(tmp_path):
+    root = tmp_path / "sessions"
+    encoded = quote("/Users/x/Projects/neurons", safe="")
+    so_t = root / encoded / "sess-a" / "updates.jsonl"
+    _grok_updates_jsonl(so_t, session_id="sess-a")
+    store = InMemoryCouchDBSourceStore()
+    report = run_migration(store=store, roots={"grok": root}, providers=["grok"], dry_run=True)
+    assert report["by_provider"]["grok"]["imported"] == 1
+    assert report["by_provider"]["grok"]["errors"] == 0
+    projects = set()
+    for doc in store.all_docs():
+        if doc.get("doc_type") == dm.SourceDocType.COVERAGE_MANIFEST:
+            projects.add(doc["project_authority"]["project"])
+            assert doc["project_authority"]["project"] != "updates.jsonl"
+            assert doc["project_authority"]["ambiguous"] is False
+            assert doc["project_authority"]["eligible_for_retirement"] is True
+    assert projects == {"neurons"}
+
+
+def test_run_migration_grok_opaque_group_not_updates_jsonl_project(tmp_path):
+    root = tmp_path / "sessions"
+    so_t = root / "opaque-slug-abc" / "sess-z" / "updates.jsonl"
+    _grok_updates_jsonl(so_t, session_id="sess-z")
+    store = InMemoryCouchDBSourceStore()
+    report = run_migration(store=store, roots={"grok": root}, providers=["grok"], dry_run=True)
+    assert report["by_provider"]["grok"]["imported"] == 1
+    for doc in store.all_docs():
+        if doc.get("doc_type") == dm.SourceDocType.COVERAGE_MANIFEST:
+            assert doc["project_authority"]["project"] != "updates.jsonl"
+            assert doc["project_authority"]["ambiguous"] is True
+            assert doc["project_authority"]["eligible_for_retirement"] is False

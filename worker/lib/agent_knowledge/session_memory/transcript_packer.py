@@ -28,10 +28,18 @@ from .transcript_model import (
     bound_text,
     redact_and_bound_text,
 )
+from .transcript_parsers import GROK_PARSER_VERSION, PARSER_VERSION
 
 TOOL_EVIDENCE_PACKER_VERSION = "tool-evidence-summary-packer.v1"
 TOOL_EVIDENCE_DRY_RUN_SCHEMA_VERSION = "agent_knowledge_tool_evidence_dry_run.v1"
 _TOOL_EVIDENCE_HEADER_BUDGET_CHARS = 512
+
+
+def _parser_version_for_provider(provider: str) -> str:
+    """Wire provider-native parser version constants into packed metadata."""
+    if str(provider or "").strip().lower() == "grok":
+        return GROK_PARSER_VERSION
+    return PARSER_VERSION
 
 
 @dataclass(frozen=True)
@@ -119,7 +127,7 @@ def pack_conversation_chunk_document(
             observed_at_end=observed_at_end,
             privacy_level="private",
             redaction_version=REDACTION_VERSION,
-            parser_version="provider-transcript-parser.v1",
+            parser_version=_parser_version_for_provider(session.provider),
             source_status=session.source_status,
             capture_request_id=capture_request_id,
             part_index=part_index,
