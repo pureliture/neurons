@@ -12,8 +12,8 @@ that excludes the affected coverage from irreversible retirement.
 
 Provider lanes
 --------------
-Four provider lanes route to ``parse_transcript_source``: codex, claude,
-antigravity, gemini. ``gemini`` is historical-import-only (no live lane). There
+Lanes that route to ``parse_transcript_source``: codex, claude, antigravity,
+gemini, hermes, grok. ``gemini`` is historical-import-only (no live lane). There
 is no separate ``agy`` lane: ``agy`` is Antigravity's headless CLI, and dendrite
 captures it as provider ``antigravity`` (``agy_headless_capture`` ->
 ``normalize_provider_capture_request("antigravity", ...)``), so agy sessions are
@@ -59,6 +59,7 @@ PROVIDER_LANES: dict[str, ProviderLane] = {
     # hermes attaches as a first-class provider; it ingests via the generic
     # provider_transcript_fixture.v1 path (no native parser yet).
     "hermes": ProviderLane("hermes", live_allowed=True, parser=parse_transcript_source),
+    "grok": ProviderLane("grok", live_allowed=True, parser=parse_transcript_source),
 }
 
 
@@ -117,10 +118,15 @@ def import_historical_source(
             notes=("parser_not_vendored", "excluded_from_retirement"),
         )
 
+    # Grok ACP SoT files are always named updates.jsonl under ~/.grok/sessions/.
+    # Feeding that path into project authority would canonicalize to the basename
+    # "updates.jsonl" and falsely mark sessions eligible_for_retirement. Project
+    # must come from capture metadata / cwd / workspace marker (or stay unresolved).
+    provider_path_for_authority = "" if provider == "grok" else locator.source_path
     resolution = resolve_project(
         ProjectAuthorityInput(
             capture_metadata_project=locator.capture_metadata_project,
-            provider_source_path=locator.source_path,
+            provider_source_path=provider_path_for_authority,
             cwd=locator.cwd,
             workspace_marker=locator.workspace_marker,
             index_project_hint=locator.index_project_hint,

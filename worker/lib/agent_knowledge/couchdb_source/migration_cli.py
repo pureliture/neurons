@@ -11,6 +11,7 @@ Provider roots (overridable):
   claude       ~/.claude/projects/**/*.jsonl             (cwd from record.cwd)
   gemini       ~/.gemini/tmp/*/chats/*.{jsonl,json}      (.json -> fixture; project from <proj> dir)
   antigravity  ~/.gemini/antigravity/**/.system_generated/**/*.jsonl  (agy is captured here too)
+  grok         $(GROK_HOME|~/.grok)/sessions/**/updates.jsonl  (project via capture metadata; ACP has no top-level cwd)
 
 The store target comes from env (COUCHDB_URL / COUCHDB_USER / COUCHDB_PASSWORD /
 COUCHDB_DB); ``--dry-run`` uses an in-memory store so coverage and project
@@ -25,6 +26,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import unquote
 
 from .couchdb_http_store import CouchDBHttpSourceStore
 from .historical_import import ImportStatus, SourceLocator, import_historical_source
@@ -33,23 +35,26 @@ from .source_store import InMemoryCouchDBSourceStore
 from .tool_evidence_bundler import store_tool_evidence_bundles
 from .document_model import build_source_locator_hash
 from ..session_memory.native_memory_sync_approval import ApprovalError, validate_memory_enqueue_approval
+from ..session_memory.transcript_model import canonicalize_project
 from ..session_memory.transcript_parsers import extract_tool_evidence
 
 MIGRATION_CLI_SCHEMA_VERSION = "transcript_migration_cli.v1"
 MIGRATION_CLI_OPERATION = "transcript_migration"
 
-MIGRATION_PROVIDERS = ("codex", "claude", "gemini", "antigravity")
+MIGRATION_PROVIDERS = ("codex", "claude", "gemini", "antigravity", "grok")
 _CWD_SCAN_MAX_LINES = 50
 
 
 def default_source_roots() -> dict[str, Path]:
     home = Path.home()
     codex_home = Path(os.environ.get("CODEX_HOME") or (home / ".codex"))
+    grok_home = Path(os.environ.get("GROK_HOME") or (home / ".grok"))
     return {
         "codex": codex_home / "sessions",
         "claude": home / ".claude" / "projects",
         "gemini": home / ".gemini" / "tmp",
         "antigravity": home / ".gemini" / "antigravity",
+        "grok": grok_home / "sessions",
     }
 
 
@@ -63,6 +68,9 @@ def enumerate_provider_files(provider: str, root: Path) -> list[Path]:
         return sorted(files)
     if provider == "antigravity":
         return sorted(p for p in root.glob("**/.system_generated/**/*.jsonl") if p.is_file())
+    if provider == "grok":
+        # Session SoT is updates.jsonl per session directory (see Grok 17-sessions.md).
+        return sorted(p for p in root.glob("**/updates.jsonl") if p.is_file() and not p.is_symlink())
     return sorted(p for p in root.glob("**/*.jsonl") if p.is_file() and not p.is_symlink())
 
 
@@ -88,6 +96,11 @@ def extract_cwd(provider: str, path: Path) -> str:
     if provider == "gemini" and path.suffix == ".json":
         # gemini .json: project derived from the <proj>/chats/ path segment instead
         return ""
+    if provider == "grok":
+        # Grok updates.jsonl is ACP session/update stream without top-level cwd;
+        # project authority comes from sessions/<encoded-cwd>/ via
+        # ``_grok_project_from_path`` (capture metadata) or dendrite metadata.
+        return ""
     for record in _iter_jsonl(path, _CWD_SCAN_MAX_LINES):
         if not isinstance(record, dict):
             continue
@@ -104,6 +117,31 @@ def extract_cwd(provider: str, path: Path) -> str:
             if isinstance(v, str) and v:
                 return v
     return ""
+
+
+def _grok_project_from_path(path: Path) -> str:
+    """Derive project from Grok layout ``sessions/<encoded-cwd>/<session-id>/updates.jsonl``.
+
+    Never returns the SoT basename ``updates.jsonl``. When the group name is a
+    URL-encoded absolute path, decode and canonicalize it. Opaque slug groups
+    yield empty string so project authority stays unresolved/ambiguous rather
+    than inventing a fake label.
+    """
+    path = Path(path)
+    if path.name != "updates.jsonl":
+        return ""
+    parts = [part for part in path.parts if part]
+    # Prefer trailing layout sessions/<encoded-cwd>/<session-id>/updates.jsonl
+    # so an earlier path segment named "sessions" cannot steal the index.
+    if len(parts) < 4 or parts[-4].lower() != "sessions":
+        return ""
+    encoded_cwd = parts[-3]
+    decoded = unquote(encoded_cwd)
+    if not decoded or decoded == encoded_cwd:
+        return ""
+    if "/" not in decoded and "\\" not in decoded:
+        return ""
+    return canonicalize_project(decoded)
 
 
 def _gemini_project_from_path(path: Path) -> str:
@@ -207,7 +245,14 @@ def run_migration(
                 # falsely conflict with cwd; cwd must win as capture metadata.
                 capture_project = cwd
                 if not capture_project:
-                    capture_project = "antigravity" if provider == "antigravity" else gemini_project
+                    if provider == "antigravity":
+                        capture_project = "antigravity"
+                    elif provider == "gemini":
+                        capture_project = gemini_project
+                    elif provider == "grok":
+                        # Prefer URL-decoded sessions/<encoded-cwd>/ group; never
+                        # fall back to the updates.jsonl basename as project.
+                        capture_project = _grok_project_from_path(path)
                 result = import_historical_source(
                     locator=SourceLocator(
                         provider=provider,
