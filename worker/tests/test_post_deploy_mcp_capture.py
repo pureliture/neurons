@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import os
+from copy import deepcopy
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -416,6 +417,291 @@ class _FakeMcpSession:
         )
 
 
+class _NestedObservedAtRouteMcpSession(_FakeMcpSession):
+    """Return route payloads whose source observation can vary independently."""
+
+    def __init__(
+        self,
+        *,
+        observed_at: str,
+        content_hash: str = "sha256:" + "c" * 64,
+        request_id: str = "request:stable",
+        valid_from: str = "2026-07-15T00:00:00+00:00",
+    ) -> None:
+        super().__init__()
+        self.observed_at = observed_at
+        self.content_hash = content_hash
+        self.request_id = request_id
+        self.valid_from = valid_from
+
+    async def call_tool(self, name: str, arguments: dict):
+        result = await super().call_tool(name, arguments)
+        if name != "brain_objects_query":
+            return result
+
+        route = str(arguments["route"])
+        result.structuredContent = deepcopy(result.structuredContent)
+        result.structuredContent["object_pack"].update(
+            {
+                "objects": [
+                    {
+                        "schema_version": "knowledge_object_envelope.v1",
+                        "object_id": f"ko:{route}",
+                        "content_hash": self.content_hash,
+                        "observed_at": self.observed_at,
+                        "payload": {
+                            "request_id": self.request_id,
+                            "valid_from": self.valid_from,
+                            "valid_to": "2026-07-16T00:00:00+00:00",
+                        },
+                    }
+                ],
+                "edges": [
+                    {
+                        "schema_version": "knowledge_edge.v1",
+                        "edge_id": f"edge:{route}",
+                        "content_hash": self.content_hash,
+                        "observed_at": self.observed_at,
+                    }
+                ],
+                "evidence": [
+                    {
+                        "schema_version": "evidence_ref.v1",
+                        "evidence_id": f"evidence:{route}",
+                        "content_hash": self.content_hash,
+                        "observed_at": self.observed_at,
+                    }
+                ],
+            }
+        )
+        return result
+
+
+def _collect_external_startup_capture(
+    monkeypatch,
+    *,
+    collector_session: _FakeMcpSession,
+    adapter_session: _FakeMcpSession,
+) -> dict:
+    subprocess_observed: dict = {}
+
+    @asynccontextmanager
+    async def _collector_session_factory(_mcp_url: str):
+        yield collector_session
+
+    @asynccontextmanager
+    async def _adapter_session_factory(_mcp_url: str):
+        yield adapter_session
+
+    class _Process:
+        returncode = 0
+
+        async def communicate(self, challenge_payload):
+            challenge = json.loads(challenge_payload.decode("utf-8"))
+            proof_key = os.read(subprocess_observed["kwargs"]["pass_fds"][0], 32)
+            receipt = await collect_agent_context_consumer_startup_receipt(
+                mcp_url="https://mcp.example.test/mcp",
+                repository="pureliture/neurons",
+                branch="main",
+                project="neurons",
+                consumer="codex",
+                expected_commit="a" * 40,
+                challenge=challenge,
+                proof_key=proof_key,
+                session_factory=_adapter_session_factory,
+            )
+            return json.dumps(receipt).encode("utf-8"), b""
+
+    async def _create_subprocess_exec(*_argv, **kwargs):
+        subprocess_observed["kwargs"] = kwargs
+        return _Process()
+
+    monkeypatch.setattr(
+        post_deploy_mcp_capture.asyncio,
+        "create_subprocess_exec",
+        _create_subprocess_exec,
+    )
+    return asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            consumer="codex",
+            expected_commit="a" * 40,
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_artifact_identity_summary",
+            },
+            collect_agent_context_startup=True,
+            session_factory=_collector_session_factory,
+        )
+    )
+
+
+def _startup_claim(capture: dict) -> dict:
+    report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=capture,
+        expected_commit="a" * 40,
+    )
+    return {item["claim_id"]: item for item in report["claims"]}[
+        "live.agent_context.startup_read_path"
+    ]
+
+
+def test_external_subprocess_receipt_v2_allows_nested_observed_at_drift(
+    monkeypatch,
+):
+    capture = _collect_external_startup_capture(
+        monkeypatch,
+        collector_session=_NestedObservedAtRouteMcpSession(
+            observed_at="2026-07-15T03:00:00+00:00"
+        ),
+        adapter_session=_NestedObservedAtRouteMcpSession(
+            observed_at="2026-07-15T03:01:00+00:00"
+        ),
+    )
+
+    startup = capture["agent_context_startup_runtime"]
+    receipt = startup["startup_receipt"]
+    route_manifest = receipt["context_binding"]["route_manifest"]
+    captured_smokes = {
+        smoke["route"]: smoke for smoke in capture["brain_objects_query_smokes"]
+    }
+
+    assert receipt["schema_version"] == "agent_context_consumer_startup_receipt.v2"
+    assert startup["receipt_validation"] == {"status": "validated", "failures": []}
+    assert startup["collector_execution"]["subprocess_attested"] is True
+    for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES:
+        binding = route_manifest[route]
+        assert set(binding) == {
+            "schema_version",
+            "route",
+            "route_request_hash",
+            "semantic_projection_hash",
+            "observed_source_payload_hash",
+        }
+        assert binding["schema_version"] == "agent_context_route_binding.v1"
+        assert binding["route"] == route
+        assert binding["route_request_hash"] == receipt["scope_binding"][
+            "route_request_hashes"
+        ][route]
+        assert binding["semantic_projection_hash"] == captured_smokes[route][
+            "semantic_payload_hash"
+        ]
+        assert binding["observed_source_payload_hash"] != captured_smokes[route][
+            "source_payload_hash"
+        ]
+
+    assert _startup_claim(capture)["bounded_adapter_status"] == "validated"
+
+
+@pytest.mark.parametrize(
+    ("adapter_kwargs", "failure_route"),
+    [
+        ({"content_hash": "sha256:" + "d" * 64}, "authority_archive_separation"),
+        ({"request_id": "request:changed"}, "authority_archive_separation"),
+        ({"valid_from": "2026-07-15T00:01:00+00:00"}, "authority_archive_separation"),
+    ],
+)
+def test_route_semantic_binding_rejects_content_or_nonvolatile_nested_changes(
+    monkeypatch,
+    adapter_kwargs,
+    failure_route,
+):
+    capture = _collect_external_startup_capture(
+        monkeypatch,
+        collector_session=_NestedObservedAtRouteMcpSession(
+            observed_at="2026-07-15T03:00:00+00:00"
+        ),
+        adapter_session=_NestedObservedAtRouteMcpSession(
+            observed_at="2026-07-15T03:01:00+00:00",
+            **adapter_kwargs,
+        ),
+    )
+
+    claim = _startup_claim(capture)
+    assert claim["status"] == "failed"
+    assert (
+        f"agent_context_startup_route_semantic_binding_mismatch:{failure_route}"
+        in claim["gaps"]
+    )
+
+
+def test_capture_bundle_route_hash_rejects_parent_observed_source_hash_tampering(
+    monkeypatch,
+):
+    capture = _collect_external_startup_capture(
+        monkeypatch,
+        collector_session=_NestedObservedAtRouteMcpSession(
+            observed_at="2026-07-15T03:00:00+00:00"
+        ),
+        adapter_session=_NestedObservedAtRouteMcpSession(
+            observed_at="2026-07-15T03:01:00+00:00"
+        ),
+    )
+
+    bundle = capture["agent_context_startup_runtime"]["capture_bundle_binding"]
+    route = "authority_archive_separation"
+    assert bundle["route_smoke_projection_hashes"][route].startswith("sha256:")
+    capture["brain_objects_query_smokes"][0]["source_payload_hash"] = "sha256:" + "0" * 64
+
+    claim = _startup_claim(capture)
+    assert claim["status"] == "failed"
+    assert f"agent_context_startup_route_capture_binding_mismatch:{route}" in claim["gaps"]
+
+
+def test_capture_bundle_rejects_duplicate_parent_route_smoke(monkeypatch):
+    capture = _collect_external_startup_capture(
+        monkeypatch,
+        collector_session=_NestedObservedAtRouteMcpSession(
+            observed_at="2026-07-15T03:00:00+00:00"
+        ),
+        adapter_session=_NestedObservedAtRouteMcpSession(
+            observed_at="2026-07-15T03:01:00+00:00"
+        ),
+    )
+    route = "authority_archive_separation"
+    route_smoke = next(
+        smoke
+        for smoke in capture["brain_objects_query_smokes"]
+        if smoke["route"] == route
+    )
+    capture["brain_objects_query_smokes"].append(deepcopy(route_smoke))
+
+    claim = _startup_claim(capture)
+    assert claim["status"] == "failed"
+    assert f"agent_context_startup_route_capture_duplicate:{route}" in claim["gaps"]
+
+
+def test_receipt_v2_rejects_cross_route_manifest_binding_swap(monkeypatch):
+    capture = _collect_external_startup_capture(
+        monkeypatch,
+        collector_session=_NestedObservedAtRouteMcpSession(
+            observed_at="2026-07-15T03:00:00+00:00"
+        ),
+        adapter_session=_NestedObservedAtRouteMcpSession(
+            observed_at="2026-07-15T03:01:00+00:00"
+        ),
+    )
+
+    route_manifest = capture["agent_context_startup_runtime"]["startup_receipt"][
+        "context_binding"
+    ]["route_manifest"]
+    first, second = REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES[:2]
+    route_manifest[first], route_manifest[second] = (
+        route_manifest[second],
+        route_manifest[first],
+    )
+
+    claim = _startup_claim(capture)
+    assert claim["status"] == "failed"
+    assert f"agent_context_startup_route_binding_route_mismatch:{first}" in claim["gaps"]
+    assert f"agent_context_startup_route_request_binding_mismatch:{first}" in claim["gaps"]
+    assert f"agent_context_startup_route_binding_route_mismatch:{second}" in claim["gaps"]
+    assert f"agent_context_startup_route_request_binding_mismatch:{second}" in claim["gaps"]
+
+
 def _actual_artifact_descriptor(**metric_overrides: int) -> dict:
     summary = (
         "Rendered HTML review artifact exposes objects, relationships, evidence, "
@@ -510,8 +796,12 @@ def _artifact_preference_application_receipt(arguments: dict) -> dict:
 def test_collect_post_deploy_capture_promotes_verified_external_codex_startup_receipt(
     monkeypatch,
 ):
-    collector_session = _FakeMcpSession()
-    adapter_session = _FakeMcpSession()
+    collector_session = _NestedObservedAtRouteMcpSession(
+        observed_at="2026-07-15T03:00:00+00:00"
+    )
+    adapter_session = _NestedObservedAtRouteMcpSession(
+        observed_at="2026-07-15T03:01:00+00:00"
+    )
     subprocess_observed: dict = {}
 
     @asynccontextmanager
@@ -680,6 +970,30 @@ def test_collect_post_deploy_capture_promotes_verified_external_codex_startup_re
     )
     capture["brain_objects_query_smokes"][0]["object_pack"]["object_count"] -= 1
 
+    original_route_source_hash = capture["brain_objects_query_smokes"][0][
+        "source_payload_hash"
+    ]
+    capture["brain_objects_query_smokes"][0]["source_payload_hash"] = (
+        "sha256:" + "0" * 64
+    )
+    substituted_source_hash_report = (
+        build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+            captured_evidence=capture,
+            expected_commit="a" * 40,
+        )
+    )
+    substituted_source_hash_claim = {
+        item["claim_id"]: item for item in substituted_source_hash_report["claims"]
+    }["live.agent_context.startup_read_path"]
+    assert substituted_source_hash_claim["status"] == "failed"
+    assert (
+        "agent_context_startup_route_capture_binding_mismatch:authority_archive_separation"
+        in substituted_source_hash_claim["gaps"]
+    )
+    capture["brain_objects_query_smokes"][0][
+        "source_payload_hash"
+    ] = original_route_source_hash
+
     serialized_capture = json.loads(json.dumps(capture))
     replay_report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
         captured_evidence=serialized_capture,
@@ -779,7 +1093,7 @@ def test_agent_context_startup_cli_reads_exact_one_time_key_from_inherited_fd(
     async def _collect(**kwargs):
         observed.update(kwargs)
         return {
-            "schema_version": "agent_context_consumer_startup_receipt.v1",
+            "schema_version": "agent_context_consumer_startup_receipt.v2",
             "production_mutation_performed": False,
         }
 
@@ -873,7 +1187,7 @@ def test_default_agent_context_startup_runner_keeps_proof_key_out_of_argv_and_st
             return (
                 json.dumps(
                     {
-                        "schema_version": "agent_context_consumer_startup_receipt.v1",
+                        "schema_version": "agent_context_consumer_startup_receipt.v2",
                         "production_mutation_performed": False,
                     }
                 ).encode("utf-8"),
@@ -910,7 +1224,7 @@ def test_default_agent_context_startup_runner_keeps_proof_key_out_of_argv_and_st
 
     argv_text = " ".join(str(item) for item in observed["argv"])
     stdin_text = observed["stdin_payload"].decode("utf-8")
-    assert receipt["schema_version"] == "agent_context_consumer_startup_receipt.v1"
+    assert receipt["schema_version"] == "agent_context_consumer_startup_receipt.v2"
     assert len(observed["kwargs"]["pass_fds"]) == 1
     assert "env" not in observed["kwargs"]
     assert proof_key.hex() not in argv_text
