@@ -135,6 +135,16 @@ _RAW_EXTERNAL_REF_SUFFIX_RE = re.compile(
     r"^(?:ragflow[._-])?(?:dataset|document)(?:[._-]|$)",
     re.IGNORECASE,
 )
+_ROUTE_SEMANTIC_VOLATILE_SCHEMAS = frozenset(
+    {
+        "knowledge_object_envelope.v1",
+        "knowledge_edge.v1",
+        "evidence_ref.v1",
+    }
+)
+_ROOT_ROUTE_OBJECT_PACK_PATH = ("object_pack",)
+_ROOT_ROUTE_ENTITY_COLLECTION_KEYS = frozenset({"objects", "edges", "evidence"})
+_ROOT_ROUTE_ENTITY_GROUP_KEYS = frozenset({"lanes", "verification"})
 
 
 def validate_post_deploy_mcp_url(mcp_url: str) -> str:
@@ -359,6 +369,7 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
             proof_key=proof_key,
             context_pack=_remote_mapping_or_failure(context_pack),
             route_smokes=smokes,
+            allow_observed_source_payload_drift=True,
         )
         startup_runtime["collector_execution"] = {
             "runner_kind": (
@@ -998,7 +1009,7 @@ def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, A
     untrusted = _remote_mapping_or_failure(raw)
     if untrusted.get("collector_call_failed") is True:
         forbidden = untrusted.get("collector_forbidden_input") is True
-        return {
+        smoke = {
             "schema_version": "brain_objects_query.v1",
             "route": route,
             "collector_error_type": public_safe_text(
@@ -1017,8 +1028,12 @@ def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, A
                     "collector_route_smoke_forbidden" if forbidden else "collector_route_smoke_failed"
                 ],
             },
+            "semantic_payload_hash": _route_semantic_payload_hash(untrusted),
+            "source_payload_hash": hash_payload(untrusted),
             "production_mutation_performed": False,
         }
+        ensure_public_safe(smoke, "SourceToCandidatePostDeployMcpRouteSmoke")
+        return smoke
     object_pack = (
         untrusted.get("object_pack")
         if isinstance(untrusted.get("object_pack"), Mapping)
@@ -1092,6 +1107,7 @@ def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, A
         ),
         "route": observed_route if observed_route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES else "",
         "object_pack": safe_object_pack,
+        "semantic_payload_hash": _route_semantic_payload_hash(untrusted),
         "source_payload_hash": hash_payload(untrusted),
         "production_mutation_performed": (
             untrusted.get("production_mutation_performed") is True
@@ -1100,6 +1116,72 @@ def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, A
     }
     ensure_public_safe(smoke, "SourceToCandidatePostDeployMcpRouteSmoke")
     return smoke
+
+
+def _route_semantic_payload_hash(raw: Mapping[str, Any]) -> str:
+    """Hash route content while omitting only schema-scoped observation time."""
+
+    return hash_payload(_route_semantic_payload(raw))
+
+
+def _route_semantic_payload(
+    value: Any,
+    *,
+    path: tuple[str, ...] = (),
+    route_entity: bool = False,
+) -> Any:
+    if isinstance(value, Mapping):
+        schema_version = str(value.get("schema_version") or "")
+        root_object_pack = (
+            path == _ROOT_ROUTE_OBJECT_PACK_PATH
+            and schema_version == "object_pack.v1"
+        )
+        semantic: dict[str, Any] = {}
+        for key, item in value.items():
+            safe_key = str(key)
+            child_path = (*path, safe_key)
+            if (
+                key == "observed_at"
+                and route_entity
+                and schema_version in _ROUTE_SEMANTIC_VOLATILE_SCHEMAS
+            ):
+                continue
+            if root_object_pack and key in _ROOT_ROUTE_ENTITY_COLLECTION_KEYS:
+                semantic[safe_key] = _route_entity_collection(item, path=child_path)
+            elif root_object_pack and key in _ROOT_ROUTE_ENTITY_GROUP_KEYS:
+                semantic[safe_key] = _route_entity_lanes(item, path=child_path)
+            else:
+                semantic[safe_key] = _route_semantic_payload(item, path=child_path)
+        return semantic
+    if isinstance(value, list):
+        return [
+            _route_semantic_payload(item, path=(*path, "[]"))
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return [
+            _route_semantic_payload(item, path=(*path, "[]"))
+            for item in value
+        ]
+    return value
+
+
+def _route_entity_collection(value: Any, *, path: tuple[str, ...]) -> Any:
+    if not isinstance(value, (list, tuple)):
+        return _route_semantic_payload(value, path=path)
+    return [
+        _route_semantic_payload(item, path=(*path, "[]"), route_entity=True)
+        for item in value
+    ]
+
+
+def _route_entity_lanes(value: Any, *, path: tuple[str, ...]) -> Any:
+    if not isinstance(value, Mapping):
+        return _route_semantic_payload(value, path=path)
+    return {
+        str(lane): _route_entity_collection(items, path=(*path, str(lane)))
+        for lane, items in value.items()
+    }
 
 
 def _runtime_collected_packet_summary(packet: Mapping[str, Any]) -> dict[str, Any]:

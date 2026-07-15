@@ -11,7 +11,8 @@ from .._util import ensure_public_safe, hash_payload, public_safe_text
 
 
 AGENT_CONTEXT_CONSUMER_CHALLENGE_SCHEMA = "agent_context_consumer_challenge.v1"
-AGENT_CONTEXT_CONSUMER_STARTUP_RECEIPT_SCHEMA = "agent_context_consumer_startup_receipt.v1"
+AGENT_CONTEXT_CONSUMER_STARTUP_RECEIPT_SCHEMA = "agent_context_consumer_startup_receipt.v2"
+AGENT_CONTEXT_ROUTE_BINDING_SCHEMA = "agent_context_route_binding.v1"
 AGENT_CONTEXT_POLICY_DECISION_RECEIPT_SCHEMA = "agent_context_policy_decision_receipt.v1"
 AGENT_CONTEXT_STARTUP_RUNTIME_SCHEMA = "agent_context_startup_runtime_evidence.v1"
 AGENT_CONTEXT_PRODUCT_SCHEMA = "agent_context_product_pack.v1"
@@ -88,6 +89,13 @@ _SCOPE_KEYS = {
     "request_hash",
     "route_request_hashes",
     "scope_hash",
+}
+_ROUTE_BINDING_KEYS = {
+    "schema_version",
+    "route",
+    "route_request_hash",
+    "semantic_projection_hash",
+    "observed_source_payload_hash",
 }
 
 
@@ -182,6 +190,11 @@ def build_agent_context_consumer_startup_receipt(
     io_audit: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     key = _proof_key(proof_key)
+    duplicate_routes = _duplicate_route_names(route_smokes)
+    if duplicate_routes:
+        raise ValueError(
+            "duplicate agent context startup route: " + ",".join(duplicate_routes)
+        )
     observed = _as_utc_datetime(now)
     safe_challenge = dict(challenge)
     product = _agent_context_product(context_pack)
@@ -213,7 +226,10 @@ def build_agent_context_consumer_startup_receipt(
         "product_schema": public_safe_text(str(product.get("schema_version") or ""), max_chars=80),
         "product_hash": hash_payload(product),
         "section_manifest": _section_manifest(product),
-        "route_manifest": _route_manifest(route_smokes),
+        "route_manifest": _route_manifest(
+            route_smokes,
+            _public_mapping(scope_binding.get("route_request_hashes")),
+        ),
         "disclosed_gaps_hash": hash_payload(
             {
                 "degraded_mode": _public_mapping(product.get("degraded_mode")),
@@ -294,6 +310,7 @@ def validate_agent_context_consumer_startup_receipt(
     route_smokes: list[Mapping[str, Any]],
     now: datetime | str | None = None,
     consumed_challenge_hashes: MutableSet[str] | None = None,
+    allow_observed_source_payload_drift: bool = False,
 ) -> list[str]:
     failures: list[str] = []
     safe_receipt = dict(receipt) if isinstance(receipt, Mapping) else {}
@@ -377,12 +394,15 @@ def validate_agent_context_consumer_startup_receipt(
         failures.append("agent_context_startup_activation_scope_mismatch")
 
     product = _agent_context_product(context_pack)
+    for route in _duplicate_route_names(route_smokes):
+        failures.append(f"agent_context_startup_route_duplicate:{route}")
+    expected_route_manifest = _route_manifest(route_smokes, route_request_hashes)
     expected_binding = {
         "response_schema": public_safe_text(str(context_pack.get("schema_version") or ""), max_chars=80),
         "product_schema": public_safe_text(str(product.get("schema_version") or ""), max_chars=80),
         "product_hash": hash_payload(product),
         "section_manifest": _section_manifest(product),
-        "route_manifest": _route_manifest(route_smokes),
+        "route_manifest": expected_route_manifest,
         "disclosed_gaps_hash": hash_payload(
             {
                 "degraded_mode": _public_mapping(product.get("degraded_mode")),
@@ -395,7 +415,13 @@ def validate_agent_context_consumer_startup_receipt(
     context_binding = _public_mapping(safe_receipt.get("context_binding"))
     if context_binding.get("product_hash") != expected_binding["product_hash"]:
         failures.append("agent_context_startup_product_hash_mismatch")
-    if context_binding != expected_binding:
+    actual_non_route_binding = {
+        key: value for key, value in context_binding.items() if key != "route_manifest"
+    }
+    expected_non_route_binding = {
+        key: value for key, value in expected_binding.items() if key != "route_manifest"
+    }
+    if actual_non_route_binding != expected_non_route_binding:
         failures.append("agent_context_startup_context_binding_mismatch")
     section_manifest = _public_mapping(context_binding.get("section_manifest"))
     for section in REQUIRED_STARTUP_SECTIONS:
@@ -407,9 +433,47 @@ def validate_agent_context_consumer_startup_receipt(
         if lanes != {"accepted_current"}:
             failures.append(f"agent_context_startup_authority_lane_mismatch:{section}")
     route_manifest = _public_mapping(context_binding.get("route_manifest"))
+    route_binding_failed = set(route_manifest) != set(REQUIRED_STARTUP_ROUTES)
+    if route_binding_failed:
+        failures.append("agent_context_startup_route_manifest_shape_mismatch")
     for route in REQUIRED_STARTUP_ROUTES:
         if route not in route_manifest:
             failures.append(f"agent_context_startup_route_missing:{route}")
+            continue
+        binding = _public_mapping(route_manifest.get(route))
+        expected_route_binding = _public_mapping(expected_route_manifest.get(route))
+        if set(binding) != _ROUTE_BINDING_KEYS:
+            failures.append(f"agent_context_startup_route_binding_shape_mismatch:{route}")
+            route_binding_failed = True
+        if binding.get("schema_version") != AGENT_CONTEXT_ROUTE_BINDING_SCHEMA:
+            failures.append(f"agent_context_startup_route_binding_schema_mismatch:{route}")
+            route_binding_failed = True
+        if binding.get("route") != route:
+            failures.append(f"agent_context_startup_route_binding_route_mismatch:{route}")
+            route_binding_failed = True
+        if binding.get("route_request_hash") != route_request_hashes.get(route):
+            failures.append(f"agent_context_startup_route_request_binding_mismatch:{route}")
+            route_binding_failed = True
+        if binding.get("semantic_projection_hash") != expected_route_binding.get(
+            "semantic_projection_hash"
+        ):
+            failures.append(f"agent_context_startup_route_semantic_binding_mismatch:{route}")
+            route_binding_failed = True
+        if not _is_sha256_ref(binding.get("semantic_projection_hash")):
+            failures.append(f"agent_context_startup_route_semantic_hash_invalid:{route}")
+            route_binding_failed = True
+        if not _is_sha256_ref(binding.get("observed_source_payload_hash")):
+            failures.append(f"agent_context_startup_route_observed_hash_invalid:{route}")
+            route_binding_failed = True
+        if (
+            not allow_observed_source_payload_drift
+            and binding.get("observed_source_payload_hash")
+            != expected_route_binding.get("observed_source_payload_hash")
+        ):
+            failures.append(f"agent_context_startup_route_observed_binding_mismatch:{route}")
+            route_binding_failed = True
+    if route_binding_failed and "agent_context_startup_context_binding_mismatch" not in failures:
+        failures.append("agent_context_startup_context_binding_mismatch")
 
     failures.extend(_startup_event_failures(_public_list(safe_receipt.get("startup_events"))))
     startup_binding_hash = hash_payload(
@@ -492,6 +556,7 @@ def build_agent_context_startup_runtime_evidence(
     context_pack: Mapping[str, Any],
     route_smokes: list[Mapping[str, Any]],
     now: datetime | str | None = None,
+    allow_observed_source_payload_drift: bool = False,
 ) -> dict[str, Any]:
     failures = validate_agent_context_consumer_startup_receipt(
         receipt,
@@ -500,6 +565,7 @@ def build_agent_context_startup_runtime_evidence(
         context_pack=context_pack,
         route_smokes=route_smokes,
         now=now,
+        allow_observed_source_payload_drift=allow_observed_source_payload_drift,
     )
     valid = not failures
     product = _agent_context_product(context_pack)
@@ -670,15 +736,45 @@ def _section_manifest(product: Mapping[str, Any]) -> dict[str, Any]:
     return manifest
 
 
-def _route_manifest(route_smokes: list[Mapping[str, Any]]) -> dict[str, str]:
-    manifest: dict[str, str] = {}
+def _route_manifest(
+    route_smokes: list[Mapping[str, Any]],
+    route_request_hashes: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    manifest: dict[str, dict[str, str]] = {}
     for smoke in route_smokes:
         if not isinstance(smoke, Mapping):
             continue
         route = public_safe_text(str(smoke.get("route") or ""), max_chars=120)
         if route and route not in manifest:
-            manifest[route] = hash_payload(dict(smoke))
+            manifest[route] = {
+                "schema_version": AGENT_CONTEXT_ROUTE_BINDING_SCHEMA,
+                "route": route,
+                "route_request_hash": public_safe_text(
+                    str(route_request_hashes.get(route) or ""), max_chars=80
+                ),
+                "semantic_projection_hash": public_safe_text(
+                    str(smoke.get("semantic_payload_hash") or ""), max_chars=80
+                ),
+                "observed_source_payload_hash": public_safe_text(
+                    str(smoke.get("source_payload_hash") or ""), max_chars=80
+                ),
+            }
     return manifest
+
+
+def _duplicate_route_names(route_smokes: list[Mapping[str, Any]]) -> list[str]:
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for smoke in route_smokes:
+        if not isinstance(smoke, Mapping):
+            continue
+        route = public_safe_text(str(smoke.get("route") or ""), max_chars=120)
+        if not route:
+            continue
+        if route in seen and route not in duplicates:
+            duplicates.append(route)
+        seen.add(route)
+    return duplicates
 
 
 def _startup_event_chain(observed: datetime) -> list[dict[str, Any]]:
