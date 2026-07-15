@@ -1952,6 +1952,48 @@ def test_mcp_approval_board_production_gate_requires_allowed_object_class(tmp_pa
     assert service.ledger.get_object_authority_state(candidate_id) == {}
 
 
+def test_mcp_approval_board_production_gate_requires_explicit_object_type(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    candidate_id = "ko:ArtifactPreference:approval-board-missing-type"
+    pack = _approval_board_candidate_pack(candidate_id, object_type="ArtifactPreference")
+    pack["objects"][0].pop("object_type")
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 127,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": pack,
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": candidate_id,
+                            "reason": "Production candidates require an explicit object type.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "reviewer_id": "reviewer-local",
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["permission"] == "denied"
+    assert result["production_mutation_performed"] is False
+    assert result["authority_write_performed"] is False
+    assert "explicit_object_type" in result["promotion_plan"]["missing_gate_evidence"]
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+    assert service.ledger.get_object_authority_state(candidate_id) == {}
+
+
 def test_mcp_approval_board_production_write_rolls_back_proposal_on_decision_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -473,7 +473,9 @@ class KnowledgeSearchService:
         for field in _APPROVAL_BOARD_PRODUCTION_REQUIRED_TRUE_FIELDS:
             if gate.get(field) is not True:
                 missing.append(field)
-        if not is_allowed_object_target(target_object_id, object_type=target_object_type):
+        if not target_object_type:
+            missing.append("explicit_object_type")
+        elif not is_allowed_object_target(target_object_id, object_type=target_object_type):
             missing.append(allowed_object_class_gap())
         if not proposal_type or not decision_type or new_lane != "accepted_current":
             missing.append("allowed_approval_board_action")
