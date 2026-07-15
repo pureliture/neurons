@@ -1,6 +1,7 @@
 import asyncio
 from copy import deepcopy
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from agent_knowledge.llm_brain_core.golden_query_eval import (
@@ -19,6 +20,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     EVIDENCE_PROVENANCE_SCHEMA,
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
     RUNTIME_READINESS_AGENT_CONTEXT_TOOL,
+    _mint_collector_attested_evidence,
     build_source_to_candidate_runtime_post_deploy_capture_packet,
 )
 from agent_knowledge.llm_brain_core.objects.artifact_preference_evaluator import (
@@ -29,9 +31,16 @@ from agent_knowledge.llm_brain_core.objects.artifact_preference_evaluator import
 from agent_knowledge.llm_brain_core.objects.post_deploy_mcp_capture import (
     collect_source_to_candidate_post_deploy_mcp_capture,
 )
+from agent_knowledge.llm_brain_core.objects.agent_context_consumer import (
+    build_agent_context_consumer_challenge,
+    build_agent_context_consumer_startup_receipt,
+    build_agent_context_startup_runtime_evidence,
+)
 from agent_knowledge.llm_brain_core._util import hash_payload
 
 _REQUIRED_ROUTE_NAMES = list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+_P9_STARTUP_NOW = datetime(2026, 7, 15, 3, 0, 0, tzinfo=timezone.utc)
+_P9_STARTUP_PROOF_KEY = b"p9-golden-query-startup-proof-key"
 
 
 def _valid_p3_projection_join_evidence():
@@ -704,6 +713,15 @@ def _valid_p9_agent_context_product(
     current_authority_lanes: tuple[str, ...] = ("accepted_current",),
     style_authority_lanes: tuple[str, ...] = ("accepted_current",),
 ):
+    def section_item(section: str, authority_lane: str = "reference_only") -> list[dict]:
+        return [
+            {
+                "object_id": f"ko:P9:{section}",
+                "object_type": "P9Fixture",
+                "authority_lane": authority_lane,
+            }
+        ]
+
     return {
         "schema_version": "agent_context_product_pack.v1",
         "consumer": "codex",
@@ -711,71 +729,158 @@ def _valid_p9_agent_context_product(
             "current_authority": {
                 "object_count": current_authority_count,
                 "authority_lanes": list(current_authority_lanes),
+                "items": section_item(
+                    "current_authority",
+                    current_authority_lanes[0] if current_authority_lanes else "reference_only",
+                )
+                if current_authority_count
+                else [],
             },
             "style_preference": {
                 "object_count": style_count,
                 "authority_lanes": list(style_authority_lanes),
+                "items": section_item(
+                    "style_preference",
+                    style_authority_lanes[0] if style_authority_lanes else "reference_only",
+                )
+                if style_count
+                else [],
             },
-            "active_work": {"object_count": active_count},
-            "required_verification": {"object_count": 1},
+            "active_work": {
+                "object_count": active_count,
+                "authority_lanes": ["reference_only"],
+                "items": section_item("active_work") if active_count else [],
+            },
+            "required_verification": {
+                "object_count": 1,
+                "authority_lanes": ["reference_only"],
+                "items": section_item("required_verification"),
+            },
         },
-        "surface_policy": {"mutation_allowed": False},
+        "surface_policy": {
+            "consumer": "codex",
+            "read_only": True,
+            "mutation_allowed": False,
+            "allowed_actions": [
+                "suggest_change",
+                "run_verification",
+                "request_missing_evidence",
+            ],
+            "property_omissions": [
+                "raw_body",
+                "raw_source",
+                "private_deploy_value",
+                "secret",
+            ],
+        },
         "degraded_mode": {"active": False, "gaps": []},
         "missing_evidence_before_promotion": [],
+        "action_hints": [
+            {
+                "action": "request_missing_evidence",
+                "suggest_allowed": True,
+                "execute_allowed": False,
+                "blocked_by": [],
+            },
+            {
+                "action": "promote_authority",
+                "suggest_allowed": True,
+                "execute_allowed": False,
+                "blocked_by": ["approved_scope_required"],
+            },
+        ],
         "tool_hints": object_native_review_tool_hints([]),
     }
 
 
 def _valid_p9_startup_runtime_evidence(
     *,
-    style_count: int = 1,
-    active_count: int = 1,
-    current_authority_count: int = 1,
+    product: dict | None = None,
 ):
-    return {
-        "schema_version": "agent_context_startup_runtime_evidence.v1",
-        "startup_context": {
-            "schema_version": "agent_context_product_pack.v1",
-            "consumer": "codex",
-            "loaded_on_startup": True,
-            "section_counts": {
-                "current_authority": current_authority_count,
-                "style_preference": style_count,
-                "active_work": active_count,
-                "required_verification": 1,
-            },
-            "surface_policy": {"mutation_allowed": False},
-            "degraded_gap_disclosure_present": True,
-            "missing_evidence_before_promotion_present": True,
-        },
-        "read_path_smoke": {
-            "tool": "brain_objects_query",
-            "read_only": True,
-            "routes_checked": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
-            "production_mutation_performed": False,
-        },
-        "runtime_enforcement": {
-            "direct_execution_allowed": False,
-            "production_mutation_allowed": False,
-            "raw_private_context_blocked": True,
-            "approval_scope_blocker_enforced": True,
-            "stale_or_degraded_disclosure_present": True,
-        },
-        "postcheck": {
-            "status": "validated",
-            "raw_private_evidence_returned": False,
-            "secret_returned": False,
-            "host_topology_returned": False,
-            "raw_external_ids_returned": False,
-        },
-        "production_mutation_performed": False,
+    product = product or _valid_p9_agent_context_product()
+    context_pack = {
+        "schema_version": "llm_brain_context_resolve.v1",
+        "authority": {"agent_context_product": product},
     }
+    route_smokes = _valid_p9_route_smokes()
+    challenge = build_agent_context_consumer_challenge(
+        consumer="codex",
+        project="neurons",
+        repository="pureliture/neurons",
+        branch="main",
+        expected_commit="a" * 40,
+        endpoint_origin="https://mcp.invalid",
+        now=_P9_STARTUP_NOW,
+        nonce="p9-golden-query-startup",
+    )
+    receipt = build_agent_context_consumer_startup_receipt(
+        challenge=challenge,
+        proof_key=_P9_STARTUP_PROOF_KEY,
+        context_pack=context_pack,
+        route_smokes=route_smokes,
+        now=_P9_STARTUP_NOW,
+        process_instance_seed="p9-golden-query-startup",
+    )
+    runtime = build_agent_context_startup_runtime_evidence(
+        receipt=receipt,
+        challenge=challenge,
+        proof_key=_P9_STARTUP_PROOF_KEY,
+        context_pack=context_pack,
+        route_smokes=route_smokes,
+        now=_P9_STARTUP_NOW,
+    )
+    runtime["collector_execution"] = {
+        "runner_kind": "default_external_subprocess",
+        "subprocess_attested": True,
+    }
+    return runtime
+
+
+def _valid_p9_route_smokes():
+    return [
+        {
+            "schema_version": "brain_objects_query.v1",
+            "route": route,
+            "production_mutation_performed": False,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": route,
+                "recommended_actions": [],
+                "lanes": {},
+                "gaps": [],
+            },
+        }
+        for route in _REQUIRED_ROUTE_NAMES
+    ]
 
 
 def _valid_p6_p7_p8_p9_runtime_evidence(*, live: bool = True):
     evidence = _valid_p6_p7_p8_runtime_evidence(live=live)
-    evidence["agent_context_product"] = _valid_p9_agent_context_product()
-    evidence["agent_context_startup_runtime"] = _valid_p9_startup_runtime_evidence()
+    source_product = _valid_p9_agent_context_product()
+    product = deepcopy(source_product)
+    product["source_payload_hash"] = hash_payload(source_product)
+    route_smokes = _valid_p9_route_smokes()
+    startup = _valid_p9_startup_runtime_evidence(product=source_product)
+    startup["capture_bundle_binding"] = {
+        "schema_version": "agent_context_capture_bundle_binding.v1",
+        "agent_context_product_projection_hash": hash_payload(product),
+        "source_product_hash": product["source_payload_hash"],
+        "route_smoke_projection_hashes": {
+            smoke["route"]: hash_payload(smoke) for smoke in route_smokes
+        },
+    }
+    evidence["agent_context_product"] = product
+    evidence["brain_objects_query_smokes"] = route_smokes
+    evidence["agent_context_startup_runtime"] = startup
+    if live:
+        # The collector integration itself is covered in test_post_deploy_mcp_capture.
+        evidence = _mint_collector_attested_evidence(
+            evidence,
+            attested_fields={
+                "agent_context_startup_runtime",
+                "preference_artifact_memory",
+            },
+        )
     return evidence
 
 
@@ -1626,7 +1731,7 @@ def test_product_activation_progress_fails_p8_when_permission_audit_returns_prot
     assert report["production_mutation_performed"] is False
 
 
-def test_product_activation_progress_closes_p9_gap_with_live_agent_context_evidence():
+def test_product_activation_progress_keeps_p9_bounded_codex_startup_gaps_visible():
     report = build_product_activation_progress_report(
         live_evidence=_valid_p6_p7_p8_p9_runtime_evidence(live=True)
     )
@@ -1635,15 +1740,25 @@ def test_product_activation_progress_closes_p9_gap_with_live_agent_context_evide
     p9 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P9")
     phase_progress = {item["phase"]: item for item in report["phase_progress"]}
 
-    assert checks["P9"]["result"] == "PASS"
-    assert phase_progress["P9"]["quality_result"] == "PASS"
-    assert phase_progress["P9"]["gaps"] == []
+    assert checks["P9"]["result"] == "PASS_WITH_GAPS"
+    assert phase_progress["P9"]["quality_result"] == "PASS_WITH_GAPS"
+    assert "production_consumer_context_pack_live_unproven" in phase_progress["P9"]["gaps"]
+    assert "consumer_action_surface_runtime_policy_unproven" in phase_progress["P9"]["gaps"]
     assert p9["evidence_source"] == "live_agent_context_packet"
     assert p9["product_sections_claim_status"] == "validated"
     assert p9["tool_hints_claim_status"] == "validated"
-    assert p9["startup_read_path_claim_status"] == "validated"
+    assert p9["startup_read_path_claim_status"] == "not_validated"
     assert p9["evidence_provenance_status"] == "validated"
     assert p9["evidence_is_live"] is True
+    assert p9["status"] == "PASS_WITH_GAPS"
+    assert "p9_agent_context_consumer_startup_unvalidated:claude-code" in checks["P9"]["gaps"]
+    assert "p9_agent_context_consumer_startup_unvalidated:gemini" in checks["P9"]["gaps"]
+    assert "p9_agent_context_consumer_startup_unvalidated:hermes" in checks["P9"]["gaps"]
+    assert (
+        "p9_agent_context_action_surface_runtime_interception_unvalidated"
+        in checks["P9"]["gaps"]
+    )
+    assert "p9_agent_context_codex_host_startup_hook_unvalidated" in checks["P9"]["gaps"]
     assert p9["section_counts"]["style_preference"] == 1
     assert p9["section_counts"]["active_work"] == 1
     assert p9["production_mutation_performed"] is False
@@ -1652,21 +1767,20 @@ def test_product_activation_progress_closes_p9_gap_with_live_agent_context_evide
 
 def test_product_activation_progress_keeps_p9_gap_for_empty_live_agent_context_sections():
     evidence = _valid_p6_p7_p8_p9_runtime_evidence(live=True)
-    evidence["agent_context_product"] = _valid_p9_agent_context_product(
+    product = _valid_p9_agent_context_product(
         style_count=0,
         active_count=0,
     )
-    evidence["agent_context_startup_runtime"] = _valid_p9_startup_runtime_evidence(
-        style_count=0,
-        active_count=0,
-    )
+    evidence["agent_context_product"] = product
+    evidence["agent_context_startup_runtime"] = _valid_p9_startup_runtime_evidence(product=product)
 
     report = build_product_activation_progress_report(live_evidence=evidence)
 
     checks = {item["phase"]: item for item in report["product_evidence_checks"]}
     p9 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P9")
 
-    assert checks["P9"]["result"] == "PASS_WITH_GAPS"
+    assert checks["P9"]["result"] == "FAIL"
+    assert "p9_agent_context_startup_read_path_failed" in checks["P9"]["failures"]
     assert "p9_live_agent_context_section_missing:style_preference" in checks["P9"]["gaps"]
     assert "p9_live_agent_context_section_missing:active_work" in checks["P9"]["gaps"]
     assert "p9_agent_context_startup_section_missing:style_preference" in checks["P9"]["gaps"]
@@ -1681,16 +1795,19 @@ def test_product_activation_progress_keeps_p9_gap_for_empty_live_agent_context_s
 
 def test_product_activation_progress_keeps_p9_gap_for_reference_only_current_authority():
     evidence = _valid_p6_p7_p8_p9_runtime_evidence(live=True)
-    evidence["agent_context_product"] = _valid_p9_agent_context_product(
+    product = _valid_p9_agent_context_product(
         current_authority_lanes=("reference_only",),
     )
+    evidence["agent_context_product"] = product
+    evidence["agent_context_startup_runtime"] = _valid_p9_startup_runtime_evidence(product=product)
 
     report = build_product_activation_progress_report(live_evidence=evidence)
 
     checks = {item["phase"]: item for item in report["product_evidence_checks"]}
     p9 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P9")
 
-    assert checks["P9"]["result"] == "PASS_WITH_GAPS"
+    assert checks["P9"]["result"] == "FAIL"
+    assert "p9_agent_context_startup_read_path_failed" in checks["P9"]["failures"]
     assert (
         "p9_live_agent_context_current_authority_accepted_current_missing"
         in checks["P9"]["gaps"]
@@ -1703,16 +1820,19 @@ def test_product_activation_progress_keeps_p9_gap_for_reference_only_current_aut
 
 def test_product_activation_progress_keeps_p9_gap_for_reference_only_style_preference():
     evidence = _valid_p6_p7_p8_p9_runtime_evidence(live=True)
-    evidence["agent_context_product"] = _valid_p9_agent_context_product(
+    product = _valid_p9_agent_context_product(
         style_authority_lanes=("reference_only",),
     )
+    evidence["agent_context_product"] = product
+    evidence["agent_context_startup_runtime"] = _valid_p9_startup_runtime_evidence(product=product)
 
     report = build_product_activation_progress_report(live_evidence=evidence)
 
     checks = {item["phase"]: item for item in report["product_evidence_checks"]}
     p9 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P9")
 
-    assert checks["P9"]["result"] == "PASS_WITH_GAPS"
+    assert checks["P9"]["result"] == "FAIL"
+    assert "p9_agent_context_startup_read_path_failed" in checks["P9"]["failures"]
     assert (
         "p9_live_agent_context_style_preference_accepted_current_missing"
         in checks["P9"]["gaps"]
@@ -1723,11 +1843,9 @@ def test_product_activation_progress_keeps_p9_gap_for_reference_only_style_prefe
     assert report["production_ready"] is False
 
 
-def test_product_activation_progress_keeps_p9_gap_when_startup_omits_current_authority():
+def test_product_activation_progress_keeps_p9_gap_when_live_evidence_omits_startup_proof():
     evidence = _valid_p6_p7_p8_p9_runtime_evidence(live=True)
-    evidence["agent_context_startup_runtime"] = _valid_p9_startup_runtime_evidence(
-        current_authority_count=0,
-    )
+    evidence.pop("agent_context_startup_runtime")
 
     report = build_product_activation_progress_report(live_evidence=evidence)
 
@@ -1735,11 +1853,49 @@ def test_product_activation_progress_keeps_p9_gap_when_startup_omits_current_aut
     p9 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P9")
 
     assert checks["P9"]["result"] == "PASS_WITH_GAPS"
-    assert "p9_agent_context_startup_section_missing:current_authority" in checks["P9"]["gaps"]
+    assert "p9_live_agent_context_startup_unverified" in checks["P9"]["gaps"]
+    assert "p9_production_startup_read_path_unproven" in checks["P9"]["gaps"]
     assert "p9_consumer_action_surface_runtime_policy_unproven" in checks["P9"]["gaps"]
     assert p9["product_sections_claim_status"] == "validated"
-    assert p9["startup_read_path_claim_status"] == "failed"
+    assert p9["startup_read_path_claim_status"] == "not_validated"
+    assert p9["status"] == "PASS_WITH_GAPS"
     assert p9["production_mutation_performed"] is False
+    assert report["production_ready"] is False
+
+
+def test_product_activation_progress_fails_p9_for_self_declared_live_startup_receipt():
+    evidence = _valid_p6_p7_p8_p9_runtime_evidence(live=True)
+    evidence["agent_context_startup_runtime"]["evidence_origin"] = "server_runtime"
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p9 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P9")
+
+    assert checks["P9"]["result"] == "FAIL"
+    assert "p9_agent_context_startup_read_path_failed" in checks["P9"]["failures"]
+    assert "p9_agent_context_startup_external_consumer_receipt_missing" in checks["P9"]["gaps"]
+    assert p9["startup_read_path_claim_status"] == "failed"
+    assert p9["status"] == "FAIL"
+    assert report["production_ready"] is False
+
+
+def test_product_activation_progress_fails_p9_for_malformed_live_startup_receipt():
+    evidence = _valid_p6_p7_p8_p9_runtime_evidence(live=True)
+    evidence["agent_context_startup_runtime"]["startup_receipt"]["receipt_hash"] = (
+        "sha256:" + "0" * 64
+    )
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p9 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P9")
+
+    assert checks["P9"]["result"] == "FAIL"
+    assert "p9_agent_context_startup_read_path_failed" in checks["P9"]["failures"]
+    assert "p9_agent_context_startup_receipt_hash_mismatch" in checks["P9"]["gaps"]
+    assert p9["startup_read_path_claim_status"] == "failed"
+    assert p9["status"] == "FAIL"
     assert report["production_ready"] is False
 
 

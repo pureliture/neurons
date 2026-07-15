@@ -1667,7 +1667,8 @@ def _preference_pack(preferences: list[Mapping[str, Any]]) -> dict[str, Any]:
         title = str(item.get("rule") or item.get("title") or "")
         if not title:
             continue
-        lane = "accepted_current" if currentness == "current" else "proposal_only"
+        accepted_current = item.get("accepted_current")
+        lane = "accepted_current" if accepted_current is not False and currentness == "current" else "proposal_only"
         action = "apply_preference" if lane == "accepted_current" else "review_inferred_preference"
         target_object_id = public_safe_text(str(item.get("target_object_id") or ""), max_chars=180)
         if target_object_id and knowledge_object_class_from_id(target_object_id) != "ArtifactPreference":
@@ -1680,7 +1681,7 @@ def _preference_pack(preferences: list[Mapping[str, Any]]) -> dict[str, Any]:
             max_chars=180,
         )
         obj = KnowledgeObjectEnvelope.from_parts(
-            object_type="ArtifactPreference",
+            object_type="ArtifactPreference" if item.get("artifact_preference") else "PreferenceRule",
             natural_key=title,
             scope={"project": project},
             title=title,
@@ -1693,6 +1694,8 @@ def _preference_pack(preferences: list[Mapping[str, Any]]) -> dict[str, Any]:
             recommended_action=action,
             payload={
                 "scope": public_safe_text(str(item.get("scope") or ""), max_chars=180),
+                "applies_to": public_safe_text(str(item.get("applies_to") or item.get("scope") or ""), max_chars=180),
+                "applies_to_current_request": bool(item.get("applies_to_current_request")),
                 "currentness": public_safe_text(currentness, max_chars=80),
                 "memory_id": public_safe_text(str(item.get("memory_id") or ""), max_chars=180),
                 "card_content_hash": public_safe_text(
@@ -1724,6 +1727,47 @@ def _preference_pack(preferences: list[Mapping[str, Any]]) -> dict[str, Any]:
     return pack
 
 
+def _current_work_pack(current_work: list[Any]) -> dict[str, Any]:
+    pack = _empty_pack("temporal_work_recall")
+    for item in current_work:
+        if not isinstance(item, Mapping):
+            title = public_safe_text(str(item or ""), max_chars=240)
+            if not title:
+                continue
+            item = {"title": title}
+        title = public_safe_text(str(item.get("title") or ""), max_chars=240)
+        if not title:
+            continue
+        lane = str(item.get("authority_lane") or "reference_only")
+        if lane not in pack["lanes"]:
+            lane = "reference_only"
+        object_type = public_safe_text(str(item.get("object_type") or "WorkUnit"), max_chars=80)
+        obj = KnowledgeObjectEnvelope.from_parts(
+            object_type=object_type,
+            natural_key=title,
+            scope={"project": public_safe_text(str(item.get("project") or "neurons"), max_chars=120)},
+            title=title,
+            summary=title,
+            lifecycle_status="current" if lane == "accepted_current" else "observed",
+            authority_lane=lane,
+            verification_state="source_hash_verified" if lane == "accepted_current" else "unverified",
+            review_state="accepted" if lane == "accepted_current" else "not_required",
+            content_hash=str(item.get("content_hash") or hash_payload(["temporal_work_recall", title, lane])),
+            recommended_action="resume_work" if lane != "derived_projection" else "inspect_derived_work",
+            payload={
+                "source_kind": public_safe_text(str(item.get("source_kind") or ""), max_chars=80),
+                "source_object_type": public_safe_text(
+                    str(item.get("source_object_type") or ""),
+                    max_chars=80,
+                ),
+            },
+        ).to_dict()
+        pack["objects"].append(obj)
+        pack["lanes"][lane].append(obj)
+        pack["recommended_actions"].append({"object_id": obj["object_id"], "action": obj["recommended_action"]})
+    return pack
+
+
 def _reference_document_pack_from_documentation(documentation_pack: Mapping[str, Any]) -> dict[str, Any]:
     pack = _empty_pack("reference_corpus_research")
     source_objects = documentation_pack.get("objects") if isinstance(documentation_pack.get("objects"), (list, tuple)) else []
@@ -1745,7 +1789,7 @@ def build_agent_context_object_packs(
     documents: list[Mapping[str, Any]],
     preferences: list[Mapping[str, Any]],
     style_profile: Mapping[str, Any],
-    current_work: list[str],
+    current_work: list[Any],
     required_verification: list[str],
     guardrails: list[str],
 ) -> dict[str, dict[str, Any]]:
@@ -1756,7 +1800,7 @@ def build_agent_context_object_packs(
         "reference_corpus": _reference_document_pack_from_documentation(documentation_pack),
         "preferences": _preference_pack(preferences),
         "style": _simple_pack("code_style_preference", style_titles, "StyleRule"),
-        "current_work": _simple_pack("temporal_work_recall", list(current_work), "WorkUnit"),
+        "current_work": _current_work_pack(list(current_work)),
         "required_verification": _simple_pack("required_verification", list(required_verification), "Test"),
         "do_not_touch_boundaries": _simple_pack("do_not_touch_boundaries", list(guardrails), "ToolHandoffContext"),
     }
