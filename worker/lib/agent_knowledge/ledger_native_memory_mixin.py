@@ -237,6 +237,10 @@ class NativeMemoryMixin:
         project: str | None = None,
         accepted_only: bool = False,
         current_only: bool = False,
+        card_type: str | None = None,
+        source_object_type: str | None = None,
+        target_object_type: str | None = None,
+        applies_to: str | None = None,
         limit: int = 10,
     ) -> list[dict]:
         filters = []
@@ -249,6 +253,24 @@ class NativeMemoryMixin:
             filters.append("approval_state IN ('approved', 'auto_accepted')")
         if current_only:
             filters.append("currentness = 'current'")
+        if card_type:
+            filters.append("card_type = ?")
+            values.append(card_type)
+        if source_object_type:
+            filters.append(
+                "json_extract(envelope_json, '$.typed_payload.source_object_type') = ?"
+            )
+            values.append(source_object_type)
+        if target_object_type:
+            target_object_prefix = f"ko:{target_object_type}:"
+            filters.append(
+                "substr(json_extract(envelope_json, '$.typed_payload.target_object_id'), "
+                "1, length(?)) = ?"
+            )
+            values.extend((target_object_prefix, target_object_prefix))
+        if applies_to:
+            filters.append("json_extract(envelope_json, '$.typed_payload.applies_to') = ?")
+            values.append(applies_to)
         where = "WHERE " + " AND ".join(filters) if filters else ""
         values.append(max(int(limit), 1))
         with self._connect() as connection:

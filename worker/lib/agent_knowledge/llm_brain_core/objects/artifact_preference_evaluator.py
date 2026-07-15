@@ -18,6 +18,7 @@ ARTIFACT_PREFERENCE_COLLECTOR_ATTESTATION_SCHEMA = (
     "artifact_preference_collector_attestation.v1"
 )
 ARTIFACT_PREFERENCE_CARD_SCAN_LIMIT = 100
+_PUBLIC_SAFE_PERCENT_DECODE_MAX_PASSES = 8
 ARTIFACT_PREFERENCE_METRICS = frozenset(
     {
         "object_count",
@@ -409,7 +410,7 @@ def artifact_preference_application_receipt_is_valid(value: Any) -> bool:
     if (
         not isinstance(value, Mapping)
         or _contains_protected_receipt_key(value)
-        or _contains_raw_external_id_receipt_value(value)
+        or _contains_protected_receipt_value(value)
         or set(value) != _RECEIPT_FIELDS
     ):
         return False
@@ -545,12 +546,30 @@ def _artifact_preference_card_scan(
         project=project,
         accepted_only=True,
         current_only=False,
+        card_type="preference",
+        source_object_type="ArtifactPreference",
+        target_object_type="ArtifactPreference",
+        applies_to=applies_to,
         limit=ARTIFACT_PREFERENCE_CARD_SCAN_LIMIT + 1,
     )
     artifact_cards = [card for card in cards if _is_artifact_preference_card(card)]
     matching_cards = [
         card for card in artifact_cards if _card_applies_to(card) == applies_to
     ]
+    if not artifact_cards:
+        artifact_cards = [
+            card
+            for card in ledger.list_llm_brain_memory_cards(
+                project=project,
+                accepted_only=True,
+                current_only=False,
+                card_type="preference",
+                source_object_type="ArtifactPreference",
+                target_object_type="ArtifactPreference",
+                limit=1,
+            )
+            if _is_artifact_preference_card(card)
+        ]
     current_cards = sorted(
         (
             card
@@ -856,7 +875,6 @@ def _artifact_evidence_refs(value: list[str] | tuple[str, ...]) -> list[str]:
         if (
             _EVIDENCE_REF_RE.fullmatch(safe) is None
             or safe.casefold().startswith(_RAW_EXTERNAL_REF_PREFIXES)
-            or _contains_raw_external_id(safe)
         ):
             raise ValueError("evidence_refs must contain opaque internal refs")
         refs.append(safe)
@@ -868,8 +886,8 @@ def _artifact_evidence_refs(value: list[str] | tuple[str, ...]) -> list[str]:
 def _safe_required_text(value: Any, *, field: str, max_chars: int) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} is required")
-    ensure_public_safe(value, field)
-    if _contains_raw_external_id(value):
+    decoded = _bounded_public_safe_percent_decode(value, field=field)
+    if _contains_raw_external_id(decoded):
         raise ValueError(f"{field} contains a raw external ID")
     safe = public_safe_text(value, max_chars=max_chars)
     if not safe:
@@ -877,17 +895,26 @@ def _safe_required_text(value: Any, *, field: str, max_chars: int) -> str:
     return safe
 
 
-def _contains_raw_external_id(value: str) -> bool:
+def _bounded_public_safe_percent_decode(value: str, *, field: str) -> str:
+    ensure_public_safe(value, field)
     decoded = value
-    for _ in range(3):
+    for _ in range(_PUBLIC_SAFE_PERCENT_DECODE_MAX_PASSES):
         next_value = unquote(decoded)
         if next_value == decoded:
-            break
+            ensure_public_safe(decoded, field)
+            return decoded
         decoded = next_value
-    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", decoded)
+    if re.search(r"%[0-9A-Fa-f]{2}", decoded):
+        raise ValueError(f"{field} exceeds the percent-decode limit")
+    ensure_public_safe(decoded, field)
+    return decoded
+
+
+def _contains_raw_external_id(value: str) -> bool:
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
     normalized = re.sub(r"[.\-\s]+", "_", snake).casefold()
     normalized = re.sub(r"_*([:=])_*", r"\1", normalized)
-    return decoded != value or _RAW_EXTERNAL_ID_RE.search(normalized) is not None
+    return _RAW_EXTERNAL_ID_RE.search(normalized) is not None
 
 
 def _contains_protected_receipt_key(value: Any) -> bool:
@@ -904,11 +931,18 @@ def _contains_protected_receipt_key(value: Any) -> bool:
     return False
 
 
-def _contains_raw_external_id_receipt_value(value: Any) -> bool:
+def _contains_protected_receipt_value(value: Any) -> bool:
     if isinstance(value, str):
-        return _contains_raw_external_id(value)
+        try:
+            decoded = _bounded_public_safe_percent_decode(
+                value,
+                field="ArtifactPreferenceApplicationReceipt",
+            )
+        except ValueError:
+            return True
+        return _contains_raw_external_id(decoded)
     if isinstance(value, Mapping):
-        return any(_contains_raw_external_id_receipt_value(item) for item in value.values())
+        return any(_contains_protected_receipt_value(item) for item in value.values())
     if isinstance(value, (list, tuple)):
-        return any(_contains_raw_external_id_receipt_value(item) for item in value)
+        return any(_contains_protected_receipt_value(item) for item in value)
     return False

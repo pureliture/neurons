@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_knowledge.llm_brain_core.objects import artifact_preference_evaluator
 from agent_knowledge.knowledge_search_service import (
     DisabledRetiredIndexBridgeClient,
     KnowledgeSearchService,
@@ -366,6 +367,26 @@ def _rewrite_current_card(service: KnowledgeSearchService, mutate) -> None:
     service.ledger.upsert_llm_brain_memory_card(card)
 
 
+def _add_unrelated_accepted_current_cards(
+    service: KnowledgeSearchService,
+    *,
+    count: int,
+) -> None:
+    template = service.ledger.list_llm_brain_memory_cards(
+        project=PROJECT,
+        accepted_only=True,
+        limit=1,
+    )[0]
+    for index in range(count):
+        card = copy.deepcopy(template)
+        card["memory_id"] = f"mem_000_unrelated_preference_{index:03d}"
+        card["typed_payload"]["source_object_type"] = "RepoStyle"
+        card["typed_payload"]["target_object_id"] = f"ko:RepoStyle:unrelated-{index:03d}"
+        card.pop("content_hash", None)
+        card.pop("card_hash", None)
+        service.ledger.upsert_llm_brain_memory_card(card)
+
+
 def test_evaluator_fails_closed_when_no_accepted_current_preference(tmp_path: Path):
     receipt = _empty_service(tmp_path).brain_artifact_preference_evaluate(
         **_valid_artifact_input()
@@ -443,6 +464,72 @@ def test_evaluator_fails_closed_for_stale_preference(tmp_path: Path):
     assert receipt["status"] == "FAIL"
     assert receipt["applied"] is False
     assert receipt["failures"] == ["artifact_preference_not_current"]
+
+
+def test_evaluator_reports_unsupported_profile_when_only_other_applies_to_exists(
+    tmp_path: Path,
+):
+    service = _service_with_current_artifact_preference(tmp_path)
+    _rewrite_current_card(
+        service,
+        lambda card: card["typed_payload"].update(
+            {"applies_to": "markdown_review_artifact"}
+        ),
+    )
+
+    receipt = service.brain_artifact_preference_evaluate(**_valid_artifact_input())
+
+    assert receipt["status"] == "FAIL"
+    assert receipt["applied"] is False
+    assert receipt["failures"] == ["unsupported_artifact_preference_profile"]
+
+
+def test_evaluator_reports_missing_when_only_malformed_target_object_type_exists(
+    tmp_path: Path,
+):
+    service = _service_with_current_artifact_preference(tmp_path)
+    _rewrite_current_card(
+        service,
+        lambda card: card["typed_payload"].update(
+            {"target_object_id": "ko:RepoStyle:malformed"}
+        ),
+    )
+
+    receipt = service.brain_artifact_preference_evaluate(**_valid_artifact_input())
+
+    assert receipt["status"] == "FAIL"
+    assert receipt["applied"] is False
+    assert receipt["failures"] == ["accepted_current_artifact_preference_missing"]
+
+
+def test_evaluator_reports_unsupported_when_newer_malformed_card_precedes_other_profile(
+    tmp_path: Path,
+):
+    service = _service_with_current_artifact_preference(tmp_path)
+    _rewrite_current_card(
+        service,
+        lambda card: card["typed_payload"].update(
+            {"applies_to": "markdown_review_artifact"}
+        ),
+    )
+    valid_other_profile = service.ledger.list_llm_brain_memory_cards(
+        project=PROJECT,
+        accepted_only=True,
+        limit=1,
+    )[0]
+    malformed = copy.deepcopy(valid_other_profile)
+    malformed["memory_id"] = "mem_000_malformed_artifact_preference"
+    malformed["approved_at"] = "2027-01-01T00:00:00+00:00"
+    malformed["typed_payload"]["target_object_id"] = "ko:RepoStyle:malformed"
+    malformed.pop("content_hash", None)
+    malformed.pop("card_hash", None)
+    service.ledger.upsert_llm_brain_memory_card(malformed)
+
+    receipt = service.brain_artifact_preference_evaluate(**_valid_artifact_input())
+
+    assert receipt["status"] == "FAIL"
+    assert receipt["applied"] is False
+    assert receipt["failures"] == ["unsupported_artifact_preference_profile"]
 
 
 @pytest.mark.parametrize(
@@ -531,6 +618,17 @@ def test_evaluator_fails_closed_when_card_scan_is_saturated(tmp_path: Path):
     ]
 
 
+def test_evaluator_ignores_200_unrelated_accepted_current_cards(tmp_path: Path):
+    service = _service_with_current_artifact_preference(tmp_path)
+    _add_unrelated_accepted_current_cards(service, count=200)
+
+    receipt = service.brain_artifact_preference_evaluate(**_valid_artifact_input())
+
+    assert receipt["status"] == "PASS"
+    assert receipt["applied"] is True
+    assert receipt["preference_binding"]["target_object_id"] == TARGET_OBJECT_ID
+
+
 def test_evaluator_does_not_miss_second_current_hidden_after_100_cards(
     tmp_path: Path,
 ):
@@ -549,6 +647,40 @@ def test_evaluator_does_not_miss_second_current_hidden_after_100_cards(
         card.pop("content_hash", None)
         card.pop("card_hash", None)
         service.ledger.upsert_llm_brain_memory_card(card)
+
+    receipt = service.brain_artifact_preference_evaluate(**_valid_artifact_input())
+
+    assert receipt["status"] == "FAIL"
+    assert receipt["applied"] is False
+    assert receipt["failures"] == [
+        "accepted_current_artifact_preference_scan_saturated"
+    ]
+
+
+def test_evaluator_fails_closed_when_malformed_card_hides_second_current(
+    tmp_path: Path,
+):
+    service = _service_with_current_artifact_preference(tmp_path)
+    _add_second_current_artifact_preference(service)
+    template = service.ledger.list_llm_brain_memory_cards(
+        project=PROJECT,
+        accepted_only=True,
+        limit=1,
+    )[0]
+    for index in range(99):
+        card = copy.deepcopy(template)
+        card["memory_id"] = f"mem_artifact_preference_archived_{index:03d}"
+        card["currentness"] = "superseded"
+        card["superseded_by"] = [template["memory_id"]]
+        card.pop("content_hash", None)
+        card.pop("card_hash", None)
+        service.ledger.upsert_llm_brain_memory_card(card)
+    malformed = copy.deepcopy(template)
+    malformed["memory_id"] = "mem_artifact_preference_archived_malformed"
+    malformed["typed_payload"]["target_object_id"] = "ko:RepoStyle:malformed"
+    malformed.pop("content_hash", None)
+    malformed.pop("card_hash", None)
+    service.ledger.upsert_llm_brain_memory_card(malformed)
 
     receipt = service.brain_artifact_preference_evaluate(**_valid_artifact_input())
 
@@ -726,6 +858,61 @@ def test_evaluator_reports_rule_failure_without_fabricating_pass(tmp_path: Path)
     assert "object_count_at_least_one" not in receipt["application_result"]["passed_rules"]
 
 
+def test_evaluator_allows_safe_percent_encoding_in_public_text(tmp_path: Path):
+    service = _service_with_current_artifact_preference(tmp_path)
+    arguments = _valid_artifact_input()
+    arguments["branch"] = "feature%2Fartifact-review"
+    arguments["summary"] = "Evidence%20dense HTML review artifact."
+    arguments["artifact_fingerprint"] = hash_payload(
+        {
+            "artifact_type": arguments["artifact_type"],
+            "summary": arguments["summary"],
+            "metrics": arguments["metrics"],
+            "evidence_refs": arguments["evidence_refs"],
+        }
+    )
+
+    receipt = service.brain_artifact_preference_evaluate(**arguments)
+
+    assert receipt["status"] == "PASS"
+    assert receipt["applied"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "encoded_value", "protected_fragment"),
+    [
+        ("summary", "%2FUsers%2Fexample%2Fprivate%20artifact", "/Users/"),
+        ("summary", "API_KEY%3Dprivate-value", "private-value"),
+        ("branch", "%5C%5Cinternal-host%5Cprivate-share", "internal-host"),
+        ("summary", "document_id%3Draw-external", "raw-external"),
+    ],
+)
+def test_evaluator_rejects_percent_encoded_protected_consumer_input_without_echo(
+    tmp_path: Path,
+    field: str,
+    encoded_value: str,
+    protected_fragment: str,
+):
+    service = _service_with_current_artifact_preference(tmp_path)
+    arguments = _valid_artifact_input()
+    arguments[field] = encoded_value
+    if field == "summary":
+        arguments["artifact_fingerprint"] = hash_payload(
+            {
+                "artifact_type": arguments["artifact_type"],
+                "summary": arguments["summary"],
+                "metrics": arguments["metrics"],
+                "evidence_refs": arguments["evidence_refs"],
+            }
+        )
+
+    with pytest.raises(ValueError) as error:
+        service.brain_artifact_preference_evaluate(**arguments)
+
+    assert encoded_value not in str(error.value)
+    assert protected_fragment not in str(error.value)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -859,6 +1046,9 @@ def test_receipt_validator_rejects_raw_external_id_marker_in_allowed_string_afte
         "mem-safe document-id: raw-external",
         "mem-safe document id: raw-external",
         "mem-safe document_id%20%3A%20raw-external",
+        "mem-safe document_id%2520%253A%2520raw-external",
+        "mem-safe document_id%252520%25253A%252520raw-external",
+        "mem-safe document_id%25252520%2525253A%25252520raw-external",
     ],
 )
 def test_receipt_validator_rejects_normalized_raw_external_id_marker_after_rehash(
@@ -880,6 +1070,82 @@ def test_receipt_validator_rejects_normalized_raw_external_id_marker_after_rehas
     )
 
     assert artifact_preference_application_receipt_is_valid(receipt) is False
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "mem-safe-%2FUsers%2Fexample%2Fprivate",
+        "mem-safe-API_KEY%3Dprivate-value",
+        "mem-safe-%5C%5Cinternal-host%5Cprivate-share",
+        "mem-safe-document_id%3Draw-external",
+    ],
+)
+def test_receipt_validator_rejects_percent_encoded_protected_string_after_rehash(
+    tmp_path: Path,
+    marker: str,
+):
+    service = _service_with_current_artifact_preference(tmp_path)
+    arguments = _valid_artifact_input()
+    arguments["consumer"] = "post_deploy_mcp_capture"
+    receipt = service.brain_artifact_preference_evaluate(**arguments)
+    receipt["preference_binding"]["memory_id"] = marker
+    receipt["receipt_hash"] = hash_payload(
+        {
+            "preference_binding": receipt["preference_binding"],
+            "artifact_binding": receipt["artifact_binding"],
+            "application_result": receipt["application_result"],
+            "consumer_surface": receipt["consumer_surface"],
+        }
+    )
+
+    assert artifact_preference_application_receipt_is_valid(receipt) is False
+
+
+@pytest.mark.parametrize("marker", ["mem-safe%20value", "mem-safe%2Fvalue"])
+def test_receipt_validator_allows_ordinary_percent_encoding_after_rehash(
+    tmp_path: Path,
+    marker: str,
+):
+    service = _service_with_current_artifact_preference(tmp_path)
+    arguments = _valid_artifact_input()
+    arguments["consumer"] = "post_deploy_mcp_capture"
+    receipt = service.brain_artifact_preference_evaluate(**arguments)
+    receipt["preference_binding"]["memory_id"] = marker
+    receipt["receipt_hash"] = hash_payload(
+        {
+            "preference_binding": receipt["preference_binding"],
+            "artifact_binding": receipt["artifact_binding"],
+            "application_result": receipt["application_result"],
+            "consumer_surface": receipt["consumer_surface"],
+        }
+    )
+
+    assert artifact_preference_application_receipt_is_valid(receipt) is True
+
+
+def test_receipt_validator_fails_closed_after_bounded_percent_decode(
+    tmp_path: Path,
+    monkeypatch,
+):
+    service = _service_with_current_artifact_preference(tmp_path)
+    arguments = _valid_artifact_input()
+    arguments["consumer"] = "post_deploy_mcp_capture"
+    receipt = service.brain_artifact_preference_evaluate(**arguments)
+    decode_calls = 0
+
+    def never_stable(value: str) -> str:
+        nonlocal decode_calls
+        decode_calls += 1
+        return value + "%20"
+
+    monkeypatch.setattr(artifact_preference_evaluator, "unquote", never_stable)
+
+    assert artifact_preference_application_receipt_is_valid(receipt) is False
+    assert (
+        decode_calls
+        == artifact_preference_evaluator._PUBLIC_SAFE_PERCENT_DECODE_MAX_PASSES
+    )
 
 
 def test_post_deploy_collector_recalculates_actual_service_artifact_review(
