@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import copy
+import re
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import unquote
 
-from .ledger import Ledger
+from .ledger import Ledger, artifact_preference_decision_semantically_equal
 from .llm_brain_core.document_bridge import RetiredIndexBridgeDocumentBridge
 from .llm_brain_core.graph import GraphMemoryAdapter
 from .llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
@@ -18,6 +21,7 @@ from .llm_brain_core.objects.authority_policy import (
     allowed_object_class_gap,
     allowed_object_classes_list,
     is_allowed_object_target,
+    knowledge_object_class_from_id,
 )
 from .llm_brain_core.objects.knowledge_objects import AuthorityDecision, ReviewProposal
 from .llm_brain_core.objects.object_packs import apply_approval_board_decisions, apply_candidate_review_edits
@@ -27,13 +31,16 @@ from .llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_evidence_packet_template,
     build_source_to_candidate_runtime_post_deploy_capture_packet,
     build_source_to_candidate_runtime_post_deploy_capture_readiness_report,
+    build_preference_artifact_memory_runtime_evidence,
     build_source_to_candidate_runtime_readiness_report,
     build_source_to_candidate_runtime_shadow_evidence_packet,
     build_source_to_candidate_runtime_shadow_readiness_report,
 )
 from .memory_read_pipeline import AuthorizedMemoryReader, MemoryReadPipeline, MemorySearchQuery
 from .index_client import RetiredIndexBridgeHttpClient
-from .public_safe_util import ensure_public_safe, public_safe_text, sha256_text, short_hash
+from .public_safe_util import ensure_public_safe, public_safe_text, require_sha256, sha256_text, short_hash
+from .session_memory.memory_card import validate_memory_card_envelope
+from .session_memory.memory_promotion import commit_stale, commit_supersession
 from .session_memory.brain_query import resolve_brain_ids, run_brain_query_v2
 from .session_memory.brain_read_model import LegacyLedgerBrainReadModel, build_semantic_recall
 
@@ -53,11 +60,764 @@ _APPROVAL_BOARD_PRODUCTION_REQUIRED_TRUE_FIELDS = (
     "no_raw_private_evidence",
 )
 
+_ARTIFACT_PREFERENCE_PAYLOAD_FIELDS = frozenset(
+    {
+        "preference",
+        "scope",
+        "applies_to",
+        "reason",
+        "exceptions",
+        "explicitness",
+        "repeated_count",
+        "confirmation_status",
+        "currentness",
+        "artifact_memory_kind",
+        "source_memory_id",
+        "raw_return_capability",
+    }
+)
+_FORBIDDEN_SNAPSHOT_KEYS = frozenset(
+    {
+        "body",
+        "content",
+        "raw",
+        "raw_body",
+        "raw_content",
+        "raw_source",
+        "raw_text",
+        "private",
+        "private_path",
+        "secret",
+        "token",
+        "api_key",
+        "password",
+        "dataset_id",
+        "document_id",
+    }
+)
+_FORBIDDEN_SNAPSHOT_COMPACT_KEYS = frozenset(key.replace("_", "") for key in _FORBIDDEN_SNAPSHOT_KEYS)
+_RAW_EXTERNAL_REF_PREFIXES = (
+    "dataset:",
+    "dataset_id:",
+    "document:",
+    "document_id:",
+    "ragflow_dataset:",
+    "ragflow_document:",
+)
+_RAW_EXTERNAL_ID_ASSIGNMENT_RE = re.compile(
+    r"(?:^|[^a-z0-9])(?:ragflow_)?(?:dataset|document)(?:_?id)?\s*[:=]",
+    re.IGNORECASE,
+)
+_ARTIFACT_PREFERENCE_EVIDENCE_REF_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_]{1,63}:[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"
+)
+_ARTIFACT_PREFERENCE_TEXT_PAYLOAD_FIELDS = _ARTIFACT_PREFERENCE_PAYLOAD_FIELDS - {
+    "exceptions",
+    "repeated_count",
+}
+
 
 def _approval_board_production_decision_state(action: str) -> tuple[str, str, str, str, str]:
     if action == "promote":
         return "propose_current", "accept_current", "accepted_current", "current", "accepted"
     return "", "", "", "", ""
+
+
+def _reject_forbidden_snapshot_keys(value: Any, *, field: str = "proposed_object") -> None:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            key_text = _normalized_snapshot_key(key)
+            compact_key = key_text.replace("_", "")
+            if (
+                key_text in _FORBIDDEN_SNAPSHOT_KEYS
+                or compact_key in _FORBIDDEN_SNAPSHOT_COMPACT_KEYS
+                or (
+                    key_text.endswith("s")
+                    and (
+                        key_text[:-1] in _FORBIDDEN_SNAPSHOT_KEYS
+                        or compact_key[:-1] in _FORBIDDEN_SNAPSHOT_COMPACT_KEYS
+                    )
+                )
+            ):
+                raise ValueError(f"{field} contains a forbidden field")
+            _reject_forbidden_snapshot_keys(child, field=field)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            _reject_forbidden_snapshot_keys(child, field=field)
+
+
+def _normalized_snapshot_key(value: Any) -> str:
+    decoded = _fully_unquote(str(value).strip())
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", decoded)
+    return re.sub(r"[^A-Za-z0-9]+", "_", snake).strip("_").casefold()
+
+
+def _fully_unquote(value: str) -> str:
+    decoded = value
+    for _ in range(3):
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    return decoded
+
+
+def _contains_raw_external_id(value: str) -> bool:
+    decoded = _fully_unquote(value)
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", decoded)
+    normalized = re.sub(r"[.\-\s]+", "_", snake).casefold()
+    return decoded != value or _RAW_EXTERNAL_ID_ASSIGNMENT_RE.search(normalized) is not None
+
+
+def _artifact_preference_payload_text(value: Any, *, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a public-safe string")
+    ensure_public_safe(value, field)
+    if _contains_raw_external_id(value):
+        raise ValueError(f"{field} must not contain a raw external ID")
+    return value.strip()
+
+
+def _artifact_preference_evidence_refs(refs: Any) -> list[str]:
+    if refs is None:
+        return []
+    if not isinstance(refs, list):
+        raise ValueError("ArtifactPreference evidence_refs must be a list of opaque string refs")
+    safe_refs: list[str] = []
+    for ref in refs:
+        if not isinstance(ref, str):
+            _reject_forbidden_snapshot_keys(ref, field="proposed_object.evidence_refs")
+            raise ValueError("ArtifactPreference evidence_refs must contain opaque string refs")
+        if ref.casefold().startswith(_RAW_EXTERNAL_REF_PREFIXES) or _contains_raw_external_id(ref):
+            raise ValueError("ArtifactPreference evidence_refs must not contain raw external IDs")
+        if _ARTIFACT_PREFERENCE_EVIDENCE_REF_RE.fullmatch(ref) is None:
+            raise ValueError("ArtifactPreference evidence_refs must use internal opaque locator syntax")
+        safe_ref = public_safe_text(ref, max_chars=180)
+        if not safe_ref:
+            raise ValueError("ArtifactPreference evidence_refs must not contain raw external IDs")
+        safe_refs.append(safe_ref)
+    return list(dict.fromkeys(safe_refs))
+
+
+def _source_ref_record_view(record: Any) -> Mapping[str, Any]:
+    if isinstance(record, Mapping):
+        return record
+    metadata = getattr(record, "metadata", None)
+    if callable(metadata):
+        value = metadata()
+        if isinstance(value, Mapping):
+            return value
+    return {}
+
+
+def _artifact_preference_source_refs(
+    refs: Any,
+    *,
+    project: str,
+    source_ref_lookup: Callable[[str], Any],
+) -> list[dict[str, str]]:
+    safe_refs: list[dict[str, str]] = []
+    for ref in refs or []:
+        if not isinstance(ref, Mapping):
+            raise ValueError("ArtifactPreference source_refs require source_ref_id locators")
+        _reject_forbidden_snapshot_keys(ref, field="proposed_object.source_refs")
+        if set(ref) - {"source_ref_id", "content_hash"}:
+            raise ValueError("ArtifactPreference source_refs allow only source_ref_id and content_hash")
+        source_ref_id = public_safe_text(str(ref.get("source_ref_id") or ""), max_chars=180)
+        if not source_ref_id:
+            raise ValueError("ArtifactPreference source_refs require source_ref_id")
+        record = _source_ref_record_view(source_ref_lookup(source_ref_id))
+        if not record:
+            raise ValueError("ArtifactPreference source_ref_id is not registered")
+        if str(record.get("revoked_at") or ""):
+            raise ValueError("ArtifactPreference source_ref_id permission is revoked")
+        if str(record.get("deleted_at") or ""):
+            raise ValueError("ArtifactPreference source_ref_id is deleted")
+        if str(record.get("permission_scope") or "") != f"project:{project}":
+            raise ValueError("ArtifactPreference source_ref_id project permission scope mismatch")
+        catalog_hash = require_sha256(str(record.get("content_hash") or ""), "source_ref.content_hash")
+        supplied_hash = str(ref.get("content_hash") or "")
+        if supplied_hash and require_sha256(supplied_hash, "source_refs.content_hash") != catalog_hash:
+            raise ValueError("ArtifactPreference source_ref content_hash mismatch")
+        safe_refs.append({"source_ref_id": source_ref_id, "content_hash": catalog_hash})
+    return list({ref["source_ref_id"]: ref for ref in safe_refs}.values())
+
+
+def _artifact_preference_repeated_count(value: Any) -> int:
+    if value is None:
+        return 1
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError("ArtifactPreference payload.repeated_count must be a positive integer")
+    return value
+
+
+def _artifact_preference_exceptions(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("ArtifactPreference payload.exceptions must be a list of public-safe strings")
+    exceptions: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("ArtifactPreference payload.exceptions must be a list of public-safe strings")
+        ensure_public_safe(item, "ArtifactPreference payload.exceptions")
+        if _contains_raw_external_id(item):
+            raise ValueError("ArtifactPreference payload.exceptions must not contain raw external IDs")
+        safe_item = public_safe_text(item, max_chars=240)
+        if not safe_item:
+            raise ValueError("ArtifactPreference payload.exceptions must not contain empty strings")
+        exceptions.append(safe_item)
+    return exceptions
+
+
+def _artifact_preference_snapshot(
+    proposed_object: Mapping[str, Any],
+    *,
+    target_object_id: str,
+    project: str,
+    source_ref_lookup: Callable[[str], Any],
+) -> dict[str, Any]:
+    ensure_public_safe(dict(proposed_object), "artifact_preference_proposed_object")
+    _reject_forbidden_snapshot_keys(proposed_object)
+    object_id = public_safe_text(str(proposed_object.get("object_id") or ""), max_chars=180)
+    object_type = public_safe_text(str(proposed_object.get("object_type") or ""), max_chars=120)
+    if object_id != target_object_id:
+        raise ValueError("ArtifactPreference proposed_object must match target_object_id")
+    if object_type != "ArtifactPreference" or knowledge_object_class_from_id(object_id) != object_type:
+        raise ValueError("ArtifactPreference object ID and type must be continuous")
+    raw_scope = proposed_object.get("scope")
+    if not isinstance(raw_scope, Mapping):
+        raise ValueError("ArtifactPreference proposed_object.scope must be an object")
+    scope = raw_scope
+    scope_project = public_safe_text(str(scope.get("project") or ""), max_chars=120)
+    if not project or scope_project != project:
+        raise ValueError("ArtifactPreference proposed_object project scope must match proposal project")
+    if str(proposed_object.get("privacy_class") or "") != "public_safe":
+        raise ValueError("ArtifactPreference proposed_object privacy_class must be public_safe")
+    title = _artifact_preference_payload_text(
+        proposed_object.get("title"),
+        field="ArtifactPreference proposed_object.title",
+    )
+    summary = _artifact_preference_payload_text(
+        proposed_object.get("summary"),
+        field="ArtifactPreference proposed_object.summary",
+    )
+    if not title or not summary:
+        raise ValueError("ArtifactPreference proposed_object requires title and summary")
+    content_hash = require_sha256(str(proposed_object.get("content_hash") or ""), "proposed_object.content_hash")
+    raw_payload = proposed_object.get("payload")
+    if not isinstance(raw_payload, Mapping):
+        raise ValueError("ArtifactPreference proposed_object.payload must be an object")
+    payload = raw_payload
+    safe_payload = {
+        str(key): copy.deepcopy(value)
+        for key, value in payload.items()
+        if str(key) in _ARTIFACT_PREFERENCE_PAYLOAD_FIELDS
+    }
+    for key in _ARTIFACT_PREFERENCE_TEXT_PAYLOAD_FIELDS:
+        if key in safe_payload:
+            safe_payload[key] = _artifact_preference_payload_text(
+                safe_payload[key],
+                field=f"ArtifactPreference payload.{key}",
+            )
+    preference = safe_payload.get("preference") or title
+    applies_to = safe_payload.get("applies_to") or safe_payload.get("scope") or "project"
+    if not preference or not applies_to:
+        raise ValueError("ArtifactPreference proposed_object requires preference and scope")
+    safe_payload["preference"] = preference
+    safe_payload["applies_to"] = applies_to
+    safe_payload["repeated_count"] = _artifact_preference_repeated_count(safe_payload.get("repeated_count"))
+    safe_payload["exceptions"] = _artifact_preference_exceptions(safe_payload.get("exceptions"))
+    evidence_refs = _artifact_preference_evidence_refs(proposed_object.get("evidence_refs"))
+    source_refs = _artifact_preference_source_refs(
+        proposed_object.get("source_refs"),
+        project=project,
+        source_ref_lookup=source_ref_lookup,
+    )
+    raw_confidence = proposed_object.get("confidence")
+    if not isinstance(raw_confidence, Mapping):
+        raise ValueError("ArtifactPreference proposed_object.confidence must be an object")
+    confidence = raw_confidence
+    score = confidence.get("score", 0.9)
+    if not isinstance(score, (int, float)) or isinstance(score, bool) or not 0 <= float(score) <= 1:
+        raise ValueError("ArtifactPreference proposed_object confidence.score must be between 0 and 1")
+    snapshot = {
+        "schema_version": "artifact_preference_proposed_object_snapshot.v1",
+        "object_id": object_id,
+        "object_type": object_type,
+        "scope": {"project": scope_project},
+        "title": title,
+        "summary": summary,
+        "content_hash": content_hash,
+        "evidence_refs": evidence_refs,
+        "source_refs": source_refs,
+        "confidence": {
+            "score": float(score),
+            "basis": public_safe_text(
+                _artifact_preference_payload_text(
+                    confidence.get("basis") or "",
+                    field="ArtifactPreference proposed_object.confidence.basis",
+                ),
+                max_chars=240,
+            ),
+        },
+        "privacy_class": "public_safe",
+        "payload": safe_payload,
+    }
+    ensure_public_safe(snapshot, "artifact_preference_proposed_object_snapshot")
+    return snapshot
+
+
+def _artifact_preference_memory_id(
+    *,
+    target_object_id: str,
+    source_content_hash: str,
+    proposal_id: str,
+    decision_id: str,
+) -> str:
+    return "mem_artifact_preference_" + short_hash(
+        [target_object_id, source_content_hash, proposal_id, decision_id],
+        length=24,
+    )
+
+
+def _artifact_preference_cards_for_target(
+    tx: Any,
+    *,
+    project: str,
+    target_object_id: str,
+) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for card in tx.list_llm_brain_memory_cards(project=project):
+        payload = card.get("typed_payload") if isinstance(card.get("typed_payload"), Mapping) else {}
+        if (
+            str(payload.get("source_object_type") or "") == "ArtifactPreference"
+            and str(payload.get("target_object_id") or "") == target_object_id
+        ):
+            cards.append(card)
+    return cards
+
+
+def _current_artifact_preference_card_for_target(
+    tx: Any,
+    *,
+    project: str,
+    target_object_id: str,
+) -> dict[str, Any] | None:
+    current = [
+        card
+        for card in _artifact_preference_cards_for_target(
+            tx,
+            project=project,
+            target_object_id=target_object_id,
+        )
+        if str(card.get("currentness") or "") == "current"
+    ]
+    if len(current) > 1:
+        raise ValueError("ArtifactPreference target has multiple current canonical versions")
+    return current[0] if current else None
+
+
+def _artifact_preference_memory_card(
+    *,
+    proposal: Mapping[str, Any],
+    decision: Mapping[str, Any],
+    source_ref_lookup: Callable[[str], Any],
+) -> dict[str, Any]:
+    snapshot = proposal.get("proposed_object")
+    if not isinstance(snapshot, Mapping):
+        raise ValueError("ArtifactPreference accept_current requires proposed_object snapshot")
+    target_object_id = str(decision.get("target_object_id") or "")
+    project = str(decision.get("project") or "")
+    snapshot = _artifact_preference_snapshot(
+        snapshot,
+        target_object_id=target_object_id,
+        project=project,
+        source_ref_lookup=source_ref_lookup,
+    )
+    payload = snapshot["payload"]
+    approved_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    evidence_refs = list(
+        dict.fromkeys(
+            [
+                *[str(ref) for ref in snapshot.get("evidence_refs") or [] if str(ref or "")],
+                *_artifact_preference_evidence_refs(proposal.get("evidence_refs")),
+            ]
+        )
+    )
+    card = {
+        "memory_id": _artifact_preference_memory_id(
+            target_object_id=target_object_id,
+            source_content_hash=snapshot["content_hash"],
+            proposal_id=str(proposal.get("proposal_id") or ""),
+            decision_id=str(decision.get("decision_id") or ""),
+        ),
+        "brain_id": f"/project/{project}",
+        "card_type": "preference",
+        "scope": "project",
+        "project": project,
+        "provider": public_safe_text(str(proposal.get("proposer") or "codex"), max_chars=80) or "codex",
+        "title": snapshot["title"],
+        "summary": snapshot["summary"],
+        "render_text": snapshot["summary"],
+        "lifecycle_state": "human_accepted",
+        "judgment_state": "none",
+        "status": "accepted",
+        "approval_state": "approved",
+        "governance_tier": "medium",
+        "freshness": "current",
+        "currentness": "current",
+        "confidence": float(snapshot["confidence"]["score"]),
+        "confidence_basis": public_safe_text(
+            str(snapshot["confidence"].get("basis") or "Object authority accept_current decision."),
+            max_chars=240,
+        ),
+        "source_refs": list(snapshot.get("source_refs") or []),
+        "evidence_refs": evidence_refs,
+        "evidence_hashes": [snapshot["content_hash"]],
+        "derived_from": [target_object_id, str(proposal.get("proposal_id") or "")],
+        "supersedes": [],
+        "superseded_by": [],
+        "conflicts": [],
+        "active_until": "",
+        "approved_by": "redacted",
+        "approved_at": approved_at,
+        "typed_payload": {
+            "preference": payload["preference"],
+            "explicitness": str(payload.get("explicitness") or "explicit"),
+            "repeated_count": payload["repeated_count"],
+            "confirmation_status": str(payload.get("confirmation_status") or "confirmed"),
+            "applies_to": payload["applies_to"],
+            "reason": str(payload.get("reason") or snapshot["summary"]),
+            "exceptions": payload["exceptions"],
+            "target_object_id": target_object_id,
+            "source_object_type": "ArtifactPreference",
+            "source_content_hash": snapshot["content_hash"],
+            "authority_proposal_id": public_safe_text(
+                str(proposal.get("proposal_id") or ""),
+                max_chars=180,
+            ),
+            "authority_decision_id": public_safe_text(
+                str(decision.get("decision_id") or ""),
+                max_chars=180,
+            ),
+        },
+    }
+    return validate_memory_card_envelope(card)
+
+
+def _artifact_preference_supersession_cards(
+    tx: Any,
+    *,
+    prior_card: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    project = str(decision.get("project") or "")
+    prior_target = str(decision.get("target_object_id") or "")
+    related_decision_id = str(decision.get("supersedes_decision_id") or "")
+    if not related_decision_id:
+        raise ValueError("ArtifactPreference commit_supersession requires related successor decision")
+    related = tx.get_object_authority_decision(related_decision_id)
+    if not related:
+        raise ValueError("ArtifactPreference commit_supersession related decision was not found")
+    successor_target = str(related.get("target_object_id") or "")
+    if not successor_target or successor_target == prior_target:
+        raise ValueError("ArtifactPreference commit_supersession requires distinct prior and successor targets")
+    if str(related.get("project") or "") != project:
+        raise ValueError("ArtifactPreference commit_supersession related decision project mismatch")
+    if knowledge_object_class_from_id(prior_target) != "ArtifactPreference" or knowledge_object_class_from_id(
+        successor_target
+    ) != "ArtifactPreference":
+        raise ValueError("ArtifactPreference commit_supersession related decision type mismatch")
+    if str(related.get("decision_type") or "") != "accept_current" or str(
+        related.get("new_authority_lane") or ""
+    ) != "accepted_current":
+        raise ValueError("ArtifactPreference commit_supersession related decision is not current authority")
+
+    successor_card = _current_artifact_preference_card_for_target(
+        tx,
+        project=project,
+        target_object_id=successor_target,
+    )
+    if successor_card is None:
+        raise ValueError("ArtifactPreference commit_supersession successor MemoryCard was not found")
+    _validate_current_artifact_preference_lineage(
+        tx,
+        card=prior_card,
+        target_object_id=prior_target,
+        project=project,
+        label="prior",
+    )
+    _validate_current_artifact_preference_lineage(
+        tx,
+        card=successor_card,
+        target_object_id=successor_target,
+        project=project,
+        label="successor",
+        expected_decision_id=related_decision_id,
+    )
+    prior_payload = prior_card.get("typed_payload") if isinstance(prior_card.get("typed_payload"), Mapping) else {}
+    successor_payload = (
+        successor_card.get("typed_payload")
+        if isinstance(successor_card.get("typed_payload"), Mapping)
+        else {}
+    )
+    if (
+        str(prior_card.get("project") or "") != project
+        or str(prior_payload.get("target_object_id") or "") != prior_target
+        or str(prior_payload.get("source_object_type") or "") != "ArtifactPreference"
+    ):
+        raise ValueError("ArtifactPreference prior MemoryCard continuity mismatch")
+    if (
+        str(successor_card.get("project") or "") != project
+        or str(successor_payload.get("target_object_id") or "") != successor_target
+        or str(successor_payload.get("source_object_type") or "") != "ArtifactPreference"
+        or str(successor_payload.get("authority_decision_id") or "") != related_decision_id
+        or str(successor_card.get("currentness") or "") != "current"
+    ):
+        raise ValueError("ArtifactPreference successor MemoryCard continuity mismatch")
+
+    demoted = commit_supersession(prior_card, superseded_by=str(successor_card["memory_id"]))
+    successor = copy.deepcopy(successor_card)
+    successor["supersedes"] = list(
+        dict.fromkeys([*[str(item) for item in successor.get("supersedes") or []], str(prior_card["memory_id"])])
+    )
+    return validate_memory_card_envelope(demoted), validate_memory_card_envelope(successor)
+
+
+def _validate_current_artifact_preference_lineage(
+    tx: Any,
+    *,
+    card: Mapping[str, Any] | None,
+    target_object_id: str,
+    project: str,
+    label: str,
+    expected_decision_id: str = "",
+) -> None:
+    state = tx.get_object_authority_state(target_object_id)
+    payload = card.get("typed_payload") if isinstance(card, Mapping) and isinstance(card.get("typed_payload"), Mapping) else {}
+    card_decision_id = str(payload.get("authority_decision_id") or "")
+    card_proposal_id = str(payload.get("authority_proposal_id") or "")
+    if (
+        not isinstance(card, Mapping)
+        or str(card.get("project") or "") != project
+        or str(card.get("currentness") or "") != "current"
+        or str(payload.get("source_object_type") or "") != "ArtifactPreference"
+        or str(payload.get("target_object_id") or "") != target_object_id
+        or not card_decision_id
+        or not card_proposal_id
+        or (expected_decision_id and card_decision_id != expected_decision_id)
+        or str(state.get("project") or "") != project
+        or str(state.get("target_object_id") or "") != target_object_id
+        or str(state.get("authority_lane") or "") != "accepted_current"
+        or str(state.get("decision_id") or "") != card_decision_id
+        or str(state.get("proposal_id") or "") != card_proposal_id
+    ):
+        raise ValueError(f"ArtifactPreference {label} current lineage mismatch")
+    accepted = tx.get_object_authority_decision(card_decision_id)
+    if (
+        not accepted
+        or str(accepted.get("project") or "") != project
+        or str(accepted.get("target_object_id") or "") != target_object_id
+        or str(accepted.get("proposal_id") or "") != card_proposal_id
+        or str(accepted.get("decision_type") or "") != "accept_current"
+        or str(accepted.get("new_authority_lane") or "") != "accepted_current"
+    ):
+        raise ValueError(f"ArtifactPreference {label} accepted decision lineage mismatch")
+
+
+def _validate_artifact_preference_rollback_lineage(
+    tx: Any,
+    *,
+    card: Mapping[str, Any] | None,
+    decision: Mapping[str, Any],
+) -> None:
+    if (
+        str(decision.get("previous_authority_lane") or "") != "accepted_current"
+        or str(decision.get("new_authority_lane") or "") != "archive_only"
+    ):
+        raise ValueError("ArtifactPreference rollback requires accepted_current to archive_only transition")
+    rollback_of_decision_id = str(decision.get("rollback_of_decision_id") or "")
+    referenced = tx.get_object_authority_decision(rollback_of_decision_id)
+    target_object_id = str(decision.get("target_object_id") or "")
+    project = str(decision.get("project") or "")
+    ledger_scope = str(decision.get("ledger_scope") or "")
+    if not referenced:
+        raise ValueError("ArtifactPreference rollback decision was not found")
+    if (
+        str(referenced.get("target_object_id") or "") != target_object_id
+        or str(referenced.get("project") or "") != project
+        or str(referenced.get("ledger_scope") or "") != ledger_scope
+        or str(referenced.get("decision_type") or "") != "accept_current"
+        or str(referenced.get("new_authority_lane") or "") != "accepted_current"
+    ):
+        raise ValueError("ArtifactPreference rollback decision lineage mismatch")
+    _validate_current_artifact_preference_lineage(
+        tx,
+        card=card,
+        target_object_id=target_object_id,
+        project=project,
+        label="rollback",
+        expected_decision_id=rollback_of_decision_id,
+    )
+
+
+def _validate_completed_artifact_preference_decision_retry(
+    tx: Any,
+    *,
+    proposal: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    decision_id = str(decision.get("decision_id") or "")
+    stored = tx.get_object_authority_decision(decision_id)
+    if not stored:
+        return None
+    decision_type = str(stored.get("decision_type") or "")
+    if decision_type not in {"rollback_decision", "commit_supersession"}:
+        return None
+    if not artifact_preference_decision_semantically_equal(stored, decision):
+        raise ValueError("approved ArtifactPreference decision lineage is immutable")
+
+    target_object_id = str(stored.get("target_object_id") or "")
+    project = str(stored.get("project") or "")
+    proposal_id = str(stored.get("proposal_id") or "")
+    expected_lane = "archive_only" if decision_type == "rollback_decision" else "accepted_non_current"
+    expected_status = "rolled_back" if decision_type == "rollback_decision" else "superseded"
+    state = tx.get_object_authority_state(target_object_id)
+    if (
+        str(stored.get("previous_authority_lane") or "") != "accepted_current"
+        or str(stored.get("new_authority_lane") or "") != expected_lane
+        or str(proposal.get("proposal_id") or "") != proposal_id
+        or str(proposal.get("target_object_id") or "") != target_object_id
+        or str(proposal.get("project") or "") != project
+        or str(proposal.get("status") or "") != expected_status
+        or str(proposal.get("decision_id") or "") != decision_id
+        or str(state.get("project") or "") != project
+        or str(state.get("target_object_id") or "") != target_object_id
+        or str(state.get("proposal_id") or "") != proposal_id
+        or str(state.get("decision_id") or "") != decision_id
+        or str(state.get("decision_type") or "") != decision_type
+        or str(state.get("authority_lane") or "") != expected_lane
+    ):
+        raise ValueError("ArtifactPreference exact retry final authority lineage mismatch")
+
+    cards = _artifact_preference_cards_for_target(
+        tx,
+        project=project,
+        target_object_id=target_object_id,
+    )
+    if len(cards) != 1:
+        raise ValueError("ArtifactPreference exact retry requires one canonical prior MemoryCard")
+    prior_card = cards[0]
+    prior_payload = (
+        prior_card.get("typed_payload")
+        if isinstance(prior_card.get("typed_payload"), Mapping)
+        else {}
+    )
+    prior_decision_id = str(prior_payload.get("authority_decision_id") or "")
+    prior_proposal_id = str(prior_payload.get("authority_proposal_id") or "")
+    prior_decision = tx.get_object_authority_decision(prior_decision_id)
+    if (
+        str(prior_card.get("project") or "") != project
+        or str(prior_payload.get("source_object_type") or "") != "ArtifactPreference"
+        or str(prior_payload.get("target_object_id") or "") != target_object_id
+        or not prior_decision
+        or str(prior_decision.get("project") or "") != project
+        or str(prior_decision.get("target_object_id") or "") != target_object_id
+        or str(prior_decision.get("ledger_scope") or "") != str(stored.get("ledger_scope") or "")
+        or str(prior_decision.get("decision_type") or "") != "accept_current"
+        or str(prior_decision.get("new_authority_lane") or "") != "accepted_current"
+        or str(prior_decision.get("proposal_id") or "") != prior_proposal_id
+    ):
+        raise ValueError("ArtifactPreference exact retry prior card lineage mismatch")
+
+    if decision_type == "rollback_decision":
+        if (
+            str(stored.get("rollback_of_decision_id") or "") != prior_decision_id
+            or str(prior_card.get("currentness") or "") != "stale"
+            or any(str(card.get("currentness") or "") == "current" for card in cards)
+        ):
+            raise ValueError("ArtifactPreference rollback exact retry final lineage mismatch")
+        return dict(stored)
+
+    successor_decision_id = str(stored.get("supersedes_decision_id") or "")
+    successor_decision = tx.get_object_authority_decision(successor_decision_id)
+    successor_target = str(successor_decision.get("target_object_id") or "")
+    successor_card = _current_artifact_preference_card_for_target(
+        tx,
+        project=project,
+        target_object_id=successor_target,
+    )
+    _validate_current_artifact_preference_lineage(
+        tx,
+        card=successor_card,
+        target_object_id=successor_target,
+        project=project,
+        label="successor retry",
+        expected_decision_id=successor_decision_id,
+    )
+    if (
+        str(prior_card.get("currentness") or "") != "superseded"
+        or list(prior_card.get("superseded_by") or []) != [str(successor_card["memory_id"])]
+        or str(prior_card["memory_id"]) not in list(successor_card.get("supersedes") or [])
+    ):
+        raise ValueError("ArtifactPreference supersession exact retry final lineage mismatch")
+    return dict(stored)
+
+
+def _resolve_artifact_preference_accept_card(
+    tx: Any,
+    *,
+    proposal: Mapping[str, Any],
+    decision: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    target_object_id = str(decision.get("target_object_id") or "")
+    project = str(decision.get("project") or "")
+    proposal_id = str(proposal.get("proposal_id") or "")
+    decision_id = str(decision.get("decision_id") or "")
+    cards = _artifact_preference_cards_for_target(
+        tx,
+        project=project,
+        target_object_id=target_object_id,
+    )
+    state = tx.get_object_authority_state(target_object_id)
+    exact = next((card for card in cards if card.get("memory_id") == candidate.get("memory_id")), None)
+    stored_decision = tx.get_object_authority_decision(decision_id)
+    if not cards and not state and not stored_decision:
+        return dict(candidate)
+    candidate_payload = (
+        candidate.get("typed_payload") if isinstance(candidate.get("typed_payload"), Mapping) else {}
+    )
+    exact_payload = exact.get("typed_payload") if isinstance(exact, Mapping) and isinstance(exact.get("typed_payload"), Mapping) else {}
+    if (
+        exact is None
+        or len(cards) != 1
+        or str(exact.get("currentness") or "") != "current"
+        or str(exact_payload.get("source_content_hash") or "")
+        != str(candidate_payload.get("source_content_hash") or "")
+        or str(exact_payload.get("authority_proposal_id") or "") != proposal_id
+        or str(exact_payload.get("authority_decision_id") or "") != decision_id
+        or str(state.get("project") or "") != project
+        or str(state.get("authority_lane") or "") != "accepted_current"
+        or str(state.get("proposal_id") or "") != proposal_id
+        or str(state.get("decision_id") or "") != decision_id
+    ):
+        raise ValueError(
+            "ArtifactPreference target already has an immutable canonical version; "
+            "use a distinct target with explicit supersession"
+        )
+    if (
+        not stored_decision
+        or str(stored_decision.get("proposal_id") or "") != proposal_id
+        or str(stored_decision.get("target_object_id") or "") != target_object_id
+        or str(stored_decision.get("project") or "") != project
+        or str(stored_decision.get("ledger_scope") or "") != str(decision.get("ledger_scope") or "")
+        or str(stored_decision.get("decision_type") or "") != "accept_current"
+        or str(stored_decision.get("new_authority_lane") or "") != "accepted_current"
+    ):
+        raise ValueError("ArtifactPreference exact retry decision lineage mismatch")
+    return None
 
 
 def build_index_client(
@@ -175,13 +935,152 @@ class KnowledgeSearchService:
 
     def append_object_review_proposal(self, proposal: dict) -> dict:
         stored = dict(proposal)
+        if (
+            str(stored.get("object_type") or "") == "ArtifactPreference"
+            or knowledge_object_class_from_id(str(stored.get("target_object_id") or ""))
+            == "ArtifactPreference"
+        ):
+            stored["evidence_refs"] = _artifact_preference_evidence_refs(
+                stored.get("evidence_refs")
+            )
         ensure_public_safe(stored, "object_review_proposal")
         return self.ledger.upsert_object_review_proposal(stored)
 
-    def commit_object_authority_decision(self, decision: dict) -> dict:
+    def prepare_proposed_object_snapshot(
+        self,
+        proposed_object: Mapping[str, Any],
+        *,
+        target_object_id: str,
+        project: str,
+    ) -> dict[str, Any]:
+        object_type = knowledge_object_class_from_id(target_object_id)
+        if object_type == "ArtifactPreference":
+            return _artifact_preference_snapshot(
+                proposed_object,
+                target_object_id=target_object_id,
+                project=project,
+                source_ref_lookup=LedgerSourceRefCatalog(self.ledger).get,
+            )
+        ensure_public_safe(dict(proposed_object), "proposed_object")
+        _reject_forbidden_snapshot_keys(proposed_object)
+        return {
+            key: copy.deepcopy(proposed_object[key])
+            for key in (
+                "schema_version",
+                "object_id",
+                "object_type",
+                "scope",
+                "title",
+                "summary",
+                "content_hash",
+                "evidence_refs",
+                "source_refs",
+                "privacy_class",
+                "payload",
+            )
+            if key in proposed_object
+        }
+
+    def commit_object_authority_decision(
+        self,
+        decision: dict,
+        *,
+        proposal: dict | None = None,
+    ) -> dict:
         stored = dict(decision)
+        proposal_to_store = dict(proposal) if proposal is not None else None
+        target_is_artifact_preference = (
+            knowledge_object_class_from_id(str(stored.get("target_object_id") or ""))
+            == "ArtifactPreference"
+        )
+        if target_is_artifact_preference:
+            stored["evidence_refs"] = _artifact_preference_evidence_refs(
+                stored.get("evidence_refs")
+            )
+            if proposal_to_store is not None:
+                proposal_to_store["evidence_refs"] = _artifact_preference_evidence_refs(
+                    proposal_to_store.get("evidence_refs")
+                )
         ensure_public_safe(stored, "object_authority_decision")
-        committed = self.ledger.commit_object_authority_decision(stored)
+        with self.ledger._transaction() as tx:
+            if proposal_to_store is not None:
+                tx.upsert_object_review_proposal(proposal_to_store)
+            stored_proposal = tx.get_object_review_proposal(str(stored.get("proposal_id") or ""))
+            if not stored_proposal:
+                raise ValueError("object authority decision requires an existing review proposal")
+            target_object_id = str(stored.get("target_object_id") or "")
+            object_type = str(
+                stored_proposal.get("object_type") or knowledge_object_class_from_id(target_object_id)
+            )
+            materialized_cards: list[dict[str, Any]] = []
+            if object_type == "ArtifactPreference":
+                completed_retry = _validate_completed_artifact_preference_decision_retry(
+                    tx,
+                    proposal=stored_proposal,
+                    decision=stored,
+                )
+                if completed_retry is not None:
+                    return completed_retry
+                decision_type = str(stored.get("decision_type") or "")
+                new_lane = str(stored.get("new_authority_lane") or "")
+                if decision_type == "accept_current" and new_lane == "accepted_current":
+                    candidate = _artifact_preference_memory_card(
+                        proposal=stored_proposal,
+                        decision=stored,
+                        source_ref_lookup=tx.get_llm_brain_source_ref,
+                    )
+                    materialized_card = _resolve_artifact_preference_accept_card(
+                        tx,
+                        proposal=stored_proposal,
+                        decision=stored,
+                        candidate=candidate,
+                    )
+                    if materialized_card is not None:
+                        materialized_cards.append(materialized_card)
+                elif new_lane != "accepted_current":
+                    existing = _current_artifact_preference_card_for_target(
+                        tx,
+                        project=str(stored.get("project") or ""),
+                        target_object_id=target_object_id,
+                    )
+                    state = tx.get_object_authority_state(target_object_id)
+                    if existing is None and str(state.get("authority_lane") or "") == "accepted_current":
+                        raise ValueError("ArtifactPreference current authority has no matching current MemoryCard")
+                    if decision_type == "rollback_decision":
+                        _validate_artifact_preference_rollback_lineage(
+                            tx,
+                            card=existing,
+                            decision=stored,
+                        )
+                        materialized_cards.append(commit_stale(existing))
+                    elif decision_type == "commit_supersession":
+                        if (
+                            str(stored.get("previous_authority_lane") or "") != "accepted_current"
+                            or new_lane != "accepted_non_current"
+                        ):
+                            raise ValueError(
+                                "ArtifactPreference supersession requires accepted_current to accepted_non_current transition"
+                            )
+                        if existing is None or str(existing.get("currentness") or "") != "current":
+                            raise ValueError(
+                                "ArtifactPreference commit_supersession requires a current prior MemoryCard"
+                            )
+                        materialized_cards.extend(
+                            _artifact_preference_supersession_cards(
+                                tx,
+                                prior_card=existing,
+                                decision=stored,
+                            )
+                        )
+                    elif existing is not None and str(existing.get("currentness") or "") == "current":
+                        raise ValueError(
+                            "ArtifactPreference current authority can only be removed by rollback or verified supersession"
+                        )
+            committed = tx.commit_object_authority_decision(stored)
+            if object_type == "ArtifactPreference" and not materialized_cards:
+                return committed
+            for materialized_card in materialized_cards:
+                tx.upsert_llm_brain_memory_card(materialized_card)
         self.invalidate_brain_card_cache()
         return committed
 
@@ -309,14 +1208,6 @@ class KnowledgeSearchService:
         reviewer_id: str,
         production_gate: Mapping[str, Any],
     ) -> dict[str, Any]:
-        preview = apply_approval_board_decisions(
-            pack,
-            decisions=decisions,
-            reviewer={"id": reviewer_id},
-            ledger_scope="local_test",
-        )
-        accepted_decisions = [dict(item) for item in preview.get("decisions") or [] if isinstance(item, Mapping)]
-        rejected_decisions = [dict(item) for item in preview.get("rejected_decisions") or [] if isinstance(item, Mapping)]
         decision_arg = decisions[0] if len(decisions) == 1 and isinstance(decisions[0], Mapping) else {}
         target_object_id = public_safe_text(str(decision_arg.get("object_id") or ""), max_chars=180)
         target = self._candidate_object(pack, target_object_id)
@@ -326,6 +1217,21 @@ class KnowledgeSearchService:
             max_chars=120,
         )
         target_object_type = public_safe_text(str(target.get("object_type") or ""), max_chars=120)
+        prepared_snapshot = None
+        if target_object_type == "ArtifactPreference":
+            prepared_snapshot = self.prepare_proposed_object_snapshot(
+                target,
+                target_object_id=target_object_id,
+                project=target_project,
+            )
+        preview = apply_approval_board_decisions(
+            pack,
+            decisions=decisions,
+            reviewer={"id": reviewer_id},
+            ledger_scope="local_test",
+        )
+        accepted_decisions = [dict(item) for item in preview.get("decisions") or [] if isinstance(item, Mapping)]
+        rejected_decisions = [dict(item) for item in preview.get("rejected_decisions") or [] if isinstance(item, Mapping)]
         gate = self._approval_board_production_gate(
             production_gate,
             target_object_id=target_object_id,
@@ -378,6 +1284,11 @@ class KnowledgeSearchService:
         proposal["ledger_scope"] = "production"
         proposal["production_mutation_performed"] = True
         proposal["production_gate_ref_hash"] = gate["approval_ref_hash"]
+        proposal["proposed_object"] = prepared_snapshot or self.prepare_proposed_object_snapshot(
+            target,
+            target_object_id=target_object_id,
+            project=gate["project"],
+        )
 
         decision = AuthorityDecision.from_parts(
             decision_type=str(authority_decision["decision_type"]),
@@ -396,10 +1307,7 @@ class KnowledgeSearchService:
         decision["authority_write_scope"] = "production_ledger"
         decision["production_mutation_performed"] = True
         decision["production_gate_ref_hash"] = gate["approval_ref_hash"]
-        with self.ledger._transaction() as tx:
-            tx.upsert_object_review_proposal(proposal)
-            committed = tx.commit_object_authority_decision(decision)
-        self.invalidate_brain_card_cache()
+        committed = self.commit_object_authority_decision(decision, proposal=proposal)
 
         updated_pack = copy.deepcopy(dict(preview.get("updated_pack") or pack))
         updated_pack["authority_write_scope"] = "production_ledger"
@@ -577,8 +1485,15 @@ class KnowledgeSearchService:
             collection_mode = public_safe_text(str(evidence_collection_mode or "local_test_replay"), max_chars=80)
             network_used = bool(evidence_collection_network_used)
             projection_join_runner = None
+            preference_artifact_memory_runner = None
             if collection_mode == "post_deploy_read_only_smoke" and network_used:
                 projection_join_runner = lambda: self._projection_join_runtime_read_path_evidence(
+                    repository=repository,
+                    branch=branch,
+                    project=repository.rsplit("/", 1)[-1] if repository else "neurons",
+                    consumer=consumer,
+                )
+                preference_artifact_memory_runner = lambda: self._preference_artifact_memory_runtime_read_path_evidence(
                     repository=repository,
                     branch=branch,
                     project=repository.rsplit("/", 1)[-1] if repository else "neurons",
@@ -591,6 +1506,7 @@ class KnowledgeSearchService:
                 consumer=consumer,
                 route_runner=route_runner,
                 projection_join_runner=projection_join_runner,
+                preference_artifact_memory_runner=preference_artifact_memory_runner,
                 collection_mode=collection_mode,
                 network_used=network_used,
             )
@@ -615,6 +1531,52 @@ class KnowledgeSearchService:
         return build_source_to_candidate_runtime_readiness_report(
             live_evidence=live_evidence,
             expected_commit=expected_commit,
+        )
+
+    def _preference_artifact_memory_runtime_read_path_evidence(
+        self,
+        *,
+        repository: str,
+        branch: str,
+        project: str,
+        consumer: str,
+    ) -> dict[str, Any]:
+        safe_repository = public_safe_text(repository or project or "neurons", max_chars=120)
+        safe_branch = public_safe_text(branch or "main", max_chars=120)
+        request = "Review an HTML artifact using the accepted style preference."
+        preference_route = self.brain_objects_query(
+            repository=safe_repository,
+            branch=safe_branch,
+            project=project,
+            route="code_style_preference",
+            query=request,
+            current_files=[],
+            consumer=consumer,
+        )
+        html_route = self.brain_objects_query(
+            repository=safe_repository,
+            branch=safe_branch,
+            project=project,
+            route="html_visualization_preference",
+            query=request,
+            current_files=[],
+            consumer=consumer,
+        )
+        context_pack = self.core_brain(project=project).brain_context_resolve(
+            repository=safe_repository,
+            branch=safe_branch,
+            project=project,
+            current_request=request,
+            current_files=[],
+            consumer=consumer,
+        ).to_dict()
+        return build_preference_artifact_memory_runtime_evidence(
+            preference_route=preference_route,
+            html_route=html_route,
+            context_pack=context_pack,
+            artifact_summary={
+                "artifact_type": "html_review",
+            },
         )
 
     def _projection_join_runtime_read_path_evidence(
