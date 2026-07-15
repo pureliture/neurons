@@ -366,6 +366,7 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
             proof_key=proof_key,
             context_pack=_remote_mapping_or_failure(context_pack),
             route_smokes=smokes,
+            allow_observed_source_payload_drift=True,
         )
         startup_runtime["collector_execution"] = {
             "runner_kind": (
