@@ -1808,7 +1808,7 @@ def test_neuron_knowledge_golden_query_eval_activation_progress_accepts_post_dep
     assert report["production_mutation_performed"] is False
 
 
-def test_neuron_knowledge_golden_query_eval_activation_progress_keeps_p7_gap_for_replayed_capture(
+def test_neuron_knowledge_golden_query_eval_activation_progress_classifies_p7_replay_as_gap(
     tmp_path, capsys
 ):
     capture_file = tmp_path / "p6-p7-post-deploy-capture.json"
@@ -1832,9 +1832,10 @@ def test_neuron_knowledge_golden_query_eval_activation_progress_keeps_p7_gap_for
     phase_progress = {item["phase"]: item for item in report["phase_progress"]}
 
     assert checks["P6"]["result"] == "PASS"
-    assert checks["P7"]["result"] == "FAIL"
+    assert checks["P7"]["result"] == "PASS_WITH_GAPS"
     assert "p7_preference_artifact_collector_capability_missing" in checks["P7"]["gaps"]
     assert phase_progress["P7"]["quality_result"] == "PASS_WITH_GAPS"
+    assert report["status"] == "PASS_WITH_GAPS"
     assert report["next_phase"] == "P7"
     assert report["remaining_phases"] == ["P7", "P8", "P9"]
     assert p7["preference_claim_status"] == "not_validated"
