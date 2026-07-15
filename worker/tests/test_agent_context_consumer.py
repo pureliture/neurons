@@ -154,7 +154,7 @@ def _route_smokes() -> list[dict]:
         "html_visualization_preference",
         "deployment_runtime_truth",
     )
-    return [
+    smokes = [
         {
             "schema_version": "brain_objects_query.v1",
             "route": route,
@@ -170,6 +170,19 @@ def _route_smokes() -> list[dict]:
         }
         for route in routes
     ]
+    for smoke in smokes:
+        route = smoke["route"]
+        smoke["semantic_payload_hash"] = hash_payload(
+            {"route": route, "content_hash": f"sha256:{route}"}
+        )
+        smoke["source_payload_hash"] = hash_payload(
+            {
+                "route": route,
+                "content_hash": f"sha256:{route}",
+                "observed_at": "2026-07-15T03:00:00+00:00",
+            }
+        )
+    return smokes
 
 
 def _challenge() -> dict:
@@ -258,6 +271,76 @@ def test_external_consumer_receipt_binds_actual_context_events_and_policy_decisi
         "deployment_runtime_truth",
     }
     assert consumed == {challenge["challenge_hash"]}
+
+
+def test_receipt_v2_rejects_tampered_child_observed_source_payload_hash():
+    challenge = _challenge()
+    receipt = _receipt()
+    route = "authority_archive_separation"
+    binding = receipt["context_binding"]["route_manifest"][route]
+
+    assert binding["schema_version"] == "agent_context_route_binding.v1"
+    assert binding["observed_source_payload_hash"].startswith("sha256:")
+    binding["observed_source_payload_hash"] = "sha256:" + "0" * 64
+
+    failures = validate_agent_context_consumer_startup_receipt(
+        receipt,
+        challenge=challenge,
+        proof_key=PROOF_KEY,
+        context_pack=_context_pack(),
+        route_smokes=_route_smokes(),
+        now=NOW,
+    )
+
+    assert "agent_context_startup_receipt_hash_mismatch" in failures
+    assert "agent_context_startup_proof_mismatch" in failures
+
+
+def test_receipt_v2_rejects_signed_child_observed_source_payload_hash_drift():
+    challenge = _challenge()
+    route = "authority_archive_separation"
+    signed_route_smokes = _route_smokes()
+    expected_route_smokes = _route_smokes()
+    for smoke in signed_route_smokes:
+        if smoke["route"] == route:
+            smoke["source_payload_hash"] = "sha256:" + "0" * 64
+            break
+    receipt = build_agent_context_consumer_startup_receipt(
+        challenge=challenge,
+        proof_key=PROOF_KEY,
+        context_pack=_context_pack(),
+        route_smokes=signed_route_smokes,
+        now=NOW,
+        process_instance_seed="bounded-test-process",
+    )
+
+    failures = validate_agent_context_consumer_startup_receipt(
+        receipt,
+        challenge=challenge,
+        proof_key=PROOF_KEY,
+        context_pack=_context_pack(),
+        route_smokes=expected_route_smokes,
+        now=NOW,
+    )
+
+    assert f"agent_context_startup_route_observed_binding_mismatch:{route}" in failures
+    assert "agent_context_startup_receipt_hash_mismatch" not in failures
+    assert "agent_context_startup_proof_mismatch" not in failures
+
+
+def test_receipt_v2_rejects_duplicate_route_smokes_before_signing():
+    route_smokes = _route_smokes()
+    route_smokes.append(deepcopy(route_smokes[0]))
+
+    with pytest.raises(ValueError, match="duplicate agent context startup route"):
+        build_agent_context_consumer_startup_receipt(
+            challenge=_challenge(),
+            proof_key=PROOF_KEY,
+            context_pack=_context_pack(),
+            route_smokes=route_smokes,
+            now=NOW,
+            process_instance_seed="bounded-test-process",
+        )
 
 
 def test_receipt_validation_fails_closed_for_replay_tamper_and_server_issuer():

@@ -837,7 +837,7 @@ def _valid_p9_startup_runtime_evidence(
 
 
 def _valid_p9_route_smokes():
-    return [
+    smokes = [
         {
             "schema_version": "brain_objects_query.v1",
             "route": route,
@@ -852,6 +852,14 @@ def _valid_p9_route_smokes():
         }
         for route in _REQUIRED_ROUTE_NAMES
     ]
+    for smoke in smokes:
+        smoke["semantic_payload_hash"] = hash_payload(
+            {"route": smoke["route"], "projection": "stable"}
+        )
+        smoke["source_payload_hash"] = hash_payload(
+            {"route": smoke["route"], "observed_at": _P9_STARTUP_NOW.isoformat()}
+        )
+    return smokes
 
 
 def _valid_p6_p7_p8_p9_runtime_evidence(*, live: bool = True):

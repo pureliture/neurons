@@ -8,6 +8,7 @@ from urllib.parse import unquote
 from .._util import ensure_public_safe, hash_payload, public_safe_text, require_sha256
 from .agent_context_consumer import (
     AGENT_CONTEXT_CONSUMER_STARTUP_RECEIPT_SCHEMA,
+    AGENT_CONTEXT_ROUTE_BINDING_SCHEMA,
     CODEX_BOUNDED_ACTIVATION_SCOPE,
     CODEX_CONTEXT_ADAPTER,
     REQUIRED_POLICY_DECISIONS,
@@ -3740,6 +3741,16 @@ def _is_sha256_hash_ref(value: str) -> bool:
     return len(digest) == 64 and all(char in "0123456789abcdefABCDEF" for char in digest)
 
 
+def _duplicate_strings(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for value in values:
+        if value in seen and value not in duplicates:
+            duplicates.append(value)
+        seen.add(value)
+    return duplicates
+
+
 def _permission_sensitive_audit_reports_mutation(
     *,
     audit: Mapping[str, Any],
@@ -4122,11 +4133,50 @@ def _external_agent_context_startup_receipt_failures(
         if isinstance(context_binding.get("route_manifest"), Mapping)
         else {}
     )
-    checked_routes = set(_string_list(read_path.get("routes_checked")))
+    checked_route_list = _string_list(read_path.get("routes_checked"))
+    checked_routes = set(checked_route_list)
+    for route in _duplicate_strings(checked_route_list):
+        failures.append(f"agent_context_startup_read_path_route_duplicate:{route}")
     if set(route_manifest) != checked_routes:
         failures.append("agent_context_startup_route_manifest_mismatch")
-    if any(not _is_sha256_hash_ref(str(value or "")) for value in route_manifest.values()):
-        failures.append("agent_context_startup_route_hash_invalid")
+    receipt_scope = (
+        receipt.get("scope_binding")
+        if isinstance(receipt.get("scope_binding"), Mapping)
+        else {}
+    )
+    route_request_hashes = (
+        receipt_scope.get("route_request_hashes")
+        if isinstance(receipt_scope.get("route_request_hashes"), Mapping)
+        else {}
+    )
+    route_binding_keys = {
+        "schema_version",
+        "route",
+        "route_request_hash",
+        "semantic_projection_hash",
+        "observed_source_payload_hash",
+    }
+    for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES:
+        if route not in route_manifest:
+            failures.append(f"agent_context_startup_route_missing:{route}")
+            continue
+        binding = (
+            route_manifest.get(route)
+            if isinstance(route_manifest.get(route), Mapping)
+            else {}
+        )
+        if set(binding) != route_binding_keys:
+            failures.append(f"agent_context_startup_route_binding_shape_mismatch:{route}")
+        if binding.get("schema_version") != AGENT_CONTEXT_ROUTE_BINDING_SCHEMA:
+            failures.append(f"agent_context_startup_route_binding_schema_mismatch:{route}")
+        if binding.get("route") != route:
+            failures.append(f"agent_context_startup_route_binding_route_mismatch:{route}")
+        if binding.get("route_request_hash") != route_request_hashes.get(route):
+            failures.append(f"agent_context_startup_route_request_binding_mismatch:{route}")
+        if not _is_sha256_hash_ref(str(binding.get("semantic_projection_hash") or "")):
+            failures.append(f"agent_context_startup_route_semantic_hash_invalid:{route}")
+        if not _is_sha256_hash_ref(str(binding.get("observed_source_payload_hash") or "")):
+            failures.append(f"agent_context_startup_route_observed_hash_invalid:{route}")
 
     bundle_binding = (
         startup.get("capture_bundle_binding")
@@ -4146,6 +4196,13 @@ def _external_agent_context_startup_receipt_failures(
         captured_product
     ):
         failures.append("agent_context_startup_product_projection_binding_mismatch")
+    captured_route_names = [
+        str(smoke.get("route") or "")
+        for smoke in captured_route_smokes
+        if str(smoke.get("route") or "")
+    ]
+    for route in _duplicate_strings(captured_route_names):
+        failures.append(f"agent_context_startup_route_capture_duplicate:{route}")
     captured_smokes_by_route = {
         str(smoke.get("route") or ""): smoke
         for smoke in captured_route_smokes
@@ -4162,11 +4219,17 @@ def _external_agent_context_startup_receipt_failures(
     ):
         failures.append("agent_context_startup_route_capture_binding_shape_mismatch")
     for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES:
-        captured_hash = hash_payload(captured_smokes_by_route.get(route, {}))
-        if (
-            str(route_manifest.get(route) or "") != captured_hash
-            or str(bundle_route_hashes.get(route) or "") != captured_hash
-        ):
+        captured_smoke = captured_smokes_by_route.get(route, {})
+        captured_hash = hash_payload(captured_smoke)
+        binding = (
+            route_manifest.get(route)
+            if isinstance(route_manifest.get(route), Mapping)
+            else {}
+        )
+        captured_semantic_hash = str(captured_smoke.get("semantic_payload_hash") or "")
+        if str(binding.get("semantic_projection_hash") or "") != captured_semantic_hash:
+            failures.append(f"agent_context_startup_route_semantic_binding_mismatch:{route}")
+        if str(bundle_route_hashes.get(route) or "") != captured_hash:
             failures.append(f"agent_context_startup_route_capture_binding_mismatch:{route}")
 
     decisions = [
