@@ -43,3 +43,45 @@ def test_preference_rule_model_does_not_consume_workflow_contracts():
     )
 
     assert preference_rule_cards_from_memory_cards([workflow]) == []
+
+
+def test_artifact_preference_rule_model_carries_canonical_six_field_continuity():
+    card = _card(
+        "mem_artifact_preference",
+        "preference",
+        "Dense HTML review artifacts",
+        {
+            "preference": "Expose objects, relationships, evidence, and gate status.",
+            "applies_to": "html_review_artifact",
+            "target_object_id": "ko:ArtifactPreference:html-review-density",
+            "source_content_hash": "sha256:" + "a" * 64,
+            "authority_proposal_id": "proposal:p7-html-review-density",
+            "authority_decision_id": "decision:p7-html-review-density",
+        },
+    )
+    card["project"] = "neurons"
+    card["content_hash"] = "sha256:" + "c" * 64
+
+    [preference] = preference_rule_cards_from_memory_cards(
+        [card],
+        current_request="review html artifact",
+    )
+
+    assert {
+        key: preference[key]
+        for key in (
+            "memory_id",
+            "card_content_hash",
+            "authority_proposal_id",
+            "authority_decision_id",
+            "project",
+            "source_content_hash",
+        )
+    } == {
+        "memory_id": "mem_artifact_preference",
+        "card_content_hash": "sha256:" + "c" * 64,
+        "authority_proposal_id": "proposal:p7-html-review-density",
+        "authority_decision_id": "decision:p7-html-review-density",
+        "project": "neurons",
+        "source_content_hash": "sha256:" + "a" * 64,
+    }

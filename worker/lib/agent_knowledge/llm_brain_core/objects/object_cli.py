@@ -19,6 +19,7 @@ from .golden_query_eval import (
     build_phase_golden_query_coverage_report,
     build_source_to_authority_quality_gate_report,
 )
+from .artifact_preference_evaluator import evaluate_artifact_preference
 from .extraction_pipeline import run_source_to_candidate_graph_activation_preview
 from .okf_export import build_okf_bundle
 from .object_packs import apply_approval_board_decisions, apply_candidate_review_edits, build_documentation_cleanup_pack
@@ -95,6 +96,24 @@ def _parse_expected_source_type_counts(values: list[str], parser: argparse.Argum
     return counts
 
 
+def _parse_artifact_metrics(
+    values: list[str],
+    parser: argparse.ArgumentParser,
+) -> dict[str, int]:
+    metrics: dict[str, int] = {}
+    for value in values:
+        if "=" not in value:
+            parser.error("--metric must use NAME=VALUE")
+        name, count_text = value.split("=", 1)
+        if not name or name in metrics:
+            parser.error("--metric names must be non-empty and unique")
+        try:
+            metrics[name] = int(count_text)
+        except ValueError:
+            parser.error("--metric values must be integers")
+    return metrics
+
+
 def _non_negative_int(value: str) -> int:
     count = int(value)
     if count < 0:
@@ -154,6 +173,53 @@ def object_explain_main(argv: list[str] | None = None) -> int:
         }
     )
     return 0
+
+
+def artifact_preference_evaluate_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="neuron-knowledge artifact-preference-evaluate")
+    parser.add_argument("--ledger", required=True)
+    parser.add_argument("--repository", required=True)
+    parser.add_argument("--branch", required=True)
+    parser.add_argument("--project", required=True)
+    parser.add_argument(
+        "--artifact-type",
+        required=True,
+        choices=["html_review", "html_review_artifact"],
+    )
+    parser.add_argument("--summary", required=True)
+    parser.add_argument("--artifact-fingerprint", required=True)
+    parser.add_argument("--metric", action="append", default=[])
+    parser.add_argument("--evidence-ref", action="append", default=[])
+    parser.add_argument(
+        "--consumer",
+        required=True,
+        choices=[
+            "unspecified",
+            "codex",
+            "claude-code",
+            "gemini",
+            "hermes",
+            "post_deploy_mcp_capture",
+        ],
+    )
+    args = parser.parse_args(argv)
+    try:
+        receipt = evaluate_artifact_preference(
+            ledger=Ledger.open_read_only(args.ledger),
+            repository=args.repository,
+            branch=args.branch,
+            project=args.project,
+            artifact_type=args.artifact_type,
+            summary=args.summary,
+            artifact_fingerprint=args.artifact_fingerprint,
+            metrics=_parse_artifact_metrics(args.metric, parser),
+            evidence_refs=[str(ref) for ref in args.evidence_ref],
+            consumer=args.consumer,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    _print_json(receipt)
+    return 1 if receipt["status"] == "FAIL" else 0
 
 
 def corpus_status_main(argv: list[str] | None = None) -> int:
@@ -603,8 +669,10 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     parser.add_argument("--collect-post-deploy-mcp-capture", action="store_true")
     parser.add_argument("--mcp-url", default="")
     parser.add_argument("--deployed-identity-file", default="")
+    parser.add_argument("--artifact-descriptor-file", default="")
     parser.add_argument("--repository", default="")
     parser.add_argument("--branch", default="")
+    parser.add_argument("--project", default="")
     parser.add_argument("--consumer", default="codex")
     args = parser.parse_args(argv)
     if args.evidence_collection_plan:
@@ -613,6 +681,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 expected_commit=args.expected_commit,
                 repository=args.repository,
                 branch=args.branch,
+                project=args.project,
                 consumer=args.consumer,
             )
         )
@@ -623,6 +692,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 expected_commit=args.expected_commit,
                 repository=args.repository,
                 branch=args.branch,
+                project=args.project,
                 consumer=args.consumer,
             )
         )
@@ -635,19 +705,35 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
             if args.deployed_identity_file
             else None
         )
-        _print_json(
-            asyncio.run(
-                collect_source_to_candidate_post_deploy_mcp_capture(
-                    mcp_url=args.mcp_url,
-                    expected_commit=args.expected_commit,
-                    repository=args.repository,
-                    branch=args.branch,
-                    consumer=args.consumer,
-                    deployed_identity=deployed_identity,
-                )
+        artifact_descriptor = (
+            _load_json_mapping(
+                args.artifact_descriptor_file,
+                label="artifact descriptor",
+            )
+            if args.artifact_descriptor_file
+            else None
+        )
+        capture = asyncio.run(
+            collect_source_to_candidate_post_deploy_mcp_capture(
+                mcp_url=args.mcp_url,
+                expected_commit=args.expected_commit,
+                repository=args.repository,
+                branch=args.branch,
+                project=args.project,
+                consumer=args.consumer,
+                deployed_identity=deployed_identity,
+                artifact_descriptor=artifact_descriptor,
             )
         )
-        return 0
+        output = dict(capture)
+        output["runtime_readiness"] = (
+            build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+                captured_evidence=capture,
+                expected_commit=args.expected_commit,
+            )
+        )
+        _print_json(output)
+        return 1 if output["runtime_readiness"]["status"] == "FAIL" else 0
     if args.collect_shadow_evidence:
         read_service = BrainReadService()
 
@@ -657,6 +743,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 branch=args.branch,
                 query=f"source-to-candidate runtime readiness route smoke: {route}",
                 current_files=[],
+                project=args.project or None,
                 route=route,
                 limit=5,
                 response_mode="full",
@@ -668,6 +755,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 expected_commit=args.expected_commit,
                 repository=args.repository,
                 branch=args.branch,
+                project=args.project,
                 consumer=args.consumer,
                 route_runner=route_runner,
             )

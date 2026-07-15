@@ -23,6 +23,9 @@ from .llm_brain_core.objects.authority_policy import (
     is_allowed_object_target,
     knowledge_object_class_from_id,
 )
+from .llm_brain_core.objects.artifact_preference_evaluator import (
+    evaluate_artifact_preference,
+)
 from .llm_brain_core.objects.knowledge_objects import AuthorityDecision, ReviewProposal
 from .llm_brain_core.objects.object_packs import apply_approval_board_decisions, apply_candidate_review_edits
 from .llm_brain_core.objects.runtime_readiness import (
@@ -1126,6 +1129,32 @@ class KnowledgeSearchService:
         )
         return self._overlay_object_authority_states(result)
 
+    def brain_artifact_preference_evaluate(
+        self,
+        *,
+        repository: str,
+        branch: str,
+        project: str,
+        artifact_type: str,
+        summary: str,
+        artifact_fingerprint: str,
+        metrics: Mapping[str, Any],
+        evidence_refs: list[str] | tuple[str, ...],
+        consumer: str,
+    ) -> dict[str, Any]:
+        return evaluate_artifact_preference(
+            ledger=self.ledger,
+            repository=repository,
+            branch=branch,
+            project=project,
+            artifact_type=artifact_type,
+            summary=summary,
+            artifact_fingerprint=artifact_fingerprint,
+            metrics=metrics,
+            evidence_refs=evidence_refs,
+            consumer=consumer,
+        )
+
     def brain_source_to_candidate_graph(
         self,
         *,
@@ -1453,6 +1482,7 @@ class KnowledgeSearchService:
         evidence_collection_network_used: bool = False,
         repository: str = "",
         branch: str = "",
+        project: str = "",
         consumer: str = "codex",
     ) -> dict[str, Any]:
         if evidence_collection_plan:
@@ -1460,6 +1490,7 @@ class KnowledgeSearchService:
                 expected_commit=expected_commit,
                 repository=repository,
                 branch=branch,
+                project=project,
                 consumer=consumer,
             )
         if evidence_packet_template:
@@ -1467,15 +1498,22 @@ class KnowledgeSearchService:
                 expected_commit=expected_commit,
                 repository=repository,
                 branch=branch,
+                project=project,
                 consumer=consumer,
             )
         if collect_shadow_evidence:
+            resolved_project = public_safe_text(
+                str(project or ("neurons" if evidence_collection_mode == "post_deploy_read_only_smoke" else "")),
+                max_chars=120,
+            )
+
             def route_runner(route: str) -> Mapping[str, Any]:
                 return self.brain_objects_query(
                     repository=repository,
                     branch=branch,
                     query=f"source-to-candidate runtime readiness route smoke: {route}",
                     current_files=[],
+                    project=resolved_project or None,
                     route=route,
                     limit=5,
                     response_mode="full",
@@ -1490,19 +1528,20 @@ class KnowledgeSearchService:
                 projection_join_runner = lambda: self._projection_join_runtime_read_path_evidence(
                     repository=repository,
                     branch=branch,
-                    project=repository.rsplit("/", 1)[-1] if repository else "neurons",
+                    project=resolved_project,
                     consumer=consumer,
                 )
                 preference_artifact_memory_runner = lambda: self._preference_artifact_memory_runtime_read_path_evidence(
                     repository=repository,
                     branch=branch,
-                    project=repository.rsplit("/", 1)[-1] if repository else "neurons",
+                    project=resolved_project,
                     consumer=consumer,
                 )
             return build_source_to_candidate_runtime_collected_shadow_evidence_packet(
                 expected_commit=expected_commit,
                 repository=repository,
                 branch=branch,
+                project=resolved_project,
                 consumer=consumer,
                 route_runner=route_runner,
                 projection_join_runner=projection_join_runner,
@@ -1512,24 +1551,24 @@ class KnowledgeSearchService:
             )
         if isinstance(normalize_post_deploy_capture, Mapping):
             return build_source_to_candidate_runtime_post_deploy_capture_packet(
-                captured_evidence=normalize_post_deploy_capture,
+                captured_evidence=dict(normalize_post_deploy_capture),
             )
         if isinstance(post_deploy_capture, Mapping):
             return build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
-                captured_evidence=post_deploy_capture,
+                captured_evidence=dict(post_deploy_capture),
                 expected_commit=expected_commit,
             )
         if isinstance(normalize_shadow_evidence, Mapping):
             return build_source_to_candidate_runtime_shadow_evidence_packet(
-                captured_evidence=normalize_shadow_evidence,
+                captured_evidence=dict(normalize_shadow_evidence),
             )
         if isinstance(shadow_evidence, Mapping):
             return build_source_to_candidate_runtime_shadow_readiness_report(
-                captured_evidence=shadow_evidence,
+                captured_evidence=dict(shadow_evidence),
                 expected_commit=expected_commit,
             )
         return build_source_to_candidate_runtime_readiness_report(
-            live_evidence=live_evidence,
+            live_evidence=dict(live_evidence) if isinstance(live_evidence, Mapping) else None,
             expected_commit=expected_commit,
         )
 
