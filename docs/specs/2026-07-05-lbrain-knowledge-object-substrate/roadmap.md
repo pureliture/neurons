@@ -919,8 +919,14 @@ Local validation evidence:
 - P7 production authority allowlist fail-closed result: `2 passed, 1 warning`
 - P7 production authority independent-review closure evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_object_authority_production_gate_rejects_proposed_object_mismatch tests/test_neuron_mcp_stdio.py::test_mcp_object_authority_production_gate_rejects_cross_project_decision tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_requires_matching_proposal_project tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_rejects_cross_project_bounded_execution_evidence tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_rejects_non_current_artifact_preference_execution tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_keeps_replacement_current_repo_document_only tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_accepts_bounded_production_execution_for_artifact_preference`
 - P7 production authority independent-review closure result: `8 passed, 1 warning`
+- P7 ledger project/scope fail-closed evidence: `cd worker && uv run pytest -q tests/test_ledger_core.py::test_object_authority_decision_fails_closed_without_matching_project_and_scope tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_requires_matching_proposal_project tests/test_neuron_mcp_stdio.py::test_mcp_object_authority_production_gate_accepts_artifact_preference`
+- P7 ledger project/scope fail-closed result: `5 passed, 1 warning`
 - P7 production authority source-gate adjacent evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py tests/test_source_to_candidate_runtime_readiness.py`
 - P7 production authority source-gate adjacent result: `196 passed, 1 warning`
+- P7 production authority source-gate worker regression evidence: `cd worker && uv run pytest -q`
+- P7 production authority source-gate worker regression result: `1835 passed, 9 skipped, 1 warning`
+- P7 production authority source-gate root regression evidence: `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`
+- P7 production authority source-gate root regression result: `BUILD SUCCESSFUL`
 - current configured LBrain read path smoke: `brain_objects_query` with explicit `code_style_preference` and `html_visualization_preference` routes returns `brain_objects_query.v1` / `object_pack.v1` without mutation, but both preference lanes are empty; `html_visualization_preference` reports `accepted_html_preference_missing` and `visualization_preference_missing`, and `code_style_preference` reports `context_authority_object_pack_empty`
 - current agent context read path smoke: `brain_context_resolve` returns `agent_context_product_pack.v1` with `style_preference.object_count=0`, read-only `surface_policy`, and `runtime_evidence_unverified`; this is live configured read-path gap evidence, not P7 PASS evidence
 
