@@ -1545,6 +1545,25 @@ def test_product_evaluator_keeps_replayed_one_object_p7_capture_as_gap():
     )
 
 
+def test_product_evaluator_fails_replayed_p7_capability_gap_without_current_object():
+    evidence = deepcopy(build_product_activation_progress_report()["product_evidence_summary"])
+    p7 = next(item for item in evidence if item["phase"] == "P7")
+    p7["status"] = "PASS_WITH_GAPS"
+    p7["preference_claim_status"] = "not_validated"
+    p7["artifact_preference_pack_status"] = "pass_with_gaps"
+    p7["object_count"] = 0
+    p7["accepted_preference_count"] = 0
+    p7["proposal_preference_count"] = 0
+    p7["source_evidence_ref_count"] = 1
+    p7["gaps"] = ["preference_artifact_collector_capability_missing"]
+
+    result = evaluate_product_evidence_summary(evidence)
+
+    check = next(item for item in result["checks"] if item["phase"] == "P7")
+    assert check["result"] == "FAIL"
+    assert "p7_preference_style_objects_missing" in check["failures"]
+
+
 def test_product_activation_progress_fails_p7_when_preference_context_lacks_accepted_current_lane():
     evidence = _valid_p6_p7_runtime_evidence(live=True)
     evidence["preference_artifact_memory"]["agent_context_preference_section"] = {
