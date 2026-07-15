@@ -4,6 +4,10 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .._util import ensure_public_safe, public_safe_text
+from .authority_policy import (
+    knowledge_object_class_from_id,
+    is_allowed_object_target,
+)
 from .golden_query_eval import build_source_to_authority_quality_gate_report
 
 REQUIRED_REVIEW_TOOL_NAMES = (
@@ -3399,9 +3403,10 @@ def _bounded_execution_failures(
         failures.append("bounded_execution_object_count_not_one")
     if not proposal_target or proposal_target != decision_target or proposal_target != read_target:
         failures.append("bounded_execution_target_object_mismatch")
-    if proposal_target and not proposal_target.startswith("ko:RepoDocument:"):
+    target_object_class = knowledge_object_class_from_id(proposal_target)
+    if proposal_target and not is_allowed_object_target(proposal_target):
         failures.append("bounded_execution_object_class_not_allowed")
-    if "RepoDocument" not in allowed_object_classes:
+    if not target_object_class or target_object_class not in allowed_object_classes:
         failures.append("bounded_execution_allowed_object_class_missing")
     if proposal.get("proposal_write_performed") is not True:
         failures.append("bounded_execution_proposal_write_missing")

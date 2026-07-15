@@ -913,6 +913,12 @@ Local validation evidence:
 - P7 post-deploy evidence consumption result: `7 passed, 1 warning`
 - P7 adjacent product/runtime regression evidence: `cd worker && uv run pytest -q tests/test_golden_query_eval.py tests/test_source_to_candidate_runtime_readiness.py tests/test_post_deploy_mcp_capture.py tests/test_neuron_cli.py`
 - P7 adjacent product/runtime regression result: `180 passed, 1 warning`
+- P7 `ArtifactPreference` production authority source-gate evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_approval_board_production_gate_requires_allowed_object_class tests/test_neuron_mcp_stdio.py::test_mcp_approval_board_production_gate_promotes_artifact_preference_to_authority tests/test_neuron_mcp_stdio.py::test_mcp_object_authority_production_gate_accepts_artifact_preference tests/test_neuron_mcp_stdio.py::test_mcp_object_decision_commit_is_restricted_denied_by_default tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_accepts_bounded_production_execution_for_artifact_preference`
+- P7 `ArtifactPreference` production authority source-gate result: `5 passed, 1 warning`
+- P7 production authority allowlist fail-closed evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py::test_mcp_object_authority_production_gate_rejects_unallowed_object_class tests/test_source_to_candidate_runtime_readiness.py::test_runtime_readiness_rejects_artifact_preference_when_scope_omits_target_class`
+- P7 production authority allowlist fail-closed result: `2 passed, 1 warning`
+- P7 production authority source-gate adjacent evidence: `cd worker && uv run pytest -q tests/test_neuron_mcp_stdio.py tests/test_source_to_candidate_runtime_readiness.py`
+- P7 production authority source-gate adjacent result: `189 passed, 1 warning`
 - current configured LBrain read path smoke: `brain_objects_query` with explicit `code_style_preference` and `html_visualization_preference` routes returns `brain_objects_query.v1` / `object_pack.v1` without mutation, but both preference lanes are empty; `html_visualization_preference` reports `accepted_html_preference_missing` and `visualization_preference_missing`, and `code_style_preference` reports `context_authority_object_pack_empty`
 - current agent context read path smoke: `brain_context_resolve` returns `agent_context_product_pack.v1` with `style_preference.object_count=0`, read-only `surface_policy`, and `runtime_evidence_unverified`; this is live configured read-path gap evidence, not P7 PASS evidence
 
@@ -929,12 +935,13 @@ Implemented local/test scope:
 - markerless shadow/local-test preference evidence is intentionally not promoted to P7 live product evidence, even when it is carried inside a deployed runtime collection packet
 - missing P7 runtime packet evidence remains `PASS_WITH_GAPS` with `live_preference_artifact_memory_unverified` and `accepted_preference_context_pack_live_unproven`; unsafe or incomplete supplied evidence fails closed
 - P5 product evidence checks now also mark P7 as `PASS_WITH_GAPS` with `p7_accepted_preference_context_pack_live_unproven` and `p7_html_artifact_review_live_unproven` until deployed/live consumer evidence is attached
+- Issue #186 adds one shared source-side production authority class policy for `RepoDocument` and `ArtifactPreference`. Approval-board and low-level proposal/decision paths keep runtime opt-in, per-call gate, single-project/single-object scope, read-after-write, rollback/supersession, and protected-output guards; runtime readiness also requires the evidence scope allowlist to contain the target object's class. The replacement-current validator remains `RepoDocument`-only.
 
 Remaining gaps:
 
 - branch-local runtime readiness can now validate or reject a sanitized P7 preference/artifact memory evidence packet, and activation progress can consume a live runtime-marked packet, but no configured/deployed read path currently returns non-empty accepted P7 preference authority
 - accepted preference context pack is not live-proven in a deployed agent read path; current configured LBrain read-path smoke returns empty `code_style_preference`, empty `html_visualization_preference`, and empty `style_preference` agent-context section
-- production preference/style authority promotion remains closed until an approved write gate exists
+- the source-side production write gate now admits a bounded `ArtifactPreference` promotion under the existing preapproved runtime/per-call controls, but it is not yet deployed or live-executed and the configured read path still has no accepted-current preference object
 - HTML artifact check is local/test summary/metrics validation only, not a live product consumer workflow
 - `html_visualization_preference` route is now part of the required post-deploy route-smoke contract and the configured read path implements the route, but the current route proof is gap evidence because accepted HTML/visualization preferences are absent
 
@@ -1017,7 +1024,7 @@ Remaining gaps:
 - no live rollout artifact identity proof is attached to this branch-local collector packet itself; post-#115 image/source identity is tracked separately in P1 evidence
 - branch-local runtime readiness and activation progress can now validate or reject a sanitized P8 permission-sensitive audit/deployed-identity/provenance packet, but that packet has not been collected from deployed runtime for the current source
 - production permission-sensitive audit flow is not live-proven
-- production authority promotion is preapproved, but only branch-local/sanitized bounded execution packet validation exists; no deployed/live runtime write gate execution evidence is attached yet
+- production authority promotion is preapproved and the source gate now covers bounded `ArtifactPreference` promotion, but only branch-local/sanitized execution validation exists; no deployed/live `ArtifactPreference` write gate execution evidence is attached yet
 - the collection plan is a branch-local template, not collected live evidence; it must not be reported as production readiness until an actual sanitized evidence packet is collected from the deployed read path
 - the evidence packet template is branch-local handoff metadata, not collected live evidence; it must not be reported as production readiness until a sanitized packet is populated from the deployed read path and validated by runtime readiness
 - the collector packet is branch-local read-only evidence preparation, not deployed read-path proof; post-#115/#12/#9 closes the separate P1 six-route/source-review-readiness activation proof, but local_test review-loop, P6 session/project/work-unit rollup, P7 preference/artifact memory, P8 permission audit, and P9 startup/read-path fields still must not be reported as production readiness until populated from the configured/deployed MCP read path with source/image identity proof

@@ -10,6 +10,11 @@ from .knowledge_search_service import KnowledgeSearchService
 from .llm_brain_core.context import project_from_repository
 from .llm_brain_core.context_builder import normalize_context_consumer
 from .llm_brain_core.models import EvidenceRequest
+from .llm_brain_core.objects.authority_policy import (
+    allowed_object_class_gap,
+    allowed_object_classes_list,
+    is_allowed_object_target,
+)
 from .llm_brain_core.objects.knowledge_objects import AuthorityDecision, ReviewProposal, denied_payload
 from .llm_brain_core.objects.reference_corpus import build_corpus_ingest_plan
 from .mcp_tools import (
@@ -705,8 +710,8 @@ def _production_object_authority_gate(arguments: Mapping[str, Any], *, service: 
     for field in required_true_fields:
         if gate.get(field) is not True:
             missing.append(field)
-    if not target_object_id.startswith("ko:RepoDocument:"):
-        missing.append("allowed_object_class_RepoDocument")
+    if not is_allowed_object_target(target_object_id):
+        missing.append(allowed_object_class_gap())
     if "proposal_type" in arguments:
         proposal_type = public_safe_text(str(arguments.get("proposal_type") or ""), max_chars=120)
         if proposal_type not in _ALLOWED_PRODUCTION_PROPOSAL_TYPES:
@@ -748,7 +753,7 @@ def _production_authority_promotion_plan(arguments: Mapping[str, object], *, gat
         "requested_decision_id": decision_id,
         "project": project,
         "missing_gate_evidence": missing_gate_evidence,
-        "allowed_object_classes": ["RepoDocument"],
+        "allowed_object_classes": allowed_object_classes_list(),
         "allowed_proposal_types": list(_ALLOWED_PRODUCTION_PROPOSAL_TYPES),
         "allowed_decision_types": list(_ALLOWED_PRODUCTION_DECISION_TYPES),
         "reviewer_role": "human_object_authority_reviewer",
