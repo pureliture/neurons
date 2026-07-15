@@ -14,6 +14,7 @@ from .llm_brain_core.objects.authority_policy import (
     allowed_object_class_gap,
     allowed_object_classes_list,
     is_allowed_object_target,
+    knowledge_object_class_from_id,
 )
 from .llm_brain_core.objects.knowledge_objects import AuthorityDecision, ReviewProposal, denied_payload
 from .llm_brain_core.objects.reference_corpus import build_corpus_ingest_plan
@@ -556,6 +557,7 @@ def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict,
             proposal_write_target="production_ledger",
         )
         result["project"] = _project_arg(arguments)
+        result["object_type"] = knowledge_object_class_from_id(result["target_object_id"])
         result["ledger_scope"] = "production"
         result["production_mutation_performed"] = True
         result["production_gate_ref_hash"] = gate["approval_ref_hash"]
@@ -579,6 +581,7 @@ def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict,
         proposal_write_target="local_test_ledger",
     )
     result["project"] = _project_arg(arguments)
+    result["object_type"] = knowledge_object_class_from_id(result["target_object_id"])
     result["ledger_scope"] = "local_test"
     result["production_mutation_performed"] = False
     service.append_object_review_proposal(result)
@@ -712,6 +715,20 @@ def _production_object_authority_gate(arguments: Mapping[str, Any], *, service: 
             missing.append(field)
     if not is_allowed_object_target(target_object_id):
         missing.append(allowed_object_class_gap())
+    proposed_object = arguments.get("proposed_object")
+    if proposed_object is not None:
+        if not isinstance(proposed_object, Mapping):
+            missing.append("proposed_object_shape")
+        else:
+            proposed_object_id = public_safe_text(str(proposed_object.get("object_id") or ""), max_chars=180)
+            proposed_object_type = public_safe_text(str(proposed_object.get("object_type") or ""), max_chars=120)
+            if proposed_object_id != target_object_id:
+                missing.append("proposed_object_target_match")
+            if not proposed_object_type or not is_allowed_object_target(
+                target_object_id,
+                object_type=proposed_object_type,
+            ):
+                missing.append(allowed_object_class_gap())
     if "proposal_type" in arguments:
         proposal_type = public_safe_text(str(arguments.get("proposal_type") or ""), max_chars=120)
         if proposal_type not in _ALLOWED_PRODUCTION_PROPOSAL_TYPES:
@@ -720,6 +737,27 @@ def _production_object_authority_gate(arguments: Mapping[str, Any], *, service: 
         decision_type = public_safe_text(str(arguments.get("decision_type") or ""), max_chars=120)
         if decision_type not in _ALLOWED_PRODUCTION_DECISION_TYPES:
             missing.append("allowed_decision_type")
+    if "proposal_id" in arguments:
+        proposal_id = public_safe_text(str(arguments.get("proposal_id") or ""), max_chars=180)
+        proposal = service.ledger.get_object_review_proposal(proposal_id) if proposal_id else {}
+        if not proposal:
+            missing.append("existing_review_proposal")
+        else:
+            proposal_project = public_safe_text(str(proposal.get("project") or ""), max_chars=120)
+            proposal_target = public_safe_text(str(proposal.get("target_object_id") or ""), max_chars=180)
+            proposal_object_type = public_safe_text(
+                str(proposal.get("object_type") or knowledge_object_class_from_id(proposal_target)),
+                max_chars=120,
+            )
+            if proposal_project != project:
+                missing.append("proposal_project_scope_match")
+            if proposal_target != target_object_id:
+                missing.append("proposal_target_match")
+            if str(proposal.get("ledger_scope") or "") != "production":
+                missing.append("proposal_ledger_scope_match")
+            if not is_allowed_object_target(proposal_target, object_type=proposal_object_type):
+                missing.append(allowed_object_class_gap())
+    missing = list(dict.fromkeys(missing))
     allowed = not missing
     return {
         "allowed": allowed,
