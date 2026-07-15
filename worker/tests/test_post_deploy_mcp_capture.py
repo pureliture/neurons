@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -10,7 +12,9 @@ import pytest
 from agent_knowledge.cli import main
 from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
 from agent_knowledge.llm_brain_core.objects import object_cli
+from agent_knowledge.llm_brain_core.objects import post_deploy_mcp_capture
 from agent_knowledge.llm_brain_core.objects.post_deploy_mcp_capture import (
+    collect_agent_context_consumer_startup_receipt,
     collect_source_to_candidate_post_deploy_mcp_capture,
     validate_post_deploy_mcp_url,
 )
@@ -80,7 +84,20 @@ def _fake_agent_context_product(*, consumer: str = "codex") -> dict:
             "no_recent_source": False,
         },
         "missing_evidence_before_promotion": missing_evidence,
-        "action_hints": [],
+        "action_hints": [
+            {
+                "action": "request_missing_evidence",
+                "suggest_allowed": True,
+                "execute_allowed": False,
+                "blocked_by": missing_evidence,
+            },
+            {
+                "action": "promote_authority",
+                "suggest_allowed": True,
+                "execute_allowed": False,
+                "blocked_by": ["approved_scope_required", *missing_evidence],
+            },
+        ],
         "tool_hints": object_native_review_tool_hints(missing_evidence),
     }
 
@@ -488,6 +505,467 @@ def _artifact_preference_application_receipt(arguments: dict) -> dict:
             }
         ),
     }
+
+
+def test_collect_post_deploy_capture_promotes_verified_external_codex_startup_receipt(
+    monkeypatch,
+):
+    collector_session = _FakeMcpSession()
+    adapter_session = _FakeMcpSession()
+    subprocess_observed: dict = {}
+
+    @asynccontextmanager
+    async def _collector_session_factory(_mcp_url: str):
+        yield collector_session
+
+    @asynccontextmanager
+    async def _adapter_session_factory(_mcp_url: str):
+        yield adapter_session
+
+    class _Process:
+        returncode = 0
+
+        async def communicate(self, challenge_payload):
+            challenge = json.loads(challenge_payload.decode("utf-8"))
+            proof_fd = subprocess_observed["kwargs"]["pass_fds"][0]
+            proof_key = os.read(proof_fd, 33)
+            receipt = await collect_agent_context_consumer_startup_receipt(
+                mcp_url="https://mcp.example.test/mcp",
+                repository="pureliture/neurons",
+                branch="main",
+                project="neurons",
+                consumer="codex",
+                expected_commit="a" * 40,
+                challenge=challenge,
+                proof_key=proof_key,
+                session_factory=_adapter_session_factory,
+            )
+            return json.dumps(receipt).encode("utf-8"), b""
+
+    async def _create_subprocess_exec(*argv, **kwargs):
+        subprocess_observed["argv"] = argv
+        subprocess_observed["kwargs"] = kwargs
+        return _Process()
+
+    monkeypatch.setattr(
+        post_deploy_mcp_capture.asyncio,
+        "create_subprocess_exec",
+        _create_subprocess_exec,
+    )
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            consumer="codex",
+            expected_commit="a" * 40,
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_artifact_identity_summary",
+            },
+            collect_agent_context_startup=True,
+            session_factory=_collector_session_factory,
+        )
+    )
+
+    startup = capture["agent_context_startup_runtime"]
+    assert startup["evidence_origin"] == "external_consumer_process"
+    assert startup["receipt_validation"] == {"status": "validated", "failures": []}
+    assert startup["startup_context"]["loaded_on_startup"] is True
+    assert startup["startup_context"]["section_counts"] == {
+        "current_authority": 1,
+        "style_preference": 1,
+        "active_work": 1,
+        "required_verification": 1,
+    }
+    assert startup["consumer_statuses"]["codex"]["status"] == "validated"
+    assert startup["consumer_statuses"]["codex"]["host_startup_hook_status"] == (
+        "not_validated"
+    )
+    assert startup["consumer_statuses"]["claude-code"]["status"] == "not_validated"
+    assert startup["collector_execution"] == {
+        "runner_kind": "default_external_subprocess",
+        "subprocess_attested": True,
+    }
+    assert capture["production_mutation_performed"] is False
+
+    adapter_context_calls = [
+        arguments for name, arguments in adapter_session.calls if name == "brain_context_resolve"
+    ]
+    collector_context_calls = [
+        arguments for name, arguments in collector_session.calls if name == "brain_context_resolve"
+    ]
+    adapter_route_calls = [
+        arguments for name, arguments in adapter_session.calls if name == "brain_objects_query"
+    ]
+    collector_route_calls = [
+        arguments for name, arguments in collector_session.calls if name == "brain_objects_query"
+    ]
+    assert len(adapter_context_calls) == 1
+    assert adapter_context_calls == collector_context_calls
+    assert adapter_context_calls[0]["consumer"] == "codex"
+    assert adapter_context_calls[0]["project"] == "neurons"
+    assert len(adapter_route_calls) == len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    assert adapter_route_calls == collector_route_calls
+    assert {call["route"] for call in adapter_route_calls} == set(
+        REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+    )
+    assert all(
+        name in {"brain_context_resolve", "brain_objects_query"}
+        for name, _ in adapter_session.calls
+    )
+
+    report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=capture,
+        expected_commit="a" * 40,
+    )
+    claim = {item["claim_id"]: item for item in report["claims"]}[
+        "live.agent_context.startup_read_path"
+    ]
+    assert claim["status"] == "not_validated"
+    assert claim["bounded_adapter_status"] == "validated"
+    assert claim["host_startup_hook_status"] == "not_validated"
+    assert claim["activation_scope"] == "codex_bounded_startup_read_only.v1"
+
+    original_product_hash = capture["agent_context_product"]["source_payload_hash"]
+    capture["agent_context_product"]["source_payload_hash"] = "sha256:" + "0" * 64
+    substituted_product_report = (
+        build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+            captured_evidence=capture,
+            expected_commit="a" * 40,
+        )
+    )
+    substituted_product_claim = {
+        item["claim_id"]: item for item in substituted_product_report["claims"]
+    }["live.agent_context.startup_read_path"]
+    assert substituted_product_claim["status"] == "failed"
+    assert "agent_context_startup_product_capture_binding_mismatch" in (
+        substituted_product_claim["gaps"]
+    )
+    capture["agent_context_product"]["source_payload_hash"] = original_product_hash
+
+    current_authority = capture["agent_context_product"]["sections"]["current_authority"]
+    current_authority["object_count"] += 1
+    substituted_projection_report = (
+        build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+            captured_evidence=capture,
+            expected_commit="a" * 40,
+        )
+    )
+    substituted_projection_claim = {
+        item["claim_id"]: item for item in substituted_projection_report["claims"]
+    }["live.agent_context.startup_read_path"]
+    assert substituted_projection_claim["status"] == "failed"
+    assert "agent_context_startup_product_projection_binding_mismatch" in (
+        substituted_projection_claim["gaps"]
+    )
+    current_authority["object_count"] -= 1
+
+    capture["brain_objects_query_smokes"][0]["object_pack"]["object_count"] += 1
+    substituted_route_report = (
+        build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+            captured_evidence=capture,
+            expected_commit="a" * 40,
+        )
+    )
+    substituted_route_claim = {
+        item["claim_id"]: item for item in substituted_route_report["claims"]
+    }["live.agent_context.startup_read_path"]
+    assert substituted_route_claim["status"] == "failed"
+    assert (
+        "agent_context_startup_route_capture_binding_mismatch:authority_archive_separation"
+        in substituted_route_claim["gaps"]
+    )
+    capture["brain_objects_query_smokes"][0]["object_pack"]["object_count"] -= 1
+
+    serialized_capture = json.loads(json.dumps(capture))
+    replay_report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=serialized_capture,
+        expected_commit="a" * 40,
+    )
+    replay_claim = {item["claim_id"]: item for item in replay_report["claims"]}[
+        "live.agent_context.startup_read_path"
+    ]
+    assert replay_claim["status"] == "failed"
+    assert "agent_context_startup_collector_capability_missing" in replay_claim["gaps"]
+
+    capture["agent_context_startup_runtime"]["startup_receipt"]["receipt_hash"] = (
+        "sha256:" + "0" * 64
+    )
+    mutated_report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=capture,
+        expected_commit="a" * 40,
+    )
+    mutated_claim = {item["claim_id"]: item for item in mutated_report["claims"]}[
+        "live.agent_context.startup_read_path"
+    ]
+    assert mutated_claim["status"] == "failed"
+    assert "agent_context_startup_collector_capability_missing" in mutated_claim["gaps"]
+
+    capture["agent_context_startup_runtime"] = object()
+    invalid_type_report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=capture,
+        expected_commit="a" * 40,
+    )
+    invalid_type_claim = {item["claim_id"]: item for item in invalid_type_report["claims"]}[
+        "live.agent_context.startup_read_path"
+    ]
+    assert invalid_type_claim["status"] == "not_validated"
+
+
+def test_collect_post_deploy_capture_does_not_attest_injected_startup_runner():
+    collector_session = _FakeMcpSession()
+    adapter_session = _FakeMcpSession()
+
+    @asynccontextmanager
+    async def _collector_session_factory(_mcp_url: str):
+        yield collector_session
+
+    @asynccontextmanager
+    async def _adapter_session_factory(_mcp_url: str):
+        yield adapter_session
+
+    async def _injected_runner(**kwargs):
+        return await collect_agent_context_consumer_startup_receipt(
+            **kwargs,
+            session_factory=_adapter_session_factory,
+        )
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            consumer="codex",
+            expected_commit="a" * 40,
+            collect_agent_context_startup=True,
+            agent_context_startup_runner=_injected_runner,
+            session_factory=_collector_session_factory,
+        )
+    )
+
+    startup = capture["agent_context_startup_runtime"]
+    assert startup["receipt_validation"]["status"] == "validated"
+    assert startup["collector_execution"] == {
+        "runner_kind": "injected_runner_unattested",
+        "subprocess_attested": False,
+    }
+    report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=capture,
+        expected_commit="a" * 40,
+    )
+    claim = {item["claim_id"]: item for item in report["claims"]}[
+        "live.agent_context.startup_read_path"
+    ]
+    assert claim["status"] == "failed"
+    assert "agent_context_startup_collector_capability_missing" in claim["gaps"]
+    assert "agent_context_startup_external_subprocess_unattested" in claim["gaps"]
+
+
+def test_agent_context_startup_cli_reads_exact_one_time_key_from_inherited_fd(
+    monkeypatch,
+    capsys,
+):
+    proof_key = b"k" * 32
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, proof_key)
+    os.close(write_fd)
+    challenge = {"schema_version": "agent_context_consumer_challenge.v1"}
+    observed: dict = {}
+
+    async def _collect(**kwargs):
+        observed.update(kwargs)
+        return {
+            "schema_version": "agent_context_consumer_startup_receipt.v1",
+            "production_mutation_performed": False,
+        }
+
+    monkeypatch.setattr(
+        object_cli,
+        "collect_agent_context_consumer_startup_receipt",
+        _collect,
+    )
+    monkeypatch.setattr(object_cli.sys, "stdin", io.StringIO(json.dumps(challenge)))
+
+    assert (
+        object_cli.agent_context_startup_main(
+            [
+                "--mcp-url",
+                "https://mcp.example.test/mcp",
+                "--repository",
+                "pureliture/neurons",
+                "--branch",
+                "main",
+                "--project",
+                "neurons",
+                "--consumer",
+                "codex",
+                "--expected-commit",
+                "a" * 40,
+                "--proof-fd",
+                str(read_fd),
+            ]
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    assert observed["proof_key"] == proof_key
+    assert observed["challenge"] == challenge
+    assert proof_key.hex() not in output
+    with pytest.raises(OSError):
+        os.read(read_fd, 1)
+
+
+def test_agent_context_startup_cli_rejects_proof_key_with_extra_byte(
+    monkeypatch,
+    capsys,
+):
+    proof_key = b"x" * 33
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, proof_key)
+    os.close(write_fd)
+    monkeypatch.setattr(
+        object_cli.sys,
+        "stdin",
+        io.StringIO('{"schema_version":"agent_context_consumer_challenge.v1"}'),
+    )
+
+    with pytest.raises(SystemExit):
+        object_cli.agent_context_startup_main(
+            [
+                "--mcp-url",
+                "https://mcp.example.test/mcp",
+                "--repository",
+                "pureliture/neurons",
+                "--branch",
+                "main",
+                "--project",
+                "neurons",
+                "--consumer",
+                "codex",
+                "--expected-commit",
+                "a" * 40,
+                "--proof-fd",
+                str(read_fd),
+            ]
+        )
+
+    captured = capsys.readouterr()
+    assert "agent context startup collection failed" in captured.err
+    assert proof_key.hex() not in captured.err
+
+
+def test_default_agent_context_startup_runner_keeps_proof_key_out_of_argv_and_stdin(
+    monkeypatch,
+):
+    proof_key = b"p" * 32
+    observed: dict = {}
+
+    class _Process:
+        returncode = 0
+
+        async def communicate(self, stdin_payload):
+            observed["stdin_payload"] = stdin_payload
+            return (
+                json.dumps(
+                    {
+                        "schema_version": "agent_context_consumer_startup_receipt.v1",
+                        "production_mutation_performed": False,
+                    }
+                ).encode("utf-8"),
+                b"",
+            )
+
+    async def _create_subprocess_exec(*argv, **kwargs):
+        observed["argv"] = argv
+        observed["kwargs"] = kwargs
+        return _Process()
+
+    monkeypatch.setattr(
+        post_deploy_mcp_capture.asyncio,
+        "create_subprocess_exec",
+        _create_subprocess_exec,
+    )
+    challenge = {
+        "schema_version": "agent_context_consumer_challenge.v1",
+        "challenge_id": "challenge:fixture",
+    }
+
+    receipt = asyncio.run(
+        post_deploy_mcp_capture._default_agent_context_startup_runner(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            consumer="codex",
+            expected_commit="a" * 40,
+            challenge=challenge,
+            proof_key=proof_key,
+        )
+    )
+
+    argv_text = " ".join(str(item) for item in observed["argv"])
+    stdin_text = observed["stdin_payload"].decode("utf-8")
+    assert receipt["schema_version"] == "agent_context_consumer_startup_receipt.v1"
+    assert len(observed["kwargs"]["pass_fds"]) == 1
+    assert "env" not in observed["kwargs"]
+    assert proof_key.hex() not in argv_text
+    assert proof_key.hex() not in stdin_text
+    assert json.loads(stdin_text) == challenge
+
+
+def test_collect_post_deploy_capture_fails_closed_for_tampered_startup_receipt():
+    collector_session = _FakeMcpSession()
+    adapter_session = _FakeMcpSession()
+
+    @asynccontextmanager
+    async def _collector_session_factory(_mcp_url: str):
+        yield collector_session
+
+    @asynccontextmanager
+    async def _adapter_session_factory(_mcp_url: str):
+        yield adapter_session
+
+    async def _tampered_runner(**kwargs):
+        receipt = await collect_agent_context_consumer_startup_receipt(
+            **kwargs,
+            session_factory=_adapter_session_factory,
+        )
+        receipt["issuer"]["kind"] = "server_runtime"
+        return receipt
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            consumer="codex",
+            expected_commit="a" * 40,
+            collect_agent_context_startup=True,
+            agent_context_startup_runner=_tampered_runner,
+            session_factory=_collector_session_factory,
+        )
+    )
+
+    startup = capture["agent_context_startup_runtime"]
+    assert startup["startup_context"]["loaded_on_startup"] is False
+    assert startup["receipt_validation"]["status"] == "failed"
+    assert "agent_context_startup_issuer_not_external_consumer" in startup[
+        "receipt_validation"
+    ]["failures"]
+    report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=capture,
+        expected_commit="a" * 40,
+    )
+    claim = {item["claim_id"]: item for item in report["claims"]}[
+        "live.agent_context.startup_read_path"
+    ]
+    assert claim["status"] == "failed"
 
 
 def test_collect_post_deploy_mcp_capture_promotes_only_direct_named_consumer_receipt(
@@ -1294,7 +1772,16 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
         "evidence_collection_network_used": False,
         "production_mutation_performed": False,
     }
-    assert capture["agent_context_product"] == _fake_agent_context_product(consumer="codex")
+    product = capture["agent_context_product"]
+    assert product["schema_version"] == "agent_context_product_pack.v1"
+    assert product["consumer"] == "codex"
+    assert product["sections"]["current_authority"]["object_count"] == 1
+    assert product["sections"]["current_authority"]["authority_lanes"] == [
+        "accepted_current"
+    ]
+    assert product["sections"]["current_authority"]["item_hashes"]
+    assert all("items" not in section for section in product["sections"].values())
+    assert len(product["tool_hints"]) == len(REQUIRED_RUNTIME_TOOL_NAMES)
     assert "private_context_not_returned" not in json.dumps(capture, sort_keys=True)
     assert capture["collection"] == {
         "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
@@ -1350,10 +1837,7 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
             "branch": "main",
             "project": "neurons",
             "current_files": [],
-            "current_request": (
-                "source-to-candidate runtime readiness post-deploy "
-                "agent context product capture"
-            ),
+            "current_request": "agent context startup before task dispatch",
             "limit": 8,
             "response_mode": "full",
             "consumer": "codex",
@@ -1361,6 +1845,10 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
     ]
     route_calls = [arguments for name, arguments in session.calls if name == "brain_objects_query"]
     assert [arguments["route"] for arguments in route_calls] == list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    assert all(
+        arguments["query"] == f"agent context startup route smoke: {arguments['route']}"
+        for arguments in route_calls
+    )
     assert all(arguments["response_mode"] == "full" for arguments in route_calls)
     assert all(arguments["consumer"] == "codex" for arguments in route_calls)
     assert all(arguments["project"] == "neurons" for arguments in route_calls)
@@ -1843,6 +2331,90 @@ def test_collect_post_deploy_mcp_capture_rejects_forbidden_fields_from_context_a
     ]
     assert all(
         smoke["object_pack"]["gaps"] == ["collector_route_smoke_forbidden"]
+        for smoke in capture["brain_objects_query_smokes"]
+    )
+
+
+def test_collect_post_deploy_mcp_capture_projects_untrusted_values_to_hashes():
+    context_raw_value = "private transcript text must never leave the collector"
+    route_raw_value = "opaque-raw-document-id-must-never-leak"
+    secret_raw_value = "secret-value-under-an-innocent-key"
+    tool_raw_value = "private-tool-name-must-never-leak"
+
+    class _UntrustedValueSession(_FakeMcpSession):
+        async def list_tools(self):
+            result = await super().list_tools()
+            result.tools.append(SimpleNamespace(name=tool_raw_value))
+            return result
+
+        async def call_tool(self, name: str, arguments: dict):
+            if (
+                name == "brain_source_to_candidate_runtime_readiness"
+                and arguments.get("collect_shadow_evidence") is True
+            ):
+                self.calls.append((name, dict(arguments)))
+                structured = _runtime_collected_packet(
+                    live=True,
+                    session_project_rollup=True,
+                )
+                structured["projection_join"]["summary"] = context_raw_value
+                structured["session_project_rollup_runtime"]["rollup_preview"][
+                    "metadata"
+                ] = {"summary": secret_raw_value, "opaque_id": route_raw_value}
+                return SimpleNamespace(isError=False, structuredContent=structured)
+            result = await super().call_tool(name, arguments)
+            structured = json.loads(json.dumps(result.structuredContent))
+            if name == "brain_context_resolve":
+                structured["authority"]["agent_context_product"]["sections"][
+                    "current_authority"
+                ]["items"][0]["title"] = context_raw_value
+            elif name == "brain_objects_query":
+                structured["object_pack"]["objects"] = [
+                    {
+                        "object_id": route_raw_value,
+                        "object_type": "RepoDocument",
+                        "title": context_raw_value,
+                        "metadata": {"summary": secret_raw_value},
+                    }
+                ]
+                structured["object_pack"]["recommended_actions"] = [
+                    {"action": "request_evidence", "summary": secret_raw_value}
+                ]
+            return SimpleNamespace(isError=False, structuredContent=structured)
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield _UntrustedValueSession()
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            expected_commit="c2b8548",
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_artifact_identity_summary",
+            },
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    serialized = json.dumps(capture, sort_keys=True)
+    assert context_raw_value not in serialized
+    assert route_raw_value not in serialized
+    assert secret_raw_value not in serialized
+    assert tool_raw_value not in serialized
+    assert capture["projection_join"]["source_payload_hash"].startswith("sha256:")
+    assert capture["session_project_rollup_runtime"]["source_payload_hash"].startswith(
+        "sha256:"
+    )
+    assert capture["agent_context_product"]["sections"]["current_authority"][
+        "item_hashes"
+    ]
+    assert all(
+        smoke["object_pack"]["object_count"] == 1
+        and smoke["object_pack"]["source_payload_hash"].startswith("sha256:")
         for smoke in capture["brain_objects_query_smokes"]
     )
 

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 from urllib.parse import unquote
 
-from .._util import ensure_public_safe, public_safe_text, require_sha256
+from .._util import ensure_public_safe, hash_payload, public_safe_text, require_sha256
+from .agent_context_consumer import (
+    AGENT_CONTEXT_CONSUMER_STARTUP_RECEIPT_SCHEMA,
+    CODEX_BOUNDED_ACTIVATION_SCOPE,
+    CODEX_CONTEXT_ADAPTER,
+    REQUIRED_POLICY_DECISIONS,
+)
 from .authority_policy import (
     knowledge_object_class_from_id,
     is_allowed_object_target,
@@ -79,28 +85,78 @@ SESSION_PROJECT_HANDOFF_SCHEMA = "session_project_handoff_pack.v1"
 SESSION_PROJECT_RESUME_SCHEMA = "session_project_resume_context.v1"
 PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA = "preference_artifact_memory_runtime_evidence.v1"
 ARTIFACT_REVIEW_PREFERENCE_CHECK_SCHEMA = "artifact_review_preference_check.v1"
-_P7_COLLECTOR_CAPABILITY = object()
+_COLLECTOR_CAPABILITY = object()
+_COLLECTOR_ATTESTABLE_FIELDS = frozenset(
+    {
+        "agent_context_startup_runtime",
+        "preference_artifact_memory",
+    }
+)
 
 
 class _CollectorAttestedEvidence(dict[str, Any]):
-    __slots__ = ("_collector_capability",)
+    __slots__ = ("_collector_capability", "_collector_field_hashes")
 
-    def __init__(self, value: Mapping[str, Any], *, capability: object) -> None:
-        if capability is not _P7_COLLECTOR_CAPABILITY:
+    def __init__(
+        self,
+        value: Mapping[str, Any],
+        *,
+        capability: object,
+        attested_fields: Iterable[str],
+    ) -> None:
+        if capability is not _COLLECTOR_CAPABILITY:
             raise TypeError("collector-attested evidence can only be minted in-process")
+        normalized_fields = frozenset(str(field) for field in attested_fields)
+        unknown_fields = normalized_fields - _COLLECTOR_ATTESTABLE_FIELDS
+        if unknown_fields:
+            raise ValueError("collector-attested evidence contains an unsupported field")
+        missing_fields = normalized_fields - value.keys()
+        if missing_fields:
+            raise ValueError("collector-attested evidence field is missing")
         super().__init__(value)
         self._collector_capability = capability
+        self._collector_field_hashes = tuple(
+            (field, hash_payload(value[field]))
+            for field in sorted(normalized_fields)
+        )
 
 
-def _mint_collector_attested_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
-    return _CollectorAttestedEvidence(value, capability=_P7_COLLECTOR_CAPABILITY)
-
-
-def _has_collector_attestation_capability(value: Mapping[str, Any]) -> bool:
-    return (
-        isinstance(value, _CollectorAttestedEvidence)
-        and value._collector_capability is _P7_COLLECTOR_CAPABILITY
+def _mint_collector_attested_evidence(
+    value: Mapping[str, Any],
+    *,
+    attested_fields: Iterable[str],
+) -> dict[str, Any]:
+    return _CollectorAttestedEvidence(
+        value,
+        capability=_COLLECTOR_CAPABILITY,
+        attested_fields=attested_fields,
     )
+
+
+def _collector_attested_fields(value: Mapping[str, Any]) -> frozenset[str]:
+    if not (
+        isinstance(value, _CollectorAttestedEvidence)
+        and value._collector_capability is _COLLECTOR_CAPABILITY
+    ):
+        return frozenset()
+    attested_fields: set[str] = set()
+    for field, expected_hash in value._collector_field_hashes:
+        if field not in value:
+            continue
+        try:
+            current_hash = hash_payload(value[field])
+        except (TypeError, ValueError):
+            continue
+        if current_hash == expected_hash:
+            attested_fields.add(field)
+    return frozenset(attested_fields)
+
+
+def _has_collector_attestation_capability(
+    value: Mapping[str, Any],
+    field: str,
+) -> bool:
+    return field in _collector_attested_fields(value)
 
 
 _RUNTIME_EVIDENCE_FORBIDDEN_KEYS = frozenset(
@@ -391,8 +447,12 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         or captured.get("mutation_performed") is True,
     }
     ensure_public_safe(packet, "SourceToCandidateRuntimeShadowEvidencePacket")
-    if _has_collector_attestation_capability(captured):
-        return _mint_collector_attested_evidence(packet)
+    attested_fields = _collector_attested_fields(captured)
+    if attested_fields:
+        return _mint_collector_attested_evidence(
+            packet,
+            attested_fields=attested_fields,
+        )
     return packet
 
 
@@ -1043,10 +1103,19 @@ def build_preference_artifact_memory_shadow_evidence(
                 "confidence": 0.94,
                 "currentness": "current",
                 "review_state": "accepted",
+                "lifecycle_state": "accepted",
+                "approval_state": "approved",
+                "project": "neurons",
+                "content_hash": "sha256:" + "a" * 64,
                 "typed_payload": {
                     "preference": "HTML review artifacts should be information dense.",
                     "applies_to": "html review artifact",
                     "reason": "Accepted local_test preference evidence.",
+                    "source_object_type": "ArtifactPreference",
+                    "target_object_id": "ko:ArtifactPreference:p7-shadow-html-review",
+                    "source_content_hash": "sha256:" + "b" * 64,
+                    "authority_proposal_id": "proposal:p7-shadow-html-review",
+                    "authority_decision_id": "decision:p7-shadow-html-review",
                 },
                 "source_refs": [{"source_ref_id": "ev:p7-shadow:html-review"}],
             },
@@ -1056,10 +1125,16 @@ def build_preference_artifact_memory_shadow_evidence(
                 "summary": "Proposed visualization preference",
                 "confidence": 0.61,
                 "currentness": "inferred",
+                "project": "neurons",
+                "content_hash": "sha256:" + "c" * 64,
                 "typed_payload": {
                     "preference": "Visualization artifacts should use motion only when it clarifies state.",
                     "applies_to": "visualization artifact",
                     "reason": "Observed local_test preference candidate requiring review.",
+                    "source_object_type": "ArtifactPreference",
+                    "target_object_id": "ko:ArtifactPreference:p7-shadow-visualization",
+                    "source_content_hash": "sha256:" + "d" * 64,
+                    "authority_proposal_id": "proposal:p7-shadow-visualization",
                 },
                 "source_refs": [{"source_ref_id": "ev:p7-shadow:visualization"}],
             },
@@ -2613,7 +2688,7 @@ def _live_agent_context_product_sections_claim(evidence: Mapping[str, Any]) -> d
     current_authority_gaps: list[str] = []
     if current_authority_object_count < 1:
         current_authority_gaps.append("live_agent_context_current_authority_missing")
-    elif REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE not in current_authority_authority_lanes:
+    elif set(current_authority_authority_lanes) != {REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE}:
         current_authority_gaps.append(
             "live_agent_context_current_authority_accepted_current_missing"
         )
@@ -2623,7 +2698,7 @@ def _live_agent_context_product_sections_claim(evidence: Mapping[str, Any]) -> d
     style_preference_gaps: list[str] = []
     if (
         style_preference_object_count >= 1
-        and REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE not in style_preference_authority_lanes
+        and set(style_preference_authority_lanes) != {REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE}
     ):
         style_preference_gaps.append(
             "live_agent_context_style_preference_accepted_current_missing"
@@ -3224,7 +3299,10 @@ def _live_preference_artifact_memory_claim(evidence: Mapping[str, Any]) -> dict[
         context=context,
         artifact_check=artifact_check,
         postcheck=postcheck,
-        collector_capability_present=_has_collector_attestation_capability(evidence),
+        collector_capability_present=_has_collector_attestation_capability(
+            evidence,
+            "preference_artifact_memory",
+        ),
     )
     collector_proof_gaps = {
         "preference_artifact_collector_capability_missing",
@@ -3698,28 +3776,118 @@ def _live_agent_context_startup_claim(evidence: Mapping[str, Any]) -> dict[str, 
         startup.get("runtime_enforcement") if isinstance(startup.get("runtime_enforcement"), Mapping) else {}
     )
     postcheck = startup.get("postcheck") if isinstance(startup.get("postcheck"), Mapping) else {}
+    provenance = (
+        evidence.get("evidence_provenance")
+        if isinstance(evidence.get("evidence_provenance"), Mapping)
+        else {}
+    )
+    collection_mode = str(provenance.get("collection_mode") or "")
+    require_external_receipt = collection_mode in LIVE_EVIDENCE_COLLECTION_MODES
+    captured_product = _agent_context_product(evidence)
+    captured_route_smokes = (
+        [item for item in evidence.get("brain_objects_query_smokes", []) if isinstance(item, Mapping)]
+        if isinstance(evidence.get("brain_objects_query_smokes"), list)
+        else []
+    )
     failures = _agent_context_startup_failures(
         startup=startup,
         context=context,
         read_path=read_path,
         enforcement=enforcement,
         postcheck=postcheck,
+        captured_product=captured_product,
+        captured_route_smokes=captured_route_smokes,
+        require_external_receipt=require_external_receipt,
+        collector_capability_present=_has_collector_attestation_capability(
+            evidence,
+            "agent_context_startup_runtime",
+        ),
     )
+    consumer_statuses = (
+        startup.get("consumer_statuses")
+        if isinstance(startup.get("consumer_statuses"), Mapping)
+        else {}
+    )
+    unvalidated_consumers = [
+        consumer
+        for consumer in ALLOWED_AGENT_CONTEXT_CONSUMERS
+        if consumer != "codex"
+        and str(
+            (
+                consumer_statuses.get(consumer)
+                if isinstance(consumer_statuses.get(consumer), Mapping)
+                else {}
+            ).get("status")
+            or "not_validated"
+        )
+        != "validated"
+    ]
+    bounded_gaps = (
+        [
+            f"agent_context_consumer_startup_unvalidated:{consumer}"
+            for consumer in unvalidated_consumers
+        ]
+        if require_external_receipt and not failures
+        else []
+    )
+    if (
+        require_external_receipt
+        and not failures
+        and enforcement.get("runtime_interception_observed") is not True
+    ):
+        bounded_gaps.append(
+            "agent_context_action_surface_runtime_interception_unvalidated"
+        )
+    if require_external_receipt and not failures:
+        bounded_gaps.append("agent_context_codex_host_startup_hook_unvalidated")
+    bounded_adapter_validated = not failures
     return {
         "claim_id": "live.agent_context.startup_read_path",
         "evidence_class": "runtime_startup_read_path",
-        "status": "failed" if failures else "validated",
+        "status": (
+            "failed"
+            if failures
+            else "not_validated"
+            if bounded_gaps
+            else "validated"
+        ),
+        "bounded_adapter_status": "validated" if bounded_adapter_validated else "failed",
+        "host_startup_hook_status": (
+            "not_validated" if bounded_adapter_validated else "failed"
+        ),
         "schema_version": public_safe_text(str(startup.get("schema_version") or ""), max_chars=80),
         "consumer": public_safe_text(str(context.get("consumer") or ""), max_chars=80),
+        "activation_scope": public_safe_text(
+            str(startup.get("activation_scope") or ""),
+            max_chars=120,
+        ),
+        "evidence_origin": public_safe_text(
+            str(startup.get("evidence_origin") or ""),
+            max_chars=120,
+        ),
         "startup_loaded": context.get("loaded_on_startup") is True,
         "read_path_tool": public_safe_text(str(read_path.get("tool") or ""), max_chars=120),
         "routes_checked": _string_list(read_path.get("routes_checked")),
+        "validated_consumers": [
+            consumer
+            for consumer in ALLOWED_AGENT_CONTEXT_CONSUMERS
+            if str(
+                (
+                    consumer_statuses.get(consumer)
+                    if isinstance(consumer_statuses.get(consumer), Mapping)
+                    else {}
+                ).get("status")
+                or ""
+            )
+            == "validated"
+        ],
+        "unvalidated_consumers": unvalidated_consumers,
         "production_mutation_performed": _agent_context_startup_reports_mutation(
             startup=startup,
             read_path=read_path,
             enforcement=enforcement,
         ),
-        "gaps": failures,
+        "gaps": [*failures, *bounded_gaps],
     }
 
 
@@ -3730,6 +3898,10 @@ def _agent_context_startup_failures(
     read_path: Mapping[str, Any],
     enforcement: Mapping[str, Any],
     postcheck: Mapping[str, Any],
+    captured_product: Mapping[str, Any],
+    captured_route_smokes: list[Mapping[str, Any]],
+    require_external_receipt: bool = False,
+    collector_capability_present: bool = False,
 ) -> list[str]:
     failures: list[str] = []
     collector_error_type = public_safe_text(str(startup.get("collector_error_type") or ""), max_chars=80)
@@ -3768,6 +3940,10 @@ def _agent_context_startup_failures(
         failures.append("agent_context_startup_read_path_mutation_performed")
     if enforcement.get("direct_execution_allowed") is not False:
         failures.append("agent_context_startup_direct_execution_allowed")
+    if require_external_receipt and enforcement.get("evidence_kind") != (
+        "context_pack_policy_projection"
+    ):
+        failures.append("agent_context_startup_policy_projection_missing")
     if enforcement.get("production_mutation_allowed") is not False:
         failures.append("agent_context_startup_production_mutation_allowed")
     if enforcement.get("raw_private_context_blocked") is not True:
@@ -3792,6 +3968,285 @@ def _agent_context_startup_failures(
     ):
         if postcheck.get(field) is not False:
             failures.append(gap)
+    if require_external_receipt:
+        failures.extend(
+            _external_agent_context_startup_receipt_failures(
+                startup=startup,
+                context=context,
+                read_path=read_path,
+                enforcement=enforcement,
+                captured_product=captured_product,
+                captured_route_smokes=captured_route_smokes,
+                collector_capability_present=collector_capability_present,
+            )
+        )
+    return _dedupe(failures)
+
+
+def _external_agent_context_startup_receipt_failures(
+    *,
+    startup: Mapping[str, Any],
+    context: Mapping[str, Any],
+    read_path: Mapping[str, Any],
+    enforcement: Mapping[str, Any],
+    captured_product: Mapping[str, Any],
+    captured_route_smokes: list[Mapping[str, Any]],
+    collector_capability_present: bool,
+) -> list[str]:
+    failures: list[str] = []
+    if not collector_capability_present:
+        failures.append("agent_context_startup_collector_capability_missing")
+    collector_execution = (
+        startup.get("collector_execution")
+        if isinstance(startup.get("collector_execution"), Mapping)
+        else {}
+    )
+    if (
+        collector_execution.get("runner_kind") != "default_external_subprocess"
+        or collector_execution.get("subprocess_attested") is not True
+    ):
+        failures.append("agent_context_startup_external_subprocess_unattested")
+    if startup.get("evidence_origin") != "external_consumer_process":
+        failures.append("agent_context_startup_external_consumer_receipt_missing")
+    if startup.get("activation_scope") != CODEX_BOUNDED_ACTIVATION_SCOPE:
+        failures.append("agent_context_startup_activation_scope_mismatch")
+    validation = (
+        startup.get("receipt_validation")
+        if isinstance(startup.get("receipt_validation"), Mapping)
+        else {}
+    )
+    validation_failures = _string_list(validation.get("failures"))
+    if validation.get("status") != "validated" or validation_failures:
+        failures.append("agent_context_startup_receipt_not_verified")
+        failures.extend(validation_failures)
+
+    receipt = (
+        startup.get("startup_receipt")
+        if isinstance(startup.get("startup_receipt"), Mapping)
+        else {}
+    )
+    if receipt.get("schema_version") != AGENT_CONTEXT_CONSUMER_STARTUP_RECEIPT_SCHEMA:
+        failures.append("agent_context_startup_receipt_schema_mismatch")
+    issuer = receipt.get("issuer") if isinstance(receipt.get("issuer"), Mapping) else {}
+    if issuer.get("kind") != "external_consumer_process":
+        failures.append("agent_context_startup_issuer_not_external_consumer")
+    if issuer.get("consumer") != "codex":
+        failures.append("agent_context_startup_consumer_mismatch")
+    if issuer.get("implementation") != CODEX_CONTEXT_ADAPTER:
+        failures.append("agent_context_startup_adapter_mismatch")
+
+    receipt_core = {
+        key: value
+        for key, value in receipt.items()
+        if key not in {"receipt_hash", "proof"}
+    }
+    receipt_hash = str(receipt.get("receipt_hash") or "")
+    if receipt_hash != hash_payload(receipt_core):
+        failures.append("agent_context_startup_receipt_hash_mismatch")
+    proof = receipt.get("proof") if isinstance(receipt.get("proof"), Mapping) else {}
+    if proof.get("algorithm") != "HMAC-SHA-256" or not _is_sha256_hash_ref(
+        str(proof.get("tag") or "")
+    ):
+        failures.append("agent_context_startup_proof_missing")
+
+    events = [
+        item
+        for item in receipt.get("startup_events", [])
+        if isinstance(item, Mapping)
+    ] if isinstance(receipt.get("startup_events"), list) else []
+    expected_event_types = (
+        "process_started",
+        "context_requested",
+        "context_loaded_before_task_dispatch",
+    )
+    if len(events) != len(expected_event_types):
+        failures.append("agent_context_startup_event_sequence_incomplete")
+    previous_hash = ""
+    for index, expected_type in enumerate(expected_event_types, start=1):
+        event = events[index - 1] if len(events) >= index else {}
+        if event.get("seq") != index or event.get("type") != expected_type:
+            failures.append(f"agent_context_startup_event_order_mismatch:{index}")
+        if event.get("prev_hash") != previous_hash:
+            failures.append(f"agent_context_startup_event_chain_mismatch:{index}")
+        expected_hash = hash_payload(
+            {key: value for key, value in event.items() if key != "event_hash"}
+        )
+        event_hash = str(event.get("event_hash") or "")
+        if event_hash != expected_hash:
+            failures.append(f"agent_context_startup_event_hash_mismatch:{index}")
+        previous_hash = event_hash
+
+    context_binding = (
+        receipt.get("context_binding")
+        if isinstance(receipt.get("context_binding"), Mapping)
+        else {}
+    )
+    section_manifest = (
+        context_binding.get("section_manifest")
+        if isinstance(context_binding.get("section_manifest"), Mapping)
+        else {}
+    )
+    section_counts = (
+        context.get("section_counts")
+        if isinstance(context.get("section_counts"), Mapping)
+        else {}
+    )
+    section_authority_lanes = (
+        context.get("section_authority_lanes")
+        if isinstance(context.get("section_authority_lanes"), Mapping)
+        else {}
+    )
+    for section in REQUIRED_AGENT_CONTEXT_STARTUP_SECTIONS:
+        manifest = (
+            section_manifest.get(section)
+            if isinstance(section_manifest.get(section), Mapping)
+            else {}
+        )
+        item_hashes = _string_list(manifest.get("item_hashes"))
+        if any(not _is_sha256_hash_ref(item_hash) for item_hash in item_hashes):
+            failures.append(f"agent_context_startup_item_hash_invalid:{section}")
+        if _int_value(section_counts.get(section)) != len(item_hashes):
+            failures.append(f"agent_context_startup_section_count_mismatch:{section}")
+        manifest_lanes = _string_list(manifest.get("authority_lanes"))
+        context_lanes = _string_list(section_authority_lanes.get(section))
+        if context_lanes != manifest_lanes:
+            failures.append(f"agent_context_startup_section_lane_mismatch:{section}")
+        if section in {
+            REQUIRED_AGENT_CONTEXT_AUTHORITY_SECTION,
+            REQUIRED_AGENT_CONTEXT_STYLE_PREFERENCE_SECTION,
+        } and set(manifest_lanes) != {REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE}:
+            failures.append(f"agent_context_startup_authority_lane_mismatch:{section}")
+
+    route_manifest = (
+        context_binding.get("route_manifest")
+        if isinstance(context_binding.get("route_manifest"), Mapping)
+        else {}
+    )
+    checked_routes = set(_string_list(read_path.get("routes_checked")))
+    if set(route_manifest) != checked_routes:
+        failures.append("agent_context_startup_route_manifest_mismatch")
+    if any(not _is_sha256_hash_ref(str(value or "")) for value in route_manifest.values()):
+        failures.append("agent_context_startup_route_hash_invalid")
+
+    bundle_binding = (
+        startup.get("capture_bundle_binding")
+        if isinstance(startup.get("capture_bundle_binding"), Mapping)
+        else {}
+    )
+    if bundle_binding.get("schema_version") != "agent_context_capture_bundle_binding.v1":
+        failures.append("agent_context_startup_capture_bundle_schema_mismatch")
+    source_product_hash = str(captured_product.get("source_payload_hash") or "")
+    if (
+        not _is_sha256_hash_ref(source_product_hash)
+        or source_product_hash != str(context_binding.get("product_hash") or "")
+        or source_product_hash != str(bundle_binding.get("source_product_hash") or "")
+    ):
+        failures.append("agent_context_startup_product_capture_binding_mismatch")
+    if bundle_binding.get("agent_context_product_projection_hash") != hash_payload(
+        captured_product
+    ):
+        failures.append("agent_context_startup_product_projection_binding_mismatch")
+    captured_smokes_by_route = {
+        str(smoke.get("route") or ""): smoke
+        for smoke in captured_route_smokes
+        if str(smoke.get("route") or "")
+    }
+    bundle_route_hashes = (
+        bundle_binding.get("route_smoke_projection_hashes")
+        if isinstance(bundle_binding.get("route_smoke_projection_hashes"), Mapping)
+        else {}
+    )
+    if (
+        set(captured_smokes_by_route) != set(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+        or set(bundle_route_hashes) != set(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+    ):
+        failures.append("agent_context_startup_route_capture_binding_shape_mismatch")
+    for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES:
+        captured_hash = hash_payload(captured_smokes_by_route.get(route, {}))
+        if (
+            str(route_manifest.get(route) or "") != captured_hash
+            or str(bundle_route_hashes.get(route) or "") != captured_hash
+        ):
+            failures.append(f"agent_context_startup_route_capture_binding_mismatch:{route}")
+
+    decisions = [
+        item
+        for item in receipt.get("policy_decisions", [])
+        if isinstance(item, Mapping)
+    ] if isinstance(receipt.get("policy_decisions"), list) else []
+    by_capability = {
+        str(
+            (
+                item.get("request")
+                if isinstance(item.get("request"), Mapping)
+                else {}
+            ).get("capability")
+            or ""
+        ): item
+        for item in decisions
+    }
+    for capability, (expected_outcome, expected_reason) in REQUIRED_POLICY_DECISIONS.items():
+        decision_receipt = by_capability.get(capability)
+        if not isinstance(decision_receipt, Mapping):
+            failures.append(f"agent_context_startup_policy_decision_missing:{capability}")
+            continue
+        decision = (
+            decision_receipt.get("decision")
+            if isinstance(decision_receipt.get("decision"), Mapping)
+            else {}
+        )
+        if (
+            decision.get("outcome") != expected_outcome
+            or decision.get("reason_code") != expected_reason
+        ):
+            failures.append(f"agent_context_startup_policy_outcome_mismatch:{capability}")
+        if decision.get("executor_invoked") is not False or decision.get("side_effect_count") != 0:
+            failures.append(f"agent_context_startup_policy_side_effect:{capability}")
+        expected_decision_hash = hash_payload(
+            {
+                key: value
+                for key, value in decision_receipt.items()
+                if key != "decision_hash"
+            }
+        )
+        if decision_receipt.get("decision_hash") != expected_decision_hash:
+            failures.append(f"agent_context_startup_policy_hash_mismatch:{capability}")
+    decision_hashes = [str(item.get("decision_hash") or "") for item in decisions]
+    if receipt.get("policy_decision_hashes") != decision_hashes:
+        failures.append("agent_context_startup_policy_decision_hashes_mismatch")
+
+    io_audit = receipt.get("io_audit") if isinstance(receipt.get("io_audit"), Mapping) else {}
+    if io_audit.get("brain_context_resolve_calls") != 1:
+        failures.append("agent_context_startup_context_read_count_mismatch")
+    if io_audit.get("brain_objects_query_calls") != len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES):
+        failures.append("agent_context_startup_object_query_count_mismatch")
+    if io_audit.get("write_tool_calls") != 0:
+        failures.append("agent_context_startup_write_tool_called")
+    if io_audit.get("task_dispatch_count_before_load") != 0:
+        failures.append("agent_context_startup_task_dispatched_before_load")
+    if enforcement.get("suggest_change_allowed") is not True:
+        failures.append("agent_context_startup_suggest_change_positive_control_missing")
+
+    consumer_statuses = (
+        startup.get("consumer_statuses")
+        if isinstance(startup.get("consumer_statuses"), Mapping)
+        else {}
+    )
+    codex_status = (
+        consumer_statuses.get("codex")
+        if isinstance(consumer_statuses.get("codex"), Mapping)
+        else {}
+    )
+    if codex_status.get("status") != "validated" or codex_status.get("scope") != CODEX_BOUNDED_ACTIVATION_SCOPE:
+        failures.append("agent_context_startup_codex_bounded_status_mismatch")
+    for consumer in ("claude-code", "gemini", "hermes"):
+        status = (
+            consumer_statuses.get(consumer)
+            if isinstance(consumer_statuses.get(consumer), Mapping)
+            else {}
+        )
+        if status.get("status") != "not_validated":
+            failures.append(f"agent_context_startup_consumer_overclaimed:{consumer}")
     return _dedupe(failures)
 
 

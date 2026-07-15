@@ -43,17 +43,26 @@ def preference_rule_cards_from_memory_cards(
     *,
     current_request: str = "",
     current_files: list[str] | tuple[str, ...] = (),
+    project: str = "",
 ) -> list[dict[str, Any]]:
     preferences: list[dict[str, Any]] = []
     for card in cards:
         payload = card.get("typed_payload") if isinstance(card.get("typed_payload"), Mapping) else {}
         if str(card.get("card_type") or "") != "preference":
             continue
+        if not _project_matches(card.get("project"), project):
+            continue
         rule = public_safe_text(str(payload.get("preference") or card.get("summary") or ""), max_chars=360)
         if not rule:
             continue
         scope = public_safe_text(str(payload.get("applies_to") or card.get("scope") or "global"), max_chars=180)
-        if not _scope_applies(scope, current_request=current_request, current_files=current_files):
+        applies_to_current_request = _scope_applies(
+            scope,
+            current_request=current_request,
+            current_files=current_files,
+        )
+        is_artifact_preference = _is_artifact_preference(payload)
+        if not applies_to_current_request and not is_artifact_preference:
             continue
         preference = PreferenceRuleCard(
             memory_id=str(card.get("memory_id") or ""),
@@ -87,8 +96,37 @@ def preference_rule_cards_from_memory_cards(
                 str(payload.get("authority_decision_id") or ""),
                 max_chars=180,
             )
+        if is_artifact_preference:
+            preference["applies_to"] = scope
+            preference["applies_to_current_request"] = applies_to_current_request
+            preference["accepted_current"] = _is_accepted_current(card)
+            preference["artifact_preference"] = True
         preferences.append(preference)
     return preferences
+
+
+def _project_matches(card_project: Any, project: str) -> bool:
+    expected = public_safe_text(str(project or ""), max_chars=120)
+    actual = public_safe_text(str(card_project or ""), max_chars=120)
+    return not expected or not actual or actual == expected
+
+
+def _is_artifact_preference(payload: Mapping[str, Any]) -> bool:
+    return (
+        str(payload.get("source_object_type") or "") == "ArtifactPreference"
+        or str(payload.get("target_object_id") or "").startswith("ko:ArtifactPreference:")
+    )
+
+
+def _is_accepted_current(card: Mapping[str, Any]) -> bool:
+    if str(card.get("currentness") or "").casefold() != "current":
+        return False
+    lifecycle = str(card.get("lifecycle_state") or "").casefold()
+    approval = str(card.get("approval_state") or "").casefold()
+    return lifecycle in {"accepted", "human_accepted", "auto_accepted"} and approval in {
+        "approved",
+        "auto_accepted",
+    }
 
 
 def _scope_applies(

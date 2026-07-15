@@ -1466,6 +1466,28 @@ def test_runtime_readiness_fails_when_agent_context_startup_omits_current_author
     assert "agent_context_startup_section_missing:current_authority" in report["gaps"]
 
 
+def test_runtime_readiness_rejects_self_declared_live_startup_without_external_receipt():
+    evidence = _sanitized_live_evidence(
+        evidence_provenance=_evidence_provenance(
+            collection_mode="post_deploy_read_only_smoke",
+            mutation_scope="none",
+            network_used=True,
+        ),
+        production_authority_execution={},
+        production_authority_replacement_current={},
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "FAIL"
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    startup = claims["live.agent_context.startup_read_path"]
+    assert startup["status"] == "failed"
+    assert "agent_context_startup_external_consumer_receipt_missing" in startup["gaps"]
+    assert "agent_context_startup_receipt_not_verified" in startup["gaps"]
+    assert report["production_mutation_performed"] is False
+
+
 def test_runtime_readiness_fails_when_live_evidence_provenance_is_missing():
     evidence = _sanitized_live_evidence()
     evidence.pop("evidence_provenance")
@@ -1529,7 +1551,7 @@ def test_runtime_readiness_post_deploy_mode_without_network_does_not_claim_live_
 
     report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
 
-    assert report["status"] == "PASS_WITH_GAPS"
+    assert report["status"] == "FAIL"
     assert report["evidence_is_live"] is False
     assert report["production_ready"] is False
     assert report["production_readiness"] == "not_ready"
@@ -1538,6 +1560,7 @@ def test_runtime_readiness_post_deploy_mode_without_network_does_not_claim_live_
     assert provenance["status"] == "not_validated"
     assert provenance["is_live"] is False
     assert "live_evidence_provenance_network_not_used_for_live_mode" in report["gaps"]
+    assert "agent_context_startup_external_consumer_receipt_missing" in report["gaps"]
 
 
 def test_runtime_readiness_fails_when_evidence_provenance_reports_private_or_topology_values():
@@ -2104,6 +2127,7 @@ def test_runtime_readiness_marks_current_session_unimplemented_route_as_gap_with
         ),
         production_authority_execution={},
         production_authority_replacement_current={},
+        agent_context_startup_runtime={},
     )
 
     report = build_source_to_candidate_runtime_readiness_report(
@@ -2227,6 +2251,7 @@ def test_runtime_readiness_breaks_partial_live_evidence_into_actionable_gap_ids(
         ),
         production_authority_execution={},
         production_authority_replacement_current={},
+        agent_context_startup_runtime={},
     )
 
     report = build_source_to_candidate_runtime_readiness_report(
