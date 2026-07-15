@@ -733,7 +733,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
             )
         )
         _print_json(output)
-        return 0
+        return 1 if output["runtime_readiness"]["status"] == "FAIL" else 0
     if args.collect_shadow_evidence:
         read_service = BrainReadService()
 
