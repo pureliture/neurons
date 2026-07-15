@@ -933,7 +933,7 @@ def _p7_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     if (
         int(evidence.get("object_count") or 0) < 2
         and not _p7_single_live_current_preference_valid(evidence)
-        and not _p7_collector_capability_only_gap(evidence)
+        and not _p7_replayed_single_current_capability_gap(evidence)
     ):
         failures.append("p7_preference_style_objects_missing")
     if int(evidence.get("source_evidence_ref_count") or 0) < 1:
@@ -964,6 +964,15 @@ def _p7_single_live_current_preference_valid(evidence: Mapping[str, Any]) -> boo
         and evidence.get("html_route_status") == "validated"
         and evidence.get("artifact_review_check_status") == "pass"
         and evidence.get("runtime_readiness_status") != "FAIL"
+    )
+
+
+def _p7_replayed_single_current_capability_gap(evidence: Mapping[str, Any]) -> bool:
+    return (
+        _p7_collector_capability_only_gap(evidence)
+        and int(evidence.get("object_count") or 0) == 1
+        and int(evidence.get("accepted_preference_count") or 0) == 1
+        and int(evidence.get("proposal_preference_count") or 0) == 0
     )
 
 
