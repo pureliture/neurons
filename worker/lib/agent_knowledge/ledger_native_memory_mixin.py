@@ -91,6 +91,19 @@ def upsert_llm_brain_memory_card_on(connection, card: dict) -> dict:
     return json.loads(row["envelope_json"])
 
 
+_TYPED_PAYLOAD_FILTER_FIELDS = frozenset(
+    {"source_object_type", "target_object_id", "applies_to"}
+)
+
+
+def _typed_payload_text_sql(connection, field: str) -> str:
+    if field not in _TYPED_PAYLOAD_FILTER_FIELDS:
+        raise ValueError("unsupported typed payload filter field")
+    if getattr(connection, "dialect", "sqlite") == "postgres":
+        return f"(envelope_json::jsonb #>> '{{typed_payload,{field}}}')"
+    return f"json_extract(envelope_json, '$.typed_payload.{field}')"
+
+
 def upsert_llm_brain_feedback_record_on(connection, record: dict) -> dict:
     """주입된 connection 으로 llm_brain feedback record 를 upsert 한다(commit/connect 하지 않음)."""
 
@@ -243,37 +256,41 @@ class NativeMemoryMixin:
         applies_to: str | None = None,
         limit: int = 10,
     ) -> list[dict]:
-        filters = []
-        values: list[object] = []
-        if project:
-            filters.append("project = ?")
-            values.append(project)
-        if accepted_only:
-            filters.append("lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')")
-            filters.append("approval_state IN ('approved', 'auto_accepted')")
-        if current_only:
-            filters.append("currentness = 'current'")
-        if card_type:
-            filters.append("card_type = ?")
-            values.append(card_type)
-        if source_object_type:
-            filters.append(
-                "json_extract(envelope_json, '$.typed_payload.source_object_type') = ?"
-            )
-            values.append(source_object_type)
-        if target_object_type:
-            target_object_prefix = f"ko:{target_object_type}:"
-            filters.append(
-                "substr(json_extract(envelope_json, '$.typed_payload.target_object_id'), "
-                "1, length(?)) = ?"
-            )
-            values.extend((target_object_prefix, target_object_prefix))
-        if applies_to:
-            filters.append("json_extract(envelope_json, '$.typed_payload.applies_to') = ?")
-            values.append(applies_to)
-        where = "WHERE " + " AND ".join(filters) if filters else ""
-        values.append(max(int(limit), 1))
         with self._connect() as connection:
+            filters = []
+            values: list[object] = []
+            if project:
+                filters.append("project = ?")
+                values.append(project)
+            if accepted_only:
+                filters.append(
+                    "lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')"
+                )
+                filters.append("approval_state IN ('approved', 'auto_accepted')")
+            if current_only:
+                filters.append("currentness = 'current'")
+            if card_type:
+                filters.append("card_type = ?")
+                values.append(card_type)
+            if source_object_type:
+                source_type_sql = _typed_payload_text_sql(
+                    connection, "source_object_type"
+                )
+                filters.append(f"{source_type_sql} = ?")
+                values.append(source_object_type)
+            if target_object_type:
+                target_object_prefix = f"ko:{target_object_type}:"
+                target_id_sql = _typed_payload_text_sql(connection, "target_object_id")
+                filters.append(
+                    f"substr({target_id_sql}, 1, length(?)) = ?"
+                )
+                values.extend((target_object_prefix, target_object_prefix))
+            if applies_to:
+                applies_to_sql = _typed_payload_text_sql(connection, "applies_to")
+                filters.append(f"{applies_to_sql} = ?")
+                values.append(applies_to)
+            where = "WHERE " + " AND ".join(filters) if filters else ""
+            values.append(max(int(limit), 1))
             rows = connection.execute(
                 f"""
                 SELECT envelope_json FROM llm_brain_memory_cards
