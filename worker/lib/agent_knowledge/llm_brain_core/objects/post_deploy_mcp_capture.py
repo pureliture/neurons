@@ -135,6 +135,13 @@ _RAW_EXTERNAL_REF_SUFFIX_RE = re.compile(
     r"^(?:ragflow[._-])?(?:dataset|document)(?:[._-]|$)",
     re.IGNORECASE,
 )
+_ROUTE_SEMANTIC_VOLATILE_SCHEMAS = frozenset(
+    {
+        "knowledge_object_envelope.v1",
+        "knowledge_edge.v1",
+        "evidence_ref.v1",
+    }
+)
 
 
 def validate_post_deploy_mcp_url(mcp_url: str) -> str:
@@ -998,7 +1005,7 @@ def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, A
     untrusted = _remote_mapping_or_failure(raw)
     if untrusted.get("collector_call_failed") is True:
         forbidden = untrusted.get("collector_forbidden_input") is True
-        return {
+        smoke = {
             "schema_version": "brain_objects_query.v1",
             "route": route,
             "collector_error_type": public_safe_text(
@@ -1017,8 +1024,12 @@ def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, A
                     "collector_route_smoke_forbidden" if forbidden else "collector_route_smoke_failed"
                 ],
             },
+            "semantic_payload_hash": _route_semantic_payload_hash(untrusted),
+            "source_payload_hash": hash_payload(untrusted),
             "production_mutation_performed": False,
         }
+        ensure_public_safe(smoke, "SourceToCandidatePostDeployMcpRouteSmoke")
+        return smoke
     object_pack = (
         untrusted.get("object_pack")
         if isinstance(untrusted.get("object_pack"), Mapping)
@@ -1092,6 +1103,7 @@ def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, A
         ),
         "route": observed_route if observed_route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES else "",
         "object_pack": safe_object_pack,
+        "semantic_payload_hash": _route_semantic_payload_hash(untrusted),
         "source_payload_hash": hash_payload(untrusted),
         "production_mutation_performed": (
             untrusted.get("production_mutation_performed") is True
@@ -1100,6 +1112,56 @@ def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, A
     }
     ensure_public_safe(smoke, "SourceToCandidatePostDeployMcpRouteSmoke")
     return smoke
+
+
+def _route_semantic_payload_hash(raw: Mapping[str, Any]) -> str:
+    """Hash route content while omitting only schema-scoped observation time."""
+
+    return hash_payload(_route_semantic_payload(raw))
+
+
+def _route_semantic_payload(value: Any, *, route_entity: bool = False) -> Any:
+    if isinstance(value, Mapping):
+        schema_version = str(value.get("schema_version") or "")
+        semantic: dict[str, Any] = {}
+        for key, item in value.items():
+            if (
+                key == "observed_at"
+                and route_entity
+                and schema_version in _ROUTE_SEMANTIC_VOLATILE_SCHEMAS
+            ):
+                continue
+            if schema_version == "object_pack.v1" and key in {
+                "objects",
+                "edges",
+                "evidence",
+            }:
+                semantic[str(key)] = _route_entity_collection(item)
+            elif schema_version == "object_pack.v1" and key in {"lanes", "verification"}:
+                semantic[str(key)] = _route_entity_lanes(item)
+            else:
+                semantic[str(key)] = _route_semantic_payload(item)
+        return semantic
+    if isinstance(value, list):
+        return [_route_semantic_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [_route_semantic_payload(item) for item in value]
+    return value
+
+
+def _route_entity_collection(value: Any) -> Any:
+    if not isinstance(value, (list, tuple)):
+        return _route_semantic_payload(value)
+    return [_route_semantic_payload(item, route_entity=True) for item in value]
+
+
+def _route_entity_lanes(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return _route_semantic_payload(value)
+    return {
+        str(lane): _route_entity_collection(items)
+        for lane, items in value.items()
+    }
 
 
 def _runtime_collected_packet_summary(packet: Mapping[str, Any]) -> dict[str, Any]:
