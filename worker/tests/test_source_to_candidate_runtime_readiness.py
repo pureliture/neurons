@@ -507,6 +507,8 @@ def _production_authority_execution_evidence(**overrides):
             "max_objects": 1,
         },
         "proposal": {
+            "project": "workspace-index-advisor",
+            "proposal_type": "propose_current",
             "proposal_write_performed": True,
             "proposal_write_target": "production_ledger",
             "authority_write_performed": False,
@@ -516,6 +518,9 @@ def _production_authority_execution_evidence(**overrides):
             "production_gate_ref_hash": approval_ref_hash,
         },
         "decision": {
+            "project": "workspace-index-advisor",
+            "decision_type": "reject_candidate",
+            "new_authority_lane": "rejected",
             "authority_write_performed": True,
             "authoritative_memory_changed": True,
             "production_mutation_performed": True,
@@ -1590,6 +1595,8 @@ def test_runtime_readiness_accepts_bounded_production_execution_for_artifact_pre
     execution["proposal"]["target_object_id"] = target_object_id
     execution["decision"]["target_object_id"] = target_object_id
     execution["decision"]["decision_id"] = "decision:p7-artifact-preference-current"
+    execution["decision"]["decision_type"] = "accept_current"
+    execution["decision"]["new_authority_lane"] = "accepted_current"
     execution["read_after_write"].update(
         {
             "target_object_id": target_object_id,
@@ -1611,6 +1618,37 @@ def test_runtime_readiness_accepts_bounded_production_execution_for_artifact_pre
     assert "bounded_production_authority_execution_unverified" not in report["gaps"]
 
 
+def test_runtime_readiness_rejects_cross_project_bounded_execution_evidence():
+    execution = _production_authority_execution_evidence()
+    execution["decision"]["project"] = "other-project"
+    evidence = _sanitized_live_evidence(production_authority_execution=execution)
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    bounded_execution = claims["live.production.object_authority_bounded_execution"]
+    assert bounded_execution["status"] == "failed"
+    assert "bounded_execution_project_mismatch" in report["gaps"]
+
+
+def test_runtime_readiness_rejects_non_current_artifact_preference_execution():
+    target_object_id = "ko:ArtifactPreference:p7-html-review-density"
+    execution = _production_authority_execution_evidence()
+    execution["proposal"]["target_object_id"] = target_object_id
+    execution["decision"]["target_object_id"] = target_object_id
+    execution["read_after_write"]["target_object_id"] = target_object_id
+    execution["scope"]["object_ids"] = [target_object_id]
+    execution["scope"]["allowed_object_classes"] = ["ArtifactPreference"]
+    evidence = _sanitized_live_evidence(production_authority_execution=execution)
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    bounded_execution = claims["live.production.object_authority_bounded_execution"]
+    assert bounded_execution["status"] == "failed"
+    assert "bounded_execution_artifact_preference_not_accepted_current" in report["gaps"]
+
+
 def test_runtime_readiness_rejects_artifact_preference_when_scope_omits_target_class():
     target_object_id = "ko:ArtifactPreference:p7-html-review-density"
     execution = _production_authority_execution_evidence()
@@ -1627,6 +1665,24 @@ def test_runtime_readiness_rejects_artifact_preference_when_scope_omits_target_c
     bounded_execution = claims["live.production.object_authority_bounded_execution"]
     assert bounded_execution["status"] == "failed"
     assert "bounded_execution_allowed_object_class_missing" in report["gaps"]
+
+
+def test_runtime_readiness_keeps_replacement_current_repo_document_only():
+    replacement = _production_authority_replacement_current_evidence()
+    prior_target = "ko:ArtifactPreference:p7-prior-current"
+    successor_target = "ko:ArtifactPreference:p7-successor-current"
+    replacement["prior_current"]["target_object_id"] = prior_target
+    replacement["successor_current"]["target_object_id"] = successor_target
+    replacement["scope"]["object_ids"] = [prior_target, successor_target]
+    replacement["scope"]["allowed_object_classes"] = ["ArtifactPreference"]
+    evidence = _sanitized_live_evidence(production_authority_replacement_current=replacement)
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    replacement_claim = claims["live.production.object_authority_replacement_current"]
+    assert replacement_claim["status"] == "failed"
+    assert "replacement_object_class_not_allowed" in report["gaps"]
 
 
 def test_runtime_readiness_fails_when_bounded_execution_postcheck_returns_forbidden_outputs():

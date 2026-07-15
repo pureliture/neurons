@@ -1456,6 +1456,8 @@ def _production_authority_execution_from_smoke(
             "max_objects": 1,
         },
         "proposal": {
+            "project": proposal["project"],
+            "proposal_type": proposal["proposal_type"],
             "proposal_write_performed": proposal["proposal_write_performed"],
             "proposal_write_target": proposal["proposal_write_target"],
             "authority_write_performed": proposal["authority_write_performed"],
@@ -1465,6 +1467,9 @@ def _production_authority_execution_from_smoke(
             "production_gate_ref_hash": proposal["production_gate_ref_hash"],
         },
         "decision": {
+            "project": decision["project"],
+            "decision_type": decision["decision_type"],
+            "new_authority_lane": decision["new_authority_lane"],
             "authority_write_performed": decision["authority_write_performed"],
             "authoritative_memory_changed": decision["authoritative_memory_changed"],
             "production_mutation_performed": decision["production_mutation_performed"],
@@ -2988,6 +2993,120 @@ def test_mcp_object_authority_production_gate_rejects_unallowed_object_class(tmp
     assert service.object_review_proposals(project=PROJECT)["count"] == 0
 
 
+@pytest.mark.parametrize(
+    ("proposed_object", "expected_gap"),
+    [
+        (
+            {
+                "object_id": "ko:ArtifactPreference:p7-html-review-density",
+                "object_type": "RuntimeTruth",
+            },
+            "allowed_object_class_RepoDocument_or_ArtifactPreference",
+        ),
+        (
+            {
+                "object_id": "ko:ArtifactPreference:p7-other-preference",
+                "object_type": "ArtifactPreference",
+            },
+            "proposed_object_target_match",
+        ),
+    ],
+)
+def test_mcp_object_authority_production_gate_rejects_proposed_object_mismatch(
+    tmp_path: Path,
+    proposed_object: dict,
+    expected_gap: str,
+):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    target_object_id = "ko:ArtifactPreference:p7-html-review-density"
+
+    result = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 133,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "proposed_object": proposed_object,
+                    "reason": "Proposed object identity and class must match the production target.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert result["permission"] == "denied"
+    assert result["proposal_write_performed"] is False
+    assert result["production_mutation_performed"] is False
+    assert expected_gap in result["production_promotion_plan"]["missing_gate_evidence"]
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+
+
+def test_mcp_object_authority_production_gate_rejects_cross_project_decision(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    target_object_id = "ko:ArtifactPreference:p7-project-boundary"
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 134,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Create a project-scoped preference proposal.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    other_project_gate = {**_approval_board_production_gate(), "project": "other-project"}
+
+    decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 135,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "accept_current",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "accepted_current",
+                    "approved_by": "preapproved-user-gate-2026-07-06",
+                    "decision_id": "decision:p7-cross-project",
+                    "ledger_scope": "production",
+                    "project": "other-project",
+                    "production_gate": other_project_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert decision["permission"] == "denied"
+    assert decision["authority_write_performed"] is False
+    assert decision["production_mutation_performed"] is False
+    assert "proposal_project_scope_match" in decision["production_promotion_plan"]["missing_gate_evidence"]
+    assert service.ledger.get_object_authority_state(target_object_id) == {}
+
+
 def test_mcp_corpus_ingest_plan_reports_manifest_ref_gap(tmp_path: Path):
     service = _service(tmp_path)
     result = handle_jsonrpc_message(
@@ -3486,6 +3605,55 @@ def test_mcp_object_decision_commit_requires_matching_review_proposal(tmp_path: 
     assert mismatch["error"]["code"] == -32602
     assert service.ledger.get_object_authority_state("ko:RepoDocument:proposal-a") == {}
     assert service.ledger.get_object_authority_state("ko:RepoDocument:proposal-b") == {}
+
+
+def test_mcp_object_decision_commit_requires_matching_proposal_project(tmp_path: Path):
+    service = _service(tmp_path)
+    target_object_id = "ko:RepoDocument:project-boundary"
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 136,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Project-scoped local proposal.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 137,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "target_object_id": target_object_id,
+                    "decision_type": "accept_current",
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "accepted_current",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:local-cross-project",
+                    "ledger_scope": "local_test",
+                    "project": "other-project",
+                },
+            },
+        },
+        service,
+    )
+
+    assert decision["error"]["code"] == -32602
+    assert service.ledger.get_object_authority_state(target_object_id) == {}
 
 
 def test_mcp_brain_object_explain_includes_local_authority_decision_history(tmp_path: Path):

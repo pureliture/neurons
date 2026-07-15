@@ -374,6 +374,7 @@ class KnowledgeSearchService:
             proposer="codex",
         ).to_dict(proposal_write_performed=True, proposal_write_target="production_ledger")
         proposal["project"] = gate["project"]
+        proposal["object_type"] = target_object_type
         proposal["ledger_scope"] = "production"
         proposal["production_mutation_performed"] = True
         proposal["production_gate_ref_hash"] = gate["approval_ref_hash"]

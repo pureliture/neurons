@@ -3403,11 +3403,30 @@ def _bounded_execution_failures(
         failures.append("bounded_execution_object_count_not_one")
     if not proposal_target or proposal_target != decision_target or proposal_target != read_target:
         failures.append("bounded_execution_target_object_mismatch")
+    approval_project = public_safe_text(str(approval.get("project") or ""), max_chars=120)
+    proposal_project = public_safe_text(str(proposal.get("project") or ""), max_chars=120)
+    decision_project = public_safe_text(str(decision.get("project") or ""), max_chars=120)
+    scope_project = public_safe_text(str(scope.get("project") or ""), max_chars=120)
+    projects = (approval_project, proposal_project, decision_project, scope_project)
+    if not all(projects):
+        failures.append("bounded_execution_project_missing")
+    elif len(set(projects)) != 1:
+        failures.append("bounded_execution_project_mismatch")
+    if proposal_target and proposal_target not in object_ids:
+        failures.append("bounded_execution_target_not_in_scope")
     target_object_class = knowledge_object_class_from_id(proposal_target)
     if proposal_target and not is_allowed_object_target(proposal_target):
         failures.append("bounded_execution_object_class_not_allowed")
     if not target_object_class or target_object_class not in allowed_object_classes:
         failures.append("bounded_execution_allowed_object_class_missing")
+    if target_object_class == "ArtifactPreference" and (
+        proposal.get("proposal_type") != "propose_current"
+        or decision.get("decision_type") != "accept_current"
+        or decision.get("new_authority_lane") != "accepted_current"
+        or read_after_write.get("authority_lane") != "accepted_current"
+        or postcheck.get("review_queue_status") != "accepted"
+    ):
+        failures.append("bounded_execution_artifact_preference_not_accepted_current")
     if proposal.get("proposal_write_performed") is not True:
         failures.append("bounded_execution_proposal_write_missing")
     if proposal.get("proposal_write_target") != "production_ledger":
