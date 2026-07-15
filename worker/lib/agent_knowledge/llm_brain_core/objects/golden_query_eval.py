@@ -969,7 +969,7 @@ def _p7_single_live_current_preference_valid(evidence: Mapping[str, Any]) -> boo
 def _p7_collector_capability_only_gap(evidence: Mapping[str, Any]) -> bool:
     gaps = {
         gap
-        for gap in evidence.get("gaps", [])
+        for gap in (evidence.get("gaps") or [])
         if isinstance(gap, str) and gap
     }
     return (
@@ -983,7 +983,7 @@ def _p7_collector_capability_only_gap(evidence: Mapping[str, Any]) -> bool:
 def _p7_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
     gaps = [
         f"p7_{gap}"
-        for gap in evidence.get("gaps", [])
+        for gap in (evidence.get("gaps") or [])
         if isinstance(gap, str) and gap
     ]
     if (
