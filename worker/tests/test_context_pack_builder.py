@@ -40,6 +40,31 @@ def _task_card(memory_id: str, task_state: str, next_action: str) -> dict:
     }
 
 
+def _artifact_preference_card(*, memory_id: str, project: str, rule: str) -> dict:
+    suffix = memory_id.replace("_", "-")
+    return {
+        "memory_id": memory_id,
+        "card_type": "preference",
+        "project": project,
+        "title": rule,
+        "summary": rule,
+        "currentness": "current",
+        "lifecycle_state": "accepted",
+        "approval_state": "approved",
+        "content_hash": "sha256:" + "c" * 64,
+        "confidence": 0.95,
+        "typed_payload": {
+            "preference": rule,
+            "applies_to": "html review artifact",
+            "source_object_type": "ArtifactPreference",
+            "target_object_id": f"ko:ArtifactPreference:{suffix}",
+            "source_content_hash": "sha256:" + "a" * 64,
+            "authority_proposal_id": f"proposal:{suffix}",
+            "authority_decision_id": f"decision:{suffix}",
+        },
+    }
+
+
 def test_builder_prefers_card_over_artifact_and_graph_for_current_task():
     # card > artifact > graph: the card task wins even when an artifact and a
     # graph task are also present.
@@ -108,6 +133,151 @@ def test_builder_falls_back_to_artifact_then_graph_when_no_card_task():
     assert pack_graph_only["current_task"] == "Graph task fallback"
     assert pack_graph_only["last_stopped_at"] == "Graph next action"
     assert "no_canonical_memory" in pack_graph_only["gaps"]
+
+
+def test_builder_projects_one_ranked_current_work_candidate_into_agent_context():
+    builder = ContextPackBuilder()
+    artifact = SimpleNamespace(
+        artifact_id="session-memory:artifact-current-work",
+        project="neurons",
+        summary="Resume the latest canonical session work",
+        content_hash="sha256:" + "b" * 64,
+        created_at="2026-07-15T00:00:00+00:00",
+    )
+    graph = _available(_graph_task_episode("Graph work", "Resume graph work"))
+
+    card_pack = builder.build(
+        brain_id="/project/neurons",
+        repository="neurons",
+        branch="main",
+        current_files=[],
+        current_request="resume P9",
+        artifacts=[artifact],
+        cards=[_task_card("mem_work", "Accepted card work", "Resume card work")],
+        graph_result=graph,
+        incidents=(),
+        bridge_status={"status": "disabled", "authority": "bridge", "details": []},
+        bridge_evidence=(),
+        consumer="codex",
+    ).to_dict()
+    artifact_pack = builder.build(
+        brain_id="/project/neurons",
+        repository="neurons",
+        branch="main",
+        current_files=[],
+        current_request="resume P9",
+        artifacts=[artifact],
+        cards=[],
+        graph_result=graph,
+        incidents=(),
+        bridge_status={"status": "disabled", "authority": "bridge", "details": []},
+        bridge_evidence=(),
+        consumer="codex",
+    ).to_dict()
+    graph_pack = builder.build(
+        brain_id="/project/neurons",
+        repository="neurons",
+        branch="main",
+        current_files=[],
+        current_request="resume P9",
+        artifacts=[],
+        cards=[],
+        graph_result=graph,
+        incidents=(),
+        bridge_status={"status": "disabled", "authority": "bridge", "details": []},
+        bridge_evidence=(),
+        consumer="codex",
+    ).to_dict()
+
+    card_work = card_pack["authority"]["agent_context_product"]["sections"]["active_work"]
+    artifact_work = artifact_pack["authority"]["agent_context_product"]["sections"]["active_work"]
+    graph_work = graph_pack["authority"]["agent_context_product"]["sections"]["active_work"]
+    assert [(item["title"], item["authority_lane"]) for item in card_work["items"]] == [
+        ("Accepted card work", "accepted_current")
+    ]
+    assert [(item["title"], item["authority_lane"]) for item in artifact_work["items"]] == [
+        ("Resume the latest canonical session work", "reference_only")
+    ]
+    assert [(item["title"], item["authority_lane"]) for item in graph_work["items"]] == [
+        ("Graph work", "derived_projection")
+    ]
+
+
+def test_builder_excludes_terminal_and_non_current_tasks_from_active_work():
+    terminal_graph = OntologyEpisode.from_payload(
+        event_id="evt_terminal_graph_task",
+        entity_type="Task",
+        natural_id="task:terminal-graph",
+        payload={
+            "brain_id": "/project/neurons",
+            "task_state": "Completed graph task",
+            "next_action": "Do not resume",
+            "status": "completed",
+        },
+        observed_at="2026-07-15T00:00:00+00:00",
+    )
+    retired_card = _task_card("mem_retired", "Retired card task", "Do not resume")
+    retired_card["currentness"] = "retired"
+
+    pack = ContextPackBuilder().build(
+        brain_id="/project/neurons",
+        repository="neurons",
+        branch="main",
+        current_files=[],
+        current_request="resume P9",
+        artifacts=[],
+        cards=[retired_card],
+        graph_result=_available(terminal_graph),
+        incidents=(),
+        bridge_status={"status": "disabled", "authority": "bridge", "details": []},
+        bridge_evidence=(),
+        consumer="codex",
+    ).to_dict()
+
+    active_work = pack["authority"]["agent_context_product"]["sections"]["active_work"]
+    assert active_work["object_count"] == 0
+    assert pack["current_task"] == ""
+
+
+def test_builder_exposes_project_accepted_artifact_preference_without_keyword_match():
+    local = _artifact_preference_card(
+        memory_id="mem_local_html_preference",
+        project="neurons",
+        rule="Prefer dense evidence-first HTML review artifacts.",
+    )
+    other = _artifact_preference_card(
+        memory_id="mem_other_html_preference",
+        project="other-project",
+        rule="Cross-project preference must stay hidden.",
+    )
+
+    pack = ContextPackBuilder().build(
+        brain_id="/project/neurons",
+        repository="neurons",
+        branch="main",
+        current_files=[],
+        current_request="P9 startup context",
+        artifacts=[],
+        cards=[local, other],
+        graph_result=GraphMemoryResult(status="available"),
+        incidents=(),
+        bridge_status={"status": "disabled", "authority": "bridge", "details": []},
+        bridge_evidence=(),
+        consumer="codex",
+    ).to_dict()
+
+    product = pack["authority"]["agent_context_product"]
+    authority = product["sections"]["current_authority"]
+    style = product["sections"]["style_preference"]
+    assert authority["object_count"] == 1
+    assert authority["authority_lanes"] == ["accepted_current"]
+    assert all(item["authority_lane"] == "accepted_current" for item in authority["items"])
+    assert [item["title"] for item in style["items"]] == [
+        "Prefer dense evidence-first HTML review artifacts."
+    ]
+    assert style["authority_lanes"] == ["accepted_current"]
+    assert style["items"][0]["payload"]["applies_to"] == "html review artifact"
+    assert style["items"][0]["payload"]["applies_to_current_request"] is False
 
 
 def test_builder_flags_graph_edge_degraded_distinct_from_unavailable():
@@ -211,10 +381,7 @@ def test_builder_adds_consumer_specific_compact_agent_context_pack_with_safe_act
         ]
         assert product["surface_policy"]["mutation_allowed"] is False
         assert product["sections"]["reference_objects"]["object_count"] >= 1
-        expected_blockers = [
-            "runtime_evidence_unverified",
-            "agent_context_current_authority_accepted_current_missing",
-        ]
+        expected_blockers = ["runtime_evidence_unverified"]
         assert product["action_hints"] == [
             {
                 "action": "request_missing_evidence",
@@ -424,8 +591,9 @@ def test_agent_context_product_pack_discloses_reference_only_current_authority_g
     )
 
     section = product["sections"]["current_authority"]
-    assert section["object_count"] == 1
-    assert section["authority_lanes"] == ["reference_only"]
+    assert section["object_count"] == 0
+    assert section["authority_lanes"] == []
+    assert section["items"] == []
     assert "agent_context_current_authority_accepted_current_missing" in section["gaps"]
     assert "agent_context_current_authority_accepted_current_missing" in product["degraded_mode"]["gaps"]
     assert (
@@ -478,12 +646,16 @@ def test_agent_context_product_pack_discloses_reference_only_style_preference_ga
     )
 
     section = product["sections"]["style_preference"]
-    assert section["object_count"] == 1
-    assert section["authority_lanes"] == ["reference_only"]
-    assert "agent_context_style_preference_accepted_current_missing" in section["gaps"]
-    assert "agent_context_style_preference_accepted_current_missing" in product["degraded_mode"]["gaps"]
+    assert section["object_count"] == 0
+    assert section["authority_lanes"] == []
+    assert section["items"] == []
+    assert section["suggestion_object_count"] == 1
+    assert section["suggestion_authority_lanes"] == ["reference_only"]
+    assert section["suggestion_items"][0]["title"] == "Repository prefers compact summaries."
+    assert "agent_context_style_preference_missing" in section["gaps"]
+    assert "agent_context_style_preference_missing" in product["degraded_mode"]["gaps"]
     assert (
-        "agent_context_style_preference_accepted_current_missing"
+        "agent_context_style_preference_missing"
         in product["missing_evidence_before_promotion"]
     )
 

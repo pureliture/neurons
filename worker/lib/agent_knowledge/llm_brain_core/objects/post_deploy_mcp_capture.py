@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 import re
+import secrets
+import sys
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
@@ -13,15 +18,78 @@ from .artifact_preference_evaluator import (
     artifact_preference_application_receipt_is_valid,
     validate_artifact_descriptor,
 )
+from .agent_context_consumer import (
+    build_agent_context_consumer_challenge,
+    build_agent_context_consumer_startup_receipt,
+    build_agent_context_startup_context_request,
+    build_agent_context_startup_route_request,
+    build_agent_context_startup_runtime_evidence,
+)
 from .authority_policy import knowledge_object_class_from_id
 from .runtime_readiness import (
+    ALLOWED_AGENT_CONTEXT_CONSUMERS,
+    ALLOWED_AGENT_CONTEXT_TOOL_SAFE_TARGETS,
     EVIDENCE_PROVENANCE_SCHEMA,
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
+    REQUIRED_RUNTIME_TOOL_NAMES,
+    REQUIRED_SESSION_PROJECT_EDGE_TYPES,
+    REQUIRED_SESSION_PROJECT_OBJECT_TYPES,
     RUNTIME_READINESS_AGENT_CONTEXT_TOOL,
     _mint_collector_attested_evidence,
 )
 
 POST_DEPLOY_MCP_CAPTURE_SCHEMA = "source_to_candidate_runtime_post_deploy_mcp_capture.v1"
+AGENT_CONTEXT_STARTUP_SUBPROCESS_TIMEOUT_SECONDS = 60
+_ALLOWED_CAPTURE_TOOL_NAMES = frozenset(
+    {
+        *REQUIRED_RUNTIME_TOOL_NAMES,
+        ARTIFACT_PREFERENCE_EVALUATOR_TOOL,
+        "brain_context_resolve",
+        "brain_object_decision_commit",
+        "brain_object_proposal_create",
+    }
+)
+_AGENT_CONTEXT_SECTION_NAMES = (
+    "current_authority",
+    "reference_objects",
+    "style_preference",
+    "active_work",
+    "guardrails",
+    "required_verification",
+)
+_AGENT_CONTEXT_AUTHORITY_LANES = frozenset(
+    {
+        "accepted_current",
+        "accepted_non_current",
+        "reference_only",
+        "proposal_only",
+        "archive_only",
+        "derived_projection",
+    }
+)
+_AGENT_CONTEXT_ACTIONS = frozenset(
+    {
+        "promote_authority",
+        "request_missing_evidence",
+        "run_verification",
+        "suggest_change",
+    }
+)
+_AGENT_CONTEXT_PROPERTY_OMISSIONS = frozenset(
+    {
+        "private_deploy_value",
+        "raw_body",
+        "raw_source",
+        "secret",
+    }
+)
+_AGENT_CONTEXT_BLOCKED_TARGETS = frozenset(
+    {
+        "authority_write",
+        "production_mutation",
+        "raw_private_runtime_evidence",
+    }
+)
 PROTECTED_OUTPUT_FLAGS = (
     "raw_private_evidence_returned",
     "secret_returned",
@@ -99,6 +167,8 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
     expected_commit: str = "",
     deployed_identity: Mapping[str, Any] | None = None,
     artifact_descriptor: Mapping[str, Any] | None = None,
+    collect_agent_context_startup: bool = False,
+    agent_context_startup_runner: Any = None,
     session_factory: Any = None,
 ) -> dict[str, Any]:
     """Collect sanitized read-only runtime evidence from a deployed MCP HTTP endpoint."""
@@ -146,19 +216,12 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         context_pack = await _call_tool_mapping(
             session,
             "brain_context_resolve",
-            {
-                "repository": repository,
-                "branch": branch,
-                "project": safe_project,
-                "current_files": [],
-                "current_request": (
-                    "source-to-candidate runtime readiness post-deploy "
-                    "agent context product capture"
-                ),
-                "limit": 8,
-                "response_mode": "full",
-                "consumer": consumer,
-            },
+            build_agent_context_startup_context_request(
+                repository=repository,
+                branch=branch,
+                project=safe_project,
+                consumer=consumer,
+            ),
         )
         smokes = [
             _route_smoke_from_call(
@@ -166,17 +229,13 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
                 raw=await _call_tool_mapping(
                     session,
                     "brain_objects_query",
-                    {
-                        "repository": repository,
-                        "branch": branch,
-                        "project": safe_project,
-                        "query": f"source-to-candidate runtime readiness post-deploy route smoke: {route}",
-                        "current_files": [],
-                        "route": route,
-                        "limit": 5,
-                        "response_mode": "full",
-                        "consumer": consumer,
-                    },
+                    build_agent_context_startup_route_request(
+                        repository=repository,
+                        branch=branch,
+                        project=safe_project,
+                        route=route,
+                        consumer=consumer,
+                    ),
                 ),
             )
             for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
@@ -240,7 +299,7 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
     capture = {
         "schema_version": POST_DEPLOY_MCP_CAPTURE_SCHEMA,
         "tool_names": tool_names,
-        "runtime_readiness_plan": _remote_mapping_or_failure(plan),
+        "runtime_readiness_plan": _runtime_readiness_plan_view(plan),
         "runtime_collected_packet": _runtime_collected_packet_summary(attested_runtime_packet),
         "agent_context_product": _agent_context_product_from_context_pack(context_pack),
         "brain_objects_query_smokes": smokes,
@@ -265,10 +324,259 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         capture["preference_artifact_memory"] = preference_artifact_memory
     if accepted_receipt:
         capture["artifact_preference_application_receipt"] = accepted_receipt
+    if collect_agent_context_startup:
+        if consumer != "codex":
+            raise ValueError("agent context startup collection only supports consumer=codex")
+        proof_key = secrets.token_bytes(32)
+        challenge = build_agent_context_consumer_challenge(
+            consumer="codex",
+            project=safe_project,
+            repository=repository,
+            branch=branch,
+            expected_commit=expected_commit,
+            endpoint_origin=safe_url,
+            ttl_seconds=300,
+        )
+        subprocess_attested = agent_context_startup_runner is None
+        startup_runner = agent_context_startup_runner or _default_agent_context_startup_runner
+        try:
+            receipt = await startup_runner(
+                mcp_url=safe_url,
+                repository=repository,
+                branch=branch,
+                project=safe_project,
+                consumer="codex",
+                expected_commit=expected_commit,
+                challenge=challenge,
+                proof_key=proof_key,
+            )
+        except Exception:
+            receipt = {"collector_error_type": "AgentContextStartupRunnerFailed"}
+        receipt = _agent_context_startup_receipt_or_failure(receipt)
+        startup_runtime = build_agent_context_startup_runtime_evidence(
+            receipt=receipt,
+            challenge=challenge,
+            proof_key=proof_key,
+            context_pack=_remote_mapping_or_failure(context_pack),
+            route_smokes=smokes,
+        )
+        startup_runtime["collector_execution"] = {
+            "runner_kind": (
+                "default_external_subprocess"
+                if subprocess_attested
+                else "injected_runner_unattested"
+            ),
+            "subprocess_attested": subprocess_attested,
+        }
+        startup_runtime["capture_bundle_binding"] = {
+            "schema_version": "agent_context_capture_bundle_binding.v1",
+            "agent_context_product_projection_hash": hash_payload(
+                capture["agent_context_product"]
+            ),
+            "source_product_hash": str(
+                capture["agent_context_product"].get("source_payload_hash") or ""
+            ),
+            "route_smoke_projection_hashes": {
+                str(smoke.get("route") or ""): hash_payload(smoke)
+                for smoke in smokes
+                if str(smoke.get("route") or "")
+            },
+        }
+        capture["agent_context_startup_runtime"] = startup_runtime
     ensure_public_safe(capture, "SourceToCandidatePostDeployMcpCapture")
+    startup_runtime = (
+        capture.get("agent_context_startup_runtime")
+        if isinstance(capture.get("agent_context_startup_runtime"), Mapping)
+        else {}
+    )
+    startup_validation = (
+        startup_runtime.get("receipt_validation")
+        if isinstance(startup_runtime.get("receipt_validation"), Mapping)
+        else {}
+    )
+    attested_fields: set[str] = set()
     if accepted_receipt:
-        return _mint_collector_attested_evidence(capture)
+        attested_fields.add("preference_artifact_memory")
+    startup_execution = (
+        startup_runtime.get("collector_execution")
+        if isinstance(startup_runtime.get("collector_execution"), Mapping)
+        else {}
+    )
+    if (
+        startup_validation.get("status") == "validated"
+        and startup_execution.get("subprocess_attested") is True
+    ):
+        attested_fields.add("agent_context_startup_runtime")
+    if attested_fields:
+        return _mint_collector_attested_evidence(
+            capture,
+            attested_fields=attested_fields,
+        )
     return capture
+
+
+async def collect_agent_context_consumer_startup_receipt(
+    *,
+    mcp_url: str,
+    repository: str,
+    branch: str,
+    project: str,
+    consumer: str,
+    expected_commit: str,
+    challenge: Mapping[str, Any],
+    proof_key: bytes,
+    session_factory: Any = None,
+) -> dict[str, Any]:
+    """Build a startup receipt from an isolated external-consumer MCP session."""
+
+    if consumer != "codex":
+        raise ValueError("agent context startup collection only supports consumer=codex")
+    safe_url = validate_post_deploy_mcp_url(mcp_url)
+    safe_project = public_safe_text(str(project or ""), max_chars=120) or "neurons"
+    factory = session_factory or _default_mcp_session
+    context_reads = 0
+    route_reads = 0
+    async with factory(safe_url) as session:
+        await session.initialize()
+        context_reads += 1
+        context_pack = _remote_mapping_or_failure(
+            await _call_tool_mapping(
+                session,
+                "brain_context_resolve",
+                build_agent_context_startup_context_request(
+                    repository=repository,
+                    branch=branch,
+                    project=safe_project,
+                    consumer="codex",
+                ),
+            )
+        )
+        smokes: list[dict[str, Any]] = []
+        for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES:
+            route_reads += 1
+            smokes.append(
+                _route_smoke_from_call(
+                    route=route,
+                    raw=await _call_tool_mapping(
+                        session,
+                        "brain_objects_query",
+                        build_agent_context_startup_route_request(
+                            repository=repository,
+                            branch=branch,
+                            project=safe_project,
+                            route=route,
+                            consumer="codex",
+                        ),
+                    ),
+                )
+            )
+    return build_agent_context_consumer_startup_receipt(
+        challenge=challenge,
+        proof_key=proof_key,
+        context_pack=context_pack,
+        route_smokes=smokes,
+        io_audit={
+            "brain_context_resolve_calls": context_reads,
+            "brain_objects_query_calls": route_reads,
+            "write_tool_calls": 0,
+            "task_dispatch_count_before_load": 0,
+        },
+    )
+
+
+async def _default_agent_context_startup_runner(
+    *,
+    mcp_url: str,
+    repository: str,
+    branch: str,
+    project: str,
+    consumer: str,
+    expected_commit: str,
+    challenge: Mapping[str, Any],
+    proof_key: bytes,
+) -> dict[str, Any]:
+    """Run the bounded consumer adapter without exposing its one-time proof key."""
+
+    if len(proof_key) != 32:
+        return {"collector_error_type": "AgentContextStartupProofKeyInvalid"}
+    read_fd, write_fd = os.pipe()
+    try:
+        try:
+            _write_exactly(write_fd, proof_key)
+        except OSError:
+            return {"collector_error_type": "AgentContextStartupProofKeyPipeWriteFailed"}
+        finally:
+            os.close(write_fd)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "agent_knowledge.cli",
+                "agent-context-startup",
+                "--mcp-url",
+                mcp_url,
+                "--repository",
+                repository,
+                "--branch",
+                branch,
+                "--project",
+                project,
+                "--consumer",
+                consumer,
+                "--expected-commit",
+                expected_commit,
+                "--proof-fd",
+                str(read_fd),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                pass_fds=(read_fd,),
+            )
+        except Exception:
+            return {"collector_error_type": "AgentContextStartupSubprocessLaunchFailed"}
+        try:
+            stdout, _stderr = await asyncio.wait_for(
+                process.communicate(json.dumps(dict(challenge)).encode("utf-8")),
+                timeout=AGENT_CONTEXT_STARTUP_SUBPROCESS_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            return {"collector_error_type": "AgentContextStartupSubprocessTimeout"}
+        except Exception:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            return {"collector_error_type": "AgentContextStartupSubprocessCommunicationFailed"}
+        if process.returncode != 0:
+            return {"collector_error_type": "AgentContextStartupSubprocessFailed"}
+        try:
+            receipt = json.loads(stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {"collector_error_type": "AgentContextStartupSubprocessInvalidJson"}
+        if not isinstance(receipt, Mapping):
+            return {"collector_error_type": "AgentContextStartupSubprocessInvalidReceipt"}
+        return _agent_context_startup_receipt_or_failure(receipt)
+    finally:
+        os.close(read_fd)
+
+
+def _write_exactly(fd: int, value: bytes) -> None:
+    offset = 0
+    while offset < len(value):
+        written = os.write(fd, value[offset:])
+        if written <= 0:
+            raise OSError("proof key pipe write failed")
+        offset += written
+
+
+def _agent_context_startup_receipt_or_failure(value: Any) -> dict[str, Any]:
+    try:
+        _reject_forbidden_runtime_input_keys(value)
+        return _public_safe_mapping(value)
+    except (TypeError, ValueError):
+        return {"collector_error_type": "AgentContextStartupReceiptUnsafe"}
 
 
 def _attach_direct_application_receipt(
@@ -427,11 +735,14 @@ def _recalculated_artifact_review_check(
 async def _collect_tool_names(session: Any) -> list[str]:
     tools_result = await session.list_tools()
     tools = getattr(tools_result, "tools", [])
-    return [
-        public_safe_text(str(getattr(tool, "name", "") or ""), max_chars=120)
-        for tool in tools
-        if str(getattr(tool, "name", "") or "")
-    ]
+    return sorted(
+        {
+            name
+            for tool in tools
+            if (name := str(getattr(tool, "name", "") or ""))
+            in _ALLOWED_CAPTURE_TOOL_NAMES
+        }
+    )
 
 
 async def _call_tool_untrusted_mapping(
@@ -465,7 +776,7 @@ def _agent_context_product_from_context_pack(context_pack: Mapping[str, Any]) ->
     if not isinstance(product, Mapping):
         product = pack.get("agent_context_product")
     if isinstance(product, Mapping):
-        return _public_safe_mapping(product)
+        return _agent_context_product_view(product)
     return {
         "schema_version": "",
         "sections": {},
@@ -479,15 +790,219 @@ def _agent_context_product_from_context_pack(context_pack: Mapping[str, Any]) ->
     }
 
 
+def _agent_context_product_view(value: Mapping[str, Any]) -> dict[str, Any]:
+    sections = value.get("sections") if isinstance(value.get("sections"), Mapping) else {}
+    surface = (
+        value.get("surface_policy")
+        if isinstance(value.get("surface_policy"), Mapping)
+        else {}
+    )
+    degraded = (
+        value.get("degraded_mode")
+        if isinstance(value.get("degraded_mode"), Mapping)
+        else {}
+    )
+    freshness = value.get("freshness") if isinstance(value.get("freshness"), Mapping) else {}
+    consumer = str(value.get("consumer") or "")
+    view = {
+        "schema_version": (
+            "agent_context_product_pack.v1"
+            if value.get("schema_version") == "agent_context_product_pack.v1"
+            else ""
+        ),
+        "consumer": consumer if consumer in ALLOWED_AGENT_CONTEXT_CONSUMERS else "",
+        "sections": {
+            name: _agent_context_section_view(sections.get(name))
+            for name in _AGENT_CONTEXT_SECTION_NAMES
+        },
+        "surface_policy": {
+            "consumer": consumer if consumer in ALLOWED_AGENT_CONTEXT_CONSUMERS else "",
+            "read_only": surface.get("read_only") if isinstance(surface.get("read_only"), bool) else None,
+            "mutation_allowed": (
+                surface.get("mutation_allowed")
+                if isinstance(surface.get("mutation_allowed"), bool)
+                else None
+            ),
+            "allowed_actions": _allowlisted_strings(
+                surface.get("allowed_actions"),
+                _AGENT_CONTEXT_ACTIONS,
+            ),
+            "property_omissions": _allowlisted_strings(
+                surface.get("property_omissions"),
+                _AGENT_CONTEXT_PROPERTY_OMISSIONS,
+            ),
+        },
+        "degraded_mode": {
+            "active": degraded.get("active") is True,
+            "gap_hashes": _hashed_string_list(degraded.get("gaps")),
+            "gaps": _hashed_string_list(degraded.get("gaps")),
+        },
+        "freshness": {
+            "stale_evidence_visible": freshness.get("stale_evidence_visible") is True,
+            "stale_memory_count": _safe_int(freshness.get("stale_memory_count")),
+            "no_recent_source": freshness.get("no_recent_source") is True,
+        },
+        "missing_evidence_before_promotion": _hashed_string_list(
+            value.get("missing_evidence_before_promotion")
+        ),
+        "action_hints": _agent_context_action_hint_views(value.get("action_hints")),
+        "tool_hints": _agent_context_tool_hint_views(value.get("tool_hints")),
+        "source_payload_hash": hash_payload(value),
+    }
+    ensure_public_safe(view, "SourceToCandidatePostDeployAgentContextProductView")
+    return view
+
+
+def _agent_context_section_view(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, Mapping) else {}
+    items = [item for item in raw.get("items", []) if isinstance(item, Mapping)] if isinstance(
+        raw.get("items"), list
+    ) else []
+    suggestion_items = [
+        item for item in raw.get("suggestion_items", []) if isinstance(item, Mapping)
+    ] if isinstance(raw.get("suggestion_items"), list) else []
+    authority_lanes = sorted(
+        {
+            lane
+            for item in items
+            if (lane := str(item.get("authority_lane") or ""))
+            in _AGENT_CONTEXT_AUTHORITY_LANES
+        }
+    )
+    suggestion_lanes = sorted(
+        {
+            lane
+            for item in suggestion_items
+            if (lane := str(item.get("authority_lane") or ""))
+            in _AGENT_CONTEXT_AUTHORITY_LANES
+        }
+    )
+    return {
+        "object_count": len(items),
+        "authority_lanes": authority_lanes,
+        "item_hashes": [hash_payload(item) for item in items],
+        "suggestion_object_count": len(suggestion_items),
+        "suggestion_authority_lanes": suggestion_lanes,
+        "suggestion_item_hashes": [hash_payload(item) for item in suggestion_items],
+        "gaps": _hashed_string_list(raw.get("gaps")),
+        "missing_evidence_before_promotion": _hashed_string_list(
+            raw.get("missing_evidence_before_promotion")
+        ),
+    }
+
+
+def _agent_context_action_hint_views(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    views: list[dict[str, Any]] = []
+    for raw in value:
+        if not isinstance(raw, Mapping):
+            continue
+        action = str(raw.get("action") or "")
+        if action not in _AGENT_CONTEXT_ACTIONS:
+            continue
+        views.append(
+            {
+                "action": action,
+                "suggest_allowed": raw.get("suggest_allowed") is True,
+                "execute_allowed": (
+                    raw.get("execute_allowed")
+                    if isinstance(raw.get("execute_allowed"), bool)
+                    else None
+                ),
+                "blocked_by": _allowlisted_strings(
+                    raw.get("blocked_by"),
+                    frozenset({"approved_scope_required"}),
+                ),
+            }
+        )
+    return views
+
+
+def _agent_context_tool_hint_views(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    views: list[dict[str, Any]] = []
+    for raw in value:
+        if not isinstance(raw, Mapping):
+            continue
+        tool = str(raw.get("tool") or "")
+        if tool not in REQUIRED_RUNTIME_TOOL_NAMES:
+            continue
+        views.append(
+            {
+                "tool": tool,
+                "suggest_allowed": raw.get("suggest_allowed") is True,
+                "execute_allowed": (
+                    raw.get("execute_allowed")
+                    if isinstance(raw.get("execute_allowed"), bool)
+                    else None
+                ),
+                "production_mutation_allowed": (
+                    raw.get("production_mutation_allowed")
+                    if isinstance(raw.get("production_mutation_allowed"), bool)
+                    else None
+                ),
+                "safe_targets": _allowlisted_strings(
+                    raw.get("safe_targets"),
+                    ALLOWED_AGENT_CONTEXT_TOOL_SAFE_TARGETS.get(tool, frozenset()),
+                ),
+                "blocked_targets": _allowlisted_strings(
+                    raw.get("blocked_targets"),
+                    _AGENT_CONTEXT_BLOCKED_TARGETS,
+                ),
+                "blocked_by": _allowlisted_strings(
+                    raw.get("blocked_by"),
+                    frozenset({"approved_scope_required"}),
+                ),
+            }
+        )
+    return views
+
+
+def _allowlisted_strings(value: Any, allowed: frozenset[str]) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item in allowed]
+
+
+def _hashed_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [hash_payload(item) for item in value if isinstance(item, str) and item]
+
+
+def _runtime_readiness_plan_view(value: Any) -> dict[str, Any]:
+    raw = _remote_mapping_or_failure(value)
+    if raw.get("collector_call_failed") is True:
+        return raw
+    return {
+        "schema_version": (
+            "source_to_candidate_runtime_evidence_collection_plan.v1"
+            if raw.get("schema_version")
+            == "source_to_candidate_runtime_evidence_collection_plan.v1"
+            else ""
+        ),
+        "collection_mode": (
+            "post_deploy_read_only_smoke"
+            if raw.get("collection_mode") == "post_deploy_read_only_smoke"
+            else ""
+        ),
+        "network_used": raw.get("network_used") is True,
+        "production_mutation_performed": raw.get("production_mutation_performed") is True,
+        "source_payload_hash": hash_payload(raw),
+    }
+
+
 def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, Any]:
-    smoke = _remote_mapping_or_failure(raw)
-    if smoke.get("collector_call_failed") is True:
-        forbidden = smoke.get("collector_forbidden_input") is True
-        smoke = {
+    untrusted = _remote_mapping_or_failure(raw)
+    if untrusted.get("collector_call_failed") is True:
+        forbidden = untrusted.get("collector_forbidden_input") is True
+        return {
             "schema_version": "brain_objects_query.v1",
             "route": route,
             "collector_error_type": public_safe_text(
-                str(smoke.get("collector_error_type") or "McpToolError"),
+                str(untrusted.get("collector_error_type") or "McpToolError"),
                 max_chars=80,
             ),
             "object_pack": {
@@ -502,34 +1017,87 @@ def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, A
                     "collector_route_smoke_forbidden" if forbidden else "collector_route_smoke_failed"
                 ],
             },
+            "production_mutation_performed": False,
         }
-    smoke["schema_version"] = public_safe_text(
-        str(smoke.get("schema_version") or "brain_objects_query.v1"),
-        max_chars=80,
+    object_pack = (
+        untrusted.get("object_pack")
+        if isinstance(untrusted.get("object_pack"), Mapping)
+        else {}
     )
-    smoke["route"] = public_safe_text(str(smoke.get("route") or route), max_chars=120)
-    smoke["production_mutation_performed"] = False
-    object_pack = smoke.get("object_pack") if isinstance(smoke.get("object_pack"), Mapping) else {}
     if not object_pack:
-        object_pack = {
-            "schema_version": "object_pack.v1",
+        safe_object_pack: dict[str, Any] = {
+            "schema_version": "",
             "route": route,
-            "objects": [],
-            "edges": [],
-            "evidence": [],
-            "recommended_actions": [],
-            "lanes": {},
+            "object_count": 0,
+            "edge_count": 0,
+            "evidence_count": 0,
+            "recommended_actions": None,
+            "lanes": None,
             "gaps": ["collector_route_smoke_missing_object_pack"],
         }
     else:
-        object_pack = _public_safe_mapping(object_pack)
-        object_pack["schema_version"] = public_safe_text(
-            str(object_pack.get("schema_version") or "object_pack.v1"),
-            max_chars=80,
+        objects = object_pack.get("objects") if isinstance(object_pack.get("objects"), list) else []
+        edges = object_pack.get("edges") if isinstance(object_pack.get("edges"), list) else []
+        evidence = object_pack.get("evidence") if isinstance(object_pack.get("evidence"), list) else []
+        actions = (
+            object_pack.get("recommended_actions")
+            if isinstance(object_pack.get("recommended_actions"), list)
+            else None
         )
-        object_pack["route"] = public_safe_text(str(object_pack.get("route") or route), max_chars=120)
-        object_pack["production_mutation_performed"] = False
-    smoke["object_pack"] = object_pack
+        lanes = object_pack.get("lanes") if isinstance(object_pack.get("lanes"), Mapping) else None
+        raw_gaps = object_pack.get("gaps") if isinstance(object_pack.get("gaps"), list) else []
+        safe_object_pack = {
+            "schema_version": (
+                "object_pack.v1" if object_pack.get("schema_version") == "object_pack.v1" else ""
+            ),
+            "route": (
+                str(object_pack.get("route"))
+                if str(object_pack.get("route") or "") in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+                else ""
+            ),
+            "object_count": len(objects),
+            "edge_count": len(edges),
+            "evidence_count": len(evidence),
+            "recommended_actions": (
+                [hash_payload(item) for item in actions]
+                if isinstance(actions, list)
+                else None
+            ),
+            "lanes": (
+                {
+                    lane: len(items) if isinstance(items, list) else 0
+                    for lane, items in lanes.items()
+                    if lane in _AGENT_CONTEXT_AUTHORITY_LANES
+                }
+                if isinstance(lanes, Mapping)
+                else None
+            ),
+            "gaps": (
+                ["object_pack_route_not_implemented"]
+                if "object_pack_route_not_implemented" in raw_gaps
+                else []
+            ),
+            "source_payload_hash": hash_payload(object_pack),
+            "production_mutation_performed": (
+                object_pack.get("production_mutation_performed") is True
+                or object_pack.get("mutation_performed") is True
+            ),
+        }
+    observed_route = str(untrusted.get("route") or "")
+    smoke = {
+        "schema_version": (
+            "brain_objects_query.v1"
+            if untrusted.get("schema_version") == "brain_objects_query.v1"
+            else ""
+        ),
+        "route": observed_route if observed_route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES else "",
+        "object_pack": safe_object_pack,
+        "source_payload_hash": hash_payload(untrusted),
+        "production_mutation_performed": (
+            untrusted.get("production_mutation_performed") is True
+            or untrusted.get("mutation_performed") is True
+        ),
+    }
     ensure_public_safe(smoke, "SourceToCandidatePostDeployMcpRouteSmoke")
     return smoke
 
@@ -586,28 +1154,45 @@ def _runtime_collected_packet_summary(packet: Mapping[str, Any]) -> dict[str, An
         safe_packet
     )
     summary = {
-        "schema_version": public_safe_text(str(safe_packet.get("schema_version") or ""), max_chars=80),
-        "collector_readiness_claim": public_safe_text(str(collector.get("readiness_claim") or ""), max_chars=120),
+        "schema_version": (
+            "source_to_candidate_runtime_evidence.v1"
+            if safe_packet.get("schema_version") == "source_to_candidate_runtime_evidence.v1"
+            else ""
+        ),
+        "collector_readiness_claim": (
+            "collector_packet_not_live_evidence"
+            if collector.get("readiness_claim") == "collector_packet_not_live_evidence"
+            else ""
+        ),
         "projection_join_present": bool(projection),
-        "projection_join_schema": public_safe_text(str(projection.get("schema_version") or ""), max_chars=80),
+        "projection_join_schema": (
+            "object_extraction_projection_join_preview.v1"
+            if projection.get("schema_version") == "object_extraction_projection_join_preview.v1"
+            else ""
+        ),
         "projection_join_edge_count": _safe_int(projection.get("edge_count")),
         "projection_join_promoted_to_live_evidence": projection_promoted,
         "session_project_rollup_present": bool(rollup),
-        "session_project_rollup_schema": public_safe_text(
-            str(rollup.get("schema_version") or ""),
-            max_chars=80,
+        "session_project_rollup_schema": (
+            "session_project_rollup_runtime_evidence.v1"
+            if rollup.get("schema_version") == "session_project_rollup_runtime_evidence.v1"
+            else ""
         ),
-        "session_project_rollup_preview_schema": public_safe_text(
-            str(rollup_preview.get("schema_version") or ""),
-            max_chars=80,
+        "session_project_rollup_preview_schema": (
+            "object_extraction_session_project_rollup_preview.v1"
+            if rollup_preview.get("schema_version")
+            == "object_extraction_session_project_rollup_preview.v1"
+            else ""
         ),
         "session_project_rollup_device_count": _safe_int(rollup_preview.get("device_count")),
         "session_project_rollup_work_unit_count": _safe_int(object_type_counts.get("WorkUnit")),
         "session_project_rollup_promoted_to_live_evidence": session_project_rollup_promoted,
         "preference_artifact_memory_present": bool(preference),
-        "preference_artifact_memory_schema": public_safe_text(
-            str(preference.get("schema_version") or ""),
-            max_chars=80,
+        "preference_artifact_memory_schema": (
+            "preference_artifact_memory_runtime_evidence.v1"
+            if preference.get("schema_version")
+            == "preference_artifact_memory_runtime_evidence.v1"
+            else ""
         ),
         "preference_artifact_accepted_preference_count": _safe_int(
             preference_pack.get("accepted_preference_count")
@@ -615,15 +1200,21 @@ def _runtime_collected_packet_summary(packet: Mapping[str, Any]) -> dict[str, An
         "preference_artifact_proposal_preference_count": _safe_int(
             preference_pack.get("proposal_preference_count")
         ),
-        "preference_artifact_review_check_status": public_safe_text(
-            str(artifact_check.get("status") or ""),
-            max_chars=80,
+        "preference_artifact_review_check_status": (
+            str(artifact_check.get("status"))
+            if artifact_check.get("status") in {"pass", "fail"}
+            else ""
         ),
         "preference_artifact_memory_promoted_to_live_evidence": (
             preference_artifact_memory_promoted
         ),
         "preference_artifact_memory_promotion_blockers": preference_artifact_memory_blockers,
-        "evidence_collection_mode": public_safe_text(str(provenance.get("collection_mode") or ""), max_chars=80),
+        "evidence_collection_mode": (
+            str(provenance.get("collection_mode"))
+            if provenance.get("collection_mode")
+            in {"local_test_replay", "post_deploy_read_only_smoke"}
+            else ""
+        ),
         "evidence_collection_network_used": provenance.get("network_used") is True,
         "production_mutation_performed": safe_packet.get("production_mutation_performed") is True,
     }
@@ -656,7 +1247,29 @@ def _live_projection_join_from_runtime_packet(packet: Mapping[str, Any]) -> dict
         return {}
     if str(projection.get("status") or "") != "pass":
         return {}
-    live_projection = _public_safe_mapping(projection)
+    postcheck = projection.get("postcheck") if isinstance(projection.get("postcheck"), Mapping) else {}
+    live_projection = {
+        "schema_version": (
+            "object_extraction_projection_join_preview.v1"
+            if projection.get("schema_version") == "object_extraction_projection_join_preview.v1"
+            else ""
+        ),
+        "evidence_class": (
+            "runtime_projection_join"
+            if projection.get("evidence_class") == "runtime_projection_join"
+            else ""
+        ),
+        "status": "pass" if projection.get("status") == "pass" else "",
+        "edge_count": _safe_int(projection.get("edge_count")),
+        "graph_hit_count": _safe_int(projection.get("graph_hit_count")),
+        "search_hit_count": _safe_int(projection.get("search_hit_count")),
+        "postcheck": _protected_output_postcheck_view(postcheck),
+        "production_mutation_performed": (
+            projection.get("production_mutation_performed") is True
+            or projection.get("mutation_performed") is True
+        ),
+        "source_payload_hash": hash_payload(projection),
+    }
     ensure_public_safe(live_projection, "SourceToCandidatePostDeployProjectionJoin")
     return live_projection
 
@@ -684,7 +1297,103 @@ def _live_session_project_rollup_from_runtime_packet(packet: Mapping[str, Any]) 
         return {}
     if _postcheck_reports_protected_output(rollup):
         return {}
-    live_rollup = _public_safe_mapping(rollup)
+    preview = rollup.get("rollup_preview") if isinstance(rollup.get("rollup_preview"), Mapping) else {}
+    handoff = rollup.get("handoff_pack") if isinstance(rollup.get("handoff_pack"), Mapping) else {}
+    resume = handoff.get("resume_context") if isinstance(handoff.get("resume_context"), Mapping) else {}
+    read_after_write = (
+        rollup.get("read_after_write")
+        if isinstance(rollup.get("read_after_write"), Mapping)
+        else {}
+    )
+    postcheck = rollup.get("postcheck") if isinstance(rollup.get("postcheck"), Mapping) else {}
+    object_type_counts = (
+        preview.get("object_type_counts")
+        if isinstance(preview.get("object_type_counts"), Mapping)
+        else {}
+    )
+    handoff_ref_counts = (
+        handoff.get("object_ref_counts")
+        if isinstance(handoff.get("object_ref_counts"), Mapping)
+        else {}
+    )
+    live_rollup = {
+        "schema_version": (
+            "session_project_rollup_runtime_evidence.v1"
+            if rollup.get("schema_version") == "session_project_rollup_runtime_evidence.v1"
+            else ""
+        ),
+        "rollup_preview": {
+            "schema_version": (
+                "object_extraction_session_project_rollup_preview.v1"
+                if preview.get("schema_version")
+                == "object_extraction_session_project_rollup_preview.v1"
+                else ""
+            ),
+            "scope": "all_devices" if preview.get("scope") == "all_devices" else "",
+            "device_count": _safe_int(preview.get("device_count")),
+            "visible_session_count": _safe_int(preview.get("visible_session_count")),
+            "all_device_session_count": _safe_int(preview.get("all_device_session_count")),
+            "edge_count": _safe_int(preview.get("edge_count")),
+            "object_type_counts": {
+                object_type: _safe_int(object_type_counts.get(object_type))
+                for object_type in REQUIRED_SESSION_PROJECT_OBJECT_TYPES
+            },
+            "edge_types": _allowlisted_strings(
+                preview.get("edge_types"),
+                frozenset(REQUIRED_SESSION_PROJECT_EDGE_TYPES),
+            ),
+            "production_mutation_performed": preview.get("production_mutation_performed") is True,
+        },
+        "handoff_pack": {
+            "schema_version": (
+                "session_project_handoff_pack.v1"
+                if handoff.get("schema_version") == "session_project_handoff_pack.v1"
+                else ""
+            ),
+            "visible_session_count": _safe_int(handoff.get("visible_session_count")),
+            "all_device_session_count": _safe_int(handoff.get("all_device_session_count")),
+            "object_ref_counts": {
+                object_type: _safe_int(handoff_ref_counts.get(object_type))
+                for object_type in ("Session", "WorkUnit")
+            },
+            "raw_return_capability": (
+                "denied" if handoff.get("raw_return_capability") == "denied" else ""
+            ),
+            "resume_context": {
+                "schema_version": (
+                    "session_project_resume_context.v1"
+                    if resume.get("schema_version") == "session_project_resume_context.v1"
+                    else ""
+                ),
+                "latest_session_ref_present": resume.get("latest_session_ref_present") is True,
+                "work_unit_ref_count": _safe_int(resume.get("work_unit_ref_count")),
+                "production_mutation_performed": resume.get("production_mutation_performed") is True,
+            },
+        },
+        "read_after_write": {
+            "status": "validated" if read_after_write.get("status") == "validated" else "",
+            "route": (
+                "temporal_work_recall"
+                if read_after_write.get("route") == "temporal_work_recall"
+                else ""
+            ),
+            "object_pack_schema": (
+                "object_pack.v1"
+                if read_after_write.get("object_pack_schema") == "object_pack.v1"
+                else ""
+            ),
+            "object_types": _allowlisted_strings(
+                read_after_write.get("object_types"),
+                frozenset(REQUIRED_SESSION_PROJECT_OBJECT_TYPES),
+            ),
+        },
+        "postcheck": _protected_output_postcheck_view(postcheck),
+        "production_mutation_performed": (
+            rollup.get("production_mutation_performed") is True
+            or rollup.get("mutation_performed") is True
+        ),
+        "source_payload_hash": hash_payload(rollup),
+    }
     ensure_public_safe(live_rollup, "SourceToCandidatePostDeploySessionProjectRollup")
     return live_rollup
 
@@ -942,7 +1651,7 @@ def _preference_artifact_review_check_view(value: Any) -> dict[str, Any]:
         "status": public_safe_text(str(raw.get("status") or ""), max_chars=80),
         "ui_required": raw.get("ui_required") is True,
         "artifact_type": public_safe_text(str(raw.get("artifact_type") or ""), max_chars=80),
-        "artifact_summary": public_safe_text(str(raw.get("artifact_summary") or ""), max_chars=360),
+        "artifact_summary_hash": hash_payload(str(raw.get("artifact_summary") or "")),
         "artifact_metrics": {
             "finding_count": _safe_int(metrics.get("finding_count")),
             "evidence_ref_count": _safe_int(metrics.get("evidence_ref_count")),
@@ -1244,9 +1953,16 @@ def _post_deploy_provenance(runtime_packet: Mapping[str, Any] | None = None) -> 
         if isinstance(safe_packet.get("evidence_provenance"), Mapping)
         else {}
     )
-    mutation_scope = public_safe_text(
-        str(runtime_provenance.get("mutation_scope") or "none"),
-        max_chars=80,
+    raw_mutation_scope = str(runtime_provenance.get("mutation_scope") or "none")
+    allowed_mutation_scopes = {
+        "none",
+        "bounded_production_authority_execution",
+        "bounded_production_corpus_ingest",
+    }
+    mutation_scope = (
+        raw_mutation_scope
+        if raw_mutation_scope in allowed_mutation_scopes
+        else "non_none_redacted"
     )
     return {
         "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
@@ -1292,9 +2008,19 @@ def _deployed_identity_view(value: Any) -> dict[str, Any]:
             "contains_expected_commit": False,
             "identity_source": "post_deploy_mcp_capture_forbidden_deployed_identity",
         }
+    identity_source = str(value.get("identity_source") or "")
+    allowed_sources = {
+        "redacted_artifact_identity_summary",
+        "redacted_live_runtime_evidence",
+        "sanitized_ops_manifest_summary",
+    }
     return {
         "contains_expected_commit": value.get("contains_expected_commit") is True,
-        "identity_source": public_safe_text(str(value.get("identity_source") or ""), max_chars=160),
+        "identity_source": (
+            identity_source
+            if identity_source in allowed_sources
+            else "redacted_unrecognized_identity_source"
+        ),
     }
 
 

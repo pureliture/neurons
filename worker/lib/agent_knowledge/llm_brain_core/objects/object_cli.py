@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,10 @@ from .artifact_preference_evaluator import evaluate_artifact_preference
 from .extraction_pipeline import run_source_to_candidate_graph_activation_preview
 from .okf_export import build_okf_bundle
 from .object_packs import apply_approval_board_decisions, apply_candidate_review_edits, build_documentation_cleanup_pack
-from .post_deploy_mcp_capture import collect_source_to_candidate_post_deploy_mcp_capture
+from .post_deploy_mcp_capture import (
+    collect_agent_context_consumer_startup_receipt,
+    collect_source_to_candidate_post_deploy_mcp_capture,
+)
 from .reference_corpus import (
     build_corpus_ingest_plan,
     build_reference_corpus_production_ingest_evidence,
@@ -173,6 +177,61 @@ def object_explain_main(argv: list[str] | None = None) -> int:
         }
     )
     return 0
+
+
+def agent_context_startup_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="neuron-knowledge agent-context-startup")
+    parser.add_argument("--mcp-url", required=True)
+    parser.add_argument("--repository", required=True)
+    parser.add_argument("--branch", required=True)
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--consumer", required=True, choices=["codex"])
+    parser.add_argument("--expected-commit", required=True)
+    parser.add_argument("--proof-fd", required=True, type=int)
+    args = parser.parse_args(argv)
+    try:
+        challenge = json.loads(sys.stdin.read())
+    except json.JSONDecodeError:
+        parser.error("agent context startup challenge must be a JSON object")
+    if not isinstance(challenge, dict):
+        parser.error("agent context startup challenge must be a JSON object")
+    try:
+        proof_key = _read_one_time_proof_key(args.proof_fd)
+        receipt = asyncio.run(
+            collect_agent_context_consumer_startup_receipt(
+                mcp_url=args.mcp_url,
+                repository=args.repository,
+                branch=args.branch,
+                project=args.project,
+                consumer=args.consumer,
+                expected_commit=args.expected_commit,
+                challenge=challenge,
+                proof_key=proof_key,
+            )
+        )
+        ensure_public_safe(receipt, "AgentContextStartupReceipt")
+    except Exception:
+        parser.error("agent context startup collection failed")
+    _print_json(receipt)
+    return 0
+
+
+def _read_one_time_proof_key(fd: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = 33
+    try:
+        while remaining:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(fd)
+    proof_key = b"".join(chunks)
+    if len(proof_key) != 32:
+        raise ValueError("proof key must be exactly 32 bytes")
+    return proof_key
 
 
 def artifact_preference_evaluate_main(argv: list[str] | None = None) -> int:
@@ -667,6 +726,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     parser.add_argument("--evidence-packet-template", action="store_true")
     parser.add_argument("--collect-shadow-evidence", action="store_true")
     parser.add_argument("--collect-post-deploy-mcp-capture", action="store_true")
+    parser.add_argument("--collect-agent-context-startup", action="store_true")
     parser.add_argument("--mcp-url", default="")
     parser.add_argument("--deployed-identity-file", default="")
     parser.add_argument("--artifact-descriptor-file", default="")
@@ -723,6 +783,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 consumer=args.consumer,
                 deployed_identity=deployed_identity,
                 artifact_descriptor=artifact_descriptor,
+                collect_agent_context_startup=args.collect_agent_context_startup,
             )
         )
         output = dict(capture)
