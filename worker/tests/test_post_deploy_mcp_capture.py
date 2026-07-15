@@ -12,6 +12,9 @@ import pytest
 
 from agent_knowledge.cli import main
 from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
+from agent_knowledge.llm_brain_core.golden_query_eval import (
+    build_product_activation_progress_report,
+)
 from agent_knowledge.llm_brain_core.objects import object_cli
 from agent_knowledge.llm_brain_core.objects import post_deploy_mcp_capture
 from agent_knowledge.llm_brain_core.objects.post_deploy_mcp_capture import (
@@ -1075,8 +1078,32 @@ def test_collect_post_deploy_capture_promotes_verified_external_codex_startup_re
     replay_claim = {item["claim_id"]: item for item in replay_report["claims"]}[
         "live.agent_context.startup_read_path"
     ]
-    assert replay_claim["status"] == "failed"
+    assert replay_claim["status"] == "not_validated"
+    assert replay_claim["bounded_adapter_status"] == "not_validated"
+    assert replay_claim["host_startup_hook_status"] == "not_validated"
     assert "agent_context_startup_collector_capability_missing" in replay_claim["gaps"]
+    assert replay_report["status"] == "PASS_WITH_GAPS"
+    assert replay_report["production_ready"] is False
+    assert replay_report["production_mutation_performed"] is False
+
+    activation_report = build_product_activation_progress_report(
+        live_evidence=serialized_capture,
+    )
+    activation_checks = {
+        item["phase"]: item for item in activation_report["product_evidence_checks"]
+    }
+    p9 = next(
+        item
+        for item in activation_report["product_evidence_summary"]
+        if item["phase"] == "P9"
+    )
+    assert activation_report["status"] == "PASS_WITH_GAPS"
+    assert activation_checks["P9"]["result"] == "PASS_WITH_GAPS"
+    assert p9["startup_read_path_claim_status"] == "not_validated"
+    assert p9["bounded_adapter_status"] == "not_validated"
+    assert p9["host_startup_hook_status"] == "not_validated"
+    assert activation_report["production_ready"] is False
+    assert activation_report["production_mutation_performed"] is False
 
     capture["agent_context_startup_runtime"]["startup_receipt"]["receipt_hash"] = (
         "sha256:" + "0" * 64
@@ -1089,6 +1116,8 @@ def test_collect_post_deploy_capture_promotes_verified_external_codex_startup_re
         "live.agent_context.startup_read_path"
     ]
     assert mutated_claim["status"] == "failed"
+    assert mutated_claim["bounded_adapter_status"] == "failed"
+    assert mutated_claim["host_startup_hook_status"] == "failed"
     assert "agent_context_startup_collector_capability_missing" in mutated_claim["gaps"]
 
     capture["agent_context_startup_runtime"] = object()

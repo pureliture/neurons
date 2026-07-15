@@ -3814,6 +3814,15 @@ def _live_agent_context_startup_claim(evidence: Mapping[str, Any]) -> dict[str, 
             "agent_context_startup_runtime",
         ),
     )
+    collector_proof_gaps = {
+        "agent_context_startup_collector_capability_missing",
+    }
+    hard_failures = [
+        failure
+        for failure in failures
+        if failure not in collector_proof_gaps
+    ]
+    collector_proof_missing = bool(collector_proof_gaps.intersection(failures))
     consumer_statuses = (
         startup.get("consumer_statuses")
         if isinstance(startup.get("consumer_statuses"), Mapping)
@@ -3838,33 +3847,40 @@ def _live_agent_context_startup_claim(evidence: Mapping[str, Any]) -> dict[str, 
             f"agent_context_consumer_startup_unvalidated:{consumer}"
             for consumer in unvalidated_consumers
         ]
-        if require_external_receipt and not failures
+        if require_external_receipt and not hard_failures and not collector_proof_missing
         else []
     )
     if (
         require_external_receipt
-        and not failures
+        and not hard_failures
+        and not collector_proof_missing
         and enforcement.get("runtime_interception_observed") is not True
     ):
         bounded_gaps.append(
             "agent_context_action_surface_runtime_interception_unvalidated"
         )
-    if require_external_receipt and not failures:
+    if require_external_receipt and not hard_failures and not collector_proof_missing:
         bounded_gaps.append("agent_context_codex_host_startup_hook_unvalidated")
-    bounded_adapter_validated = not failures
+    bounded_adapter_status = (
+        "failed"
+        if hard_failures
+        else "not_validated"
+        if collector_proof_missing
+        else "validated"
+    )
     return {
         "claim_id": "live.agent_context.startup_read_path",
         "evidence_class": "runtime_startup_read_path",
         "status": (
             "failed"
-            if failures
+            if hard_failures
             else "not_validated"
-            if bounded_gaps
+            if collector_proof_missing or bounded_gaps
             else "validated"
         ),
-        "bounded_adapter_status": "validated" if bounded_adapter_validated else "failed",
+        "bounded_adapter_status": bounded_adapter_status,
         "host_startup_hook_status": (
-            "not_validated" if bounded_adapter_validated else "failed"
+            "failed" if hard_failures else "not_validated"
         ),
         "schema_version": public_safe_text(str(startup.get("schema_version") or ""), max_chars=80),
         "consumer": public_safe_text(str(context.get("consumer") or ""), max_chars=80),

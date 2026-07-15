@@ -930,11 +930,17 @@ def _p7_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     failures: list[str] = []
     if evidence.get("schema_version") != "object_extraction_preference_style_preview.v1":
         failures.append("p7_schema_mismatch")
-    if int(evidence.get("object_count") or 0) < 2:
+    if (
+        int(evidence.get("object_count") or 0) < 2
+        and not _p7_single_live_current_preference_valid(evidence)
+    ):
         failures.append("p7_preference_style_objects_missing")
     if int(evidence.get("source_evidence_ref_count") or 0) < 1:
         failures.append("p7_source_evidence_missing")
-    if evidence.get("artifact_preference_pack_status") != "pass":
+    if (
+        evidence.get("artifact_preference_pack_status") != "pass"
+        and not _p7_collector_capability_only_gap(evidence)
+    ):
         failures.append("p7_artifact_preference_pack_not_pass")
     if int(evidence.get("accepted_preference_count") or 0) < 1:
         failures.append("p7_accepted_preference_missing")
@@ -947,10 +953,37 @@ def _p7_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
     return failures
 
 
+def _p7_single_live_current_preference_valid(evidence: Mapping[str, Any]) -> bool:
+    return (
+        evidence.get("preference_claim_status") == "validated"
+        and evidence.get("evidence_is_live") is True
+        and int(evidence.get("object_count") or 0) == 1
+        and int(evidence.get("accepted_preference_count") or 0) == 1
+        and int(evidence.get("proposal_preference_count") or 0) == 0
+        and evidence.get("html_route_status") == "validated"
+        and evidence.get("artifact_review_check_status") == "pass"
+        and evidence.get("runtime_readiness_status") != "FAIL"
+    )
+
+
+def _p7_collector_capability_only_gap(evidence: Mapping[str, Any]) -> bool:
+    gaps = {
+        gap
+        for gap in (evidence.get("gaps") or [])
+        if isinstance(gap, str) and gap
+    }
+    return (
+        evidence.get("status") == "PASS_WITH_GAPS"
+        and evidence.get("preference_claim_status") == "not_validated"
+        and evidence.get("artifact_preference_pack_status") == "pass_with_gaps"
+        and gaps == {"preference_artifact_collector_capability_missing"}
+    )
+
+
 def _p7_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
     gaps = [
         f"p7_{gap}"
-        for gap in evidence.get("gaps", [])
+        for gap in (evidence.get("gaps") or [])
         if isinstance(gap, str) and gap
     ]
     if (
@@ -1213,6 +1246,7 @@ _P9_LIVE_GAP_ONLY_VALUES = frozenset(
         "consumer_action_surface_runtime_policy_unproven",
         "agent_context_action_surface_runtime_interception_unvalidated",
         "agent_context_codex_host_startup_hook_unvalidated",
+        "agent_context_startup_collector_capability_missing",
         "agent_context_evidence_not_live",
     }
 )
@@ -2388,6 +2422,12 @@ def _p9_live_agent_context_evidence(live_evidence: Mapping[str, Any]) -> dict[st
         "tool_hints_claim_status": str(tool_hints.get("status") or "not_validated"),
         "product_sections_claim_status": str(product_sections.get("status") or "not_validated"),
         "startup_read_path_claim_status": str(startup.get("status") or "not_validated"),
+        "bounded_adapter_status": str(
+            startup.get("bounded_adapter_status") or "not_validated"
+        ),
+        "host_startup_hook_status": str(
+            startup.get("host_startup_hook_status") or "not_validated"
+        ),
         "evidence_provenance_status": str(provenance.get("status") or "not_validated"),
         "startup_loaded": startup.get("startup_loaded") is True,
         "read_path_tool": str(startup.get("read_path_tool") or ""),
