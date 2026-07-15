@@ -21,6 +21,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     REQUIRED_RUNTIME_TOOL_NAMES,
     build_source_to_candidate_runtime_post_deploy_capture_readiness_report,
 )
+from agent_knowledge.public_safe_util import hash_payload
 
 
 def _fake_agent_context_product(*, consumer: str = "codex") -> dict:
@@ -169,7 +170,10 @@ def _preference_artifact_memory_evidence(
     actual_consumer_proof: bool = True,
 ) -> dict:
     target_object_id = "ko:ArtifactPreference:html-review-density"
+    memory_id = "mem_artifact_preference_html_review_density"
+    card_content_hash = "sha256:" + "c" * 64
     source_content_hash = "sha256:" + "a" * 64
+    authority_proposal_id = "proposal:p7-html-review-density"
     authority_decision_id = "decision:p7-html-review-density"
     accepted_object = {
         "object_id": target_object_id,
@@ -179,7 +183,12 @@ def _preference_artifact_memory_evidence(
         "content_hash": source_content_hash,
         "payload": {
             "target_object_id": target_object_id,
+            "memory_id": memory_id,
+            "card_content_hash": card_content_hash,
+            "authority_proposal_id": authority_proposal_id,
             "authority_decision_id": authority_decision_id,
+            "project": "neurons",
+            "source_content_hash": source_content_hash,
         },
     }
     proposal_object = {
@@ -249,6 +258,9 @@ def _preference_artifact_memory_evidence(
     evidence["read_surface_alignment"] = {
         "status": "validated",
         "target_object_id": accepted_object["object_id"],
+        "memory_id": memory_id,
+        "card_content_hash": card_content_hash,
+        "authority_proposal_id": authority_proposal_id,
         "project": "neurons",
         "source_content_hash": source_content_hash,
         "authority_decision_id": authority_decision_id,
@@ -387,6 +399,833 @@ class _FakeMcpSession:
         )
 
 
+def _actual_artifact_descriptor(**metric_overrides: int) -> dict:
+    summary = (
+        "Rendered HTML review artifact exposes objects, relationships, evidence, "
+        "and explicit gate status."
+    )
+    metrics = {
+        "object_count": 2,
+        "relationship_count": 1,
+        "evidence_count": 2,
+        "gate_status_count": 1,
+        "hidden_gap_count": 0,
+        "protected_content_count": 0,
+        **metric_overrides,
+    }
+    evidence_refs = ["artifact:rendered-review", "evidence:review-findings"]
+    return {
+        "artifact_type": "html_review_artifact",
+        "summary": summary,
+        "artifact_fingerprint": hash_payload(
+            {
+                "artifact_type": "html_review_artifact",
+                "summary": summary,
+                "metrics": metrics,
+                "evidence_refs": evidence_refs,
+            }
+        ),
+        "metrics": metrics,
+        "evidence_refs": evidence_refs,
+    }
+
+
+def _artifact_preference_application_receipt(arguments: dict) -> dict:
+    preference_binding = {
+        "target_object_id": "ko:ArtifactPreference:html-review-density",
+        "project": "neurons",
+        "memory_id": "mem_artifact_preference_html_review_density",
+        "card_content_hash": "sha256:" + "c" * 64,
+        "source_content_hash": "sha256:" + "a" * 64,
+        "proposal_id": "proposal:p7-html-review-density",
+        "decision_id": "decision:p7-html-review-density",
+        "authority_lane": "accepted_current",
+    }
+    artifact_binding = {
+        "repository_hash": hash_payload(arguments["repository"]),
+        "branch_hash": hash_payload(arguments["branch"]),
+        "artifact_type": arguments["artifact_type"],
+        "artifact_fingerprint": arguments["artifact_fingerprint"],
+        "summary_hash": hash_payload(arguments["summary"]),
+        "metrics_hash": hash_payload(arguments["metrics"]),
+        "evidence_refs_hash": hash_payload(arguments["evidence_refs"]),
+    }
+    application_result = {
+        "evaluator_profile": "html_review_evidence_density_v1",
+        "outcome": "pass",
+        "passed_rules": [
+            "object_count_at_least_one",
+            "relationship_count_at_least_one",
+            "evidence_count_at_least_one",
+            "gate_status_count_at_least_one",
+            "hidden_gap_count_zero",
+            "protected_content_count_zero",
+        ],
+        "failed_rules": [],
+    }
+    consumer_surface = {
+        "tool": "brain_artifact_preference_evaluate",
+        "version": "v1",
+        "consumer": "post_deploy_mcp_capture",
+    }
+    return {
+        "schema_version": "artifact_preference_application_receipt.v1",
+        "status": "PASS",
+        "applied": True,
+        "production_mutation_performed": False,
+        "preference_binding": preference_binding,
+        "artifact_binding": artifact_binding,
+        "application_result": application_result,
+        "consumer_surface": consumer_surface,
+        "failures": [],
+        "gaps": [],
+        "receipt_hash": hash_payload(
+            {
+                "preference_binding": preference_binding,
+                "artifact_binding": artifact_binding,
+                "application_result": application_result,
+                "consumer_surface": consumer_surface,
+            }
+        ),
+    }
+
+
+def test_collect_post_deploy_mcp_capture_promotes_only_direct_named_consumer_receipt(
+    monkeypatch,
+    capsys,
+):
+    class _DirectConsumerSession(_FakeMcpSession):
+        async def list_tools(self):
+            listed = await super().list_tools()
+            listed.tools.append(SimpleNamespace(name="brain_artifact_preference_evaluate"))
+            return listed
+
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "brain_source_to_candidate_runtime_readiness" and arguments.get(
+                "collect_shadow_evidence"
+            ) is True:
+                self.calls.append((name, dict(arguments)))
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=_runtime_collected_packet(
+                        live=True,
+                        preference_artifact_memory=True,
+                        preference_artifact_memory_actual=True,
+                    ),
+                )
+            if name == "brain_artifact_preference_evaluate":
+                self.calls.append((name, dict(arguments)))
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=_artifact_preference_application_receipt(arguments),
+                )
+            return await super().call_tool(name, arguments)
+
+    session = _DirectConsumerSession()
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield session
+
+    artifact_descriptor = _actual_artifact_descriptor()
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            expected_commit="c2b8548",
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_artifact_identity_summary",
+            },
+            artifact_descriptor=artifact_descriptor,
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    direct_calls = [
+        arguments
+        for name, arguments in session.calls
+        if name == "brain_artifact_preference_evaluate"
+    ]
+    assert len(direct_calls) == 1
+    assert direct_calls[0]["project"] == "neurons"
+    assert {
+        key: direct_calls[0][key]
+        for key in (
+            "artifact_type",
+            "summary",
+            "artifact_fingerprint",
+            "metrics",
+            "evidence_refs",
+        )
+    } == artifact_descriptor
+    assert all(
+        arguments["project"] == "neurons"
+        for name, arguments in session.calls
+        if name
+        in {
+            "brain_source_to_candidate_runtime_readiness",
+            "brain_context_resolve",
+            "brain_objects_query",
+            "brain_artifact_preference_evaluate",
+        }
+    )
+    assert capture["artifact_preference_application_receipt"]["status"] == "PASS"
+    assert capture["preference_artifact_memory"]["artifact_consumer_evidence"] == (
+        capture["artifact_preference_application_receipt"]
+    )
+    assert capture["runtime_collected_packet"][
+        "preference_artifact_memory_promoted_to_live_evidence"
+    ] is True
+    assert capture["production_mutation_performed"] is False
+    report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=capture,
+        expected_commit="c2b8548",
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["live.preference_artifact.memory"]["status"] == "validated"
+    assert "live_preference_artifact_memory_unverified" not in report["gaps"]
+
+    async def _return_capture(**_kwargs):
+        return capture
+
+    monkeypatch.setattr(
+        object_cli,
+        "collect_source_to_candidate_post_deploy_mcp_capture",
+        _return_capture,
+    )
+    assert (
+        main(
+            [
+                "source-to-candidate-runtime-readiness",
+                "--collect-post-deploy-mcp-capture",
+                "--mcp-url",
+                "https://mcp.example.test/mcp",
+                "--expected-commit",
+                "c2b8548",
+            ]
+        )
+        == 0
+    )
+    cli_output = json.loads(capsys.readouterr().out)
+    cli_claim = next(
+        claim
+        for claim in cli_output["runtime_readiness"]["claims"]
+        if claim["claim_id"] == "live.preference_artifact.memory"
+    )
+    assert cli_output["schema_version"] == "source_to_candidate_runtime_post_deploy_mcp_capture.v1"
+    assert cli_claim["status"] == "validated"
+
+
+def test_collect_post_deploy_mcp_capture_rejects_authority_drift_after_evaluator():
+    class _DriftingAuthoritySession(_FakeMcpSession):
+        def __init__(self):
+            super().__init__()
+            self.runtime_read_count = 0
+
+        async def list_tools(self):
+            listed = await super().list_tools()
+            listed.tools.append(SimpleNamespace(name="brain_artifact_preference_evaluate"))
+            return listed
+
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "brain_source_to_candidate_runtime_readiness" and arguments.get(
+                "collect_shadow_evidence"
+            ) is True:
+                self.calls.append((name, dict(arguments)))
+                self.runtime_read_count += 1
+                packet = _runtime_collected_packet(
+                    live=True,
+                    preference_artifact_memory=True,
+                    preference_artifact_memory_actual=True,
+                )
+                if self.runtime_read_count > 1:
+                    drifted = "decision:p7-html-review-density-drifted"
+                    packet["preference_artifact_memory"]["read_surface_alignment"][
+                        "authority_decision_id"
+                    ] = drifted
+                    for objects in (
+                        packet["preference_artifact_memory"]["preference_object_pack"]["lanes"][
+                            "accepted_current"
+                        ],
+                        packet["preference_artifact_memory"]["html_visualization_route_smoke"][
+                            "object_pack"
+                        ]["lanes"]["accepted_current"],
+                        packet["preference_artifact_memory"]["agent_context_preference_section"][
+                            "items"
+                        ],
+                    ):
+                        objects[0]["authority_decision_id"] = drifted
+                return SimpleNamespace(isError=False, structuredContent=packet)
+            if name == "brain_artifact_preference_evaluate":
+                self.calls.append((name, dict(arguments)))
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=_artifact_preference_application_receipt(arguments),
+                )
+            return await super().call_tool(name, arguments)
+
+    session = _DriftingAuthoritySession()
+
+    @asynccontextmanager
+    async def session_factory(_mcp_url: str):
+        yield session
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            expected_commit="c2b8548",
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_artifact_identity_summary",
+            },
+            artifact_descriptor=_actual_artifact_descriptor(),
+            session_factory=session_factory,
+        )
+    )
+
+    assert session.runtime_read_count == 2
+    assert "artifact_preference_application_receipt" not in capture
+    assert "preference_artifact_memory" not in capture
+    assert capture["runtime_collected_packet"][
+        "preference_artifact_memory_promoted_to_live_evidence"
+    ] is False
+
+
+def test_collect_post_deploy_mcp_capture_requires_explicit_actual_descriptor_for_named_evaluator():
+    class _NamedEvaluatorSession(_FakeMcpSession):
+        async def list_tools(self):
+            listed = await super().list_tools()
+            listed.tools.append(SimpleNamespace(name="brain_artifact_preference_evaluate"))
+            return listed
+
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "brain_source_to_candidate_runtime_readiness" and arguments.get(
+                "collect_shadow_evidence"
+            ) is True:
+                self.calls.append((name, dict(arguments)))
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=_runtime_collected_packet(
+                        live=True,
+                        preference_artifact_memory=True,
+                        preference_artifact_memory_actual=True,
+                    ),
+                )
+            return await super().call_tool(name, arguments)
+
+    session = _NamedEvaluatorSession()
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield session
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            expected_commit="c2b8548",
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_artifact_identity_summary",
+            },
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert not any(
+        name == "brain_artifact_preference_evaluate" for name, _ in session.calls
+    )
+    assert "artifact_preference_application_receipt" not in capture
+    assert capture["runtime_collected_packet"][
+        "preference_artifact_memory_promotion_blockers"
+    ] == ["preference_artifact_consumer_evidence_missing"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda descriptor: descriptor.update({"dataset_id": "raw-external"}),
+        lambda descriptor: descriptor["metrics"].update({"document_id": 1}),
+    ],
+)
+def test_collect_post_deploy_mcp_capture_rejects_unknown_or_protected_descriptor_fields(
+    mutation,
+):
+    descriptor = _actual_artifact_descriptor()
+    mutation(descriptor)
+
+    with pytest.raises(ValueError):
+        asyncio.run(
+            collect_source_to_candidate_post_deploy_mcp_capture(
+                mcp_url="https://mcp.example.test/mcp",
+                repository="pureliture/neurons",
+                branch="main",
+                project="neurons",
+                artifact_descriptor=descriptor,
+                session_factory=lambda _: None,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "tool_error",
+        "stale_lineage",
+        "repository_drift",
+        "branch_drift",
+        "project_drift",
+        "memory_drift",
+        "card_hash_drift",
+        "proposal_drift",
+        "descriptor_drift",
+    ],
+)
+def test_collect_post_deploy_mcp_capture_keeps_direct_receipt_failures_as_gap(mode: str):
+    class _RejectedConsumerSession(_FakeMcpSession):
+        async def list_tools(self):
+            listed = await super().list_tools()
+            listed.tools.append(SimpleNamespace(name="brain_artifact_preference_evaluate"))
+            return listed
+
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "brain_source_to_candidate_runtime_readiness" and arguments.get(
+                "collect_shadow_evidence"
+            ) is True:
+                self.calls.append((name, dict(arguments)))
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=_runtime_collected_packet(
+                        live=True,
+                        preference_artifact_memory=True,
+                        preference_artifact_memory_actual=True,
+                    ),
+                )
+            if name == "brain_artifact_preference_evaluate":
+                self.calls.append((name, dict(arguments)))
+                if mode == "tool_error":
+                    return SimpleNamespace(isError=True, structuredContent={})
+                receipt = _artifact_preference_application_receipt(arguments)
+                if mode == "stale_lineage":
+                    receipt["preference_binding"]["decision_id"] = "decision:stale-lineage"
+                elif mode == "repository_drift":
+                    receipt["artifact_binding"]["repository_hash"] = hash_payload(
+                        "different/repository"
+                    )
+                elif mode == "branch_drift":
+                    receipt["artifact_binding"]["branch_hash"] = hash_payload(
+                        "different-branch"
+                    )
+                elif mode == "project_drift":
+                    receipt["preference_binding"]["project"] = "different-project"
+                elif mode == "memory_drift":
+                    receipt["preference_binding"]["memory_id"] = "mem_artifact_preference_other"
+                elif mode == "card_hash_drift":
+                    receipt["preference_binding"]["card_content_hash"] = "sha256:" + "d" * 64
+                elif mode == "proposal_drift":
+                    receipt["preference_binding"]["proposal_id"] = "proposal:p7-other"
+                elif mode == "descriptor_drift":
+                    receipt["artifact_binding"]["artifact_fingerprint"] = (
+                        "sha256:" + "e" * 64
+                    )
+                receipt["receipt_hash"] = hash_payload(
+                    {
+                        "preference_binding": receipt["preference_binding"],
+                        "artifact_binding": receipt["artifact_binding"],
+                        "application_result": receipt["application_result"],
+                        "consumer_surface": receipt["consumer_surface"],
+                    }
+                )
+                return SimpleNamespace(isError=False, structuredContent=receipt)
+            return await super().call_tool(name, arguments)
+
+    session = _RejectedConsumerSession()
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield session
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            expected_commit="c2b8548",
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_artifact_identity_summary",
+            },
+            artifact_descriptor=_actual_artifact_descriptor(),
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert "artifact_preference_application_receipt" not in capture
+    assert "preference_artifact_memory" not in capture
+    assert capture["runtime_collected_packet"][
+        "preference_artifact_memory_promoted_to_live_evidence"
+    ] is False
+    assert capture["runtime_collected_packet"][
+        "preference_artifact_memory_promotion_blockers"
+    ] == ["preference_artifact_consumer_evidence_missing"]
+
+
+@pytest.mark.parametrize("location", ["top_level", "nested"])
+def test_collect_post_deploy_mcp_capture_never_emits_protected_extra_receipt_field(
+    location: str,
+):
+    class _ProtectedReceiptSession(_FakeMcpSession):
+        async def list_tools(self):
+            listed = await super().list_tools()
+            listed.tools.append(SimpleNamespace(name="brain_artifact_preference_evaluate"))
+            return listed
+
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "brain_source_to_candidate_runtime_readiness" and arguments.get(
+                "collect_shadow_evidence"
+            ) is True:
+                self.calls.append((name, dict(arguments)))
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=_runtime_collected_packet(
+                        live=True,
+                        preference_artifact_memory=True,
+                        preference_artifact_memory_actual=True,
+                    ),
+                )
+            if name == "brain_artifact_preference_evaluate":
+                self.calls.append((name, dict(arguments)))
+                receipt = _artifact_preference_application_receipt(arguments)
+                if location == "top_level":
+                    receipt["document_id"] = "raw-external"
+                else:
+                    receipt["artifact_binding"]["dataset_id"] = "raw-external"
+                receipt["receipt_hash"] = hash_payload(
+                    {
+                        "preference_binding": receipt["preference_binding"],
+                        "artifact_binding": receipt["artifact_binding"],
+                        "application_result": receipt["application_result"],
+                        "consumer_surface": receipt["consumer_surface"],
+                    }
+                )
+                return SimpleNamespace(isError=False, structuredContent=receipt)
+            return await super().call_tool(name, arguments)
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield _ProtectedReceiptSession()
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            expected_commit="c2b8548",
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_artifact_identity_summary",
+            },
+            artifact_descriptor=_actual_artifact_descriptor(),
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    serialized = json.dumps(capture, sort_keys=True)
+    assert "artifact_preference_application_receipt" not in capture
+    assert "dataset_id" not in serialized
+    assert "raw-external" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "marker"),
+    [
+        ("preference_binding", "memory_id", "mem-safe document_id=raw-external"),
+        ("preference_binding", "proposal_id", "proposal:safe dataset_id:raw-external"),
+    ],
+)
+def test_collect_post_deploy_mcp_capture_rejects_raw_external_id_marker_in_allowed_receipt_value(
+    section: str,
+    field: str,
+    marker: str,
+):
+    class _MarkedReceiptSession(_FakeMcpSession):
+        async def list_tools(self):
+            listed = await super().list_tools()
+            listed.tools.append(SimpleNamespace(name="brain_artifact_preference_evaluate"))
+            return listed
+
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "brain_source_to_candidate_runtime_readiness" and arguments.get(
+                "collect_shadow_evidence"
+            ) is True:
+                self.calls.append((name, dict(arguments)))
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=_runtime_collected_packet(
+                        live=True,
+                        preference_artifact_memory=True,
+                        preference_artifact_memory_actual=True,
+                    ),
+                )
+            if name == "brain_artifact_preference_evaluate":
+                self.calls.append((name, dict(arguments)))
+                receipt = _artifact_preference_application_receipt(arguments)
+                receipt[section][field] = marker
+                receipt["receipt_hash"] = hash_payload(
+                    {
+                        "preference_binding": receipt["preference_binding"],
+                        "artifact_binding": receipt["artifact_binding"],
+                        "application_result": receipt["application_result"],
+                        "consumer_surface": receipt["consumer_surface"],
+                    }
+                )
+                return SimpleNamespace(isError=False, structuredContent=receipt)
+            return await super().call_tool(name, arguments)
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield _MarkedReceiptSession()
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            expected_commit="c2b8548",
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_artifact_identity_summary",
+            },
+            artifact_descriptor=_actual_artifact_descriptor(),
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    serialized = json.dumps(capture, sort_keys=True)
+    assert "artifact_preference_application_receipt" not in capture
+    assert "preference_artifact_memory" not in capture
+    assert "document_id" not in serialized
+    assert "dataset_id" not in serialized
+    assert "raw-external" not in serialized
+
+
+def test_collect_post_deploy_mcp_capture_rejects_descriptor_fingerprint_mismatch():
+    descriptor = _actual_artifact_descriptor()
+    descriptor["artifact_fingerprint"] = "sha256:" + "0" * 64
+
+    with pytest.raises(ValueError, match="artifact_fingerprint"):
+        asyncio.run(
+            collect_source_to_candidate_post_deploy_mcp_capture(
+                mcp_url="https://mcp.example.test/mcp",
+                repository="pureliture/neurons",
+                branch="main",
+                project="neurons",
+                artifact_descriptor=descriptor,
+                session_factory=lambda _: None,
+            )
+        )
+
+
+def test_collect_post_deploy_mcp_capture_does_not_evaluate_without_explicit_project():
+    class _NamedEvaluatorSession(_FakeMcpSession):
+        async def list_tools(self):
+            listed = await super().list_tools()
+            listed.tools.append(SimpleNamespace(name="brain_artifact_preference_evaluate"))
+            return listed
+
+    session = _NamedEvaluatorSession()
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield session
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            artifact_descriptor=_actual_artifact_descriptor(),
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert not any(
+        name == "brain_artifact_preference_evaluate" for name, _ in session.calls
+    )
+    assert "artifact_preference_application_receipt" not in capture
+    assert capture["project_scope"]["source"] == "collector_default"
+
+
+def test_collect_post_deploy_mcp_capture_keeps_missing_evaluator_as_gap():
+    class _LiveWithoutEvaluatorSession(_FakeMcpSession):
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "brain_source_to_candidate_runtime_readiness" and arguments.get(
+                "collect_shadow_evidence"
+            ) is True:
+                self.calls.append((name, dict(arguments)))
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=_runtime_collected_packet(
+                        live=True,
+                        preference_artifact_memory=True,
+                        preference_artifact_memory_actual=True,
+                    ),
+                )
+            return await super().call_tool(name, arguments)
+
+    session = _LiveWithoutEvaluatorSession()
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield session
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            expected_commit="c2b8548",
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_artifact_identity_summary",
+            },
+            artifact_descriptor=_actual_artifact_descriptor(),
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert not any(
+        name == "brain_artifact_preference_evaluate" for name, _ in session.calls
+    )
+    assert "artifact_preference_application_receipt" not in capture
+    assert capture["runtime_collected_packet"][
+        "preference_artifact_memory_promotion_blockers"
+    ] == ["preference_artifact_consumer_evidence_missing"]
+
+
+def test_collect_post_deploy_mcp_capture_does_not_pass_html_only_preference_surface():
+    class _HtmlOnlyConsumerSession(_FakeMcpSession):
+        async def list_tools(self):
+            listed = await super().list_tools()
+            listed.tools.append(SimpleNamespace(name="brain_artifact_preference_evaluate"))
+            return listed
+
+        async def call_tool(self, name: str, arguments: dict):
+            if name == "brain_source_to_candidate_runtime_readiness" and arguments.get(
+                "collect_shadow_evidence"
+            ) is True:
+                self.calls.append((name, dict(arguments)))
+                packet = _runtime_collected_packet(
+                    live=True,
+                    preference_artifact_memory=True,
+                    preference_artifact_memory_actual=True,
+                )
+                preference = packet["preference_artifact_memory"]
+                preference["preference_object_pack"]["lanes"]["accepted_current"] = []
+                preference["preference_object_pack"]["objects"] = []
+                preference["agent_context_preference_section"]["items"] = []
+                preference["agent_context_preference_section"]["object_count"] = 0
+                preference["agent_context_preference_section"]["accepted_preference_count"] = 0
+                return SimpleNamespace(isError=False, structuredContent=packet)
+            if name == "brain_artifact_preference_evaluate":
+                self.calls.append((name, dict(arguments)))
+                receipt = _artifact_preference_application_receipt(arguments)
+                receipt["status"] = "FAIL"
+                receipt["application_result"]["outcome"] = "fail"
+                receipt["application_result"]["passed_rules"].remove(
+                    "relationship_count_at_least_one"
+                )
+                receipt["application_result"]["failed_rules"] = [
+                    "relationship_count_at_least_one"
+                ]
+                receipt["failures"] = ["relationship_count_at_least_one"]
+                receipt["receipt_hash"] = hash_payload(
+                    {
+                        "preference_binding": receipt["preference_binding"],
+                        "artifact_binding": receipt["artifact_binding"],
+                        "application_result": receipt["application_result"],
+                        "consumer_surface": receipt["consumer_surface"],
+                    }
+                )
+                return SimpleNamespace(isError=False, structuredContent=receipt)
+            return await super().call_tool(name, arguments)
+
+    session = _HtmlOnlyConsumerSession()
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield session
+
+    artifact_descriptor = _actual_artifact_descriptor(relationship_count=0)
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            artifact_descriptor=artifact_descriptor,
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    arguments = next(
+        arguments
+        for name, arguments in session.calls
+        if name == "brain_artifact_preference_evaluate"
+    )
+    assert arguments["metrics"]["object_count"] == 2
+    assert arguments["metrics"]["relationship_count"] == 0
+    assert "artifact_preference_application_receipt" not in capture
+    assert capture["runtime_collected_packet"][
+        "preference_artifact_memory_promoted_to_live_evidence"
+    ] is False
+
+
+def test_collect_post_deploy_mcp_capture_uses_explicit_default_when_project_is_omitted():
+    session = _FakeMcpSession()
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield session
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="different-owner/different-repository",
+            branch="main",
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert capture["project_scope"] == {
+        "project": "neurons",
+        "source": "collector_default",
+        "repository_inference_used": False,
+    }
+    assert all(
+        arguments["project"] == "neurons"
+        for name, arguments in session.calls
+        if name
+        in {
+            "brain_source_to_candidate_runtime_readiness",
+            "brain_context_resolve",
+            "brain_objects_query",
+        }
+    )
+
+
 def test_post_deploy_mcp_url_rejects_values_that_can_leak_secrets_or_topology():
     assert validate_post_deploy_mcp_url("https://mcp.example.test/mcp") == "https://mcp.example.test/mcp"
     with pytest.raises(ValueError):
@@ -486,6 +1325,7 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
             "expected_commit": "c2b8548",
             "repository": "pureliture/neurons",
             "branch": "main",
+            "project": "neurons",
             "consumer": "codex",
         },
         {
@@ -493,6 +1333,7 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
             "expected_commit": "c2b8548",
             "repository": "pureliture/neurons",
             "branch": "main",
+            "project": "neurons",
             "consumer": "codex",
             "evidence_collection_mode": "post_deploy_read_only_smoke",
             "evidence_collection_network_used": True,
@@ -507,6 +1348,7 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
         {
             "repository": "pureliture/neurons",
             "branch": "main",
+            "project": "neurons",
             "current_files": [],
             "current_request": (
                 "source-to-candidate runtime readiness post-deploy "
@@ -521,6 +1363,7 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
     assert [arguments["route"] for arguments in route_calls] == list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
     assert all(arguments["response_mode"] == "full" for arguments in route_calls)
     assert all(arguments["consumer"] == "codex" for arguments in route_calls)
+    assert all(arguments["project"] == "neurons" for arguments in route_calls)
 
     report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
         captured_evidence=capture,
@@ -1336,21 +2179,34 @@ def test_collect_post_deploy_mcp_capture_promotes_live_projection_join_from_read
 
 def test_collect_post_deploy_mcp_capture_keeps_tool_errors_as_public_safe_gaps():
     class _FailingRouteSession(_FakeMcpSession):
+        async def list_tools(self):
+            listed = await super().list_tools()
+            listed.tools.append(SimpleNamespace(name="brain_artifact_preference_evaluate"))
+            return listed
+
         async def call_tool(self, name: str, arguments: dict):
             if name == "brain_objects_query" and arguments.get("route") == "temporal_work_recall":
                 self.calls.append((name, dict(arguments)))
                 return SimpleNamespace(isError=True, structuredContent={})
+            if name == "brain_artifact_preference_evaluate":
+                self.calls.append((name, dict(arguments)))
+                return SimpleNamespace(isError=True, structuredContent={})
             return await super().call_tool(name, arguments)
+
+    session = _FailingRouteSession()
 
     @asynccontextmanager
     async def _fake_session_factory(_mcp_url: str):
-        yield _FailingRouteSession()
+        yield session
 
+    artifact_descriptor = _actual_artifact_descriptor()
     capture = asyncio.run(
         collect_source_to_candidate_post_deploy_mcp_capture(
             mcp_url="https://mcp.example.test/mcp",
             repository="pureliture/neurons",
             branch="main",
+            project="neurons",
+            artifact_descriptor=artifact_descriptor,
             session_factory=_fake_session_factory,
         )
     )
@@ -1359,6 +2215,12 @@ def test_collect_post_deploy_mcp_capture_keeps_tool_errors_as_public_safe_gaps()
     assert by_route["temporal_work_recall"]["collector_error_type"] == "McpToolError"
     assert by_route["temporal_work_recall"]["object_pack"]["gaps"] == ["collector_route_smoke_failed"]
     assert by_route["temporal_work_recall"]["production_mutation_performed"] is False
+    evaluator_arguments = next(
+        arguments
+        for name, arguments in session.calls
+        if name == "brain_artifact_preference_evaluate"
+    )
+    assert evaluator_arguments["metrics"] == artifact_descriptor["metrics"]
 
 
 def test_collect_post_deploy_mcp_capture_keeps_missing_agent_context_as_public_safe_gap():
@@ -1400,6 +2262,12 @@ def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, cap
         ),
         encoding="utf-8",
     )
+    artifact_descriptor_file = tmp_path / "artifact-descriptor.json"
+    artifact_descriptor = _actual_artifact_descriptor()
+    artifact_descriptor_file.write_text(
+        json.dumps(artifact_descriptor),
+        encoding="utf-8",
+    )
     seen: dict[str, object] = {}
 
     async def _fake_collect(**kwargs):
@@ -1432,12 +2300,16 @@ def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, cap
                 "pureliture/neurons",
                 "--branch",
                 "main",
+                "--project",
+                "neurons",
                 "--consumer",
                 "codex",
                 "--expected-commit",
                 "c2b8548",
                 "--deployed-identity-file",
                 str(identity_file),
+                "--artifact-descriptor-file",
+                str(artifact_descriptor_file),
             ]
         )
         == 0
@@ -1446,12 +2318,17 @@ def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, cap
     output = json.loads(capsys.readouterr().out)
     assert output["schema_version"] == "source_to_candidate_runtime_post_deploy_mcp_capture.v1"
     assert output["collection"]["network_used"] is True
+    assert output["runtime_readiness"]["schema_version"] == "source_to_candidate_runtime_readiness.v1"
     assert seen["mcp_url"] == "https://mcp.example.test/mcp"
     assert seen["repository"] == "pureliture/neurons"
     assert seen["branch"] == "main"
+    assert seen["project"] == "neurons"
     assert seen["consumer"] == "codex"
     assert seen["expected_commit"] == "c2b8548"
     assert seen["deployed_identity"] == {
         "contains_expected_commit": True,
         "identity_source": "redacted_artifact_identity_summary",
     }
+    assert seen["artifact_descriptor"] == artifact_descriptor
+    assert str(artifact_descriptor_file) not in json.dumps(output, sort_keys=True)
+    assert artifact_descriptor["summary"] not in json.dumps(output, sort_keys=True)

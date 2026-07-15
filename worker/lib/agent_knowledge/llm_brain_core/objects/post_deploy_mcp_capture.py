@@ -6,12 +6,19 @@ from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from .._util import ensure_public_safe, public_safe_text, require_sha256
+from .._util import ensure_public_safe, hash_payload, public_safe_text, require_sha256
+from .artifact_preference_evaluator import (
+    ARTIFACT_PREFERENCE_COLLECTOR_ATTESTATION_SCHEMA,
+    ARTIFACT_PREFERENCE_EVALUATOR_TOOL,
+    artifact_preference_application_receipt_is_valid,
+    validate_artifact_descriptor,
+)
 from .authority_policy import knowledge_object_class_from_id
 from .runtime_readiness import (
     EVIDENCE_PROVENANCE_SCHEMA,
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
     RUNTIME_READINESS_AGENT_CONTEXT_TOOL,
+    _mint_collector_attested_evidence,
 )
 
 POST_DEPLOY_MCP_CAPTURE_SCHEMA = "source_to_candidate_runtime_post_deploy_mcp_capture.v1"
@@ -87,14 +94,24 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
     mcp_url: str,
     repository: str = "",
     branch: str = "",
+    project: str = "",
     consumer: str = "codex",
     expected_commit: str = "",
     deployed_identity: Mapping[str, Any] | None = None,
+    artifact_descriptor: Mapping[str, Any] | None = None,
     session_factory: Any = None,
 ) -> dict[str, Any]:
     """Collect sanitized read-only runtime evidence from a deployed MCP HTTP endpoint."""
 
     safe_url = validate_post_deploy_mcp_url(mcp_url)
+    validated_artifact_descriptor = (
+        validate_artifact_descriptor(artifact_descriptor)
+        if artifact_descriptor is not None
+        else None
+    )
+    explicit_project = str(project or "").strip()
+    safe_project = public_safe_text(explicit_project, max_chars=120) or "neurons"
+    project_source = "explicit" if explicit_project else "collector_default"
     factory = session_factory or _default_mcp_session
     async with factory(safe_url) as session:
         await session.initialize()
@@ -107,21 +124,24 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
                 "expected_commit": expected_commit,
                 "repository": repository,
                 "branch": branch,
+                "project": safe_project,
                 "consumer": consumer,
             },
         )
+        runtime_read_arguments = {
+            "collect_shadow_evidence": True,
+            "expected_commit": expected_commit,
+            "repository": repository,
+            "branch": branch,
+            "project": safe_project,
+            "consumer": consumer,
+            "evidence_collection_mode": "post_deploy_read_only_smoke",
+            "evidence_collection_network_used": True,
+        }
         runtime_packet = await _call_tool_mapping(
             session,
             RUNTIME_READINESS_AGENT_CONTEXT_TOOL,
-            {
-                "collect_shadow_evidence": True,
-                "expected_commit": expected_commit,
-                "repository": repository,
-                "branch": branch,
-                "consumer": consumer,
-                "evidence_collection_mode": "post_deploy_read_only_smoke",
-                "evidence_collection_network_used": True,
-            },
+            runtime_read_arguments,
         )
         context_pack = await _call_tool_mapping(
             session,
@@ -129,6 +149,7 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
             {
                 "repository": repository,
                 "branch": branch,
+                "project": safe_project,
                 "current_files": [],
                 "current_request": (
                     "source-to-candidate runtime readiness post-deploy "
@@ -148,6 +169,7 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
                     {
                         "repository": repository,
                         "branch": branch,
+                        "project": safe_project,
                         "query": f"source-to-candidate runtime readiness post-deploy route smoke: {route}",
                         "current_files": [],
                         "route": route,
@@ -159,18 +181,61 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
             )
             for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
         ]
+        direct_receipt: dict[str, Any] = {}
+        post_evaluator_runtime_packet = runtime_packet
+        if (
+            validated_artifact_descriptor is not None
+            and project_source == "explicit"
+            and ARTIFACT_PREFERENCE_EVALUATOR_TOOL in tool_names
+        ):
+            direct_receipt = await _call_tool_untrusted_mapping(
+                session,
+                ARTIFACT_PREFERENCE_EVALUATOR_TOOL,
+                {
+                    "repository": repository,
+                    "branch": branch,
+                    "project": safe_project,
+                    **validated_artifact_descriptor,
+                    "consumer": "post_deploy_mcp_capture",
+                },
+            )
+            post_evaluator_runtime_packet = await _call_tool_mapping(
+                session,
+                RUNTIME_READINESS_AGENT_CONTEXT_TOOL,
+                runtime_read_arguments,
+            )
 
     identity = _deployed_identity_view(deployed_identity)
     try:
         _reject_forbidden_runtime_input_keys(runtime_packet)
-        attested_runtime_packet = _attest_preference_artifact_memory(
+        _reject_forbidden_runtime_input_keys(post_evaluator_runtime_packet)
+        initial_attested_runtime_packet = _attest_preference_artifact_memory(
             runtime_packet,
             deployed_identity=identity,
             expected_commit=expected_commit,
             streamable_http_network_capture=True,
         )
+        attested_runtime_packet = _attest_preference_artifact_memory(
+            post_evaluator_runtime_packet,
+            deployed_identity=identity,
+            expected_commit=expected_commit,
+            streamable_http_network_capture=True,
+        )
+        if validated_artifact_descriptor is not None and project_source == "explicit":
+            attested_runtime_packet, accepted_receipt = _attach_direct_application_receipt(
+                attested_runtime_packet,
+                prior_packet=initial_attested_runtime_packet,
+                direct_receipt=direct_receipt,
+                artifact_descriptor=validated_artifact_descriptor,
+                repository=repository,
+                branch=branch,
+                project=safe_project,
+            )
+        else:
+            accepted_receipt = {}
     except ValueError:
         attested_runtime_packet = _forbidden_runtime_packet_failure(runtime_packet)
+        accepted_receipt = {}
     provenance = _post_deploy_provenance(attested_runtime_packet)
     capture = {
         "schema_version": POST_DEPLOY_MCP_CAPTURE_SCHEMA,
@@ -180,6 +245,11 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         "agent_context_product": _agent_context_product_from_context_pack(context_pack),
         "brain_objects_query_smokes": smokes,
         "deployed_identity": identity,
+        "project_scope": {
+            "project": safe_project,
+            "source": project_source,
+            "repository_inference_used": False,
+        },
         "collection": provenance,
         "evidence_provenance": provenance,
         "production_mutation_performed": _runtime_packet_reports_mutation(attested_runtime_packet),
@@ -193,8 +263,165 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
     preference_artifact_memory = _live_preference_artifact_memory_from_runtime_packet(attested_runtime_packet)
     if preference_artifact_memory:
         capture["preference_artifact_memory"] = preference_artifact_memory
+    if accepted_receipt:
+        capture["artifact_preference_application_receipt"] = accepted_receipt
     ensure_public_safe(capture, "SourceToCandidatePostDeployMcpCapture")
+    if accepted_receipt:
+        return _mint_collector_attested_evidence(capture)
     return capture
+
+
+def _attach_direct_application_receipt(
+    packet: Mapping[str, Any],
+    *,
+    prior_packet: Mapping[str, Any],
+    direct_receipt: Mapping[str, Any],
+    artifact_descriptor: Mapping[str, Any],
+    repository: str,
+    branch: str,
+    project: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        _reject_forbidden_runtime_input_keys(direct_receipt)
+    except ValueError:
+        return _public_safe_mapping(packet), {}
+    if not artifact_preference_application_receipt_is_valid(direct_receipt):
+        return _public_safe_mapping(packet), {}
+    safe_packet = _public_safe_mapping(packet)
+    safe_prior_packet = _public_safe_mapping(prior_packet)
+    safe_receipt = _public_safe_mapping(direct_receipt)
+    preference = (
+        safe_packet.get("preference_artifact_memory")
+        if isinstance(safe_packet.get("preference_artifact_memory"), Mapping)
+        else {}
+    )
+    alignment = (
+        preference.get("read_surface_alignment")
+        if isinstance(preference.get("read_surface_alignment"), Mapping)
+        else {}
+    )
+    preference_binding = safe_receipt.get("preference_binding")
+    artifact_binding = safe_receipt.get("artifact_binding")
+    expected_artifact_binding = {
+        "repository_hash": hash_payload(repository),
+        "branch_hash": hash_payload(branch),
+        "artifact_type": artifact_descriptor.get("artifact_type"),
+        "artifact_fingerprint": artifact_descriptor.get("artifact_fingerprint"),
+        "summary_hash": hash_payload(artifact_descriptor.get("summary")),
+        "metrics_hash": hash_payload(artifact_descriptor.get("metrics")),
+        "evidence_refs_hash": hash_payload(artifact_descriptor.get("evidence_refs")),
+    }
+    if (
+        not preference
+        or not _preference_runtime_read_stable(
+            safe_prior_packet,
+            safe_packet,
+        )
+        or not isinstance(preference_binding, Mapping)
+        or not isinstance(artifact_binding, Mapping)
+        or str(preference_binding.get("project") or "") != project
+        or str(preference_binding.get("project") or "")
+        != str(alignment.get("project") or "")
+        or str(preference_binding.get("target_object_id") or "")
+        != str(alignment.get("target_object_id") or "")
+        or str(preference_binding.get("memory_id") or "")
+        != str(alignment.get("memory_id") or "")
+        or str(preference_binding.get("card_content_hash") or "")
+        != str(alignment.get("card_content_hash") or "")
+        or str(preference_binding.get("source_content_hash") or "")
+        != str(alignment.get("source_content_hash") or "")
+        or str(preference_binding.get("proposal_id") or "")
+        != str(alignment.get("authority_proposal_id") or "")
+        or str(preference_binding.get("decision_id") or "")
+        != str(alignment.get("authority_decision_id") or "")
+        or dict(artifact_binding) != expected_artifact_binding
+    ):
+        return safe_packet, {}
+    safe_preference = dict(preference)
+    safe_preference["artifact_consumer_evidence"] = safe_receipt
+    safe_preference["artifact_review_check"] = _recalculated_artifact_review_check(
+        preference,
+        artifact_descriptor=artifact_descriptor,
+        target_object_id=str(alignment.get("target_object_id") or ""),
+    )
+    safe_preference["gaps"] = [
+        gap
+        for gap in _public_safe_string_list(safe_preference.get("gaps"), max_chars=160)
+        if gap != "artifact_consumer_evidence_missing"
+    ]
+    safe_preference["attestation_provenance"] = {
+        "schema_version": ARTIFACT_PREFERENCE_COLLECTOR_ATTESTATION_SCHEMA,
+        "collector": "source_to_candidate_post_deploy_mcp_capture",
+        "transport": "streamable_http",
+        "named_tool": ARTIFACT_PREFERENCE_EVALUATOR_TOOL,
+        "receipt_hash": str(safe_receipt.get("receipt_hash") or ""),
+        "read_surface_recheck": "validated",
+    }
+    safe_packet["preference_artifact_memory"] = safe_preference
+    ensure_public_safe(safe_packet, "DirectArtifactPreferenceApplicationReceiptPacket")
+    return safe_packet, safe_receipt
+
+
+def _preference_runtime_read_stable(
+    prior_packet: Mapping[str, Any],
+    current_packet: Mapping[str, Any],
+) -> bool:
+    prior = prior_packet.get("preference_artifact_memory")
+    current = current_packet.get("preference_artifact_memory")
+    if not isinstance(prior, Mapping) or not isinstance(current, Mapping):
+        return False
+    prior_alignment = (
+        prior.get("read_surface_alignment")
+        if isinstance(prior.get("read_surface_alignment"), Mapping)
+        else {}
+    )
+    current_alignment = (
+        current.get("read_surface_alignment")
+        if isinstance(current.get("read_surface_alignment"), Mapping)
+        else {}
+    )
+    target_object_id = str(current_alignment.get("target_object_id") or "")
+    return (
+        bool(target_object_id)
+        and dict(prior_alignment) == dict(current_alignment)
+        and _preference_surface_continuity_matches(
+            prior,
+            target_object_id,
+            prior_alignment,
+        )
+        and _preference_surface_continuity_matches(
+            current,
+            target_object_id,
+            current_alignment,
+        )
+    )
+
+
+def _recalculated_artifact_review_check(
+    preference: Mapping[str, Any],
+    *,
+    artifact_descriptor: Mapping[str, Any],
+    target_object_id: str,
+) -> dict[str, Any]:
+    original = _preference_artifact_review_check_view(
+        preference.get("artifact_review_check")
+    )
+    original.update(
+        {
+            "schema_version": "artifact_review_preference_check.v1",
+            "status": "pass",
+            "ui_required": False,
+            "artifact_type": public_safe_text(
+                str(artifact_descriptor.get("artifact_type") or ""),
+                max_chars=80,
+            ),
+            "artifact_summary": "operator_supplied_public_safe_descriptor",
+            "matched_preference_object_ids": [target_object_id],
+            "failures": [],
+            "raw_artifact_body_returned": False,
+        }
+    )
+    return original
 
 
 async def _collect_tool_names(session: Any) -> list[str]:
@@ -207,7 +434,11 @@ async def _collect_tool_names(session: Any) -> list[str]:
     ]
 
 
-async def _call_tool_mapping(session: Any, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+async def _call_tool_untrusted_mapping(
+    session: Any,
+    name: str,
+    arguments: Mapping[str, Any],
+) -> dict[str, Any]:
     try:
         result = await session.call_tool(name, dict(arguments))
     except Exception as exc:  # pragma: no cover - defensive transport guard
@@ -218,7 +449,13 @@ async def _call_tool_mapping(session: Any, name: str, arguments: Mapping[str, An
     if getattr(result, "isError", False) is True:
         return {"collector_call_failed": True, "collector_error_type": "McpToolError"}
     structured = getattr(result, "structuredContent", None)
-    return _public_safe_mapping(structured)
+    return dict(structured) if isinstance(structured, Mapping) else {}
+
+
+async def _call_tool_mapping(session: Any, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    return _public_safe_mapping(
+        await _call_tool_untrusted_mapping(session, name, arguments)
+    )
 
 
 def _agent_context_product_from_context_pack(context_pack: Mapping[str, Any]) -> dict[str, Any]:
@@ -531,6 +768,15 @@ def _preference_alignment_view(value: Any) -> dict[str, Any]:
     return {
         "status": public_safe_text(str(raw.get("status") or ""), max_chars=80),
         "target_object_id": public_safe_text(str(raw.get("target_object_id") or ""), max_chars=180),
+        "memory_id": public_safe_text(str(raw.get("memory_id") or ""), max_chars=180),
+        "card_content_hash": public_safe_text(
+            str(raw.get("card_content_hash") or ""),
+            max_chars=80,
+        ),
+        "authority_proposal_id": public_safe_text(
+            str(raw.get("authority_proposal_id") or ""),
+            max_chars=180,
+        ),
         "project": public_safe_text(str(raw.get("project") or ""), max_chars=120),
         "source_content_hash": public_safe_text(
             str(raw.get("source_content_hash") or ""),
@@ -629,6 +875,26 @@ def _preference_object_views(value: Any, *, required_lane: str) -> list[dict[str
                 "object_id": object_id,
                 "object_type": object_type,
                 "authority_lane": lane,
+                "memory_id": public_safe_text(
+                    str(item.get("memory_id") or payload.get("memory_id") or ""),
+                    max_chars=180,
+                ),
+                "card_content_hash": public_safe_text(
+                    str(
+                        item.get("card_content_hash")
+                        or payload.get("card_content_hash")
+                        or ""
+                    ),
+                    max_chars=80,
+                ),
+                "authority_proposal_id": public_safe_text(
+                    str(
+                        item.get("authority_proposal_id")
+                        or payload.get("authority_proposal_id")
+                        or ""
+                    ),
+                    max_chars=180,
+                ),
                 "project": public_safe_text(
                     str(item.get("project") or scope.get("project") or payload.get("project") or ""),
                     max_chars=120,
@@ -801,29 +1067,7 @@ def _artifact_consumer_evidence_valid(preference: Mapping[str, Any]) -> bool:
         if isinstance(preference.get("artifact_consumer_evidence"), Mapping)
         else {}
     )
-    provenance = (
-        consumer.get("consumer_provenance")
-        if isinstance(consumer.get("consumer_provenance"), Mapping)
-        else {}
-    )
-    finding_refs = consumer.get("finding_refs") if isinstance(consumer.get("finding_refs"), list) else []
-    evidence_refs = consumer.get("evidence_refs") if isinstance(consumer.get("evidence_refs"), list) else []
-    try:
-        require_sha256(str(consumer.get("artifact_fingerprint") or ""), "artifact_fingerprint")
-    except ValueError:
-        return False
-    return (
-        consumer.get("status") == "validated"
-        and provenance.get("evidence_kind") == "actual_consumer_output"
-        and bool(str(provenance.get("consumer") or ""))
-        and bool(str(provenance.get("workflow") or ""))
-        and bool(finding_refs)
-        and bool(evidence_refs)
-        and all(_artifact_ref_is_public_safe(item, required_prefix="finding:") for item in finding_refs)
-        and all(_artifact_ref_is_public_safe(item, required_prefix="evidence:") for item in evidence_refs)
-        and _safe_int(consumer.get("finding_count")) == len(finding_refs)
-        and _safe_int(consumer.get("evidence_ref_count")) == len(evidence_refs)
-    )
+    return artifact_preference_application_receipt_is_valid(consumer)
 
 
 def _artifact_ref_is_public_safe(value: Any, *, required_prefix: str) -> bool:
@@ -865,7 +1109,7 @@ def _preference_surface_continuity_matches(
         else [],
         context.get("items", []) if isinstance(context.get("items"), list) else [],
     ]
-    continuity: list[tuple[str, str, str]] = []
+    continuity: list[tuple[str, str, str, str, str, str]] = []
     for items in surfaces:
         obj = next(
             (
@@ -882,6 +1126,30 @@ def _preference_surface_continuity_matches(
         continuity.append(
             (
                 public_safe_text(
+                    str(obj.get("memory_id") or payload.get("memory_id") or ""),
+                    max_chars=180,
+                ),
+                public_safe_text(
+                    str(
+                        obj.get("card_content_hash")
+                        or payload.get("card_content_hash")
+                        or ""
+                    ),
+                    max_chars=80,
+                ),
+                public_safe_text(
+                    str(
+                        obj.get("authority_proposal_id")
+                        or payload.get("authority_proposal_id")
+                        or ""
+                    ),
+                    max_chars=180,
+                ),
+                public_safe_text(
+                    str(obj.get("authority_decision_id") or payload.get("authority_decision_id") or ""),
+                    max_chars=180,
+                ),
+                public_safe_text(
                     str(obj.get("project") or scope.get("project") or payload.get("project") or ""),
                     max_chars=120,
                 ),
@@ -894,18 +1162,21 @@ def _preference_surface_continuity_matches(
                     ),
                     max_chars=80,
                 ),
-                public_safe_text(
-                    str(obj.get("authority_decision_id") or payload.get("authority_decision_id") or ""),
-                    max_chars=180,
-                ),
             )
         )
     expected = (
+        public_safe_text(str(alignment.get("memory_id") or ""), max_chars=180),
+        public_safe_text(str(alignment.get("card_content_hash") or ""), max_chars=80),
+        public_safe_text(str(alignment.get("authority_proposal_id") or ""), max_chars=180),
+        public_safe_text(str(alignment.get("authority_decision_id") or ""), max_chars=180),
         public_safe_text(str(alignment.get("project") or ""), max_chars=120),
         public_safe_text(str(alignment.get("source_content_hash") or ""), max_chars=80),
-        public_safe_text(str(alignment.get("authority_decision_id") or ""), max_chars=180),
     )
-    return expected != ("", "", "") and len(set(continuity)) == 1 and continuity[0] == expected
+    return (
+        expected != ("", "", "", "", "", "")
+        and len(set(continuity)) == 1
+        and continuity[0] == expected
+    )
 
 
 def _preference_artifact_has_accepted_current_lane(preference: Mapping[str, Any]) -> bool:

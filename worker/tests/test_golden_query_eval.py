@@ -1,3 +1,8 @@
+import asyncio
+from copy import deepcopy
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+
 from agent_knowledge.llm_brain_core.golden_query_eval import (
     GOLDEN_QUERIES,
     REQUIRED_QUALITY_AXES,
@@ -13,7 +18,18 @@ from agent_knowledge.llm_brain_core.object_packs import build_code_change_impact
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     EVIDENCE_PROVENANCE_SCHEMA,
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
+    RUNTIME_READINESS_AGENT_CONTEXT_TOOL,
+    build_source_to_candidate_runtime_post_deploy_capture_packet,
 )
+from agent_knowledge.llm_brain_core.objects.artifact_preference_evaluator import (
+    ARTIFACT_PREFERENCE_EVALUATOR_TOOL,
+    artifact_descriptor_fingerprint,
+    evaluate_artifact_preference,
+)
+from agent_knowledge.llm_brain_core.objects.post_deploy_mcp_capture import (
+    collect_source_to_candidate_post_deploy_mcp_capture,
+)
+from agent_knowledge.llm_brain_core._util import hash_payload
 
 _REQUIRED_ROUTE_NAMES = list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
 
@@ -251,10 +267,27 @@ def _valid_p6_runtime_evidence(*, live: bool = True):
 
 
 def _valid_p7_runtime_evidence(*, live: bool = True):
+    target_object_id = "ko:ArtifactPreference:html-review-density"
+    memory_id = "mem_artifact_preference_html_review_density"
+    card_content_hash = "sha256:" + "c" * 64
+    source_content_hash = "sha256:" + "a" * 64
+    authority_proposal_id = "proposal:p7-html-review-density"
+    authority_decision_id = "decision:p7-html-review-density"
     accepted_object = {
-        "object_id": "ko:ArtifactPreference:html-review-density",
+        "object_id": target_object_id,
         "object_type": "ArtifactPreference",
         "authority_lane": "accepted_current",
+        "scope": {"project": "neurons"},
+        "content_hash": source_content_hash,
+        "payload": {
+            "target_object_id": target_object_id,
+            "memory_id": memory_id,
+            "card_content_hash": card_content_hash,
+            "authority_proposal_id": authority_proposal_id,
+            "authority_decision_id": authority_decision_id,
+            "project": "neurons",
+            "source_content_hash": source_content_hash,
+        },
     }
     proposal_object = {
         "object_id": "ko:ArtifactPreference:visualization-proposal",
@@ -265,7 +298,7 @@ def _valid_p7_runtime_evidence(*, live: bool = True):
         "schema_version": "source_to_candidate_runtime_evidence.v1",
         "preference_artifact_memory": {
             "schema_version": "preference_artifact_memory_runtime_evidence.v1",
-            "evidence_class": "runtime_preference_artifact_memory",
+            "attestation_state": "unattested_runtime_read",
             "preference_object_pack": {
                 "schema_version": "object_pack.v1",
                 "route": "code_style_preference",
@@ -304,6 +337,7 @@ def _valid_p7_runtime_evidence(*, live: bool = True):
                 "object_count": 1,
                 "accepted_preference_count": 1,
                 "authority_lanes": ["accepted_current"],
+                "items": [accepted_object],
                 "surface_policy": {"mutation_allowed": False},
             },
             "artifact_review_check": {
@@ -320,6 +354,19 @@ def _valid_p7_runtime_evidence(*, live: bool = True):
                 "host_topology_returned": False,
                 "raw_external_ids_returned": False,
             },
+            "read_surface_alignment": {
+                "status": "validated",
+                "target_object_id": target_object_id,
+                "memory_id": memory_id,
+                "card_content_hash": card_content_hash,
+                "authority_proposal_id": authority_proposal_id,
+                "project": "neurons",
+                "source_content_hash": source_content_hash,
+                "authority_decision_id": authority_decision_id,
+                "code_style_preference_object_ids": [target_object_id],
+                "html_visualization_preference_object_ids": [target_object_id],
+                "style_preference_context_object_ids": [target_object_id],
+            },
         },
         "evidence_provenance": {
             "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
@@ -335,11 +382,228 @@ def _valid_p7_runtime_evidence(*, live: bool = True):
     }
 
 
+def _attested_p7_post_deploy_capture() -> dict:
+    repository = "pureliture/neurons"
+    branch = "main"
+    project = "neurons"
+    target_object_id = "ko:ArtifactPreference:html-review-density"
+    source_content_hash = "sha256:" + "a" * 64
+    proposal_id = "proposal:p7-html-review-density"
+    decision_id = "decision:p7-html-review-density"
+    card = {
+        "memory_id": "mem_artifact_preference_html_review_density",
+        "project": project,
+        "card_type": "preference",
+        "lifecycle_state": "accepted",
+        "approval_state": "approved",
+        "currentness": "current",
+        "freshness": "current",
+        "superseded_by": [],
+        "typed_payload": {
+            "target_object_id": target_object_id,
+            "source_object_type": "ArtifactPreference",
+            "source_content_hash": source_content_hash,
+            "authority_proposal_id": proposal_id,
+            "authority_decision_id": decision_id,
+            "applies_to": "html_review_artifact",
+            "evaluator_profile": "html_review_evidence_density_v1",
+        },
+    }
+    card_content_hash = hash_payload(card)
+    card["content_hash"] = card_content_hash
+    card["card_hash"] = card_content_hash
+    proposal = {
+        "project": project,
+        "proposal_id": proposal_id,
+        "proposal_type": "propose_current",
+        "target_object_id": target_object_id,
+        "object_type": "ArtifactPreference",
+        "status": "accepted",
+        "decision_id": decision_id,
+        "proposed_object": {
+            "object_id": target_object_id,
+            "object_type": "ArtifactPreference",
+            "scope": {"project": project},
+            "content_hash": source_content_hash,
+            "payload": {"applies_to": "html_review_artifact"},
+        },
+    }
+    decision = {
+        "project": project,
+        "proposal_id": proposal_id,
+        "decision_id": decision_id,
+        "target_object_id": target_object_id,
+        "decision_type": "accept_current",
+        "new_authority_lane": "accepted_current",
+    }
+    state = {
+        "project": project,
+        "target_object_id": target_object_id,
+        "authority_lane": "accepted_current",
+        "proposal_id": proposal_id,
+        "decision_id": decision_id,
+        "decision_type": "accept_current",
+    }
+
+    class _Ledger:
+        def list_llm_brain_memory_cards(self, **_kwargs):
+            return [card]
+
+        def get_object_authority_state(self, _object_id):
+            return state
+
+        def get_object_review_proposal(self, _proposal_id):
+            return proposal
+
+        def list_object_authority_decisions(self, **_kwargs):
+            return [decision]
+
+    summary = "Rendered HTML review artifact exposes objects, relationships, evidence, and gate status."
+    metrics = {
+        "object_count": 2,
+        "relationship_count": 1,
+        "evidence_count": 2,
+        "gate_status_count": 1,
+        "hidden_gap_count": 0,
+        "protected_content_count": 0,
+    }
+    evidence_refs = ["artifact:rendered-review", "evidence:review-findings"]
+    descriptor = {
+        "artifact_type": "html_review_artifact",
+        "summary": summary,
+        "artifact_fingerprint": artifact_descriptor_fingerprint(
+            artifact_type="html_review_artifact",
+            summary=summary,
+            metrics=metrics,
+            evidence_refs=evidence_refs,
+        ),
+        "metrics": metrics,
+        "evidence_refs": evidence_refs,
+    }
+    receipt = evaluate_artifact_preference(
+        ledger=_Ledger(),
+        repository=repository,
+        branch=branch,
+        project=project,
+        consumer="post_deploy_mcp_capture",
+        **descriptor,
+    )
+    assert receipt["status"] == "PASS"
+
+    runtime_packet = _valid_p7_runtime_evidence(live=True)
+    preference = runtime_packet["preference_artifact_memory"]
+    accepted = preference["preference_object_pack"]["lanes"]["accepted_current"][0]
+    for field in (
+        "memory_id",
+        "card_content_hash",
+        "source_content_hash",
+        "proposal_id",
+        "decision_id",
+        "project",
+    ):
+        source_field = {
+            "proposal_id": "authority_proposal_id",
+            "decision_id": "authority_decision_id",
+        }.get(field, field)
+        accepted["payload"][source_field] = receipt["preference_binding"][field]
+        preference["read_surface_alignment"][source_field] = receipt["preference_binding"][field]
+
+    class _Session:
+        async def initialize(self):
+            return None
+
+        async def list_tools(self):
+            return SimpleNamespace(
+                tools=[SimpleNamespace(name=ARTIFACT_PREFERENCE_EVALUATOR_TOOL)]
+            )
+
+        async def call_tool(self, name, arguments):
+            if name == RUNTIME_READINESS_AGENT_CONTEXT_TOOL:
+                if arguments.get("evidence_collection_plan") is True:
+                    return SimpleNamespace(
+                        isError=False,
+                        structuredContent={
+                            "schema_version": "source_to_candidate_runtime_evidence_collection_plan.v1",
+                            "collection_mode": "post_deploy_read_only_smoke",
+                            "network_used": True,
+                            "production_mutation_performed": False,
+                        },
+                    )
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=deepcopy(runtime_packet),
+                )
+            if name == ARTIFACT_PREFERENCE_EVALUATOR_TOOL:
+                return SimpleNamespace(isError=False, structuredContent=deepcopy(receipt))
+            if name == "brain_context_resolve":
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent={
+                        "authority": {
+                            "agent_context_product": {
+                                "schema_version": "agent_context_product_pack.v1",
+                                "sections": {},
+                                "surface_policy": {"mutation_allowed": False},
+                            }
+                        }
+                    },
+                )
+            route = str(arguments.get("route") or "")
+            return SimpleNamespace(
+                isError=False,
+                structuredContent={
+                    "schema_version": "brain_objects_query.v1",
+                    "route": route,
+                    "object_pack": {
+                        "schema_version": "object_pack.v1",
+                        "route": route,
+                        "objects": [],
+                        "lanes": {},
+                        "recommended_actions": [],
+                        "gaps": [],
+                    },
+                },
+            )
+
+    session = _Session()
+
+    @asynccontextmanager
+    async def _session_factory(_mcp_url):
+        yield session
+
+    # The collector owns attestation: the receipt comes from the named evaluator tool.
+    return asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository=repository,
+            branch=branch,
+            project=project,
+            expected_commit="bec7b38",
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_artifact_identity_summary",
+            },
+            artifact_descriptor=descriptor,
+            session_factory=_session_factory,
+        )
+    )
+
+
 def _valid_p6_p7_runtime_evidence(*, live: bool = True):
-    evidence = _valid_p6_runtime_evidence(live=live)
-    evidence["preference_artifact_memory"] = _valid_p7_runtime_evidence(live=live)[
-        "preference_artifact_memory"
-    ]
+    if not live:
+        evidence = _valid_p6_runtime_evidence(live=False)
+        evidence["preference_artifact_memory"] = _valid_p7_runtime_evidence(live=False)[
+            "preference_artifact_memory"
+        ]
+        return evidence
+    capture = _attested_p7_post_deploy_capture()
+    evidence = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=capture,
+    )
+    preference = evidence["preference_artifact_memory"]
+    evidence.clear()
+    evidence.update(_valid_p6_runtime_evidence(live=True))
+    evidence["preference_artifact_memory"] = preference
     return evidence
 
 

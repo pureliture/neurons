@@ -379,10 +379,22 @@ def compact_section(
                         str(payload.get("target_object_id") or ""),
                         max_chars=180,
                     ),
+                    "memory_id": public_safe_text(
+                        str(payload.get("memory_id") or ""),
+                        max_chars=180,
+                    ),
+                    "card_content_hash": public_safe_text(
+                        str(payload.get("card_content_hash") or ""),
+                        max_chars=80,
+                    ),
                     "project": public_safe_text(str(payload.get("project") or ""), max_chars=120),
                     "source_content_hash": public_safe_text(
                         str(payload.get("source_content_hash") or ""),
                         max_chars=80,
+                    ),
+                    "authority_proposal_id": public_safe_text(
+                        str(payload.get("authority_proposal_id") or ""),
+                        max_chars=180,
                     ),
                     "authority_decision_id": public_safe_text(
                         str(payload.get("authority_decision_id") or ""),

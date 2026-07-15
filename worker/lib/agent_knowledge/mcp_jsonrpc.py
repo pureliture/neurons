@@ -31,6 +31,7 @@ from .mcp_tools import (
     BRAIN_INCIDENT_SEARCH_TOOL_NAME,
     BRAIN_MEMORY_SEARCH_TOOL_NAME,
     BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+    BRAIN_ARTIFACT_PREFERENCE_EVALUATE_TOOL_NAME,
     BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
     BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
     BRAIN_OBJECTS_QUERY_TOOL_NAME,
@@ -220,6 +221,10 @@ def _tool_dispatch_registry() -> dict[str, ToolDispatch]:
         (BRAIN_PERSONA_CHECK_TOOL_NAME, _dispatch_brain_persona_check_tool),
         (BRAIN_EVIDENCE_GET_TOOL_NAME, _dispatch_brain_evidence_get_tool),
         (BRAIN_OBJECTS_QUERY_TOOL_NAME, _dispatch_brain_objects_query_tool),
+        (
+            BRAIN_ARTIFACT_PREFERENCE_EVALUATE_TOOL_NAME,
+            _dispatch_brain_artifact_preference_evaluate_tool,
+        ),
         (BRAIN_OBJECT_EXPLAIN_TOOL_NAME, _dispatch_brain_object_explain_tool),
         (BRAIN_CORPUS_STATUS_TOOL_NAME, _dispatch_brain_corpus_status_tool),
         (BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME, _dispatch_brain_corpus_ingest_plan_tool),
@@ -385,6 +390,48 @@ def _dispatch_brain_objects_query_tool(tool_name: str, arguments: dict, service:
     return _tool_result(result)
 
 
+def _dispatch_brain_artifact_preference_evaluate_tool(
+    tool_name: str,
+    arguments: dict,
+    service: KnowledgeSearchService,
+) -> dict:
+    allowed_fields = {
+        "repository",
+        "branch",
+        "project",
+        "artifact_type",
+        "summary",
+        "artifact_fingerprint",
+        "metrics",
+        "evidence_refs",
+        "consumer",
+    }
+    if set(arguments) != allowed_fields:
+        raise ValueError(f"{tool_name} requires the exact public consumer input fields")
+    metrics = arguments.get("metrics")
+    if not isinstance(metrics, Mapping):
+        raise ValueError("metrics must be an object")
+    evidence_refs = arguments.get("evidence_refs")
+    if not isinstance(evidence_refs, list):
+        raise ValueError("evidence_refs must be an array")
+    result = service.brain_artifact_preference_evaluate(
+        repository=_require_non_empty_string(arguments, "repository", tool_name=tool_name),
+        branch=_require_non_empty_string(arguments, "branch", tool_name=tool_name),
+        project=_require_non_empty_string(arguments, "project", tool_name=tool_name),
+        artifact_type=_require_non_empty_string(arguments, "artifact_type", tool_name=tool_name),
+        summary=_require_non_empty_string(arguments, "summary", tool_name=tool_name),
+        artifact_fingerprint=_require_non_empty_string(
+            arguments,
+            "artifact_fingerprint",
+            tool_name=tool_name,
+        ),
+        metrics=metrics,
+        evidence_refs=evidence_refs,
+        consumer=_require_non_empty_string(arguments, "consumer", tool_name=tool_name),
+    )
+    return _tool_result(result)
+
+
 def _dispatch_brain_object_explain_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
     result = service.brain_object_explain(
         object_id=_require_non_empty_string(arguments, "object_id", tool_name=tool_name),
@@ -521,6 +568,7 @@ def _dispatch_brain_source_to_candidate_runtime_readiness_tool(
         evidence_collection_network_used=arguments.get("evidence_collection_network_used") is True,
         repository=str(arguments.get("repository") or ""),
         branch=str(arguments.get("branch") or ""),
+        project=str(arguments.get("project") or ""),
         consumer=str(arguments.get("consumer") or "codex"),
     )
     return _tool_result(result)

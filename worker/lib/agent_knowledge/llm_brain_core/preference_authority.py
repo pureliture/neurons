@@ -71,9 +71,17 @@ def preference_rule_cards_from_memory_cards(
         if target_object_id:
             preference["target_object_id"] = target_object_id
             preference["project"] = public_safe_text(str(card.get("project") or ""), max_chars=120)
+            preference["card_content_hash"] = public_safe_text(
+                str(card.get("content_hash") or ""),
+                max_chars=80,
+            )
             preference["source_content_hash"] = public_safe_text(
                 str(payload.get("source_content_hash") or ""),
                 max_chars=80,
+            )
+            preference["authority_proposal_id"] = public_safe_text(
+                str(payload.get("authority_proposal_id") or ""),
+                max_chars=180,
             )
             preference["authority_decision_id"] = public_safe_text(
                 str(payload.get("authority_decision_id") or ""),

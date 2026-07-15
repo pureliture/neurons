@@ -361,6 +361,17 @@ def test_agent_context_product_pack_defensively_compacts_dynamic_object_packs():
                             "title": "Current preference",
                             "authority_lane": "accepted_current",
                             "recommended_action": "apply_preference",
+                            "scope": {"project": "neurons"},
+                            "content_hash": "sha256:" + "a" * 64,
+                            "payload": {
+                                "target_object_id": "ko:ArtifactPreference:html-review-density",
+                                "memory_id": "mem_artifact_preference",
+                                "card_content_hash": "sha256:" + "c" * 64,
+                                "authority_proposal_id": "proposal:p7-html-review-density",
+                                "authority_decision_id": "decision:p7-html-review-density",
+                                "project": "neurons",
+                                "source_content_hash": "sha256:" + "a" * 64,
+                            },
                         },
                     ],
                 }
@@ -373,6 +384,15 @@ def test_agent_context_product_pack_defensively_compacts_dynamic_object_packs():
     section = product["sections"]["style_preference"]
     assert section["object_count"] == 1
     assert section["items"][0]["title"] == "Current preference"
+    assert section["items"][0]["payload"] == {
+        "target_object_id": "ko:ArtifactPreference:html-review-density",
+        "memory_id": "mem_artifact_preference",
+        "card_content_hash": "sha256:" + "c" * 64,
+        "authority_proposal_id": "proposal:p7-html-review-density",
+        "authority_decision_id": "decision:p7-html-review-density",
+        "project": "neurons",
+        "source_content_hash": "sha256:" + "a" * 64,
+    }
     assert section["gaps"] == []
 
 
