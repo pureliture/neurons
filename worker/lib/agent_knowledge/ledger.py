@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import sqlite3
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
@@ -11,6 +12,7 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Any
 
 from .db_adapter import ClosingSqliteConnection, SqliteLedgerDbAdapter
 from .ledger_base import *  # noqa: F401,F403 (상수/helper re-export 호환)
@@ -114,6 +116,36 @@ def _object_proposal_status_for_decision(decision_type: str, new_authority_lane:
     if decision_type == "retire":
         return "retired"
     return "accepted"
+
+
+_ARTIFACT_PREFERENCE_DECISION_IMMUTABLE_FIELDS = (
+    "decision_id",
+    "proposal_id",
+    "target_object_id",
+    "decision_type",
+    "previous_authority_lane",
+    "new_authority_lane",
+    "project",
+    "ledger_scope",
+    "decision_reason",
+    "evidence_refs",
+    "approved_by",
+    "approved_by_hash",
+    "rollback_of_decision_id",
+    "supersedes_decision_id",
+    "authority_write_scope",
+    "production_gate_ref_hash",
+)
+
+
+def artifact_preference_decision_semantically_equal(
+    stored: Mapping[str, Any],
+    incoming: Mapping[str, Any],
+) -> bool:
+    return all(
+        stored.get(field) == incoming.get(field)
+        for field in _ARTIFACT_PREFERENCE_DECISION_IMMUTABLE_FIELDS
+    )
 
 
 def _introspection_query(
@@ -544,8 +576,50 @@ class _LedgerTransaction:
     def upsert_object_review_proposal(self, proposal: dict) -> dict:
         return self._ledger._upsert_object_review_proposal_on(self._connection, proposal)
 
+    def get_object_review_proposal(self, proposal_id: str) -> dict:
+        row = self._connection.execute(
+            "SELECT proposal_json FROM object_review_proposals WHERE proposal_id = ?",
+            (proposal_id,),
+        ).fetchone()
+        return json.loads(row["proposal_json"]) if row is not None else {}
+
     def commit_object_authority_decision(self, decision: dict) -> dict:
         return self._ledger._commit_object_authority_decision_on(self._connection, decision)
+
+    def get_llm_brain_memory_card(self, memory_id: str) -> dict | None:
+        row = self._connection.execute(
+            "SELECT envelope_json FROM llm_brain_memory_cards WHERE memory_id = ?",
+            (memory_id,),
+        ).fetchone()
+        return json.loads(row["envelope_json"]) if row is not None else None
+
+    def list_llm_brain_memory_cards(self, *, project: str) -> list[dict]:
+        rows = self._connection.execute(
+            "SELECT envelope_json FROM llm_brain_memory_cards WHERE project = ? ORDER BY memory_id",
+            (project,),
+        ).fetchall()
+        return [json.loads(row["envelope_json"]) for row in rows]
+
+    def get_object_authority_decision(self, decision_id: str) -> dict:
+        row = self._connection.execute(
+            "SELECT decision_json FROM object_authority_decisions WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
+        return json.loads(row["decision_json"]) if row is not None else {}
+
+    def get_object_authority_state(self, target_object_id: str) -> dict:
+        row = self._connection.execute(
+            "SELECT state_json FROM object_authority_states WHERE target_object_id = ?",
+            (target_object_id,),
+        ).fetchone()
+        return json.loads(row["state_json"]) if row is not None else {}
+
+    def get_llm_brain_source_ref(self, source_ref_id: str) -> dict | None:
+        row = self._connection.execute(
+            "SELECT record_json FROM llm_brain_source_refs WHERE source_ref_id = ?",
+            (source_ref_id,),
+        ).fetchone()
+        return json.loads(row["record_json"]) if row is not None else None
 
     def add_memory_card_evidence(self, memory_id: str, evidence_refs: list[dict]) -> None:
         for ref in evidence_refs:
@@ -2577,6 +2651,8 @@ class Ledger(
                 status=excluded.status,
                 proposal_json=excluded.proposal_json,
                 updated_at=excluded.updated_at
+            WHERE object_review_proposals.target_object_id NOT LIKE 'ko:ArtifactPreference:%'
+              AND excluded.target_object_id NOT LIKE 'ko:ArtifactPreference:%'
             """,
             (proposal_id, project, proposal_type, target_object_id, status, payload, now, now),
         )
@@ -2586,7 +2662,35 @@ class Ledger(
         ).fetchone()
         if row is None:
             raise ValueError(f"Failed to read back upserted object review proposal: {proposal_id}")
-        return json.loads(row["proposal_json"])
+        stored = json.loads(row["proposal_json"])
+        is_artifact_preference_collision = (
+            str(stored.get("object_type") or "") == "ArtifactPreference"
+            or str(stored.get("target_object_id") or "").startswith("ko:ArtifactPreference:")
+            or str(proposal.get("object_type") or "") == "ArtifactPreference"
+            or target_object_id.startswith("ko:ArtifactPreference:")
+        )
+        if is_artifact_preference_collision:
+            immutable_fields = (
+                "proposal_id",
+                "proposal_type",
+                "target_object_id",
+                "project",
+                "object_type",
+                "ledger_scope",
+                "reason",
+                "evidence_refs",
+                "proposer",
+                "proposed_object",
+                "production_gate_ref_hash",
+            )
+            semantic_retry = all(stored.get(field) == proposal.get(field) for field in immutable_fields)
+            incoming_status = str(proposal.get("status") or "needs_review")
+            if not semantic_retry or incoming_status not in {
+                "needs_review",
+                str(stored.get("status") or ""),
+            }:
+                raise ValueError("ArtifactPreference proposal lineage is immutable after creation")
+        return stored
 
     def list_object_review_proposals(self, *, project: str = "", limit: int = 20) -> list[dict]:
         bounded = max(1, min(int(limit or 20), 100))
@@ -2695,6 +2799,58 @@ class Ledger(
             raise ValueError("object authority decision requires explicit ledger scope on proposal and decision")
         if proposal_ledger_scope != decision_ledger_scope:
             raise ValueError("object authority decision ledger scope must match the review proposal scope")
+        existing_decision_row = connection.execute(
+            "SELECT decision_json FROM object_authority_decisions WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
+        existing_decision = (
+            json.loads(existing_decision_row["decision_json"])
+            if existing_decision_row is not None
+            else {}
+        )
+        existing_proposal_row = None
+        existing_proposal_id = str(existing_decision.get("proposal_id") or "")
+        if existing_proposal_id:
+            existing_proposal_row = connection.execute(
+                "SELECT proposal_json FROM object_review_proposals WHERE proposal_id = ?",
+                (existing_proposal_id,),
+            ).fetchone()
+        existing_proposal = (
+            json.loads(existing_proposal_row["proposal_json"])
+            if existing_proposal_row is not None
+            else {}
+        )
+        is_artifact_preference = (
+            str(proposal.get("object_type") or "") == "ArtifactPreference"
+            or target_object_id.startswith("ko:ArtifactPreference:")
+            or str(existing_decision.get("target_object_id") or "").startswith(
+                "ko:ArtifactPreference:"
+            )
+            or str(existing_proposal.get("object_type") or "") == "ArtifactPreference"
+            or str(existing_proposal.get("target_object_id") or "").startswith(
+                "ko:ArtifactPreference:"
+            )
+        )
+        if existing_decision_row is not None and is_artifact_preference:
+            if not artifact_preference_decision_semantically_equal(
+                existing_decision,
+                decision_payload,
+            ):
+                raise ValueError("approved ArtifactPreference decision lineage is immutable")
+            existing_state_row = connection.execute(
+                "SELECT state_json FROM object_authority_states WHERE target_object_id = ?",
+                (target_object_id,),
+            ).fetchone()
+            existing_state = json.loads(existing_state_row["state_json"]) if existing_state_row else {}
+            if (
+                str(existing_state.get("project") or "") != project
+                or str(existing_state.get("decision_id") or "") != decision_id
+                or str(existing_state.get("proposal_id") or "") != proposal_id
+                or str(existing_state.get("authority_lane") or "") != new_lane
+                or str(proposal.get("status") or "") != proposal_status
+            ):
+                raise ValueError("ArtifactPreference exact retry authority lineage mismatch")
+            return existing_decision
         connection.execute(
             """
             INSERT INTO object_authority_decisions (

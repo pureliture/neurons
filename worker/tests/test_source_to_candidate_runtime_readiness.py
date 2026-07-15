@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agent_knowledge.cli import main
 from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
@@ -16,6 +18,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_readiness_report,
     build_source_to_candidate_runtime_shadow_readiness_report,
     build_source_to_candidate_runtime_shadow_evidence_packet,
+    build_preference_artifact_memory_runtime_evidence,
 )
 
 
@@ -2833,6 +2836,691 @@ def test_runtime_readiness_collector_reports_session_project_rollup_collector_er
     assert claims["live.session_project.rollup"]["status"] == "failed"
     assert "session_project_rollup_collector_error:RuntimeError" in report["gaps"]
     assert report["status"] == "FAIL"
+
+
+def test_preference_artifact_memory_runtime_evidence_uses_aligned_live_read_surfaces():
+    target_object_id = "ko:ArtifactPreference:p7-live-current"
+    source_content_hash = "sha256:" + "a" * 64
+    authority_decision_id = "decision:p7-live-current"
+    accepted = {
+        "object_id": target_object_id,
+        "object_type": "ArtifactPreference",
+        "authority_lane": "accepted_current",
+        "title": "Dense HTML review artifacts",
+        "scope": {"project": "neurons"},
+        "content_hash": source_content_hash,
+        "payload": {
+            "target_object_id": target_object_id,
+            "authority_decision_id": authority_decision_id,
+        },
+    }
+    preference_route = {
+        "schema_version": "brain_objects_query.v1",
+        "route": "code_style_preference",
+        "object_pack": {
+            "schema_version": "object_pack.v1",
+            "route": "code_style_preference",
+            "objects": [accepted],
+            "lanes": {"accepted_current": [accepted], "proposal_only": []},
+            "recommended_actions": [{"object_id": target_object_id, "action": "apply_preference"}],
+            "gaps": [],
+        },
+    }
+    html_route = {
+        "schema_version": "brain_objects_query.v1",
+        "route": "html_visualization_preference",
+        "object_pack": {
+            "schema_version": "object_pack.v1",
+            "route": "html_visualization_preference",
+            "objects": [accepted],
+            "lanes": {"accepted_current": [accepted]},
+            "recommended_actions": [{"object_id": target_object_id, "action": "apply_preference"}],
+            "gaps": [],
+        },
+    }
+    context_pack = {
+        "schema_version": "llm_brain_context_resolve.v1",
+        "authority": {
+            "agent_context_product": {
+                "schema_version": "agent_context_product_pack.v1",
+                "sections": {
+                    "style_preference": {
+                        "object_count": 1,
+                        "items": [accepted],
+                        "authority_lanes": ["accepted_current"],
+                    }
+                },
+                "surface_policy": {"mutation_allowed": False},
+            }
+        },
+    }
+
+    evidence = build_preference_artifact_memory_runtime_evidence(
+        preference_route=preference_route,
+        html_route=html_route,
+        context_pack=context_pack,
+        artifact_summary={
+            "artifact_type": "html_review",
+            "summary": "Public-safe review summary with findings and evidence references.",
+            "artifact_fingerprint": "sha256:" + "f" * 64,
+            "consumer_provenance": {
+                "consumer": "html_artifact_review_product",
+                "workflow": "review_rendered_artifact",
+                "evidence_kind": "actual_consumer_output",
+            },
+            "finding_refs": ["finding:p7-density", "finding:p7-evidence"],
+            "evidence_refs": ["evidence:p7-density", "evidence:p7-evidence"],
+            "finding_count": 2,
+            "evidence_ref_count": 2,
+            "word_count": 240,
+        },
+    )
+
+    assert evidence["schema_version"] == "preference_artifact_memory_runtime_evidence.v1"
+    assert "evidence_class" not in evidence
+    assert "evidence_source" not in evidence
+    assert evidence["attestation_state"] == "unattested_runtime_read"
+    assert evidence["read_surface_alignment"] == {
+        "status": "validated",
+        "target_object_id": target_object_id,
+        "project": "neurons",
+        "source_content_hash": source_content_hash,
+        "authority_decision_id": authority_decision_id,
+        "code_style_preference_object_ids": [target_object_id],
+        "html_visualization_preference_object_ids": [target_object_id],
+        "style_preference_context_object_ids": [target_object_id],
+    }
+    assert evidence["artifact_review_check"]["status"] == "pass"
+    assert evidence["artifact_review_check"]["ui_required"] is False
+    assert evidence["artifact_review_check"]["raw_artifact_body_returned"] is False
+    assert evidence["artifact_consumer_evidence"]["artifact_fingerprint"] == "sha256:" + "f" * 64
+    assert evidence["artifact_consumer_evidence"]["consumer_provenance"]["evidence_kind"] == (
+        "actual_consumer_output"
+    )
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_sanitized_live_evidence(preference_artifact_memory=evidence)
+    )
+    claim = next(item for item in report["claims"] if item["claim_id"] == "live.preference_artifact.memory")
+    assert claim["status"] == "validated"
+    assert "preference_artifact_proposal_lane_missing" not in claim["gaps"]
+    assert "preference_artifact_read_surface_alignment_failed" not in claim["gaps"]
+
+
+def test_preference_artifact_memory_runtime_evidence_rejects_cross_type_object_ids():
+    target_object_id = "ko:RepoDocument:p7-cross-type-preference"
+    accepted = {
+        "object_id": target_object_id,
+        "object_type": "ArtifactPreference",
+        "authority_lane": "accepted_current",
+        "scope": {"project": "neurons"},
+        "content_hash": "sha256:" + "a" * 64,
+        "payload": {
+            "target_object_id": target_object_id,
+            "authority_decision_id": "decision:p7-cross-type-preference",
+        },
+    }
+
+    def route(name: str) -> dict:
+        return {
+            "schema_version": "brain_objects_query.v1",
+            "route": name,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": name,
+                "objects": [accepted],
+                "lanes": {"accepted_current": [accepted], "proposal_only": []},
+                "recommended_actions": [],
+                "gaps": [],
+            },
+        }
+
+    evidence = build_preference_artifact_memory_runtime_evidence(
+        preference_route=route("code_style_preference"),
+        html_route=route("html_visualization_preference"),
+        context_pack={
+            "authority": {
+                "agent_context_product": {
+                    "schema_version": "agent_context_product_pack.v1",
+                    "sections": {
+                        "style_preference": {
+                            "items": [accepted],
+                            "authority_lanes": ["accepted_current"],
+                        }
+                    },
+                    "surface_policy": {"mutation_allowed": False},
+                }
+            }
+        },
+        artifact_summary={
+            "artifact_type": "html_review",
+            "summary": "Cross-type object IDs must not validate as preferences.",
+        },
+    )
+
+    assert evidence["preference_object_pack"]["accepted_preference_count"] == 0
+    assert evidence["read_surface_alignment"]["status"] == "failed"
+    assert "accepted_current_artifact_preference_missing" in evidence["gaps"]
+
+
+def test_preference_artifact_memory_runtime_evidence_does_not_fabricate_consumer_proof_from_routes():
+    target_object_id = "ko:ArtifactPreference:p7-route-only"
+    accepted = {
+        "object_id": target_object_id,
+        "object_type": "ArtifactPreference",
+        "authority_lane": "accepted_current",
+        "scope": {"project": "neurons"},
+        "content_hash": "sha256:" + "a" * 64,
+        "payload": {"authority_decision_id": "decision:p7-route-only"},
+    }
+
+    def route(name: str) -> dict:
+        return {
+            "schema_version": "brain_objects_query.v1",
+            "route": name,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": name,
+                "objects": [accepted],
+                "lanes": {"accepted_current": [accepted], "proposal_only": []},
+                "recommended_actions": [],
+                "gaps": [],
+            },
+        }
+
+    evidence = build_preference_artifact_memory_runtime_evidence(
+        preference_route=route("code_style_preference"),
+        html_route=route("html_visualization_preference"),
+        context_pack={
+            "authority": {
+                "agent_context_product": {
+                    "schema_version": "agent_context_product_pack.v1",
+                    "sections": {
+                        "style_preference": {
+                            "items": [accepted],
+                            "authority_lanes": ["accepted_current"],
+                        }
+                    },
+                    "surface_policy": {"mutation_allowed": False},
+                }
+            }
+        },
+        artifact_summary={
+            "artifact_type": "html_review",
+            "summary": "A collector-authored summary must not count as consumer proof.",
+            "finding_count": 1,
+            "evidence_ref_count": 3,
+            "word_count": 9,
+        },
+    )
+
+    assert evidence["read_surface_alignment"]["status"] == "validated"
+    assert evidence["artifact_review_check"]["status"] == "failed"
+    assert evidence["artifact_review_check"]["artifact_metrics"]["finding_count"] == 0
+    assert "actual_artifact_consumer_provenance_missing" in evidence["artifact_review_check"]["failures"]
+    assert "artifact_fingerprint_missing" in evidence["artifact_review_check"]["failures"]
+    assert "artifact_consumer_evidence_missing" in evidence["gaps"]
+
+
+@pytest.mark.parametrize(
+    ("forbidden_key", "raw_value", "redacted_key"),
+    [
+        ("dataset_id", "raw-dataset-value-must-not-leak", "dataset_ref"),
+        ("document_id", "raw-document-value-must-not-leak", "document_ref"),
+    ],
+)
+def test_preference_artifact_runtime_collector_rejects_raw_external_ids_before_key_redaction(
+    forbidden_key: str,
+    raw_value: str,
+    redacted_key: str,
+):
+    target_object_id = "ko:ArtifactPreference:p7-forbidden-runtime-input"
+    accepted = {
+        "object_id": target_object_id,
+        "object_type": "ArtifactPreference",
+        "authority_lane": "accepted_current",
+        "scope": {"project": "neurons"},
+        "content_hash": "sha256:" + "a" * 64,
+        "payload": {
+            "authority_decision_id": "decision:p7-forbidden-runtime-input",
+            "nested": {forbidden_key: raw_value},
+        },
+    }
+
+    def route(name: str) -> dict:
+        return {
+            "schema_version": "brain_objects_query.v1",
+            "route": name,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": name,
+                "objects": [accepted],
+                "lanes": {"accepted_current": [accepted], "proposal_only": []},
+                "recommended_actions": [],
+                "gaps": [],
+            },
+        }
+
+    def preference_runner() -> dict:
+        return build_preference_artifact_memory_runtime_evidence(
+            preference_route=route("code_style_preference"),
+            html_route=route("html_visualization_preference"),
+            context_pack={
+                "authority": {
+                    "agent_context_product": {
+                        "schema_version": "agent_context_product_pack.v1",
+                        "sections": {
+                            "style_preference": {
+                                "items": [accepted],
+                                "authority_lanes": ["accepted_current"],
+                            }
+                        },
+                        "surface_policy": {"mutation_allowed": False},
+                    }
+                }
+            },
+            artifact_summary={
+                "artifact_type": "html_review",
+                "summary": "Public-safe consumer summary.",
+                "artifact_fingerprint": "sha256:" + "f" * 64,
+                "consumer_provenance": {
+                    "consumer": "html_artifact_review_product",
+                    "workflow": "review_rendered_artifact",
+                    "evidence_kind": "actual_consumer_output",
+                },
+                "finding_refs": ["finding:p7-safe"],
+                "evidence_refs": ["evidence:p7-safe"],
+                "finding_count": 1,
+                "evidence_ref_count": 1,
+            },
+        )
+
+    packet = build_source_to_candidate_runtime_collected_shadow_evidence_packet(
+        repository="pureliture/neurons",
+        branch="main",
+        route_runner=lambda name: route(name),
+        preference_artifact_memory_runner=preference_runner,
+        collection_mode="post_deploy_read_only_smoke",
+        network_used=True,
+    )
+
+    serialized = json.dumps(packet, sort_keys=True)
+    preference = packet["preference_artifact_memory"]
+    assert preference["collector_error_type"] == "ValueError"
+    assert preference["preference_object_pack"]["gaps"] == ["preference_artifact_collector_failed"]
+    assert preference["postcheck"]["status"] == "failed"
+    assert preference["postcheck"].get("raw_external_ids_returned") is not False
+    assert raw_value not in serialized
+    assert forbidden_key not in serialized
+    assert redacted_key not in serialized
+
+
+@pytest.mark.parametrize(
+    ("ref_field", "raw_ref"),
+    [
+        ("finding_refs", "dataset:raw-external-id"),
+        ("finding_refs", "finding:dataset-id=raw-external-id"),
+        ("finding_refs", "finding:dataset%3Araw-external-id"),
+        ("evidence_refs", "document:raw-external-id"),
+        ("evidence_refs", "evidence:document-id=raw-external-id"),
+        ("evidence_refs", "evidence:document%3Araw-external-id"),
+    ],
+)
+def test_preference_artifact_runtime_evidence_rejects_raw_external_id_ref_values(
+    ref_field: str,
+    raw_ref: str,
+):
+    target_object_id = "ko:ArtifactPreference:p7-forbidden-runtime-ref"
+    accepted = {
+        "object_id": target_object_id,
+        "object_type": "ArtifactPreference",
+        "authority_lane": "accepted_current",
+        "scope": {"project": "neurons"},
+        "content_hash": "sha256:" + "a" * 64,
+        "payload": {"authority_decision_id": "decision:p7-forbidden-runtime-ref"},
+    }
+
+    def route(name: str) -> dict:
+        return {
+            "schema_version": "brain_objects_query.v1",
+            "route": name,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": name,
+                "objects": [accepted],
+                "lanes": {"accepted_current": [accepted], "proposal_only": []},
+                "recommended_actions": [],
+                "gaps": [],
+            },
+        }
+
+    artifact_summary = {
+        "artifact_type": "html_review",
+        "summary": "Public-safe consumer summary.",
+        "artifact_fingerprint": "sha256:" + "f" * 64,
+        "consumer_provenance": {
+            "consumer": "html_artifact_review_product",
+            "workflow": "review_rendered_artifact",
+            "evidence_kind": "actual_consumer_output",
+        },
+        "finding_refs": ["finding:p7-safe"],
+        "evidence_refs": ["evidence:p7-safe"],
+        "finding_count": 1,
+        "evidence_ref_count": 1,
+    }
+    artifact_summary[ref_field] = [raw_ref]
+
+    with pytest.raises(ValueError, match="public-safe artifact refs"):
+        build_preference_artifact_memory_runtime_evidence(
+            preference_route=route("code_style_preference"),
+            html_route=route("html_visualization_preference"),
+            context_pack={
+                "authority": {
+                    "agent_context_product": {
+                        "schema_version": "agent_context_product_pack.v1",
+                        "sections": {
+                            "style_preference": {
+                                "items": [accepted],
+                                "authority_lanes": ["accepted_current"],
+                            }
+                        },
+                        "surface_policy": {"mutation_allowed": False},
+                    }
+                }
+            },
+            artifact_summary=artifact_summary,
+        )
+
+
+@pytest.mark.parametrize(
+    ("ref_field", "raw_ref"),
+    [
+        ("finding_refs", "finding:dataset:raw-external-id"),
+        ("finding_refs", "finding:dataset-id=raw-external-id"),
+        ("finding_refs", "finding:dataset%3Araw-external-id"),
+        ("evidence_refs", "evidence:document:raw-external-id"),
+        ("evidence_refs", "evidence:document-id=raw-external-id"),
+        ("evidence_refs", "evidence:document%3Araw-external-id"),
+    ],
+)
+def test_runtime_readiness_rejects_raw_external_id_markers_in_direct_consumer_refs(
+    ref_field: str,
+    raw_ref: str,
+):
+    target_object_id = "ko:ArtifactPreference:p7-direct-runtime-ref"
+    accepted = {
+        "object_id": target_object_id,
+        "object_type": "ArtifactPreference",
+        "authority_lane": "accepted_current",
+        "scope": {"project": "neurons"},
+        "content_hash": "sha256:" + "a" * 64,
+        "payload": {"authority_decision_id": "decision:p7-direct-runtime-ref"},
+    }
+
+    def route(name: str) -> dict:
+        return {
+            "schema_version": "brain_objects_query.v1",
+            "route": name,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": name,
+                "objects": [accepted],
+                "lanes": {"accepted_current": [accepted], "proposal_only": []},
+                "recommended_actions": [],
+                "gaps": [],
+            },
+        }
+
+    preference = build_preference_artifact_memory_runtime_evidence(
+        preference_route=route("code_style_preference"),
+        html_route=route("html_visualization_preference"),
+        context_pack={
+            "authority": {
+                "agent_context_product": {
+                    "schema_version": "agent_context_product_pack.v1",
+                    "sections": {
+                        "style_preference": {
+                            "items": [accepted],
+                            "authority_lanes": ["accepted_current"],
+                        }
+                    },
+                    "surface_policy": {"mutation_allowed": False},
+                }
+            }
+        },
+        artifact_summary={
+            "artifact_type": "html_review",
+            "summary": "Public-safe consumer summary.",
+            "artifact_fingerprint": "sha256:" + "f" * 64,
+            "consumer_provenance": {
+                "consumer": "html_artifact_review_product",
+                "workflow": "review_rendered_artifact",
+                "evidence_kind": "actual_consumer_output",
+            },
+            "finding_refs": ["finding:p7-safe"],
+            "evidence_refs": ["evidence:p7-safe"],
+            "finding_count": 1,
+            "evidence_ref_count": 1,
+        },
+    )
+    preference["artifact_consumer_evidence"][ref_field] = [raw_ref]
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_sanitized_live_evidence(preference_artifact_memory=preference)
+    )
+    claim = next(item for item in report["claims"] if item["claim_id"] == "live.preference_artifact.memory")
+
+    assert claim["status"] == "failed"
+    assert "preference_artifact_consumer_evidence_missing" in claim["gaps"]
+
+
+def test_preference_artifact_runtime_evidence_outputs_only_allowlisted_object_views():
+    target_object_id = "ko:ArtifactPreference:p7-allowlist-view"
+    hidden_value = "benign-but-not-required-runtime-metadata"
+    accepted = {
+        "object_id": target_object_id,
+        "object_type": "ArtifactPreference",
+        "authority_lane": "accepted_current",
+        "title": "Dense HTML review artifacts",
+        "scope": {"project": "neurons"},
+        "content_hash": "sha256:" + "a" * 64,
+        "payload": {
+            "authority_decision_id": "decision:p7-allowlist-view",
+            "reason": hidden_value,
+        },
+        "debug_metadata": {"note": hidden_value},
+    }
+
+    def route(name: str) -> dict:
+        return {
+            "schema_version": "brain_objects_query.v1",
+            "route": name,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": name,
+                "objects": [accepted],
+                "lanes": {"accepted_current": [accepted], "proposal_only": []},
+                "recommended_actions": [{"object_id": target_object_id, "action": "apply_preference"}],
+                "gaps": [],
+            },
+        }
+
+    evidence = build_preference_artifact_memory_runtime_evidence(
+        preference_route=route("code_style_preference"),
+        html_route=route("html_visualization_preference"),
+        context_pack={
+            "authority": {
+                "agent_context_product": {
+                    "schema_version": "agent_context_product_pack.v1",
+                    "sections": {
+                        "style_preference": {
+                            "items": [accepted],
+                            "authority_lanes": ["accepted_current"],
+                        }
+                    },
+                    "surface_policy": {"mutation_allowed": False},
+                }
+            }
+        },
+        artifact_summary={
+            "artifact_type": "html_review",
+            "summary": "Public-safe consumer summary.",
+            "artifact_fingerprint": "sha256:" + "f" * 64,
+            "consumer_provenance": {
+                "consumer": "html_artifact_review_product",
+                "workflow": "review_rendered_artifact",
+                "evidence_kind": "actual_consumer_output",
+            },
+            "finding_refs": ["finding:p7-safe"],
+            "evidence_refs": ["evidence:p7-safe"],
+            "finding_count": 1,
+            "evidence_ref_count": 1,
+        },
+    )
+
+    serialized = json.dumps(evidence, sort_keys=True)
+    assert hidden_value not in serialized
+    assert "debug_metadata" not in serialized
+    output = evidence["preference_object_pack"]["lanes"]["accepted_current"][0]
+    assert output == {
+        "object_id": target_object_id,
+        "object_type": "ArtifactPreference",
+        "authority_lane": "accepted_current",
+        "title": "Dense HTML review artifacts",
+        "project": "neurons",
+        "content_hash": "sha256:" + "a" * 64,
+        "source_content_hash": "sha256:" + "a" * 64,
+        "authority_decision_id": "decision:p7-allowlist-view",
+    }
+
+
+@pytest.mark.parametrize(
+    ("surface", "field", "value"),
+    [
+        ("html", "content_hash", "sha256:" + "b" * 64),
+        ("context", "project", "other-project"),
+        ("html", "authority_decision_id", "decision:p7-other"),
+    ],
+)
+def test_preference_artifact_memory_runtime_evidence_rejects_metadata_discontinuity(
+    surface: str,
+    field: str,
+    value: str,
+):
+    target_object_id = "ko:ArtifactPreference:p7-continuity"
+    base = {
+        "object_id": target_object_id,
+        "object_type": "ArtifactPreference",
+        "authority_lane": "accepted_current",
+        "scope": {"project": "neurons"},
+        "content_hash": "sha256:" + "c" * 64,
+        "payload": {
+            "target_object_id": target_object_id,
+            "authority_decision_id": "decision:p7-continuity",
+        },
+    }
+    objects = {name: json.loads(json.dumps(base)) for name in ("code", "html", "context")}
+    target = objects[surface]
+    if field == "project":
+        target["scope"]["project"] = value
+    elif field == "authority_decision_id":
+        target["payload"]["authority_decision_id"] = value
+    else:
+        target[field] = value
+
+    def route(route_name: str, obj: dict) -> dict:
+        return {
+            "schema_version": "brain_objects_query.v1",
+            "route": route_name,
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": route_name,
+                "objects": [obj],
+                "lanes": {"accepted_current": [obj], "proposal_only": []},
+                "recommended_actions": [],
+                "gaps": [],
+            },
+        }
+
+    evidence = build_preference_artifact_memory_runtime_evidence(
+        preference_route=route("code_style_preference", objects["code"]),
+        html_route=route("html_visualization_preference", objects["html"]),
+        context_pack={
+            "schema_version": "llm_brain_context_resolve.v1",
+            "authority": {
+                "agent_context_product": {
+                    "schema_version": "agent_context_product_pack.v1",
+                    "sections": {
+                        "style_preference": {
+                            "object_count": 1,
+                            "items": [objects["context"]],
+                            "authority_lanes": ["accepted_current"],
+                        }
+                    },
+                    "surface_policy": {"mutation_allowed": False},
+                }
+            },
+        },
+        artifact_summary={
+            "artifact_type": "html_review",
+            "summary": "Public-safe continuity review summary.",
+            "finding_count": 1,
+            "evidence_ref_count": 1,
+            "word_count": 5,
+        },
+    )
+
+    assert evidence["read_surface_alignment"]["status"] == "failed"
+    assert evidence["read_surface_alignment"]["target_object_id"] == ""
+    assert "preference_read_surface_metadata_mismatch" in evidence["gaps"]
+
+
+def test_preference_artifact_memory_runtime_evidence_keeps_missing_current_authority_as_failure():
+    empty_pack = {
+        "schema_version": "brain_objects_query.v1",
+        "route": "code_style_preference",
+        "object_pack": {
+            "schema_version": "object_pack.v1",
+            "route": "code_style_preference",
+            "objects": [],
+            "lanes": {"accepted_current": [], "proposal_only": []},
+            "recommended_actions": [],
+            "gaps": ["accepted_current preferences empty"],
+        },
+    }
+    html = json.loads(json.dumps(empty_pack))
+    html["route"] = "html_visualization_preference"
+    html["object_pack"]["route"] = "html_visualization_preference"
+    context = {
+        "schema_version": "llm_brain_context_resolve.v1",
+        "authority": {
+            "agent_context_product": {
+                "schema_version": "agent_context_product_pack.v1",
+                "sections": {
+                    "style_preference": {
+                        "object_count": 0,
+                        "items": [],
+                        "authority_lanes": [],
+                    }
+                },
+                "surface_policy": {"mutation_allowed": False},
+            }
+        },
+    }
+
+    evidence = build_preference_artifact_memory_runtime_evidence(
+        preference_route=empty_pack,
+        html_route=html,
+        context_pack=context,
+        artifact_summary={"artifact_type": "html_review", "summary": "Public-safe summary."},
+    )
+
+    assert evidence["attestation_state"] == "unattested_runtime_read"
+    assert evidence["read_surface_alignment"]["status"] == "failed"
+    assert "accepted_current_artifact_preference_missing" in evidence["gaps"]
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_sanitized_live_evidence(preference_artifact_memory=evidence)
+    )
+    assert "live.preference_artifact.memory" in report["failed_claims"]
 
 
 def test_runtime_readiness_collector_includes_preference_artifact_memory_shadow_evidence():

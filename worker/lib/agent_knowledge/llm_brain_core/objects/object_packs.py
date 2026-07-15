@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any, Mapping
 
 from .._util import ensure_public_safe, hash_payload, public_safe_text, short_hash
+from .authority_policy import knowledge_object_class_from_id
 from .knowledge_objects import AuthorityDecision, EvidenceRef, KnowledgeEdge, KnowledgeObjectEnvelope
 
 
@@ -1668,23 +1669,39 @@ def _preference_pack(preferences: list[Mapping[str, Any]]) -> dict[str, Any]:
             continue
         lane = "accepted_current" if currentness == "current" else "proposal_only"
         action = "apply_preference" if lane == "accepted_current" else "review_inferred_preference"
+        target_object_id = public_safe_text(str(item.get("target_object_id") or ""), max_chars=180)
+        if target_object_id and knowledge_object_class_from_id(target_object_id) != "ArtifactPreference":
+            pack["gaps"].append("artifact_preference_target_object_class_mismatch")
+            continue
+        project = public_safe_text(str(item.get("project") or "neurons"), max_chars=120)
+        source_content_hash = public_safe_text(str(item.get("source_content_hash") or ""), max_chars=80)
+        authority_decision_id = public_safe_text(
+            str(item.get("authority_decision_id") or ""),
+            max_chars=180,
+        )
         obj = KnowledgeObjectEnvelope.from_parts(
             object_type="ArtifactPreference",
             natural_key=title,
-            scope={"project": "neurons"},
+            scope={"project": project},
             title=title,
             summary=str(item.get("reason") or title),
             lifecycle_status="current" if lane == "accepted_current" else "proposed",
             authority_lane=lane,
             verification_state="source_hash_verified" if lane == "accepted_current" else "unverified",
             review_state="accepted" if lane == "accepted_current" else "needs_review",
-            content_hash=hash_payload(["code_style_preference", title, currentness]),
+            content_hash=source_content_hash or hash_payload(["code_style_preference", title, currentness]),
             recommended_action=action,
             payload={
                 "scope": public_safe_text(str(item.get("scope") or ""), max_chars=180),
                 "currentness": public_safe_text(currentness, max_chars=80),
+                "project": project,
+                "source_content_hash": source_content_hash,
+                "authority_decision_id": authority_decision_id,
             },
         ).to_dict()
+        if target_object_id:
+            obj["object_id"] = target_object_id
+            obj["payload"]["target_object_id"] = target_object_id
         pack["objects"].append(obj)
         pack["lanes"][lane].append(obj)
         pack["recommended_actions"].append({"object_id": obj["object_id"], "action": action})

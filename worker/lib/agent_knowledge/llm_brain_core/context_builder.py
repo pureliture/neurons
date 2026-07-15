@@ -357,15 +357,39 @@ def compact_section(
                 break
             if obj.get("authority_lane"):
                 lanes.add(str(obj.get("authority_lane") or ""))
-            items.append(
-                {
-                    "object_id": public_safe_text(str(obj.get("object_id") or ""), max_chars=180),
-                    "object_type": public_safe_text(str(obj.get("object_type") or ""), max_chars=80),
-                    "title": public_safe_text(str(obj.get("title") or ""), max_chars=240),
-                    "authority_lane": public_safe_text(str(obj.get("authority_lane") or ""), max_chars=80),
-                    "recommended_action": public_safe_text(str(obj.get("recommended_action") or ""), max_chars=120),
+            item = {
+                "object_id": public_safe_text(str(obj.get("object_id") or ""), max_chars=180),
+                "object_type": public_safe_text(str(obj.get("object_type") or ""), max_chars=80),
+                "title": public_safe_text(str(obj.get("title") or ""), max_chars=240),
+                "authority_lane": public_safe_text(str(obj.get("authority_lane") or ""), max_chars=80),
+                "recommended_action": public_safe_text(str(obj.get("recommended_action") or ""), max_chars=120),
+            }
+            if item["object_type"] == "ArtifactPreference":
+                scope = obj.get("scope") if isinstance(obj.get("scope"), Mapping) else {}
+                payload = obj.get("payload") if isinstance(obj.get("payload"), Mapping) else {}
+                item["scope"] = {
+                    "project": public_safe_text(str(scope.get("project") or ""), max_chars=120)
                 }
-            )
+                item["content_hash"] = public_safe_text(
+                    str(obj.get("content_hash") or ""),
+                    max_chars=80,
+                )
+                item["payload"] = {
+                    "target_object_id": public_safe_text(
+                        str(payload.get("target_object_id") or ""),
+                        max_chars=180,
+                    ),
+                    "project": public_safe_text(str(payload.get("project") or ""), max_chars=120),
+                    "source_content_hash": public_safe_text(
+                        str(payload.get("source_content_hash") or ""),
+                        max_chars=80,
+                    ),
+                    "authority_decision_id": public_safe_text(
+                        str(payload.get("authority_decision_id") or ""),
+                        max_chars=180,
+                    ),
+                }
+            items.append(item)
     section = {
         "object_count": len(items),
         "items": items,
