@@ -1199,6 +1199,7 @@ def _p9_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
 _P9_LIVE_GAP_ONLY_PREFIXES = (
     "live_agent_context_section_missing:",
     "agent_context_startup_section_missing:",
+    "agent_context_consumer_startup_unvalidated:",
 )
 _P9_LIVE_GAP_ONLY_VALUES = frozenset(
     {
@@ -1210,6 +1211,8 @@ _P9_LIVE_GAP_ONLY_VALUES = frozenset(
         "production_startup_read_path_unproven",
         "production_consumer_context_pack_live_unproven",
         "consumer_action_surface_runtime_policy_unproven",
+        "agent_context_action_surface_runtime_interception_unvalidated",
+        "agent_context_codex_host_startup_hook_unvalidated",
         "agent_context_evidence_not_live",
     }
 )
@@ -1226,10 +1229,7 @@ def _p9_live_agent_context_failures(evidence: Mapping[str, Any]) -> list[str]:
         and _p9_live_has_blocking_gap(evidence)
     ):
         failures.append("p9_agent_context_product_sections_failed")
-    if (
-        evidence.get("startup_read_path_claim_status") == "failed"
-        and _p9_live_has_blocking_gap(evidence)
-    ):
+    if evidence.get("startup_read_path_claim_status") == "failed":
         failures.append("p9_agent_context_startup_read_path_failed")
     if evidence.get("evidence_provenance_status") == "failed":
         failures.append("p9_evidence_provenance_failed")

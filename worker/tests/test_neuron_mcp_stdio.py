@@ -171,6 +171,7 @@ def _accepted_preference_card(
         "currentness": "current",
         "confidence": 0.93,
         "confidence_basis": "accepted preference fixture",
+        "content_hash": _h(f"{memory_id}:card"),
         "source_refs": [{"source_ref_id": "src_neuron_mcp", "content_hash": _h(memory_id)}],
         "evidence_refs": [],
         "evidence_hashes": [_h(memory_id)],
@@ -186,6 +187,11 @@ def _accepted_preference_card(
             "explicitness": "explicit",
             "repeated_count": 1,
             "confirmation_status": "confirmed",
+            "source_object_type": "ArtifactPreference",
+            "target_object_id": f"ko:ArtifactPreference:{memory_id}",
+            "source_content_hash": _h(f"{memory_id}:source"),
+            "authority_proposal_id": f"proposal:{memory_id}",
+            "authority_decision_id": f"decision:{memory_id}",
         },
     }
 
@@ -860,7 +866,6 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
         "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
         "preference_artifact_memory": _preference_artifact_memory_evidence(),
         "permission_sensitive_audit": _permission_sensitive_audit_evidence(),
-        "agent_context_startup_runtime": _agent_context_startup_runtime_evidence(),
         "production_denials": {
             BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME: {
                 "status": "denied",
@@ -938,6 +943,7 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
     assert report["evidence_collection_network_used"] is True
     assert "bounded_production_authority_execution_unverified" in report["gaps"]
     assert "live_session_project_rollup_unverified" not in report["gaps"]
+    assert "live_agent_context_startup_unverified" in report["gaps"]
 
 
 def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_plan(tmp_path: Path):
@@ -4538,7 +4544,7 @@ def test_mcp_brain_objects_query_default_route_returns_agent_context_objects(tmp
     assert pack["objects"]
     assert "object_pack_route_not_implemented" not in pack["gaps"]
     assert pack["recommended_actions"]
-    assert {obj["object_type"] for obj in pack["objects"]} >= {"ArtifactPreference", "Test", "ToolHandoffContext"}
+    assert {obj["object_type"] for obj in pack["objects"]} >= {"PreferenceRule", "Test", "ToolHandoffContext"}
     assert pack["audit"]["object_pack_route_source"] == "context_authority_object_packs"
     assert pack["route_trace"]["route"] == "authority_archive_separation"
     assert "reference_only" in pack["route_trace"]["selected_source_lanes"]
@@ -4582,7 +4588,7 @@ def test_mcp_brain_objects_query_temporal_route_returns_current_work_objects(tmp
     assert result["route"] == "temporal_work_recall"
     assert "object_pack_route_not_implemented" not in pack["gaps"]
     assert any(obj["object_type"] == "WorkUnit" for obj in pack["objects"])
-    assert any("P6 temporal repo recall" in obj["title"] for obj in pack["objects"])
+    assert any("Resume fixture mem_temporal_work_recall" in obj["title"] for obj in pack["objects"])
     assert pack["recommended_actions"]
     assert pack["audit"]["source_pack_names"] == ["current_work", "required_verification"]
     assert pack["response_mode"] == "compact"
@@ -4613,7 +4619,7 @@ def test_mcp_brain_objects_query_style_route_uses_preference_objects(tmp_path: P
     pack = result["object_pack"]
     assert result["route"] == "code_style_preference"
     assert "object_pack_route_not_implemented" not in pack["gaps"]
-    assert any(obj["object_type"] == "ArtifactPreference" for obj in pack["objects"])
+    assert any(obj["object_type"] == "PreferenceRule" for obj in pack["objects"])
 
 
 def test_mcp_brain_objects_query_rejects_cross_type_artifact_preference_target_id(tmp_path: Path):

@@ -16,9 +16,9 @@ from .workflow_authority import workflow_contract_cards_from_memory_cards
 # ranking/merge logic so the "is this still unfinished" rule lives in one place.
 # 더 이상 현재-권위(current authority)가 아닌 currentness. persona/context-pack 의 현재
 # 사실(fact) 소비자는 이 상태의 카드를 제외한다. (drift_explain 같은 history 소비자는 별도.)
-NON_CURRENT_AUTHORITY = frozenset({"stale", "superseded", "archive_candidate"})
+NON_CURRENT_AUTHORITY = frozenset({"stale", "superseded", "archive_candidate", "retired", "rejected", "conflicted"})
 
-TERMINAL_TASK_STATUSES = {"done", "resolved", "closed", "cancelled"}
+TERMINAL_TASK_STATUSES = {"completed", "done", "resolved", "closed", "cancelled"}
 CONTEXT_AUTHORITY_CONSUMERS = {"unspecified", "codex", "claude-code", "gemini", "hermes"}
 SEARCH_MIRROR_STATUSES = {"unverified", "configured_unverified", "available", "degraded", "unavailable"}
 AGENT_CONTEXT_SURFACE_POLICIES = {
@@ -107,32 +107,50 @@ class ContextPackBuilder:
         search_mirror_status: Mapping[str, Any] | None = None,
     ) -> ContextPack:
         safe_consumer = normalize_context_consumer(consumer)
-        task_card = select_current_task(cards, current_request)
+        project = project_from_brain_id(brain_id)
+        scoped_cards = project_scoped_cards(cards, project)
+        scoped_artifacts = [
+            artifact
+            for artifact in artifacts
+            if project_matches(artifact_field(artifact, "project"), project)
+        ]
+        task_card = select_current_task(scoped_cards, current_request, project=project)
+        artifact = select_current_artifact(scoped_artifacts, project=project)
 
         # current_task: card > artifact > graph.
         current_task = task_title(task_card)
-        if not current_task and artifacts:
-            current_task = artifacts[0].summary
+        if not current_task and artifact:
+            current_task = artifact_summary(artifact)
         if not current_task:
-            current_task = graph_task_title(graph_result)
+            current_task = graph_task_title(graph_result, project=project)
 
         # last_stopped_at: card/artifact (via last_stop) > graph.
-        last_stopped_at = last_stop(task_card, artifacts)
+        last_stopped_at = last_stop(task_card, [artifact] if artifact else [])
         if not last_stopped_at:
-            last_stopped_at = graph_task_stop(graph_result)
+            last_stopped_at = graph_task_stop(graph_result, project=project)
 
-        decisions = tuple(decision_view(card) for card in cards if card.get("card_type") == "decision")
+        decisions = tuple(
+            decision_view(card)
+            for card in scoped_cards
+            if card.get("card_type") == "decision"
+        )
         persona = tuple(
             persona_view(card)
-            for card in cards
+            for card in scoped_cards
             if card.get("card_type") == "preference"
             and str(card.get("currentness") or "") not in NON_CURRENT_AUTHORITY
         )
-        unfinished = tuple(unfinished_items(cards, graph_result))
-        source_refs = tuple(merged_source_refs(cards, graph_result))
+        selected_work = select_active_work(
+            scoped_cards,
+            scoped_artifacts,
+            graph_result,
+            project=project,
+        )
+        unfinished = tuple(str(item.get("title") or "") for item in selected_work)
+        source_refs = tuple(merged_source_refs(scoped_cards, graph_result))
 
         gaps: list[str] = []
-        if not artifacts and not cards:
+        if not scoped_artifacts and not scoped_cards:
             gaps.append("no_canonical_memory")
         if graph_result.status == "degraded":
             # Edge/relationship search failed but episode reads survived: a
@@ -143,12 +161,14 @@ class ContextPackBuilder:
         if needs_runtime_evidence(current_request, current_files):
             gaps.append("runtime_evidence_unverified")
         authority = authority_block(
-            cards,
+            scoped_cards,
+            artifacts=scoped_artifacts,
             graph_result=graph_result,
             gaps=gaps,
             current_files=current_files,
             current_request=current_request,
             consumer=safe_consumer,
+            project=project,
             search_mirror_status=search_mirror_status,
         )
 
@@ -164,8 +184,8 @@ class ContextPackBuilder:
             memory_status={
                 "status": "available",
                 "authority": "canonical_artifact_and_card",
-                "artifact_count": len(artifacts),
-                "card_count": len(cards),
+                "artifact_count": len(scoped_artifacts),
+                "card_count": len(scoped_cards),
             },
             graph_status={
                 "status": graph_result.status,
@@ -189,19 +209,27 @@ class ContextPackBuilder:
 def authority_block(
     cards: list[dict[str, Any]],
     *,
+    artifacts: list[Any] | None = None,
     graph_result: GraphMemoryResult,
     gaps: list[str],
     current_files: list[str] | tuple[str, ...] = (),
     current_request: str = "",
     consumer: str = "unspecified",
+    project: str = "",
     search_mirror_status: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     safe_consumer = normalize_context_consumer(consumer)
+    scoped_cards = project_scoped_cards(cards, project)
     block = {
         "schema_version": "context_authority_pack.v1",
-        "documents": document_authority_cards(cards, current_files=current_files),
-        "workflow_contracts": workflow_contract_cards(cards),
-        "preferences": preference_rule_cards(cards, current_request=current_request, current_files=current_files),
+        "documents": document_authority_cards(scoped_cards, current_files=current_files),
+        "workflow_contracts": workflow_contract_cards(scoped_cards),
+        "preferences": preference_rule_cards(
+            cards,
+            current_request=current_request,
+            current_files=current_files,
+            project=project,
+        ),
         "evidence_gaps": evidence_gap_cards(gaps),
         "boundary_guardrails": [
             "agents_use_brain_context_resolve",
@@ -232,8 +260,8 @@ def authority_block(
     block["object_packs"] = build_agent_context_object_packs(
         documents=block["documents"],
         preferences=block["preferences"],
-        style_profile=repo_style_profile_from_memory_cards(cards, repository=""),
-        current_work=unfinished_items(cards, graph_result),
+        style_profile=repo_style_profile_from_memory_cards(scoped_cards, repository=""),
+        current_work=select_active_work(cards, artifacts or [], graph_result, project=project),
         required_verification=["cd worker && uv run pytest -q"],
         guardrails=block["boundary_guardrails"],
     )
@@ -267,8 +295,9 @@ def build_agent_context_product_pack(
     sections = {
         "current_authority": compact_section(
             object_packs,
-            names=("documentation_cleanup",),
+            names=("documentation_cleanup", "preferences"),
             max_items=int(policy["max_section_items"]),
+            allowed_lanes={AGENT_CONTEXT_REQUIRED_AUTHORITY_LANE},
         ),
         "reference_objects": compact_section(
             object_packs,
@@ -277,8 +306,9 @@ def build_agent_context_product_pack(
         ),
         "style_preference": compact_section(
             object_packs,
-            names=("preferences", "style"),
+            names=("preferences",),
             max_items=int(policy["max_section_items"]),
+            allowed_lanes={AGENT_CONTEXT_REQUIRED_AUTHORITY_LANE},
         ),
         "active_work": compact_section(
             object_packs,
@@ -297,6 +327,19 @@ def build_agent_context_product_pack(
             missing_evidence=base_missing_evidence,
         ),
     }
+    style_suggestions = compact_section(
+        object_packs,
+        names=("preferences", "style"),
+        max_items=int(policy["max_section_items"]),
+        allowed_lanes={"proposal_only", "reference_only"},
+    )
+    sections["style_preference"].update(
+        {
+            "suggestion_object_count": style_suggestions["object_count"],
+            "suggestion_items": style_suggestions["items"],
+            "suggestion_authority_lanes": style_suggestions["authority_lanes"],
+        }
+    )
     section_gaps = required_agent_context_section_gaps(sections)
     for section_name, gap in section_gaps.items():
         section = sections.get(section_name)
@@ -339,6 +382,7 @@ def compact_section(
     names: tuple[str, ...],
     max_items: int,
     missing_evidence: list[str] | None = None,
+    allowed_lanes: set[str] | None = None,
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     lanes: set[str] = set()
@@ -346,7 +390,11 @@ def compact_section(
     for name in names:
         pack = object_packs.get(name) if isinstance(object_packs.get(name), Mapping) else {}
         pack_lanes = pack.get("lanes") if isinstance(pack.get("lanes"), Mapping) else {}
-        lanes.update(str(lane) for lane, values in pack_lanes.items() if values)
+        lanes.update(
+            str(lane)
+            for lane, values in pack_lanes.items()
+            if values and (allowed_lanes is None or str(lane) in allowed_lanes)
+        )
         pack_gaps = pack.get("gaps") if isinstance(pack.get("gaps"), (list, tuple)) else []
         gaps.extend(str(gap) for gap in pack_gaps)
         pack_objects = pack.get("objects") if isinstance(pack.get("objects"), (list, tuple)) else []
@@ -355,6 +403,9 @@ def compact_section(
                 continue
             if len(items) >= max_items:
                 break
+            lane = str(obj.get("authority_lane") or "")
+            if allowed_lanes is not None and lane not in allowed_lanes:
+                continue
             if obj.get("authority_lane"):
                 lanes.add(str(obj.get("authority_lane") or ""))
             item = {
@@ -401,6 +452,14 @@ def compact_section(
                         max_chars=180,
                     ),
                 }
+                if "applies_to" in payload or "applies_to_current_request" in payload:
+                    item["payload"]["applies_to"] = public_safe_text(
+                        str(payload.get("applies_to") or ""),
+                        max_chars=180,
+                    )
+                    item["payload"]["applies_to_current_request"] = bool(
+                        payload.get("applies_to_current_request")
+                    )
             items.append(item)
     section = {
         "object_count": len(items),
@@ -423,7 +482,7 @@ def required_agent_context_section_gaps(sections: Mapping[str, Any]) -> dict[str
     style_section = sections.get(AGENT_CONTEXT_STYLE_PREFERENCE_SECTION)
     style_count = _agent_context_section_object_count(style_section)
     style_lanes = _agent_context_section_authority_lanes(style_section)
-    if style_count >= 1 and AGENT_CONTEXT_REQUIRED_AUTHORITY_LANE not in style_lanes:
+    if style_count >= 1 and style_lanes != {AGENT_CONTEXT_REQUIRED_AUTHORITY_LANE}:
         gaps[AGENT_CONTEXT_STYLE_PREFERENCE_SECTION] = (
             AGENT_CONTEXT_STYLE_PREFERENCE_ACCEPTED_CURRENT_MISSING_GAP
         )
@@ -431,8 +490,10 @@ def required_agent_context_section_gaps(sections: Mapping[str, Any]) -> dict[str
     authority_count = _agent_context_section_object_count(authority_section)
     authority_lanes = _agent_context_section_authority_lanes(authority_section)
     if authority_count < 1:
-        gaps[AGENT_CONTEXT_CURRENT_AUTHORITY_SECTION] = AGENT_CONTEXT_CURRENT_AUTHORITY_MISSING_GAP
-    elif AGENT_CONTEXT_REQUIRED_AUTHORITY_LANE not in authority_lanes:
+        gaps[AGENT_CONTEXT_CURRENT_AUTHORITY_SECTION] = (
+            AGENT_CONTEXT_CURRENT_AUTHORITY_ACCEPTED_CURRENT_MISSING_GAP
+        )
+    elif authority_lanes != {AGENT_CONTEXT_REQUIRED_AUTHORITY_LANE}:
         gaps[AGENT_CONTEXT_CURRENT_AUTHORITY_SECTION] = (
             AGENT_CONTEXT_CURRENT_AUTHORITY_ACCEPTED_CURRENT_MISSING_GAP
         )
@@ -609,11 +670,13 @@ def preference_rule_cards(
     *,
     current_request: str = "",
     current_files: list[str] | tuple[str, ...] = (),
+    project: str = "",
 ) -> list[dict[str, Any]]:
     return preference_rule_cards_from_memory_cards(
         cards,
         current_request=current_request,
         current_files=current_files,
+        project=project,
     )
 
 
@@ -664,13 +727,55 @@ def needs_runtime_evidence(current_request: str, current_files: list[str]) -> bo
     return "worker" in request_tokens and bool(request_tokens & {"running", "status", "healthy", "deployed"})
 
 
-def select_current_task(cards: list[dict[str, Any]], request: str) -> dict[str, Any] | None:
+def project_from_brain_id(brain_id: str) -> str:
+    value = public_safe_text(str(brain_id or ""), max_chars=120).strip("/")
+    prefix, separator, project = value.partition("project/")
+    return project if separator and not prefix else value
+
+
+def project_scoped_cards(cards: list[dict[str, Any]], project: str) -> list[dict[str, Any]]:
+    return [card for card in cards if project_matches(card.get("project"), project)]
+
+
+def project_matches(value: Any, project: str) -> bool:
+    actual = public_safe_text(str(value or ""), max_chars=120)
+    expected = public_safe_text(str(project or ""), max_chars=120)
+    return not expected or not actual or actual == expected
+
+
+def _state_values(value: Mapping[str, Any], payload: Mapping[str, Any]) -> set[str]:
+    return {
+        str(candidate or "").casefold()
+        for candidate in (
+            value.get("currentness"),
+            value.get("lifecycle_state"),
+            value.get("status"),
+            payload.get("currentness"),
+            payload.get("lifecycle_state"),
+            payload.get("status"),
+        )
+    }
+
+
+def is_current_nonterminal(value: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
+    states = _state_values(value, payload)
+    return not bool(states & (NON_CURRENT_AUTHORITY | TERMINAL_TASK_STATUSES))
+
+
+def select_current_task(
+    cards: list[dict[str, Any]],
+    request: str,
+    *,
+    project: str = "",
+) -> dict[str, Any] | None:
     candidates = []
     for card in cards:
-        if card.get("card_type") != "task" or card.get("currentness") not in ("current", "unknown", ""):
+        if card.get("card_type") != "task" or not project_matches(card.get("project"), project):
             continue
-        payload = card.get("typed_payload") or {}
-        if str(payload.get("status") or "").lower() in TERMINAL_TASK_STATUSES:
+        if str(card.get("currentness") or "").casefold() != "current":
+            continue
+        payload = card.get("typed_payload") if isinstance(card.get("typed_payload"), Mapping) else {}
+        if not is_current_nonterminal(card, payload):
             continue
         candidates.append(card)
     if not candidates:
@@ -684,6 +789,96 @@ def select_current_task(cards: list[dict[str, Any]], request: str) -> dict[str, 
         reverse=True,
     )
     return candidates[0]
+
+
+def artifact_field(artifact: Any, name: str) -> Any:
+    if isinstance(artifact, Mapping):
+        return artifact.get(name)
+    return getattr(artifact, name, None)
+
+
+def artifact_summary(artifact: Any) -> str:
+    return public_safe_text(str(artifact_field(artifact, "summary") or ""), max_chars=240)
+
+
+def select_current_artifact(artifacts: list[Any], *, project: str) -> Any | None:
+    candidates = [artifact for artifact in artifacts if project_matches(artifact_field(artifact, "project"), project) and artifact_summary(artifact)]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda artifact: str(artifact_field(artifact, "created_at") or ""), reverse=True)
+    return candidates[0]
+
+
+def graph_task_payload(episode: Any) -> Mapping[str, Any]:
+    payload = episode.payload if isinstance(episode.payload, Mapping) else {}
+    typed = payload.get("typed_payload") if isinstance(payload.get("typed_payload"), Mapping) else {}
+    return {**payload, **typed}
+
+
+def graph_task_project(episode: Any) -> str:
+    payload = graph_task_payload(episode)
+    brain_id = str(payload.get("brain_id") or "")
+    return str(payload.get("project") or project_from_brain_id(brain_id))
+
+
+def select_current_graph_task(graph: GraphMemoryResult, *, project: str = "") -> Any | None:
+    for episode in graph.episodes:
+        if episode.entity_type != "Task" or not project_matches(graph_task_project(episode), project):
+            continue
+        if str(getattr(episode, "currentness", "")).casefold() != "current":
+            continue
+        payload = graph_task_payload(episode)
+        state = {
+            "currentness": getattr(episode, "currentness", ""),
+            "lifecycle_state": getattr(episode, "lifecycle_state", ""),
+            "status": payload.get("status"),
+        }
+        if is_current_nonterminal(state, payload):
+            return episode
+    return None
+
+
+def select_active_work(
+    cards: list[dict[str, Any]],
+    artifacts: list[Any],
+    graph: GraphMemoryResult,
+    *,
+    project: str,
+) -> list[dict[str, Any]]:
+    task_card = select_current_task(cards, "", project=project)
+    if task_card:
+        return [{
+            "title": task_title(task_card),
+            "project": project,
+            "object_type": "WorkUnit",
+            "authority_lane": "accepted_current",
+            "source_kind": "memory_card",
+            "source_object_type": "MemoryCard:task",
+            "content_hash": str(task_card.get("content_hash") or ""),
+        }]
+    artifact = select_current_artifact(artifacts, project=project)
+    if artifact:
+        return [{
+            "title": artifact_summary(artifact),
+            "project": project,
+            "object_type": "WorkUnit",
+            "authority_lane": "reference_only",
+            "source_kind": "session_memory_artifact",
+            "source_object_type": "SessionMemoryArtifact",
+            "content_hash": str(artifact_field(artifact, "content_hash") or ""),
+        }]
+    episode = select_current_graph_task(graph, project=project)
+    if episode:
+        return [{
+            "title": graph_task_title(graph, project=project),
+            "project": project,
+            "object_type": "WorkUnit",
+            "authority_lane": "derived_projection",
+            "source_kind": "graph_task",
+            "source_object_type": "Task",
+            "content_hash": str(getattr(episode, "content_hash", "") or ""),
+        }]
+    return []
 
 
 def _card_match_text(card: Mapping[str, Any]) -> str:
@@ -712,46 +907,26 @@ def last_stop(task_card: Mapping[str, Any] | None, artifacts: list[Any]) -> str:
         payload = task_card.get("typed_payload") or {}
         return public_safe_text(str(payload.get("next_action") or payload.get("blocker") or task_card.get("summary") or ""), max_chars=320)
     if artifacts:
-        return public_safe_text(artifacts[0].summary, max_chars=320)
+        return public_safe_text(str(artifact_field(artifacts[0], "summary") or ""), max_chars=320)
     return ""
 
 
-def graph_task_title(graph: GraphMemoryResult) -> str:
-    for episode in graph.episodes:
-        if episode.entity_type != "Task":
-            continue
-        payload = episode.payload
-        typed_payload = payload.get("typed_payload") if isinstance(payload.get("typed_payload"), Mapping) else {}
-        value = (
-            payload.get("task_state")
-            or payload.get("task")
-            or typed_payload.get("task_state")
-            or payload.get("title")
-            or payload.get("summary")
-        )
-        text = public_safe_text(str(value or ""), max_chars=240)
-        if text:
-            return text
-    return ""
+def graph_task_title(graph: GraphMemoryResult, *, project: str = "") -> str:
+    episode = select_current_graph_task(graph, project=project)
+    if not episode:
+        return ""
+    payload = graph_task_payload(episode)
+    value = payload.get("task_state") or payload.get("task") or payload.get("title") or payload.get("summary")
+    return public_safe_text(str(value or ""), max_chars=240)
 
 
-def graph_task_stop(graph: GraphMemoryResult) -> str:
-    for episode in graph.episodes:
-        if episode.entity_type != "Task":
-            continue
-        payload = episode.payload
-        typed_payload = payload.get("typed_payload") if isinstance(payload.get("typed_payload"), Mapping) else {}
-        value = (
-            payload.get("next_action")
-            or payload.get("blocker")
-            or typed_payload.get("next_action")
-            or typed_payload.get("blocker")
-            or payload.get("summary")
-        )
-        text = public_safe_text(str(value or ""), max_chars=320)
-        if text:
-            return text
-    return ""
+def graph_task_stop(graph: GraphMemoryResult, *, project: str = "") -> str:
+    episode = select_current_graph_task(graph, project=project)
+    if not episode:
+        return ""
+    payload = graph_task_payload(episode)
+    value = payload.get("next_action") or payload.get("blocker") or payload.get("summary")
+    return public_safe_text(str(value or ""), max_chars=320)
 
 
 def unfinished_items(cards: list[dict[str, Any]], graph: GraphMemoryResult) -> list[str]:
