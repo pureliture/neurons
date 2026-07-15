@@ -1584,6 +1584,51 @@ def test_runtime_readiness_fails_when_bounded_production_execution_evidence_is_i
     assert "bounded_execution_raw_private_evidence_returned" in report["gaps"]
 
 
+def test_runtime_readiness_accepts_bounded_production_execution_for_artifact_preference():
+    target_object_id = "ko:ArtifactPreference:p7-html-review-density"
+    execution = _production_authority_execution_evidence()
+    execution["proposal"]["target_object_id"] = target_object_id
+    execution["decision"]["target_object_id"] = target_object_id
+    execution["decision"]["decision_id"] = "decision:p7-artifact-preference-current"
+    execution["read_after_write"].update(
+        {
+            "target_object_id": target_object_id,
+            "authority_lane": "accepted_current",
+            "decision_id": "decision:p7-artifact-preference-current",
+        }
+    )
+    execution["postcheck"]["review_queue_status"] = "accepted"
+    execution["scope"]["object_ids"] = [target_object_id]
+    execution["scope"]["allowed_object_classes"] = ["ArtifactPreference"]
+    evidence = _sanitized_live_evidence(production_authority_execution=execution)
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    bounded_execution = claims["live.production.object_authority_bounded_execution"]
+    assert bounded_execution["status"] == "validated"
+    assert bounded_execution["target_object_id"] == target_object_id
+    assert "bounded_production_authority_execution_unverified" not in report["gaps"]
+
+
+def test_runtime_readiness_rejects_artifact_preference_when_scope_omits_target_class():
+    target_object_id = "ko:ArtifactPreference:p7-html-review-density"
+    execution = _production_authority_execution_evidence()
+    execution["proposal"]["target_object_id"] = target_object_id
+    execution["decision"]["target_object_id"] = target_object_id
+    execution["read_after_write"]["target_object_id"] = target_object_id
+    execution["scope"]["object_ids"] = [target_object_id]
+    execution["scope"]["allowed_object_classes"] = ["RepoDocument"]
+    evidence = _sanitized_live_evidence(production_authority_execution=execution)
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    bounded_execution = claims["live.production.object_authority_bounded_execution"]
+    assert bounded_execution["status"] == "failed"
+    assert "bounded_execution_allowed_object_class_missing" in report["gaps"]
+
+
 def test_runtime_readiness_fails_when_bounded_execution_postcheck_returns_forbidden_outputs():
     evidence = _sanitized_live_evidence(
         production_authority_execution=_production_authority_execution_evidence(
