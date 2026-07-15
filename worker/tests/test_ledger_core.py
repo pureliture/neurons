@@ -191,6 +191,51 @@ def test_object_review_proposal_upsert_fails_closed_when_readback_missing(
     assert calls == ["INSERT", "SELECT"]
 
 
+@pytest.mark.parametrize(
+    ("proposal_project", "decision_project", "proposal_scope", "decision_scope", "message"),
+    [
+        ("", "", "local_test", "local_test", "requires a non-empty project"),
+        (PROJECT, PROJECT, "", "", "requires explicit ledger scope"),
+        (PROJECT, PROJECT, "local_test", "production", "ledger scope must match"),
+    ],
+)
+def test_object_authority_decision_fails_closed_without_matching_project_and_scope(
+    tmp_path: Path,
+    proposal_project: str,
+    decision_project: str,
+    proposal_scope: str,
+    decision_scope: str,
+    message: str,
+):
+    ledger = _ledger(tmp_path)
+    target_object_id = "ko:RepoDocument:ledger-project-scope"
+    ledger.upsert_object_review_proposal(
+        {
+            "proposal_id": "proposal:ledger-project-scope",
+            "proposal_type": "propose_current",
+            "target_object_id": target_object_id,
+            "project": proposal_project,
+            "ledger_scope": proposal_scope,
+        }
+    )
+
+    with pytest.raises(ValueError, match=message):
+        ledger.commit_object_authority_decision(
+            {
+                "decision_id": "decision:ledger-project-scope",
+                "proposal_id": "proposal:ledger-project-scope",
+                "target_object_id": target_object_id,
+                "decision_type": "accept_current",
+                "previous_authority_lane": "proposal_only",
+                "new_authority_lane": "accepted_current",
+                "project": decision_project,
+                "ledger_scope": decision_scope,
+            }
+        )
+
+    assert ledger.get_object_authority_state(target_object_id) == {}
+
+
 def test_server_backed_read_only_ledger_does_not_snapshot_path(tmp_path: Path):
     class ServerBackedAdapter:
         is_file_backed = False

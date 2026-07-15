@@ -2614,6 +2614,17 @@ class Ledger(
                 ).fetchall()
         return [json.loads(row["proposal_json"]) for row in rows]
 
+    def get_object_review_proposal(self, proposal_id: str) -> dict:
+        proposal_id = str(proposal_id or "")
+        if not proposal_id:
+            return {}
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT proposal_json FROM object_review_proposals WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        return json.loads(row["proposal_json"]) if row is not None else {}
+
     def commit_object_authority_decision(self, decision: dict) -> dict:
         if self.read_only:
             raise sqlite3.OperationalError("read-only ledger는 object authority decision write를 허용하지 않습니다")
@@ -2672,6 +2683,18 @@ class Ledger(
         proposal = json.loads(row["proposal_json"])
         if str(proposal.get("target_object_id") or "") != target_object_id:
             raise ValueError("object authority decision target must match the review proposal target")
+        proposal_project = public_safe_text(str(proposal.get("project") or ""), max_chars=120)
+        if not proposal_project or not project:
+            raise ValueError("object authority decision requires a non-empty project on proposal and decision")
+        if proposal_project != project:
+            raise ValueError("object authority decision project must match the review proposal project")
+        proposal_ledger_scope = str(proposal.get("ledger_scope") or "")
+        decision_ledger_scope = str(decision.get("ledger_scope") or "")
+        valid_ledger_scopes = {"local_test", "production"}
+        if proposal_ledger_scope not in valid_ledger_scopes or decision_ledger_scope not in valid_ledger_scopes:
+            raise ValueError("object authority decision requires explicit ledger scope on proposal and decision")
+        if proposal_ledger_scope != decision_ledger_scope:
+            raise ValueError("object authority decision ledger scope must match the review proposal scope")
         connection.execute(
             """
             INSERT INTO object_authority_decisions (

@@ -14,6 +14,11 @@ from .llm_brain_core.objects.extraction_pipeline import (
     run_graph_search_projection_join_preview,
     run_source_to_candidate_graph_activation_preview,
 )
+from .llm_brain_core.objects.authority_policy import (
+    allowed_object_class_gap,
+    allowed_object_classes_list,
+    is_allowed_object_target,
+)
 from .llm_brain_core.objects.knowledge_objects import AuthorityDecision, ReviewProposal
 from .llm_brain_core.objects.object_packs import apply_approval_board_decisions, apply_candidate_review_edits
 from .llm_brain_core.objects.runtime_readiness import (
@@ -369,6 +374,7 @@ class KnowledgeSearchService:
             proposer="codex",
         ).to_dict(proposal_write_performed=True, proposal_write_target="production_ledger")
         proposal["project"] = gate["project"]
+        proposal["object_type"] = target_object_type
         proposal["ledger_scope"] = "production"
         proposal["production_mutation_performed"] = True
         proposal["production_gate_ref_hash"] = gate["approval_ref_hash"]
@@ -467,8 +473,10 @@ class KnowledgeSearchService:
         for field in _APPROVAL_BOARD_PRODUCTION_REQUIRED_TRUE_FIELDS:
             if gate.get(field) is not True:
                 missing.append(field)
-        if not target_object_id.startswith("ko:RepoDocument:") or target_object_type != "RepoDocument":
-            missing.append("allowed_object_class_RepoDocument")
+        if not target_object_type:
+            missing.append("explicit_object_type")
+        elif not is_allowed_object_target(target_object_id, object_type=target_object_type):
+            missing.append(allowed_object_class_gap())
         if not proposal_type or not decision_type or new_lane != "accepted_current":
             missing.append("allowed_approval_board_action")
         return {
@@ -505,7 +513,7 @@ class KnowledgeSearchService:
             "project": public_safe_text(str(gate.get("project") or ""), max_chars=120),
             "target_object_id": public_safe_text(str(gate.get("target_object_id") or ""), max_chars=180),
             "missing_gate_evidence": list(dict.fromkeys(missing_gate_evidence)),
-            "allowed_object_classes": ["RepoDocument"],
+            "allowed_object_classes": allowed_object_classes_list(),
             "allowed_approval_board_actions": ["promote"],
             "required_gate_evidence": [
                 "configured_deployed_mcp_identity_matches_source",

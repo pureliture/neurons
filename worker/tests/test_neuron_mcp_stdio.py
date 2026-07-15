@@ -223,11 +223,11 @@ def _approval_board_production_gate() -> dict:
     }
 
 
-def _approval_board_candidate_pack(candidate_id: str) -> dict:
+def _approval_board_candidate_pack(candidate_id: str, *, object_type: str = "RepoDocument") -> dict:
     candidate = {
         "schema_version": "knowledge_object.v1",
         "object_id": candidate_id,
-        "object_type": "RepoDocument",
+        "object_type": object_type,
         "scope": {"project": PROJECT},
         "title": "Approval board production candidate",
         "summary": "Production approval-board candidate.",
@@ -1456,6 +1456,8 @@ def _production_authority_execution_from_smoke(
             "max_objects": 1,
         },
         "proposal": {
+            "project": proposal["project"],
+            "proposal_type": proposal["proposal_type"],
             "proposal_write_performed": proposal["proposal_write_performed"],
             "proposal_write_target": proposal["proposal_write_target"],
             "authority_write_performed": proposal["authority_write_performed"],
@@ -1465,6 +1467,9 @@ def _production_authority_execution_from_smoke(
             "production_gate_ref_hash": proposal["production_gate_ref_hash"],
         },
         "decision": {
+            "project": decision["project"],
+            "decision_type": decision["decision_type"],
+            "new_authority_lane": decision["new_authority_lane"],
             "authority_write_performed": decision["authority_write_performed"],
             "authoritative_memory_changed": decision["authoritative_memory_changed"],
             "production_mutation_performed": decision["production_mutation_performed"],
@@ -1905,7 +1910,7 @@ def test_mcp_approval_board_production_gate_requires_candidate_project_match(tmp
     assert service.ledger.get_object_authority_state(candidate_id) == {}
 
 
-def test_mcp_approval_board_production_gate_requires_repo_document_object_type(tmp_path: Path):
+def test_mcp_approval_board_production_gate_requires_allowed_object_class(tmp_path: Path):
     service = _service(tmp_path)
     service.allow_production_object_authority_writes = True
     candidate_id = "ko:RepoDocument:approval-board-type-mismatch"
@@ -1942,7 +1947,49 @@ def test_mcp_approval_board_production_gate_requires_repo_document_object_type(t
     assert result["permission"] == "denied"
     assert result["production_mutation_performed"] is False
     assert result["authority_write_performed"] is False
-    assert "allowed_object_class_RepoDocument" in result["promotion_plan"]["missing_gate_evidence"]
+    assert "allowed_object_class_RepoDocument_or_ArtifactPreference" in result["promotion_plan"]["missing_gate_evidence"]
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+    assert service.ledger.get_object_authority_state(candidate_id) == {}
+
+
+def test_mcp_approval_board_production_gate_requires_explicit_object_type(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    candidate_id = "ko:ArtifactPreference:approval-board-missing-type"
+    pack = _approval_board_candidate_pack(candidate_id, object_type="ArtifactPreference")
+    pack["objects"][0].pop("object_type")
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 127,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": pack,
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": candidate_id,
+                            "reason": "Production candidates require an explicit object type.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "reviewer_id": "reviewer-local",
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["permission"] == "denied"
+    assert result["production_mutation_performed"] is False
+    assert result["authority_write_performed"] is False
+    assert "explicit_object_type" in result["promotion_plan"]["missing_gate_evidence"]
     assert service.object_review_proposals(project=PROJECT)["count"] == 0
     assert service.ledger.get_object_authority_state(candidate_id) == {}
 
@@ -2040,6 +2087,58 @@ def test_mcp_approval_board_production_gate_promotes_candidate_to_authority(tmp_
     assert queued["items"][0]["status"] == "accepted"
     assert queued["items"][0]["target_object_id"] == candidate_id
     assert result["updated_pack"]["lanes"]["accepted_current"][0]["object_id"] == candidate_id
+
+
+def test_mcp_approval_board_production_gate_promotes_artifact_preference_to_authority(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    candidate_id = "ko:ArtifactPreference:p7-html-review-density"
+    pack = _approval_board_candidate_pack(candidate_id, object_type="ArtifactPreference")
+    pack["objects"][0]["summary"] = "Prefer compact evidence-dense HTML review artifacts."
+    pack["objects"][0]["payload"] = {"scope": "html_review", "currentness": "current"}
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 128,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": pack,
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": candidate_id,
+                            "reason": "P7 production gate promotes reviewed artifact preference.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "reviewer_id": "reviewer-local",
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["permission"] == "allowed"
+    assert result["production_mutation_performed"] is True
+    assert result["authority_write_performed"] is True
+    assert result["decision_count"] == 1
+    decision = result["decisions"][0]
+    assert decision["target_object_id"] == candidate_id
+    assert decision["new_authority_lane"] == "accepted_current"
+    state = service.ledger.get_object_authority_state(candidate_id)
+    assert state["authority_lane"] == "accepted_current"
+    assert state["decision_id"] == decision["decision_id"]
+    queued = service.object_review_proposals(project=PROJECT)
+    assert queued["count"] == 1
+    assert queued["items"][0]["status"] == "accepted"
+    assert queued["items"][0]["target_object_id"] == candidate_id
+    assert result["updated_pack"]["lanes"]["accepted_current"][0]["object_type"] == "ArtifactPreference"
 
 
 def test_project_deriving_brain_tool_schemas_allow_repository():
@@ -2836,6 +2935,220 @@ def test_mcp_object_authority_production_gate_writes_single_object_with_postchec
     assert queued["items"][0]["decision_id"] == "decision:production-gate-smoke"
 
 
+def test_mcp_object_authority_production_gate_accepts_artifact_preference(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    target_object_id = "ko:ArtifactPreference:p7-html-review-density"
+    production_gate = _approval_board_production_gate()
+
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 130,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Reviewed artifact preference is ready for authority promotion.",
+                    "evidence_refs": ["git_commit:p7-artifact-preference-gate"],
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert proposal["proposal_write_performed"] is True
+    assert proposal["authority_write_performed"] is False
+    assert proposal["production_mutation_performed"] is True
+
+    decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 131,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "accept_current",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "accepted_current",
+                    "approved_by": "preapproved-user-gate-2026-07-06",
+                    "decision_id": "decision:p7-artifact-preference-current",
+                    "decision_reason": "Promote reviewed artifact preference to current authority.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "production_gate": production_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert decision["authority_write_performed"] is True
+    assert decision["authoritative_memory_changed"] is True
+    assert decision["production_mutation_performed"] is True
+    state = service.ledger.get_object_authority_state(target_object_id)
+    assert state["authority_lane"] == "accepted_current"
+    assert state["decision_id"] == "decision:p7-artifact-preference-current"
+
+
+def test_mcp_object_authority_production_gate_rejects_unallowed_object_class(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    target_object_id = "ko:RuntimeTruth:p7-not-authority-target"
+
+    result = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 132,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "An unapproved object class must remain outside the production gate.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert result["permission"] == "denied"
+    assert result["proposal_write_performed"] is False
+    assert result["production_mutation_performed"] is False
+    assert "allowed_object_class_RepoDocument_or_ArtifactPreference" in result["production_promotion_plan"][
+        "missing_gate_evidence"
+    ]
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("proposed_object", "expected_gap"),
+    [
+        (
+            {
+                "object_id": "ko:ArtifactPreference:p7-html-review-density",
+                "object_type": "RuntimeTruth",
+            },
+            "allowed_object_class_RepoDocument_or_ArtifactPreference",
+        ),
+        (
+            {
+                "object_id": "ko:ArtifactPreference:p7-other-preference",
+                "object_type": "ArtifactPreference",
+            },
+            "proposed_object_target_match",
+        ),
+    ],
+)
+def test_mcp_object_authority_production_gate_rejects_proposed_object_mismatch(
+    tmp_path: Path,
+    proposed_object: dict,
+    expected_gap: str,
+):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    target_object_id = "ko:ArtifactPreference:p7-html-review-density"
+
+    result = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 133,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "proposed_object": proposed_object,
+                    "reason": "Proposed object identity and class must match the production target.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert result["permission"] == "denied"
+    assert result["proposal_write_performed"] is False
+    assert result["production_mutation_performed"] is False
+    assert expected_gap in result["production_promotion_plan"]["missing_gate_evidence"]
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+
+
+def test_mcp_object_authority_production_gate_rejects_cross_project_decision(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    target_object_id = "ko:ArtifactPreference:p7-project-boundary"
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 134,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Create a project-scoped preference proposal.",
+                    "ledger_scope": "production",
+                    "project": PROJECT,
+                    "proposer": "codex",
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    other_project_gate = {**_approval_board_production_gate(), "project": "other-project"}
+
+    decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 135,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "accept_current",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "accepted_current",
+                    "approved_by": "preapproved-user-gate-2026-07-06",
+                    "decision_id": "decision:p7-cross-project",
+                    "ledger_scope": "production",
+                    "project": "other-project",
+                    "production_gate": other_project_gate,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    assert decision["permission"] == "denied"
+    assert decision["authority_write_performed"] is False
+    assert decision["production_mutation_performed"] is False
+    assert "proposal_project_scope_match" in decision["production_promotion_plan"]["missing_gate_evidence"]
+    assert service.ledger.get_object_authority_state(target_object_id) == {}
+
+
 def test_mcp_corpus_ingest_plan_reports_manifest_ref_gap(tmp_path: Path):
     service = _service(tmp_path)
     result = handle_jsonrpc_message(
@@ -2990,7 +3303,7 @@ def test_mcp_object_decision_commit_is_restricted_denied_by_default(tmp_path: Pa
     assert plan["schema_version"] == "object_authority_promotion_plan.v1"
     assert plan["production_write_state"] == "closed_without_human_gate"
     assert plan["mutation_allowed"] is False
-    assert plan["allowed_object_classes"] == ["RepoDocument"]
+    assert plan["allowed_object_classes"] == ["RepoDocument", "ArtifactPreference"]
     assert "commit_stale" in plan["allowed_decision_types"]
     assert plan["reviewer_role"] == "human_object_authority_reviewer"
     assert plan["blast_radius"]["max_objects_per_decision"] == 1
@@ -3334,6 +3647,55 @@ def test_mcp_object_decision_commit_requires_matching_review_proposal(tmp_path: 
     assert mismatch["error"]["code"] == -32602
     assert service.ledger.get_object_authority_state("ko:RepoDocument:proposal-a") == {}
     assert service.ledger.get_object_authority_state("ko:RepoDocument:proposal-b") == {}
+
+
+def test_mcp_object_decision_commit_requires_matching_proposal_project(tmp_path: Path):
+    service = _service(tmp_path)
+    target_object_id = "ko:RepoDocument:project-boundary"
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 136,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "reason": "Project-scoped local proposal.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 137,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "target_object_id": target_object_id,
+                    "decision_type": "accept_current",
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "accepted_current",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:local-cross-project",
+                    "ledger_scope": "local_test",
+                    "project": "other-project",
+                },
+            },
+        },
+        service,
+    )
+
+    assert decision["error"]["code"] == -32602
+    assert service.ledger.get_object_authority_state(target_object_id) == {}
 
 
 def test_mcp_brain_object_explain_includes_local_authority_decision_history(tmp_path: Path):
