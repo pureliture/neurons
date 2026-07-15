@@ -2332,3 +2332,59 @@ def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, cap
     assert seen["artifact_descriptor"] == artifact_descriptor
     assert str(artifact_descriptor_file) not in json.dumps(output, sort_keys=True)
     assert artifact_descriptor["summary"] not in json.dumps(output, sort_keys=True)
+
+
+@pytest.mark.parametrize(
+    ("readiness_status", "expected_exit_code"),
+    [
+        ("FAIL", 1),
+        ("PASS", 0),
+        ("PASS_WITH_GAPS", 0),
+    ],
+)
+def test_runtime_readiness_cli_collect_post_deploy_mcp_capture_uses_readiness_exit_status(
+    monkeypatch,
+    capsys,
+    readiness_status: str,
+    expected_exit_code: int,
+):
+    capture = {
+        "schema_version": "source_to_candidate_runtime_post_deploy_mcp_capture.v1",
+        "production_mutation_performed": False,
+    }
+
+    async def _fake_collect(**_kwargs):
+        return capture
+
+    def _fake_readiness_report(**_kwargs):
+        return {
+            "schema_version": "source_to_candidate_runtime_readiness.v1",
+            "status": readiness_status,
+        }
+
+    monkeypatch.setattr(
+        object_cli,
+        "collect_source_to_candidate_post_deploy_mcp_capture",
+        _fake_collect,
+    )
+    monkeypatch.setattr(
+        object_cli,
+        "build_source_to_candidate_runtime_post_deploy_capture_readiness_report",
+        _fake_readiness_report,
+    )
+
+    assert (
+        main(
+            [
+                "source-to-candidate-runtime-readiness",
+                "--collect-post-deploy-mcp-capture",
+                "--mcp-url",
+                "https://mcp.example.test/mcp",
+            ]
+        )
+        == expected_exit_code
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["schema_version"] == capture["schema_version"]
+    assert output["runtime_readiness"]["status"] == readiness_status
