@@ -9,6 +9,9 @@ from agent_knowledge.cli import BOUNDARY, COMMAND_HANDLERS, main
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.llm_brain_core.knowledge_objects import EvidenceRef, KnowledgeEdge
 from object_query_route_cases import REQUIRED_OBJECT_QUERY_ROUTE_CASES
+from test_golden_query_eval import (
+    _valid_p6_p7_runtime_evidence as _valid_attested_p6_p7_runtime_evidence,
+)
 
 
 def _reference_manifest() -> dict:
@@ -210,9 +213,7 @@ def _preference_artifact_memory_runtime_evidence() -> dict:
 
 
 def _valid_p6_p7_runtime_evidence(*, live: bool = True) -> dict:
-    evidence = _valid_p6_runtime_evidence(live=live)
-    evidence["preference_artifact_memory"] = _preference_artifact_memory_runtime_evidence()
-    return evidence
+    return _valid_attested_p6_p7_runtime_evidence(live=live)
 
 
 def _valid_p3_post_deploy_capture(*, live: bool = True) -> dict:
@@ -1807,7 +1808,7 @@ def test_neuron_knowledge_golden_query_eval_activation_progress_accepts_post_dep
     assert report["production_mutation_performed"] is False
 
 
-def test_neuron_knowledge_golden_query_eval_activation_progress_closes_p7_post_deploy_gap(
+def test_neuron_knowledge_golden_query_eval_activation_progress_keeps_p7_gap_for_replayed_capture(
     tmp_path, capsys
 ):
     capture_file = tmp_path / "p6-p7-post-deploy-capture.json"
@@ -1831,14 +1832,12 @@ def test_neuron_knowledge_golden_query_eval_activation_progress_closes_p7_post_d
     phase_progress = {item["phase"]: item for item in report["phase_progress"]}
 
     assert checks["P6"]["result"] == "PASS"
-    assert checks["P7"]["result"] == "PASS"
-    assert "p7_accepted_preference_context_pack_live_unproven" not in checks["P7"]["gaps"]
-    assert "p7_html_artifact_review_live_unproven" not in checks["P7"]["gaps"]
-    assert phase_progress["P7"]["quality_result"] == "PASS"
-    assert phase_progress["P7"]["gaps"] == []
-    assert report["next_phase"] == "P8"
-    assert report["remaining_phases"] == ["P8", "P9"]
-    assert p7["preference_claim_status"] == "validated"
+    assert checks["P7"]["result"] == "FAIL"
+    assert "p7_preference_artifact_collector_capability_missing" in checks["P7"]["gaps"]
+    assert phase_progress["P7"]["quality_result"] == "PASS_WITH_GAPS"
+    assert report["next_phase"] == "P7"
+    assert report["remaining_phases"] == ["P7", "P8", "P9"]
+    assert p7["preference_claim_status"] == "not_validated"
     assert p7["evidence_provenance_status"] == "validated"
     assert p7["evidence_is_live"] is True
     assert p7["accepted_preference_count"] == 1

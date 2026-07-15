@@ -95,6 +95,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "session-memory-repair-zombie-snapshots": zombie_snapshot_repair.main,
     "brain-context-resolve": llm_brain_core_cli.main,
     "object-query": llm_brain_object_cli.object_query_main,
+    "artifact-preference-evaluate": llm_brain_object_cli.artifact_preference_evaluate_main,
     "object-explain": llm_brain_object_cli.object_explain_main,
     "corpus-status": llm_brain_object_cli.corpus_status_main,
     "corpus-ingest-plan": llm_brain_object_cli.corpus_ingest_plan_main,

@@ -10,6 +10,11 @@ from .authority_policy import (
     knowledge_object_class_from_id,
     is_allowed_object_target,
 )
+from .artifact_preference_evaluator import (
+    ARTIFACT_PREFERENCE_COLLECTOR_ATTESTATION_SCHEMA,
+    ARTIFACT_PREFERENCE_EVALUATOR_TOOL,
+    artifact_preference_application_receipt_is_valid,
+)
 from .golden_query_eval import build_source_to_authority_quality_gate_report
 
 REQUIRED_REVIEW_TOOL_NAMES = (
@@ -74,6 +79,30 @@ SESSION_PROJECT_HANDOFF_SCHEMA = "session_project_handoff_pack.v1"
 SESSION_PROJECT_RESUME_SCHEMA = "session_project_resume_context.v1"
 PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA = "preference_artifact_memory_runtime_evidence.v1"
 ARTIFACT_REVIEW_PREFERENCE_CHECK_SCHEMA = "artifact_review_preference_check.v1"
+_P7_COLLECTOR_CAPABILITY = object()
+
+
+class _CollectorAttestedEvidence(dict[str, Any]):
+    __slots__ = ("_collector_capability",)
+
+    def __init__(self, value: Mapping[str, Any], *, capability: object) -> None:
+        if capability is not _P7_COLLECTOR_CAPABILITY:
+            raise TypeError("collector-attested evidence can only be minted in-process")
+        super().__init__(value)
+        self._collector_capability = capability
+
+
+def _mint_collector_attested_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
+    return _CollectorAttestedEvidence(value, capability=_P7_COLLECTOR_CAPABILITY)
+
+
+def _has_collector_attestation_capability(value: Mapping[str, Any]) -> bool:
+    return (
+        isinstance(value, _CollectorAttestedEvidence)
+        and value._collector_capability is _P7_COLLECTOR_CAPABILITY
+    )
+
+
 _RUNTIME_EVIDENCE_FORBIDDEN_KEYS = frozenset(
     {
         "api_key",
@@ -150,6 +179,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
     expected_commit: str = "",
     repository: str = "",
     branch: str = "",
+    project: str = "",
     consumer: str = "codex",
 ) -> dict[str, Any]:
     required_steps = [
@@ -177,6 +207,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
         "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
         "repository": public_safe_text(str(repository or ""), max_chars=120),
         "branch": public_safe_text(str(branch or ""), max_chars=120),
+        "project": public_safe_text(str(project or ""), max_chars=120),
         "consumer": public_safe_text(str(consumer or "codex"), max_chars=80),
         "network_used": False,
         "production_mutation_performed": False,
@@ -251,12 +282,14 @@ def build_source_to_candidate_runtime_evidence_packet_template(
     expected_commit: str = "",
     repository: str = "",
     branch: str = "",
+    project: str = "",
     consumer: str = "codex",
 ) -> dict[str, Any]:
     collection_plan = build_source_to_candidate_runtime_evidence_collection_plan(
         expected_commit=expected_commit,
         repository=repository,
         branch=branch,
+        project=project,
         consumer=consumer,
     )
     registration = collection_plan.get("shadow_collection_registration")
@@ -273,6 +306,7 @@ def build_source_to_candidate_runtime_evidence_packet_template(
         "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
         "repository": public_safe_text(str(repository or ""), max_chars=120),
         "branch": public_safe_text(str(branch or ""), max_chars=120),
+        "project": public_safe_text(str(project or ""), max_chars=120),
         "consumer": public_safe_text(str(consumer or "codex"), max_chars=80),
         "collection_mode": "post_deploy_read_only_smoke",
         "network_used": False,
@@ -357,6 +391,8 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         or captured.get("mutation_performed") is True,
     }
     ensure_public_safe(packet, "SourceToCandidateRuntimeShadowEvidencePacket")
+    if _has_collector_attestation_capability(captured):
+        return _mint_collector_attested_evidence(packet)
     return packet
 
 
@@ -403,6 +439,7 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
     *,
     repository: str = "",
     branch: str = "",
+    project: str = "",
     consumer: str = "codex",
     expected_commit: str = "",
     route_runner: Callable[[str], Mapping[str, Any]],
@@ -469,6 +506,7 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
             "status": "completed_with_gaps",
             "repository": public_safe_text(str(repository or ""), max_chars=120),
             "branch": public_safe_text(str(branch or ""), max_chars=120),
+            "project": public_safe_text(str(project or ""), max_chars=120),
             "consumer": public_safe_text(str(consumer or "codex"), max_chars=80),
             "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
             "routes_collected": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
@@ -1162,7 +1200,7 @@ def build_preference_artifact_memory_runtime_evidence(
     html_by_id = {str(item.get("object_id") or ""): item for item in html_objects}
     context_by_id = {str(item.get("object_id") or ""): item for item in context_objects}
     target_object_id = ""
-    continuity: tuple[str, str, str] = ("", "", "")
+    continuity: tuple[str, str, str, str, str, str] = ("", "", "", "", "", "")
     for candidate_id in aligned_ids:
         surface_continuity = [
             _artifact_preference_continuity(view)
@@ -1172,7 +1210,7 @@ def build_preference_artifact_memory_runtime_evidence(
                 context_by_id[candidate_id],
             )
         ]
-        if surface_continuity[0] != ("", "", "") and len(set(surface_continuity)) == 1:
+        if surface_continuity[0] != ("", "", "", "", "", "") and len(set(surface_continuity)) == 1:
             target_object_id = candidate_id
             continuity = surface_continuity[0]
             break
@@ -1268,9 +1306,12 @@ def build_preference_artifact_memory_runtime_evidence(
         "read_surface_alignment": {
             "status": alignment_status,
             "target_object_id": target_object_id,
-            "project": continuity[0],
-            "source_content_hash": continuity[1],
-            "authority_decision_id": continuity[2],
+            "memory_id": continuity[0],
+            "card_content_hash": continuity[1],
+            "authority_proposal_id": continuity[2],
+            "authority_decision_id": continuity[3],
+            "project": continuity[4],
+            "source_content_hash": continuity[5],
             "code_style_preference_object_ids": code_ids,
             "html_visualization_preference_object_ids": html_ids,
             "style_preference_context_object_ids": context_ids,
@@ -1415,6 +1456,22 @@ def _artifact_preference_object_view(obj: Mapping[str, Any]) -> dict[str, Any]:
         "object_type": public_safe_text(str(obj.get("object_type") or ""), max_chars=80),
         "authority_lane": public_safe_text(str(obj.get("authority_lane") or ""), max_chars=80),
         "title": public_safe_text(str(obj.get("title") or ""), max_chars=240),
+        "memory_id": public_safe_text(
+            str(obj.get("memory_id") or payload.get("memory_id") or ""),
+            max_chars=180,
+        ),
+        "card_content_hash": public_safe_text(
+            str(obj.get("card_content_hash") or payload.get("card_content_hash") or ""),
+            max_chars=80,
+        ),
+        "authority_proposal_id": public_safe_text(
+            str(
+                obj.get("authority_proposal_id")
+                or payload.get("authority_proposal_id")
+                or ""
+            ),
+            max_chars=180,
+        ),
         "project": public_safe_text(
             str(scope.get("project") or payload.get("project") or ""),
             max_chars=120,
@@ -1441,9 +1498,27 @@ def _artifact_preference_action_views(value: Any) -> list[dict[str, str]]:
     ]
 
 
-def _artifact_preference_continuity(obj: Mapping[str, Any]) -> tuple[str, str, str]:
+def _artifact_preference_continuity(
+    obj: Mapping[str, Any],
+) -> tuple[str, str, str, str, str, str]:
     scope = obj.get("scope") if isinstance(obj.get("scope"), Mapping) else {}
     payload = obj.get("payload") if isinstance(obj.get("payload"), Mapping) else {}
+    memory_id = public_safe_text(
+        str(obj.get("memory_id") or payload.get("memory_id") or ""),
+        max_chars=180,
+    )
+    card_content_hash = public_safe_text(
+        str(obj.get("card_content_hash") or payload.get("card_content_hash") or ""),
+        max_chars=80,
+    )
+    authority_proposal_id = public_safe_text(
+        str(obj.get("authority_proposal_id") or payload.get("authority_proposal_id") or ""),
+        max_chars=180,
+    )
+    authority_decision_id = public_safe_text(
+        str(obj.get("authority_decision_id") or payload.get("authority_decision_id") or ""),
+        max_chars=180,
+    )
     project = public_safe_text(
         str(obj.get("project") or scope.get("project") or payload.get("project") or ""),
         max_chars=120,
@@ -1457,13 +1532,28 @@ def _artifact_preference_continuity(obj: Mapping[str, Any]) -> tuple[str, str, s
         ),
         max_chars=80,
     )
-    authority_decision_id = public_safe_text(
-        str(obj.get("authority_decision_id") or payload.get("authority_decision_id") or ""),
-        max_chars=180,
+    try:
+        require_sha256(card_content_hash, "card_content_hash")
+        require_sha256(content_hash, "source_content_hash")
+    except ValueError:
+        return "", "", "", "", "", ""
+    if not all(
+        (
+            memory_id,
+            authority_proposal_id,
+            authority_decision_id,
+            project,
+        )
+    ):
+        return "", "", "", "", "", ""
+    return (
+        memory_id,
+        card_content_hash,
+        authority_proposal_id,
+        authority_decision_id,
+        project,
+        content_hash,
     )
-    if not project or not content_hash.startswith("sha256:") or not authority_decision_id:
-        return "", "", ""
-    return project, content_hash, authority_decision_id
 
 
 def _object_ids(objects: list[Mapping[str, Any]]) -> set[str]:
@@ -3134,11 +3224,29 @@ def _live_preference_artifact_memory_claim(evidence: Mapping[str, Any]) -> dict[
         context=context,
         artifact_check=artifact_check,
         postcheck=postcheck,
+        collector_capability_present=_has_collector_attestation_capability(evidence),
     )
+    collector_proof_gaps = {
+        "preference_artifact_collector_capability_missing",
+        "preference_artifact_collector_attestation_missing",
+    }
+    hard_failures = [
+        failure
+        for failure in failures
+        if failure not in collector_proof_gaps
+    ]
     return {
         "claim_id": "live.preference_artifact.memory",
         "evidence_class": "runtime_read_path",
-        "status": "failed" if failures else "validated",
+        "status": (
+            "failed"
+            if hard_failures
+            else (
+                "not_validated"
+                if collector_proof_gaps.intersection(failures)
+                else "validated"
+            )
+        ),
         "schema_version": public_safe_text(str(preference.get("schema_version") or ""), max_chars=80),
         "preference_pack_schema": public_safe_text(str(pack.get("schema_version") or ""), max_chars=80),
         "accepted_preference_count": _int_value(pack.get("accepted_preference_count")),
@@ -3169,6 +3277,7 @@ def _preference_artifact_memory_failures(
     context: Mapping[str, Any],
     artifact_check: Mapping[str, Any],
     postcheck: Mapping[str, Any],
+    collector_capability_present: bool = False,
 ) -> list[str]:
     failures: list[str] = []
     collector_error_type = public_safe_text(str(preference.get("collector_error_type") or ""), max_chars=80)
@@ -3176,6 +3285,10 @@ def _preference_artifact_memory_failures(
         failures.append(f"preference_artifact_memory_collector_error:{collector_error_type}")
     if preference.get("schema_version") != PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA:
         failures.append("preference_artifact_memory_schema_mismatch")
+    if not collector_capability_present:
+        failures.append("preference_artifact_collector_capability_missing")
+    elif not _collector_preference_attestation_valid(preference):
+        failures.append("preference_artifact_collector_attestation_missing")
     if pack.get("schema_version") != "object_pack.v1":
         failures.append("preference_artifact_pack_schema_mismatch")
     if pack.get("route") != "code_style_preference":
@@ -3271,37 +3384,50 @@ def _runtime_artifact_consumer_evidence_valid(preference: Mapping[str, Any]) -> 
         if isinstance(preference.get("artifact_consumer_evidence"), Mapping)
         else {}
     )
-    provenance = (
-        consumer.get("consumer_provenance")
-        if isinstance(consumer.get("consumer_provenance"), Mapping)
+    return artifact_preference_application_receipt_is_valid(consumer)
+
+
+def _collector_preference_attestation_valid(preference: Mapping[str, Any]) -> bool:
+    attestation = (
+        preference.get("attestation_provenance")
+        if isinstance(preference.get("attestation_provenance"), Mapping)
         else {}
     )
-    finding_refs = consumer.get("finding_refs") if isinstance(consumer.get("finding_refs"), list) else []
-    evidence_refs = consumer.get("evidence_refs") if isinstance(consumer.get("evidence_refs"), list) else []
+    receipt = (
+        preference.get("artifact_consumer_evidence")
+        if isinstance(preference.get("artifact_consumer_evidence"), Mapping)
+        else {}
+    )
+    if set(attestation) != {
+        "schema_version",
+        "collector",
+        "transport",
+        "named_tool",
+        "receipt_hash",
+        "read_surface_recheck",
+    }:
+        return False
     try:
-        require_sha256(str(consumer.get("artifact_fingerprint") or ""), "artifact_fingerprint")
+        receipt_hash = require_sha256(
+            str(attestation.get("receipt_hash") or ""),
+            "attestation_provenance.receipt_hash",
+        )
     except ValueError:
         return False
     return (
-        consumer.get("status") == "validated"
-        and provenance.get("evidence_kind") == "actual_consumer_output"
-        and bool(str(provenance.get("consumer") or ""))
-        and bool(str(provenance.get("workflow") or ""))
-        and _artifact_ref_list_is_public_safe(finding_refs, required_prefix="finding:")
-        and _artifact_ref_list_is_public_safe(evidence_refs, required_prefix="evidence:")
-        and _int_value(consumer.get("finding_count")) == len(finding_refs)
-        and _int_value(consumer.get("evidence_ref_count")) == len(evidence_refs)
+        preference.get("attestation_state") == "attested_post_deploy_streamable_http"
+        and preference.get("evidence_class") == "runtime_preference_artifact_memory"
+        and preference.get("evidence_source") == "actual_live_read_surfaces"
+        and attestation.get("schema_version")
+        == ARTIFACT_PREFERENCE_COLLECTOR_ATTESTATION_SCHEMA
+        and attestation.get("collector")
+        == "source_to_candidate_post_deploy_mcp_capture"
+        and attestation.get("transport") == "streamable_http"
+        and attestation.get("named_tool") == ARTIFACT_PREFERENCE_EVALUATOR_TOOL
+        and attestation.get("read_surface_recheck") == "validated"
+        and receipt_hash == str(receipt.get("receipt_hash") or "")
+        and artifact_preference_application_receipt_is_valid(receipt)
     )
-
-
-def _artifact_ref_list_is_public_safe(value: Any, *, required_prefix: str) -> bool:
-    if not isinstance(value, list) or not value:
-        return False
-    try:
-        normalized = _public_safe_artifact_refs(value, required_prefix=required_prefix)
-    except ValueError:
-        return False
-    return normalized == value
 
 
 def _preference_artifact_alignment_valid(
@@ -3333,7 +3459,7 @@ def _preference_artifact_alignment_valid(
         else [],
         context.get("items", []) if isinstance(context.get("items"), list) else [],
     ]
-    continuity: list[tuple[str, str, str]] = []
+    continuity: list[tuple[str, str, str, str, str, str]] = []
     for items in surfaces:
         obj = next(
             (
@@ -3347,11 +3473,18 @@ def _preference_artifact_alignment_valid(
             return False
         continuity.append(_artifact_preference_continuity(obj))
     expected = (
+        public_safe_text(str(alignment.get("memory_id") or ""), max_chars=180),
+        public_safe_text(str(alignment.get("card_content_hash") or ""), max_chars=80),
+        public_safe_text(str(alignment.get("authority_proposal_id") or ""), max_chars=180),
+        public_safe_text(str(alignment.get("authority_decision_id") or ""), max_chars=180),
         public_safe_text(str(alignment.get("project") or ""), max_chars=120),
         public_safe_text(str(alignment.get("source_content_hash") or ""), max_chars=80),
-        public_safe_text(str(alignment.get("authority_decision_id") or ""), max_chars=180),
     )
-    return expected != ("", "", "") and len(set(continuity)) == 1 and continuity[0] == expected
+    return (
+        expected != ("", "", "", "", "", "")
+        and len(set(continuity)) == 1
+        and continuity[0] == expected
+    )
 
 
 def _html_preference_route_unimplemented(html_smoke: Mapping[str, Any], html_pack: Mapping[str, Any]) -> bool:

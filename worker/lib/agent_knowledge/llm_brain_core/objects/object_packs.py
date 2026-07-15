@@ -1694,8 +1694,17 @@ def _preference_pack(preferences: list[Mapping[str, Any]]) -> dict[str, Any]:
             payload={
                 "scope": public_safe_text(str(item.get("scope") or ""), max_chars=180),
                 "currentness": public_safe_text(currentness, max_chars=80),
+                "memory_id": public_safe_text(str(item.get("memory_id") or ""), max_chars=180),
+                "card_content_hash": public_safe_text(
+                    str(item.get("card_content_hash") or ""),
+                    max_chars=80,
+                ),
                 "project": project,
                 "source_content_hash": source_content_hash,
+                "authority_proposal_id": public_safe_text(
+                    str(item.get("authority_proposal_id") or ""),
+                    max_chars=180,
+                ),
                 "authority_decision_id": authority_decision_id,
             },
         ).to_dict()
