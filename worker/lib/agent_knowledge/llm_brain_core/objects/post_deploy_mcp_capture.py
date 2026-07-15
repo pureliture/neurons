@@ -142,6 +142,9 @@ _ROUTE_SEMANTIC_VOLATILE_SCHEMAS = frozenset(
         "evidence_ref.v1",
     }
 )
+_ROOT_ROUTE_OBJECT_PACK_PATH = ("object_pack",)
+_ROOT_ROUTE_ENTITY_COLLECTION_KEYS = frozenset({"objects", "edges", "evidence"})
+_ROOT_ROUTE_ENTITY_GROUP_KEYS = frozenset({"lanes", "verification"})
 
 
 def validate_post_deploy_mcp_url(mcp_url: str) -> str:
@@ -1121,46 +1124,62 @@ def _route_semantic_payload_hash(raw: Mapping[str, Any]) -> str:
     return hash_payload(_route_semantic_payload(raw))
 
 
-def _route_semantic_payload(value: Any, *, route_entity: bool = False) -> Any:
+def _route_semantic_payload(
+    value: Any,
+    *,
+    path: tuple[str, ...] = (),
+    route_entity: bool = False,
+) -> Any:
     if isinstance(value, Mapping):
         schema_version = str(value.get("schema_version") or "")
+        root_object_pack = (
+            path == _ROOT_ROUTE_OBJECT_PACK_PATH
+            and schema_version == "object_pack.v1"
+        )
         semantic: dict[str, Any] = {}
         for key, item in value.items():
+            safe_key = str(key)
+            child_path = (*path, safe_key)
             if (
                 key == "observed_at"
                 and route_entity
                 and schema_version in _ROUTE_SEMANTIC_VOLATILE_SCHEMAS
             ):
                 continue
-            if schema_version == "object_pack.v1" and key in {
-                "objects",
-                "edges",
-                "evidence",
-            }:
-                semantic[str(key)] = _route_entity_collection(item)
-            elif schema_version == "object_pack.v1" and key in {"lanes", "verification"}:
-                semantic[str(key)] = _route_entity_lanes(item)
+            if root_object_pack and key in _ROOT_ROUTE_ENTITY_COLLECTION_KEYS:
+                semantic[safe_key] = _route_entity_collection(item, path=child_path)
+            elif root_object_pack and key in _ROOT_ROUTE_ENTITY_GROUP_KEYS:
+                semantic[safe_key] = _route_entity_lanes(item, path=child_path)
             else:
-                semantic[str(key)] = _route_semantic_payload(item)
+                semantic[safe_key] = _route_semantic_payload(item, path=child_path)
         return semantic
     if isinstance(value, list):
-        return [_route_semantic_payload(item) for item in value]
+        return [
+            _route_semantic_payload(item, path=(*path, "[]"))
+            for item in value
+        ]
     if isinstance(value, tuple):
-        return [_route_semantic_payload(item) for item in value]
+        return [
+            _route_semantic_payload(item, path=(*path, "[]"))
+            for item in value
+        ]
     return value
 
 
-def _route_entity_collection(value: Any) -> Any:
+def _route_entity_collection(value: Any, *, path: tuple[str, ...]) -> Any:
     if not isinstance(value, (list, tuple)):
-        return _route_semantic_payload(value)
-    return [_route_semantic_payload(item, route_entity=True) for item in value]
+        return _route_semantic_payload(value, path=path)
+    return [
+        _route_semantic_payload(item, path=(*path, "[]"), route_entity=True)
+        for item in value
+    ]
 
 
-def _route_entity_lanes(value: Any) -> Any:
+def _route_entity_lanes(value: Any, *, path: tuple[str, ...]) -> Any:
     if not isinstance(value, Mapping):
-        return _route_semantic_payload(value)
+        return _route_semantic_payload(value, path=path)
     return {
-        str(lane): _route_entity_collection(items)
+        str(lane): _route_entity_collection(items, path=(*path, str(lane)))
         for lane, items in value.items()
     }
 
