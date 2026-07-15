@@ -1,4 +1,7 @@
+import json
+
 from agent_knowledge.ledger import _column_names, _copy_index_targets_from_legacy_table, _table_exists
+from agent_knowledge.ledger_native_memory_mixin import NativeMemoryMixin
 
 
 class _FakeRow(dict):
@@ -107,3 +110,88 @@ def test_legacy_index_target_copy_uses_postgres_conflict_clause():
     sql = "\n".join(statement for statement, _ in conn.statements)
     assert "ON CONFLICT DO NOTHING" in sql
     assert "INSERT OR IGNORE" not in sql
+
+
+class _FakeNativeMemoryConnection:
+    def __init__(self, *, dialect):
+        self.dialect = dialect
+        self.statements = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def execute(self, sql, params=()):
+        self.statements.append((sql, params))
+        return _FakeResult(
+            [
+                _FakeRow(
+                    envelope_json=json.dumps(
+                        {
+                            "memory_id": "mem_artifact_preference",
+                            "typed_payload": {
+                                "source_object_type": "ArtifactPreference",
+                                "target_object_id": "ko:ArtifactPreference:html-review",
+                                "applies_to": "html_review_artifact",
+                            },
+                        }
+                    )
+                )
+            ]
+        )
+
+
+class _NativeMemoryLedger(NativeMemoryMixin):
+    def __init__(self, connection):
+        self.connection = connection
+
+    def _connect(self):
+        return self.connection
+
+
+def _list_filtered_artifact_preference_cards(connection):
+    return _NativeMemoryLedger(connection).list_llm_brain_memory_cards(
+        project="neurons",
+        accepted_only=True,
+        current_only=True,
+        card_type="preference",
+        source_object_type="ArtifactPreference",
+        target_object_type="ArtifactPreference",
+        applies_to="html_review_artifact",
+        limit=101,
+    )
+
+
+def test_memory_card_typed_payload_filters_use_postgres_json_operators():
+    connection = _FakeNativeMemoryConnection(dialect="postgres")
+
+    cards = _list_filtered_artifact_preference_cards(connection)
+
+    assert cards[0]["memory_id"] == "mem_artifact_preference"
+    sql, params = connection.statements[0]
+    assert "json_extract" not in sql
+    assert "envelope_json::jsonb #>> '{typed_payload,source_object_type}'" in sql
+    assert "envelope_json::jsonb #>> '{typed_payload,target_object_id}'" in sql
+    assert "envelope_json::jsonb #>> '{typed_payload,applies_to}'" in sql
+    assert params == [
+        "neurons",
+        "preference",
+        "ArtifactPreference",
+        "ko:ArtifactPreference:",
+        "ko:ArtifactPreference:",
+        "html_review_artifact",
+        101,
+    ]
+
+
+def test_memory_card_typed_payload_filters_keep_sqlite_json_extract():
+    connection = _FakeNativeMemoryConnection(dialect="sqlite")
+
+    _list_filtered_artifact_preference_cards(connection)
+
+    sql, _ = connection.statements[0]
+    assert "json_extract(envelope_json, '$.typed_payload.source_object_type')" in sql
+    assert "json_extract(envelope_json, '$.typed_payload.target_object_id')" in sql
+    assert "json_extract(envelope_json, '$.typed_payload.applies_to')" in sql

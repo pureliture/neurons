@@ -6,6 +6,7 @@ SQLite와 PostgreSQL 양쪽에 돌려 관측 결과가 동일함을 단언한다
 """
 
 import hashlib
+import json
 import os
 
 import pytest
@@ -203,3 +204,60 @@ def test_env_switch_routes_ledger_to_postgres(monkeypatch):
     )
     audits = ledger.list_memory_gc_audit()
     assert len(audits) == 1 and audits[0]["operation"] == "env_op"
+
+
+def test_memory_card_typed_payload_filters_execute_on_postgres():
+    _reset_pg(PG_DSN)
+    ledger = Ledger("pg", db_adapter=PostgresLedgerDbAdapter(PG_DSN))
+    envelope = {
+        "memory_id": "mem_pg_artifact_preference",
+        "card_type": "preference",
+        "project": "neurons",
+        "lifecycle_state": "accepted",
+        "approval_state": "approved",
+        "currentness": "current",
+        "typed_payload": {
+            "source_object_type": "ArtifactPreference",
+            "target_object_id": "ko:ArtifactPreference:html-review",
+            "applies_to": "html_review_artifact",
+        },
+    }
+    with ledger._connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO llm_brain_memory_cards (
+                memory_id, brain_id, card_type, project, provider,
+                lifecycle_state, judgment_state, approval_state, currentness,
+                status, content_hash, envelope_json, accepted_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                envelope["memory_id"],
+                "brain_pg_parity",
+                envelope["card_type"],
+                envelope["project"],
+                "codex",
+                envelope["lifecycle_state"],
+                "accepted",
+                envelope["approval_state"],
+                envelope["currentness"],
+                "accepted",
+                _sha("pg-artifact-preference"),
+                json.dumps(envelope, sort_keys=True),
+                "2026-07-15T00:00:00+00:00",
+                "2026-07-15T00:00:00+00:00",
+            ),
+        )
+
+    cards = ledger.list_llm_brain_memory_cards(
+        project="neurons",
+        accepted_only=True,
+        current_only=True,
+        card_type="preference",
+        source_object_type="ArtifactPreference",
+        target_object_type="ArtifactPreference",
+        applies_to="html_review_artifact",
+        limit=10,
+    )
+
+    assert [card["memory_id"] for card in cards] == ["mem_pg_artifact_preference"]
