@@ -4157,6 +4157,9 @@ def _external_agent_context_startup_receipt_failures(
         "observed_source_payload_hash",
     }
     for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES:
+        if route not in route_manifest:
+            failures.append(f"agent_context_startup_route_missing:{route}")
+            continue
         binding = (
             route_manifest.get(route)
             if isinstance(route_manifest.get(route), Mapping)

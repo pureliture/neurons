@@ -702,6 +702,32 @@ def test_receipt_v2_rejects_cross_route_manifest_binding_swap(monkeypatch):
     assert f"agent_context_startup_route_request_binding_mismatch:{second}" in claim["gaps"]
 
 
+def test_receipt_v2_missing_route_manifest_avoids_cascading_binding_noise(monkeypatch):
+    capture = _collect_external_startup_capture(
+        monkeypatch,
+        collector_session=_NestedObservedAtRouteMcpSession(
+            observed_at="2026-07-15T03:00:00+00:00"
+        ),
+        adapter_session=_NestedObservedAtRouteMcpSession(
+            observed_at="2026-07-15T03:01:00+00:00"
+        ),
+    )
+    route = "authority_archive_separation"
+    route_manifest = capture["agent_context_startup_runtime"]["startup_receipt"][
+        "context_binding"
+    ]["route_manifest"]
+    route_manifest.pop(route)
+
+    gaps = _startup_claim(capture)["gaps"]
+    assert f"agent_context_startup_route_missing:{route}" in gaps
+    assert f"agent_context_startup_route_binding_shape_mismatch:{route}" not in gaps
+    assert f"agent_context_startup_route_binding_schema_mismatch:{route}" not in gaps
+    assert f"agent_context_startup_route_binding_route_mismatch:{route}" not in gaps
+    assert f"agent_context_startup_route_request_binding_mismatch:{route}" not in gaps
+    assert f"agent_context_startup_route_semantic_hash_invalid:{route}" not in gaps
+    assert f"agent_context_startup_route_observed_hash_invalid:{route}" not in gaps
+
+
 def _actual_artifact_descriptor(**metric_overrides: int) -> dict:
     summary = (
         "Rendered HTML review artifact exposes objects, relationships, evidence, "
