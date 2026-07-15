@@ -477,6 +477,53 @@ class _NestedObservedAtRouteMcpSession(_FakeMcpSession):
         return result
 
 
+def test_route_semantic_hash_only_normalizes_root_object_pack_entity_paths():
+    raw = {
+        "schema_version": "brain_objects_query.v1",
+        "route": "authority_archive_separation",
+        "object_pack": {
+            "schema_version": "object_pack.v1",
+            "objects": [
+                {
+                    "schema_version": "knowledge_object_envelope.v1",
+                    "object_id": "ko:outer",
+                    "content_hash": "sha256:" + "a" * 64,
+                    "observed_at": "2026-07-15T03:00:00+00:00",
+                    "payload": {
+                        "nested_pack": {
+                            "schema_version": "object_pack.v1",
+                            "objects": [
+                                {
+                                    "schema_version": "knowledge_object_envelope.v1",
+                                    "object_id": "ko:nested",
+                                    "content_hash": "sha256:" + "b" * 64,
+                                    "observed_at": "nested-observation-a",
+                                }
+                            ],
+                        }
+                    },
+                }
+            ],
+            "edges": [],
+            "evidence": [],
+            "lanes": {},
+            "verification": {},
+        },
+    }
+    outer_drift = deepcopy(raw)
+    outer_drift["object_pack"]["objects"][0]["observed_at"] = (
+        "2026-07-15T03:01:00+00:00"
+    )
+    nested_drift = deepcopy(raw)
+    nested_drift["object_pack"]["objects"][0]["payload"]["nested_pack"][
+        "objects"
+    ][0]["observed_at"] = "nested-observation-b"
+
+    semantic_hash = post_deploy_mcp_capture._route_semantic_payload_hash
+    assert semantic_hash(raw) == semantic_hash(outer_drift)
+    assert semantic_hash(raw) != semantic_hash(nested_drift)
+
+
 def _collect_external_startup_capture(
     monkeypatch,
     *,
