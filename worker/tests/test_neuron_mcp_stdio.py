@@ -56,6 +56,10 @@ from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
 from agent_knowledge.llm_brain_core.knowledge_objects import EvidenceRef, KnowledgeEdge
 from agent_knowledge.llm_brain_core.models import CONTEXT_PACK_SCHEMA_VERSION, OntologyEpisode
 from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
+from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
+    build_source_to_candidate_runtime_readiness_report,
+)
+from agent_knowledge.public_safe_util import short_hash
 from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
 from object_query_route_cases import REQUIRED_OBJECT_QUERY_ROUTE_CASES
 
@@ -260,6 +264,160 @@ def _approval_board_candidate_pack(candidate_id: str, *, object_type: str = "Rep
         "recommended_actions": [{"object_id": candidate_id, "action": "promote"}],
         "gaps": [],
     }
+
+
+def _artifact_preference_candidate_pack(
+    candidate_id: str = "ko:ArtifactPreference:p7-html-review-density",
+    *,
+    project: str = PROJECT,
+) -> dict:
+    pack = _approval_board_candidate_pack(candidate_id, object_type="ArtifactPreference")
+    candidate = pack["objects"][0]
+    candidate.update(
+        {
+            "scope": {"project": project},
+            "title": "Dense HTML review artifacts",
+            "summary": "Prefer compact evidence-dense HTML review artifacts.",
+            "privacy_class": "public_safe",
+            "payload": {
+                "scope": "html review artifact",
+                "preference": "HTML review artifacts should be compact and evidence dense.",
+                "reason": "Dense review output makes decisions easier to verify.",
+            },
+        }
+    )
+    return pack
+
+
+def _promote_artifact_preference(
+    service: KnowledgeSearchService,
+    target_object_id: str,
+    *,
+    request_id: int,
+) -> dict:
+    return handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": _artifact_preference_candidate_pack(target_object_id),
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": target_object_id,
+                            "reason": "Promote reviewed ArtifactPreference authority.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]["decisions"][0]
+
+
+def _commit_local_artifact_preference(
+    service: KnowledgeSearchService,
+    target_object_id: str,
+    *,
+    request_id: int,
+    content_hash: str | None = None,
+    decision_id: str | None = None,
+) -> tuple[dict, dict]:
+    proposed_object = _artifact_preference_candidate_pack(target_object_id)["objects"][0]
+    if content_hash is not None:
+        proposed_object["content_hash"] = content_hash
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "proposed_object": proposed_object,
+                    "reason": "Accept reviewed local ArtifactPreference fixture.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    decision = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id + 1,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "accept_current",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "accepted_current",
+                    "approved_by": "human-reviewer",
+                    "decision_id": decision_id or f"decision:{target_object_id.rsplit(':', 1)[-1]}",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    return proposal, decision
+
+
+def _artifact_preference_authority_snapshot(
+    service: KnowledgeSearchService,
+    *,
+    target_object_id: str,
+    proposal_id: str,
+) -> dict:
+    return {
+        "proposal": service.ledger.get_object_review_proposal(proposal_id),
+        "state": service.ledger.get_object_authority_state(target_object_id),
+        "cards": service.ledger.list_llm_brain_memory_cards(
+            project=PROJECT,
+            accepted_only=True,
+            limit=50,
+        ),
+        "decisions": service.ledger.list_object_authority_decisions(
+            target_object_id=target_object_id,
+            limit=50,
+        ),
+    }
+
+
+def _stored_authority_decision(service: KnowledgeSearchService, decision_id: str) -> dict:
+    with service.ledger._connect() as connection:
+        row = connection.execute(
+            "SELECT decision_json FROM object_authority_decisions WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
+    return json.loads(row["decision_json"]) if row is not None else {}
+
+
+def _authority_storage_snapshot(service: KnowledgeSearchService) -> dict[str, list[dict]]:
+    tables = (
+        "object_review_proposals",
+        "object_authority_decisions",
+        "object_authority_states",
+        "llm_brain_memory_cards",
+    )
+    with service.ledger._connect() as connection:
+        return {
+            table: [dict(row) for row in connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()]
+            for table in tables
+        }
 
 
 def _service(tmp_path: Path) -> KnowledgeSearchService:
@@ -2141,6 +2299,1939 @@ def test_mcp_approval_board_production_gate_promotes_artifact_preference_to_auth
     assert result["updated_pack"]["lanes"]["accepted_current"][0]["object_type"] == "ArtifactPreference"
 
 
+def test_mcp_approval_board_materializes_artifact_preference_for_both_read_surfaces(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    target_object_id = "ko:ArtifactPreference:p7-html-review-density"
+    pack = _artifact_preference_candidate_pack(target_object_id)
+    pack["objects"][0]["payload"].update(
+        {
+            "repeated_count": 3,
+            "exceptions": ["Do not apply to private evidence.", "Human approval overrides this preference."],
+        }
+    )
+
+    promoted = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 129,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": pack,
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": target_object_id,
+                            "reason": "Promote reviewed artifact preference to canonical authority.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "reviewer_id": "reviewer-local",
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    object_query = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 130,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "project": PROJECT,
+                    "route": "code_style_preference",
+                    "query": "Apply my HTML review artifact preference.",
+                    "current_files": [],
+                    "consumer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    context = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 131,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "project": PROJECT,
+                    "current_request": "Apply my HTML review artifact preference.",
+                    "current_files": [],
+                    "consumer": "codex",
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    query_ids = {
+        obj["object_id"]
+        for obj in object_query["object_pack"]["lanes"]["accepted_current"]
+        if obj["object_type"] == "ArtifactPreference"
+    }
+    context_ids = {
+        obj["object_id"]
+        for obj in context["authority"]["agent_context_product"]["sections"]["style_preference"]["items"]
+        if obj["object_type"] == "ArtifactPreference" and obj["authority_lane"] == "accepted_current"
+    }
+    cards = service.ledger.list_llm_brain_memory_cards(project=PROJECT, accepted_only=True, limit=20)
+    canonical = [
+        card
+        for card in cards
+        if card.get("typed_payload", {}).get("target_object_id") == target_object_id
+    ]
+    brain_query = service.brain_query(
+        brain_id=f"/project/{PROJECT}",
+        query="Apply HTML review artifact preference.",
+        limit=8,
+    )
+    read_card = next(
+        card
+        for card in brain_query["current"]
+        if card.get("typed_payload", {}).get("target_object_id") == target_object_id
+    )
+
+    assert promoted["permission"] == "allowed"
+    assert target_object_id in query_ids
+    assert target_object_id in context_ids
+    assert target_object_id in query_ids.intersection(context_ids)
+    assert len(canonical) == 1
+    assert canonical[0]["currentness"] == "current"
+    assert canonical[0]["typed_payload"]["repeated_count"] == 3
+    assert canonical[0]["typed_payload"]["exceptions"] == [
+        "Do not apply to private evidence.",
+        "Human approval overrides this preference.",
+    ]
+    assert read_card["typed_payload"]["repeated_count"] == 3
+    assert read_card["typed_payload"]["exceptions"] == canonical[0]["typed_payload"]["exceptions"]
+    decision_id = promoted["decisions"][0]["decision_id"]
+    source_content_hash = _h(target_object_id)
+    assert canonical[0]["typed_payload"]["source_content_hash"] == source_content_hash
+    assert canonical[0]["typed_payload"]["authority_decision_id"] == decision_id
+    query_object = next(obj for obj in object_query["object_pack"]["objects"] if obj["object_id"] == target_object_id)
+    context_object = next(
+        obj
+        for obj in context["authority"]["agent_context_product"]["sections"]["style_preference"]["items"]
+        if obj["object_id"] == target_object_id
+    )
+    for read_object in (query_object, context_object):
+        assert read_object["scope"]["project"] == PROJECT
+        assert read_object["content_hash"] == source_content_hash
+        assert read_object["payload"]["authority_decision_id"] == decision_id
+
+
+@pytest.mark.parametrize(
+    ("payload_update", "expected_message"),
+    [
+        ({"repeated_count": True}, "repeated_count"),
+        ({"repeated_count": 1.0}, "repeated_count"),
+        ({"repeated_count": "3"}, "repeated_count"),
+        ({"repeated_count": 0}, "repeated_count"),
+        ({"repeated_count": -1}, "repeated_count"),
+        ({"exceptions": "one exception"}, "exceptions"),
+        ({"exceptions": ["safe exception", 1]}, "exceptions"),
+        ({"exceptions": ["raw transcript body"]}, "private or raw"),
+        ({"reason": {"dataset-id": "opaque-placeholder"}}, "forbidden field"),
+        ({"reason": {"datasetId": "opaque-placeholder"}}, "forbidden field"),
+        ({"reason": ["unexpected nested value"]}, "public-safe string"),
+        ({"preference": {"text": "unexpected nested value"}}, "public-safe string"),
+        ({"reason": "documentId=opaque-placeholder"}, "raw external ID"),
+    ],
+)
+def test_mcp_artifact_preference_invalid_typed_payload_fails_before_proposal_decision_or_card_mutation(
+    tmp_path: Path,
+    payload_update: dict,
+    expected_message: str,
+):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    target_object_id = "ko:ArtifactPreference:p7-invalid-typed-payload"
+    pack = _artifact_preference_candidate_pack(target_object_id)
+    pack["objects"][0]["payload"].update(payload_update)
+
+    with pytest.raises(ValueError, match=expected_message):
+        service.brain_approval_board_decide(
+            target="production",
+            pack=pack,
+            decisions=[
+                {
+                    "action": "promote",
+                    "object_id": target_object_id,
+                    "reason": "Invalid typed payload must fail before mutation.",
+                    "approved_by": "reviewer-local",
+                }
+            ],
+            reviewer_id="reviewer-local",
+            production_gate=_approval_board_production_gate(),
+        )
+
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+    assert service.ledger.get_object_authority_state(target_object_id) == {}
+    assert not any(
+        card.get("typed_payload", {}).get("target_object_id") == target_object_id
+        for card in service.ledger.list_llm_brain_memory_cards(project=PROJECT, accepted_only=True, limit=20)
+    )
+
+
+def test_mcp_artifact_preference_snapshot_defaults_missing_exceptions_to_empty_list(tmp_path: Path):
+    service = _service(tmp_path)
+    target_object_id = "ko:ArtifactPreference:p7-default-exceptions"
+
+    snapshot = service.prepare_proposed_object_snapshot(
+        _artifact_preference_candidate_pack(target_object_id)["objects"][0],
+        target_object_id=target_object_id,
+        project=PROJECT,
+    )
+
+    assert snapshot["payload"]["exceptions"] == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("payload", []),
+        ("confidence", "high"),
+    ],
+)
+def test_mcp_artifact_preference_rejects_non_object_snapshot_sections_without_mutation(
+    tmp_path: Path,
+    field: str,
+    value: object,
+):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    target_object_id = f"ko:ArtifactPreference:p7-malformed-{field}"
+    pack = _artifact_preference_candidate_pack(target_object_id)
+    pack["objects"][0][field] = value
+
+    before = _authority_storage_snapshot(service)
+    with pytest.raises(ValueError, match=field):
+        service.brain_approval_board_decide(
+            target="production",
+            pack=pack,
+            decisions=[
+                {
+                    "action": "promote",
+                    "object_id": target_object_id,
+                    "reason": "Malformed snapshot sections must fail before mutation.",
+                    "approved_by": "reviewer-local",
+                }
+            ],
+            reviewer_id="reviewer-local",
+            production_gate=_approval_board_production_gate(),
+        )
+
+    assert _authority_storage_snapshot(service) == before
+
+
+def test_mcp_local_runtime_collector_keeps_route_alignment_but_does_not_fabricate_artifact_consumer_proof(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    target_object_id = "ko:ArtifactPreference:p7-live-read-evidence"
+    handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 136,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": _artifact_preference_candidate_pack(target_object_id),
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": target_object_id,
+                            "reason": "Promote live P7 evidence fixture.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )
+
+    live_packet = service.brain_source_to_candidate_runtime_readiness(
+        collect_shadow_evidence=True,
+        evidence_collection_mode="post_deploy_read_only_smoke",
+        evidence_collection_network_used=True,
+        repository=FIXTURE_REPOSITORY,
+        branch=FIXTURE_BRANCH,
+        consumer="codex",
+    )
+    replay_packet = service.brain_source_to_candidate_runtime_readiness(
+        collect_shadow_evidence=True,
+        evidence_collection_mode="local_test_replay",
+        evidence_collection_network_used=False,
+        repository=FIXTURE_REPOSITORY,
+        branch=FIXTURE_BRANCH,
+        consumer="codex",
+    )
+
+    runtime_p7 = live_packet["preference_artifact_memory"]
+    assert "evidence_class" not in runtime_p7
+    assert "evidence_source" not in runtime_p7
+    assert runtime_p7["attestation_state"] == "unattested_runtime_read"
+    assert runtime_p7["read_surface_alignment"]["status"] == "validated"
+    assert runtime_p7["read_surface_alignment"]["target_object_id"] == target_object_id
+    assert runtime_p7["artifact_review_check"]["status"] == "failed"
+    assert "actual_artifact_consumer_provenance_missing" in runtime_p7["artifact_review_check"]["failures"]
+    assert "artifact_consumer_evidence_missing" in runtime_p7["gaps"]
+    live_report = build_source_to_candidate_runtime_readiness_report(live_evidence=live_packet)
+    assert "live.preference_artifact.memory" in live_report["failed_claims"]
+    assert live_packet["production_mutation_performed"] is False
+    assert "evidence_class" not in replay_packet["preference_artifact_memory"]
+    assert replay_packet["collector"]["readiness_claim"] == "collector_packet_not_live_evidence"
+
+
+def test_mcp_artifact_preference_supersession_links_distinct_memory_cards_reciprocally(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    prior_target = "ko:ArtifactPreference:p7-prior-lineage"
+    successor_target = "ko:ArtifactPreference:p7-successor-lineage"
+    _promote_artifact_preference(service, prior_target, request_id=1360)
+    successor_decision = _promote_artifact_preference(service, successor_target, request_id=1361)
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1362,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_supersede",
+                    "target_object_id": prior_target,
+                    "reason": "Replace prior ArtifactPreference with reviewed successor.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1363,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "commit_supersession",
+                    "target_object_id": prior_target,
+                    "previous_authority_lane": "accepted_current",
+                    "new_authority_lane": "accepted_non_current",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:p7-prior-lineage-superseded",
+                    "supersedes_decision_id": successor_decision["decision_id"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    assert "error" not in response
+    cards = service.ledger.list_llm_brain_memory_cards(project=PROJECT, accepted_only=True, limit=20)
+    prior = next(card for card in cards if card.get("typed_payload", {}).get("target_object_id") == prior_target)
+    successor = next(
+        card for card in cards if card.get("typed_payload", {}).get("target_object_id") == successor_target
+    )
+    assert prior["memory_id"] != successor["memory_id"]
+    assert prior["currentness"] == "superseded"
+    assert prior["superseded_by"] == [successor["memory_id"]]
+    assert successor["supersedes"] == [prior["memory_id"]]
+
+
+def test_mcp_artifact_preference_exact_retry_keeps_one_immutable_lineage_version(tmp_path: Path):
+    service = _service(tmp_path)
+    target_object_id = "ko:ArtifactPreference:p7-exact-retry"
+    proposal, decision = _commit_local_artifact_preference(
+        service,
+        target_object_id,
+        request_id=1364,
+    )
+    content_hash = _h(target_object_id)
+    expected_memory_id = "mem_artifact_preference_" + short_hash(
+        [target_object_id, content_hash, proposal["proposal_id"], decision["decision_id"]],
+        length=24,
+    )
+    before_retry = _authority_storage_snapshot(service)
+
+    retry = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1366,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "accept_current",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "accepted_current",
+                    "approved_by": "human-reviewer",
+                    "decision_id": decision["decision_id"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    cards = [
+        card
+        for card in service.ledger.list_llm_brain_memory_cards(project=PROJECT, accepted_only=True, limit=50)
+        if card.get("typed_payload", {}).get("target_object_id") == target_object_id
+    ]
+    decisions = service.ledger.list_object_authority_decisions(
+        target_object_id=target_object_id,
+        limit=50,
+    )
+    assert "error" not in retry
+    assert len(cards) == 1
+    assert cards[0]["memory_id"] == expected_memory_id
+    assert cards[0]["typed_payload"]["authority_proposal_id"] == proposal["proposal_id"]
+    assert cards[0]["typed_payload"]["authority_decision_id"] == decision["decision_id"]
+    assert [item["decision_id"] for item in decisions] == [decision["decision_id"]]
+    assert _authority_storage_snapshot(service) == before_retry
+
+
+def test_mcp_pending_artifact_preference_proposal_rejects_same_id_snapshot_drift_atomically(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+    target_object_id = "ko:ArtifactPreference:p7-pending-proposal-drift"
+    proposed_object = _artifact_preference_candidate_pack(target_object_id)["objects"][0]
+    arguments = {
+        "proposal_type": "propose_current",
+        "target_object_id": target_object_id,
+        "reason": "Review pending ArtifactPreference fixture.",
+        "evidence_refs": ["ev:p7-pending-proposal"],
+        "project": PROJECT,
+        "ledger_scope": "local_test",
+        "proposed_object": proposed_object,
+    }
+    first = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1490,
+            "method": "tools/call",
+            "params": {"name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME, "arguments": arguments},
+        },
+        service,
+    )["result"]["structuredContent"]
+    before = _authority_storage_snapshot(service)
+    changed_object = _artifact_preference_candidate_pack(target_object_id)["objects"][0]
+    changed_object["summary"] = "A drifted snapshot must not replace the reviewed proposal."
+    changed_object["content_hash"] = _h("p7-pending-proposal-drifted")
+
+    retry = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1491,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {**arguments, "proposed_object": changed_object},
+            },
+        },
+        service,
+    )
+
+    assert "error" in retry
+    assert service.ledger.get_object_review_proposal(first["proposal_id"])["proposed_object"] == (
+        first["proposed_object"]
+    )
+    assert _authority_storage_snapshot(service) == before
+
+
+@pytest.mark.parametrize(
+    ("surface", "unsafe_ref"),
+    [
+        ("proposal", "datasetId:opaque-placeholder"),
+        ("proposal", {"ref": "opaque-placeholder"}),
+        ("proposal_mapping", {"ev:p7-safe-key": "opaque-placeholder"}),
+        ("decision", "%64ocument-id%3Dopaque-placeholder"),
+        ("decision_mapping", {"ev:p7-safe-key": "opaque-placeholder"}),
+    ],
+)
+def test_mcp_artifact_preference_top_level_evidence_refs_fail_closed_atomically(
+    tmp_path: Path,
+    surface: str,
+    unsafe_ref: object,
+):
+    service = _service(tmp_path)
+    target_object_id = f"ko:ArtifactPreference:p7-top-level-ref-{surface}"
+    proposed_object = _artifact_preference_candidate_pack(target_object_id)["objects"][0]
+    proposal_arguments = {
+        "proposal_type": "propose_current",
+        "target_object_id": target_object_id,
+        "reason": "Top-level evidence refs must remain public-safe.",
+        "evidence_refs": (
+            unsafe_ref
+            if surface == "proposal_mapping"
+            else [unsafe_ref]
+            if surface == "proposal"
+            else ["ev:p7-safe-proposal"]
+        ),
+        "project": PROJECT,
+        "ledger_scope": "local_test",
+        "proposed_object": proposed_object,
+    }
+    before = _authority_storage_snapshot(service)
+    proposal_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1492,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": proposal_arguments,
+            },
+        },
+        service,
+    )
+    if surface.startswith("proposal"):
+        assert "error" in proposal_response
+        assert _authority_storage_snapshot(service) == before
+        return
+
+    proposal = proposal_response["result"]["structuredContent"]
+    after_proposal = _authority_storage_snapshot(service)
+    decision_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1493,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "accept_current",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "accepted_current",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:p7-top-level-ref-decision",
+                    "evidence_refs": unsafe_ref if surface == "decision_mapping" else [unsafe_ref],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    assert "error" in decision_response
+    assert _authority_storage_snapshot(service) == after_proposal
+
+
+def test_mcp_approved_artifact_preference_proposal_rejects_same_id_snapshot_drift_atomically(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+    target_object_id = "ko:ArtifactPreference:p7-approved-proposal-drift"
+    proposal, _ = _commit_local_artifact_preference(
+        service,
+        target_object_id,
+        request_id=1500,
+    )
+    before = _artifact_preference_authority_snapshot(
+        service,
+        target_object_id=target_object_id,
+        proposal_id=proposal["proposal_id"],
+    )
+    changed_object = _artifact_preference_candidate_pack(target_object_id)["objects"][0]
+    changed_object["content_hash"] = _h(f"{target_object_id}-drift")
+    changed_object["payload"]["preference"] = "Use a different approved preference snapshot."
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1502,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "proposed_object": changed_object,
+                    "reason": "Accept reviewed local ArtifactPreference fixture.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    assert "error" in response
+    assert _artifact_preference_authority_snapshot(
+        service,
+        target_object_id=target_object_id,
+        proposal_id=proposal["proposal_id"],
+    ) == before
+
+
+@pytest.mark.parametrize("drift", ["reason", "evidence", "approver"])
+def test_mcp_approved_artifact_preference_decision_rejects_same_id_payload_drift_atomically(
+    tmp_path: Path,
+    drift: str,
+):
+    service = _service(tmp_path)
+    target_object_id = f"ko:ArtifactPreference:p7-approved-decision-{drift}"
+    proposal, decision = _commit_local_artifact_preference(
+        service,
+        target_object_id,
+        request_id=1510,
+    )
+    before = _artifact_preference_authority_snapshot(
+        service,
+        target_object_id=target_object_id,
+        proposal_id=proposal["proposal_id"],
+    )
+    arguments = {
+        "proposal_id": proposal["proposal_id"],
+        "decision_type": "accept_current",
+        "target_object_id": target_object_id,
+        "previous_authority_lane": "proposal_only",
+        "new_authority_lane": "accepted_current",
+        "approved_by": "human-reviewer",
+        "decision_id": decision["decision_id"],
+        "ledger_scope": "local_test",
+        "project": PROJECT,
+    }
+    if drift == "reason":
+        arguments["decision_reason"] = "A changed reason must not rewrite approved lineage."
+    elif drift == "evidence":
+        arguments["evidence_refs"] = ["ev:changed-approved-lineage"]
+    else:
+        arguments["approved_by"] = "different-human-reviewer"
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1512,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": arguments,
+            },
+        },
+        service,
+    )
+
+    assert "error" in response
+    assert _artifact_preference_authority_snapshot(
+        service,
+        target_object_id=target_object_id,
+        proposal_id=proposal["proposal_id"],
+    ) == before
+
+
+@pytest.mark.parametrize("existing_lineage_source", ["decision_target", "decision_proposal"])
+def test_mcp_generic_decision_cannot_overwrite_existing_artifact_preference_decision_id(
+    tmp_path: Path,
+    existing_lineage_source: str,
+):
+    service = _service(tmp_path)
+    artifact_target = f"ko:ArtifactPreference:p7-generic-collision-{existing_lineage_source}"
+    artifact_proposal, artifact_decision = _commit_local_artifact_preference(
+        service,
+        artifact_target,
+        request_id=1514,
+    )
+    if existing_lineage_source == "decision_proposal":
+        with service.ledger._connect() as connection:
+            stored = _stored_authority_decision(service, artifact_decision["decision_id"])
+            stored["target_object_id"] = "ko:RepoDocument:p7-legacy-generic-owner"
+            connection.execute(
+                "UPDATE object_authority_decisions SET target_object_id = ?, decision_json = ? WHERE decision_id = ?",
+                (
+                    stored["target_object_id"],
+                    json.dumps(stored),
+                    artifact_decision["decision_id"],
+                ),
+            )
+
+    generic_target = f"ko:RepoDocument:p7-incoming-collision-{existing_lineage_source}"
+    generic_proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1516,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "request_evidence",
+                    "target_object_id": generic_target,
+                    "reason": "A generic proposal must not capture an ArtifactPreference decision ID.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    artifact_before = _artifact_preference_authority_snapshot(
+        service,
+        target_object_id=artifact_target,
+        proposal_id=artifact_proposal["proposal_id"],
+    )
+    decision_before = _stored_authority_decision(service, artifact_decision["decision_id"])
+    generic_proposal_before = service.ledger.get_object_review_proposal(generic_proposal["proposal_id"])
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1517,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": generic_proposal["proposal_id"],
+                    "decision_type": "reject_candidate",
+                    "target_object_id": generic_target,
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "rejected",
+                    "approved_by": "human-reviewer",
+                    "decision_id": artifact_decision["decision_id"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    assert "error" in response
+    assert _stored_authority_decision(service, artifact_decision["decision_id"]) == decision_before
+    assert service.ledger.get_object_review_proposal(generic_proposal["proposal_id"]) == generic_proposal_before
+    assert service.ledger.get_object_authority_state(generic_target) == {}
+    assert _artifact_preference_authority_snapshot(
+        service,
+        target_object_id=artifact_target,
+        proposal_id=artifact_proposal["proposal_id"],
+    ) == artifact_before
+
+
+@pytest.mark.parametrize("existing_object_type", ["RepoDocument", "ArtifactPreference"])
+def test_approved_proposal_collision_with_artifact_preference_on_either_side_fails_atomically(
+    tmp_path: Path,
+    existing_object_type: str,
+):
+    service = _service(tmp_path)
+    existing_target = f"ko:{existing_object_type}:p7-proposal-collision-existing"
+    if existing_object_type == "ArtifactPreference":
+        existing_proposal, _ = _commit_local_artifact_preference(
+            service,
+            existing_target,
+            request_id=1570,
+        )
+        incoming_target = "ko:RepoDocument:p7-proposal-collision-incoming"
+        incoming = dict(service.ledger.get_object_review_proposal(existing_proposal["proposal_id"]))
+        incoming.update(
+            {
+                "proposal_type": "request_evidence",
+                "target_object_id": incoming_target,
+                "object_type": "RepoDocument",
+                "status": "needs_review",
+                "reason": "A generic retry must not capture approved ArtifactPreference lineage.",
+            }
+        )
+        incoming.pop("proposed_object", None)
+    else:
+        existing_proposal = handle_jsonrpc_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1572,
+                "method": "tools/call",
+                "params": {
+                    "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                    "arguments": {
+                        "proposal_type": "request_evidence",
+                        "target_object_id": existing_target,
+                        "reason": "Approve a generic proposal before collision testing.",
+                        "ledger_scope": "local_test",
+                        "project": PROJECT,
+                    },
+                },
+            },
+            service,
+        )["result"]["structuredContent"]
+        handle_jsonrpc_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1573,
+                "method": "tools/call",
+                "params": {
+                    "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                    "arguments": {
+                        "proposal_id": existing_proposal["proposal_id"],
+                        "decision_type": "reject_candidate",
+                        "target_object_id": existing_target,
+                        "previous_authority_lane": "proposal_only",
+                        "new_authority_lane": "rejected",
+                        "approved_by": "human-reviewer",
+                        "decision_id": "decision:p7-approved-generic-proposal",
+                        "ledger_scope": "local_test",
+                        "project": PROJECT,
+                    },
+                },
+            },
+            service,
+        )
+        incoming_target = "ko:ArtifactPreference:p7-proposal-collision-incoming"
+        incoming = dict(service.ledger.get_object_review_proposal(existing_proposal["proposal_id"]))
+        incoming.update(
+            {
+                "proposal_type": "propose_current",
+                "target_object_id": incoming_target,
+                "object_type": "ArtifactPreference",
+                "status": "needs_review",
+                "reason": "ArtifactPreference must not capture approved generic lineage.",
+                "proposed_object": service.prepare_proposed_object_snapshot(
+                    _artifact_preference_candidate_pack(incoming_target)["objects"][0],
+                    target_object_id=incoming_target,
+                    project=PROJECT,
+                ),
+            }
+        )
+    before = _authority_storage_snapshot(service)
+
+    with pytest.raises(ValueError, match="ArtifactPreference proposal lineage is immutable"):
+        service.append_object_review_proposal(incoming)
+
+    assert _authority_storage_snapshot(service) == before
+
+
+def test_mcp_completed_artifact_preference_rollback_exact_retry_is_storage_noop_and_drift_fails(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+    target_object_id = "ko:ArtifactPreference:p7-completed-rollback-retry"
+    _, accepted = _commit_local_artifact_preference(service, target_object_id, request_id=1580)
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1582,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_retire",
+                    "target_object_id": target_object_id,
+                    "reason": "Rollback the reviewed current ArtifactPreference.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    arguments = {
+        "proposal_id": proposal["proposal_id"],
+        "decision_type": "rollback_decision",
+        "target_object_id": target_object_id,
+        "previous_authority_lane": "accepted_current",
+        "new_authority_lane": "archive_only",
+        "approved_by": "human-reviewer",
+        "decision_id": "decision:p7-completed-rollback-retry-final",
+        "rollback_of_decision_id": accepted["decision_id"],
+        "ledger_scope": "local_test",
+        "project": PROJECT,
+    }
+    committed = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1583,
+            "method": "tools/call",
+            "params": {"name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME, "arguments": arguments},
+        },
+        service,
+    )["result"]["structuredContent"]
+    before = _authority_storage_snapshot(service)
+
+    retry = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1584,
+            "method": "tools/call",
+            "params": {"name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME, "arguments": arguments},
+        },
+        service,
+    )
+
+    assert "error" not in retry
+    assert retry["result"]["structuredContent"] == committed
+    assert _authority_storage_snapshot(service) == before
+
+    drifted = dict(arguments)
+    drifted["decision_reason"] = "Changed rollback payload must fail closed."
+    drift = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1585,
+            "method": "tools/call",
+            "params": {"name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME, "arguments": drifted},
+        },
+        service,
+    )
+    assert "error" in drift
+    assert _authority_storage_snapshot(service) == before
+
+
+def test_mcp_completed_artifact_preference_supersession_exact_retry_is_storage_noop_and_drift_fails(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+    prior_target = "ko:ArtifactPreference:p7-completed-supersession-prior"
+    successor_target = "ko:ArtifactPreference:p7-completed-supersession-successor"
+    _commit_local_artifact_preference(service, prior_target, request_id=1590)
+    _, successor_decision = _commit_local_artifact_preference(service, successor_target, request_id=1592)
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1594,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_supersede",
+                    "target_object_id": prior_target,
+                    "reason": "Replace prior authority with the reviewed successor.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    arguments = {
+        "proposal_id": proposal["proposal_id"],
+        "decision_type": "commit_supersession",
+        "target_object_id": prior_target,
+        "previous_authority_lane": "accepted_current",
+        "new_authority_lane": "accepted_non_current",
+        "approved_by": "human-reviewer",
+        "decision_id": "decision:p7-completed-supersession-retry",
+        "supersedes_decision_id": successor_decision["decision_id"],
+        "ledger_scope": "local_test",
+        "project": PROJECT,
+    }
+    committed = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1595,
+            "method": "tools/call",
+            "params": {"name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME, "arguments": arguments},
+        },
+        service,
+    )["result"]["structuredContent"]
+    before = _authority_storage_snapshot(service)
+
+    retry = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1596,
+            "method": "tools/call",
+            "params": {"name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME, "arguments": arguments},
+        },
+        service,
+    )
+
+    assert "error" not in retry
+    assert retry["result"]["structuredContent"] == committed
+    assert _authority_storage_snapshot(service) == before
+
+    drifted = dict(arguments)
+    drifted["evidence_refs"] = ["ev:changed-supersession-retry"]
+    drift = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1597,
+            "method": "tools/call",
+            "params": {"name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME, "arguments": drifted},
+        },
+        service,
+    )
+    assert "error" in drift
+    assert _authority_storage_snapshot(service) == before
+
+
+@pytest.mark.parametrize("ledger_scope", ["local_test", "production"])
+def test_mcp_approved_artifact_preference_proposal_exact_retry_returns_canonical_noop_response(
+    tmp_path: Path,
+    ledger_scope: str,
+):
+    service = _service(tmp_path)
+    target_object_id = f"ko:ArtifactPreference:p7-proposal-response-{ledger_scope}"
+    proposed_object = _artifact_preference_candidate_pack(target_object_id)["objects"][0]
+    if ledger_scope == "local_test":
+        first_proposal, _ = _commit_local_artifact_preference(
+            service,
+            target_object_id,
+            request_id=1600,
+        )
+        arguments = {
+            "proposal_type": "propose_current",
+            "target_object_id": target_object_id,
+            "proposed_object": proposed_object,
+            "reason": "Accept reviewed local ArtifactPreference fixture.",
+            "ledger_scope": "local_test",
+            "project": PROJECT,
+        }
+        assert first_proposal["proposal_write_performed"] is True
+    else:
+        service.allow_production_object_authority_writes = True
+        promoted = _promote_artifact_preference(service, target_object_id, request_id=1602)
+        first_proposal = service.ledger.get_object_review_proposal(promoted["proposal_id"])
+        arguments = {
+            "proposal_type": first_proposal["proposal_type"],
+            "target_object_id": target_object_id,
+            "proposed_object": proposed_object,
+            "reason": first_proposal["reason"],
+            "evidence_refs": first_proposal["evidence_refs"],
+            "proposer": first_proposal["proposer"],
+            "ledger_scope": "production",
+            "project": PROJECT,
+            "production_gate": _approval_board_production_gate(),
+        }
+    canonical = service.ledger.get_object_review_proposal(first_proposal["proposal_id"])
+    before = _authority_storage_snapshot(service)
+
+    retry = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1604,
+            "method": "tools/call",
+            "params": {"name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME, "arguments": arguments},
+        },
+        service,
+    )
+
+    assert "error" not in retry
+    result = retry["result"]["structuredContent"]
+    assert result["proposal_id"] == canonical["proposal_id"]
+    assert result["status"] == canonical["status"] == "accepted"
+    assert result["decision_id"] == canonical["decision_id"]
+    assert result["proposal_write_performed"] is False
+    assert result["authority_write_performed"] is False
+    assert result["authoritative_memory_changed"] is False
+    assert result["production_mutation_performed"] is False
+    assert _authority_storage_snapshot(service) == before
+
+
+@pytest.mark.parametrize("ledger_scope", ["local_test", "production"])
+def test_mcp_artifact_preference_propose_current_requires_snapshot_before_any_mutation(
+    tmp_path: Path,
+    ledger_scope: str,
+):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    target_object_id = f"ko:ArtifactPreference:p7-missing-snapshot-{ledger_scope}"
+    arguments = {
+        "proposal_type": "propose_current",
+        "target_object_id": target_object_id,
+        "reason": "A materialization proposal requires its reviewed snapshot.",
+        "ledger_scope": ledger_scope,
+        "project": PROJECT,
+    }
+    if ledger_scope == "production":
+        arguments["production_gate"] = _approval_board_production_gate()
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1520,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": arguments,
+            },
+        },
+        service,
+    )
+
+    assert "error" in response
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+    assert service.ledger.get_object_authority_state(target_object_id) == {}
+    assert not any(
+        card.get("typed_payload", {}).get("target_object_id") == target_object_id
+        for card in service.ledger.list_llm_brain_memory_cards(
+            project=PROJECT,
+            accepted_only=True,
+            limit=20,
+        )
+    )
+
+
+@pytest.mark.parametrize("proposal_type", ["propose_retire", "request_evidence"])
+def test_mcp_artifact_preference_non_materialization_proposal_allows_missing_snapshot(
+    tmp_path: Path,
+    proposal_type: str,
+):
+    service = _service(tmp_path)
+    target_object_id = f"ko:ArtifactPreference:p7-no-snapshot-{proposal_type}"
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1522,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": proposal_type,
+                    "target_object_id": target_object_id,
+                    "reason": "Non-materialization review keeps rollback and evidence flow open.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    assert "error" not in response
+    proposal = response["result"]["structuredContent"]
+    assert proposal["proposal_type"] == proposal_type
+    assert "proposed_object" not in proposal
+    assert service.ledger.get_object_review_proposal(proposal["proposal_id"]) == proposal
+
+
+def test_mcp_current_artifact_preference_reject_candidate_fails_without_partial_mutation(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+    target_object_id = "ko:ArtifactPreference:p7-current-reject-blocked"
+    _commit_local_artifact_preference(service, target_object_id, request_id=1530)
+    proposal_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1532,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "request_evidence",
+                    "target_object_id": target_object_id,
+                    "reason": "Request more evidence without removing current authority.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+    proposal = proposal_response["result"]["structuredContent"]
+    before = _artifact_preference_authority_snapshot(
+        service,
+        target_object_id=target_object_id,
+        proposal_id=proposal["proposal_id"],
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1533,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "reject_candidate",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "accepted_current",
+                    "new_authority_lane": "rejected",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:p7-current-reject-blocked",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    assert "error" in response
+    assert _artifact_preference_authority_snapshot(
+        service,
+        target_object_id=target_object_id,
+        proposal_id=proposal["proposal_id"],
+    ) == before
+
+
+def test_mcp_fresh_artifact_preference_candidate_can_still_be_rejected(tmp_path: Path):
+    service = _service(tmp_path)
+    target_object_id = "ko:ArtifactPreference:p7-fresh-reject-allowed"
+    proposed_object = _artifact_preference_candidate_pack(target_object_id)["objects"][0]
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1540,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "proposed_object": proposed_object,
+                    "reason": "Reject a fresh candidate after review.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1541,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "reject_candidate",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "proposal_only",
+                    "new_authority_lane": "rejected",
+                    "approved_by": "human-reviewer",
+                    "decision_id": "decision:p7-fresh-reject-allowed",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    assert "error" not in response
+    assert service.ledger.get_object_authority_state(target_object_id)["authority_lane"] == "rejected"
+    assert service.ledger.get_object_review_proposal(proposal["proposal_id"])["status"] == "rejected"
+    assert not any(
+        card.get("typed_payload", {}).get("target_object_id") == target_object_id
+        for card in service.ledger.list_llm_brain_memory_cards(
+            project=PROJECT,
+            accepted_only=True,
+            limit=20,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("previous_lane", "new_lane"),
+    [("proposal_only", "archive_only"), ("accepted_current", "accepted_non_current")],
+)
+def test_mcp_artifact_preference_rollback_requires_exact_transition_atomically(
+    tmp_path: Path,
+    previous_lane: str,
+    new_lane: str,
+):
+    service = _service(tmp_path)
+    target_object_id = f"ko:ArtifactPreference:p7-rollback-transition-{new_lane}"
+    _, accepted = _commit_local_artifact_preference(service, target_object_id, request_id=1550)
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1552,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_retire",
+                    "target_object_id": target_object_id,
+                    "reason": "Rollback requires its exact authority transition.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    before = _artifact_preference_authority_snapshot(
+        service,
+        target_object_id=target_object_id,
+        proposal_id=proposal["proposal_id"],
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1553,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "rollback_decision",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": previous_lane,
+                    "new_authority_lane": new_lane,
+                    "approved_by": "human-reviewer",
+                    "decision_id": f"decision:p7-invalid-rollback-{new_lane}",
+                    "rollback_of_decision_id": accepted["decision_id"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    assert "error" in response
+    assert _artifact_preference_authority_snapshot(
+        service,
+        target_object_id=target_object_id,
+        proposal_id=proposal["proposal_id"],
+    ) == before
+
+
+@pytest.mark.parametrize("invalid_kind", ["transition", "prior_state", "successor_state"])
+def test_mcp_artifact_preference_supersession_validates_transition_and_both_states_atomically(
+    tmp_path: Path,
+    invalid_kind: str,
+):
+    service = _service(tmp_path)
+    prior_target = f"ko:ArtifactPreference:p7-supersession-prior-{invalid_kind}"
+    successor_target = f"ko:ArtifactPreference:p7-supersession-successor-{invalid_kind}"
+    _commit_local_artifact_preference(service, prior_target, request_id=1560)
+    _, successor_decision = _commit_local_artifact_preference(service, successor_target, request_id=1562)
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1564,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_supersede",
+                    "target_object_id": prior_target,
+                    "reason": "Supersession requires exact prior and successor lineage.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    previous_lane = "accepted_current"
+    new_lane = "accepted_non_current"
+    if invalid_kind == "transition":
+        new_lane = "archive_only"
+    else:
+        drift_target = prior_target if invalid_kind == "prior_state" else successor_target
+        with service.ledger._connect() as connection:
+            state = service.ledger.get_object_authority_state(drift_target)
+            state["decision_id"] = f"decision:p7-drifted-{invalid_kind}"
+            connection.execute(
+                "UPDATE object_authority_states SET decision_id = ?, state_json = ? WHERE target_object_id = ?",
+                (state["decision_id"], json.dumps(state), drift_target),
+            )
+    prior_before = _artifact_preference_authority_snapshot(
+        service,
+        target_object_id=prior_target,
+        proposal_id=proposal["proposal_id"],
+    )
+    successor_before = _artifact_preference_authority_snapshot(
+        service,
+        target_object_id=successor_target,
+        proposal_id=successor_decision["proposal_id"],
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1565,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "commit_supersession",
+                    "target_object_id": prior_target,
+                    "previous_authority_lane": previous_lane,
+                    "new_authority_lane": new_lane,
+                    "approved_by": "human-reviewer",
+                    "decision_id": f"decision:p7-invalid-supersession-{invalid_kind}",
+                    "supersedes_decision_id": successor_decision["decision_id"],
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    assert "error" in response
+    assert _artifact_preference_authority_snapshot(
+        service,
+        target_object_id=prior_target,
+        proposal_id=proposal["proposal_id"],
+    ) == prior_before
+    assert _artifact_preference_authority_snapshot(
+        service,
+        target_object_id=successor_target,
+        proposal_id=successor_decision["proposal_id"],
+    ) == successor_before
+
+
+@pytest.mark.parametrize("changed", ["content", "proposal_lineage"])
+def test_mcp_artifact_preference_reapproval_of_same_target_rejects_new_version_atomically(
+    tmp_path: Path,
+    changed: str,
+):
+    service = _service(tmp_path)
+    target_object_id = f"ko:ArtifactPreference:p7-immutable-{changed}"
+    original_proposal, original_decision = _commit_local_artifact_preference(
+        service,
+        target_object_id,
+        request_id=1367,
+    )
+    proposed_object = _artifact_preference_candidate_pack(target_object_id)["objects"][0]
+    if changed == "content":
+        proposed_object["content_hash"] = _h(f"{target_object_id}-changed-content")
+        proposed_object["payload"]["preference"] = "Use a materially different reviewed preference."
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1369,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_current",
+                    "target_object_id": target_object_id,
+                    "proposed_object": proposed_object,
+                    "reason": f"Create a distinct {changed} proposal for the same target.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    assert proposal["proposal_id"] != original_proposal["proposal_id"]
+
+    proposal_before = service.ledger.get_object_review_proposal(proposal["proposal_id"])
+    state_before = service.ledger.get_object_authority_state(target_object_id)
+    cards_before = service.ledger.list_llm_brain_memory_cards(project=PROJECT, accepted_only=True, limit=50)
+    decisions_before = service.ledger.list_object_authority_decisions(
+        target_object_id=target_object_id,
+        limit=50,
+    )
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1370,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "accept_current",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "accepted_current",
+                    "new_authority_lane": "accepted_current",
+                    "approved_by": "human-reviewer",
+                    "decision_id": f"decision:p7-immutable-reapproval-{changed}",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    assert "error" in response
+    assert service.ledger.get_object_review_proposal(proposal["proposal_id"]) == proposal_before
+    assert service.ledger.get_object_authority_state(target_object_id) == state_before
+    assert state_before["decision_id"] == original_decision["decision_id"]
+    assert service.ledger.list_llm_brain_memory_cards(
+        project=PROJECT,
+        accepted_only=True,
+        limit=50,
+    ) == cards_before
+    assert service.ledger.list_object_authority_decisions(
+        target_object_id=target_object_id,
+        limit=50,
+    ) == decisions_before
+
+
+@pytest.mark.parametrize("related_decision", ["missing", "self"])
+def test_mcp_artifact_preference_supersession_rejects_invalid_related_decision_atomically(
+    tmp_path: Path,
+    related_decision: str,
+):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    prior_target = f"ko:ArtifactPreference:p7-invalid-lineage-{related_decision}"
+    prior_decision = _promote_artifact_preference(service, prior_target, request_id=1370)
+    proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1371,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_supersede",
+                    "target_object_id": prior_target,
+                    "reason": "Invalid lineage must fail closed.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    related_id = (
+        "decision:p7-missing-related"
+        if related_decision == "missing"
+        else prior_decision["decision_id"]
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1372,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": proposal["proposal_id"],
+                    "decision_type": "commit_supersession",
+                    "target_object_id": prior_target,
+                    "previous_authority_lane": "accepted_current",
+                    "new_authority_lane": "accepted_non_current",
+                    "approved_by": "human-reviewer",
+                    "decision_id": f"decision:p7-invalid-lineage-{related_decision}",
+                    "supersedes_decision_id": related_id,
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    assert "error" in response
+    state = service.ledger.get_object_authority_state(prior_target)
+    assert state["decision_id"] == prior_decision["decision_id"]
+    card = next(
+        card
+        for card in service.ledger.list_llm_brain_memory_cards(project=PROJECT, accepted_only=True, limit=20)
+        if card.get("typed_payload", {}).get("target_object_id") == prior_target
+    )
+    assert card["currentness"] == "current"
+    assert card["superseded_by"] == []
+
+
+def test_mcp_artifact_preference_rollback_removes_canonical_read_authority(tmp_path: Path):
+    service = _service(tmp_path)
+    target_object_id = "ko:ArtifactPreference:p7-html-review-rollback"
+    _, promoted = _commit_local_artifact_preference(
+        service,
+        target_object_id,
+        request_id=132,
+    )
+    rollback_proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 133,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_retire",
+                    "target_object_id": target_object_id,
+                    "reason": "Rollback invalidated preference authority.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+    demotion_arguments = {
+        "proposal_id": rollback_proposal["proposal_id"],
+        "decision_type": "rollback_decision",
+        "target_object_id": target_object_id,
+        "previous_authority_lane": "accepted_current",
+        "new_authority_lane": "archive_only",
+        "approved_by": "human-reviewer",
+        "decision_id": "decision:p7-artifact-preference-stale",
+        "rollback_of_decision_id": promoted["decision_id"],
+        "ledger_scope": "local_test",
+        "project": PROJECT,
+    }
+    handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 134,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": demotion_arguments,
+            },
+        },
+        service,
+    )
+
+    object_query = service.brain_objects_query(
+        repository=FIXTURE_REPOSITORY,
+        branch=FIXTURE_BRANCH,
+        project=PROJECT,
+        route="code_style_preference",
+        query="Apply my HTML review artifact preference.",
+        current_files=[],
+    )
+    context = service.core_brain(project=PROJECT).brain_context_resolve(
+        repository=FIXTURE_REPOSITORY,
+        branch=FIXTURE_BRANCH,
+        project=PROJECT,
+        current_request="Apply my HTML review artifact preference.",
+        current_files=[],
+    ).to_dict()
+    cards = service.ledger.list_llm_brain_memory_cards(project=PROJECT, accepted_only=True, limit=20)
+    canonical = next(
+        card for card in cards if card.get("typed_payload", {}).get("target_object_id") == target_object_id
+    )
+
+    assert target_object_id not in {
+        obj["object_id"] for obj in object_query["object_pack"]["lanes"]["accepted_current"]
+    }
+    assert target_object_id not in {
+        obj["object_id"]
+        for obj in context["authority"]["agent_context_product"]["sections"]["style_preference"]["items"]
+        if obj["authority_lane"] == "accepted_current"
+    }
+    assert canonical["currentness"] == "stale"
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ["missing_decision", "wrong_target", "state_decision", "card_decision"],
+)
+def test_mcp_artifact_preference_rollback_lineage_mismatch_fails_without_partial_mutation(
+    tmp_path: Path,
+    mismatch: str,
+):
+    service = _service(tmp_path)
+    target_object_id = f"ko:ArtifactPreference:p7-rollback-lineage-{mismatch}"
+    _, accepted = _commit_local_artifact_preference(
+        service,
+        target_object_id,
+        request_id=1390,
+    )
+    rollback_of_decision_id = accepted["decision_id"]
+    if mismatch == "missing_decision":
+        rollback_of_decision_id = "decision:p7-rollback-missing"
+    elif mismatch == "wrong_target":
+        _, other = _commit_local_artifact_preference(
+            service,
+            f"{target_object_id}-other",
+            request_id=1392,
+        )
+        rollback_of_decision_id = other["decision_id"]
+
+    rollback_proposal = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1394,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+                "arguments": {
+                    "proposal_type": "propose_retire",
+                    "target_object_id": target_object_id,
+                    "reason": "Rollback only the exact current ArtifactPreference lineage.",
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]
+
+    canonical = next(
+        card
+        for card in service.ledger.list_llm_brain_memory_cards(project=PROJECT, accepted_only=True, limit=50)
+        if card.get("typed_payload", {}).get("target_object_id") == target_object_id
+    )
+    if mismatch == "state_decision":
+        with service.ledger._connect() as connection:
+            state = service.ledger.get_object_authority_state(target_object_id)
+            state["decision_id"] = "decision:p7-drifted-state"
+            connection.execute(
+                "UPDATE object_authority_states SET decision_id = ?, state_json = ? WHERE target_object_id = ?",
+                ("decision:p7-drifted-state", json.dumps(state), target_object_id),
+            )
+    elif mismatch == "card_decision":
+        canonical["typed_payload"]["authority_decision_id"] = "decision:p7-drifted-card"
+        service.ledger.upsert_llm_brain_memory_card(canonical)
+
+    proposal_before = service.ledger.get_object_review_proposal(rollback_proposal["proposal_id"])
+    state_before = service.ledger.get_object_authority_state(target_object_id)
+    cards_before = service.ledger.list_llm_brain_memory_cards(project=PROJECT, accepted_only=True, limit=50)
+    decisions_before = service.ledger.list_object_authority_decisions(
+        target_object_id=target_object_id,
+        limit=50,
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1395,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+                "arguments": {
+                    "proposal_id": rollback_proposal["proposal_id"],
+                    "decision_type": "rollback_decision",
+                    "target_object_id": target_object_id,
+                    "previous_authority_lane": "accepted_current",
+                    "new_authority_lane": "archive_only",
+                    "approved_by": "human-reviewer",
+                    "decision_id": f"decision:p7-rollback-rejected-{mismatch}",
+                    "rollback_of_decision_id": rollback_of_decision_id,
+                    "ledger_scope": "local_test",
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    assert "error" in response
+    assert service.ledger.get_object_review_proposal(rollback_proposal["proposal_id"]) == proposal_before
+    assert service.ledger.get_object_authority_state(target_object_id) == state_before
+    assert service.ledger.list_llm_brain_memory_cards(
+        project=PROJECT,
+        accepted_only=True,
+        limit=50,
+    ) == cards_before
+    assert service.ledger.list_object_authority_decisions(
+        target_object_id=target_object_id,
+        limit=50,
+    ) == decisions_before
+
+
+@pytest.mark.parametrize(
+    "invalid_kind",
+    ["malformed", "private", "raw_body", "cross_project", "invalid_card"],
+)
+def test_mcp_approval_board_artifact_preference_snapshot_fails_closed_without_partial_mutation(
+    tmp_path: Path,
+    invalid_kind: str,
+):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    target_object_id = f"ko:ArtifactPreference:p7-invalid-{invalid_kind}"
+    pack = _artifact_preference_candidate_pack(target_object_id)
+    candidate = pack["objects"][0]
+    if invalid_kind == "malformed":
+        candidate.pop("content_hash")
+    elif invalid_kind == "private":
+        candidate["privacy_class"] = "private"
+    elif invalid_kind == "raw_body":
+        candidate["payload"]["raw_body"] = "not allowed even when text looks public"
+    elif invalid_kind == "invalid_card":
+        candidate["payload"]["explicitness"] = "guessed"
+    else:
+        candidate["scope"] = {"project": "other-project"}
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 135,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": pack,
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": target_object_id,
+                            "reason": "Invalid snapshot must fail closed.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )
+
+    cards = service.ledger.list_llm_brain_memory_cards(project=PROJECT, accepted_only=True, limit=20)
+    assert "error" in response or response["result"]["structuredContent"]["permission"] == "denied"
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+    assert service.ledger.get_object_authority_state(target_object_id) == {}
+    assert not any(card.get("typed_payload", {}).get("target_object_id") == target_object_id for card in cards)
+
+
+@pytest.mark.parametrize(
+    "invalid_ref",
+    [
+        "unknown",
+        "unqualified",
+        "cross_project",
+        "revoked",
+        "deleted",
+        "content_hash_mismatch",
+        "raw_source_key",
+        "raw_evidence_prefix",
+        "raw_evidence_hyphen",
+        "raw_evidence_camel",
+        "raw_evidence_encoded",
+    ],
+)
+def test_mcp_artifact_preference_refs_fail_closed_without_partial_mutation(
+    tmp_path: Path,
+    invalid_ref: str,
+):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    target_object_id = f"ko:ArtifactPreference:p7-invalid-ref-{invalid_ref}"
+    pack = _artifact_preference_candidate_pack(target_object_id)
+    candidate = pack["objects"][0]
+    source_ref_id = f"src_p7_{invalid_ref}"
+    source_content_hash = _h(f"p7-source-{invalid_ref}")
+
+    if invalid_ref == "raw_source_key":
+        candidate["source_refs"] = [{"dataset_id": "raw-external-id"}]
+    elif invalid_ref == "raw_evidence_prefix":
+        candidate["evidence_refs"] = ["document_id:raw-external-id"]
+    elif invalid_ref == "raw_evidence_hyphen":
+        candidate["evidence_refs"] = ["document-id=opaque-placeholder"]
+    elif invalid_ref == "raw_evidence_camel":
+        candidate["evidence_refs"] = ["datasetId:opaque-placeholder"]
+    elif invalid_ref == "raw_evidence_encoded":
+        candidate["evidence_refs"] = ["%64ocument_id%3Aopaque-placeholder"]
+    else:
+        if invalid_ref != "unknown":
+            event = {
+                "source_ref_id": source_ref_id,
+                "device_id_hash": _h("p7-device"),
+                "root_id": "p7-project-root",
+                "relative_path_hash": _h(f"docs/{invalid_ref}.md"),
+                "content_hash": source_content_hash,
+                "mtime": "2026-07-15T00:00:00Z",
+                "size": 42,
+                "sync_policy": "metadata_only",
+                "permission_scope": f"project:{PROJECT}",
+            }
+            if invalid_ref == "unqualified":
+                event["permission_scope"] = "project"
+            elif invalid_ref == "cross_project":
+                event["permission_scope"] = "project:other-project"
+            elif invalid_ref == "revoked":
+                event["revoked_at"] = "2026-07-15T00:00:00Z"
+            elif invalid_ref == "deleted":
+                event["deleted_at"] = "2026-07-15T00:00:00Z"
+            LedgerSourceRefCatalog(service.ledger).register(source_ref_from_catalog_event(event))
+        supplied_hash = _h("wrong-source") if invalid_ref == "content_hash_mismatch" else source_content_hash
+        candidate["source_refs"] = [
+            {"source_ref_id": source_ref_id, "content_hash": supplied_hash}
+        ]
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1380,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": pack,
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": target_object_id,
+                            "reason": "Invalid refs must fail closed.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )
+
+    assert "error" in response or response["result"]["structuredContent"]["permission"] == "denied"
+    assert service.object_review_proposals(project=PROJECT)["count"] == 0
+    assert service.ledger.get_object_authority_state(target_object_id) == {}
+    assert not any(
+        card.get("typed_payload", {}).get("target_object_id") == target_object_id
+        for card in service.ledger.list_llm_brain_memory_cards(project=PROJECT, accepted_only=True, limit=20)
+    )
+
+
+def test_mcp_artifact_preference_snapshot_accepts_catalog_qualified_source_locator(tmp_path: Path):
+    service = _service(tmp_path)
+    target_object_id = "ko:ArtifactPreference:p7-qualified-source"
+    source_ref_id = "src_p7_qualified_source"
+    content_hash = _h("qualified-source-content")
+    LedgerSourceRefCatalog(service.ledger).register(
+        source_ref_from_catalog_event(
+            {
+                "source_ref_id": source_ref_id,
+                "device_id_hash": _h("p7-device"),
+                "root_id": "p7-project-root",
+                "relative_path_hash": _h("docs/qualified.md"),
+                "content_hash": content_hash,
+                "mtime": "2026-07-15T00:00:00Z",
+                "size": 42,
+                "sync_policy": "metadata_only",
+                "permission_scope": f"project:{PROJECT}",
+            }
+        )
+    )
+    candidate = _artifact_preference_candidate_pack(target_object_id)["objects"][0]
+    candidate["source_refs"] = [{"source_ref_id": source_ref_id, "content_hash": content_hash}]
+
+    snapshot = service.prepare_proposed_object_snapshot(
+        candidate,
+        target_object_id=target_object_id,
+        project=PROJECT,
+    )
+
+    assert snapshot["source_refs"] == [
+        {"source_ref_id": source_ref_id, "content_hash": content_hash}
+    ]
+
+
 def test_project_deriving_brain_tool_schemas_allow_repository():
     tools = {tool["name"]: tool for tool in list_tools()}
 
@@ -2339,6 +4430,39 @@ def test_mcp_brain_objects_query_style_route_uses_preference_objects(tmp_path: P
     assert result["route"] == "code_style_preference"
     assert "object_pack_route_not_implemented" not in pack["gaps"]
     assert any(obj["object_type"] == "ArtifactPreference" for obj in pack["objects"])
+
+
+def test_mcp_brain_objects_query_rejects_cross_type_artifact_preference_target_id(tmp_path: Path):
+    service = _service(tmp_path)
+    malformed = _accepted_preference_card(
+        "mem_cross_type_artifact_preference",
+        preference="Malformed preference must not enter object routes.",
+        applies_to="html review artifact",
+    )
+    malformed["typed_payload"].update(
+        {
+            "source_object_type": "ArtifactPreference",
+            "target_object_id": "ko:RepoDocument:cross-type-preference",
+            "source_content_hash": _h("cross-type-preference"),
+            "authority_decision_id": "decision:cross-type-preference",
+        }
+    )
+    service.ledger.upsert_llm_brain_memory_card(malformed)
+
+    result = service.brain_objects_query(
+        repository=FIXTURE_REPOSITORY,
+        branch=FIXTURE_BRANCH,
+        project=PROJECT,
+        route="code_style_preference",
+        query="Show accepted HTML review artifact preferences.",
+        current_files=[],
+    )
+    pack = result["object_pack"]
+
+    assert "ko:RepoDocument:cross-type-preference" not in {
+        obj["object_id"] for obj in pack["objects"]
+    }
+    assert "artifact_preference_target_object_class_mismatch" in pack["gaps"]
 
 
 def test_mcp_brain_objects_query_html_visualization_route_uses_artifact_preferences(tmp_path: Path):
@@ -2951,6 +5075,7 @@ def test_mcp_object_authority_production_gate_accepts_artifact_preference(tmp_pa
                 "arguments": {
                     "proposal_type": "propose_current",
                     "target_object_id": target_object_id,
+                    "proposed_object": _artifact_preference_candidate_pack(target_object_id)["objects"][0],
                     "reason": "Reviewed artifact preference is ready for authority promotion.",
                     "evidence_refs": ["git_commit:p7-artifact-preference-gate"],
                     "ledger_scope": "production",
@@ -2998,6 +5123,12 @@ def test_mcp_object_authority_production_gate_accepts_artifact_preference(tmp_pa
     state = service.ledger.get_object_authority_state(target_object_id)
     assert state["authority_lane"] == "accepted_current"
     assert state["decision_id"] == "decision:p7-artifact-preference-current"
+    canonical = next(
+        card
+        for card in service.ledger.list_llm_brain_memory_cards(project=PROJECT, accepted_only=True, limit=20)
+        if card.get("typed_payload", {}).get("target_object_id") == target_object_id
+    )
+    assert canonical["currentness"] == "current"
 
 
 def test_mcp_object_authority_production_gate_rejects_unallowed_object_class(tmp_path: Path):
@@ -3103,10 +5234,11 @@ def test_mcp_object_authority_production_gate_rejects_cross_project_decision(tmp
             "method": "tools/call",
             "params": {
                 "name": BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
-                "arguments": {
-                    "proposal_type": "propose_current",
-                    "target_object_id": target_object_id,
-                    "reason": "Create a project-scoped preference proposal.",
+                    "arguments": {
+                        "proposal_type": "propose_current",
+                        "target_object_id": target_object_id,
+                        "proposed_object": _artifact_preference_candidate_pack(target_object_id)["objects"][0],
+                        "reason": "Create a project-scoped preference proposal.",
                     "ledger_scope": "production",
                     "project": PROJECT,
                     "proposer": "codex",

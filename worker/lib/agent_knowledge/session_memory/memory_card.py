@@ -309,7 +309,9 @@ def validate_typed_payload(card_type: str, payload: Mapping[str, Any], *, field_
     elif card_type == "preference":
         _require_enum(normalized, "explicitness", _PREFERENCE_EXPLICITNESS, owner=field_name)
         _require_enum(normalized, "confirmation_status", _PREFERENCE_CONFIRMATION, owner=field_name)
-        _require_number(normalized.get("repeated_count"), f"{field_name}.repeated_count")
+        _require_positive_integer(normalized.get("repeated_count"), f"{field_name}.repeated_count")
+        if "exceptions" in normalized:
+            _require_public_safe_string_list(normalized["exceptions"], f"{field_name}.exceptions")
     elif card_type == "evidence":
         _require_enum(normalized, "evidence_kind", _EVIDENCE_KINDS, owner=field_name)
         _require_enum(normalized, "result_status", _EVIDENCE_RESULT_STATUSES, owner=field_name)
@@ -449,9 +451,22 @@ def _require_number(value: Any, field_name: str) -> None:
         raise ValueError(f"{field_name} must be between 0 and 1")
 
 
+def _require_positive_integer(value: Any, field_name: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(f"{field_name} must be a positive integer")
+
+
 def _require_list(value: Any, field_name: str) -> None:
     if not isinstance(value, list):
         raise ValueError(f"{field_name} must be a list")
+
+
+def _require_public_safe_string_list(value: Any, field_name: str) -> None:
+    _require_list(value, field_name)
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{field_name} entries must be strings")
+        _ensure_no_forbidden_content(item, f"{field_name}[]")
 
 
 def _validate_locator_list(value: Any, field_name: str) -> list:

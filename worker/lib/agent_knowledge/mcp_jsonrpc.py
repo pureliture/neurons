@@ -550,7 +550,7 @@ def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict,
             proposal_type=_require_non_empty_string(arguments, "proposal_type", tool_name=tool_name),
             target_object_id=_require_non_empty_string(arguments, "target_object_id", tool_name=tool_name),
             reason=_require_non_empty_string(arguments, "reason", tool_name=tool_name),
-            evidence_refs=[str(item) for item in arguments.get("evidence_refs") or []],
+            evidence_refs=_evidence_ref_arguments(arguments, tool_name=tool_name),
             proposer=_steward_proposer(arguments),
         ).to_dict(
             proposal_write_performed=True,
@@ -561,8 +561,9 @@ def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict,
         result["ledger_scope"] = "production"
         result["production_mutation_performed"] = True
         result["production_gate_ref_hash"] = gate["approval_ref_hash"]
-        service.append_object_review_proposal(result)
-        return _tool_result(result)
+        _attach_proposed_object_snapshot(arguments, result, service=service)
+        stored = service.append_object_review_proposal(result)
+        return _tool_result(_proposal_create_result(result, stored))
     if not _local_test_object_authority_writes_allowed(service):
         return _tool_result(
             denied_payload(
@@ -574,7 +575,7 @@ def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict,
         proposal_type=_require_non_empty_string(arguments, "proposal_type", tool_name=tool_name),
         target_object_id=_require_non_empty_string(arguments, "target_object_id", tool_name=tool_name),
         reason=_require_non_empty_string(arguments, "reason", tool_name=tool_name),
-        evidence_refs=[str(item) for item in arguments.get("evidence_refs") or []],
+        evidence_refs=_evidence_ref_arguments(arguments, tool_name=tool_name),
         proposer=_steward_proposer(arguments),
     ).to_dict(
         proposal_write_performed=True,
@@ -584,8 +585,40 @@ def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict,
     result["object_type"] = knowledge_object_class_from_id(result["target_object_id"])
     result["ledger_scope"] = "local_test"
     result["production_mutation_performed"] = False
-    service.append_object_review_proposal(result)
-    return _tool_result(result)
+    _attach_proposed_object_snapshot(arguments, result, service=service)
+    stored = service.append_object_review_proposal(result)
+    return _tool_result(_proposal_create_result(result, stored))
+
+
+def _proposal_create_result(requested: Mapping[str, Any], stored: Mapping[str, Any]) -> dict[str, Any]:
+    response = dict(stored)
+    if str(stored.get("status") or "needs_review") != str(requested.get("status") or "needs_review"):
+        response["proposal_write_performed"] = False
+        response["authority_write_performed"] = False
+        response["authoritative_memory_changed"] = False
+        response["production_mutation_performed"] = False
+    return response
+
+
+def _attach_proposed_object_snapshot(
+    arguments: Mapping[str, Any],
+    proposal: dict[str, Any],
+    *,
+    service: KnowledgeSearchService,
+) -> None:
+    proposed_object = arguments.get("proposed_object")
+    if (
+        str(proposal.get("object_type") or "") == "ArtifactPreference"
+        and str(proposal.get("proposal_type") or "") == "propose_current"
+        and not isinstance(proposed_object, Mapping)
+    ):
+        raise ValueError("ArtifactPreference propose_current requires proposed_object snapshot")
+    if isinstance(proposed_object, Mapping):
+        proposal["proposed_object"] = service.prepare_proposed_object_snapshot(
+            proposed_object,
+            target_object_id=proposal["target_object_id"],
+            project=proposal["project"],
+        )
 
 
 def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
@@ -615,7 +648,7 @@ def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict,
             previous_authority_lane=_require_non_empty_string(arguments, "previous_authority_lane", tool_name=tool_name),
             new_authority_lane=_require_non_empty_string(arguments, "new_authority_lane", tool_name=tool_name),
             approved_by="redacted",
-            evidence_refs=[str(item) for item in arguments.get("evidence_refs") or []],
+            evidence_refs=_evidence_ref_arguments(arguments, tool_name=tool_name),
         ).to_dict(authority_write_performed=True, cache_invalidated=True)
         decision["decision_id"] = _require_non_empty_string(arguments, "decision_id", tool_name=tool_name)
         decision["proposal_id"] = _require_non_empty_string(arguments, "proposal_id", tool_name=tool_name)
@@ -643,7 +676,7 @@ def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict,
         previous_authority_lane=_require_non_empty_string(arguments, "previous_authority_lane", tool_name=tool_name),
         new_authority_lane=_require_non_empty_string(arguments, "new_authority_lane", tool_name=tool_name),
         approved_by="redacted",
-        evidence_refs=[str(item) for item in arguments.get("evidence_refs") or []],
+        evidence_refs=_evidence_ref_arguments(arguments, tool_name=tool_name),
     ).to_dict(authority_write_performed=True, cache_invalidated=True)
     decision["decision_id"] = _require_non_empty_string(arguments, "decision_id", tool_name=tool_name)
     decision["proposal_id"] = _require_non_empty_string(arguments, "proposal_id", tool_name=tool_name)
@@ -1083,6 +1116,15 @@ def _consumer(arguments: dict) -> str:
 
 def _knowledge_search_limit(arguments: dict) -> int:
     return max(1, min(10, int(arguments.get("limit", 10))))
+
+
+def _evidence_ref_arguments(arguments: Mapping[str, Any], *, tool_name: str) -> list[str]:
+    value = arguments.get("evidence_refs")
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"{tool_name} evidence_refs must be a list of strings")
+    return list(value)
 
 
 def _require_non_empty_string(arguments: dict, key: str, *, tool_name: str) -> str:
