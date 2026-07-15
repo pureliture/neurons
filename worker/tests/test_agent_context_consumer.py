@@ -296,6 +296,38 @@ def test_receipt_v2_rejects_tampered_child_observed_source_payload_hash():
     assert "agent_context_startup_proof_mismatch" in failures
 
 
+def test_receipt_v2_rejects_signed_child_observed_source_payload_hash_drift():
+    challenge = _challenge()
+    route = "authority_archive_separation"
+    signed_route_smokes = _route_smokes()
+    expected_route_smokes = _route_smokes()
+    for smoke in signed_route_smokes:
+        if smoke["route"] == route:
+            smoke["source_payload_hash"] = "sha256:" + "0" * 64
+            break
+    receipt = build_agent_context_consumer_startup_receipt(
+        challenge=challenge,
+        proof_key=PROOF_KEY,
+        context_pack=_context_pack(),
+        route_smokes=signed_route_smokes,
+        now=NOW,
+        process_instance_seed="bounded-test-process",
+    )
+
+    failures = validate_agent_context_consumer_startup_receipt(
+        receipt,
+        challenge=challenge,
+        proof_key=PROOF_KEY,
+        context_pack=_context_pack(),
+        route_smokes=expected_route_smokes,
+        now=NOW,
+    )
+
+    assert f"agent_context_startup_route_observed_binding_mismatch:{route}" in failures
+    assert "agent_context_startup_receipt_hash_mismatch" not in failures
+    assert "agent_context_startup_proof_mismatch" not in failures
+
+
 def test_receipt_v2_rejects_duplicate_route_smokes_before_signing():
     route_smokes = _route_smokes()
     route_smokes.append(deepcopy(route_smokes[0]))

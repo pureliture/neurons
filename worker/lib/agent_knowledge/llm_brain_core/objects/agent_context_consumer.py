@@ -310,6 +310,7 @@ def validate_agent_context_consumer_startup_receipt(
     route_smokes: list[Mapping[str, Any]],
     now: datetime | str | None = None,
     consumed_challenge_hashes: MutableSet[str] | None = None,
+    allow_observed_source_payload_drift: bool = False,
 ) -> list[str]:
     failures: list[str] = []
     safe_receipt = dict(receipt) if isinstance(receipt, Mapping) else {}
@@ -464,6 +465,13 @@ def validate_agent_context_consumer_startup_receipt(
         if not _is_sha256_ref(binding.get("observed_source_payload_hash")):
             failures.append(f"agent_context_startup_route_observed_hash_invalid:{route}")
             route_binding_failed = True
+        if (
+            not allow_observed_source_payload_drift
+            and binding.get("observed_source_payload_hash")
+            != expected_route_binding.get("observed_source_payload_hash")
+        ):
+            failures.append(f"agent_context_startup_route_observed_binding_mismatch:{route}")
+            route_binding_failed = True
     if route_binding_failed and "agent_context_startup_context_binding_mismatch" not in failures:
         failures.append("agent_context_startup_context_binding_mismatch")
 
@@ -548,6 +556,7 @@ def build_agent_context_startup_runtime_evidence(
     context_pack: Mapping[str, Any],
     route_smokes: list[Mapping[str, Any]],
     now: datetime | str | None = None,
+    allow_observed_source_payload_drift: bool = False,
 ) -> dict[str, Any]:
     failures = validate_agent_context_consumer_startup_receipt(
         receipt,
@@ -556,6 +565,7 @@ def build_agent_context_startup_runtime_evidence(
         context_pack=context_pack,
         route_smokes=route_smokes,
         now=now,
+        allow_observed_source_payload_drift=allow_observed_source_payload_drift,
     )
     valid = not failures
     product = _agent_context_product(context_pack)
