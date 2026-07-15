@@ -12,6 +12,7 @@ from agent_knowledge.llm_brain_core.reference_corpus import reference_corpus_obj
 from agent_knowledge.session_memory.curation import CurationService
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.mcp_server import (
+    BRAIN_ARTIFACT_PREFERENCE_EVALUATE_TOOL_NAME,
     BRAIN_QUERY_TOOL_NAME,
     BRAIN_RESOLVE_TOOL_NAME,
     BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
@@ -59,7 +60,10 @@ from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_readiness_report,
 )
-from agent_knowledge.public_safe_util import short_hash
+from agent_knowledge.llm_brain_core.objects.artifact_preference_evaluator import (
+    artifact_descriptor_fingerprint,
+)
+from agent_knowledge.public_safe_util import hash_payload, short_hash
 from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
 from object_query_route_cases import REQUIRED_OBJECT_QUERY_ROUTE_CASES
 
@@ -570,6 +574,183 @@ def test_brain_context_resolve_schema_exposes_response_mode():
     }
     assert schema["properties"]["consumer"]["enum"] == ["unspecified", "codex", "claude-code", "gemini", "hermes"]
     assert schema["properties"]["consumer"]["default"] == "unspecified"
+
+
+def test_artifact_preference_evaluator_schema_allows_only_public_consumer_input():
+    tool = next(
+        tool
+        for tool in list_tools()
+        if tool["name"] == "brain_artifact_preference_evaluate"
+    )
+    schema = tool["inputSchema"]
+
+    assert schema["required"] == [
+        "repository",
+        "branch",
+        "project",
+        "artifact_type",
+        "summary",
+        "artifact_fingerprint",
+        "metrics",
+        "evidence_refs",
+        "consumer",
+    ]
+    assert schema["additionalProperties"] is False
+    assert set(schema["properties"]) == set(schema["required"])
+    assert schema["properties"]["metrics"]["additionalProperties"] is False
+    assert set(schema["properties"]["metrics"]["required"]) == {
+        "object_count",
+        "relationship_count",
+        "evidence_count",
+        "gate_status_count",
+        "hidden_gap_count",
+        "protected_content_count",
+    }
+    assert not {
+        "object_id",
+        "authority_lane",
+        "proposal_id",
+        "decision_id",
+        "outcome",
+        "status",
+        "body",
+        "path",
+        "dataset_id",
+        "document_id",
+    }.intersection(schema["properties"])
+
+
+def test_mcp_promoted_artifact_preference_is_evaluated_read_only(tmp_path: Path):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+    target_object_id = "ko:ArtifactPreference:p7-evaluator-integration"
+    pack = _artifact_preference_candidate_pack(target_object_id)
+    pack["objects"][0]["payload"]["applies_to"] = "html_review_artifact"
+    promoted = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1260,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+                "arguments": {
+                    "target": "production",
+                    "pack": pack,
+                    "decisions": [
+                        {
+                            "action": "promote",
+                            "object_id": target_object_id,
+                            "reason": "Promote the evaluator integration preference fixture.",
+                            "approved_by": "reviewer-local",
+                        }
+                    ],
+                    "production_gate": _approval_board_production_gate(),
+                },
+            },
+        },
+        service,
+    )["result"]["structuredContent"]["decisions"][0]
+    metrics = {
+        "object_count": 1,
+        "relationship_count": 3,
+        "evidence_count": 2,
+        "gate_status_count": 1,
+        "hidden_gap_count": 0,
+        "protected_content_count": 0,
+    }
+    evidence_refs = ["route:code-style", "context:style-preference"]
+    summary = "Public-safe HTML review artifact evidence density summary."
+    arguments = {
+        "repository": FIXTURE_REPOSITORY,
+        "branch": FIXTURE_BRANCH,
+        "project": PROJECT,
+        "artifact_type": "html_review_artifact",
+        "summary": summary,
+        "artifact_fingerprint": artifact_descriptor_fingerprint(
+            artifact_type="html_review_artifact",
+            summary=summary,
+            metrics=metrics,
+            evidence_refs=evidence_refs,
+        ),
+        "metrics": metrics,
+        "evidence_refs": evidence_refs,
+        "consumer": "post_deploy_mcp_capture",
+    }
+    before = hash_payload(
+        {
+            "card": service.ledger.list_llm_brain_memory_cards(
+                project=PROJECT,
+                accepted_only=True,
+                limit=100,
+            ),
+            "state": service.ledger.get_object_authority_state(target_object_id),
+            "proposals": service.ledger.list_object_review_proposals(
+                project=PROJECT,
+                limit=100,
+            ),
+            "decisions": service.ledger.list_object_authority_decisions(
+                target_object_id=target_object_id,
+                limit=100,
+            ),
+        }
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1261,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_ARTIFACT_PREFERENCE_EVALUATE_TOOL_NAME,
+                "arguments": arguments,
+            },
+        },
+        service,
+    )
+
+    receipt = response["result"]["structuredContent"]
+    assert receipt["status"] == "PASS"
+    assert receipt["applied"] is True
+    assert receipt["production_mutation_performed"] is False
+    canonical_card = next(
+        card
+        for card in service.ledger.list_llm_brain_memory_cards(
+            project=PROJECT,
+            accepted_only=True,
+            limit=100,
+        )
+        if (card.get("typed_payload") or {}).get("target_object_id")
+        == target_object_id
+    )
+    assert receipt["preference_binding"] == {
+        "target_object_id": target_object_id,
+        "project": PROJECT,
+        "memory_id": canonical_card["memory_id"],
+        "card_content_hash": canonical_card["content_hash"],
+        "source_content_hash": pack["objects"][0]["content_hash"],
+        "proposal_id": promoted["proposal_id"],
+        "decision_id": promoted["decision_id"],
+        "authority_lane": "accepted_current",
+    }
+    after = hash_payload(
+        {
+            "card": service.ledger.list_llm_brain_memory_cards(
+                project=PROJECT,
+                accepted_only=True,
+                limit=100,
+            ),
+            "state": service.ledger.get_object_authority_state(target_object_id),
+            "proposals": service.ledger.list_object_review_proposals(
+                project=PROJECT,
+                limit=100,
+            ),
+            "decisions": service.ledger.list_object_authority_decisions(
+                target_object_id=target_object_id,
+                limit=100,
+            ),
+        }
+    )
+    assert after == before
 
 
 def test_mcp_tool_list_exposes_object_substrate_tools():
@@ -1758,11 +1939,12 @@ def test_mcp_source_to_candidate_runtime_readiness_accepts_bounded_execution_evi
 
     report = response["result"]["structuredContent"]
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
-    assert report["status"] == "PASS"
+    assert report["status"] == "PASS_WITH_GAPS"
     assert report["production_mutation_performed"] is True
     assert claims["live.production.object_authority_bounded_execution"]["status"] == "validated"
     assert claims["live.production.object_authority_bounded_execution"]["read_after_write_status"] == "validated"
     assert "bounded_production_authority_execution_unverified" not in report["gaps"]
+    assert "preference_artifact_collector_capability_missing" in report["gaps"]
 
 
 def test_mcp_source_to_candidate_runtime_readiness_without_evidence_preserves_live_gaps(tmp_path: Path):
@@ -2574,6 +2756,7 @@ def test_mcp_local_runtime_collector_keeps_route_alignment_but_does_not_fabricat
         evidence_collection_network_used=True,
         repository=FIXTURE_REPOSITORY,
         branch=FIXTURE_BRANCH,
+        project=PROJECT,
         consumer="codex",
     )
     replay_packet = service.brain_source_to_candidate_runtime_readiness(
@@ -2582,6 +2765,7 @@ def test_mcp_local_runtime_collector_keeps_route_alignment_but_does_not_fabricat
         evidence_collection_network_used=False,
         repository=FIXTURE_REPOSITORY,
         branch=FIXTURE_BRANCH,
+        project=PROJECT,
         consumer="codex",
     )
 

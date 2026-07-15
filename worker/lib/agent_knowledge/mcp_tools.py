@@ -13,6 +13,7 @@ BRAIN_PERSONA_GET_TOOL_NAME = "brain_persona_get"
 BRAIN_PERSONA_CHECK_TOOL_NAME = "brain_persona_check"
 BRAIN_EVIDENCE_GET_TOOL_NAME = "brain_evidence_get"
 BRAIN_OBJECTS_QUERY_TOOL_NAME = "brain_objects_query"
+BRAIN_ARTIFACT_PREFERENCE_EVALUATE_TOOL_NAME = "brain_artifact_preference_evaluate"
 BRAIN_OBJECT_EXPLAIN_TOOL_NAME = "brain_object_explain"
 BRAIN_CORPUS_STATUS_TOOL_NAME = "brain_corpus_status"
 BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME = "brain_corpus_ingest_plan"
@@ -73,6 +74,7 @@ _DISPATCH_OWNER_BY_TOOL_NAME = {
     BRAIN_PERSONA_CHECK_TOOL_NAME: "jsonrpc_brain",
     BRAIN_EVIDENCE_GET_TOOL_NAME: "jsonrpc_brain",
     BRAIN_OBJECTS_QUERY_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_ARTIFACT_PREFERENCE_EVALUATE_TOOL_NAME: "jsonrpc_brain",
     BRAIN_OBJECT_EXPLAIN_TOOL_NAME: "jsonrpc_brain",
     BRAIN_CORPUS_STATUS_TOOL_NAME: "jsonrpc_brain",
     BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME: "jsonrpc_brain",
@@ -328,6 +330,75 @@ def list_tools() -> list[dict]:
             },
         },
         {
+            "name": BRAIN_ARTIFACT_PREFERENCE_EVALUATE_TOOL_NAME,
+            "description": "accepted/current ArtifactPreference를 public-safe artifact descriptor에 read-only로 적용한다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repository": {"type": "string", "minLength": 1, "maxLength": 240},
+                    "branch": {"type": "string", "minLength": 1, "maxLength": 180},
+                    "project": {"type": "string", "minLength": 1, "maxLength": 120},
+                    "artifact_type": {
+                        "type": "string",
+                        "enum": ["html_review", "html_review_artifact"],
+                    },
+                    "summary": {"type": "string", "minLength": 1, "maxLength": 1200},
+                    "artifact_fingerprint": {
+                        "type": "string",
+                        "pattern": "^sha256:[0-9a-f]{64}$",
+                    },
+                    "metrics": {
+                        "type": "object",
+                        "properties": {
+                            "object_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+                            "relationship_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+                            "evidence_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+                            "gate_status_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+                            "hidden_gap_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+                            "protected_content_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+                        },
+                        "required": [
+                            "object_count",
+                            "relationship_count",
+                            "evidence_count",
+                            "gate_status_count",
+                            "hidden_gap_count",
+                            "protected_content_count",
+                        ],
+                        "additionalProperties": False,
+                    },
+                    "evidence_refs": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {"type": "string", "minLength": 3, "maxLength": 180},
+                    },
+                    "consumer": {
+                        "type": "string",
+                        "enum": [
+                            "unspecified",
+                            "codex",
+                            "claude-code",
+                            "gemini",
+                            "hermes",
+                            "post_deploy_mcp_capture",
+                        ],
+                    },
+                },
+                "required": [
+                    "repository",
+                    "branch",
+                    "project",
+                    "artifact_type",
+                    "summary",
+                    "artifact_fingerprint",
+                    "metrics",
+                    "evidence_refs",
+                    "consumer",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
             "description": "KnowledgeObject 하나의 authority lane, evidence view, edges, freshness gap을 설명한다.",
             "inputSchema": {
@@ -465,6 +536,7 @@ def list_tools() -> list[dict]:
                     "shadow_evidence": {"type": "object", "default": {}},
                     "repository": {"type": "string", "default": ""},
                     "branch": {"type": "string", "default": ""},
+                    "project": {"type": "string", "default": ""},
                     "consumer": {"type": "string", "default": "codex"},
                 },
                 "additionalProperties": False,

@@ -881,3 +881,36 @@ def test_agent_context_object_packs_include_fr11_sections():
     }
     assert packs["required_verification"]["objects"][0]["title"] == "cd worker && uv run pytest -q"
     assert packs["do_not_touch_boundaries"]["objects"][0]["title"] == "do_not_touch_production_ledger"
+
+
+def test_artifact_preference_object_pack_preserves_canonical_six_field_continuity():
+    continuity = {
+        "memory_id": "mem_artifact_preference",
+        "card_content_hash": "sha256:" + "c" * 64,
+        "authority_proposal_id": "proposal:p7-html-review-density",
+        "authority_decision_id": "decision:p7-html-review-density",
+        "project": "neurons",
+        "source_content_hash": "sha256:" + "a" * 64,
+    }
+    packs = build_agent_context_object_packs(
+        documents=[],
+        preferences=[
+            {
+                **continuity,
+                "target_object_id": "ko:ArtifactPreference:html-review-density",
+                "rule": "Expose objects, relationships, evidence, and gate status.",
+                "reason": "Keep review evidence dense.",
+                "scope": "html_review_artifact",
+                "currentness": "current",
+            }
+        ],
+        style_profile={"claims": []},
+        current_work=[],
+        required_verification=[],
+        guardrails=[],
+    )
+
+    [obj] = packs["preferences"]["lanes"]["accepted_current"]
+    assert {key: obj["payload"][key] for key in continuity} == continuity
+    assert "raw_body" not in obj
+    assert "path" not in obj

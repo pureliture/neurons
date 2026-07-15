@@ -75,6 +75,7 @@ ROOT_MODULE_AREA_MANIFEST: dict[str, frozenset[str]] = {
 ROOT_MODULE_AREAS = ROOT_MODULE_AREA_MANIFEST
 
 OBJECT_SUBPACKAGE_MODULES = frozenset({
+    "artifact_preference_evaluator",
     "authority_policy",
     "golden_query_eval",
     "extraction_pipeline",

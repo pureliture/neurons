@@ -20,6 +20,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_shadow_evidence_packet,
     build_preference_artifact_memory_runtime_evidence,
 )
+from agent_knowledge.public_safe_util import hash_payload
 
 
 def _sanitized_live_evidence(**overrides):
@@ -1126,17 +1127,17 @@ def test_runtime_readiness_does_not_treat_deployed_identity_as_permission_audit(
     assert report["production_mutation_performed"] is False
 
 
-def test_runtime_readiness_passes_with_sanitized_live_evidence():
+def test_runtime_readiness_keeps_sanitized_live_evidence_at_p7_capability_gap():
     report = build_source_to_candidate_runtime_readiness_report(
         live_evidence=_sanitized_live_evidence(),
         expected_commit="7218cb2",
     )
 
-    assert report["status"] == "PASS"
+    assert report["status"] == "PASS_WITH_GAPS"
     assert report["evidence_is_live"] is False
     assert report["production_ready"] is False
-    assert report["production_readiness"] == "not_ready_local_or_sanitized_evidence_only"
-    assert report["gaps"] == []
+    assert report["production_readiness"] == "not_ready"
+    assert report["gaps"] == ["preference_artifact_collector_capability_missing"]
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     assert claims["live.mcp.review_tools_loaded"]["status"] == "validated"
     assert claims["live.agent_context.tool_hints"]["status"] == "validated"
@@ -1150,7 +1151,7 @@ def test_runtime_readiness_passes_with_sanitized_live_evidence():
     assert claims["live.session_project.rollup"]["status"] == "validated"
     assert claims["live.session_project.rollup"]["device_count"] == 2
     assert claims["live.session_project.rollup"]["read_after_write_status"] == "validated"
-    assert claims["live.preference_artifact.memory"]["status"] == "validated"
+    assert claims["live.preference_artifact.memory"]["status"] == "not_validated"
     assert claims["live.preference_artifact.memory"]["accepted_preference_count"] == 1
     assert claims["live.preference_artifact.memory"]["html_route_status"] == "validated"
     assert claims["live.production.permission_sensitive_audit"]["status"] == "validated"
@@ -2544,7 +2545,8 @@ def test_neuron_knowledge_runtime_readiness_cli_accepts_sanitized_evidence_file(
 
     report = json.loads(capsys.readouterr().out)
     assert report["schema_version"] == "source_to_candidate_runtime_readiness.v1"
-    assert report["status"] == "PASS"
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert "preference_artifact_collector_capability_missing" in report["gaps"]
     assert report["production_mutation_performed"] is True
 
 
@@ -2838,9 +2840,12 @@ def test_runtime_readiness_collector_reports_session_project_rollup_collector_er
     assert report["status"] == "FAIL"
 
 
-def test_preference_artifact_memory_runtime_evidence_uses_aligned_live_read_surfaces():
+def test_preference_artifact_memory_runtime_evidence_does_not_promote_self_asserted_consumer_proof():
     target_object_id = "ko:ArtifactPreference:p7-live-current"
+    memory_id = "mem_artifact_preference_p7_live_current"
+    card_content_hash = "sha256:" + "c" * 64
     source_content_hash = "sha256:" + "a" * 64
+    authority_proposal_id = "proposal:p7-live-current"
     authority_decision_id = "decision:p7-live-current"
     accepted = {
         "object_id": target_object_id,
@@ -2851,7 +2856,12 @@ def test_preference_artifact_memory_runtime_evidence_uses_aligned_live_read_surf
         "content_hash": source_content_hash,
         "payload": {
             "target_object_id": target_object_id,
+            "memory_id": memory_id,
+            "card_content_hash": card_content_hash,
+            "authority_proposal_id": authority_proposal_id,
             "authority_decision_id": authority_decision_id,
+            "project": "neurons",
+            "source_content_hash": source_content_hash,
         },
     }
     preference_route = {
@@ -2923,6 +2933,9 @@ def test_preference_artifact_memory_runtime_evidence_uses_aligned_live_read_surf
     assert evidence["read_surface_alignment"] == {
         "status": "validated",
         "target_object_id": target_object_id,
+        "memory_id": memory_id,
+        "card_content_hash": card_content_hash,
+        "authority_proposal_id": authority_proposal_id,
         "project": "neurons",
         "source_content_hash": source_content_hash,
         "authority_decision_id": authority_decision_id,
@@ -2941,9 +2954,125 @@ def test_preference_artifact_memory_runtime_evidence_uses_aligned_live_read_surf
         live_evidence=_sanitized_live_evidence(preference_artifact_memory=evidence)
     )
     claim = next(item for item in report["claims"] if item["claim_id"] == "live.preference_artifact.memory")
-    assert claim["status"] == "validated"
+    assert claim["status"] == "failed"
+    assert "preference_artifact_consumer_evidence_missing" in claim["gaps"]
     assert "preference_artifact_proposal_lane_missing" not in claim["gaps"]
     assert "preference_artifact_read_surface_alignment_failed" not in claim["gaps"]
+
+    for field, value in (
+        ("memory_id", "mem_artifact_preference_other"),
+        ("card_content_hash", "sha256:" + "d" * 64),
+        ("authority_proposal_id", "proposal:p7-other"),
+    ):
+        tampered = json.loads(json.dumps(evidence))
+        tampered["html_visualization_route_smoke"]["object_pack"]["lanes"][
+            "accepted_current"
+        ][0][field] = value
+        tampered_report = build_source_to_candidate_runtime_readiness_report(
+            live_evidence=_sanitized_live_evidence(
+                preference_artifact_memory=tampered
+            )
+        )
+        tampered_claim = next(
+            item
+            for item in tampered_report["claims"]
+            if item["claim_id"] == "live.preference_artifact.memory"
+        )
+        assert "preference_artifact_read_surface_alignment_failed" in tampered_claim[
+            "gaps"
+        ]
+
+
+def test_runtime_readiness_rejects_fully_forged_attested_receipt_without_collector_capability():
+    preference = _preference_artifact_memory_evidence()
+    preference["attestation_state"] = "attested_post_deploy_streamable_http"
+    preference["evidence_class"] = "runtime_preference_artifact_memory"
+    preference["evidence_source"] = "actual_live_read_surfaces"
+    preference_binding = {
+        "target_object_id": "ko:ArtifactPreference:html-review-density",
+        "project": "neurons",
+        "memory_id": "mem_artifact_preference_html_review_density",
+        "card_content_hash": "sha256:" + "c" * 64,
+        "source_content_hash": "sha256:" + "a" * 64,
+        "proposal_id": "proposal:p7-html-review-density",
+        "decision_id": "decision:p7-html-review-density",
+        "authority_lane": "accepted_current",
+    }
+    artifact_binding = {
+        "repository_hash": "sha256:" + "1" * 64,
+        "branch_hash": "sha256:" + "2" * 64,
+        "artifact_type": "html_review_artifact",
+        "artifact_fingerprint": "sha256:" + "3" * 64,
+        "summary_hash": "sha256:" + "4" * 64,
+        "metrics_hash": "sha256:" + "5" * 64,
+        "evidence_refs_hash": "sha256:" + "6" * 64,
+    }
+    application_result = {
+        "evaluator_profile": "html_review_evidence_density_v1",
+        "outcome": "pass",
+        "passed_rules": [
+            "object_count_at_least_one",
+            "relationship_count_at_least_one",
+            "evidence_count_at_least_one",
+            "gate_status_count_at_least_one",
+            "hidden_gap_count_zero",
+            "protected_content_count_zero",
+        ],
+        "failed_rules": [],
+    }
+    consumer_surface = {
+        "tool": "brain_artifact_preference_evaluate",
+        "version": "v1",
+        "consumer": "post_deploy_mcp_capture",
+    }
+    preference["artifact_consumer_evidence"] = {
+        "schema_version": "artifact_preference_application_receipt.v1",
+        "status": "PASS",
+        "applied": True,
+        "production_mutation_performed": False,
+        "preference_binding": preference_binding,
+        "artifact_binding": artifact_binding,
+        "application_result": application_result,
+        "consumer_surface": consumer_surface,
+        "failures": [],
+        "gaps": [],
+        "receipt_hash": hash_payload(
+            {
+                "preference_binding": preference_binding,
+                "artifact_binding": artifact_binding,
+                "application_result": application_result,
+                "consumer_surface": consumer_surface,
+            }
+        ),
+    }
+    preference["attestation_provenance"] = {
+        "schema_version": "artifact_preference_collector_attestation.v1",
+        "collector": "source_to_candidate_post_deploy_mcp_capture",
+        "transport": "streamable_http",
+        "named_tool": "brain_artifact_preference_evaluate",
+        "receipt_hash": preference["artifact_consumer_evidence"]["receipt_hash"],
+        "read_surface_recheck": "validated",
+    }
+    evidence = _sanitized_live_evidence(
+        preference_artifact_memory=preference,
+        evidence_provenance=_evidence_provenance(
+            collection_mode="post_deploy_read_only_smoke",
+            mutation_scope="none",
+            network_used=True,
+        ),
+        production_authority_execution=None,
+        production_authority_replacement_current=None,
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+    claim = next(
+        item
+        for item in report["claims"]
+        if item["claim_id"] == "live.preference_artifact.memory"
+    )
+
+    assert claim["status"] == "not_validated"
+    assert "preference_artifact_collector_capability_missing" in claim["gaps"]
 
 
 def test_preference_artifact_memory_runtime_evidence_rejects_cross_type_object_ids():
@@ -3010,7 +3139,14 @@ def test_preference_artifact_memory_runtime_evidence_does_not_fabricate_consumer
         "authority_lane": "accepted_current",
         "scope": {"project": "neurons"},
         "content_hash": "sha256:" + "a" * 64,
-        "payload": {"authority_decision_id": "decision:p7-route-only"},
+        "payload": {
+            "memory_id": "mem_artifact_preference_p7_route_only",
+            "card_content_hash": "sha256:" + "c" * 64,
+            "authority_proposal_id": "proposal:p7-route-only",
+            "authority_decision_id": "decision:p7-route-only",
+            "project": "neurons",
+            "source_content_hash": "sha256:" + "a" * 64,
+        },
     }
 
     def route(name: str) -> dict:
@@ -3324,7 +3460,12 @@ def test_preference_artifact_runtime_evidence_outputs_only_allowlisted_object_vi
         "scope": {"project": "neurons"},
         "content_hash": "sha256:" + "a" * 64,
         "payload": {
+            "memory_id": "mem_artifact_preference_p7_allowlist_view",
+            "card_content_hash": "sha256:" + "c" * 64,
+            "authority_proposal_id": "proposal:p7-allowlist-view",
             "authority_decision_id": "decision:p7-allowlist-view",
+            "project": "neurons",
+            "source_content_hash": "sha256:" + "a" * 64,
             "reason": hidden_value,
         },
         "debug_metadata": {"note": hidden_value},
@@ -3386,6 +3527,9 @@ def test_preference_artifact_runtime_evidence_outputs_only_allowlisted_object_vi
         "object_type": "ArtifactPreference",
         "authority_lane": "accepted_current",
         "title": "Dense HTML review artifacts",
+        "memory_id": "mem_artifact_preference_p7_allowlist_view",
+        "card_content_hash": "sha256:" + "c" * 64,
+        "authority_proposal_id": "proposal:p7-allowlist-view",
         "project": "neurons",
         "content_hash": "sha256:" + "a" * 64,
         "source_content_hash": "sha256:" + "a" * 64,
@@ -3396,8 +3540,11 @@ def test_preference_artifact_runtime_evidence_outputs_only_allowlisted_object_vi
 @pytest.mark.parametrize(
     ("surface", "field", "value"),
     [
-        ("html", "content_hash", "sha256:" + "b" * 64),
+        ("html", "source_content_hash", "sha256:" + "b" * 64),
         ("context", "project", "other-project"),
+        ("html", "memory_id", "mem_artifact_preference_other"),
+        ("context", "card_content_hash", "sha256:" + "b" * 64),
+        ("html", "authority_proposal_id", "proposal:p7-other"),
         ("html", "authority_decision_id", "decision:p7-other"),
     ],
 )
@@ -3415,15 +3562,26 @@ def test_preference_artifact_memory_runtime_evidence_rejects_metadata_discontinu
         "content_hash": "sha256:" + "c" * 64,
         "payload": {
             "target_object_id": target_object_id,
+            "memory_id": "mem_artifact_preference_p7_continuity",
+            "card_content_hash": "sha256:" + "d" * 64,
+            "authority_proposal_id": "proposal:p7-continuity",
             "authority_decision_id": "decision:p7-continuity",
+            "project": "neurons",
+            "source_content_hash": "sha256:" + "c" * 64,
         },
     }
     objects = {name: json.loads(json.dumps(base)) for name in ("code", "html", "context")}
     target = objects[surface]
     if field == "project":
         target["scope"]["project"] = value
-    elif field == "authority_decision_id":
-        target["payload"]["authority_decision_id"] = value
+    elif field in {
+        "memory_id",
+        "card_content_hash",
+        "authority_proposal_id",
+        "authority_decision_id",
+        "source_content_hash",
+    }:
+        target["payload"][field] = value
     else:
         target[field] = value
 
@@ -3567,7 +3725,10 @@ def test_runtime_readiness_collector_includes_preference_artifact_memory_shadow_
 
     report = build_source_to_candidate_runtime_readiness_report(live_evidence=packet)
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
-    assert claims["live.preference_artifact.memory"]["status"] == "validated"
+    assert claims["live.preference_artifact.memory"]["status"] == "not_validated"
+    assert "preference_artifact_collector_capability_missing" in claims[
+        "live.preference_artifact.memory"
+    ]["gaps"]
     assert "live_preference_artifact_memory_unverified" not in report["gaps"]
     assert "accepted_preference_context_pack_live_unproven" not in report["gaps"]
     assert report["status"] == "PASS_WITH_GAPS"
@@ -3809,7 +3970,10 @@ def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys)
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     assert claims["live.source_to_candidate.review_loop"]["status"] == "validated"
     assert claims["live.session_project.rollup"]["status"] == "validated"
-    assert claims["live.preference_artifact.memory"]["status"] == "validated"
+    assert claims["live.preference_artifact.memory"]["status"] == "not_validated"
+    assert "preference_artifact_collector_capability_missing" in claims[
+        "live.preference_artifact.memory"
+    ]["gaps"]
     assert claims["live.production.permission_sensitive_audit"]["status"] == "validated"
     assert claims["live.agent_context.startup_read_path"]["status"] == "validated"
 
@@ -3967,5 +4131,12 @@ def test_neuron_knowledge_runtime_readiness_cli_evaluates_post_deploy_capture_fi
     assert report["production_mutation_performed"] is False
     assert report["evidence_collection_network_used"] is True
     assert report["evidence_provenance"]["is_live"] is True
+    preference_claim = next(
+        claim
+        for claim in report["claims"]
+        if claim["claim_id"] == "live.preference_artifact.memory"
+    )
+    assert preference_claim["status"] == "not_validated"
+    assert "live_preference_artifact_memory_unverified" in preference_claim["gaps"]
     for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES:
         assert f"shadow_route_smoke_not_implemented:{route}" in report["gaps"]
