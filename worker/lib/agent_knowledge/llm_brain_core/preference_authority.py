@@ -55,18 +55,31 @@ def preference_rule_cards_from_memory_cards(
         scope = public_safe_text(str(payload.get("applies_to") or card.get("scope") or "global"), max_chars=180)
         if not _scope_applies(scope, current_request=current_request, current_files=current_files):
             continue
-        preferences.append(
-            PreferenceRuleCard(
-                memory_id=str(card.get("memory_id") or ""),
-                rule=rule,
-                scope=scope,
-                reason=public_safe_text(str(payload.get("reason") or card.get("summary") or ""), max_chars=360),
-                confidence=float(card.get("confidence") or 0),
-                currentness=public_safe_text(str(card.get("currentness") or "unknown"), max_chars=80),
-                evidence_refs=tuple(_evidence_refs(card)),
-                exceptions=tuple(public_safe_text(str(item), max_chars=180) for item in payload.get("exceptions") or []),
-            ).to_dict()
-        )
+        preference = PreferenceRuleCard(
+            memory_id=str(card.get("memory_id") or ""),
+            rule=rule,
+            scope=scope,
+            reason=public_safe_text(str(payload.get("reason") or card.get("summary") or ""), max_chars=360),
+            confidence=float(card.get("confidence") or 0),
+            currentness=public_safe_text(str(card.get("currentness") or "unknown"), max_chars=80),
+            evidence_refs=tuple(_evidence_refs(card)),
+            exceptions=tuple(
+                public_safe_text(str(item), max_chars=180) for item in payload.get("exceptions") or []
+            ),
+        ).to_dict()
+        target_object_id = public_safe_text(str(payload.get("target_object_id") or ""), max_chars=180)
+        if target_object_id:
+            preference["target_object_id"] = target_object_id
+            preference["project"] = public_safe_text(str(card.get("project") or ""), max_chars=120)
+            preference["source_content_hash"] = public_safe_text(
+                str(payload.get("source_content_hash") or ""),
+                max_chars=80,
+            )
+            preference["authority_decision_id"] = public_safe_text(
+                str(payload.get("authority_decision_id") or ""),
+                max_chars=180,
+            )
+        preferences.append(preference)
     return preferences
 
 

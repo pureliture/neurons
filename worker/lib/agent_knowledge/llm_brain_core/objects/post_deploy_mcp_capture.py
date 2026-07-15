@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
-from .._util import ensure_public_safe, public_safe_text
+from .._util import ensure_public_safe, public_safe_text, require_sha256
+from .authority_policy import knowledge_object_class_from_id
 from .runtime_readiness import (
     EVIDENCE_PROVENANCE_SCHEMA,
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
@@ -18,6 +20,45 @@ PROTECTED_OUTPUT_FLAGS = (
     "secret_returned",
     "host_topology_returned",
     "raw_external_ids_returned",
+)
+_FORBIDDEN_RUNTIME_INPUT_KEYS = frozenset(
+    {
+        "api_key",
+        "body",
+        "dataset_id",
+        "document_id",
+        "endpoint_url",
+        "host",
+        "hostname",
+        "host_topology",
+        "ip_address",
+        "password",
+        "private",
+        "private_path",
+        "raw",
+        "raw_body",
+        "raw_content",
+        "raw_source",
+        "raw_text",
+        "secret",
+        "token",
+    }
+)
+_FORBIDDEN_RUNTIME_INPUT_COMPACT_KEYS = frozenset(
+    key.replace("_", "") for key in _FORBIDDEN_RUNTIME_INPUT_KEYS
+)
+_RAW_EXTERNAL_REF_MARKERS = (
+    "dataset:",
+    "dataset_id:",
+    "document:",
+    "document_id:",
+    "ragflow_dataset:",
+    "ragflow_document:",
+)
+_ARTIFACT_REF_SUFFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
+_RAW_EXTERNAL_REF_SUFFIX_RE = re.compile(
+    r"^(?:ragflow[._-])?(?:dataset|document)(?:[._-]|$)",
+    re.IGNORECASE,
 )
 
 
@@ -119,34 +160,37 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
             for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
         ]
 
-    identity = (
-        _public_safe_mapping(deployed_identity)
-        if isinstance(deployed_identity, Mapping)
-        else {
-            "contains_expected_commit": False,
-            "identity_source": "post_deploy_mcp_capture_missing_deployed_identity",
-        }
-    )
-    provenance = _post_deploy_provenance(runtime_packet)
+    identity = _deployed_identity_view(deployed_identity)
+    try:
+        _reject_forbidden_runtime_input_keys(runtime_packet)
+        attested_runtime_packet = _attest_preference_artifact_memory(
+            runtime_packet,
+            deployed_identity=identity,
+            expected_commit=expected_commit,
+            streamable_http_network_capture=True,
+        )
+    except ValueError:
+        attested_runtime_packet = _forbidden_runtime_packet_failure(runtime_packet)
+    provenance = _post_deploy_provenance(attested_runtime_packet)
     capture = {
         "schema_version": POST_DEPLOY_MCP_CAPTURE_SCHEMA,
         "tool_names": tool_names,
-        "runtime_readiness_plan": _public_safe_mapping(plan),
-        "runtime_collected_packet": _runtime_collected_packet_summary(runtime_packet),
+        "runtime_readiness_plan": _remote_mapping_or_failure(plan),
+        "runtime_collected_packet": _runtime_collected_packet_summary(attested_runtime_packet),
         "agent_context_product": _agent_context_product_from_context_pack(context_pack),
         "brain_objects_query_smokes": smokes,
         "deployed_identity": identity,
         "collection": provenance,
         "evidence_provenance": provenance,
-        "production_mutation_performed": _runtime_packet_reports_mutation(runtime_packet),
+        "production_mutation_performed": _runtime_packet_reports_mutation(attested_runtime_packet),
     }
-    projection_join = _live_projection_join_from_runtime_packet(runtime_packet)
+    projection_join = _live_projection_join_from_runtime_packet(attested_runtime_packet)
     if projection_join:
         capture["projection_join"] = projection_join
-    session_project_rollup = _live_session_project_rollup_from_runtime_packet(runtime_packet)
+    session_project_rollup = _live_session_project_rollup_from_runtime_packet(attested_runtime_packet)
     if session_project_rollup:
         capture["session_project_rollup_runtime"] = session_project_rollup
-    preference_artifact_memory = _live_preference_artifact_memory_from_runtime_packet(runtime_packet)
+    preference_artifact_memory = _live_preference_artifact_memory_from_runtime_packet(attested_runtime_packet)
     if preference_artifact_memory:
         capture["preference_artifact_memory"] = preference_artifact_memory
     ensure_public_safe(capture, "SourceToCandidatePostDeployMcpCapture")
@@ -178,7 +222,7 @@ async def _call_tool_mapping(session: Any, name: str, arguments: Mapping[str, An
 
 
 def _agent_context_product_from_context_pack(context_pack: Mapping[str, Any]) -> dict[str, Any]:
-    pack = _public_safe_mapping(context_pack)
+    pack = _remote_mapping_or_failure(context_pack)
     authority = pack.get("authority") if isinstance(pack.get("authority"), Mapping) else {}
     product = authority.get("agent_context_product")
     if not isinstance(product, Mapping):
@@ -199,8 +243,9 @@ def _agent_context_product_from_context_pack(context_pack: Mapping[str, Any]) ->
 
 
 def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, Any]:
-    smoke = _public_safe_mapping(raw)
+    smoke = _remote_mapping_or_failure(raw)
     if smoke.get("collector_call_failed") is True:
+        forbidden = smoke.get("collector_forbidden_input") is True
         smoke = {
             "schema_version": "brain_objects_query.v1",
             "route": route,
@@ -216,7 +261,9 @@ def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, A
                 "evidence": [],
                 "recommended_actions": [],
                 "lanes": {},
-                "gaps": ["collector_route_smoke_failed"],
+                "gaps": [
+                    "collector_route_smoke_forbidden" if forbidden else "collector_route_smoke_failed"
+                ],
             },
         }
     smoke["schema_version"] = public_safe_text(
@@ -417,13 +464,268 @@ def _live_preference_artifact_memory_from_runtime_packet(packet: Mapping[str, An
     return live_preference
 
 
+def _attest_preference_artifact_memory(
+    packet: Mapping[str, Any],
+    *,
+    deployed_identity: Mapping[str, Any],
+    expected_commit: str,
+    streamable_http_network_capture: bool,
+) -> dict[str, Any]:
+    attested_packet = _public_safe_mapping(packet)
+    preference = attested_packet.get("preference_artifact_memory")
+    if not isinstance(preference, Mapping):
+        return attested_packet
+    safe_preference = _remote_preference_artifact_memory_view(preference)
+    blockers: list[str] = []
+    if str(safe_preference.get("attestation_state") or "") != "unattested_runtime_read":
+        blockers.append("preference_artifact_memory_unattested_runtime_read_missing")
+    if (
+        not expected_commit
+        or deployed_identity.get("contains_expected_commit") is not True
+        or not str(deployed_identity.get("identity_source") or "")
+    ):
+        blockers.append("deployed_identity_expected_commit_unverified")
+    if not streamable_http_network_capture:
+        blockers.append("post_deploy_streamable_http_network_capture_missing")
+    if blockers:
+        attested_packet["preference_artifact_memory"] = safe_preference
+        attested_packet["preference_artifact_memory_attestation_blockers"] = blockers
+        return attested_packet
+    safe_preference.update(
+        {
+            "attestation_state": "attested_post_deploy_streamable_http",
+            "evidence_class": "runtime_preference_artifact_memory",
+            "evidence_source": "actual_live_read_surfaces",
+        }
+    )
+    attested_packet["preference_artifact_memory"] = safe_preference
+    attested_packet["preference_artifact_memory_attestation_blockers"] = []
+    return attested_packet
+
+
+def _remote_preference_artifact_memory_view(value: Mapping[str, Any]) -> dict[str, Any]:
+    preference_pack = value.get("preference_object_pack")
+    html_smoke = value.get("html_visualization_route_smoke")
+    context = value.get("agent_context_preference_section")
+    alignment = value.get("read_surface_alignment")
+    artifact_check = value.get("artifact_review_check")
+    postcheck = value.get("postcheck")
+    view = {
+        "schema_version": public_safe_text(str(value.get("schema_version") or ""), max_chars=80),
+        "attestation_state": public_safe_text(str(value.get("attestation_state") or ""), max_chars=80),
+        "read_surface_alignment": _preference_alignment_view(alignment),
+        "preference_object_pack": _preference_object_pack_view(preference_pack),
+        "html_visualization_route_smoke": _preference_html_route_view(html_smoke),
+        "agent_context_preference_section": _preference_context_section_view(context),
+        "artifact_review_check": _preference_artifact_review_check_view(artifact_check),
+        "gaps": _public_safe_string_list(value.get("gaps"), max_chars=160),
+        "postcheck": _protected_output_postcheck_view(postcheck),
+        "production_mutation_performed": value.get("production_mutation_performed") is True,
+    }
+    ensure_public_safe(view, "SourceToCandidatePostDeployPreferenceArtifactMemoryView")
+    return view
+
+
+def _preference_alignment_view(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, Mapping) else {}
+    return {
+        "status": public_safe_text(str(raw.get("status") or ""), max_chars=80),
+        "target_object_id": public_safe_text(str(raw.get("target_object_id") or ""), max_chars=180),
+        "project": public_safe_text(str(raw.get("project") or ""), max_chars=120),
+        "source_content_hash": public_safe_text(
+            str(raw.get("source_content_hash") or ""),
+            max_chars=80,
+        ),
+        "authority_decision_id": public_safe_text(
+            str(raw.get("authority_decision_id") or ""),
+            max_chars=180,
+        ),
+        "code_style_preference_object_ids": _public_safe_string_list(
+            raw.get("code_style_preference_object_ids"),
+            max_chars=180,
+        ),
+        "html_visualization_preference_object_ids": _public_safe_string_list(
+            raw.get("html_visualization_preference_object_ids"),
+            max_chars=180,
+        ),
+        "style_preference_context_object_ids": _public_safe_string_list(
+            raw.get("style_preference_context_object_ids"),
+            max_chars=180,
+        ),
+    }
+
+
+def _preference_object_pack_view(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, Mapping) else {}
+    lanes = raw.get("lanes") if isinstance(raw.get("lanes"), Mapping) else {}
+    accepted = _preference_object_views(lanes.get("accepted_current"), required_lane="accepted_current")
+    proposals = _preference_object_views(lanes.get("proposal_only"), required_lane="proposal_only")
+    return {
+        "schema_version": public_safe_text(str(raw.get("schema_version") or ""), max_chars=80),
+        "route": public_safe_text(str(raw.get("route") or ""), max_chars=80),
+        "accepted_preference_count": len(accepted),
+        "proposal_preference_count": len(proposals),
+        "objects": [*accepted, *proposals],
+        "lanes": {"accepted_current": accepted, "proposal_only": proposals},
+        "recommended_actions": _preference_action_views(raw.get("recommended_actions")),
+        "gaps": _public_safe_string_list(raw.get("gaps"), max_chars=160),
+        "production_mutation_performed": raw.get("production_mutation_performed") is True,
+    }
+
+
+def _preference_html_route_view(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, Mapping) else {}
+    pack = raw.get("object_pack") if isinstance(raw.get("object_pack"), Mapping) else {}
+    lanes = pack.get("lanes") if isinstance(pack.get("lanes"), Mapping) else {}
+    accepted = _preference_object_views(lanes.get("accepted_current"), required_lane="accepted_current")
+    return {
+        "schema_version": public_safe_text(str(raw.get("schema_version") or ""), max_chars=80),
+        "route": public_safe_text(str(raw.get("route") or ""), max_chars=80),
+        "production_mutation_performed": raw.get("production_mutation_performed") is True,
+        "object_pack": {
+            "schema_version": public_safe_text(str(pack.get("schema_version") or ""), max_chars=80),
+            "route": public_safe_text(str(pack.get("route") or ""), max_chars=80),
+            "objects": accepted,
+            "lanes": {"accepted_current": accepted},
+            "recommended_actions": _preference_action_views(pack.get("recommended_actions")),
+            "gaps": _public_safe_string_list(pack.get("gaps"), max_chars=160),
+        },
+    }
+
+
+def _preference_context_section_view(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, Mapping) else {}
+    items = _preference_object_views(raw.get("items"), required_lane="accepted_current")
+    surface_policy = raw.get("surface_policy") if isinstance(raw.get("surface_policy"), Mapping) else {}
+    return {
+        "schema_version": public_safe_text(str(raw.get("schema_version") or ""), max_chars=80),
+        "section": "style_preference",
+        "object_count": len(items),
+        "accepted_preference_count": len(items),
+        "authority_lanes": _public_safe_string_list(raw.get("authority_lanes"), max_chars=80),
+        "items": items,
+        "surface_policy": {"mutation_allowed": surface_policy.get("mutation_allowed") is True},
+    }
+
+
+def _preference_object_views(value: Any, *, required_lane: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    views: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+        scope = item.get("scope") if isinstance(item.get("scope"), Mapping) else {}
+        lane = public_safe_text(str(item.get("authority_lane") or ""), max_chars=80)
+        object_id = public_safe_text(str(item.get("object_id") or ""), max_chars=180)
+        object_type = public_safe_text(str(item.get("object_type") or ""), max_chars=80)
+        if lane != required_lane or object_type != "ArtifactPreference" or not object_id:
+            continue
+        if knowledge_object_class_from_id(object_id) != "ArtifactPreference":
+            continue
+        views.append(
+            {
+                "object_id": object_id,
+                "object_type": object_type,
+                "authority_lane": lane,
+                "project": public_safe_text(
+                    str(item.get("project") or scope.get("project") or payload.get("project") or ""),
+                    max_chars=120,
+                ),
+                "content_hash": public_safe_text(
+                    str(item.get("content_hash") or payload.get("source_content_hash") or ""),
+                    max_chars=80,
+                ),
+                "source_content_hash": public_safe_text(
+                    str(
+                        item.get("source_content_hash")
+                        or payload.get("source_content_hash")
+                        or item.get("content_hash")
+                        or ""
+                    ),
+                    max_chars=80,
+                ),
+                "authority_decision_id": public_safe_text(
+                    str(item.get("authority_decision_id") or payload.get("authority_decision_id") or ""),
+                    max_chars=180,
+                ),
+            }
+        )
+    return views
+
+
+def _preference_action_views(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    return [
+        {
+            "object_id": public_safe_text(str(item.get("object_id") or ""), max_chars=180),
+            "action": public_safe_text(str(item.get("action") or ""), max_chars=80),
+        }
+        for item in value
+        if isinstance(item, Mapping) and item.get("object_id") and item.get("action")
+    ]
+
+
+def _preference_artifact_review_check_view(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, Mapping) else {}
+    metrics = raw.get("artifact_metrics") if isinstance(raw.get("artifact_metrics"), Mapping) else {}
+    return {
+        "schema_version": public_safe_text(str(raw.get("schema_version") or ""), max_chars=80),
+        "status": public_safe_text(str(raw.get("status") or ""), max_chars=80),
+        "ui_required": raw.get("ui_required") is True,
+        "artifact_type": public_safe_text(str(raw.get("artifact_type") or ""), max_chars=80),
+        "artifact_summary": public_safe_text(str(raw.get("artifact_summary") or ""), max_chars=360),
+        "artifact_metrics": {
+            "finding_count": _safe_int(metrics.get("finding_count")),
+            "evidence_ref_count": _safe_int(metrics.get("evidence_ref_count")),
+            "word_count": _safe_int(metrics.get("word_count")),
+        },
+        "matched_preference_object_ids": _public_safe_string_list(
+            raw.get("matched_preference_object_ids"),
+            max_chars=180,
+        ),
+        "failures": _public_safe_string_list(raw.get("failures"), max_chars=160),
+        "raw_artifact_body_returned": raw.get("raw_artifact_body_returned")
+        if isinstance(raw.get("raw_artifact_body_returned"), bool)
+        else None,
+    }
+
+
+def _protected_output_postcheck_view(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, Mapping) else {}
+    return {
+        "status": public_safe_text(str(raw.get("status") or ""), max_chars=80),
+        **{
+            field: raw.get(field) if isinstance(raw.get(field), bool) else None
+            for field in PROTECTED_OUTPUT_FLAGS
+        },
+    }
+
+
+def _public_safe_string_list(value: Any, *, max_chars: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [
+        public_safe_text(str(item), max_chars=max_chars)
+        for item in value
+        if isinstance(item, str) and item
+    ]
+
+
 def _preference_artifact_memory_promotion_blockers(packet: Mapping[str, Any]) -> list[str]:
     safe_packet = _public_safe_mapping(packet)
     preference = safe_packet.get("preference_artifact_memory")
     if not isinstance(preference, Mapping):
         return ["preference_artifact_memory_missing"]
-    if str(preference.get("evidence_class") or "") != "runtime_preference_artifact_memory":
-        return ["preference_artifact_memory_evidence_class_missing"]
+    attestation_blockers = safe_packet.get("preference_artifact_memory_attestation_blockers")
+    if (
+        isinstance(attestation_blockers, list)
+        and attestation_blockers
+        and attestation_blockers[0] == "preference_artifact_runtime_input_forbidden"
+    ):
+        return [public_safe_text(str(attestation_blockers[0] or ""), max_chars=120)]
     collector = safe_packet.get("collector") if isinstance(safe_packet.get("collector"), Mapping) else {}
     if str(collector.get("readiness_claim") or "") == "collector_packet_not_live_evidence":
         return ["collector_packet_not_live_evidence"]
@@ -449,6 +751,8 @@ def _preference_artifact_memory_promotion_blockers(packet: Mapping[str, Any]) ->
         if isinstance(preference.get("artifact_review_check"), Mapping)
         else {}
     )
+    if artifact_check.get("status") != "pass":
+        return ["preference_artifact_review_check_failed"]
     if artifact_check.get("raw_artifact_body_returned") is not False:
         return ["preference_artifact_raw_artifact_body_returned"]
     context = (
@@ -460,7 +764,148 @@ def _preference_artifact_memory_promotion_blockers(packet: Mapping[str, Any]) ->
     safe_lanes = [public_safe_text(str(lane or ""), max_chars=80) for lane in lanes if lane]
     if "accepted_current" not in safe_lanes:
         return ["preference_artifact_agent_context_accepted_current_missing"]
+    if isinstance(attestation_blockers, list) and attestation_blockers:
+        return [public_safe_text(str(attestation_blockers[0] or ""), max_chars=120)]
+    if not _artifact_consumer_evidence_valid(preference):
+        return ["preference_artifact_consumer_evidence_missing"]
+    if str(preference.get("attestation_state") or "") != "attested_post_deploy_streamable_http":
+        return ["preference_artifact_memory_post_deploy_attestation_missing"]
+    if str(preference.get("evidence_class") or "") != "runtime_preference_artifact_memory":
+        return ["preference_artifact_memory_evidence_class_missing"]
+    if str(preference.get("evidence_source") or "") != "actual_live_read_surfaces":
+        return ["preference_artifact_memory_not_actual_live_read_surfaces"]
+    alignment = (
+        preference.get("read_surface_alignment")
+        if isinstance(preference.get("read_surface_alignment"), Mapping)
+        else {}
+    )
+    target_object_id = public_safe_text(str(alignment.get("target_object_id") or ""), max_chars=180)
+    aligned_lists = [
+        alignment.get("code_style_preference_object_ids"),
+        alignment.get("html_visualization_preference_object_ids"),
+        alignment.get("style_preference_context_object_ids"),
+    ]
+    if (
+        alignment.get("status") != "validated"
+        or not target_object_id
+        or any(not isinstance(items, list) or target_object_id not in items for items in aligned_lists)
+        or not _preference_surface_continuity_matches(preference, target_object_id, alignment)
+    ):
+        return ["preference_artifact_memory_read_surface_alignment_failed"]
     return []
+
+
+def _artifact_consumer_evidence_valid(preference: Mapping[str, Any]) -> bool:
+    consumer = (
+        preference.get("artifact_consumer_evidence")
+        if isinstance(preference.get("artifact_consumer_evidence"), Mapping)
+        else {}
+    )
+    provenance = (
+        consumer.get("consumer_provenance")
+        if isinstance(consumer.get("consumer_provenance"), Mapping)
+        else {}
+    )
+    finding_refs = consumer.get("finding_refs") if isinstance(consumer.get("finding_refs"), list) else []
+    evidence_refs = consumer.get("evidence_refs") if isinstance(consumer.get("evidence_refs"), list) else []
+    try:
+        require_sha256(str(consumer.get("artifact_fingerprint") or ""), "artifact_fingerprint")
+    except ValueError:
+        return False
+    return (
+        consumer.get("status") == "validated"
+        and provenance.get("evidence_kind") == "actual_consumer_output"
+        and bool(str(provenance.get("consumer") or ""))
+        and bool(str(provenance.get("workflow") or ""))
+        and bool(finding_refs)
+        and bool(evidence_refs)
+        and all(_artifact_ref_is_public_safe(item, required_prefix="finding:") for item in finding_refs)
+        and all(_artifact_ref_is_public_safe(item, required_prefix="evidence:") for item in evidence_refs)
+        and _safe_int(consumer.get("finding_count")) == len(finding_refs)
+        and _safe_int(consumer.get("evidence_ref_count")) == len(evidence_refs)
+    )
+
+
+def _artifact_ref_is_public_safe(value: Any, *, required_prefix: str) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    normalized = value.casefold()
+    decoded = _fully_unquote(value)
+    suffix = value[len(required_prefix) :] if normalized.startswith(required_prefix) else ""
+    return (
+        decoded == value
+        and bool(suffix)
+        and _ARTIFACT_REF_SUFFIX_RE.fullmatch(suffix) is not None
+        and _RAW_EXTERNAL_REF_SUFFIX_RE.match(suffix) is None
+        and not any(marker in normalized for marker in _RAW_EXTERNAL_REF_MARKERS)
+    )
+
+
+def _preference_surface_continuity_matches(
+    preference: Mapping[str, Any],
+    target_object_id: str,
+    alignment: Mapping[str, Any],
+) -> bool:
+    if knowledge_object_class_from_id(target_object_id) != "ArtifactPreference":
+        return False
+    pack = preference.get("preference_object_pack") if isinstance(
+        preference.get("preference_object_pack"), Mapping
+    ) else {}
+    html_smoke = preference.get("html_visualization_route_smoke") if isinstance(
+        preference.get("html_visualization_route_smoke"), Mapping
+    ) else {}
+    html_pack = html_smoke.get("object_pack") if isinstance(html_smoke.get("object_pack"), Mapping) else {}
+    context = preference.get("agent_context_preference_section") if isinstance(
+        preference.get("agent_context_preference_section"), Mapping
+    ) else {}
+    surfaces = [
+        pack.get("lanes", {}).get("accepted_current", []) if isinstance(pack.get("lanes"), Mapping) else [],
+        html_pack.get("lanes", {}).get("accepted_current", [])
+        if isinstance(html_pack.get("lanes"), Mapping)
+        else [],
+        context.get("items", []) if isinstance(context.get("items"), list) else [],
+    ]
+    continuity: list[tuple[str, str, str]] = []
+    for items in surfaces:
+        obj = next(
+            (
+                item
+                for item in items
+                if isinstance(item, Mapping) and str(item.get("object_id") or "") == target_object_id
+            ),
+            None,
+        )
+        if obj is None:
+            return False
+        scope = obj.get("scope") if isinstance(obj.get("scope"), Mapping) else {}
+        payload = obj.get("payload") if isinstance(obj.get("payload"), Mapping) else {}
+        continuity.append(
+            (
+                public_safe_text(
+                    str(obj.get("project") or scope.get("project") or payload.get("project") or ""),
+                    max_chars=120,
+                ),
+                public_safe_text(
+                    str(
+                        obj.get("source_content_hash")
+                        or obj.get("content_hash")
+                        or payload.get("source_content_hash")
+                        or ""
+                    ),
+                    max_chars=80,
+                ),
+                public_safe_text(
+                    str(obj.get("authority_decision_id") or payload.get("authority_decision_id") or ""),
+                    max_chars=180,
+                ),
+            )
+        )
+    expected = (
+        public_safe_text(str(alignment.get("project") or ""), max_chars=120),
+        public_safe_text(str(alignment.get("source_content_hash") or ""), max_chars=80),
+        public_safe_text(str(alignment.get("authority_decision_id") or ""), max_chars=180),
+    )
+    return expected != ("", "", "") and len(set(continuity)) == 1 and continuity[0] == expected
 
 
 def _preference_artifact_has_accepted_current_lane(preference: Mapping[str, Any]) -> bool:
@@ -549,3 +994,115 @@ def _public_safe_mapping(value: Any) -> dict[str, Any]:
     safe = dict(value) if isinstance(value, Mapping) else {}
     ensure_public_safe(safe, "SourceToCandidatePostDeployMcpMapping")
     return safe
+
+
+def _remote_mapping_or_failure(value: Any) -> dict[str, Any]:
+    try:
+        _reject_forbidden_runtime_input_keys(value)
+    except ValueError:
+        return {
+            "collector_call_failed": True,
+            "collector_error_type": "ForbiddenRuntimeEvidenceField",
+            "collector_forbidden_input": True,
+        }
+    return _public_safe_mapping(value)
+
+
+def _deployed_identity_view(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {
+            "contains_expected_commit": False,
+            "identity_source": "post_deploy_mcp_capture_missing_deployed_identity",
+        }
+    try:
+        _reject_forbidden_runtime_input_keys(value)
+    except ValueError:
+        return {
+            "contains_expected_commit": False,
+            "identity_source": "post_deploy_mcp_capture_forbidden_deployed_identity",
+        }
+    return {
+        "contains_expected_commit": value.get("contains_expected_commit") is True,
+        "identity_source": public_safe_text(str(value.get("identity_source") or ""), max_chars=160),
+    }
+
+
+def _reject_forbidden_runtime_input_keys(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            normalized = _normalized_sensitive_key(key)
+            compact = normalized.replace("_", "")
+            if (
+                normalized in _FORBIDDEN_RUNTIME_INPUT_KEYS
+                or compact in _FORBIDDEN_RUNTIME_INPUT_COMPACT_KEYS
+                or (
+                    normalized.endswith("s")
+                    and (
+                        normalized[:-1] in _FORBIDDEN_RUNTIME_INPUT_KEYS
+                        or compact[:-1] in _FORBIDDEN_RUNTIME_INPUT_COMPACT_KEYS
+                    )
+                )
+            ):
+                raise ValueError("runtime evidence contains a forbidden field")
+            _reject_forbidden_runtime_input_keys(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            _reject_forbidden_runtime_input_keys(child)
+
+
+def _normalized_sensitive_key(value: Any) -> str:
+    decoded = _fully_unquote(str(value).strip())
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", decoded)
+    return re.sub(r"[^A-Za-z0-9]+", "_", snake).strip("_").casefold()
+
+
+def _fully_unquote(value: str) -> str:
+    decoded = value
+    for _ in range(3):
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    return decoded
+
+
+def _forbidden_runtime_packet_failure(packet: Mapping[str, Any]) -> dict[str, Any]:
+    provenance = packet.get("evidence_provenance") if isinstance(packet.get("evidence_provenance"), Mapping) else {}
+    collector = packet.get("collector") if isinstance(packet.get("collector"), Mapping) else {}
+    preference = (
+        packet.get("preference_artifact_memory")
+        if isinstance(packet.get("preference_artifact_memory"), Mapping)
+        else {}
+    )
+    return {
+        "schema_version": public_safe_text(str(packet.get("schema_version") or ""), max_chars=80),
+        "collector": {
+            "readiness_claim": public_safe_text(
+                str(collector.get("readiness_claim") or ""),
+                max_chars=120,
+            )
+        },
+        "evidence_provenance": {
+            "collection_mode": public_safe_text(
+                str(provenance.get("collection_mode") or ""),
+                max_chars=80,
+            ),
+            "network_used": provenance.get("network_used") is True,
+            "mutation_scope": public_safe_text(
+                str(provenance.get("mutation_scope") or "none"),
+                max_chars=80,
+            ),
+        },
+        "preference_artifact_memory": {
+            "schema_version": public_safe_text(
+                str(preference.get("schema_version") or ""),
+                max_chars=80,
+            ),
+            "collector_error_type": "ForbiddenRuntimeEvidenceField",
+            "postcheck": {"status": "failed"},
+        },
+        "preference_artifact_memory_attestation_blockers": [
+            "preference_artifact_runtime_input_forbidden"
+        ],
+        "production_mutation_performed": packet.get("production_mutation_performed") is True,
+    }

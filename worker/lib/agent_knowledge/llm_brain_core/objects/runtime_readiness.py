@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from typing import Any
+from urllib.parse import unquote
 
-from .._util import ensure_public_safe, public_safe_text
+from .._util import ensure_public_safe, public_safe_text, require_sha256
 from .authority_policy import (
     knowledge_object_class_from_id,
     is_allowed_object_target,
@@ -72,6 +74,45 @@ SESSION_PROJECT_HANDOFF_SCHEMA = "session_project_handoff_pack.v1"
 SESSION_PROJECT_RESUME_SCHEMA = "session_project_resume_context.v1"
 PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA = "preference_artifact_memory_runtime_evidence.v1"
 ARTIFACT_REVIEW_PREFERENCE_CHECK_SCHEMA = "artifact_review_preference_check.v1"
+_RUNTIME_EVIDENCE_FORBIDDEN_KEYS = frozenset(
+    {
+        "api_key",
+        "body",
+        "dataset_id",
+        "document_id",
+        "endpoint_url",
+        "host",
+        "hostname",
+        "host_topology",
+        "ip_address",
+        "password",
+        "private",
+        "private_path",
+        "raw",
+        "raw_body",
+        "raw_content",
+        "raw_source",
+        "raw_text",
+        "secret",
+        "token",
+    }
+)
+_RUNTIME_EVIDENCE_FORBIDDEN_COMPACT_KEYS = frozenset(
+    key.replace("_", "") for key in _RUNTIME_EVIDENCE_FORBIDDEN_KEYS
+)
+_RAW_EXTERNAL_REF_MARKERS = (
+    "dataset:",
+    "dataset_id:",
+    "document:",
+    "document_id:",
+    "ragflow_dataset:",
+    "ragflow_document:",
+)
+_ARTIFACT_REF_SUFFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
+_RAW_EXTERNAL_REF_SUFFIX_RE = re.compile(
+    r"^(?:ragflow[._-])?(?:dataset|document)(?:[._-]|$)",
+    re.IGNORECASE,
+)
 PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA = "permission_sensitive_runtime_audit_evidence.v1"
 PERMISSION_AUDIT_EVENT_SCHEMA = "runtime_permission_audit_event.v1"
 AGENT_CONTEXT_STARTUP_RUNTIME_SCHEMA = "agent_context_startup_runtime_evidence.v1"
@@ -1068,6 +1109,371 @@ def build_preference_artifact_memory_shadow_evidence(
     return evidence
 
 
+def build_preference_artifact_memory_runtime_evidence(
+    *,
+    preference_route: Mapping[str, Any],
+    html_route: Mapping[str, Any],
+    context_pack: Mapping[str, Any],
+    artifact_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build P7 evidence only from actual public-safe runtime read surfaces."""
+
+    for raw_input in (preference_route, html_route, context_pack, artifact_summary):
+        _reject_forbidden_runtime_evidence_keys(raw_input)
+    safe_preference_route = _public_safe_mapping(preference_route)
+    safe_html_route = _public_safe_mapping(html_route)
+    safe_context = _public_safe_mapping(context_pack)
+    preference_pack = (
+        safe_preference_route.get("object_pack")
+        if isinstance(safe_preference_route.get("object_pack"), Mapping)
+        else {}
+    )
+    html_pack = (
+        safe_html_route.get("object_pack")
+        if isinstance(safe_html_route.get("object_pack"), Mapping)
+        else {}
+    )
+    authority = safe_context.get("authority") if isinstance(safe_context.get("authority"), Mapping) else {}
+    product = (
+        authority.get("agent_context_product")
+        if isinstance(authority.get("agent_context_product"), Mapping)
+        else {}
+    )
+    sections = product.get("sections") if isinstance(product.get("sections"), Mapping) else {}
+    style_section = sections.get("style_preference") if isinstance(sections.get("style_preference"), Mapping) else {}
+
+    code_objects = _accepted_artifact_preferences(preference_pack)
+    html_objects = _accepted_artifact_preferences(html_pack)
+    context_items = style_section.get("items") if isinstance(style_section.get("items"), list) else []
+    context_objects = [
+        _artifact_preference_object_view(item)
+        for item in context_items
+        if isinstance(item, Mapping)
+        and item.get("object_type") == "ArtifactPreference"
+        and item.get("authority_lane") == REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE
+        and knowledge_object_class_from_id(str(item.get("object_id") or ""))
+        == "ArtifactPreference"
+    ]
+    code_ids = sorted(_object_ids(code_objects))
+    html_ids = sorted(_object_ids(html_objects))
+    context_ids = sorted(_object_ids(context_objects))
+    aligned_ids = sorted(set(code_ids).intersection(html_ids, context_ids))
+    code_by_id = {str(item.get("object_id") or ""): item for item in code_objects}
+    html_by_id = {str(item.get("object_id") or ""): item for item in html_objects}
+    context_by_id = {str(item.get("object_id") or ""): item for item in context_objects}
+    target_object_id = ""
+    continuity: tuple[str, str, str] = ("", "", "")
+    for candidate_id in aligned_ids:
+        surface_continuity = [
+            _artifact_preference_continuity(view)
+            for view in (
+                code_by_id[candidate_id],
+                html_by_id[candidate_id],
+                context_by_id[candidate_id],
+            )
+        ]
+        if surface_continuity[0] != ("", "", "") and len(set(surface_continuity)) == 1:
+            target_object_id = candidate_id
+            continuity = surface_continuity[0]
+            break
+    alignment_status = "validated" if target_object_id else "failed"
+
+    safe_summary = public_safe_text(str(artifact_summary.get("summary") or ""), max_chars=360)
+    artifact_type = public_safe_text(str(artifact_summary.get("artifact_type") or ""), max_chars=80)
+    consumer_provenance = (
+        artifact_summary.get("consumer_provenance")
+        if isinstance(artifact_summary.get("consumer_provenance"), Mapping)
+        else {}
+    )
+    safe_consumer_provenance = {
+        "consumer": public_safe_text(str(consumer_provenance.get("consumer") or ""), max_chars=120),
+        "workflow": public_safe_text(str(consumer_provenance.get("workflow") or ""), max_chars=120),
+        "evidence_kind": public_safe_text(
+            str(consumer_provenance.get("evidence_kind") or ""),
+            max_chars=80,
+        ),
+    }
+    artifact_fingerprint = ""
+    supplied_fingerprint = str(artifact_summary.get("artifact_fingerprint") or "")
+    try:
+        artifact_fingerprint = require_sha256(supplied_fingerprint, "artifact_fingerprint")
+    except ValueError:
+        pass
+    finding_refs = _public_safe_artifact_refs(
+        artifact_summary.get("finding_refs"),
+        required_prefix="finding:",
+    )
+    evidence_refs = _public_safe_artifact_refs(
+        artifact_summary.get("evidence_refs"),
+        required_prefix="evidence:",
+    )
+    finding_count = len(finding_refs)
+    evidence_ref_count = len(evidence_refs)
+    word_count = _int_value(artifact_summary.get("word_count"))
+    artifact_failures: list[str] = []
+    if artifact_type != "html_review" or not safe_summary:
+        artifact_failures.append("html_artifact_summary_missing")
+    if not target_object_id:
+        artifact_failures.append("accepted_html_preference_missing")
+    if (
+        safe_consumer_provenance["evidence_kind"] != "actual_consumer_output"
+        or not safe_consumer_provenance["consumer"]
+        or not safe_consumer_provenance["workflow"]
+    ):
+        artifact_failures.append("actual_artifact_consumer_provenance_missing")
+    if not artifact_fingerprint:
+        artifact_failures.append("artifact_fingerprint_missing")
+    if finding_count < 1 or evidence_ref_count < 1:
+        artifact_failures.append("information_density_evidence_missing")
+    if _int_value(artifact_summary.get("finding_count")) != finding_count:
+        artifact_failures.append("artifact_finding_count_mismatch")
+    if _int_value(artifact_summary.get("evidence_ref_count")) != evidence_ref_count:
+        artifact_failures.append("artifact_evidence_ref_count_mismatch")
+    gaps: list[str] = []
+    if not code_ids:
+        gaps.append("accepted_current_artifact_preference_missing")
+    if not target_object_id:
+        gaps.append("preference_read_surface_target_mismatch")
+    if aligned_ids and not target_object_id:
+        gaps.append("preference_read_surface_metadata_mismatch")
+    if any(
+        failure
+        in {
+            "actual_artifact_consumer_provenance_missing",
+            "artifact_fingerprint_missing",
+            "information_density_evidence_missing",
+            "artifact_finding_count_mismatch",
+            "artifact_evidence_ref_count_mismatch",
+        }
+        for failure in artifact_failures
+    ):
+        gaps.append("artifact_consumer_evidence_missing")
+
+    raw_proposal_lane = (
+        preference_pack.get("lanes", {}).get("proposal_only", [])
+        if isinstance(preference_pack.get("lanes"), Mapping)
+        else []
+    )
+    proposal_lane = [
+        _artifact_preference_object_view(item)
+        for item in raw_proposal_lane
+        if isinstance(item, Mapping)
+        and item.get("object_type") == "ArtifactPreference"
+        and knowledge_object_class_from_id(str(item.get("object_id") or ""))
+        == "ArtifactPreference"
+    ]
+    evidence = {
+        "schema_version": PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA,
+        "attestation_state": "unattested_runtime_read",
+        "read_surface_alignment": {
+            "status": alignment_status,
+            "target_object_id": target_object_id,
+            "project": continuity[0],
+            "source_content_hash": continuity[1],
+            "authority_decision_id": continuity[2],
+            "code_style_preference_object_ids": code_ids,
+            "html_visualization_preference_object_ids": html_ids,
+            "style_preference_context_object_ids": context_ids,
+        },
+        "preference_object_pack": {
+            "schema_version": public_safe_text(str(preference_pack.get("schema_version") or ""), max_chars=80),
+            "route": public_safe_text(str(preference_pack.get("route") or ""), max_chars=80),
+            "accepted_preference_count": len(code_objects),
+            "proposal_preference_count": len(proposal_lane),
+            "objects": [*code_objects, *proposal_lane],
+            "lanes": {
+                "accepted_current": code_objects,
+                "proposal_only": proposal_lane,
+            },
+            "recommended_actions": _artifact_preference_action_views(
+                preference_pack.get("recommended_actions")
+            ),
+            "gaps": _string_list(preference_pack.get("gaps")),
+            "production_mutation_performed": False,
+        },
+        "html_visualization_route_smoke": {
+            "schema_version": public_safe_text(str(safe_html_route.get("schema_version") or ""), max_chars=80),
+            "route": public_safe_text(str(safe_html_route.get("route") or ""), max_chars=80),
+            "production_mutation_performed": False,
+            "object_pack": {
+                "schema_version": public_safe_text(
+                    str(html_pack.get("schema_version") or ""),
+                    max_chars=80,
+                ),
+                "route": public_safe_text(str(html_pack.get("route") or ""), max_chars=80),
+                "objects": html_objects,
+                "lanes": {"accepted_current": html_objects},
+                "recommended_actions": _artifact_preference_action_views(
+                    html_pack.get("recommended_actions")
+                ),
+                "gaps": _string_list(html_pack.get("gaps")),
+            },
+        },
+        "agent_context_preference_section": {
+            "schema_version": public_safe_text(str(product.get("schema_version") or ""), max_chars=80),
+            "section": "style_preference",
+            "object_count": len(context_objects),
+            "accepted_preference_count": len(context_objects),
+            "authority_lanes": list(style_section.get("authority_lanes") or []),
+            "items": context_objects,
+            "surface_policy": {
+                "mutation_allowed": (
+                    product.get("surface_policy", {}).get("mutation_allowed")
+                    if isinstance(product.get("surface_policy"), Mapping)
+                    else None
+                )
+            },
+        },
+        "artifact_consumer_evidence": {
+            "status": "validated" if not artifact_failures else "failed",
+            "consumer_provenance": safe_consumer_provenance,
+            "artifact_fingerprint": artifact_fingerprint,
+            "finding_refs": finding_refs,
+            "evidence_refs": evidence_refs,
+            "finding_count": finding_count,
+            "evidence_ref_count": evidence_ref_count,
+        },
+        "artifact_review_check": {
+            "schema_version": ARTIFACT_REVIEW_PREFERENCE_CHECK_SCHEMA,
+            "status": "pass" if not artifact_failures else "failed",
+            "ui_required": False,
+            "artifact_type": artifact_type,
+            "artifact_summary": safe_summary,
+            "artifact_metrics": {
+                "finding_count": finding_count,
+                "evidence_ref_count": evidence_ref_count,
+                "word_count": word_count,
+            },
+            "matched_preference_object_ids": [target_object_id] if target_object_id else [],
+            "failures": artifact_failures,
+            "raw_artifact_body_returned": False,
+        },
+        "gaps": gaps,
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": False,
+    }
+    ensure_public_safe(evidence, "PreferenceArtifactMemoryRuntimeEvidence")
+    return evidence
+
+
+def _public_safe_artifact_refs(value: Any, *, required_prefix: str) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    refs: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            return []
+        ensure_public_safe(item, "artifact_consumer_ref")
+        safe = public_safe_text(item, max_chars=180)
+        if not safe:
+            return []
+        normalized = safe.casefold()
+        decoded = _fully_unquote(safe)
+        suffix = safe[len(required_prefix) :] if normalized.startswith(required_prefix) else ""
+        if (
+            decoded != safe
+            or not suffix
+            or not _ARTIFACT_REF_SUFFIX_RE.fullmatch(suffix)
+            or _RAW_EXTERNAL_REF_SUFFIX_RE.match(suffix)
+            or any(marker in normalized for marker in _RAW_EXTERNAL_REF_MARKERS)
+        ):
+            raise ValueError("public-safe artifact refs must use internal finding/evidence refs")
+        refs.append(safe)
+    return list(dict.fromkeys(refs))
+
+
+def _accepted_artifact_preferences(pack: Mapping[str, Any]) -> list[dict[str, Any]]:
+    lanes = pack.get("lanes") if isinstance(pack.get("lanes"), Mapping) else {}
+    accepted = lanes.get(REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE)
+    return [
+        _artifact_preference_object_view(item)
+        for item in accepted or []
+        if isinstance(item, Mapping)
+        and item.get("object_type") == "ArtifactPreference"
+        and item.get("authority_lane") == REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE
+        and knowledge_object_class_from_id(str(item.get("object_id") or ""))
+        == "ArtifactPreference"
+    ]
+
+
+def _artifact_preference_object_view(obj: Mapping[str, Any]) -> dict[str, Any]:
+    scope = obj.get("scope") if isinstance(obj.get("scope"), Mapping) else {}
+    payload = obj.get("payload") if isinstance(obj.get("payload"), Mapping) else {}
+    content_hash = public_safe_text(str(obj.get("content_hash") or ""), max_chars=80)
+    source_content_hash = public_safe_text(
+        str(payload.get("source_content_hash") or content_hash),
+        max_chars=80,
+    )
+    return {
+        "object_id": public_safe_text(str(obj.get("object_id") or ""), max_chars=180),
+        "object_type": public_safe_text(str(obj.get("object_type") or ""), max_chars=80),
+        "authority_lane": public_safe_text(str(obj.get("authority_lane") or ""), max_chars=80),
+        "title": public_safe_text(str(obj.get("title") or ""), max_chars=240),
+        "project": public_safe_text(
+            str(scope.get("project") or payload.get("project") or ""),
+            max_chars=120,
+        ),
+        "content_hash": content_hash,
+        "source_content_hash": source_content_hash,
+        "authority_decision_id": public_safe_text(
+            str(payload.get("authority_decision_id") or ""),
+            max_chars=180,
+        ),
+    }
+
+
+def _artifact_preference_action_views(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    return [
+        {
+            "object_id": public_safe_text(str(item.get("object_id") or ""), max_chars=180),
+            "action": public_safe_text(str(item.get("action") or ""), max_chars=120),
+        }
+        for item in value
+        if isinstance(item, Mapping)
+    ]
+
+
+def _artifact_preference_continuity(obj: Mapping[str, Any]) -> tuple[str, str, str]:
+    scope = obj.get("scope") if isinstance(obj.get("scope"), Mapping) else {}
+    payload = obj.get("payload") if isinstance(obj.get("payload"), Mapping) else {}
+    project = public_safe_text(
+        str(obj.get("project") or scope.get("project") or payload.get("project") or ""),
+        max_chars=120,
+    )
+    content_hash = public_safe_text(
+        str(
+            obj.get("source_content_hash")
+            or obj.get("content_hash")
+            or payload.get("source_content_hash")
+            or ""
+        ),
+        max_chars=80,
+    )
+    authority_decision_id = public_safe_text(
+        str(obj.get("authority_decision_id") or payload.get("authority_decision_id") or ""),
+        max_chars=180,
+    )
+    if not project or not content_hash.startswith("sha256:") or not authority_decision_id:
+        return "", "", ""
+    return project, content_hash, authority_decision_id
+
+
+def _object_ids(objects: list[Mapping[str, Any]]) -> set[str]:
+    return {
+        public_safe_text(str(item.get("object_id") or ""), max_chars=180)
+        for item in objects
+        if str(item.get("object_id") or "")
+    }
+
+
 def _collect_preference_artifact_memory_shadow(
     preference_artifact_memory_runner: Callable[[], Mapping[str, Any]] | None,
     *,
@@ -1122,11 +1528,7 @@ def _collect_preference_artifact_memory_shadow(
                 "raw_artifact_body_returned": False,
             },
             "postcheck": {
-                "status": "validated",
-                "raw_private_evidence_returned": False,
-                "secret_returned": False,
-                "host_topology_returned": False,
-                "raw_external_ids_returned": False,
+                "status": "failed",
             },
         }
     evidence = _public_safe_mapping(raw)
@@ -1321,6 +1723,7 @@ def _collect_brain_objects_query_route_smoke(
 ) -> dict[str, Any]:
     try:
         raw = route_runner(route)
+        _reject_forbidden_runtime_evidence_keys(raw)
     except Exception as exc:  # pragma: no cover - defensive public-safe guard
         raw = {
             "schema_version": "brain_objects_query.v1",
@@ -2785,8 +3188,19 @@ def _preference_artifact_memory_failures(
         "ArtifactPreference",
     ):
         failures.append("preference_artifact_accepted_current_lane_missing")
-    if _int_value(pack.get("proposal_preference_count")) < 1:
+    actual_runtime_read = _is_actual_preference_runtime_read(preference)
+    if not actual_runtime_read and _int_value(pack.get("proposal_preference_count")) < 1:
         failures.append("preference_artifact_proposal_lane_missing")
+    if actual_runtime_read:
+        alignment = (
+            preference.get("read_surface_alignment")
+            if isinstance(preference.get("read_surface_alignment"), Mapping)
+            else {}
+        )
+        if not _preference_artifact_alignment_valid(preference, alignment):
+            failures.append("preference_artifact_read_surface_alignment_failed")
+        if not _runtime_artifact_consumer_evidence_valid(preference):
+            failures.append("preference_artifact_consumer_evidence_missing")
     if not _pack_contains_object_type(pack, "ArtifactPreference"):
         failures.append("preference_artifact_object_missing")
     if not isinstance(pack.get("recommended_actions"), list):
@@ -2841,6 +3255,105 @@ def _preference_artifact_memory_failures(
     return _dedupe(failures)
 
 
+def _is_actual_preference_runtime_read(preference: Mapping[str, Any]) -> bool:
+    return (
+        preference.get("schema_version") == PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA
+        and preference.get("attestation_state")
+        in {"unattested_runtime_read", "attested_post_deploy_streamable_http"}
+        and isinstance(preference.get("read_surface_alignment"), Mapping)
+        and isinstance(preference.get("artifact_consumer_evidence"), Mapping)
+    )
+
+
+def _runtime_artifact_consumer_evidence_valid(preference: Mapping[str, Any]) -> bool:
+    consumer = (
+        preference.get("artifact_consumer_evidence")
+        if isinstance(preference.get("artifact_consumer_evidence"), Mapping)
+        else {}
+    )
+    provenance = (
+        consumer.get("consumer_provenance")
+        if isinstance(consumer.get("consumer_provenance"), Mapping)
+        else {}
+    )
+    finding_refs = consumer.get("finding_refs") if isinstance(consumer.get("finding_refs"), list) else []
+    evidence_refs = consumer.get("evidence_refs") if isinstance(consumer.get("evidence_refs"), list) else []
+    try:
+        require_sha256(str(consumer.get("artifact_fingerprint") or ""), "artifact_fingerprint")
+    except ValueError:
+        return False
+    return (
+        consumer.get("status") == "validated"
+        and provenance.get("evidence_kind") == "actual_consumer_output"
+        and bool(str(provenance.get("consumer") or ""))
+        and bool(str(provenance.get("workflow") or ""))
+        and _artifact_ref_list_is_public_safe(finding_refs, required_prefix="finding:")
+        and _artifact_ref_list_is_public_safe(evidence_refs, required_prefix="evidence:")
+        and _int_value(consumer.get("finding_count")) == len(finding_refs)
+        and _int_value(consumer.get("evidence_ref_count")) == len(evidence_refs)
+    )
+
+
+def _artifact_ref_list_is_public_safe(value: Any, *, required_prefix: str) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    try:
+        normalized = _public_safe_artifact_refs(value, required_prefix=required_prefix)
+    except ValueError:
+        return False
+    return normalized == value
+
+
+def _preference_artifact_alignment_valid(
+    preference: Mapping[str, Any],
+    alignment: Mapping[str, Any],
+) -> bool:
+    target_object_id = public_safe_text(str(alignment.get("target_object_id") or ""), max_chars=180)
+    if (
+        alignment.get("status") != "validated"
+        or knowledge_object_class_from_id(target_object_id) != "ArtifactPreference"
+    ):
+        return False
+    pack = preference.get("preference_object_pack") if isinstance(
+        preference.get("preference_object_pack"), Mapping
+    ) else {}
+    html_smoke = preference.get("html_visualization_route_smoke") if isinstance(
+        preference.get("html_visualization_route_smoke"), Mapping
+    ) else {}
+    html_pack = html_smoke.get("object_pack") if isinstance(html_smoke.get("object_pack"), Mapping) else {}
+    context = preference.get("agent_context_preference_section") if isinstance(
+        preference.get("agent_context_preference_section"), Mapping
+    ) else {}
+    surfaces = [
+        pack.get("lanes", {}).get(REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE, [])
+        if isinstance(pack.get("lanes"), Mapping)
+        else [],
+        html_pack.get("lanes", {}).get(REQUIRED_AGENT_CONTEXT_AUTHORITY_LANE, [])
+        if isinstance(html_pack.get("lanes"), Mapping)
+        else [],
+        context.get("items", []) if isinstance(context.get("items"), list) else [],
+    ]
+    continuity: list[tuple[str, str, str]] = []
+    for items in surfaces:
+        obj = next(
+            (
+                item
+                for item in items
+                if isinstance(item, Mapping) and str(item.get("object_id") or "") == target_object_id
+            ),
+            None,
+        )
+        if obj is None:
+            return False
+        continuity.append(_artifact_preference_continuity(obj))
+    expected = (
+        public_safe_text(str(alignment.get("project") or ""), max_chars=120),
+        public_safe_text(str(alignment.get("source_content_hash") or ""), max_chars=80),
+        public_safe_text(str(alignment.get("authority_decision_id") or ""), max_chars=180),
+    )
+    return expected != ("", "", "") and len(set(continuity)) == 1 and continuity[0] == expected
+
+
 def _html_preference_route_unimplemented(html_smoke: Mapping[str, Any], html_pack: Mapping[str, Any]) -> bool:
     gaps = [str(gap) for gap in html_pack.get("gaps", []) if str(gap or "")]
     return (
@@ -2853,7 +3366,7 @@ def _html_preference_route_unimplemented(html_smoke: Mapping[str, Any], html_pac
 
 def _pack_contains_object_type(pack: Mapping[str, Any], object_type: str) -> bool:
     objects = pack.get("objects") if isinstance(pack.get("objects"), list) else []
-    return any(isinstance(obj, Mapping) and obj.get("object_type") == object_type for obj in objects)
+    return any(_object_matches_type(obj, object_type) for obj in objects)
 
 
 def _pack_lane_object_count(pack: Mapping[str, Any], lane: str) -> int:
@@ -2866,10 +3379,19 @@ def _pack_lane_contains_object_type(pack: Mapping[str, Any], lane: str, object_t
     lanes = pack.get("lanes") if isinstance(pack.get("lanes"), Mapping) else {}
     objects = lanes.get(lane) if isinstance(lanes.get(lane), list) else []
     return any(
-        isinstance(obj, Mapping)
-        and obj.get("object_type") == object_type
+        _object_matches_type(obj, object_type)
         and obj.get("authority_lane") == lane
         for obj in objects
+    )
+
+
+def _object_matches_type(value: Any, object_type: str) -> bool:
+    if not isinstance(value, Mapping) or value.get("object_type") != object_type:
+        return False
+    return (
+        object_type != "ArtifactPreference"
+        or knowledge_object_class_from_id(str(value.get("object_id") or ""))
+        == "ArtifactPreference"
     )
 
 
@@ -3801,6 +4323,45 @@ def _object_query_smokes_report_mutation(smoke_items: list[Mapping[str, Any]]) -
 
 def _public_safe_mapping(value: Any) -> dict[str, Any]:
     return _public_safe_json_value(value) if isinstance(value, Mapping) else {}
+
+
+def _reject_forbidden_runtime_evidence_keys(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            normalized = _normalized_sensitive_key(key)
+            compact = normalized.replace("_", "")
+            if (
+                normalized in _RUNTIME_EVIDENCE_FORBIDDEN_KEYS
+                or compact in _RUNTIME_EVIDENCE_FORBIDDEN_COMPACT_KEYS
+                or (
+                    normalized.endswith("s")
+                    and (
+                        normalized[:-1] in _RUNTIME_EVIDENCE_FORBIDDEN_KEYS
+                        or compact[:-1] in _RUNTIME_EVIDENCE_FORBIDDEN_COMPACT_KEYS
+                    )
+                )
+            ):
+                raise ValueError("runtime evidence contains a forbidden field")
+            _reject_forbidden_runtime_evidence_keys(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            _reject_forbidden_runtime_evidence_keys(child)
+
+
+def _normalized_sensitive_key(value: Any) -> str:
+    decoded = _fully_unquote(str(value).strip())
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", decoded)
+    return re.sub(r"[^A-Za-z0-9]+", "_", snake).strip("_").casefold()
+
+
+def _fully_unquote(value: str) -> str:
+    decoded = value
+    for _ in range(3):
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    return decoded
 
 
 def _public_safe_mapping_list(value: Any) -> list[dict[str, Any]]:
