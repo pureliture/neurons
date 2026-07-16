@@ -21,6 +21,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
     RUNTIME_READINESS_AGENT_CONTEXT_TOOL,
     _mint_collector_attested_evidence,
+    build_deployment_evidence_binding,
     build_source_to_candidate_runtime_post_deploy_capture_packet,
 )
 from agent_knowledge.llm_brain_core.objects.artifact_preference_evaluator import (
@@ -39,6 +40,7 @@ from agent_knowledge.llm_brain_core.objects.agent_context_consumer import (
 from agent_knowledge.llm_brain_core._util import hash_payload
 
 _REQUIRED_ROUTE_NAMES = list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+_P8_SOURCE_COMMIT = "b" * 40
 _P9_STARTUP_NOW = datetime(2026, 7, 15, 3, 0, 0, tzinfo=timezone.utc)
 _P9_STARTUP_PROOF_KEY = b"p9-golden-query-startup-proof-key"
 
@@ -664,22 +666,53 @@ def _permission_sensitive_audit_runtime_evidence() -> dict:
 
 
 def _valid_p8_runtime_evidence(*, live: bool = True):
-    expected_commit = "bec7b38"
+    expected_commit = _P8_SOURCE_COMMIT
+    desired_state = {
+        "schema_version": "gitops_desired_state_identity.v1",
+        "images_include_expected_commit": True,
+        "desired_state_source": "sanitized_ops_manifest_summary",
+        "target_revision": "main",
+        "source_commit": expected_commit,
+        "desired_image_set_hash": "sha256:" + "a" * 64,
+        "ops_revision": "a" * 40,
+        "expected_image_ref_count": 1,
+        "production_mutation_performed": False,
+    }
+    deployed_identity = {
+        "contains_expected_commit": True,
+        "identity_source": "redacted_live_runtime_evidence",
+        "source_commit": expected_commit,
+        "live_image_set_hash": "sha256:" + "a" * 64,
+        "stale_image_ref_count": 0,
+        "production_mutation_performed": False,
+    }
     return {
         "schema_version": "source_to_candidate_runtime_evidence.v1",
         "expected_commit": expected_commit,
         "permission_sensitive_audit": _permission_sensitive_audit_runtime_evidence(),
-        "deployed_identity": {
-            "contains_expected_commit": True,
-            "identity_source": "redacted_artifact_identity_summary",
-        },
-        "gitops_desired_state": {
-            "schema_version": "gitops_desired_state_identity.v1",
-            "images_include_expected_commit": True,
-            "desired_state_source": "sanitized_ops_manifest_summary",
-            "target_revision": "main",
+        "deployed_identity": deployed_identity,
+        "gitops_desired_state": desired_state,
+        "argo_reconciliation": {
+            "schema_version": "argo_reconciliation_identity.v1",
+            "reconciliation_source": "sanitized_argo_application_summary",
+            "reconciled_ops_revision": "a" * 40,
+            "sync_status": "Synced",
+            "health_status": "Healthy",
             "production_mutation_performed": False,
         },
+        "deployment_evidence_binding": build_deployment_evidence_binding(
+            expected_commit=expected_commit,
+            gitops_desired_state=desired_state,
+            argo_reconciliation={
+                "schema_version": "argo_reconciliation_identity.v1",
+                "reconciliation_source": "sanitized_argo_application_summary",
+                "reconciled_ops_revision": "a" * 40,
+                "sync_status": "Synced",
+                "health_status": "Healthy",
+                "production_mutation_performed": False,
+            },
+            deployed_identity=deployed_identity,
+        ),
         "evidence_provenance": {
             "schema_version": EVIDENCE_PROVENANCE_SCHEMA,
             "collection_mode": "post_deploy_read_only_smoke" if live else "local_test_replay",
@@ -700,7 +733,9 @@ def _valid_p6_p7_p8_runtime_evidence(*, live: bool = True):
     evidence["expected_commit"] = p8["expected_commit"]
     evidence["permission_sensitive_audit"] = p8["permission_sensitive_audit"]
     evidence["gitops_desired_state"] = p8["gitops_desired_state"]
+    evidence["argo_reconciliation"] = p8["argo_reconciliation"]
     evidence["deployed_identity"] = p8["deployed_identity"]
+    evidence["deployment_evidence_binding"] = p8["deployment_evidence_binding"]
     evidence["evidence_provenance"] = p8["evidence_provenance"]
     return evidence
 
@@ -1631,7 +1666,8 @@ def test_product_activation_progress_fails_p7_when_artifact_review_returns_raw_b
 
 def test_product_activation_progress_closes_p8_gap_with_live_runtime_authority_evidence():
     report = build_product_activation_progress_report(
-        live_evidence=_valid_p6_p7_p8_runtime_evidence(live=True)
+        live_evidence=_valid_p6_p7_p8_runtime_evidence(live=True),
+        expected_commit=_P8_SOURCE_COMMIT,
     )
 
     checks = {item["phase"]: item for item in report["product_evidence_checks"]}
@@ -1656,6 +1692,99 @@ def test_product_activation_progress_closes_p8_gap_with_live_runtime_authority_e
     assert p8["production_mutation_performed"] is False
     assert report["production_mutation_performed"] is False
     assert report["production_ready"] is False
+
+
+def test_product_activation_progress_closes_p8_gitops_binding_gap_with_valid_binding():
+    evidence = _valid_p6_p7_p8_runtime_evidence(live=True)
+    expected_commit = evidence["expected_commit"]
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=evidence
+    )
+
+    report = build_product_activation_progress_report(
+        live_evidence=packet,
+        expected_commit=expected_commit,
+    )
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p8 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P8")
+
+    assert checks["P8"]["result"] == "PASS"
+    assert p8["gitops_deployment_binding_claim_status"] == "validated"
+
+
+def test_product_activation_progress_fails_p8_for_tampered_gitops_binding():
+    evidence = _valid_p6_p7_p8_runtime_evidence(live=True)
+    expected_commit = evidence["expected_commit"]
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=evidence
+    )
+    packet["deployment_evidence_binding"]["canonical_tuple_hash"] = "sha256:" + "b" * 64
+
+    report = build_product_activation_progress_report(
+        live_evidence=packet,
+        expected_commit=expected_commit,
+    )
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+
+    assert report["status"] == "FAIL"
+    assert checks["P8"]["result"] == "FAIL"
+    assert "p8_gitops_deployment_evidence_binding_hash_mismatch" in checks["P8"]["gaps"]
+
+
+def test_product_activation_progress_detects_binding_only_packet_as_p8_failure():
+    report = build_product_activation_progress_report(
+        live_evidence={
+            "schema_version": "source_to_candidate_runtime_evidence.v1",
+            "deployment_evidence_binding": {
+                "schema_version": "deployment_evidence_binding.v1",
+                "canonical_tuple_hash": "sha256:" + "a" * 64,
+            },
+        },
+        expected_commit="bec7b38",
+    )
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+
+    assert report["status"] == "FAIL"
+    assert checks["P8"]["result"] == "FAIL"
+
+
+def test_product_activation_progress_fails_p8_for_argo_nested_mutation():
+    report = build_product_activation_progress_report(
+        live_evidence={
+            "schema_version": "source_to_candidate_runtime_evidence.v1",
+            "argo_reconciliation": {
+                "schema_version": "argo_reconciliation_identity.v1",
+                "reconciliation_source": "sanitized_argo_application_summary",
+                "reconciled_ops_revision": "a" * 40,
+                "sync_status": "Synced",
+                "health_status": "Healthy",
+                "production_mutation_performed": True,
+            },
+        },
+    )
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p8 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P8")
+
+    assert report["status"] == "FAIL"
+    assert checks["P8"]["result"] == "FAIL"
+    assert p8["production_mutation_performed"] is True
+
+
+def test_product_activation_progress_fails_p8_for_deployed_identity_nested_mutation():
+    evidence = _valid_p6_p7_runtime_evidence(live=True)
+    evidence["deployed_identity"] = {
+        "contains_expected_commit": False,
+        "identity_source": "redacted_live_runtime_evidence",
+        "production_mutation_performed": True,
+    }
+
+    report = build_product_activation_progress_report(live_evidence=evidence)
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p8 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P8")
+
+    assert report["status"] == "FAIL"
+    assert checks["P8"]["result"] == "FAIL"
+    assert p8["deployed_identity_mutation_performed"] is True
 
 
 def test_product_activation_progress_keeps_p8_permission_audit_gap_when_identity_only():
@@ -1701,6 +1830,7 @@ def test_product_activation_progress_treats_unproven_p8_identity_as_gap_not_mism
         "contains_expected_commit": False,
         "identity_source": "collector_not_deployed_identity_proof",
     }
+    evidence.pop("deployment_evidence_binding")
 
     report = build_product_activation_progress_report(live_evidence=evidence)
 
@@ -1744,7 +1874,7 @@ def test_product_activation_progress_surfaces_gitops_desired_state_without_closi
     assert checks["P8"]["result"] == "PASS_WITH_GAPS"
     assert "p8_live_deployed_identity_unverified" in checks["P8"]["gaps"]
     assert "p8_permission_sensitive_audit_unverified" in checks["P8"]["gaps"]
-    assert p8["gitops_desired_state_claim_status"] == "validated"
+    assert p8["gitops_desired_state_claim_status"] == "not_validated"
     assert p8["gitops_desired_state_matches_expected_commit"] is True
     assert p8["deployed_identity_claim_status"] == "not_validated"
     assert p8["production_mutation_performed"] is False
@@ -1791,7 +1921,7 @@ def test_product_activation_progress_propagates_gitops_desired_state_mutation_fl
 
     assert checks["P8"]["result"] == "FAIL"
     assert "p8_production_mutation_performed" in checks["P8"]["failures"]
-    assert "p8_gitops_desired_state_mutated_production" in checks["P8"]["gaps"]
+    assert "p8_gitops_desired_state_mutation_invalid" in checks["P8"]["gaps"]
     assert p8["gitops_desired_state_claim_status"] == "failed"
     assert p8["gitops_desired_state_mutation_performed"] is True
     assert p8["production_mutation_performed"] is True
@@ -1805,7 +1935,10 @@ def test_product_activation_progress_scopes_p8_no_mutation_to_permission_audit_c
         "production_authority_replacement_current"
     ]
 
-    report = build_product_activation_progress_report(live_evidence=evidence)
+    report = build_product_activation_progress_report(
+        live_evidence=evidence,
+        expected_commit=evidence["expected_commit"],
+    )
 
     checks = {item["phase"]: item for item in report["product_evidence_checks"]}
     p8 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P8")

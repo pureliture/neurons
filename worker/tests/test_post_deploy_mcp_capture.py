@@ -27,9 +27,13 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
     REQUIRED_AGENT_CONTEXT_SECTIONS,
     REQUIRED_RUNTIME_TOOL_NAMES,
+    build_source_to_candidate_runtime_post_deploy_capture_packet,
     build_source_to_candidate_runtime_post_deploy_capture_readiness_report,
 )
 from agent_knowledge.public_safe_util import hash_payload
+
+
+_BOUND_SOURCE_COMMIT = "c" * 40
 
 
 def _fake_agent_context_product(*, consumer: str = "codex") -> dict:
@@ -3276,7 +3280,6 @@ def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, cap
         "collect_source_to_candidate_post_deploy_mcp_capture",
         _fake_collect,
     )
-
     assert (
         main(
             [
@@ -3320,6 +3323,269 @@ def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, cap
     assert seen["artifact_descriptor"] == artifact_descriptor
     assert str(artifact_descriptor_file) not in json.dumps(output, sort_keys=True)
     assert artifact_descriptor["summary"] not in json.dumps(output, sort_keys=True)
+
+
+def test_runtime_readiness_cli_collect_post_deploy_capture_preserves_sanitized_gitops_state(
+    monkeypatch, capsys, tmp_path
+):
+    gitops_file = tmp_path / "gitops-desired-state.json"
+    gitops_state = {
+        "schema_version": "gitops_desired_state_identity.v1",
+        "desired_state_source": "sanitized_ops_manifest_summary",
+        "source_commit": "c2b8548",
+        "desired_image_set_hash": "sha256:" + "a" * 64,
+        "ops_revision": "ops-42",
+        "reconciled_ops_revision": "ops-42",
+        "expected_image_ref_count": 1,
+        "production_mutation_performed": False,
+    }
+    gitops_file.write_text(json.dumps(gitops_state), encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    async def _fake_collect(**kwargs):
+        seen.update(kwargs)
+        return {
+            "schema_version": "source_to_candidate_runtime_post_deploy_mcp_capture.v1",
+            "expected_commit": kwargs["expected_commit"],
+            "gitops_desired_state": kwargs["gitops_desired_state"],
+            "production_mutation_performed": False,
+        }
+
+    monkeypatch.setattr(
+        object_cli,
+        "collect_source_to_candidate_post_deploy_mcp_capture",
+        _fake_collect,
+    )
+    monkeypatch.setattr(
+        object_cli,
+        "build_source_to_candidate_runtime_post_deploy_capture_readiness_report",
+        lambda **_kwargs: {
+            "schema_version": "source_to_candidate_runtime_readiness.v1",
+            "status": "PASS_WITH_GAPS",
+        },
+    )
+
+    assert (
+        main(
+            [
+                "source-to-candidate-runtime-readiness",
+                "--collect-post-deploy-mcp-capture",
+                "--mcp-url",
+                "https://mcp.example.test/mcp",
+                "--expected-commit",
+                "c2b8548",
+                "--gitops-desired-state-file",
+                str(gitops_file),
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert seen["gitops_desired_state"] == gitops_state
+    assert output["expected_commit"] == "c2b8548"
+    assert output["gitops_desired_state"] == gitops_state
+
+
+def test_runtime_readiness_cli_collect_post_deploy_capture_passes_argo_reconciliation(
+    monkeypatch, capsys, tmp_path
+):
+    argo_file = tmp_path / "argo-reconciliation.json"
+    argo_state = {
+        "schema_version": "argo_reconciliation_identity.v1",
+        "reconciliation_source": "sanitized_argo_application_summary",
+        "reconciled_ops_revision": "a" * 40,
+        "sync_status": "Synced",
+        "health_status": "Healthy",
+        "production_mutation_performed": False,
+    }
+    argo_file.write_text(json.dumps(argo_state), encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    async def _fake_collect(**kwargs):
+        seen.update(kwargs)
+        return {"schema_version": "source_to_candidate_runtime_post_deploy_mcp_capture.v1"}
+
+    monkeypatch.setattr(object_cli, "collect_source_to_candidate_post_deploy_mcp_capture", _fake_collect)
+    monkeypatch.setattr(
+        object_cli,
+        "build_source_to_candidate_runtime_post_deploy_capture_readiness_report",
+        lambda **_kwargs: {"schema_version": "source_to_candidate_runtime_readiness.v1", "status": "PASS_WITH_GAPS"},
+    )
+
+    assert main([
+        "source-to-candidate-runtime-readiness",
+        "--collect-post-deploy-mcp-capture",
+        "--mcp-url", "https://mcp.example.test/mcp",
+        "--argo-reconciliation-file", str(argo_file),
+    ]) == 0
+
+    capsys.readouterr()
+    assert seen["argo_reconciliation"] == argo_state
+
+
+def test_golden_query_eval_activation_progress_passes_external_expected_commit(
+    monkeypatch, capsys
+):
+    seen: dict[str, object] = {}
+
+    def _fake_progress(**kwargs):
+        seen.update(kwargs)
+        return {"schema_version": "knowledge_object_product_activation_progress.v1"}
+
+    monkeypatch.setattr(object_cli, "build_product_activation_progress_report", _fake_progress)
+
+    assert main([
+        "golden-query-eval", "--activation-progress", "--expected-commit", "c2b8548",
+    ]) == 0
+
+    capsys.readouterr()
+    assert seen["expected_commit"] == "c2b8548"
+
+
+def test_collect_post_deploy_mcp_capture_calculates_gitops_deployment_binding():
+    state = {
+        "schema_version": "gitops_desired_state_identity.v1",
+        "images_include_expected_commit": True,
+        "desired_state_source": "sanitized_ops_manifest_summary",
+        "target_revision": "main",
+        "source_commit": _BOUND_SOURCE_COMMIT,
+        "desired_image_set_hash": "sha256:" + "a" * 64,
+        "ops_revision": "a" * 40,
+        "expected_image_ref_count": 1,
+        "production_mutation_performed": False,
+    }
+    session = _FakeMcpSession()
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield session
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            expected_commit=_BOUND_SOURCE_COMMIT,
+            gitops_desired_state=state,
+            argo_reconciliation={
+                "schema_version": "argo_reconciliation_identity.v1",
+                "reconciliation_source": "sanitized_argo_application_summary",
+                "reconciled_ops_revision": "a" * 40,
+                "sync_status": "Synced",
+                "health_status": "Healthy",
+                "production_mutation_performed": False,
+            },
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_live_runtime_evidence",
+                "source_commit": _BOUND_SOURCE_COMMIT,
+                "live_image_set_hash": "sha256:" + "a" * 64,
+                "stale_image_ref_count": 0,
+                "production_mutation_performed": False,
+            },
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert capture["deployment_evidence_binding"]["schema_version"] == "deployment_evidence_binding.v1"
+    assert capture["deployment_evidence_binding"]["canonical_tuple_hash"].startswith("sha256:")
+    assert capture["argo_reconciliation"]["reconciled_ops_revision"] == "a" * 40
+    assert capture["deployed_identity"]["live_image_set_hash"] == "sha256:" + "a" * 64
+
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=capture,
+    )
+    report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=packet,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+
+    assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "validated"
+
+
+def test_collect_post_deploy_mcp_capture_keeps_missing_live_identity_as_binding_gap():
+    session = _FakeMcpSession()
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield session
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            expected_commit=_BOUND_SOURCE_COMMIT,
+            gitops_desired_state={
+                "schema_version": "gitops_desired_state_identity.v1",
+                "images_include_expected_commit": True,
+                "desired_state_source": "sanitized_ops_manifest_summary",
+                "target_revision": "main",
+                "source_commit": _BOUND_SOURCE_COMMIT,
+                "desired_image_set_hash": "sha256:" + "a" * 64,
+                "ops_revision": "a" * 40,
+                "expected_image_ref_count": 1,
+                "production_mutation_performed": False,
+            },
+            argo_reconciliation={
+                "schema_version": "argo_reconciliation_identity.v1",
+                "reconciliation_source": "sanitized_argo_application_summary",
+                "reconciled_ops_revision": "a" * 40,
+                "sync_status": "Synced",
+                "health_status": "Healthy",
+                "production_mutation_performed": False,
+            },
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert "deployment_evidence_binding" not in capture
+
+
+@pytest.mark.parametrize("expected_commit", ["", "main"])
+def test_collect_post_deploy_mcp_capture_does_not_mint_binding_without_immutable_commit(
+    expected_commit,
+):
+    session = _FakeMcpSession()
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield session
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            expected_commit=expected_commit,
+            gitops_desired_state={
+                "schema_version": "gitops_desired_state_identity.v1",
+                "images_include_expected_commit": True,
+                "desired_state_source": "sanitized_ops_manifest_summary",
+                "target_revision": "main",
+                "source_commit": _BOUND_SOURCE_COMMIT,
+                "desired_image_set_hash": "sha256:" + "a" * 64,
+                "ops_revision": "a" * 40,
+                "expected_image_ref_count": 1,
+                "production_mutation_performed": False,
+            },
+            argo_reconciliation={
+                "schema_version": "argo_reconciliation_identity.v1",
+                "reconciliation_source": "sanitized_argo_application_summary",
+                "reconciled_ops_revision": "a" * 40,
+                "sync_status": "Synced",
+                "health_status": "Healthy",
+                "production_mutation_performed": False,
+            },
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_live_runtime_evidence",
+                "source_commit": _BOUND_SOURCE_COMMIT,
+                "live_image_set_hash": "sha256:" + "a" * 64,
+                "stale_image_ref_count": 0,
+                "production_mutation_performed": False,
+            },
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert "deployment_evidence_binding" not in capture
 
 
 @pytest.mark.parametrize(
