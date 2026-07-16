@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import re
 import sys
 import time
@@ -95,7 +96,7 @@ def _validate_bounds(*, project: str, limit: int, max_runtime_seconds: float) ->
         raise ValueError("project scope is required")
     if int(limit) <= 0:
         raise ValueError("limit must be positive")
-    if float(max_runtime_seconds) <= 0:
+    if not math.isfinite(float(max_runtime_seconds)) or float(max_runtime_seconds) <= 0:
         raise ValueError("max_runtime_seconds must be positive")
 
 
@@ -339,23 +340,42 @@ def _snapshot_artifact(
     )
 
 
-def _replay_artifacts(events: list[_ReplayEvent]) -> tuple[list[SessionMemoryArtifact], int]:
+def _replay_artifacts(
+    events: list[_ReplayEvent],
+    *,
+    deadline: float,
+    monotonic: Callable[[], float],
+) -> tuple[list[SessionMemoryArtifact], int, bool]:
     grouped: dict[str, list[_ReplayEvent]] = {}
     for event in events:
+        if monotonic() >= deadline:
+            return [], 0, True
         grouped.setdefault(event.session_id_hash, []).append(event)
+    if monotonic() >= deadline:
+        return [], 0, True
 
     artifacts: list[SessionMemoryArtifact] = []
     exact_duplicate_count = 0
-    for session_id_hash in sorted(grouped):
+    session_id_hashes = sorted(grouped)
+    if monotonic() >= deadline:
+        return [], exact_duplicate_count, True
+    for session_id_hash in session_id_hashes:
         snapshot: dict[str, dict[str, Any]] = {}
         snapshot_tokens: dict[str, str] = {}
         materialization_revision = 0
-        for event in sorted(
+        session_events = sorted(
             grouped[session_id_hash],
             key=lambda item: (item.recorded_at, item.ordering_key),
-        ):
+        )
+        if monotonic() >= deadline:
+            return [], exact_duplicate_count, True
+        for event in session_events:
+            if monotonic() >= deadline:
+                return [], exact_duplicate_count, True
             if snapshot_tokens.get(event.document_id) == event.revision_token:
                 exact_duplicate_count += 1
+                if monotonic() >= deadline:
+                    return [], exact_duplicate_count, True
                 continue
             snapshot[event.document_id] = event.document
             snapshot_tokens[event.document_id] = event.revision_token
@@ -367,7 +387,9 @@ def _replay_artifacts(events: list[_ReplayEvent]) -> tuple[list[SessionMemoryArt
                     materialization_revision=materialization_revision,
                 )
             )
-    return artifacts, exact_duplicate_count
+            if monotonic() >= deadline:
+                return [], exact_duplicate_count, True
+    return artifacts, exact_duplicate_count, False
 
 
 def _plan_digest(artifacts: list[SessionMemoryArtifact]) -> str:
@@ -475,6 +497,7 @@ def rebuild_temporal_revisions(
     max_runtime_seconds: float,
     execute: bool = False,
     expected_plan_digest: str = "",
+    deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Plan or add bounded historical artifacts from proven retained deliveries."""
@@ -492,10 +515,33 @@ def rebuild_temporal_revisions(
         execute=execute,
     )
     started = monotonic()
+    local_deadline = started + float(max_runtime_seconds)
+    effective_deadline = (
+        min(local_deadline, float(deadline))
+        if deadline is not None
+        else local_deadline
+    )
+    if not math.isfinite(effective_deadline):
+        raise ValueError("deadline must be finite")
+
+    def _deadline_reached() -> bool:
+        return monotonic() >= effective_deadline
+
+    def _abort_timeout() -> dict[str, Any]:
+        report["scan_exhausted"] = False
+        report["timed_out"] = True
+        report["aborted"] = True
+        report["planned_artifact_count"] = 0
+        report["total_remaining_artifact_count"] = 0
+        return _finish_report(report, execute=execute)
+
+    if started >= effective_deadline:
+        return _abort_timeout()
+
     events: list[_ReplayEvent] = []
     rows = _payload_rows(state_db, project=project)
     for row in rows:
-        if monotonic() - started >= float(max_runtime_seconds):
+        if _deadline_reached():
             report["scan_exhausted"] = False
             report["timed_out"] = True
             report["aborted"] = True
@@ -537,6 +583,11 @@ def rebuild_temporal_revisions(
     if callable(close_rows):
         close_rows()
 
+    if _deadline_reached():
+        report["scan_exhausted"] = False
+        report["timed_out"] = True
+        report["aborted"] = True
+
     # Never derive or execute a partial history when the authoritative scan did
     # not complete inside its bound.
     if report["timed_out"]:
@@ -544,15 +595,25 @@ def rebuild_temporal_revisions(
         report["total_remaining_artifact_count"] = 0
         return _finish_report(report, execute=execute)
 
-    artifacts, exact_duplicate_count = _replay_artifacts(events)
+    artifacts, exact_duplicate_count, replay_timed_out = _replay_artifacts(
+        events,
+        deadline=effective_deadline,
+        monotonic=monotonic,
+    )
+    if replay_timed_out:
+        return _abort_timeout()
     report["exact_duplicate_payload_count"] = exact_duplicate_count
     remaining: list[SessionMemoryArtifact] = []
     for artifact in artifacts:
+        if _deadline_reached():
+            return _abort_timeout()
         try:
             existing = artifact_store.get(artifact.artifact_id)
         except Exception:
             report["write_error_count"] += 1
             continue
+        if _deadline_reached():
+            return _abort_timeout()
         if existing is None:
             remaining.append(artifact)
         elif existing.content_hash == artifact.content_hash:
@@ -566,6 +627,8 @@ def rebuild_temporal_revisions(
     report["total_remaining_artifact_count"] = len(remaining)
     report["planned_artifact_count"] = len(planned)
     report["plan_digest"] = _plan_digest(planned)
+    if _deadline_reached():
+        return _abort_timeout()
 
     if execute:
         report["expected_plan_digest_match"] = (
@@ -581,27 +644,63 @@ def rebuild_temporal_revisions(
             return report
 
         for artifact in planned:
-            if monotonic() - started >= float(max_runtime_seconds):
+            if _deadline_reached():
                 report["timed_out"] = True
                 report["aborted"] = True
                 break
             try:
                 outcome = artifact_store.upsert(artifact)
-                persisted = artifact_store.get(artifact.artifact_id)
-                if persisted is None or persisted.content_hash != artifact.content_hash:
-                    report["postcheck_error_count"] += 1
-                    report["mutation_uncertain"] = True
-                    continue
-                if outcome == "inserted":
-                    report["inserted_artifact_count"] += 1
-                    report["mutation_performed"] = True
-                    report["current_materialization_rebuild_required"] = True
-                elif outcome == "duplicate":
-                    report["duplicate_artifact_count"] += 1
-                else:
-                    report["write_error_count"] += 1
             except Exception:
+                # The store may have committed before losing its acknowledgement.
+                # Without an outcome or postcheck the mutation state is unknown.
                 report["write_error_count"] += 1
+                report["mutation_uncertain"] = True
+                if _deadline_reached():
+                    report["timed_out"] = True
+                    report["aborted"] = True
+                    break
+                continue
+
+            if outcome == "inserted":
+                report["inserted_artifact_count"] += 1
+                report["mutation_performed"] = True
+                report["current_materialization_rebuild_required"] = True
+            elif outcome == "duplicate":
+                report["duplicate_artifact_count"] += 1
+            else:
+                report["write_error_count"] += 1
+                report["mutation_uncertain"] = True
+                if _deadline_reached():
+                    report["timed_out"] = True
+                    report["aborted"] = True
+                    break
+                continue
+
+            if _deadline_reached():
+                report["timed_out"] = True
+                report["aborted"] = True
+                report["mutation_uncertain"] = True
+                break
+
+            try:
+                persisted = artifact_store.get(artifact.artifact_id)
+            except Exception:
+                report["postcheck_error_count"] += 1
+                report["mutation_uncertain"] = True
+                if _deadline_reached():
+                    report["timed_out"] = True
+                    report["aborted"] = True
+                    break
+                continue
+
+            if _deadline_reached():
+                report["timed_out"] = True
+                report["aborted"] = True
+                report["mutation_uncertain"] = True
+                break
+            if persisted is None or persisted.content_hash != artifact.content_hash:
+                report["postcheck_error_count"] += 1
+                report["mutation_uncertain"] = True
 
     return _finish_report(report, execute=execute)
 
@@ -648,6 +747,8 @@ def _read_only_plan(
     project: str,
     limit: int,
     max_runtime_seconds: float,
+    deadline: float,
+    monotonic: Callable[[], float],
 ) -> dict[str, Any]:
     ledger = Ledger.open_read_only(ledger_path)
     return rebuild_temporal_revisions(
@@ -656,10 +757,16 @@ def _read_only_plan(
         project=project,
         limit=limit,
         max_runtime_seconds=max_runtime_seconds,
+        deadline=deadline,
+        monotonic=monotonic,
     )
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> int:
     args = _parser().parse_args(argv)
     effective_argv = list(sys.argv[1:] if argv is None else argv)
     execute = bool(args.execute)
@@ -672,6 +779,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError:
         print(json.dumps(_error_report("invalid_bounds", dry_run=not execute), sort_keys=True))
         return 2
+    command_deadline = monotonic() + float(args.max_runtime_seconds)
 
     if execute and re.fullmatch(
         r"sha256:[0-9a-f]{64}",
@@ -712,6 +820,8 @@ def main(argv: list[str] | None = None) -> int:
             project=str(args.project),
             limit=int(args.limit),
             max_runtime_seconds=float(args.max_runtime_seconds),
+            deadline=command_deadline,
+            monotonic=monotonic,
         )
     except Exception:
         print(json.dumps(_error_report("rebuild_failed", dry_run=not execute), sort_keys=True))
@@ -750,6 +860,8 @@ def main(argv: list[str] | None = None) -> int:
             max_runtime_seconds=float(args.max_runtime_seconds),
             execute=True,
             expected_plan_digest=str(args.expected_plan_digest),
+            deadline=command_deadline,
+            monotonic=monotonic,
         )
     except Exception:
         print(json.dumps(_error_report("rebuild_failed", dry_run=False), sort_keys=True))

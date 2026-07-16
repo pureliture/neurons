@@ -11,6 +11,7 @@ import argparse
 import base64
 import datetime
 import json
+import math
 import os
 import re
 import sys
@@ -76,7 +77,7 @@ def _validate_bounds(*, project: str, limit: int, max_runtime_seconds: float) ->
         raise ValueError("project scope is required")
     if int(limit) <= 0:
         raise ValueError("limit must be positive")
-    if float(max_runtime_seconds) <= 0:
+    if not math.isfinite(float(max_runtime_seconds)) or float(max_runtime_seconds) <= 0:
         raise ValueError("max_runtime_seconds must be positive")
 
 
