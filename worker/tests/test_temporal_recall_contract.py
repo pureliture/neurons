@@ -317,6 +317,32 @@ def test_query_iso_date_routes_to_temporal_recall_when_route_is_omitted() -> Non
     assert _work_titles(result) == ["Deploy the date A temporal migration"]
 
 
+def test_english_auxiliary_is_not_required_for_temporal_artifact_relevance() -> None:
+    store = InMemorySessionMemoryArtifactStore(
+        [
+            _artifact(
+                "english-auxiliary-artifact",
+                "Deployment completed",
+                observed_at_start="2026-07-15T00:00:00Z",
+                observed_at_end="2026-07-15T23:59:59Z",
+                materialized_at="2026-07-15T23:59:59Z",
+                search_terms=("deploy",),
+            )
+        ]
+    )
+
+    result = BrainReadService(artifact_store=store).brain_objects_query(
+        repository="neurons",
+        branch="main",
+        query="what was deployment on 2026-07-15",
+        current_files=[],
+    )
+
+    assert result["route"] == "temporal_work_recall"
+    assert _work_titles(result) == ["Deployment completed"]
+    assert result["object_pack"]["gaps"] == []
+
+
 def test_query_iso_date_rejects_an_explicit_non_temporal_route() -> None:
     service = BrainReadService(
         memory_cards=[

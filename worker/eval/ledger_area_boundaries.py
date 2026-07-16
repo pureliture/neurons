@@ -134,17 +134,13 @@ def _created_tables_in_text(source: str) -> set[str]:
 def _string_constant(source: str, name: str) -> str:
     tree = ast.parse(source)
     for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == name for target in node.targets
-        ):
-            value = ast.literal_eval(node.value)
-            if isinstance(value, str):
-                return value
-        if (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and node.target.id == name
-        ):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if any(isinstance(target, ast.Name) and target.id == name for target in targets):
             value = ast.literal_eval(node.value)
             if isinstance(value, str):
                 return value
