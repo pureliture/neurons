@@ -484,6 +484,10 @@ def test_dispatch_value_error_is_masked_to_type_name():
     res = asyncio.run(mh._dispatch_call_tool(_StubService(), "no.such.tool", {}))
     assert res.isError is True
     assert res.content[0].text == "invalid params: ValueError"
+    assert res.structuredContent == {
+        "error_code": -32602,
+        "error_type": "ValueError",
+    }
     # caller 입력(tool 이름)이 응답으로 새지 않음.
     assert "no.such.tool" not in res.content[0].text
 
@@ -494,6 +498,10 @@ def test_dispatch_unexpected_exception_is_masked():
     res = asyncio.run(mh._dispatch_call_tool(stub, "knowledge.search", {"query": "q"}))
     assert res.isError is True
     assert res.content[0].text == "internal error"
+    assert res.structuredContent == {
+        "error_code": -32603,
+        "error_type": "InternalError",
+    }
     assert "private" not in res.content[0].text
     assert "token" not in res.content[0].text
 

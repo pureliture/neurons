@@ -52,21 +52,23 @@ state_db round-trip.
 
 from __future__ import annotations
 
-import datetime
-
-from ..couchdb_source.couchdb_http_store import CouchDBError
 from ..couchdb_source.document_model import (
     ProjectionStatus,
     build_conversation_chunk_document,
     build_coverage_manifest_document,
     build_projection_state_document,
+    build_source_revision_token,
     build_transcript_session_document,
     conversation_chunk_doc_id,
-    projection_state_doc_id,
     session_doc_id,
     sha256_hash,
 )
 from ..couchdb_source.source_store import CouchDBSourceStore
+from ..couchdb_source.session_memory_materializer import (
+    mark_projection_pending_if_source_changed,
+    upsert_transcript_session_aggregate,
+    update_coverage_with_tool_evidence,
+)
 from ..session_memory.transcript_model import REDACTION_VERSION, TranscriptChunk, TranscriptSession
 from .retired_index_bridge import (
     BackendDocumentHandle,
@@ -106,6 +108,8 @@ def build_couchdb_docs_from_rag_document(document: RagReadyDocument) -> tuple[
     project = str(metadata.get("project") or "")
     chunk_id = str(metadata.get("chunk_id") or "")
     redaction_version = str(document.redaction_version or REDACTION_VERSION)
+    observed_at_start = str(metadata.get("observed_at_start") or "")
+    observed_at_end = str(metadata.get("observed_at_end") or observed_at_start)
 
     # Positional chunk metadata — fall back to 0/1 when dendrite omits them
     document_body = document.body
@@ -131,16 +135,20 @@ def build_couchdb_docs_from_rag_document(document: RagReadyDocument) -> tuple[
         part_count=part_count,
         char_start=char_start,
         char_end=char_end,
+        observed_at_start=observed_at_start,
+        observed_at_end=observed_at_end,
     )
 
     session = TranscriptSession(
         session_id_hash=session_id_hash,
         provider=provider,
         project=project,
-        started_at="",   # not available in live ingress
-        ended_at="",
+        started_at=observed_at_start,
+        ended_at=observed_at_end,
         source_status="source_unproven",
         source_locator_hash="",  # private Mac path; never sent server-side
+        observed_at_start=observed_at_start,
+        observed_at_end=observed_at_end,
     )
 
     session_doc = build_transcript_session_document(session=session)
@@ -156,7 +164,12 @@ def build_couchdb_docs_from_rag_document(document: RagReadyDocument) -> tuple[
         tool_evidence_bundle_count=0,
         conversation_content_hashes=[chunk_content_hash],
         tool_evidence_coverage_hashes=[],
+        conversation_revision_tokens=[
+            build_source_revision_token(chunk_doc, material_hash_field="content_hash")
+        ],
         source_locator_hash="",
+        observed_at_start=observed_at_start,
+        observed_at_end=observed_at_end,
     )
 
     proj_doc = build_projection_state_document(
@@ -165,6 +178,7 @@ def build_couchdb_docs_from_rag_document(document: RagReadyDocument) -> tuple[
         project=project,
         projection_status=ProjectionStatus.PENDING,
         source_locator_hash="",
+        source_hash=str(coverage_doc.get("source_hash") or ""),
     )
 
     return session_doc, chunk_doc, coverage_doc, proj_doc, session_id_hash, chunk_id
@@ -231,24 +245,33 @@ class CouchDBRetiredIndexBridgeAdapter:
         dataset_ref = f"couchdb:{db_name}"
         doc_ref = session_doc_id(session_id_hash)
 
-        # Store all 4 documents.  Any CouchDBError propagates to caller.
-        self._store.put(session_doc)
-        if on_step_complete is not None:
-            on_step_complete("session", document_ref=doc_ref)
-
-        self._store.put(chunk_doc)
+        # Persist the chunk first, then converge the cumulative session envelope.
+        chunk_revision = self._store.put(chunk_doc)
         if on_step_complete is not None:
             on_step_complete("chunk", document_ref=doc_ref)
 
-        self._store.put(coverage_doc)
+        upsert_transcript_session_aggregate(
+            store=self._store,
+            incoming=session_doc,
+        )
+        if on_step_complete is not None:
+            on_step_complete("session", document_ref=doc_ref)
+
+        coverage_doc = update_coverage_with_tool_evidence(
+            session_id_hash=session_id_hash,
+            store=self._store,
+        ) or coverage_doc
         if on_step_complete is not None:
             on_step_complete("coverage", document_ref=doc_ref)
 
-        # Upsert projection_state: only write if not already PROJECTED so we
-        # don't clobber a materialiser that has already finished the session.
-        existing_proj = self._store.get(projection_state_doc_id(session_id_hash))
-        if existing_proj is None or existing_proj.get("projection_status") != ProjectionStatus.PROJECTED:
-            self._store.put(proj_doc)
+        mark_projection_pending_if_source_changed(
+            session_id_hash=session_id_hash,
+            provider=str(session_doc.get("provider") or ""),
+            project=str(session_doc.get("project") or ""),
+            source_hash=str(coverage_doc.get("source_hash") or ""),
+            store=self._store,
+            source_changed=chunk_revision.outcome != "duplicate",
+        )
         if on_step_complete is not None:
             on_step_complete("projection", document_ref=doc_ref)
 

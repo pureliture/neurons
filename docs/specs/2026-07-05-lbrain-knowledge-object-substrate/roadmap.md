@@ -1208,6 +1208,52 @@ Decision outcome:
 - Do not defer the minimal candidate edit/review surface needed by P3/P4.
 - If P10 is later started, the first slice must be read-only/local, must use existing object packs, and must not introduce production mutation or protected-value disclosure.
 
+## Temporal Recall Correctness Corrective Checkpoint (2026-07-16)
+
+Status: `in_progress`. 이 checkpoint는 기존 P6의 route/object 존재 smoke를 temporal recall semantic correctness 증명으로 해석하지 않습니다. 아래 acceptance evidence가 모두 수집되기 전에는 temporal recall, production `brain.query` relevance, projection currentness를 `PASS`로 선언하지 않습니다.
+
+확정된 결함 경로:
+
+- `temporal_work_recall`은 날짜를 route 선택에만 사용하고 event/observed time 필터에는 적용하지 않았습니다.
+- live ingress는 `observed_at_start` / `observed_at_end`를 source model에 보존하지 않았고, 이미 `PROJECTED`인 session에 distinct chunk가 추가되어도 dirty/pending으로 되돌리지 않았습니다.
+- session-memory builder와 graph projection은 source revision/coverage hash 대신 session identity와 완료 상태에 의존해 stale projection을 current로 오판할 수 있었습니다.
+- global limit와 deterministic ordering은 processed session을 반복 선택해 backlog starvation을 만들었습니다.
+- production `brain.query`는 strict relevance와 semantic result lane을 실제 결과에 결합하지 않아 unrelated current-card padding을 허용했습니다.
+- 기존 smoke는 route와 object 존재만 확인했고, empty/mismatched temporal evidence에도 gap 없는 고정 confidence를 줄 수 있었습니다.
+
+Corrective contract:
+
+- source는 observed/event time, materialization revision, source revision 또는 coverage hash를 보존합니다. Exact duplicate는 idempotent하게 유지하고 distinct content는 session-memory와 graph projection을 모두 invalidate합니다.
+- projection state는 projected source hash와 current source hash를 비교하며, same-session artifact 최신성은 materialization revision으로 결정합니다.
+- public query contract는 `as_of`, `date_from`, `date_to` 또는 동등한 명시 selector를 제공하고 invalid range를 거부합니다. Offset이 없는 bare date와 inferred today/yesterday는 UTC calendar day로 해석하고, offset을 포함한 instant는 UTC로 normalize합니다. Temporal evidence가 없거나 selector와 불일치하면 최신 객체로 fallback하지 않고 빈 결과, 명시적 gap, fail-closed confidence를 반환합니다.
+- production `brain.query`는 semantic ranker가 bound/used되었음을 audit하고 threshold 이상인 expected Qdrant semantic hit을 실제 result lane에 정확히 한 건 반영합니다. Positive probe는 expected/observed result fingerprint, `semantic_match` reason, score threshold를 raw query/result 원문 없이 검증합니다. Nonsense query에는 unrelated current cards를 채우지 않습니다.
+- route/object existence smoke는 `temporal_recall_corrective_checkpoint.v1` semantic acceptance packet이 없으면 `temporal_work_recall`을 validated route로 세지 않습니다. Legacy packet은 계속 읽을 수 있지만 corrective checkpoint 없이 validated로 승격하지 않습니다.
+- runtime aggregate는 source/projection hash currentness, stale projected session count, artifact currentness, entity coverage/backlog/error count를 public-safe aggregate로만 기록합니다. Operator가 acceptance 기대값이나 receipt로 주입한 aggregate는 신뢰하지 않으며, production read path가 현재 source/projection authority와 정상 종료된 최신 graph run을 직접 읽어 만든 `live_mcp_runtime_packet`만 acceptance evidence로 사용합니다. Exact argv, backup/restore, bounded postcheck receipt는 mutation audit에는 필요하지만 MCP semantic acceptance aggregate를 대체하지 않습니다.
+- graph run evidence는 opaque run id의 start/complete pair, project scope hash, provider scope, entity extraction level, started/completed timestamp를 결합합니다. `neurons` project 전체를 대상으로 정상 종료했고 configured freshness window 안에 있는 run만 runtime acceptance에 사용하며, 오래됐거나 다른 scope의 성공 로그는 fail-closed로 거부합니다.
+- same-session temporal artifact는 cumulative session bounds와 별도로 source revision이 새로 도입한 event-time window를 기록합니다. Legacy source-event identity를 migration-safe하게 비교해 이전 chunk를 새 revision으로 오인하지 않으며, 누락된 historical observed time은 retained redacted ingress payload에서 bounded dry-run/apply backfill한 뒤 projection을 invalidate합니다.
+- 한 materialization에 여러 event-time interval이 있으면 각 interval과 revision-local search-term hash를 결합해 보존합니다. 서로 다른 interval의 term union을 공유하지 않으며, supplied bound가 malformed이거나 일부 source event의 observed time이 누락되면 temporal lane은 fail-closed합니다. Tool-evidence bundle도 서로 다른 또는 유효하지 않은 event time을 하나의 bounded bundle로 합치지 않습니다.
+- `couchdb-projection-invalidation-canary`는 stable synthetic canary session 하나에서 distinct chunk의 source-hash 변경, session-memory/graph dirty 및 재선택, 양쪽 projected-hash catch-up, exact duplicate nonselection을 bounded public-safe receipt로 증명합니다. Dry-run plan digest, exact argv approval, 외부 hard timeout, fresh-nonce restore/retry, destructive mutation 금지가 release gate입니다.
+
+Production mutation boundary:
+
+- 이 corrective run에는 사용자가 bounded production ledger/corpus/runtime mutation을 사전승인했습니다. 이는 기존 read-only evidence run과 분리된 현재 작업의 명시적 scope override입니다.
+- 허용 범위는 additive migration, dry-run count, backup/rollback 또는 restore 경로, bounded timeout/abort 기준, resumable reprojection, bounded artifact rebuild, entity-extraction canary, postcheck입니다.
+- Destructive delete/GC, secret/host topology/raw external ID/raw transcript 출력, 승인 범위 밖 authority mutation은 포함하지 않습니다.
+
+Pending acceptance evidence:
+
+- [ ] Focused temporal/relevance/currentness regression tests와 전체 `worker` test suite가 통과합니다.
+- [ ] Neurons PR의 review와 CI가 통과하고 merge됩니다.
+- [ ] Ops PR의 bounded canary/fair scheduling/postcheck 변경이 review와 CI를 통과하고 merge됩니다.
+- [ ] Canonical image build, GitOps desired-state update, reconciliation, rollout을 각각 분리된 evidence로 확인합니다.
+- [ ] Date A와 Date B가 서로 다른 expected/observed whole-object fingerprint와 stable object identity fingerprint를 반환하고, range boundary와 invalid range 계약이 통과합니다.
+- [ ] Empty/mismatched temporal evidence가 object count 0, non-empty gap, fail-closed confidence를 반환합니다.
+- [ ] Nonsense `brain.query`가 result/current/accepted lane에 unrelated card를 반환하지 않고 semantic ranker가 bound/used됩니다.
+- [ ] Positive semantic `brain.query`가 expected fingerprint와 일치하는 Qdrant result를 정확히 한 건 반환하고, `semantic_match` reason, minimum score, semantic ranker bound/used를 모두 충족합니다.
+- [ ] Distinct new chunk 뒤 source hash와 projected hash가 다시 일치하고 stale projected session count와 artifact currentness postcheck가 통과합니다. Exact duplicate는 재선택되지 않습니다.
+- [ ] Entity extraction bounded canary 뒤 coverage가 증가하거나 backlog가 감소하며 error count와 abort 기준을 함께 기록합니다.
+- [ ] Merge, source CI, image build, GitOps desired state, rollout, live semantics, cleanup을 분리 보고하고 최종 상태를 `PASS`, `PASS_WITH_GAPS`, `FAIL` 중 하나로 판정합니다.
+
 ## Recommended Execution Order
 
 P5 runs continuously across the sequence below. It is listed as a phase because the full golden-query suite becomes a release gate, but phase-specific evaluator slices must run during P1-P9.

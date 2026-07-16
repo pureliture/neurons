@@ -31,6 +31,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_post_deploy_capture_readiness_report,
 )
 from agent_knowledge.public_safe_util import hash_payload
+from agent_knowledge.mcp_tools import BRAIN_QUERY_TOOL_NAME
 
 
 _BOUND_SOURCE_COMMIT = "c" * 40
@@ -320,6 +321,7 @@ def _runtime_collected_packet(
     preference_artifact_memory: bool = False,
     preference_artifact_memory_actual: bool = False,
     preference_artifact_memory_consumer_proof: bool = True,
+    temporal_correctness_runtime: bool = False,
     production_mutation_performed: bool = False,
     provenance_overrides: dict | None = None,
 ) -> dict:
@@ -346,12 +348,136 @@ def _runtime_collected_packet(
             actual_live_read_surfaces=preference_artifact_memory_actual,
             actual_consumer_proof=preference_artifact_memory_consumer_proof,
         )
+    if temporal_correctness_runtime:
+        packet["temporal_correctness_runtime"] = _temporal_correctness_runtime_aggregate()
     if not live:
         packet["collector"] = {
             "schema_version": "source_to_candidate_runtime_evidence_collector.v1",
             "readiness_claim": "collector_packet_not_live_evidence",
         }
     return packet
+
+
+def _temporal_correctness_runtime_aggregate() -> dict:
+    return {
+        "schema_version": "temporal_correctness_runtime_aggregate.v1",
+        "projection_currentness": {
+            "source_hash_match": True,
+            "source_state_digest": "sha256:" + "1" * 64,
+            "graph_projection_state_digest": "sha256:" + "2" * 64,
+            "session_memory_projection_state_digest": "sha256:" + "3" * 64,
+            "source_projection_state_digest": "sha256:" + "4" * 64,
+            "source_hash_mismatch_count": 0,
+            "stale_projected_session_count": 0,
+            "source_session_count": 126,
+            "graph_projection_current_count": 126,
+            "graph_projection_noncurrent_count": 0,
+            "session_memory_projection_current_count": 126,
+            "session_memory_projection_noncurrent_count": 0,
+            "session_memory_source_hash_mismatch_count": 0,
+            "session_memory_stale_projected_session_count": 0,
+            "artifact_current": True,
+            "artifact_missing_session_count": 0,
+            "artifact_age_unknown_count": 0,
+            "artifact_source_hash_mismatch_count": 0,
+            "oldest_artifact_age_seconds": 60,
+            "graph_run_scope_match": True,
+            "graph_run_fresh": True,
+            "graph_run_completed_age_seconds": 5,
+            "graph_run_max_age_seconds": 900,
+        },
+        "entity_projection": {
+            "valid_source_count": 126,
+            "baseline_coverage_count": 15,
+            "coverage_count": 16,
+            "baseline_backlog_count": 111,
+            "backlog_count": 110,
+            "error_count": 0,
+        },
+        "production_mutation_performed": False,
+    }
+
+
+def _temporal_runtime_postcheck_receipt() -> dict:
+    return {
+        "schema_version": "temporal_correctness_runtime_postcheck_receipt.v1",
+        "evidence_class": "bounded_live_runtime_postcheck",
+        "exact_argv_sha256": "sha256:" + "8" * 64,
+        "backup_receipt_sha256": "sha256:" + "9" * 64,
+        "evidence_provenance": {
+            "collection_mode": "bounded_live_runtime_postcheck",
+            "network_used": True,
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "aggregate": _temporal_correctness_runtime_aggregate(),
+    }
+
+
+def _minimal_temporal_acceptance_config() -> dict:
+    return {
+        "temporal_query": "temporal work recall",
+        "date_a": {
+            "as_of": "2026-07-09T12:00:00Z",
+            "expected_object_fingerprint": "sha256:" + "a" * 64,
+            "expected_object_identity_fingerprint": "sha256:" + "d" * 64,
+        },
+        "date_b": {
+            "as_of": "2026-07-15T12:00:00Z",
+            "expected_object_fingerprint": "sha256:" + "b" * 64,
+            "expected_object_identity_fingerprint": "sha256:" + "e" * 64,
+        },
+        "range_boundary": {
+            "date_from": "2026-07-09T12:00:00Z",
+            "date_to": "2026-07-09T12:00:00Z",
+            "expected_object_fingerprint": "sha256:" + "a" * 64,
+            "expected_object_identity_fingerprint": "sha256:" + "d" * 64,
+        },
+        "mismatch": {"as_of": "2026-07-01T12:00:00Z"},
+        "invalid_range": {
+            "date_from": "2026-07-16T00:00:00Z",
+            "date_to": "2026-07-15T00:00:00Z",
+        },
+        "nonsense_query": "quasar marmalade unrelated nonsense",
+        "semantic_query": {
+            "query": "temporal currentness verification",
+            "expected_result_fingerprint": "sha256:" + "c" * 64,
+        },
+        "runtime_expectations": {
+            "schema_version": "temporal_correctness_runtime_expectations.v1",
+            "baseline_coverage_count": 15,
+            "baseline_backlog_count": 111,
+            "minimum_source_session_count": 126,
+            "minimum_valid_source_count": 126,
+            "max_artifact_age_seconds": 3600,
+        },
+    }
+
+
+def test_temporal_acceptance_rejects_operator_supplied_runtime_aggregate() -> None:
+    config = _minimal_temporal_acceptance_config()
+    config["runtime_aggregate"] = _temporal_correctness_runtime_aggregate()
+
+    with pytest.raises(ValueError, match="runtime_aggregate is untrusted"):
+        post_deploy_mcp_capture._validate_temporal_acceptance_config(config)
+
+
+def test_temporal_acceptance_rejects_operator_runtime_postcheck_receipt() -> None:
+    config = _minimal_temporal_acceptance_config()
+    config["runtime_postcheck_receipt"] = _temporal_runtime_postcheck_receipt()
+
+    with pytest.raises(ValueError, match="runtime_postcheck_receipt is untrusted"):
+        post_deploy_mcp_capture._validate_temporal_acceptance_config(config)
+
+
+def test_temporal_acceptance_rejects_different_date_probe_query() -> None:
+    config = _minimal_temporal_acceptance_config()
+    config["date_b"]["query"] = "different temporal query"
+
+    with pytest.raises(ValueError, match="date_b.query must equal temporal_query"):
+        post_deploy_mcp_capture._validate_temporal_acceptance_config(config)
 
 
 class _FakeMcpSession:
@@ -2280,9 +2406,563 @@ def test_collect_post_deploy_mcp_capture_uses_read_only_mcp_calls_and_sanitizes_
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     assert claims["live.agent_context.tool_hints"]["status"] == "validated"
     assert claims["live.agent_context.product_sections"]["status"] == "validated"
+    assert claims["live.temporal_recall.corrective_checkpoint"]["status"] == "not_validated"
+    assert claims["live.brain_objects_query.route_smokes"]["status"] == "not_validated"
+    assert "live_temporal_recall_corrective_checkpoint_unverified" in report["gaps"]
     assert claims["live.source_to_candidate.projection_join"]["status"] == "not_validated"
     assert "live_graph_qdrant_projection_join_unproven" in report["gaps"]
     assert report["production_ready"] is False
+
+
+def test_collect_post_deploy_mcp_capture_builds_temporal_semantic_acceptance_checkpoint():
+    date_a_object = {
+        "schema_version": "knowledge_object_envelope.v1",
+        "object_id": "ko:WorkUnit:date-a",
+        "object_type": "WorkUnit",
+        "title": "Date A work",
+        "content_hash": "sha256:" + "a" * 64,
+        "observed_at": "2026-07-09T12:00:00Z",
+    }
+    date_b_object = {
+        "schema_version": "knowledge_object_envelope.v1",
+        "object_id": "ko:WorkUnit:date-b",
+        "object_type": "WorkUnit",
+        "title": "Date B work",
+        "content_hash": "sha256:" + "b" * 64,
+        "observed_at": "2026-07-15T12:00:00Z",
+    }
+    semantic_result = {
+        "brain_id": "/project/neurons",
+        "result_type": "session_memory",
+        "retrieval_lane": "qdrant_semantic",
+        "summary": "Temporal projection currentness semantic evidence",
+        "why_retrieved": "semantic_match",
+        "source_ref": "sanitized-semantic-ref",
+        "privacy": "redacted",
+        "score": 0.91,
+    }
+    semantic_query_text = "how is temporal projection currentness verified"
+
+    class _TemporalAcceptanceSession(_FakeMcpSession):
+        async def list_tools(self):
+            listed = await super().list_tools()
+            return SimpleNamespace(
+                tools=[*listed.tools, SimpleNamespace(name=BRAIN_QUERY_TOOL_NAME)]
+            )
+
+        async def call_tool(self, name: str, arguments: dict):
+            if (
+                name == "brain_source_to_candidate_runtime_readiness"
+                and arguments.get("collect_shadow_evidence") is True
+            ):
+                self.calls.append((name, dict(arguments)))
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=_runtime_collected_packet(
+                        live=True,
+                        temporal_correctness_runtime=True,
+                    ),
+                )
+            if name == BRAIN_QUERY_TOOL_NAME:
+                self.calls.append((name, dict(arguments)))
+                if arguments.get("query") == semantic_query_text:
+                    return SimpleNamespace(
+                        isError=False,
+                        structuredContent={
+                            "schema_version": "brain_query.v2",
+                            "results": [semantic_result],
+                            "current": [],
+                            "accepted": [],
+                            "audit": {
+                                "semantic_ranker_bound": True,
+                                "semantic_ranker_used": True,
+                            },
+                        },
+                    )
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent={
+                        "schema_version": "brain_query.v2",
+                        "results": [],
+                        "current": [],
+                        "accepted": [],
+                        "audit": {
+                            "semantic_ranker_bound": True,
+                            "semantic_ranker_used": True,
+                        },
+                    },
+                )
+            if name == "brain_objects_query" and any(
+                field in arguments for field in ("as_of", "date_from", "date_to")
+            ):
+                self.calls.append((name, dict(arguments)))
+                if (
+                    arguments.get("date_from") == "2026-07-16T00:00:00Z"
+                    and arguments.get("date_to") == "2026-07-15T00:00:00Z"
+                ):
+                    return SimpleNamespace(
+                        isError=True,
+                        structuredContent={"error_code": -32602},
+                    )
+                as_of = str(arguments.get("as_of") or "")
+                if as_of.startswith("2026-07-09") or arguments.get("date_from"):
+                    objects = [date_a_object]
+                    gaps = []
+                    confidence = {"score": 0.9}
+                elif as_of.startswith("2026-07-15"):
+                    objects = [date_b_object]
+                    gaps = []
+                    confidence = {"score": 0.9}
+                else:
+                    objects = []
+                    gaps = ["temporal_evidence_mismatch"]
+                    confidence = {"score": 0.0}
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent={
+                        "schema_version": "brain_objects_query.v1",
+                        "route": "temporal_work_recall",
+                        "object_pack": {
+                            "schema_version": "object_pack.v1",
+                            "route": "temporal_work_recall",
+                            "objects": objects,
+                            "edges": [],
+                            "evidence": [],
+                            "recommended_actions": [],
+                            "lanes": {"accepted_current": objects},
+                            "confidence": confidence,
+                            "gaps": gaps,
+                        },
+                    },
+                )
+            return await super().call_tool(name, arguments)
+
+    session = _TemporalAcceptanceSession()
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield session
+
+    temporal_acceptance = {
+        "temporal_query": "temporal work recall",
+        "date_a": {
+            "as_of": "2026-07-09T12:00:00Z",
+            "expected_object_fingerprint": hash_payload(date_a_object),
+            "expected_object_identity_fingerprint": (
+                post_deploy_mcp_capture._temporal_work_unit_identity_fingerprint(
+                    date_a_object
+                )
+            ),
+        },
+        "date_b": {
+            "as_of": "2026-07-15T12:00:00Z",
+            "expected_object_fingerprint": hash_payload(date_b_object),
+            "expected_object_identity_fingerprint": (
+                post_deploy_mcp_capture._temporal_work_unit_identity_fingerprint(
+                    date_b_object
+                )
+            ),
+        },
+        "range_boundary": {
+            "date_from": "2026-07-09T12:00:00Z",
+            "date_to": "2026-07-09T12:00:00Z",
+            "expected_object_fingerprint": hash_payload(date_a_object),
+            "expected_object_identity_fingerprint": (
+                post_deploy_mcp_capture._temporal_work_unit_identity_fingerprint(
+                    date_a_object
+                )
+            ),
+        },
+        "mismatch": {"as_of": "2026-07-01T12:00:00Z"},
+        "invalid_range": {
+            "date_from": "2026-07-16T00:00:00Z",
+            "date_to": "2026-07-15T00:00:00Z",
+        },
+        "nonsense_query": "quasar marmalade unrelated nonsense",
+        "semantic_query": {
+            "query": semantic_query_text,
+            "expected_result_fingerprint": hash_payload(semantic_result),
+        },
+        "runtime_expectations": {
+            "schema_version": "temporal_correctness_runtime_expectations.v1",
+            "baseline_coverage_count": 15,
+            "baseline_backlog_count": 111,
+            "minimum_source_session_count": 126,
+            "minimum_valid_source_count": 126,
+            "max_artifact_age_seconds": 3600,
+        },
+    }
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            temporal_acceptance=temporal_acceptance,
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    checkpoint = capture["temporal_recall_corrective_checkpoint"]
+    assert checkpoint["schema_version"] == "temporal_recall_corrective_checkpoint.v1"
+    assert checkpoint["temporal_query_hash"] == hash_payload("temporal work recall")
+    assert checkpoint["selector_contract"]["invalid_range_error_code"] == -32602
+    assert checkpoint["date_a"]["observed_object_fingerprint"] == hash_payload(date_a_object)
+    assert checkpoint["date_b"]["observed_object_fingerprint"] == hash_payload(date_b_object)
+    assert checkpoint["date_a"]["observed_object_identity_fingerprint"] == (
+        post_deploy_mcp_capture._temporal_work_unit_identity_fingerprint(date_a_object)
+    )
+    assert checkpoint["date_b"]["observed_object_identity_fingerprint"] == (
+        post_deploy_mcp_capture._temporal_work_unit_identity_fingerprint(date_b_object)
+    )
+    assert checkpoint["mismatch"] == {
+        "selector_hash": hash_payload({"as_of": "2026-07-01T12:00:00Z"}),
+        "object_count": 0,
+        "gap_count": 1,
+        "confidence_score": 0.0,
+    }
+    assert checkpoint["nonsense_query"]["result_count"] == 0
+    assert checkpoint["nonsense_query"]["semantic_ranker_bound"] is True
+    assert checkpoint["nonsense_query"]["semantic_ranker_used"] is True
+    assert checkpoint["semantic_query"] == {
+        "query_hash": hash_payload(semantic_query_text),
+        "expected_result_fingerprint": hash_payload(semantic_result),
+        "observed_result_fingerprint": hash_payload(semantic_result),
+        "result_count": 1,
+        "why_retrieved_semantic_match": True,
+        "score": 0.91,
+        "minimum_score": 0.75,
+        "semantic_ranker_bound": True,
+        "semantic_ranker_used": True,
+        "qdrant_semantic_result_lane_used": True,
+    }
+    assert checkpoint["runtime_aggregate_source"] == "live_mcp_runtime_packet"
+    assert (
+        checkpoint["runtime_aggregate"]["projection_currentness"][
+            "source_projection_state_digest"
+        ]
+        == "sha256:" + "4" * 64
+    )
+    assert checkpoint["runtime_postcheck_receipt_hash"] == ""
+    assert "ko:WorkUnit" not in json.dumps(checkpoint, sort_keys=True)
+    assert semantic_query_text not in json.dumps(checkpoint, sort_keys=True)
+    assert semantic_result["summary"] not in json.dumps(checkpoint, sort_keys=True)
+
+    selector_calls = [
+        arguments
+        for name, arguments in session.calls
+        if name == "brain_objects_query"
+        and any(field in arguments for field in ("as_of", "date_from", "date_to"))
+    ]
+    assert len(selector_calls) == 5
+    assert all(
+        arguments["query"] == "temporal work recall" for arguments in selector_calls
+    )
+    assert any(arguments.get("as_of") == "2026-07-09T12:00:00Z" for arguments in selector_calls)
+    assert any(arguments.get("as_of") == "2026-07-15T12:00:00Z" for arguments in selector_calls)
+    assert any("date_from" in arguments and "date_to" in arguments for arguments in selector_calls)
+    brain_query_calls = [
+        arguments
+        for name, arguments in session.calls
+        if name == BRAIN_QUERY_TOOL_NAME
+    ]
+    assert len(brain_query_calls) == 2
+    assert {arguments["query"] for arguments in brain_query_calls} == {
+        temporal_acceptance["nonsense_query"],
+        semantic_query_text,
+    }
+
+    report = build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
+        captured_evidence=capture
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert claims["live.temporal_recall.corrective_checkpoint"]["status"] == "validated"
+    assert claims["live.brain_objects_query.route_smokes"]["status"] == "validated"
+
+
+def test_collect_temporal_corrective_checkpoint_only_avoids_deployment_readiness_inputs():
+    date_a_object = {
+        "schema_version": "knowledge_object_envelope.v1",
+        "object_id": "ko:WorkUnit:checkpoint-date-a",
+        "object_type": "WorkUnit",
+        "content_hash": "sha256:" + "a" * 64,
+        "observed_at": "2026-07-09T12:00:00Z",
+    }
+    date_b_object = {
+        "schema_version": "knowledge_object_envelope.v1",
+        "object_id": "ko:WorkUnit:checkpoint-date-b",
+        "object_type": "WorkUnit",
+        "content_hash": "sha256:" + "b" * 64,
+        "observed_at": "2026-07-15T12:00:00Z",
+    }
+    semantic_result = {
+        "brain_id": "/project/neurons",
+        "result_type": "session_memory",
+        "retrieval_lane": "qdrant_semantic",
+        "summary": "Temporal checkpoint semantic evidence",
+        "why_retrieved": "semantic_match",
+        "source_ref": "sanitized-semantic-ref",
+        "privacy": "redacted",
+        "score": 0.91,
+    }
+    semantic_query_text = "how is temporal projection currentness verified"
+    temporal_acceptance = _minimal_temporal_acceptance_config()
+    temporal_acceptance["date_a"].update(
+        expected_object_fingerprint=hash_payload(date_a_object),
+        expected_object_identity_fingerprint=(
+            post_deploy_mcp_capture._temporal_work_unit_identity_fingerprint(
+                date_a_object
+            )
+        ),
+    )
+    temporal_acceptance["date_b"].update(
+        expected_object_fingerprint=hash_payload(date_b_object),
+        expected_object_identity_fingerprint=(
+            post_deploy_mcp_capture._temporal_work_unit_identity_fingerprint(
+                date_b_object
+            )
+        ),
+    )
+    temporal_acceptance["range_boundary"].update(
+        expected_object_fingerprint=hash_payload(date_a_object),
+        expected_object_identity_fingerprint=(
+            post_deploy_mcp_capture._temporal_work_unit_identity_fingerprint(
+                date_a_object
+            )
+        ),
+    )
+    temporal_acceptance["semantic_query"] = {
+        "query": semantic_query_text,
+        "expected_result_fingerprint": hash_payload(semantic_result),
+    }
+
+    class _CheckpointOnlySession(_FakeMcpSession):
+        async def call_tool(self, name: str, arguments: dict):
+            self.calls.append((name, dict(arguments)))
+            if name == "brain_source_to_candidate_runtime_readiness":
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent=_runtime_collected_packet(
+                        live=True,
+                        temporal_correctness_runtime=True,
+                    ),
+                )
+            if name == BRAIN_QUERY_TOOL_NAME:
+                if arguments.get("query") == semantic_query_text:
+                    return SimpleNamespace(
+                        isError=False,
+                        structuredContent={
+                            "schema_version": "brain_query.v2",
+                            "results": [semantic_result],
+                            "current": [],
+                            "accepted": [],
+                            "audit": {
+                                "semantic_ranker_bound": True,
+                                "semantic_ranker_used": True,
+                            },
+                        },
+                    )
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent={
+                        "schema_version": "brain_query.v2",
+                        "results": [],
+                        "current": [],
+                        "accepted": [],
+                        "audit": {
+                            "semantic_ranker_bound": True,
+                            "semantic_ranker_used": True,
+                        },
+                    },
+                )
+            if name == "brain_objects_query":
+                if (
+                    arguments.get("date_from") == "2026-07-16T00:00:00Z"
+                    and arguments.get("date_to") == "2026-07-15T00:00:00Z"
+                ):
+                    return SimpleNamespace(
+                        isError=True,
+                        structuredContent={"error_code": -32602},
+                    )
+                as_of = str(arguments.get("as_of") or "")
+                if as_of.startswith("2026-07-09") or arguments.get("date_from"):
+                    objects, gaps, confidence = [date_a_object], [], {"score": 0.9}
+                elif as_of.startswith("2026-07-15"):
+                    objects, gaps, confidence = [date_b_object], [], {"score": 0.9}
+                else:
+                    objects = []
+                    gaps = ["temporal_evidence_mismatch"]
+                    confidence = {"score": 0.0}
+                return SimpleNamespace(
+                    isError=False,
+                    structuredContent={
+                        "schema_version": "brain_objects_query.v1",
+                        "route": "temporal_work_recall",
+                        "object_pack": {
+                            "schema_version": "object_pack.v1",
+                            "route": "temporal_work_recall",
+                            "objects": objects,
+                            "edges": [],
+                            "evidence": [],
+                            "recommended_actions": [],
+                            "lanes": {"accepted_current": objects},
+                            "confidence": confidence,
+                            "gaps": gaps,
+                        },
+                    },
+                )
+            raise AssertionError(f"unexpected checkpoint-only call: {name}")
+
+    session = _CheckpointOnlySession()
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield session
+
+    capture = asyncio.run(
+        post_deploy_mcp_capture.collect_temporal_recall_corrective_checkpoint(
+            mcp_url="https://mcp.example.test/mcp",
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            temporal_acceptance=temporal_acceptance,
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert capture["schema_version"] == "temporal_recall_corrective_checkpoint_capture.v1"
+    assert capture["production_mutation_performed"] is False
+    assert capture["collection"] == {
+        "mode": "temporal_corrective_checkpoint_read_only",
+        "network_used": True,
+        "mutation_scope": "none",
+        "raw_private_evidence_returned": False,
+        "secret_returned": False,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": False,
+    }
+    checkpoint = capture["temporal_recall_corrective_checkpoint"]
+    currentness = checkpoint["runtime_aggregate"]["projection_currentness"]
+    assert currentness["source_projection_state_digest"] == "sha256:" + "4" * 64
+    assert all(
+        currentness[field].startswith("sha256:")
+        for field in (
+            "source_state_digest",
+            "graph_projection_state_digest",
+            "session_memory_projection_state_digest",
+            "source_projection_state_digest",
+        )
+    )
+    assert set(name for name, _ in session.calls) == {
+        "brain_source_to_candidate_runtime_readiness",
+        "brain_objects_query",
+        BRAIN_QUERY_TOOL_NAME,
+    }
+    assert len(
+        [name for name, _ in session.calls if name == "brain_objects_query"]
+    ) == 5
+    assert len([name for name, _ in session.calls if name == BRAIN_QUERY_TOOL_NAME]) == 2
+    assert "deployment_evidence_binding" not in capture
+    assert "gitops_desired_state" not in capture
+    assert "argo_reconciliation" not in capture
+    serialized = json.dumps(capture, sort_keys=True)
+    assert date_a_object["object_id"] not in serialized
+    assert date_b_object["object_id"] not in serialized
+    assert semantic_query_text not in serialized
+    assert semantic_result["summary"] not in serialized
+
+
+def test_collect_temporal_corrective_checkpoint_fails_closed_on_runtime_mutation(
+    monkeypatch,
+):
+    checkpoint = {
+        "schema_version": "temporal_recall_corrective_checkpoint.v1",
+        "production_mutation_performed": False,
+    }
+
+    async def _collect_checkpoint(*_args, **_kwargs):
+        return dict(checkpoint)
+
+    monkeypatch.setattr(
+        post_deploy_mcp_capture,
+        "_collect_temporal_recall_corrective_checkpoint",
+        _collect_checkpoint,
+    )
+
+    class _MutationReportingSession:
+        async def initialize(self):
+            return None
+
+        async def call_tool(self, name: str, arguments: dict):
+            assert name == "brain_source_to_candidate_runtime_readiness"
+            assert arguments["collect_shadow_evidence"] is True
+            return SimpleNamespace(
+                isError=False,
+                structuredContent=_runtime_collected_packet(
+                    live=True,
+                    temporal_correctness_runtime=True,
+                    production_mutation_performed=True,
+                ),
+            )
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield _MutationReportingSession()
+
+    capture = asyncio.run(
+        post_deploy_mcp_capture.collect_temporal_recall_corrective_checkpoint(
+            mcp_url="https://mcp.example.test/mcp",
+            project="neurons",
+            temporal_acceptance=_minimal_temporal_acceptance_config(),
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert capture["production_mutation_performed"] is True
+    assert (
+        capture["temporal_recall_corrective_checkpoint"]
+        ["production_mutation_performed"]
+        is True
+    )
+
+
+def test_temporal_acceptance_config_requires_positive_semantic_query():
+    config = {
+        "temporal_query": "temporal work recall",
+        "date_a": {
+            "as_of": "2026-07-09T12:00:00Z",
+            "expected_object_fingerprint": "sha256:" + "a" * 64,
+            "expected_object_identity_fingerprint": "sha256:" + "d" * 64,
+        },
+        "date_b": {
+            "as_of": "2026-07-15T12:00:00Z",
+            "expected_object_fingerprint": "sha256:" + "b" * 64,
+            "expected_object_identity_fingerprint": "sha256:" + "e" * 64,
+        },
+        "range_boundary": {
+            "date_from": "2026-07-09T12:00:00Z",
+            "date_to": "2026-07-09T12:00:00Z",
+            "expected_object_fingerprint": "sha256:" + "a" * 64,
+            "expected_object_identity_fingerprint": "sha256:" + "d" * 64,
+        },
+        "mismatch": {"as_of": "2026-07-01T12:00:00Z"},
+        "invalid_range": {
+            "date_from": "2026-07-16T00:00:00Z",
+            "date_to": "2026-07-15T00:00:00Z",
+        },
+        "nonsense_query": "quasar marmalade unrelated nonsense",
+        "runtime_expectations": {
+            "schema_version": "temporal_correctness_runtime_expectations.v1",
+            "baseline_coverage_count": 15,
+            "baseline_backlog_count": 111,
+            "minimum_source_session_count": 126,
+            "minimum_valid_source_count": 126,
+            "max_artifact_age_seconds": 3600,
+        },
+    }
+
+    with pytest.raises(ValueError, match="semantic_query"):
+        post_deploy_mcp_capture._validate_temporal_acceptance_config(config)
 
 
 def test_collect_post_deploy_mcp_capture_promotes_live_p6_rollup_from_read_only_runtime():
@@ -3260,6 +3940,15 @@ def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, cap
         json.dumps(artifact_descriptor),
         encoding="utf-8",
     )
+    temporal_acceptance_file = tmp_path / "temporal-acceptance.json"
+    temporal_acceptance = {
+        "date_a": {"as_of": "2026-07-09", "expected_object_fingerprint": "sha256:" + "a" * 64},
+        "date_b": {"as_of": "2026-07-15", "expected_object_fingerprint": "sha256:" + "b" * 64},
+    }
+    temporal_acceptance_file.write_text(
+        json.dumps(temporal_acceptance),
+        encoding="utf-8",
+    )
     seen: dict[str, object] = {}
 
     async def _fake_collect(**kwargs):
@@ -3301,6 +3990,8 @@ def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, cap
                 str(identity_file),
                 "--artifact-descriptor-file",
                 str(artifact_descriptor_file),
+                "--temporal-acceptance-file",
+                str(temporal_acceptance_file),
             ]
         )
         == 0
@@ -3321,6 +4012,7 @@ def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, cap
         "identity_source": "redacted_artifact_identity_summary",
     }
     assert seen["artifact_descriptor"] == artifact_descriptor
+    assert seen["temporal_acceptance"] == temporal_acceptance
     assert str(artifact_descriptor_file) not in json.dumps(output, sort_keys=True)
     assert artifact_descriptor["summary"] not in json.dumps(output, sort_keys=True)
 

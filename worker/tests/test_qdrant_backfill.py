@@ -76,6 +76,7 @@ def _seed_session(store, sid, *, provider="codex", project="neurons", chunk_text
     )
     store.put(dm.build_transcript_session_document(session=session))
     conv_hashes = []
+    chunk_docs = []
     for i, text in enumerate(chunk_texts):
         chunk = TranscriptChunk.from_text(
             chunk_id=f"chunk_{i:02d}",
@@ -88,6 +89,7 @@ def _seed_session(store, sid, *, provider="codex", project="neurons", chunk_text
         )
         doc = dm.build_conversation_chunk_document(chunk=chunk)
         store.put(doc)
+        chunk_docs.append(doc)
         conv_hashes.append(doc["content_hash"])
     cov = dm.build_coverage_manifest_document(
         session_id_hash=sid,
@@ -97,6 +99,12 @@ def _seed_session(store, sid, *, provider="codex", project="neurons", chunk_text
         tool_evidence_bundle_count=0,
         conversation_content_hashes=conv_hashes,
         tool_evidence_coverage_hashes=[],
+        conversation_revision_tokens=[
+            dm.build_source_revision_token(doc, material_hash_field="content_hash")
+            for doc in chunk_docs
+        ],
+        observed_at_start=session.started_at,
+        observed_at_end=session.started_at,
         project_authority={"project": project, "ambiguous": False, "eligible_for_retirement": True},
     )
     store.put(cov)
@@ -261,12 +269,7 @@ def test_resolver_drops_missing_projection_state():
     assert CouchDBProjectionStateAuthorityResolver(store).resolve(hit) is None
 
 
-def test_resolver_legacy_doc_without_active_content_hash_resolves():
-    # The ~3577 pre-existing projected sessions have NO active_content_hash; a
-    # backfilled point must still resolve on projection_status alone (legacy
-    # fallback). The builder now REQUIRES active_content_hash for a PROJECTED state,
-    # so simulate a pre-existing legacy doc by stripping the field after build (these
-    # docs already live in CouchDB, written before the field became required).
+def test_resolver_legacy_doc_without_active_content_hash_fails_closed():
     store = InMemoryCouchDBSourceStore()
     sid = _sid(raw="legacy")
     legacy = dm.build_projection_state_document(
@@ -280,8 +283,7 @@ def test_resolver_legacy_doc_without_active_content_hash_resolves():
     record = CouchDBProjectionStateAuthorityResolver(store).resolve(
         {"session_id_hash": sid, "content_hash": "sha256:" + "c" * 64}
     )
-    assert record is not None  # resolves on projected-only for legacy docs
-    assert record["provider"] == "codex"
+    assert record is None
 
 
 def test_resolver_returns_no_privacy_level_key():

@@ -31,6 +31,7 @@ from .document_model import (
     SourceRedactionLeak,
     build_conversation_chunk_document,
     build_coverage_manifest_document,
+    build_source_revision_token,
     build_source_locator_hash,
     build_transcript_session_document,
 )
@@ -188,6 +189,10 @@ def import_historical_source(
         tool_evidence_bundle_count=0,  # M3 fills tool evidence coverage
         conversation_content_hashes=conversation_content_hashes,
         tool_evidence_coverage_hashes=[],
+        conversation_revision_tokens=[
+            build_source_revision_token(doc, material_hash_field="content_hash")
+            for doc in chunk_docs
+        ],
         source_locator_hash=source_locator_hash,
         ledger_comparison=ledger_comparison,
         project_authority=resolution.to_authority_block(),

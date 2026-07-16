@@ -86,8 +86,16 @@ class ClosingSqliteConnection(sqlite3.Connection):
 
 
 class RAGIngressStateDB:
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, *, read_only: bool = False):
         self.path = Path(path)
+        self.read_only = bool(read_only)
+        if self.read_only:
+            if self.path.is_symlink() or not self.path.is_file():
+                raise ValueError("read-only state db must be an existing regular file")
+            parent = self.path.parent
+            if parent.is_symlink() or parent.stat().st_mode & 0o077:
+                raise ValueError("state db parent must be private")
+            return
         self._prepare_parent_directory()
         self._initialize()
         for candidate in self.path.parent.glob(f"{self.path.name}*"):
@@ -109,15 +117,29 @@ class RAGIngressStateDB:
             raise ValueError("state db parent must be private")
 
     def connect(self) -> sqlite3.Connection:
+        database = self.path
+        uri = False
+        if self.read_only:
+            wal_path = self.path.with_name(self.path.name + "-wal")
+            shm_path = self.path.with_name(self.path.name + "-shm")
+            if wal_path.exists() != shm_path.exists():
+                raise ValueError("read-only WAL state is incomplete")
+            immutable = "" if wal_path.exists() else "&immutable=1"
+            database = self.path.resolve().as_uri() + f"?mode=ro{immutable}"
+            uri = True
         connection = sqlite3.connect(
-            self.path,
+            database,
             timeout=SQLITE_BUSY_TIMEOUT_MS / 1000,
             factory=ClosingSqliteConnection,
+            uri=uri,
         )
         connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS};")
         connection.execute("PRAGMA foreign_keys=ON;")
-        connection.execute("PRAGMA synchronous=NORMAL;")
+        if self.read_only:
+            connection.execute("PRAGMA query_only=ON;")
+        else:
+            connection.execute("PRAGMA synchronous=NORMAL;")
         return connection
 
     def _initialize(self) -> None:
