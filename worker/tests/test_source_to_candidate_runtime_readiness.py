@@ -24,6 +24,9 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
 from agent_knowledge.public_safe_util import hash_payload
 
 
+_BOUND_SOURCE_COMMIT = "c" * 40
+
+
 def _sanitized_live_evidence(**overrides):
     evidence = {
         "schema_version": "source_to_candidate_runtime_evidence.v1",
@@ -120,7 +123,7 @@ def _safe_tool_hints():
 
 
 def _gitops_bound_live_evidence(**overrides):
-    expected_commit = "c2b8548"
+    expected_commit = _BOUND_SOURCE_COMMIT
     evidence = _sanitized_live_evidence(
         expected_commit=expected_commit,
         gitops_desired_state={
@@ -172,11 +175,11 @@ def test_runtime_readiness_normalizes_and_validates_gitops_deployment_evidence_b
     binding = packet["deployment_evidence_binding"]
     report = build_source_to_candidate_runtime_readiness_report(
         live_evidence=packet,
-        expected_commit="c2b8548",
+        expected_commit=_BOUND_SOURCE_COMMIT,
     )
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
 
-    assert packet["expected_commit"] == "c2b8548"
+    assert packet["expected_commit"] == _BOUND_SOURCE_COMMIT
     assert binding["schema_version"] == "deployment_evidence_binding.v1"
     assert binding["canonical_tuple_hash"].startswith("sha256:")
     assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "validated"
@@ -224,7 +227,7 @@ def test_runtime_readiness_fails_closed_for_malformed_bound_layer_values(
 
     report = build_source_to_candidate_runtime_readiness_report(
         live_evidence=evidence,
-        expected_commit="c2b8548",
+        expected_commit=_BOUND_SOURCE_COMMIT,
     )
 
     assert report["status"] == "FAIL"
@@ -239,7 +242,7 @@ def test_runtime_readiness_rejects_unknown_or_raw_binding_layer_keys(key):
 
     report = build_source_to_candidate_runtime_readiness_report(
         live_evidence=evidence,
-        expected_commit="c2b8548",
+        expected_commit=_BOUND_SOURCE_COMMIT,
     )
 
     assert report["status"] == "FAIL"
@@ -278,7 +281,7 @@ def test_runtime_readiness_fails_for_supplied_invalid_argo_without_binding(
 
     report = build_source_to_candidate_runtime_readiness_report(
         live_evidence=evidence,
-        expected_commit="c2b8548",
+        expected_commit=_BOUND_SOURCE_COMMIT,
     )
 
     assert report["status"] == "FAIL"
@@ -324,7 +327,7 @@ def test_runtime_readiness_fails_for_supplied_cross_layer_mismatch_without_bindi
 
     report = build_source_to_candidate_runtime_readiness_report(
         live_evidence=evidence,
-        expected_commit="c2b8548",
+        expected_commit=_BOUND_SOURCE_COMMIT,
     )
 
     assert report["status"] == "FAIL"
@@ -387,7 +390,7 @@ def test_runtime_readiness_fails_closed_for_gitops_deployment_binding_mismatch(
 
     report = build_source_to_candidate_runtime_readiness_report(
         live_evidence=packet,
-        expected_commit="c2b8548",
+        expected_commit=_BOUND_SOURCE_COMMIT,
     )
 
     assert report["status"] == "FAIL"
@@ -404,12 +407,128 @@ def test_runtime_readiness_keeps_missing_gitops_deployment_binding_as_gap():
 
     report = build_source_to_candidate_runtime_readiness_report(
         live_evidence=packet,
-        expected_commit="c2b8548",
+        expected_commit=_BOUND_SOURCE_COMMIT,
     )
 
     assert report["status"] == "PASS_WITH_GAPS"
     assert "ops.gitops_deployment_evidence_binding" not in report["failed_claims"]
     assert "gitops_deployment_evidence_binding_unverified" in report["gaps"]
+
+
+def test_runtime_readiness_rejects_mutable_ref_as_deployment_commit_anchor():
+    evidence = _gitops_bound_live_evidence()
+    evidence["expected_commit"] = "main"
+    evidence["gitops_desired_state"]["source_commit"] = "main"
+    evidence["deployed_identity"]["source_commit"] = "main"
+    evidence["deployment_evidence_binding"] = build_deployment_evidence_binding(
+        expected_commit="main",
+        gitops_desired_state=evidence["gitops_desired_state"],
+        argo_reconciliation=evidence["argo_reconciliation"],
+        deployed_identity=evidence["deployed_identity"],
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit="main",
+    )
+
+    assert report["status"] == "FAIL"
+    assert "ops.gitops_deployment_evidence_binding" in report["failed_claims"]
+    assert "gitops_deployment_evidence_binding_packet_expected_commit_invalid" in report["gaps"]
+
+
+@pytest.mark.parametrize(
+    ("layer", "failed_claim"),
+    [
+        ("gitops_desired_state", "ops.gitops_desired_state.includes_expected_commit"),
+        ("argo_reconciliation", "ops.argo_reconciliation.application_status"),
+        ("deployed_identity", "live.deployed_identity.includes_expected_commit"),
+        ("deployment_evidence_binding", "ops.gitops_deployment_evidence_binding"),
+    ],
+)
+@pytest.mark.parametrize("bad_value", ["tampered", ["tampered"], None])
+def test_runtime_readiness_fails_for_supplied_non_mapping_deployment_layer(
+    layer, failed_claim, bad_value
+):
+    evidence = _gitops_bound_live_evidence()
+    evidence.pop("deployment_evidence_binding")
+    evidence[layer] = bad_value
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+    )
+
+    assert report["status"] == "FAIL"
+    assert failed_claim in report["failed_claims"]
+
+
+@pytest.mark.parametrize(
+    ("layer", "failed_claim"),
+    [
+        ("gitops_desired_state", "ops.gitops_desired_state.includes_expected_commit"),
+        ("argo_reconciliation", "ops.argo_reconciliation.application_status"),
+        ("deployed_identity", "live.deployed_identity.includes_expected_commit"),
+        ("deployment_evidence_binding", "ops.gitops_deployment_evidence_binding"),
+    ],
+)
+@pytest.mark.parametrize("bad_value", ["tampered", ["tampered"], None])
+def test_runtime_readiness_normalizer_preserves_non_mapping_layer_failure(
+    layer, failed_claim, bad_value
+):
+    capture = _gitops_bound_live_evidence()
+    capture.pop("deployment_evidence_binding")
+    capture[layer] = bad_value
+
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=capture,
+    )
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=packet,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+    )
+
+    assert report["status"] == "FAIL"
+    assert failed_claim in report["failed_claims"]
+
+
+@pytest.mark.parametrize(
+    ("layer", "value", "failed_claim"),
+    [
+        (
+            "gitops_desired_state",
+            {
+                "schema_version": "gitops_desired_state_identity.v1",
+                "unknown_field": True,
+            },
+            "ops.gitops_desired_state.includes_expected_commit",
+        ),
+        (
+            "deployed_identity",
+            {
+                "contains_expected_commit": True,
+                "identity_source": "redacted_live_runtime_evidence",
+                "manifest_path": "redacted",
+            },
+            "live.deployed_identity.includes_expected_commit",
+        ),
+    ],
+)
+def test_runtime_readiness_fails_for_unknown_field_without_strict_fields(
+    layer, value, failed_claim
+):
+    evidence = {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        layer: value,
+    }
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+    )
+
+    assert report["status"] == "FAIL"
+    assert failed_claim in report["failed_claims"]
 
 
 def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None):

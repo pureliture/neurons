@@ -2166,7 +2166,6 @@ def _p8_live_runtime_authority_evidence(
     deployed_identity_mutation_performed = identity_claim.get("production_mutation_performed") is True
     production_mutation_performed = bool(
         authority_write_performed
-        or permission_claim.get("production_mutation_performed") is True
         or desired_state_mutation_performed
         or argo_mutation_performed
         or deployed_identity_mutation_performed
