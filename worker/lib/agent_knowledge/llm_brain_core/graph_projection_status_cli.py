@@ -15,7 +15,7 @@ from agent_knowledge.couchdb_source.document_model import (
     sha256_hash,
 )
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
-from agent_knowledge.ledger import Ledger
+from agent_knowledge.ledger import Ledger, _column_names
 from agent_knowledge.ledger_base import _table_exists
 
 from .couchdb_projection_cli import _build_source_store, _filter_sessions, _project_ref
@@ -458,9 +458,15 @@ def _projection_rows(
     with ledger._connect() as connection:
         if not _table_exists(connection, "llm_brain_graph_projection_state"):
             return []
+        source_hash_select = (
+            "source_hash"
+            if "source_hash"
+            in _column_names(connection, "llm_brain_graph_projection_state")
+            else "'' AS source_hash"
+        )
         rows = connection.execute(
-            """
-            SELECT natural_id, extraction_level, upsert_result, source_hash, projected_at
+            f"""
+            SELECT natural_id, extraction_level, upsert_result, {source_hash_select}, projected_at
             FROM llm_brain_graph_projection_state
             WHERE """ + " AND ".join(clauses),
             tuple(params),
@@ -528,7 +534,6 @@ def _source_hash_mismatch_ids(
         if (natural_id := str(row.get("natural_id") or ""))
         and natural_id not in current_ids
         and bool(source_hashes.get(natural_id))
-        and bool(str(row.get("source_hash") or ""))
         and str(row.get("source_hash") or "") != source_hashes[natural_id]
     }
 

@@ -560,6 +560,59 @@ def test_status_counts_source_hash_mismatch_as_stale_backlog(tmp_path):
     assert report["artifact_age"]["artifact_source_hash_mismatch_count"] == 1
 
 
+def test_status_fails_closed_for_legacy_projection_state_without_source_hash(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    session_id_hash = _seed_session(store, raw_id="legacy-state-without-source-hash")
+    natural_id = session_id_hash.replace(":", "_")
+    ledger_path = tmp_path / "ledger.sqlite3"
+    Ledger(ledger_path)
+
+    # Model a pre-currentness table.  The status command opens its ledger
+    # read-only, so it must not rely on a write-time migration to add the
+    # source_hash column.
+    with Ledger(ledger_path)._connect() as connection:
+        connection.execute("DROP TABLE llm_brain_graph_projection_state")
+        connection.executescript(
+            """
+            CREATE TABLE llm_brain_graph_projection_state (
+                episode_id TEXT NOT NULL,
+                extraction_level TEXT NOT NULL DEFAULT 'episodic',
+                project TEXT NOT NULL DEFAULT '',
+                entity_type TEXT NOT NULL DEFAULT '',
+                natural_id TEXT NOT NULL DEFAULT '',
+                upsert_result TEXT NOT NULL DEFAULT '',
+                projected_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(episode_id, extraction_level)
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO llm_brain_graph_projection_state (
+                episode_id, extraction_level, project, entity_type, natural_id,
+                upsert_result, projected_at, updated_at
+            ) VALUES (?, 'entity', ?, 'Session', ?, 'inserted',
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            ("legacy:source-hash", PROJECT, natural_id),
+        )
+
+    report = build_graph_projection_status(
+        ledger_path=ledger_path,
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+    )
+
+    state = report["projection_state"]
+    assert report["status"] == "ok"
+    assert state["entity_session_projected"] == 0
+    assert state["entity_session_backlog"] == 1
+    assert state["source_hash_mismatch_count"] == 1
+    assert state["stale_projected_session_count"] == 1
+
+
 def test_status_digest_changes_for_same_session_distinct_source_revision(tmp_path):
     store = InMemoryCouchDBSourceStore()
     raw_id = "status-digest-source-change"
