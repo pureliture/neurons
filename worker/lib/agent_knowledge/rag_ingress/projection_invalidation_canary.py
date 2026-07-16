@@ -29,6 +29,7 @@ import copy
 import contextlib
 import datetime
 import json
+import math
 import os
 import re
 import signal
@@ -125,7 +126,7 @@ def _validated_inputs(
     if int(limit) != 1:
         raise ValueError("limit must equal 1")
     timeout = float(max_runtime_seconds)
-    if timeout <= 0 or timeout > _MAX_RUNTIME_SECONDS:
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > _MAX_RUNTIME_SECONDS:
         raise ValueError("max_runtime_seconds must be within the bounded range")
     if not _SHA256_REF_RE.fullmatch(normalized_nonce):
         raise ValueError("probe_nonce_sha256 must be a sha256 reference")

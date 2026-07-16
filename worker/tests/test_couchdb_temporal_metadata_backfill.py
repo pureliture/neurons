@@ -717,11 +717,18 @@ def test_reconciliation_only_plan_rechecks_temporal_revision_before_aggregate_wr
     assert report["updated_count"] == 0
 
 
-def test_project_scope_and_limit_are_mandatory_bounded_inputs(tmp_path):
+def test_project_scope_limit_and_finite_timeout_are_mandatory_bounded_inputs(tmp_path):
     state_db = _state_db(tmp_path)
     store = _source_store()
 
-    for project, limit, timeout in (("", 10, 30), (PROJECT, 0, 30), (PROJECT, 10, 0)):
+    for project, limit, timeout in (
+        ("", 10, 30),
+        (PROJECT, 0, 30),
+        (PROJECT, 10, 0),
+        (PROJECT, 10, float("nan")),
+        (PROJECT, 10, float("inf")),
+        (PROJECT, 10, float("-inf")),
+    ):
         try:
             backfill_temporal_metadata(
                 state_db=state_db,

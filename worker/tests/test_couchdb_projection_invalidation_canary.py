@@ -223,6 +223,23 @@ def test_plan_is_public_safe_read_only_and_digest_bound() -> None:
     assert SOURCE_COMMIT not in serialized
 
 
+@pytest.mark.parametrize(
+    "max_runtime_seconds",
+    [float("nan"), float("inf"), float("-inf")],
+)
+def test_plan_rejects_nonfinite_runtime_bound(max_runtime_seconds: float) -> None:
+    with pytest.raises(ValueError, match="bounded range"):
+        build_canary_plan(
+            project=PROJECT,
+            provider=PROVIDER,
+            probe_nonce_sha256=NONCE,
+            expected_source_commit=SOURCE_COMMIT,
+            observed_at=OBSERVED_AT,
+            limit=1,
+            max_runtime_seconds=max_runtime_seconds,
+        )
+
+
 class _FailOnSecondProjection:
     def __init__(self) -> None:
         self.calls = 0

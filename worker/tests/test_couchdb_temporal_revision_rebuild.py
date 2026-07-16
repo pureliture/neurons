@@ -22,6 +22,7 @@ from agent_knowledge.rag_ingress.state_db import (
     DeliveryJobSpec,
     RAGIngressStateDB,
 )
+from agent_knowledge.rag_ingress import temporal_revision_rebuild as rebuild_module
 from agent_knowledge.rag_ingress.temporal_revision_rebuild import (
     REBUILD_OPERATION,
     main,
@@ -33,6 +34,14 @@ PROJECT = "neurons"
 SESSION_HASH = sha256_hash("private-session")
 DATE_A = ("2026-07-09T10:00:00Z", "2026-07-09T10:30:00Z")
 DATE_B = ("2026-07-15T10:00:00Z", "2026-07-15T10:30:00Z")
+
+
+class _ControlledClock:
+    def __init__(self, now: float = 0.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
 
 
 def _state_db(tmp_path: Path) -> RAGIngressStateDB:
@@ -368,7 +377,15 @@ def test_exact_duplicate_delivery_does_not_create_an_extra_revision(tmp_path: Pa
 def test_timeout_after_one_additive_write_is_explicit_and_resumable(tmp_path: Path) -> None:
     state_db = _state_db(tmp_path)
     _record_date_a_b(state_db)
-    store = InMemorySessionMemoryArtifactStore()
+    clock = _ControlledClock()
+
+    class _ExpiringAfterFirstWriteStore(InMemorySessionMemoryArtifactStore):
+        def upsert(self, artifact: SessionMemoryArtifact) -> str:
+            outcome = super().upsert(artifact)
+            clock.now = 31.0
+            return outcome
+
+    store = _ExpiringAfterFirstWriteStore()
     plan = rebuild_temporal_revisions(
         state_db=state_db,
         artifact_store=store,
@@ -376,8 +393,6 @@ def test_timeout_after_one_additive_write_is_explicit_and_resumable(tmp_path: Pa
         limit=100,
         max_runtime_seconds=30,
     )
-    ticks = iter((0.0, 0.0, 0.0, 0.0, 31.0))
-
     partial = rebuild_temporal_revisions(
         state_db=state_db,
         artifact_store=store,
@@ -386,7 +401,7 @@ def test_timeout_after_one_additive_write_is_explicit_and_resumable(tmp_path: Pa
         max_runtime_seconds=30,
         execute=True,
         expected_plan_digest=plan["plan_digest"],
-        monotonic=lambda: next(ticks, 31.0),
+        monotonic=clock,
     )
     remaining = rebuild_temporal_revisions(
         state_db=state_db,
@@ -401,6 +416,177 @@ def test_timeout_after_one_additive_write_is_explicit_and_resumable(tmp_path: Pa
     assert partial["mutation_performed"] is True
     assert partial["current_materialization_rebuild_required"] is True
     assert remaining["total_remaining_artifact_count"] == 1
+
+
+def test_upsert_exception_after_commit_is_reported_as_mutation_uncertain(
+    tmp_path: Path,
+) -> None:
+    state_db = _state_db(tmp_path)
+    _record_date_a_b(state_db)
+
+    class _CommitThenRaiseStore(InMemorySessionMemoryArtifactStore):
+        def upsert(self, artifact: SessionMemoryArtifact) -> str:
+            super().upsert(artifact)
+            raise RuntimeError("ack lost")
+
+    store = _CommitThenRaiseStore()
+    plan = rebuild_temporal_revisions(
+        state_db=state_db,
+        artifact_store=store,
+        project=PROJECT,
+        limit=1,
+        max_runtime_seconds=30,
+    )
+
+    report = rebuild_temporal_revisions(
+        state_db=state_db,
+        artifact_store=store,
+        project=PROJECT,
+        limit=1,
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+    )
+
+    assert report["write_error_count"] == 1
+    assert report["mutation_uncertain"] is True
+    assert len(store.list_recent(project=PROJECT, limit=10)) == 1
+
+
+def test_postcheck_exception_preserves_insert_outcome_and_uncertainty(
+    tmp_path: Path,
+) -> None:
+    state_db = _state_db(tmp_path)
+    _record_date_a_b(state_db)
+
+    class _PostcheckRaiseStore(InMemorySessionMemoryArtifactStore):
+        wrote = False
+
+        def upsert(self, artifact: SessionMemoryArtifact) -> str:
+            outcome = super().upsert(artifact)
+            self.wrote = True
+            return outcome
+
+        def get(self, artifact_id: str):
+            if self.wrote:
+                raise RuntimeError("postcheck unavailable")
+            return super().get(artifact_id)
+
+    store = _PostcheckRaiseStore()
+    plan = rebuild_temporal_revisions(
+        state_db=state_db,
+        artifact_store=store,
+        project=PROJECT,
+        limit=1,
+        max_runtime_seconds=30,
+    )
+
+    report = rebuild_temporal_revisions(
+        state_db=state_db,
+        artifact_store=store,
+        project=PROJECT,
+        limit=1,
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+    )
+
+    assert report["inserted_artifact_count"] == 1
+    assert report["mutation_performed"] is True
+    assert report["postcheck_error_count"] == 1
+    assert report["mutation_uncertain"] is True
+
+
+def test_postcheck_mismatch_preserves_insert_outcome_and_uncertainty(
+    tmp_path: Path,
+) -> None:
+    state_db = _state_db(tmp_path)
+    _record_date_a_b(state_db)
+
+    class _PostcheckMissingStore(InMemorySessionMemoryArtifactStore):
+        wrote = False
+
+        def upsert(self, artifact: SessionMemoryArtifact) -> str:
+            outcome = super().upsert(artifact)
+            self.wrote = True
+            return outcome
+
+        def get(self, artifact_id: str):
+            if self.wrote:
+                return None
+            return super().get(artifact_id)
+
+    store = _PostcheckMissingStore()
+    plan = rebuild_temporal_revisions(
+        state_db=state_db,
+        artifact_store=store,
+        project=PROJECT,
+        limit=1,
+        max_runtime_seconds=30,
+    )
+
+    report = rebuild_temporal_revisions(
+        state_db=state_db,
+        artifact_store=store,
+        project=PROJECT,
+        limit=1,
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+    )
+
+    assert report["inserted_artifact_count"] == 1
+    assert report["mutation_performed"] is True
+    assert report["postcheck_error_count"] == 1
+    assert report["mutation_uncertain"] is True
+
+
+def test_postcheck_exception_after_deadline_is_also_reported_as_timeout(
+    tmp_path: Path,
+) -> None:
+    state_db = _state_db(tmp_path)
+    _record_date_a_b(state_db)
+    clock = _ControlledClock()
+
+    class _ExpiringPostcheckStore(InMemorySessionMemoryArtifactStore):
+        wrote = False
+
+        def upsert(self, artifact: SessionMemoryArtifact) -> str:
+            outcome = super().upsert(artifact)
+            self.wrote = True
+            return outcome
+
+        def get(self, artifact_id: str):
+            if self.wrote:
+                clock.now = 31.0
+                raise RuntimeError("postcheck timed out")
+            return super().get(artifact_id)
+
+    store = _ExpiringPostcheckStore()
+    plan = rebuild_temporal_revisions(
+        state_db=state_db,
+        artifact_store=store,
+        project=PROJECT,
+        limit=1,
+        max_runtime_seconds=30,
+    )
+
+    report = rebuild_temporal_revisions(
+        state_db=state_db,
+        artifact_store=store,
+        project=PROJECT,
+        limit=1,
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+        monotonic=clock,
+    )
+
+    assert report["status"] == "aborted_timeout"
+    assert report["timed_out"] is True
+    assert report["inserted_artifact_count"] == 1
+    assert report["mutation_performed"] is True
+    assert report["mutation_uncertain"] is True
 
 
 def test_execute_rejects_plan_drift_before_any_additive_write(tmp_path: Path) -> None:
@@ -446,6 +632,63 @@ def test_timeout_during_scan_aborts_before_planning_or_writing(tmp_path: Path) -
     assert report["timed_out"] is True
     assert report["planned_artifact_count"] == 0
     assert report["inserted_artifact_count"] == 0
+    assert report["mutation_performed"] is False
+
+
+def test_timeout_during_replay_discards_partial_plan(tmp_path: Path) -> None:
+    state_db = _state_db(tmp_path)
+    _record_date_a_b(state_db)
+    clock = _ControlledClock()
+    original_snapshot = rebuild_module._snapshot_artifact
+
+    def _snapshot_then_expire(**kwargs):
+        artifact = original_snapshot(**kwargs)
+        clock.now = 31.0
+        return artifact
+
+    with patch.object(
+        rebuild_module,
+        "_snapshot_artifact",
+        side_effect=_snapshot_then_expire,
+    ):
+        report = rebuild_temporal_revisions(
+            state_db=state_db,
+            artifact_store=InMemorySessionMemoryArtifactStore(),
+            project=PROJECT,
+            limit=100,
+            max_runtime_seconds=30,
+            monotonic=clock,
+        )
+
+    assert report["status"] == "aborted_timeout"
+    assert report["timed_out"] is True
+    assert report["planned_artifact_count"] == 0
+    assert report["mutation_performed"] is False
+
+
+def test_timeout_during_artifact_lookup_discards_partial_plan(tmp_path: Path) -> None:
+    state_db = _state_db(tmp_path)
+    _record_date_a_b(state_db)
+    clock = _ControlledClock()
+
+    class _ExpiringArtifactStore(InMemorySessionMemoryArtifactStore):
+        def get(self, artifact_id: str):
+            result = super().get(artifact_id)
+            clock.now = 31.0
+            return result
+
+    report = rebuild_temporal_revisions(
+        state_db=state_db,
+        artifact_store=_ExpiringArtifactStore(),
+        project=PROJECT,
+        limit=100,
+        max_runtime_seconds=30,
+        monotonic=clock,
+    )
+
+    assert report["status"] == "aborted_timeout"
+    assert report["timed_out"] is True
+    assert report["planned_artifact_count"] == 0
     assert report["mutation_performed"] is False
 
 
@@ -581,3 +824,55 @@ def test_cli_defaults_to_read_only_plan_and_execute_requires_exact_argv_approval
         rejected = json.loads(output.getvalue())
     assert rejected["error"] == "approval_rejected"
     assert rejected["mutation_performed"] is False
+
+
+def test_cli_execute_shares_one_absolute_deadline_across_plan_and_apply(
+    tmp_path: Path,
+) -> None:
+    state_db = _state_db(tmp_path)
+    ledger_path = state_db.path.parent / "ledger.sqlite3"
+    Ledger(ledger_path)
+    plan_digest = sha256_hash("shared-deadline-plan")
+    approval_path = state_db.path.parent / "approval.json"
+    execute_argv = [
+        "--state-db",
+        str(state_db.path),
+        "--ledger",
+        str(ledger_path),
+        "--project",
+        PROJECT,
+        "--limit",
+        "100",
+        "--max-runtime-seconds",
+        "30",
+        "--execute",
+        "--expected-plan-digest",
+        plan_digest,
+        "--approval",
+        str(approval_path),
+    ]
+    _write_approval(approval_path, execute_argv)
+    clock = _ControlledClock(now=100.0)
+
+    def _plan_then_expire(**kwargs):
+        assert kwargs["deadline"] == 130.0
+        assert kwargs["monotonic"] is clock
+        clock.now = 131.0
+        return {
+            "plan_digest": plan_digest,
+            "error_count": 0,
+            "gap_count": 0,
+            "aborted": False,
+        }
+
+    with patch.object(
+        rebuild_module,
+        "_read_only_plan",
+        side_effect=_plan_then_expire,
+    ), patch("sys.stdout", StringIO()) as output:
+        assert main(execute_argv, monotonic=clock) == 1
+
+    report = json.loads(output.getvalue())
+    assert report["status"] == "aborted_timeout"
+    assert report["timed_out"] is True
+    assert report["mutation_performed"] is False
