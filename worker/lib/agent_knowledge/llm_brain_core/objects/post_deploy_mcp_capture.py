@@ -36,6 +36,7 @@ from .runtime_readiness import (
     REQUIRED_SESSION_PROJECT_EDGE_TYPES,
     REQUIRED_SESSION_PROJECT_OBJECT_TYPES,
     RUNTIME_READINESS_AGENT_CONTEXT_TOOL,
+    _is_commit_sha,
     _mint_collector_attested_evidence,
     build_deployment_evidence_binding,
 )
@@ -357,9 +358,14 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         "evidence_provenance": provenance,
         "production_mutation_performed": _runtime_packet_reports_mutation(attested_runtime_packet),
     }
-    if desired_state and argo_state and isinstance(deployed_identity, Mapping):
+    if (
+        _is_commit_sha(capture["expected_commit"])
+        and desired_state
+        and argo_state
+        and isinstance(deployed_identity, Mapping)
+    ):
         capture["deployment_evidence_binding"] = build_deployment_evidence_binding(
-            expected_commit=expected_commit,
+            expected_commit=capture["expected_commit"],
             gitops_desired_state=desired_state,
             argo_reconciliation=argo_state,
             deployed_identity=identity,

@@ -40,6 +40,7 @@ from agent_knowledge.llm_brain_core.objects.agent_context_consumer import (
 from agent_knowledge.llm_brain_core._util import hash_payload
 
 _REQUIRED_ROUTE_NAMES = list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
+_P8_SOURCE_COMMIT = "b" * 40
 _P9_STARTUP_NOW = datetime(2026, 7, 15, 3, 0, 0, tzinfo=timezone.utc)
 _P9_STARTUP_PROOF_KEY = b"p9-golden-query-startup-proof-key"
 
@@ -665,7 +666,7 @@ def _permission_sensitive_audit_runtime_evidence() -> dict:
 
 
 def _valid_p8_runtime_evidence(*, live: bool = True):
-    expected_commit = "bec7b38"
+    expected_commit = _P8_SOURCE_COMMIT
     desired_state = {
         "schema_version": "gitops_desired_state_identity.v1",
         "images_include_expected_commit": True,
@@ -1666,7 +1667,7 @@ def test_product_activation_progress_fails_p7_when_artifact_review_returns_raw_b
 def test_product_activation_progress_closes_p8_gap_with_live_runtime_authority_evidence():
     report = build_product_activation_progress_report(
         live_evidence=_valid_p6_p7_p8_runtime_evidence(live=True),
-        expected_commit="bec7b38",
+        expected_commit=_P8_SOURCE_COMMIT,
     )
 
     checks = {item["phase"]: item for item in report["product_evidence_checks"]}
