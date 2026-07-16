@@ -129,10 +129,16 @@ def _selector_bounds(value: str, *, point_for_datetime: bool) -> tuple[datetime,
             datetime.combine(selected_day, time.min, tzinfo=timezone.utc),
             datetime.combine(selected_day, time.max, tzinfo=timezone.utc),
         )
-    parsed = parse_observed_at(text)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00").replace("z", "+00:00"))
+    except ValueError as exc:
+        raise TemporalSelectorError("temporal selector must be ISO-8601") from exc
+    if parsed.tzinfo is None:
+        raise TemporalSelectorError("temporal selector datetime must include timezone")
     if parsed is None:
         raise TemporalSelectorError("temporal selector must be ISO-8601")
-    return (parsed, parsed) if point_for_datetime else (parsed, parsed)
+    normalized = parsed.astimezone(timezone.utc)
+    return (normalized, normalized) if point_for_datetime else (normalized, normalized)
 
 
 def _iso(value: datetime) -> str:

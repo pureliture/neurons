@@ -16,8 +16,8 @@ import os
 import re
 import sys
 import time
-from collections.abc import Iterator
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
@@ -45,6 +45,18 @@ from .state_cli import DEFAULT_TRANSCRIPT_TARGET_PROFILE
 
 BACKFILL_OPERATION = "couchdb_temporal_metadata_backfill"
 BACKFILL_SCHEMA_VERSION = "couchdb_temporal_metadata_backfill.v1"
+_TARGET_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class _ResolvedBackfillTarget:
+    """One immutable, internal-only snapshot of the writable CouchDB target."""
+
+    couchdb_url: str = field(repr=False)
+    couchdb_db: str = field(repr=False)
+    couchdb_user: str = field(repr=False)
+    couchdb_password: str = field(repr=False)
+    target_fingerprints: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -70,6 +82,76 @@ class _Candidate:
             "source_content_hash": self.expected_source_content_hash,
         }
         return sha256_hash(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
+def _target_fingerprint(value: Mapping[str, object]) -> str:
+    """Hash a resolved writable target without exposing any target detail."""
+
+    return sha256_hash(json.dumps(dict(value), sort_keys=True, separators=(",", ":")))
+
+
+def _normalized_target_fingerprints(
+    target_fingerprints: Mapping[str, object] | None,
+) -> dict[str, str]:
+    if target_fingerprints is None:
+        return {}
+    if not isinstance(target_fingerprints, Mapping):
+        raise ValueError("target fingerprints must be a mapping")
+    normalized: dict[str, str] = {}
+    for name, fingerprint in target_fingerprints.items():
+        target_name = str(name or "").strip()
+        target_value = str(fingerprint or "").strip()
+        if not target_name or _TARGET_FINGERPRINT_RE.fullmatch(target_value) is None:
+            raise ValueError("target fingerprint is invalid")
+        normalized[target_name] = target_value
+    return dict(sorted(normalized.items()))
+
+
+def _target_fingerprint_digest(target_fingerprints: Mapping[str, object] | None) -> str:
+    return _target_fingerprint(_normalized_target_fingerprints(target_fingerprints))
+
+
+def _resolve_backfill_target(
+    environ: Mapping[str, str],
+) -> _ResolvedBackfillTarget:
+    """Resolve once before approval and retain the exact target for execution.
+
+    The command historically read ``COUCHDB_*`` after validating argv-only
+    approval.  A changed environment could therefore move the write to another
+    database without changing the approved argv.  Keep raw values internal and
+    expose only a stable fingerprint in plans/approval packets.
+    """
+
+    couchdb_url = str(environ.get("COUCHDB_URL") or "").strip().rstrip("/")
+    couchdb_db = str(environ.get("COUCHDB_DB") or "neurons_transcript_source").strip()
+    return _ResolvedBackfillTarget(
+        couchdb_url=couchdb_url,
+        couchdb_db=couchdb_db,
+        couchdb_user=str(environ.get("COUCHDB_USER") or "").strip(),
+        couchdb_password=str(environ.get("COUCHDB_PASSWORD") or ""),
+        target_fingerprints={
+            "couchdb_source": _target_fingerprint(
+                {
+                    "kind": "couchdb_source",
+                    "base_url": couchdb_url,
+                    "database": couchdb_db,
+                }
+            )
+        },
+    )
+
+
+def _require_approved_target_fingerprints(
+    approval: Mapping[str, object],
+    *,
+    target_fingerprints: Mapping[str, object],
+) -> None:
+    target = approval.get("target")
+    approved = target.get("target_fingerprints") if isinstance(target, Mapping) else None
+    if _normalized_target_fingerprints(approved) != _normalized_target_fingerprints(
+        target_fingerprints
+    ):
+        raise ApprovalError("approval target fingerprint mismatch")
 
 
 def _validate_bounds(*, project: str, limit: int, max_runtime_seconds: float) -> None:
@@ -191,7 +273,11 @@ def _candidate_from_payload(payload: dict, *, expected_project: str) -> _Candida
     )
 
 
-def _plan_digest(planned: list[tuple[_Candidate, dict]]) -> str:
+def _plan_digest(
+    planned: list[tuple[_Candidate, dict]],
+    *,
+    target_fingerprints: Mapping[str, object] | None = None,
+) -> str:
     """Bind approval to the exact bounded source revisions selected for writes."""
 
     items = [
@@ -205,7 +291,16 @@ def _plan_digest(planned: list[tuple[_Candidate, dict]]) -> str:
         )
         for candidate, existing in planned
     ]
-    return sha256_hash("\n".join(sorted(items)))
+    return sha256_hash(
+        json.dumps(
+            {
+                "planned_source_revisions": sorted(items),
+                "target_fingerprint": _target_fingerprint_digest(target_fingerprints),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
 
 
 def _aggregate_is_current(
@@ -271,6 +366,7 @@ def backfill_temporal_metadata(
     max_runtime_seconds: float,
     execute: bool = False,
     expected_plan_digest: str = "",
+    target_fingerprints: Mapping[str, object] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Plan or apply a bounded temporal-metadata repair.
@@ -287,6 +383,9 @@ def backfill_temporal_metadata(
         project=project,
         limit=int(limit),
         max_runtime_seconds=float(max_runtime_seconds),
+    )
+    resolved_target_fingerprints = _normalized_target_fingerprints(
+        target_fingerprints
     )
     started = monotonic()
     rows = _payload_rows(state_db, project=project)
@@ -370,7 +469,11 @@ def backfill_temporal_metadata(
         "mutation_uncertain_count": 0,
         "raw_ids_printed": False,
         "raw_bodies_printed": False,
-        "plan_digest": _plan_digest([]),
+        "target_fingerprints": resolved_target_fingerprints,
+        "target_fingerprint": _target_fingerprint_digest(resolved_target_fingerprints),
+        "plan_digest": _plan_digest(
+            [], target_fingerprints=resolved_target_fingerprints
+        ),
         "expected_plan_digest_match": None,
         "plan_drift_count": 0,
         "gap_count": delivery_not_succeeded_count,
@@ -456,7 +559,9 @@ def backfill_temporal_metadata(
             planned.append((candidate, existing))
     report["planned_update_count"] = len(planned)
     report["total_remaining_update_count"] = total_remaining_update_count
-    report["plan_digest"] = _plan_digest(planned)
+    report["plan_digest"] = _plan_digest(
+        planned, target_fingerprints=resolved_target_fingerprints
+    )
 
     if execute and expected_plan_digest:
         report["expected_plan_digest_match"] = (
@@ -637,6 +742,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    target = _resolve_backfill_target(os.environ)
+
     if execute:
         try:
             approval = validate_memory_enqueue_approval(
@@ -646,22 +753,25 @@ def main(argv: list[str] | None = None) -> int:
             )
             if float(approval.get("timeout_seconds") or 0) < float(args.max_runtime_seconds):
                 raise ApprovalError("approval timeout is below execution bound")
+            _require_approved_target_fingerprints(
+                approval,
+                target_fingerprints=target.target_fingerprints,
+            )
         except ApprovalError:
             print(json.dumps(_error_report("approval_rejected", dry_run=False), sort_keys=True))
             return 2
 
-    couchdb_url = os.environ.get("COUCHDB_URL", "")
-    if not couchdb_url:
+    if not target.couchdb_url:
         print(json.dumps(_error_report("env_missing", dry_run=not execute), sort_keys=True))
         return 2
     try:
         state_db = RAGIngressStateDB(args.state_db, read_only=True)
         store = CouchDBHttpSourceStore(
-            base_url=couchdb_url,
-            db=os.environ.get("COUCHDB_DB", "neurons_transcript_source"),
+            base_url=target.couchdb_url,
+            db=target.couchdb_db,
             auth_header=_auth_header(
-                os.environ.get("COUCHDB_USER", ""),
-                os.environ.get("COUCHDB_PASSWORD", ""),
+                target.couchdb_user,
+                target.couchdb_password,
             ),
             request_timeout_seconds=min(30.0, float(args.max_runtime_seconds)),
         )
@@ -673,6 +783,7 @@ def main(argv: list[str] | None = None) -> int:
             max_runtime_seconds=float(args.max_runtime_seconds),
             execute=execute,
             expected_plan_digest=str(args.expected_plan_digest or ""),
+            target_fingerprints=target.target_fingerprints,
         )
     except Exception:
         print(json.dumps(_error_report("backfill_failed", dry_run=not execute), sort_keys=True))

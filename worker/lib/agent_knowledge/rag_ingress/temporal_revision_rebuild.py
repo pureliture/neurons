@@ -17,7 +17,8 @@ import re
 import sys
 import time
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from ..couchdb_source.document_model import (
@@ -50,6 +51,70 @@ from .state_cli import DEFAULT_TRANSCRIPT_TARGET_PROFILE
 REBUILD_OPERATION = "couchdb_temporal_revision_rebuild"
 REBUILD_SCHEMA_VERSION = "couchdb_temporal_revision_rebuild.v1"
 REBUILD_EXTRACTOR_VERSION = "temporal-revision-rebuild.1"
+_TARGET_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class _ResolvedRebuildTarget:
+    """Immutable writable-ledger snapshot kept separate from public reports."""
+
+    ledger_path: Path = field(repr=False)
+    target_fingerprints: dict[str, str]
+
+
+def _normalized_target_fingerprints(
+    target_fingerprints: Mapping[str, object] | None,
+) -> dict[str, str]:
+    if target_fingerprints is None:
+        return {}
+    if not isinstance(target_fingerprints, Mapping):
+        raise ValueError("target fingerprints must be a mapping")
+    normalized: dict[str, str] = {}
+    for name, fingerprint in target_fingerprints.items():
+        target_name = str(name or "").strip()
+        target_value = str(fingerprint or "").strip()
+        if not target_name or _TARGET_FINGERPRINT_RE.fullmatch(target_value) is None:
+            raise ValueError("target fingerprint is invalid")
+        normalized[target_name] = target_value
+    return dict(sorted(normalized.items()))
+
+
+def _target_fingerprint(value: Mapping[str, object]) -> str:
+    return sha256_hash(json.dumps(dict(value), sort_keys=True, separators=(",", ":")))
+
+
+def _target_fingerprint_digest(target_fingerprints: Mapping[str, object] | None) -> str:
+    return _target_fingerprint(_normalized_target_fingerprints(target_fingerprints))
+
+
+def _resolve_rebuild_target(args: argparse.Namespace) -> _ResolvedRebuildTarget:
+    """Resolve the writable ledger once so argv aliases cannot drift after approval."""
+
+    ledger_path = Path(str(args.ledger or "")).expanduser().resolve(strict=False)
+    fingerprints = _normalized_target_fingerprints(
+        {
+            "projection_ledger": _target_fingerprint(
+                {"kind": "projection_ledger", "path": str(ledger_path)}
+            )
+        }
+    )
+    return _ResolvedRebuildTarget(
+        ledger_path=ledger_path,
+        target_fingerprints=fingerprints,
+    )
+
+
+def _require_approved_target_fingerprints(
+    approval: Mapping[str, object],
+    *,
+    target_fingerprints: Mapping[str, object],
+) -> None:
+    target = approval.get("target")
+    approved = target.get("target_fingerprints") if isinstance(target, Mapping) else None
+    if _normalized_target_fingerprints(approved) != _normalized_target_fingerprints(
+        target_fingerprints
+    ):
+        raise ApprovalError("approval target fingerprint mismatch")
 
 
 @dataclass(frozen=True)
@@ -392,7 +457,11 @@ def _replay_artifacts(
     return artifacts, exact_duplicate_count, False
 
 
-def _plan_digest(artifacts: list[SessionMemoryArtifact]) -> str:
+def _plan_digest(
+    artifacts: list[SessionMemoryArtifact],
+    *,
+    target_fingerprints: Mapping[str, object] | None = None,
+) -> str:
     items = [
         json.dumps(
             {
@@ -413,7 +482,16 @@ def _plan_digest(artifacts: list[SessionMemoryArtifact]) -> str:
         )
         for artifact in artifacts
     ]
-    return sha256_hash("\n".join(sorted(items)))
+    return sha256_hash(
+        json.dumps(
+            {
+                "artifacts": sorted(items),
+                "target_fingerprint": _target_fingerprint_digest(target_fingerprints),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
 
 
 def _base_report(
@@ -422,7 +500,9 @@ def _base_report(
     limit: int,
     max_runtime_seconds: float,
     execute: bool,
+    target_fingerprints: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
+    normalized_target_fingerprints = _normalized_target_fingerprints(target_fingerprints)
     return {
         "schema_version": REBUILD_SCHEMA_VERSION,
         "status": "completed" if execute else "dry_run",
@@ -456,7 +536,12 @@ def _base_report(
         "current_materialization_rebuild_required": False,
         "raw_ids_printed": False,
         "raw_bodies_printed": False,
-        "plan_digest": _plan_digest([]),
+        "target_fingerprints": normalized_target_fingerprints,
+        "target_fingerprint": _target_fingerprint_digest(normalized_target_fingerprints),
+        "plan_digest": _plan_digest(
+            [],
+            target_fingerprints=normalized_target_fingerprints,
+        ),
         "expected_plan_digest_match": None,
         "plan_drift_count": 0,
     }
@@ -497,6 +582,7 @@ def rebuild_temporal_revisions(
     max_runtime_seconds: float,
     execute: bool = False,
     expected_plan_digest: str = "",
+    target_fingerprints: Mapping[str, object] | None = None,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
@@ -513,6 +599,7 @@ def rebuild_temporal_revisions(
         limit=int(limit),
         max_runtime_seconds=float(max_runtime_seconds),
         execute=execute,
+        target_fingerprints=target_fingerprints,
     )
     started = monotonic()
     local_deadline = started + float(max_runtime_seconds)
@@ -626,7 +713,10 @@ def rebuild_temporal_revisions(
     planned = remaining[: int(limit)]
     report["total_remaining_artifact_count"] = len(remaining)
     report["planned_artifact_count"] = len(planned)
-    report["plan_digest"] = _plan_digest(planned)
+    report["plan_digest"] = _plan_digest(
+        planned,
+        target_fingerprints=report["target_fingerprints"],
+    )
     if _deadline_reached():
         return _abort_timeout()
 
@@ -743,20 +833,22 @@ def _error_report(error: str, *, dry_run: bool) -> dict[str, Any]:
 def _read_only_plan(
     *,
     state_db: RAGIngressStateDB,
-    ledger_path: str,
+    ledger_path: Path,
+    target_fingerprints: Mapping[str, object],
     project: str,
     limit: int,
     max_runtime_seconds: float,
     deadline: float,
     monotonic: Callable[[], float],
 ) -> dict[str, Any]:
-    ledger = Ledger.open_read_only(ledger_path)
+    ledger = Ledger.open_read_only(str(ledger_path))
     return rebuild_temporal_revisions(
         state_db=state_db,
         artifact_store=LedgerSessionMemoryArtifactStore(ledger),
         project=project,
         limit=limit,
         max_runtime_seconds=max_runtime_seconds,
+        target_fingerprints=target_fingerprints,
         deadline=deadline,
         monotonic=monotonic,
     )
@@ -781,6 +873,12 @@ def main(
         return 2
     command_deadline = monotonic() + float(args.max_runtime_seconds)
 
+    try:
+        target = _resolve_rebuild_target(args)
+    except Exception:
+        print(json.dumps(_error_report("invalid_target", dry_run=not execute), sort_keys=True))
+        return 2
+
     if execute and re.fullmatch(
         r"sha256:[0-9a-f]{64}",
         str(args.expected_plan_digest or ""),
@@ -803,6 +901,10 @@ def main(
                 args.max_runtime_seconds
             ):
                 raise ApprovalError("approval timeout is below execution bound")
+            _require_approved_target_fingerprints(
+                approval,
+                target_fingerprints=target.target_fingerprints,
+            )
         except ApprovalError:
             print(
                 json.dumps(
@@ -816,7 +918,8 @@ def main(
         state_db = RAGIngressStateDB(args.state_db, read_only=True)
         plan = _read_only_plan(
             state_db=state_db,
-            ledger_path=str(args.ledger),
+            ledger_path=target.ledger_path,
+            target_fingerprints=target.target_fingerprints,
             project=str(args.project),
             limit=int(args.limit),
             max_runtime_seconds=float(args.max_runtime_seconds),
@@ -851,7 +954,7 @@ def main(
     try:
         # Writable ledger access is delayed until exact argv approval and a fresh
         # read-only plan digest have both passed.
-        ledger = Ledger(args.ledger, initialize_schema=False)
+        ledger = Ledger(str(target.ledger_path), initialize_schema=False)
         report = rebuild_temporal_revisions(
             state_db=state_db,
             artifact_store=LedgerSessionMemoryArtifactStore(ledger),
@@ -860,6 +963,7 @@ def main(
             max_runtime_seconds=float(args.max_runtime_seconds),
             execute=True,
             expected_plan_digest=str(args.expected_plan_digest),
+            target_fingerprints=target.target_fingerprints,
             deadline=command_deadline,
             monotonic=monotonic,
         )

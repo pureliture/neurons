@@ -20,7 +20,7 @@ from .context_builder import (
 )
 from .document_bridge import DisabledDocumentBridge, DocumentBridge
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
-from .models import EvidenceRequest
+from .models import EvidenceRequest, GraphMemoryResult
 from .objects.knowledge_objects import KnowledgeObjectEnvelope
 from .objects.object_packs import (
     build_code_change_impact_pack,
@@ -31,6 +31,7 @@ from .objects.reference_corpus import default_corpus_policy_status
 from .source_ref import SourceRefResolver
 from .temporal import (
     TemporalSelector,
+    TemporalSelectorError,
     validate_explicit_temporal_selector,
     parse_temporal_selector,
 )
@@ -44,6 +45,44 @@ if TYPE_CHECKING:
 
 ACCEPTED_LIFECYCLE_STATES = {"accepted", "human_accepted", "auto_accepted"}
 ACCEPTED_APPROVAL_STATES = {"approved", "auto_accepted"}
+_SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
+
+
+def _is_synthetic_canary_artifact(artifact: Any) -> bool:
+    """Keep additive projection probes outside every user recall lane."""
+
+    return (
+        str(artifact_field(artifact, "provider") or "").strip().casefold()
+        == _SYNTHETIC_CANARY_PROVIDER
+    )
+
+
+def _recall_safe_artifacts(artifacts: list[Any]) -> list[Any]:
+    return [artifact for artifact in artifacts if not _is_synthetic_canary_artifact(artifact)]
+
+
+def _is_synthetic_canary_episode(episode: Any) -> bool:
+    payload = getattr(episode, "payload", None)
+    return (
+        isinstance(payload, Mapping)
+        and str(payload.get("provider") or "").strip().casefold()
+        == _SYNTHETIC_CANARY_PROVIDER
+    )
+
+
+def _recall_safe_graph_result(graph_result: GraphMemoryResult) -> GraphMemoryResult:
+    episodes = tuple(
+        episode
+        for episode in graph_result.episodes
+        if not _is_synthetic_canary_episode(episode)
+    )
+    if len(episodes) == len(graph_result.episodes):
+        return graph_result
+    return GraphMemoryResult(
+        status=graph_result.status,
+        episodes=episodes,
+        details=graph_result.details,
+    )
 
 
 class BrainReadService:
@@ -84,14 +123,18 @@ class BrainReadService:
     ) -> ContextPack:
         project_name = project or project_from_repository(repository)
         brain_id = f"/project/{project_name}"
-        artifacts = self.artifact_store.list_recent(project=project_name, limit=limit)
+        artifacts = _recall_safe_artifacts(
+            self.artifact_store.list_recent(project=project_name, limit=limit)
+        )
         cards = _project_cards(self.memory_cards, project_name)
         query = " ".join([repository, branch, current_request, " ".join(current_files)])
-        graph_result = self.graph_adapter.search_context(
-            brain_id=brain_id,
-            query=query,
-            entity_types=["Task", "Decision", "Incident", "PersonaFact", "File", "SourceRef"],
-            limit=limit,
+        graph_result = _recall_safe_graph_result(
+            self.graph_adapter.search_context(
+                brain_id=brain_id,
+                query=query,
+                entity_types=["Task", "Decision", "Incident", "PersonaFact", "File", "SourceRef"],
+                limit=limit,
+            )
         )
         bridge_result = self.document_bridge.search_documents(
             query=current_request,
@@ -137,11 +180,13 @@ class BrainReadService:
             for card in _project_cards(self.memory_cards, project)
             if (not wanted or str(card.get("card_type")) in wanted) and _matches_terms(card, terms)
         ][:bounded]
-        graph = self.graph_adapter.search_context(
-            brain_id=f"/project/{project}",
-            query=query,
-            entity_types=card_types,
-            limit=bounded,
+        graph = _recall_safe_graph_result(
+            self.graph_adapter.search_context(
+                brain_id=f"/project/{project}",
+                query=query,
+                entity_types=card_types,
+                limit=bounded,
+            )
         )
         result = {
             "memory_status": {"status": "available", "authority": "canonical_card", "count": len(cards)},
@@ -177,15 +222,32 @@ class BrainReadService:
             route=route,
         )
         has_explicit_temporal_selector = bool(as_of or date_from or date_to)
+        query_temporal_selector = (
+            parse_temporal_selector(query=query)
+            if not has_explicit_temporal_selector
+            else None
+        )
+        if (
+            query_temporal_selector is not None
+            and route
+            and route != "temporal_work_recall"
+        ):
+            raise TemporalSelectorError(
+                "query temporal selectors require route temporal_work_recall"
+            )
         selected_route = (
             "temporal_work_recall"
-            if has_explicit_temporal_selector
+            if has_explicit_temporal_selector or query_temporal_selector is not None
             else route or _route_for_query(query)
         )
         route_source = (
             "temporal_selector"
             if has_explicit_temporal_selector and not route
-            else "explicit" if route else "inferred"
+            else "explicit"
+            if route
+            else "query_temporal_selector"
+            if query_temporal_selector is not None
+            else "inferred"
         )
         pack = self.brain_context_resolve(
             repository=repository,
@@ -249,7 +311,7 @@ class BrainReadService:
                 # Compatibility for external adapters that have not adopted the
                 # all-revisions seam yet. Built-in stores always provide it.
                 list_revisions = self.artifact_store.list_observed_interval
-            artifacts = (
+            artifacts = _recall_safe_artifacts(
                 list_revisions(
                     project=project_name,
                     observed_at_start=str(selector_bounds.get("start") or ""),
@@ -494,11 +556,13 @@ class BrainReadService:
         return result
 
     def brain_incident_search(self, *, symptom: str, project: str, limit: int = 5) -> dict[str, Any]:
-        graph = self.graph_adapter.search_context(
-            brain_id=f"/project/{project}",
-            query=symptom,
-            entity_types=["Incident", "Symptom", "Attempt", "Fix", "Verification"],
-            limit=max(limit * 4, 10),
+        graph = _recall_safe_graph_result(
+            self.graph_adapter.search_context(
+                brain_id=f"/project/{project}",
+                query=symptom,
+                entity_types=["Incident", "Symptom", "Attempt", "Fix", "Verification"],
+                limit=max(limit * 4, 10),
+            )
         )
         reusable, do_not_apply = _split_incident_lanes(_incident_records(graph), limit=limit)
         result = {
@@ -511,11 +575,13 @@ class BrainReadService:
         return result
 
     def brain_incident_replay(self, *, incident_id: str, project: str) -> dict[str, Any]:
-        graph = self.graph_adapter.search_context(
-            brain_id=f"/project/{project}",
-            query=incident_id,
-            entity_types=["Incident", "Symptom", "Hypothesis", "Attempt", "Fix", "Verification"],
-            limit=20,
+        graph = _recall_safe_graph_result(
+            self.graph_adapter.search_context(
+                brain_id=f"/project/{project}",
+                query=incident_id,
+                entity_types=["Incident", "Symptom", "Hypothesis", "Attempt", "Fix", "Verification"],
+                limit=20,
+            )
         )
         timeline = sorted(
             [episode.to_dict() for episode in graph.episodes],
@@ -777,6 +843,11 @@ def _temporal_work_object_pack(
                 "recommended_action": "resume_work" if lane == "accepted_current" else "",
                 "source_kind": "memory_card",
                 "source_object_type": "MemoryCard:task",
+                # The object envelope has its own deterministic object_id. Keep
+                # the canonical card identifier as a distinct provenance field
+                # so the public brain.query compatibility adapter never swaps
+                # its stable memory_id for a WorkUnit id.
+                "source_memory_id": str(card.get("memory_id") or ""),
                 "source_revision": str(card.get("source_revision") or card.get("content_hash") or ""),
                 "relevance_text": " ".join(
                     str(value or "")
@@ -1003,6 +1074,7 @@ def _temporal_work_object_pack(
             payload={
                 "source_kind": candidate.get("source_kind"),
                 "source_object_type": candidate.get("source_object_type"),
+                "source_memory_id": candidate.get("source_memory_id"),
                 "observed_at_start": candidate.get("observed_at_start"),
                 "observed_at_end": candidate.get("observed_at_end"),
                 "source_revision": candidate.get("source_revision"),

@@ -6,14 +6,22 @@ from datetime import datetime
 import pytest
 
 from agent_knowledge.llm_brain_core.context import BrainReadService
-from agent_knowledge.llm_brain_core.temporal import parse_temporal_selector
+from agent_knowledge.llm_brain_core.temporal import TemporalSelectorError, parse_temporal_selector
 from agent_knowledge.llm_brain_core._util import hash_payload
+from agent_knowledge.session_memory.brain_query import build_temporal_brain_query_response
 from agent_knowledge.llm_brain_core import (
+    FakeGraphMemoryAdapter,
     InMemorySessionMemoryArtifactStore,
+    OntologyEpisode,
     SessionMemoryArtifact,
+    episode_from_session_artifact,
 )
 from agent_knowledge.mcp_jsonrpc import handle_jsonrpc_message
-from agent_knowledge.mcp_tools import BRAIN_OBJECTS_QUERY_TOOL_NAME, list_tools
+from agent_knowledge.mcp_tools import (
+    BRAIN_OBJECTS_QUERY_TOOL_NAME,
+    BRAIN_QUERY_TOOL_NAME,
+    list_tools,
+)
 
 
 class _RecordingObjectQueryService:
@@ -27,6 +35,19 @@ class _RecordingObjectQueryService:
             "route": "temporal_work_recall",
             "response_mode": "full",
             "object_pack": {"objects": [], "gaps": []},
+        }
+
+
+class _RecordingBrainQueryService:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def brain_query(self, **kwargs) -> dict:
+        self.calls.append(dict(kwargs))
+        return {
+            "schema_version": "brain.query.v1",
+            "route": "temporal_work_recall",
+            "results": [],
         }
 
 
@@ -103,6 +124,8 @@ def test_selector_rejects_supplied_malformed_evidence_bound(
     "selector",
     [
         {"as_of": "2026-07-09T12:00:00Z"},
+        {"date_from": "2026-07-09T00:00:00Z"},
+        {"date_to": "2026-07-15T23:59:59Z"},
         {
             "date_from": "2026-07-09T00:00:00Z",
             "date_to": "2026-07-15T23:59:59Z",
@@ -119,6 +142,78 @@ def test_mcp_brain_objects_query_forwards_temporal_selectors(selector: dict[str,
     assert set(selector).issubset(service.calls[0])
     for field, value in selector.items():
         assert service.calls[0][field] == value
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        {"date_from": "2026-07-09T00:00:00Z"},
+        {"date_to": "2026-07-15T23:59:59Z"},
+    ],
+)
+def test_mcp_brain_query_forwards_open_ended_temporal_selector(
+    selector: dict[str, str],
+) -> None:
+    service = _RecordingBrainQueryService()
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_QUERY_TOOL_NAME,
+                "arguments": {
+                    "brain_id": "/project/neurons",
+                    "query": "temporal migration",
+                    **selector,
+                },
+            },
+        },
+        service,
+    )
+
+    assert "error" not in response
+    assert service.calls
+    for field, value in selector.items():
+        assert service.calls[0][field] == value
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        {
+            "as_of": "2026-07-09T10:00:00Z",
+            "date_from": "2026-07-09T00:00:00Z",
+        },
+        {"as_of": "2026-07-09T10:00:00"},
+        {"date_to": "2026-07-09T10:00:00"},
+    ],
+)
+def test_mcp_brain_query_rejects_conflicting_or_offsetless_temporal_selector(
+    selector: dict[str, str],
+) -> None:
+    service = _RecordingBrainQueryService()
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_QUERY_TOOL_NAME,
+                "arguments": {
+                    "brain_id": "/project/neurons",
+                    "query": "temporal migration",
+                    **selector,
+                },
+            },
+        },
+        service,
+    )
+
+    assert response["error"]["code"] == -32602
+    assert service.calls == []
 
 
 @pytest.mark.parametrize(
@@ -193,6 +288,57 @@ def test_explicit_temporal_selector_routes_to_temporal_recall_when_route_is_omit
     assert _work_titles(result) == ["Deploy the temporal projection migration"]
 
 
+def test_query_iso_date_routes_to_temporal_recall_when_route_is_omitted() -> None:
+    service = BrainReadService(
+        memory_cards=[
+            _task_card(
+                "mem_iso_date_a",
+                "Deploy the date A temporal migration",
+                observed_at_start="2026-07-09T10:00:00Z",
+                observed_at_end="2026-07-09T11:00:00Z",
+            ),
+            _task_card(
+                "mem_iso_date_b",
+                "Deploy the date B temporal migration",
+                observed_at_start="2026-07-15T10:00:00Z",
+                observed_at_end="2026-07-15T11:00:00Z",
+            ),
+        ]
+    )
+
+    result = service.brain_objects_query(
+        repository="neurons",
+        branch="main",
+        query="What did we deploy on 2026-07-09?",
+        current_files=[],
+    )
+
+    assert result["route"] == "temporal_work_recall"
+    assert _work_titles(result) == ["Deploy the date A temporal migration"]
+
+
+def test_query_iso_date_rejects_an_explicit_non_temporal_route() -> None:
+    service = BrainReadService(
+        memory_cards=[
+            _task_card(
+                "mem_iso_date_explicit_route",
+                "Deploy the explicit-route temporal migration",
+                observed_at_start="2026-07-09T10:00:00Z",
+                observed_at_end="2026-07-09T11:00:00Z",
+            )
+        ]
+    )
+
+    with pytest.raises(TemporalSelectorError, match="require route temporal_work_recall"):
+        service.brain_objects_query(
+            repository="neurons",
+            branch="main",
+            query="What did we deploy on 2026-07-09?",
+            current_files=[],
+            route="authority_archive_separation",
+        )
+
+
 def _task_card(
     memory_id: str,
     title: str,
@@ -235,6 +381,7 @@ def _artifact(
     observed_at_end: str,
     materialized_at: str,
     search_terms: tuple[str, ...] = (),
+    provider: str = "codex",
 ) -> SessionMemoryArtifact:
     session_hash = "sha256:" + hashlib.sha256(session_key.encode("utf-8")).hexdigest()
     source_revision = "sha256:" + hashlib.sha256(
@@ -243,7 +390,7 @@ def _artifact(
     return SessionMemoryArtifact.from_summary(
         session_id_hash=session_hash,
         project="neurons",
-        provider="codex",
+        provider=provider,
         summary=summary,
         source_event_ids=[f"event-{session_key}"],
         source_revision=source_revision,
@@ -535,6 +682,164 @@ def test_artifact_only_temporal_match_has_evidence_backed_confidence() -> None:
     assert pack["objects"][0]["confidence"]["score"] > 0.0
     assert pack["confidence"]["score"] > 0.0
     assert pack["gaps"] == []
+
+
+def test_synthetic_canary_artifact_is_excluded_from_normal_context_and_temporal_recall() -> None:
+    normal_summary = "Normal retention migration work"
+    canary_summary = "Synthetic canary temporal migration"
+    store = InMemorySessionMemoryArtifactStore(
+        [
+            _artifact(
+                "normal-session",
+                normal_summary,
+                observed_at_start="2026-07-15T10:00:00Z",
+                observed_at_end="2026-07-15T11:00:00Z",
+                materialized_at="2026-07-15T11:01:00Z",
+                search_terms=("retention", "migration"),
+            ),
+            _artifact(
+                "canary-session",
+                canary_summary,
+                observed_at_start="2026-07-15T10:00:00Z",
+                observed_at_end="2026-07-15T11:00:00Z",
+                materialized_at="2026-07-15T11:02:00Z",
+                search_terms=("synthetic", "canary", "temporal", "migration"),
+                provider="lbrain-temporal-canary",
+            ),
+        ]
+    )
+    service = BrainReadService(artifact_store=store)
+
+    context = service.brain_context_resolve(
+        repository="neurons",
+        branch="main",
+        current_files=[],
+        current_request="resume current work",
+        project="neurons",
+    ).to_dict()
+    temporal = service.brain_objects_query(
+        repository="neurons",
+        branch="main",
+        query="synthetic canary temporal migration",
+        current_files=[],
+        route="temporal_work_recall",
+        as_of="2026-07-15T10:30:00Z",
+    )
+
+    assert context["current_task"] == normal_summary
+    assert context["memory_status"]["artifact_count"] == 1
+    assert canary_summary not in repr(context)
+    assert _work_titles(temporal) == []
+    assert temporal["object_pack"]["gaps"]
+    assert canary_summary not in repr(temporal)
+
+
+def test_synthetic_canary_graph_episode_is_excluded_from_memory_search() -> None:
+    canary = _artifact(
+        "canary-graph-session",
+        "Synthetic canary graph projection",
+        observed_at_start="2026-07-15T10:00:00Z",
+        observed_at_end="2026-07-15T11:00:00Z",
+        materialized_at="2026-07-15T11:02:00Z",
+        search_terms=("synthetic", "canary", "graph"),
+        provider="lbrain-temporal-canary",
+    )
+    canary_task = OntologyEpisode.from_payload(
+        event_id="canary-graph-task-event",
+        entity_type="Task",
+        natural_id="canary-graph-task",
+        payload={
+            "brain_id": "/project/neurons",
+            "project": "neurons",
+            "provider": "lbrain-temporal-canary",
+            "task_state": "Synthetic canary graph task",
+        },
+        observed_at="2026-07-15T11:02:00Z",
+    )
+    service = BrainReadService(
+        graph_adapter=FakeGraphMemoryAdapter(
+            [episode_from_session_artifact(canary), canary_task]
+        )
+    )
+
+    result = service.brain_memory_search(
+        project="neurons",
+        query="synthetic canary graph",
+    )
+
+    assert result["graph_results"] == []
+
+    context = service.brain_context_resolve(
+        repository="neurons",
+        branch="main",
+        current_files=[],
+        current_request="synthetic canary graph task",
+        project="neurons",
+    ).to_dict()
+
+    assert context["current_task"] == ""
+    assert context["authority"]["object_packs"]["current_work"]["objects"] == []
+
+
+def test_temporal_brain_query_keeps_artifact_evidence_out_of_memory_card_lanes() -> None:
+    object_id = "ko:WorkUnit:artifact-only-temporal-evidence"
+    response = build_temporal_brain_query_response(
+        brain_id="/project/neurons",
+        temporal_response={
+            "object_pack": {
+                "objects": [
+                    {
+                        "object_id": object_id,
+                        "title": "Artifact-only temporal evidence",
+                        "summary": "Artifact-only temporal evidence",
+                        "observed_at": "2026-07-15T10:00:00Z",
+                        "authority_lane": "reference_only",
+                        "lifecycle_status": "observed",
+                        "confidence": {"score": 0.7},
+                        "payload": {
+                            "source_kind": "session_memory_artifact",
+                            "source_object_type": "SessionMemoryArtifact",
+                            "observed_at_start": "2026-07-15T10:00:00Z",
+                            "observed_at_end": "2026-07-15T11:00:00Z",
+                        },
+                    }
+                ],
+                "gaps": [],
+                "audit": {
+                    "temporal_selector": {
+                        "start": "2026-07-15T10:00:00Z",
+                        "end": "2026-07-15T11:00:00Z",
+                        "source": "as_of",
+                    }
+                },
+            }
+        },
+    )
+
+    assert response["current"] == []
+    assert response["accepted"] == []
+    assert response["results"] == [
+        {
+            "brain_id": "/project/neurons",
+            "result_type": "temporal_artifact_evidence",
+            "summary": "Artifact-only temporal evidence",
+            "why_retrieved": "matching_observed_event_time",
+            "source_ref": object_id,
+            "object_id": object_id,
+            "observed_at": "2026-07-15T10:00:00Z",
+            "observed_at_start": "2026-07-15T10:00:00Z",
+            "observed_at_end": "2026-07-15T11:00:00Z",
+            "freshness": "event_time_matched",
+            "approval_state": "unknown",
+            "privacy": "redacted",
+            "confidence": 0.7,
+            "conflicts": [],
+            "currentness": "unknown",
+            "card_type": "",
+            "score": 0.7,
+            "source_kind": "session_memory_artifact",
+        }
+    ]
 
 
 def test_temporal_recall_excludes_unrelated_work_observed_on_the_same_date() -> None:

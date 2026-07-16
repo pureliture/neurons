@@ -750,7 +750,12 @@ def test_neuron_knowledge_routes_rebuild_as_approval_gated_additive_repair() -> 
     assert REBUILD_OPERATION == "couchdb_temporal_revision_rebuild"
 
 
-def _write_approval(path: Path, argv: list[str]) -> Path:
+def _write_approval(
+    path: Path,
+    argv: list[str],
+    *,
+    target_fingerprints: dict[str, str] | None = None,
+) -> Path:
     path.write_text(
         json.dumps(
             {
@@ -763,6 +768,11 @@ def _write_approval(path: Path, argv: list[str]) -> Path:
                     "abort on artifact write or postcheck error"
                 ],
                 "command": {"argv": argv},
+                **(
+                    {"target": {"target_fingerprints": target_fingerprints}}
+                    if target_fingerprints is not None
+                    else {}
+                ),
             }
         ),
         encoding="utf-8",
@@ -809,7 +819,11 @@ def test_cli_defaults_to_read_only_plan_and_execute_requires_exact_argv_approval
     ]
     approval_path = state_db.path.parent / "approval.json"
     execute_argv[-1] = str(approval_path)
-    _write_approval(approval_path, execute_argv)
+    _write_approval(
+        approval_path,
+        execute_argv,
+        target_fingerprints=dry_report["target_fingerprints"],
+    )
 
     with patch("sys.stdout", StringIO()) as output:
         assert main(execute_argv) == 0
@@ -822,6 +836,65 @@ def test_cli_defaults_to_read_only_plan_and_execute_requires_exact_argv_approval
     with patch("sys.stdout", StringIO()) as output:
         assert main(tampered_argv) == 2
         rejected = json.loads(output.getvalue())
+    assert rejected["error"] == "approval_rejected"
+    assert rejected["mutation_performed"] is False
+
+
+def test_cli_rejects_resolved_ledger_target_drift_before_read_or_write(
+    tmp_path: Path,
+) -> None:
+    state_db = _state_db(tmp_path)
+    _record_date_a_b(state_db)
+    ledger_a = tmp_path / "ledger-a.sqlite3"
+    ledger_b = tmp_path / "ledger-b.sqlite3"
+    Ledger(ledger_a)
+    Ledger(ledger_b)
+    ledger_link = tmp_path / "ledger-target.sqlite3"
+    ledger_link.symlink_to(ledger_a)
+    dry_argv = [
+        "--state-db",
+        str(state_db.path),
+        "--ledger",
+        str(ledger_link),
+        "--project",
+        PROJECT,
+        "--limit",
+        "100",
+        "--max-runtime-seconds",
+        "30",
+    ]
+
+    with patch("sys.stdout", StringIO()) as output:
+        assert main(dry_argv) == 0
+        dry_report = json.loads(output.getvalue())
+    assert set(dry_report["target_fingerprints"]) == {"projection_ledger"}
+    assert str(ledger_a) not in json.dumps(dry_report)
+
+    approval_path = tmp_path / "approval.json"
+    execute_argv = [
+        *dry_argv,
+        "--execute",
+        "--expected-plan-digest",
+        dry_report["plan_digest"],
+        "--approval",
+        str(approval_path),
+    ]
+    _write_approval(
+        approval_path,
+        execute_argv,
+        target_fingerprints=dry_report["target_fingerprints"],
+    )
+    ledger_link.unlink()
+    ledger_link.symlink_to(ledger_b)
+
+    with patch.object(
+        rebuild_module,
+        "_read_only_plan",
+        side_effect=AssertionError("target drift must stop before planning"),
+    ), patch("sys.stdout", StringIO()) as output:
+        assert main(execute_argv) == 2
+
+    rejected = json.loads(output.getvalue())
     assert rejected["error"] == "approval_rejected"
     assert rejected["mutation_performed"] is False
 
@@ -851,7 +924,15 @@ def test_cli_execute_shares_one_absolute_deadline_across_plan_and_apply(
         "--approval",
         str(approval_path),
     ]
-    _write_approval(approval_path, execute_argv)
+    target = rebuild_module._resolve_rebuild_target(
+        rebuild_module._parser().parse_args(execute_argv)
+    )
+    assert str(ledger_path) not in repr(target)
+    _write_approval(
+        approval_path,
+        execute_argv,
+        target_fingerprints=target.target_fingerprints,
+    )
     clock = _ControlledClock(now=100.0)
 
     def _plan_then_expire(**kwargs):

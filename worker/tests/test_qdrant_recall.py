@@ -34,17 +34,62 @@ def _sid(raw="r1", provider="codex"):
     return dm.build_session_id_hash(provider, raw)
 
 
-def _seed_projected(store, sid, *, project="neurons", chunk_texts=("alpha apple distinctive token", "beta gamma topic body")):
-    session = TranscriptSession(session_id_hash=sid, provider="codex", project=project, started_at="2026-06-17T01:00:00Z")
+def _seed_projected(
+    store,
+    sid,
+    *,
+    project="neurons",
+    provider="codex",
+    chunk_texts=("alpha apple distinctive token", "beta gamma topic body"),
+):
+    session = TranscriptSession(
+        session_id_hash=sid,
+        provider=provider,
+        project=project,
+        started_at="2026-06-17T01:00:00Z",
+    )
     store.put(dm.build_transcript_session_document(session=session))
     conv = []
     for i, t in enumerate(chunk_texts):
-        ch = TranscriptChunk.from_text(chunk_id=f"c{i}", session_id_hash=sid, provider="codex", project=project, turn_start_index=i, turn_end_index=i, text=t)
+        ch = TranscriptChunk.from_text(
+            chunk_id=f"c{i}",
+            session_id_hash=sid,
+            provider=provider,
+            project=project,
+            turn_start_index=i,
+            turn_end_index=i,
+            text=t,
+        )
         d = dm.build_conversation_chunk_document(chunk=ch)
         store.put(d)
         conv.append(d["content_hash"])
-    store.put(dm.build_coverage_manifest_document(session_id_hash=sid, provider="codex", project=project, conversation_chunk_count=len(chunk_texts), tool_evidence_bundle_count=0, conversation_content_hashes=conv, tool_evidence_coverage_hashes=[]))
-    store_tool_evidence_bundles([ToolEvidenceSummaryRecord(session_id_hash=sid, provider="codex", project=project, category="test_result", outcome="pass", tool_name="bash", command_summary="x", redacted_summary="12 passed", evidence_index=0)], store=store)
+    store.put(
+        dm.build_coverage_manifest_document(
+            session_id_hash=sid,
+            provider=provider,
+            project=project,
+            conversation_chunk_count=len(chunk_texts),
+            tool_evidence_bundle_count=0,
+            conversation_content_hashes=conv,
+            tool_evidence_coverage_hashes=[],
+        )
+    )
+    store_tool_evidence_bundles(
+        [
+            ToolEvidenceSummaryRecord(
+                session_id_hash=sid,
+                provider=provider,
+                project=project,
+                category="test_result",
+                outcome="pass",
+                tool_name="bash",
+                command_summary="x",
+                redacted_summary="12 passed",
+                evidence_index=0,
+            )
+        ],
+        store=store,
+    )
 
     class _P:
         def project(self, *, target_profile, document):
@@ -87,6 +132,45 @@ def test_qdrant_recall_project_filter_drops_other_project():
     search = build_qdrant_brain_query_search(adapter=adapter, store=store)
     # wrong project -> authority resolver drops every hit
     assert search(mat.body, "/project/other-project") == []
+
+
+def test_public_brain_query_mirror_drops_authority_joined_synthetic_canary():
+    store = InMemoryCouchDBSourceStore()
+    sid = _sid(raw="synthetic-canary", provider="lbrain-temporal-canary")
+    _seed_projected(
+        store,
+        sid,
+        provider="lbrain-temporal-canary",
+        chunk_texts=("synthetic canary-only semantic recall marker",),
+    )
+    client = InMemoryQdrantClient()
+    adapter = _adapter(client)
+    backfill_session_memory(store=store, adapter=adapter, dry_run=False)
+    mat = materialize_session_memory(session_id_hash=sid, store=store)
+    search = build_qdrant_brain_query_search(adapter=adapter, store=store)
+
+    # The mirror point is authority-valid, so filtering must happen after the
+    # authority join and before the public brain.query archive/result lanes.
+    assert search(mat.body, "/project/neurons") == []
+
+    class _ReadModel:
+        def get_card_meta(self, card_id):
+            return None
+
+        def list_recent_cards(self, *, project, limit):
+            return []
+
+        def list_project_card_counts(self):
+            return []
+
+    response = run_brain_query_v2(
+        read_model=_ReadModel(),
+        brain_id="/project/neurons",
+        query=mat.body,
+        index_search=search,
+    )
+    assert all(item.get("content_hash") != mat.content_hash for item in response["archive"])
+    assert all(item.get("content_hash") != mat.content_hash for item in response["results"])
 
 
 def test_brain_query_archive_lane_filled_by_qdrant_recall():

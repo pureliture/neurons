@@ -51,10 +51,28 @@ from .session_memory.memory_card import validate_memory_card_envelope
 from .session_memory.memory_promotion import commit_stale, commit_supersession
 from .session_memory.brain_query import (
     SEMANTIC_RESULT_MIN_SCORE,
+    build_temporal_brain_query_response,
+    project_from_brain_id,
     resolve_brain_ids,
     run_brain_query_v2,
 )
 from .session_memory.brain_read_model import LegacyLedgerBrainReadModel, build_semantic_recall
+
+
+_SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
+
+
+def _is_synthetic_canary_episode(episode: object) -> bool:
+    """Exclude additive canary episodes from direct graph evidence reads."""
+
+    payload = getattr(episode, "payload", None)
+    if payload is None and isinstance(episode, Mapping):
+        payload = episode.get("payload")
+    return (
+        isinstance(payload, Mapping)
+        and str(payload.get("provider") or "").strip().casefold()
+        == _SYNTHETIC_CANARY_PROVIDER
+    )
 
 
 class DisabledRetiredIndexBridgeClient:
@@ -1913,6 +1931,8 @@ class KnowledgeSearchService:
                 graph_status = public_safe_text(str(getattr(graph_result, "status", "") or ""), max_chars=80)
                 graph_detail_count = len(getattr(graph_result, "details", ()) or ())
                 for index, episode in enumerate(getattr(graph_result, "episodes", ()) or [], start=1):
+                    if _is_synthetic_canary_episode(episode):
+                        continue
                     projection_hits.append(
                         {
                             "hit_id": f"graph:{short_hash(str(getattr(episode, 'episode_id', '') or index))}",
@@ -2151,7 +2171,42 @@ class KnowledgeSearchService:
             results_dict.append(item_dict)
         return {"results": results_dict}
 
-    def brain_query(self, *, brain_id: str, query: str, limit: int = 8) -> dict:
+    def brain_query(
+        self,
+        *,
+        brain_id: str,
+        query: str,
+        limit: int = 8,
+        as_of: str = "",
+        date_from: str = "",
+        date_to: str = "",
+    ) -> dict:
+        from .llm_brain_core.temporal import parse_temporal_selector
+
+        selector = parse_temporal_selector(
+            as_of=as_of,
+            date_from=date_from,
+            date_to=date_to,
+            query=query,
+        )
+        project = project_from_brain_id(brain_id)
+        if selector is not None and project is not None and str(query).strip():
+            temporal_response = self.core_brain(project=project).brain_objects_query(
+                repository=project,
+                branch="brain.query",
+                query=query,
+                current_files=[],
+                project=project,
+                route="temporal_work_recall",
+                limit=limit,
+                as_of=as_of,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            return build_temporal_brain_query_response(
+                brain_id=brain_id,
+                temporal_response=temporal_response,
+            )
         read_model = LegacyLedgerBrainReadModel(self.ledger)
         index_search = self._mirror_search or (
             self._brain_query_index_search if self.dataset_ids else None

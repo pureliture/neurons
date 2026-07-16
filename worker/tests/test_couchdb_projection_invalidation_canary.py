@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from io import StringIO
 from pathlib import Path
@@ -16,6 +17,7 @@ from agent_knowledge.couchdb_source.document_model import SourceDocType
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
+from agent_knowledge.rag_ingress import projection_invalidation_canary as canary_module
 from agent_knowledge.rag_ingress.projection_invalidation_canary import (
     CANARY_OPERATION,
     CANARY_SCHEMA_VERSION,
@@ -34,6 +36,12 @@ PROVIDER = "lbrain-temporal-canary"
 NONCE = "sha256:" + ("a" * 64)
 SOURCE_COMMIT = "0" * 40
 OBSERVED_AT = "2026-07-17T01:02:03Z"
+
+
+def _cli_plan(argv: list[str]) -> dict:
+    with patch("sys.stdout", StringIO()) as output:
+        assert main(argv) == 0
+    return json.loads(output.getvalue())
 
 
 def _private_dir(path: Path) -> Path:
@@ -420,15 +428,7 @@ def test_execute_requires_exact_argv_approval_and_matching_plan_digest(
         "--observed-at",
         OBSERVED_AT,
     ]
-    plan = build_canary_plan(
-        project=PROJECT,
-        provider=PROVIDER,
-        probe_nonce_sha256=NONCE,
-        expected_source_commit=SOURCE_COMMIT,
-        observed_at=OBSERVED_AT,
-        limit=1,
-        max_runtime_seconds=30,
-    )
+    plan = _cli_plan(base)
     approval_path = tmp_path / "approval.json"
     execute_argv = [
         *base,
@@ -449,6 +449,7 @@ def test_execute_requires_exact_argv_approval_and_matching_plan_digest(
                 "rollback_or_abort_criteria": [
                     "abort on any lane selection or source hash mismatch"
                 ],
+                "target": {"target_fingerprints": plan["target_fingerprints"]},
                 "command": {"argv": execute_argv},
             }
         ),
@@ -475,6 +476,217 @@ def test_execute_requires_exact_argv_approval_and_matching_plan_digest(
     rejected = json.loads(output.getvalue())
     assert rejected["status"] in {"approval_rejected", "plan_digest_mismatch"}
     assert rejected["mutation_performed"] is False
+
+
+def test_execute_rejects_resolved_writable_target_drift_before_live_call(
+    tmp_path: Path,
+) -> None:
+    base = [
+        "--state-db",
+        str(tmp_path / "state.sqlite3"),
+        "--ledger",
+        str(tmp_path / "ledger.sqlite3"),
+        "--runtime-dir",
+        str(tmp_path / "runtime"),
+        "--project",
+        PROJECT,
+        "--provider",
+        PROVIDER,
+        "--limit",
+        "1",
+        "--max-runtime-seconds",
+        "30",
+        "--expected-source-commit",
+        SOURCE_COMMIT,
+        "--probe-nonce-sha256",
+        NONCE,
+        "--observed-at",
+        OBSERVED_AT,
+    ]
+    primary_env = {
+        "COUCHDB_URL": "https://primary-couchdb.invalid",
+        "COUCHDB_DB": "primary_source",
+        "QDRANT_URL": "https://primary-qdrant.invalid",
+        "QDRANT_COLLECTION": "primary_collection",
+        "LLM_BRAIN_NEO4J_URI": "bolt://primary-graph.invalid:7687",
+    }
+    with patch.dict(os.environ, primary_env, clear=False), patch(
+        "sys.stdout", StringIO()
+    ) as output:
+        assert main(base) == 0
+    plan = json.loads(output.getvalue())
+    assert set(plan["target_fingerprints"]) == {
+        "couchdb_source",
+        "graph_store",
+        "ingress_state_db",
+        "projection_ledger",
+        "qdrant_collection",
+        "runtime_workspace",
+    }
+    assert all(value.startswith("sha256:") for value in plan["target_fingerprints"].values())
+    serialized_plan = json.dumps(plan, sort_keys=True)
+    assert "primary-couchdb" not in serialized_plan
+    assert "primary-qdrant" not in serialized_plan
+    assert "primary-graph" not in serialized_plan
+
+    approval_path = tmp_path / "approval.json"
+    execute_argv = [
+        *base,
+        "--execute",
+        "--expected-plan-digest",
+        plan["plan_digest"],
+        "--approval",
+        str(approval_path),
+    ]
+    approval_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "agent_knowledge_live_approval.v1",
+                "operation": CANARY_OPERATION,
+                "operator_approval": {"approved": True},
+                "redaction_required": True,
+                "timeout_seconds": 30,
+                "rollback_or_abort_criteria": ["abort on target fingerprint mismatch"],
+                "target": {"target_fingerprints": plan["target_fingerprints"]},
+                "command": {"argv": execute_argv},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with (
+        patch.dict(
+            os.environ,
+            {**primary_env, "QDRANT_COLLECTION": "drifted_collection"},
+            clear=False,
+        ),
+        patch(
+            "agent_knowledge.rag_ingress.projection_invalidation_canary._execute_live",
+            side_effect=AssertionError("must not start live execution after target drift"),
+        ) as execute_live,
+        patch("sys.stdout", StringIO()) as output,
+    ):
+        assert main(execute_argv) == 2
+    report = json.loads(output.getvalue())
+    assert report["status"] == "plan_digest_mismatch"
+    assert report["mutation_performed"] is False
+    execute_live.assert_not_called()
+
+    mismatched_target_fingerprints = dict(plan["target_fingerprints"])
+    mismatched_target_fingerprints["qdrant_collection"] = "sha256:" + ("b" * 64)
+    approval_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "agent_knowledge_live_approval.v1",
+                "operation": CANARY_OPERATION,
+                "operator_approval": {"approved": True},
+                "redaction_required": True,
+                "timeout_seconds": 30,
+                "rollback_or_abort_criteria": ["abort on target fingerprint mismatch"],
+                "target": {"target_fingerprints": mismatched_target_fingerprints},
+                "command": {"argv": execute_argv},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with (
+        patch.dict(os.environ, primary_env, clear=False),
+        patch(
+            "agent_knowledge.rag_ingress.projection_invalidation_canary._execute_live",
+            side_effect=AssertionError("must not start live execution after approval mismatch"),
+        ) as execute_live,
+        patch("sys.stdout", StringIO()) as output,
+    ):
+        assert main(execute_argv) == 2
+    approval_report = json.loads(output.getvalue())
+    assert approval_report["status"] == "approval_rejected"
+    assert approval_report["mutation_performed"] is False
+    execute_live.assert_not_called()
+
+
+def test_execute_live_uses_private_resolved_password_snapshot_without_repr_leak(
+    tmp_path: Path,
+) -> None:
+    password_marker = "snapshot-password-marker"
+    args = canary_module._build_parser().parse_args(
+        [
+            "--state-db",
+            str(tmp_path / "private-state.sqlite3"),
+            "--ledger",
+            str(tmp_path / "private-ledger.sqlite3"),
+            "--runtime-dir",
+            str(tmp_path / "private-runtime"),
+            "--project",
+            PROJECT,
+            "--expected-source-commit",
+            SOURCE_COMMIT,
+            "--probe-nonce-sha256",
+            NONCE,
+            "--observed-at",
+            OBSERVED_AT,
+            "--couchdb-url",
+            "https://private-couchdb.invalid",
+            "--couchdb-db",
+            "private_source",
+            "--couchdb-user",
+            "private-user",
+            "--couchdb-password-env",
+            "CANARY_TEST_PASSWORD",
+        ]
+    )
+    targets = canary_module._resolve_canary_targets(
+        args,
+        {
+            "CANARY_TEST_PASSWORD": password_marker,
+            "SESSION_MEMORY_PROJECTION_BACKEND": "qdrant",
+            "QDRANT_URL": "https://private-qdrant.invalid",
+        },
+    )
+    rendered = repr(targets)
+    for private_value in (
+        password_marker,
+        "private-couchdb.invalid",
+        "private-state.sqlite3",
+        "CANARY_TEST_PASSWORD",
+    ):
+        assert private_value not in rendered
+    assert targets.couchdb_password == password_marker
+
+    plan = build_canary_plan(
+        project=args.project,
+        provider=args.provider,
+        probe_nonce_sha256=args.probe_nonce_sha256,
+        expected_source_commit=args.expected_source_commit,
+        observed_at=args.observed_at,
+        limit=args.limit,
+        max_runtime_seconds=args.max_runtime_seconds,
+        target_fingerprints=targets.target_fingerprints,
+    )
+    source_store = object()
+    projector = object()
+    graph_adapter = object()
+    with (
+        patch.dict(
+            os.environ,
+            {"CANARY_TEST_PASSWORD": "global-password-drift"},
+            clear=False,
+        ),
+        patch(
+            "agent_knowledge.llm_brain_core.couchdb_projection_cli._build_source_store",
+            return_value=source_store,
+        ) as build_source_store,
+        patch.object(canary_module, "_build_qdrant_projector", return_value=projector),
+        patch.object(canary_module, "build_graph_adapter_from_env", return_value=graph_adapter),
+        patch.object(
+            canary_module,
+            "run_projection_invalidation_canary",
+            return_value={"status": "passed"},
+        ),
+    ):
+        assert canary_module._execute_live(args, plan, resolved_targets=targets) == {
+            "status": "passed"
+        }
+    assert build_source_store.call_args.kwargs["couchdb_password"] == password_marker
 
 
 def test_malformed_approval_timeout_is_rejected_without_echoing_raw_value(
@@ -504,15 +716,7 @@ def test_malformed_approval_timeout_is_rejected_without_echoing_raw_value(
         "--observed-at",
         OBSERVED_AT,
     ]
-    plan = build_canary_plan(
-        project=PROJECT,
-        provider=PROVIDER,
-        probe_nonce_sha256=NONCE,
-        expected_source_commit=SOURCE_COMMIT,
-        observed_at=OBSERVED_AT,
-        limit=1,
-        max_runtime_seconds=30,
-    )
+    plan = _cli_plan(base)
     execute_argv = [
         *base,
         "--execute",
@@ -530,6 +734,7 @@ def test_malformed_approval_timeout_is_rejected_without_echoing_raw_value(
                 "redaction_required": True,
                 "timeout_seconds": sensitive_marker,
                 "rollback_or_abort_criteria": ["abort on mismatch"],
+                "target": {"target_fingerprints": plan["target_fingerprints"]},
                 "command": {"argv": execute_argv},
             }
         ),
@@ -573,15 +778,7 @@ def test_cli_hard_timeout_interrupts_live_execution_and_reports_resumable_state(
         "--observed-at",
         OBSERVED_AT,
     ]
-    plan = build_canary_plan(
-        project=PROJECT,
-        provider=PROVIDER,
-        probe_nonce_sha256=NONCE,
-        expected_source_commit=SOURCE_COMMIT,
-        observed_at=OBSERVED_AT,
-        limit=1,
-        max_runtime_seconds=0.01,
-    )
+    plan = _cli_plan(base)
     execute_argv = [
         *base,
         "--execute",
@@ -599,6 +796,7 @@ def test_cli_hard_timeout_interrupts_live_execution_and_reports_resumable_state(
                 "redaction_required": True,
                 "timeout_seconds": 1,
                 "rollback_or_abort_criteria": ["abort on timeout"],
+                "target": {"target_fingerprints": plan["target_fingerprints"]},
                 "command": {"argv": execute_argv},
             }
         ),
