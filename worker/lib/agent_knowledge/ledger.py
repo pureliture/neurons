@@ -906,7 +906,10 @@ class Ledger(
             if _pg_dsn:
                 from .postgres_db_adapter import PostgresLedgerDbAdapter
 
-                self._db_adapter = PostgresLedgerDbAdapter(_pg_dsn)
+                self._db_adapter = PostgresLedgerDbAdapter(
+                    _pg_dsn,
+                    read_only=self.read_only,
+                )
         # C: 파일 기반 엔진(SQLite)만 파일 권한 준비/하드닝을 한다. 서버형(Postgres)은 skip.
         file_backed = (
             True if self._db_adapter is None else getattr(self._db_adapter, "is_file_backed", True)
