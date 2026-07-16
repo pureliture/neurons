@@ -34,6 +34,7 @@ ROOT_MODULE_AREA_MANIFEST: dict[str, frozenset[str]] = {
         "reference_corpus",
         "repo_style_profile",
         "source_ref",
+        "temporal",
         "workflow_authority",
     }),
     "runtime_services": frozenset({

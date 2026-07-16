@@ -164,13 +164,16 @@ def list_tools() -> list[dict]:
         },
         {
             "name": BRAIN_QUERY_TOOL_NAME,
-            "description": "brain_id 기준으로 승인된 최신 neuron memory를 질의한다.",
+            "description": "brain_id 기준으로 승인된 neuron memory를 질의한다. 날짜 selector 또는 ISO 날짜 질의는 observed/event time 기준 temporal recall을 수행한다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "brain_id": {"type": "string"},
                     "query": {"type": "string"},
                     "mode": {"type": "string", "enum": ["latest"], "default": "latest"},
+                    "as_of": {"type": "string", "description": "ISO-8601 instant or UTC calendar date for temporal recall."},
+                    "date_from": {"type": "string", "description": "Inclusive ISO-8601 instant or UTC calendar-date range start."},
+                    "date_to": {"type": "string", "description": "Inclusive ISO-8601 instant or UTC calendar-date range end."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 8},
                 },
                 "required": ["brain_id", "query"],
@@ -317,6 +320,9 @@ def list_tools() -> list[dict]:
                     "project": {"type": "string"},
                     "object_types": {"type": "array", "items": {"type": "string"}, "default": []},
                     "route": {"type": "string"},
+                    "as_of": {"type": "string", "description": "ISO-8601 instant or UTC calendar date for temporal recall."},
+                    "date_from": {"type": "string", "description": "Inclusive ISO-8601 instant or UTC calendar-date range start."},
+                    "date_to": {"type": "string", "description": "Inclusive ISO-8601 instant or UTC calendar-date range end."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
                     "response_mode": {"type": "string", "enum": ["full", "compact", "degraded"], "default": "full"},
                     "consumer": {

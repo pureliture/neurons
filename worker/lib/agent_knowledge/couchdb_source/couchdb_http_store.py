@@ -18,9 +18,17 @@ import json
 from collections.abc import Iterator
 from urllib.parse import quote
 
-from ..rag_ingress.idempotency import IdempotencyOutcome, classify_idempotency
+from ..rag_ingress.idempotency import IdempotencyOutcome
 from ..transport_contract import ProxyResponse
-from .source_store import StoredRevision, payload_hash, validate_for_write
+from .source_store import (
+    SourceStoreConflict,
+    SourceStoreError,
+    StoredRevision,
+    _classify_document_idempotency,
+    merge_transcript_session_documents,
+    payload_hash,
+    validate_for_write,
+)
 
 
 class CouchDBError(RuntimeError):
@@ -120,13 +128,177 @@ class CouchDBHttpSourceStore:
         incoming_hash = payload_hash(document)
         existing = self.get(doc_id)
 
-        decision = classify_idempotency(existing, idempotency_key=doc_id, payload_hash=incoming_hash)
+        decision = _classify_document_idempotency(
+            existing,
+            doc_id=doc_id,
+            incoming_hash=incoming_hash,
+        )
         if existing is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
             return StoredRevision(doc_id=doc_id, rev=str(existing.get("_rev", "")), outcome="duplicate")
 
         outcome = "conflict_resolved" if existing is not None else "accepted"
         rev = self._write(doc_id, document, incoming_hash, existing)
         return StoredRevision(doc_id=doc_id, rev=rev, outcome=outcome)
+
+    def put_if_revision(
+        self,
+        document: dict,
+        *,
+        expected_rev: str,
+    ) -> StoredRevision:
+        """Write exactly one known revision and never retry a stale payload."""
+
+        validate_for_write(document)
+        doc_id = str(document["_id"])
+        current = self.get(doc_id)
+        current_rev = str((current or {}).get("_rev") or "")
+        if current_rev != str(expected_rev or ""):
+            raise SourceStoreConflict("conditional source revision changed")
+        incoming_hash = payload_hash(document)
+        decision = _classify_document_idempotency(
+            current,
+            doc_id=doc_id,
+            incoming_hash=incoming_hash,
+        )
+        if current is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
+            return StoredRevision(doc_id=doc_id, rev=current_rev, outcome="duplicate")
+        stored = copy.deepcopy(document)
+        stored.pop("_rev", None)
+        stored["idempotency_key"] = doc_id
+        stored["payload_hash"] = incoming_hash
+        if current_rev:
+            stored["_rev"] = current_rev
+        status, response = self._request(
+            "PUT",
+            self._doc_path(doc_id),
+            json_body=stored,
+        )
+        if status == 409:
+            raise SourceStoreConflict("conditional source revision changed")
+        if status not in (201, 202) or not response.get("ok"):
+            raise CouchDBError(f"conditional source write failed: HTTP {status}")
+        return StoredRevision(
+            doc_id=doc_id,
+            rev=str(response.get("rev") or ""),
+            outcome="conflict_resolved" if current is not None else "accepted",
+        )
+
+    def merge_transcript_session_aggregate(
+        self,
+        *,
+        incoming: dict,
+        max_attempts: int = 3,
+        source_hash_authoritative: bool = False,
+    ) -> StoredRevision:
+        """CAS-merge a cumulative session envelope with bounded conflict retry.
+
+        Every 409 discards the stale merged payload.  The next attempt performs
+        a fresh GET and pure re-merge, so a concurrent projector's newer
+        ``materialized_at``/``source_hash`` cannot be overwritten by ingress.
+        """
+
+        if max_attempts < 1:
+            raise SourceStoreError("aggregate merge max_attempts must be positive")
+        validate_for_write(incoming)
+        doc_id = str(incoming["_id"])
+        for _attempt in range(max_attempts):
+            current = self.get(doc_id)
+            merged = merge_transcript_session_documents(
+                existing=current,
+                incoming=incoming,
+                source_hash_authoritative=source_hash_authoritative,
+            )
+            incoming_hash = payload_hash(merged)
+            decision = _classify_document_idempotency(
+                current,
+                doc_id=doc_id,
+                incoming_hash=incoming_hash,
+            )
+            if current is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
+                return StoredRevision(
+                    doc_id=doc_id,
+                    rev=str(current.get("_rev") or ""),
+                    outcome="duplicate",
+                )
+
+            stored = copy.deepcopy(merged)
+            stored["idempotency_key"] = doc_id
+            stored["payload_hash"] = incoming_hash
+            if current is not None:
+                current_rev = str(current.get("_rev") or "")
+                if not current_rev:
+                    raise SourceStoreConflict("transcript session aggregate revision is missing")
+                stored["_rev"] = current_rev
+            status, response = self._request(
+                "PUT",
+                self._doc_path(doc_id),
+                json_body=stored,
+            )
+            if status == 409:
+                continue
+            if status not in (201, 202) or not response.get("ok"):
+                raise CouchDBError(f"transcript session aggregate merge failed: HTTP {status}")
+            return StoredRevision(
+                doc_id=doc_id,
+                rev=str(response.get("rev") or ""),
+                outcome="conflict_resolved" if current is not None else "accepted",
+            )
+        raise SourceStoreConflict("transcript session aggregate conflict retry exhausted")
+
+    def patch_observed_time_if_content_hash(
+        self,
+        *,
+        doc_id: str,
+        expected_content_hash: str,
+        expected_rev: str,
+        observed_at_start: str,
+        observed_at_end: str,
+    ) -> StoredRevision:
+        """CAS temporal metadata without retrying over a concurrent source write.
+
+        The ordinary ``put`` path intentionally retries 409 conflicts for full
+        deterministic upserts.  A recovery patch must be stricter: retrying the
+        stale planned document could overwrite a newer live-ingress body.  This
+        method binds the patch to both the current content hash and CouchDB rev,
+        and a 409 is returned to the caller as a fail-closed conflict.
+        """
+
+        current = self.get(doc_id)
+        if current is None:
+            raise SourceStoreConflict("conditional temporal patch source is missing")
+        if str(current.get("content_hash") or "") != str(expected_content_hash or ""):
+            raise SourceStoreConflict("conditional temporal patch content changed")
+        if not expected_rev or str(current.get("_rev") or "") != str(expected_rev):
+            raise SourceStoreConflict("conditional temporal patch revision changed")
+        if (
+            str(current.get("observed_at_start") or "") == str(observed_at_start or "")
+            and str(current.get("observed_at_end") or "") == str(observed_at_end or "")
+        ):
+            return StoredRevision(
+                doc_id=doc_id,
+                rev=str(current.get("_rev") or ""),
+                outcome="duplicate",
+            )
+        current_rev = str(current.get("_rev") or "")
+        if not current_rev:
+            raise SourceStoreConflict("conditional temporal patch revision is missing")
+        stored = copy.deepcopy(current)
+        stored["observed_at_start"] = str(observed_at_start or "")
+        stored["observed_at_end"] = str(observed_at_end or "")
+        validate_for_write(stored)
+        incoming_hash = payload_hash(stored)
+        stored["idempotency_key"] = doc_id
+        stored["payload_hash"] = incoming_hash
+        status, response = self._request("PUT", self._doc_path(doc_id), json_body=stored)
+        if status == 409:
+            raise SourceStoreConflict("conditional temporal patch revision changed")
+        if status not in (201, 202) or not response.get("ok"):
+            raise CouchDBError(f"conditional temporal patch failed: HTTP {status}")
+        return StoredRevision(
+            doc_id=doc_id,
+            rev=str(response.get("rev") or ""),
+            outcome="conflict_resolved",
+        )
 
     def _write(self, doc_id: str, document: dict, incoming_hash: str, existing: dict | None) -> str:
         stored = copy.deepcopy(document)

@@ -27,6 +27,7 @@ from .object_packs import apply_approval_board_decisions, apply_candidate_review
 from .post_deploy_mcp_capture import (
     collect_agent_context_consumer_startup_receipt,
     collect_source_to_candidate_post_deploy_mcp_capture,
+    collect_temporal_recall_corrective_checkpoint,
 )
 from .reference_corpus import (
     build_corpus_ingest_plan,
@@ -44,6 +45,7 @@ from .runtime_readiness import (
     build_source_to_candidate_runtime_readiness_report,
     build_source_to_candidate_runtime_shadow_evidence_packet,
     build_source_to_candidate_runtime_shadow_readiness_report,
+    build_temporal_recall_corrective_checkpoint_readiness_report,
 )
 
 REFERENCE_CORPUS_LEDGER_ENV = "NEURON_REFERENCE_CORPUS_LEDGER"
@@ -142,6 +144,9 @@ def object_query_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--current-file", action="append", default=[])
     parser.add_argument("--object-type", action="append", default=[])
     parser.add_argument("--route", default="")
+    parser.add_argument("--as-of", default="")
+    parser.add_argument("--date-from", default="")
+    parser.add_argument("--date-to", default="")
     parser.add_argument("--limit", type=_non_negative_int, default=20)
     parser.add_argument("--response-mode", choices=["full", "compact", "degraded"], default="full")
     parser.add_argument("--consumer", choices=["unspecified", "codex", "claude-code", "gemini", "hermes"], default="unspecified")
@@ -157,6 +162,9 @@ def object_query_main(argv: list[str] | None = None) -> int:
         limit=args.limit,
         response_mode=args.response_mode,
         consumer=args.consumer,
+        as_of=args.as_of,
+        date_from=args.date_from,
+        date_to=args.date_to,
     )
     _print_json(result)
     return 0
@@ -732,17 +740,66 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     parser.add_argument("--evidence-packet-template", action="store_true")
     parser.add_argument("--collect-shadow-evidence", action="store_true")
     parser.add_argument("--collect-post-deploy-mcp-capture", action="store_true")
+    parser.add_argument("--collect-temporal-corrective-checkpoint", action="store_true")
     parser.add_argument("--collect-agent-context-startup", action="store_true")
     parser.add_argument("--mcp-url", default="")
     parser.add_argument("--gitops-desired-state-file", default="")
     parser.add_argument("--argo-reconciliation-file", default="")
     parser.add_argument("--deployed-identity-file", default="")
     parser.add_argument("--artifact-descriptor-file", default="")
+    parser.add_argument("--temporal-acceptance-file", default="")
     parser.add_argument("--repository", default="")
     parser.add_argument("--branch", default="")
     parser.add_argument("--project", default="")
     parser.add_argument("--consumer", default="codex")
     args = parser.parse_args(argv)
+    if args.collect_temporal_corrective_checkpoint:
+        temporal_mode_conflicts = [
+            flag
+            for flag, supplied in (
+                ("--live-evidence-file", bool(args.live_evidence_file)),
+                (
+                    "--normalize-post-deploy-capture-file",
+                    bool(args.normalize_post_deploy_capture_file),
+                ),
+                ("--post-deploy-capture-file", bool(args.post_deploy_capture_file)),
+                (
+                    "--normalize-shadow-evidence-file",
+                    bool(args.normalize_shadow_evidence_file),
+                ),
+                ("--shadow-evidence-file", bool(args.shadow_evidence_file)),
+                ("--evidence-collection-plan", args.evidence_collection_plan),
+                ("--evidence-packet-template", args.evidence_packet_template),
+                ("--collect-shadow-evidence", args.collect_shadow_evidence),
+                (
+                    "--collect-post-deploy-mcp-capture",
+                    args.collect_post_deploy_mcp_capture,
+                ),
+                (
+                    "--collect-agent-context-startup",
+                    args.collect_agent_context_startup,
+                ),
+                (
+                    "--gitops-desired-state-file",
+                    bool(args.gitops_desired_state_file),
+                ),
+                (
+                    "--argo-reconciliation-file",
+                    bool(args.argo_reconciliation_file),
+                ),
+                ("--deployed-identity-file", bool(args.deployed_identity_file)),
+                (
+                    "--artifact-descriptor-file",
+                    bool(args.artifact_descriptor_file),
+                ),
+            )
+            if supplied
+        ]
+        if temporal_mode_conflicts:
+            parser.error(
+                "--collect-temporal-corrective-checkpoint cannot be combined with "
+                + ", ".join(temporal_mode_conflicts)
+            )
     if args.evidence_collection_plan:
         _print_json(
             build_source_to_candidate_runtime_evidence_collection_plan(
@@ -765,6 +822,36 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
             )
         )
         return 0
+    if args.collect_temporal_corrective_checkpoint:
+        if not args.mcp_url:
+            parser.error("--collect-temporal-corrective-checkpoint requires --mcp-url")
+        if not args.temporal_acceptance_file:
+            parser.error(
+                "--collect-temporal-corrective-checkpoint requires "
+                "--temporal-acceptance-file"
+            )
+        capture = asyncio.run(
+            collect_temporal_recall_corrective_checkpoint(
+                mcp_url=args.mcp_url,
+                expected_commit=args.expected_commit,
+                repository=args.repository,
+                branch=args.branch,
+                project=args.project,
+                consumer=args.consumer,
+                temporal_acceptance=_load_json_mapping(
+                    args.temporal_acceptance_file,
+                    label="temporal acceptance",
+                ),
+            )
+        )
+        output = dict(capture)
+        output["checkpoint_readiness"] = (
+            build_temporal_recall_corrective_checkpoint_readiness_report(
+                checkpoint=capture.get("temporal_recall_corrective_checkpoint")
+            )
+        )
+        _print_json(output)
+        return 1 if output["checkpoint_readiness"]["status"] == "FAIL" else 0
     if args.collect_post_deploy_mcp_capture:
         if not args.mcp_url:
             parser.error("--collect-post-deploy-mcp-capture requires --mcp-url")
@@ -797,6 +884,14 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
             if args.artifact_descriptor_file
             else None
         )
+        temporal_acceptance = (
+            _load_json_mapping(
+                args.temporal_acceptance_file,
+                label="temporal acceptance",
+            )
+            if args.temporal_acceptance_file
+            else None
+        )
         capture = asyncio.run(
             collect_source_to_candidate_post_deploy_mcp_capture(
                 mcp_url=args.mcp_url,
@@ -809,6 +904,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 argo_reconciliation=argo_reconciliation,
                 deployed_identity=deployed_identity,
                 artifact_descriptor=artifact_descriptor,
+                temporal_acceptance=temporal_acceptance,
                 collect_agent_context_startup=args.collect_agent_context_startup,
             )
         )
