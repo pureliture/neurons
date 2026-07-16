@@ -6,6 +6,7 @@ import pytest
 
 from agent_knowledge.cli import main
 from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
+from agent_knowledge.llm_brain_core.objects import object_cli
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     EVIDENCE_PROVENANCE_SCHEMA,
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
@@ -20,6 +21,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_shadow_readiness_report,
     build_source_to_candidate_runtime_shadow_evidence_packet,
     build_preference_artifact_memory_runtime_evidence,
+    build_temporal_recall_corrective_checkpoint_readiness_report,
 )
 from agent_knowledge.public_safe_util import hash_payload
 
@@ -624,6 +626,10 @@ def _temporal_recall_corrective_checkpoint(**overrides):
             "schema_version": "temporal_correctness_runtime_aggregate.v1",
             "projection_currentness": {
                 "source_hash_match": True,
+                "source_state_digest": "sha256:" + "1" * 64,
+                "graph_projection_state_digest": "sha256:" + "2" * 64,
+                "session_memory_projection_state_digest": "sha256:" + "3" * 64,
+                "source_projection_state_digest": "sha256:" + "4" * 64,
                 "source_hash_mismatch_count": 0,
                 "stale_projected_session_count": 0,
                 "source_session_count": 126,
@@ -682,6 +688,32 @@ def test_runtime_readiness_requires_temporal_corrective_checkpoint_before_semant
     assert route_smokes["status"] == "not_validated"
     assert "temporal_work_recall" not in route_smokes["validated_routes"]
     assert "live_temporal_recall_corrective_checkpoint_unverified" in report["gaps"]
+
+
+@pytest.mark.parametrize(
+    "digest_field",
+    (
+        "source_state_digest",
+        "graph_projection_state_digest",
+        "session_memory_projection_state_digest",
+        "source_projection_state_digest",
+    ),
+)
+def test_temporal_checkpoint_readiness_requires_each_projection_state_digest(
+    digest_field,
+):
+    checkpoint = _temporal_recall_corrective_checkpoint()
+    checkpoint["runtime_aggregate"]["projection_currentness"][digest_field] = ""
+
+    report = build_temporal_recall_corrective_checkpoint_readiness_report(
+        checkpoint=checkpoint
+    )
+
+    assert report["status"] == "FAIL"
+    assert report["failed_claims"] == [
+        "live.temporal_recall.corrective_checkpoint"
+    ]
+    assert "temporal_corrective_projection_state_digest_invalid" in report["gaps"]
 
 
 def test_runtime_readiness_rejects_positive_temporal_probe_with_gap() -> None:
@@ -832,6 +864,12 @@ def test_runtime_readiness_validates_complete_temporal_corrective_checkpoint():
                 stale_projected_session_count=1,
             ),
             "temporal_corrective_projection_hash_not_current",
+        ),
+        (
+            lambda checkpoint: checkpoint["runtime_aggregate"]["projection_currentness"].update(
+                source_projection_state_digest="",
+            ),
+            "temporal_corrective_projection_state_digest_invalid",
         ),
         (
             lambda checkpoint: checkpoint["runtime_aggregate"]["projection_currentness"].update(
@@ -4825,6 +4863,180 @@ def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys)
     ]["gaps"]
     assert claims["live.production.permission_sensitive_audit"]["status"] == "validated"
     assert claims["live.agent_context.startup_read_path"]["status"] == "validated"
+
+
+def test_neuron_knowledge_runtime_readiness_cli_collects_temporal_checkpoint_without_deployment_binding(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    acceptance_file = tmp_path / "temporal-acceptance.json"
+    acceptance_file.write_text("{}", encoding="utf-8")
+    received: dict = {}
+
+    async def _collect_temporal_checkpoint(**kwargs):
+        received.update(kwargs)
+        return {
+            "schema_version": "temporal_recall_corrective_checkpoint_capture.v1",
+            "collection": {
+                "mode": "temporal_corrective_checkpoint_read_only",
+                "network_used": True,
+                "mutation_scope": "none",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+            "temporal_recall_corrective_checkpoint": (
+                _temporal_recall_corrective_checkpoint()
+            ),
+            "production_mutation_performed": False,
+        }
+
+    monkeypatch.setattr(
+        object_cli,
+        "collect_temporal_recall_corrective_checkpoint",
+        _collect_temporal_checkpoint,
+    )
+
+    exit_code = main(
+        [
+            "source-to-candidate-runtime-readiness",
+            "--collect-temporal-corrective-checkpoint",
+            "--mcp-url",
+            "https://mcp.example.test/mcp",
+            "--temporal-acceptance-file",
+            str(acceptance_file),
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--project",
+            "neurons",
+            "--consumer",
+            "codex",
+        ]
+    )
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["schema_version"] == "temporal_recall_corrective_checkpoint_capture.v1"
+    readiness = output["checkpoint_readiness"]
+    assert readiness["schema_version"] == (
+        "temporal_recall_corrective_checkpoint_readiness.v1"
+    )
+    assert readiness["status"] == "PASS"
+    assert readiness["production_mutation_performed"] is False
+    assert readiness["failed_claims"] == []
+    assert readiness["gaps"] == []
+    assert readiness["claim"]["status"] == "validated"
+    assert received["temporal_acceptance"] == {}
+    assert received["project"] == "neurons"
+    assert "deployed_identity" not in received
+    assert "gitops_desired_state" not in received
+    assert "argo_reconciliation" not in received
+
+
+def test_temporal_checkpoint_cli_returns_failure_exit_for_invalid_checkpoint(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    acceptance_file = tmp_path / "temporal-acceptance.json"
+    acceptance_file.write_text("{}", encoding="utf-8")
+    failed_checkpoint = _temporal_recall_corrective_checkpoint()
+    failed_checkpoint["runtime_aggregate"]["projection_currentness"][
+        "source_projection_state_digest"
+    ] = ""
+
+    async def _collect_temporal_checkpoint(**_kwargs):
+        return {
+            "schema_version": "temporal_recall_corrective_checkpoint_capture.v1",
+            "collection": {
+                "mode": "temporal_corrective_checkpoint_read_only",
+                "network_used": True,
+                "mutation_scope": "none",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+            "temporal_recall_corrective_checkpoint": failed_checkpoint,
+            "production_mutation_performed": False,
+        }
+
+    monkeypatch.setattr(
+        object_cli,
+        "collect_temporal_recall_corrective_checkpoint",
+        _collect_temporal_checkpoint,
+    )
+
+    exit_code = main(
+        [
+            "source-to-candidate-runtime-readiness",
+            "--collect-temporal-corrective-checkpoint",
+            "--mcp-url",
+            "https://mcp.example.test/mcp",
+            "--temporal-acceptance-file",
+            str(acceptance_file),
+            "--project",
+            "neurons",
+        ]
+    )
+
+    assert exit_code == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["checkpoint_readiness"]["status"] == "FAIL"
+    assert output["checkpoint_readiness"]["failed_claims"] == [
+        "live.temporal_recall.corrective_checkpoint"
+    ]
+    assert (
+        "temporal_corrective_projection_state_digest_invalid"
+        in output["checkpoint_readiness"]["gaps"]
+    )
+
+
+@pytest.mark.parametrize(
+    "conflicting_args",
+    [
+        ["--live-evidence-file", "ignored.json"],
+        ["--normalize-post-deploy-capture-file", "ignored.json"],
+        ["--post-deploy-capture-file", "ignored.json"],
+        ["--normalize-shadow-evidence-file", "ignored.json"],
+        ["--shadow-evidence-file", "ignored.json"],
+        ["--evidence-collection-plan"],
+        ["--evidence-packet-template"],
+        ["--collect-shadow-evidence"],
+        ["--collect-post-deploy-mcp-capture"],
+        ["--collect-agent-context-startup"],
+        ["--gitops-desired-state-file", "ignored.json"],
+        ["--argo-reconciliation-file", "ignored.json"],
+        ["--deployed-identity-file", "ignored.json"],
+        ["--artifact-descriptor-file", "ignored.json"],
+    ],
+)
+def test_temporal_checkpoint_cli_rejects_other_modes_and_deployment_binding_inputs(
+    tmp_path,
+    conflicting_args,
+):
+    acceptance_file = tmp_path / "temporal-acceptance.json"
+    acceptance_file.write_text("{}", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "source-to-candidate-runtime-readiness",
+            "--collect-temporal-corrective-checkpoint",
+            "--mcp-url",
+            "https://mcp.example.test/mcp",
+            "--temporal-acceptance-file",
+            str(acceptance_file),
+            "--project",
+            "neurons",
+            *conflicting_args,
+        ]
+    )
+
+    assert exit_code == 2
 
 
 def test_neuron_knowledge_runtime_readiness_cli_normalizes_shadow_evidence_file(tmp_path, capsys):

@@ -48,6 +48,9 @@ from .runtime_readiness import (
 )
 
 POST_DEPLOY_MCP_CAPTURE_SCHEMA = "source_to_candidate_runtime_post_deploy_mcp_capture.v1"
+TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_CAPTURE_SCHEMA = (
+    "temporal_recall_corrective_checkpoint_capture.v1"
+)
 TEMPORAL_CORRECTNESS_RUNTIME_EXPECTATIONS_SCHEMA = (
     "temporal_correctness_runtime_expectations.v1"
 )
@@ -499,6 +502,78 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
             capture,
             attested_fields=attested_fields,
         )
+    return capture
+
+
+async def collect_temporal_recall_corrective_checkpoint(
+    *,
+    mcp_url: str,
+    repository: str = "",
+    branch: str = "",
+    project: str = "",
+    consumer: str = "codex",
+    expected_commit: str = "",
+    temporal_acceptance: Mapping[str, Any] | None = None,
+    session_factory: Any = None,
+) -> dict[str, Any]:
+    """Collect only read-only live evidence needed by the temporal checkpoint."""
+
+    safe_url = validate_post_deploy_mcp_url(mcp_url)
+    validated_temporal_acceptance = _validate_temporal_acceptance_config(
+        temporal_acceptance
+    )
+    if not validated_temporal_acceptance:
+        raise ValueError("temporal acceptance config is required")
+    safe_project = public_safe_text(str(project or ""), max_chars=120) or "neurons"
+    factory = session_factory or _default_mcp_session
+    async with factory(safe_url) as session:
+        await session.initialize()
+        runtime_packet = await _call_tool_mapping(
+            session,
+            RUNTIME_READINESS_AGENT_CONTEXT_TOOL,
+            {
+                "collect_shadow_evidence": True,
+                "expected_commit": expected_commit,
+                "repository": repository,
+                "branch": branch,
+                "project": safe_project,
+                "consumer": consumer,
+                "evidence_collection_mode": "post_deploy_read_only_smoke",
+                "evidence_collection_network_used": True,
+            },
+        )
+        checkpoint = await _collect_temporal_recall_corrective_checkpoint(
+            session,
+            repository=repository,
+            branch=branch,
+            project=safe_project,
+            consumer=consumer,
+            config=validated_temporal_acceptance,
+            runtime_packet=runtime_packet,
+        )
+        if _runtime_packet_reports_mutation(runtime_packet):
+            checkpoint = {
+                **checkpoint,
+                "production_mutation_performed": True,
+            }
+
+    capture = {
+        "schema_version": TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_CAPTURE_SCHEMA,
+        "collection": {
+            "mode": "temporal_corrective_checkpoint_read_only",
+            "network_used": True,
+            "mutation_scope": "none",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "temporal_recall_corrective_checkpoint": checkpoint,
+        "production_mutation_performed": (
+            checkpoint.get("production_mutation_performed") is True
+        ),
+    }
+    ensure_public_safe(capture, "TemporalRecallCorrectiveCheckpointCapture")
     return capture
 
 
@@ -1351,6 +1426,15 @@ def _temporal_runtime_aggregate_view(packet: Mapping[str, Any]) -> dict[str, Any
             if isinstance(currentness.get("graph_run_fresh"), bool)
             else None,
             **{
+                field: _sha256_ref_or_empty(currentness.get(field))
+                for field in (
+                    "source_state_digest",
+                    "graph_projection_state_digest",
+                    "session_memory_projection_state_digest",
+                    "source_projection_state_digest",
+                )
+            },
+            **{
                 field: _strict_nonnegative_int(currentness.get(field))
                 for field in (
                     "source_session_count",
@@ -1384,6 +1468,11 @@ def _temporal_runtime_aggregate_view(packet: Mapping[str, Any]) -> dict[str, Any
             )
         },
     }
+
+
+def _sha256_ref_or_empty(value: Any) -> str:
+    text = str(value or "")
+    return text if re.fullmatch(r"sha256:[0-9a-f]{64}", text) else ""
 
 
 def _trusted_temporal_runtime_aggregate(

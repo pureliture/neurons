@@ -9,7 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agent_knowledge.couchdb_source.document_model import ProjectionStatus, SourceDocType
+from agent_knowledge.couchdb_source.document_model import (
+    ProjectionStatus,
+    SourceDocType,
+    sha256_hash,
+)
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.ledger_base import _table_exists
@@ -93,6 +97,20 @@ def build_graph_projection_status(
         for session in source_sessions
         if str(session.get("session_id_hash") or "")
     }
+    source_state_digest = _canonical_state_digest(
+        lane="source",
+        items=[
+            {
+                "session_ref": sha256_hash(
+                    _session_natural_id(str(session.get("session_id_hash") or ""))
+                ),
+                "source_hash": str(session.get("source_hash") or ""),
+                "materialized_at": str(session.get("materialized_at") or ""),
+            }
+            for session in source_sessions
+            if str(session.get("session_id_hash") or "")
+        ],
+    )
     episodic_rows = _projection_rows(
         ledger,
         project=project,
@@ -125,11 +143,65 @@ def build_graph_projection_status(
     stale_ids = _stale_projected_ids(
         scoped_episodic_rows, source_hashes
     ) | _stale_projected_ids(scoped_entity_rows, source_hashes)
+    session_memory_states = _session_memory_projection_states(
+        source_store=source_store,
+        source_hashes=source_hashes,
+    )
     session_memory_current_ids, session_memory_mismatch_ids, session_memory_stale_ids = (
         _session_memory_projection_currentness(
-            source_store=source_store,
             source_hashes=source_hashes,
+            states=session_memory_states,
         )
+    )
+    graph_projection_state_digest = _graph_projection_state_digest(
+        source_hashes=source_hashes,
+        episodic_rows=scoped_episodic_rows,
+        entity_rows=scoped_entity_rows,
+    )
+    session_memory_projection_state_digest = _canonical_state_digest(
+        lane="session_memory",
+        items=[
+            {
+                "session_ref": sha256_hash(natural_id),
+                "projection_status": str(
+                    (session_memory_states.get(natural_id) or {}).get(
+                        "projection_status"
+                    )
+                    or ""
+                ),
+                "projected_source_hash": str(
+                    (session_memory_states.get(natural_id) or {}).get(
+                        "projected_source_hash"
+                    )
+                    or ""
+                ),
+                "materialized_at": str(
+                    (session_memory_states.get(natural_id) or {}).get(
+                        "materialized_at"
+                    )
+                    or ""
+                ),
+                "active_content_hash": str(
+                    (session_memory_states.get(natural_id) or {}).get(
+                        "active_content_hash"
+                    )
+                    or ""
+                ),
+            }
+            for natural_id in sorted(source_hashes)
+        ],
+    )
+    source_projection_state_digest = _canonical_state_digest(
+        lane="source_projection_join",
+        items=[
+            {
+                "source_state_digest": source_state_digest,
+                "graph_projection_state_digest": graph_projection_state_digest,
+                "session_memory_projection_state_digest": (
+                    session_memory_projection_state_digest
+                ),
+            }
+        ],
     )
     session_memory_noncurrent_ids = source_natural_ids - session_memory_current_ids
     mismatch_ids |= session_memory_mismatch_ids
@@ -182,6 +254,12 @@ def build_graph_projection_status(
             "session_count": source_count,
         },
         "projection_state": {
+            "source_state_digest": source_state_digest,
+            "graph_projection_state_digest": graph_projection_state_digest,
+            "session_memory_projection_state_digest": (
+                session_memory_projection_state_digest
+            ),
+            "source_projection_state_digest": source_projection_state_digest,
             "episodic_session_projected": episodic_projected,
             "episodic_session_noncurrent": source_count - episodic_projected,
             "entity_session_projected": entity_projected,
@@ -234,6 +312,7 @@ def _source_sessions(
             "started_at",
             "observed_at_start",
             "source_hash",
+            "materialized_at",
         ],
     )
     filtered = _filter_sessions(sessions, project=project, provider=provider)
@@ -247,32 +326,41 @@ def _source_sessions(
     return filtered
 
 
-def _session_memory_projection_currentness(
+def _session_memory_projection_states(
     *,
     source_store: CouchDBSourceStore,
     source_hashes: dict[str, str],
-) -> tuple[set[str], set[str], set[str]]:
-    """Compare canonical CouchDB projection state with the current source revision."""
-
+) -> dict[str, dict[str, Any]]:
     states = source_store.find_by_type(
         SourceDocType.PROJECTION_STATE,
         fields=[
             "session_id_hash",
             "projection_status",
             "projected_source_hash",
+            "materialized_at",
+            "active_content_hash",
         ],
     )
-    selected_states = {
+    return {
         _session_natural_id(str(state.get("session_id_hash") or "")): state
         for state in states
         if _session_natural_id(str(state.get("session_id_hash") or ""))
         in source_hashes
     }
+
+
+def _session_memory_projection_currentness(
+    *,
+    source_hashes: dict[str, str],
+    states: dict[str, dict[str, Any]],
+) -> tuple[set[str], set[str], set[str]]:
+    """Compare canonical CouchDB projection state with the current source revision."""
+
     current_ids: set[str] = set()
     mismatch_ids: set[str] = set()
     stale_projected_ids: set[str] = set()
     for natural_id, current_source_hash in source_hashes.items():
-        state = selected_states.get(natural_id)
+        state = states.get(natural_id)
         status = str((state or {}).get("projection_status") or "")
         projected_source_hash = str(
             (state or {}).get("projected_source_hash") or ""
@@ -300,6 +388,60 @@ def _session_memory_projection_currentness(
         if status == ProjectionStatus.PROJECTED:
             stale_projected_ids.add(natural_id)
     return current_ids, mismatch_ids, stale_projected_ids
+
+
+def _canonical_state_digest(*, lane: str, items: list[dict[str, str]]) -> str:
+    canonical = {
+        "schema_version": "lbrain_projection_state_digest.v1",
+        "lane": lane,
+        "items": sorted(
+            items,
+            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+        ),
+    }
+    return sha256_hash(json.dumps(canonical, sort_keys=True, separators=(",", ":")))
+
+
+def _graph_projection_state_digest(
+    *,
+    source_hashes: dict[str, str],
+    episodic_rows: list[dict[str, str]],
+    entity_rows: list[dict[str, str]],
+) -> str:
+    by_lane = {
+        EXTRACTION_LEVEL_EPISODIC: {
+            str(row.get("natural_id") or ""): row for row in episodic_rows
+        },
+        EXTRACTION_LEVEL_ENTITY: {
+            str(row.get("natural_id") or ""): row for row in entity_rows
+        },
+    }
+    return _canonical_state_digest(
+        lane="graph",
+        items=[
+            {
+                "session_ref": sha256_hash(natural_id),
+                "extraction_level": extraction_level,
+                "projected_source_hash": str(
+                    (by_lane[extraction_level].get(natural_id) or {}).get(
+                        "source_hash"
+                    )
+                    or ""
+                ),
+                "upsert_result": str(
+                    (by_lane[extraction_level].get(natural_id) or {}).get(
+                        "upsert_result"
+                    )
+                    or ""
+                ),
+            }
+            for natural_id in sorted(source_hashes)
+            for extraction_level in (
+                EXTRACTION_LEVEL_EPISODIC,
+                EXTRACTION_LEVEL_ENTITY,
+            )
+        ],
+    )
 
 
 def _projection_rows(

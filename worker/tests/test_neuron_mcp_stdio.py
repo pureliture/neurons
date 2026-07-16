@@ -2800,6 +2800,10 @@ def test_mcp_live_runtime_collector_includes_temporal_currentness_from_read_path
     aggregate = {
         "schema_version": "temporal_correctness_runtime_aggregate.v1",
         "projection_currentness": {
+            "source_state_digest": "sha256:" + ("1" * 64),
+            "graph_projection_state_digest": "sha256:" + ("2" * 64),
+            "session_memory_projection_state_digest": "sha256:" + ("3" * 64),
+            "source_projection_state_digest": "sha256:" + ("4" * 64),
             "source_hash_match": True,
             "source_hash_mismatch_count": 0,
             "stale_projected_session_count": 0,
@@ -2861,6 +2865,10 @@ def _temporal_graph_runtime_status(
     return {
         "source": {"session_count": 126},
         "projection_state": {
+            "source_state_digest": "sha256:" + ("1" * 64),
+            "graph_projection_state_digest": "sha256:" + ("2" * 64),
+            "session_memory_projection_state_digest": "sha256:" + ("3" * 64),
+            "source_projection_state_digest": "sha256:" + ("4" * 64),
             "source_hash_mismatch_count": 0,
             "stale_projected_session_count": 0,
             "episodic_session_projected": 126,
@@ -2957,6 +2965,29 @@ def test_temporal_runtime_read_path_rejects_stale_canonical_projection_currentne
     assert currentness["session_memory_projection_noncurrent_count"] == 1
     assert currentness["session_memory_source_hash_mismatch_count"] == 1
     assert currentness["session_memory_stale_projected_session_count"] == 1
+
+
+def test_temporal_runtime_read_path_rejects_missing_projection_state_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = _service(tmp_path)
+    monkeypatch.setenv("LLM_BRAIN_GRAPH_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr(
+        knowledge_search_service_module,
+        "_build_source_store",
+        lambda **_kwargs: object(),
+    )
+    status = _temporal_graph_runtime_status(completed=True, status="ok")
+    status["projection_state"].pop("source_projection_state_digest")
+    monkeypatch.setattr(
+        knowledge_search_service_module,
+        "build_graph_projection_status",
+        lambda **_kwargs: status,
+    )
+
+    with pytest.raises(ValueError, match="projection state digest is missing or invalid"):
+        service._temporal_correctness_runtime_read_path_evidence(project=PROJECT)
 
 
 def test_temporal_runtime_read_path_rejects_started_but_incomplete_graph_run(
