@@ -10,6 +10,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     EVIDENCE_PROVENANCE_SCHEMA,
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
     REQUIRED_RUNTIME_TOOL_NAMES,
+    build_deployment_evidence_binding,
     build_source_to_candidate_runtime_evidence_collection_plan,
     build_source_to_candidate_runtime_evidence_packet_template,
     build_source_to_candidate_runtime_collected_shadow_evidence_packet,
@@ -116,6 +117,299 @@ def _sanitized_live_evidence(**overrides):
 
 def _safe_tool_hints():
     return [dict(item) for item in object_native_review_tool_hints([])]
+
+
+def _gitops_bound_live_evidence(**overrides):
+    expected_commit = "c2b8548"
+    evidence = _sanitized_live_evidence(
+        expected_commit=expected_commit,
+        gitops_desired_state={
+            "schema_version": "gitops_desired_state_identity.v1",
+            "images_include_expected_commit": True,
+            "desired_state_source": "sanitized_ops_manifest_summary",
+            "target_revision": "main",
+            "source_commit": expected_commit,
+            "desired_image_set_hash": "sha256:" + "a" * 64,
+            "ops_revision": "a" * 40,
+            "expected_image_ref_count": 1,
+            "production_mutation_performed": False,
+        },
+        deployed_identity={
+            "contains_expected_commit": True,
+            "identity_source": "redacted_live_runtime_evidence",
+            "source_commit": expected_commit,
+            "live_image_set_hash": "sha256:" + "a" * 64,
+            "stale_image_ref_count": 0,
+            "production_mutation_performed": False,
+        },
+        argo_reconciliation={
+            "schema_version": "argo_reconciliation_identity.v1",
+            "reconciliation_source": "sanitized_argo_application_summary",
+            "reconciled_ops_revision": "a" * 40,
+            "sync_status": "Synced",
+            "health_status": "Healthy",
+            "production_mutation_performed": False,
+        },
+    )
+    evidence.update(overrides)
+    evidence.setdefault(
+        "deployment_evidence_binding",
+        build_deployment_evidence_binding(
+            expected_commit=expected_commit,
+            gitops_desired_state=evidence["gitops_desired_state"],
+            argo_reconciliation=evidence["argo_reconciliation"],
+            deployed_identity=evidence["deployed_identity"],
+        ),
+    )
+    return evidence
+
+
+def test_runtime_readiness_normalizes_and_validates_gitops_deployment_evidence_binding():
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=_gitops_bound_live_evidence(),
+    )
+
+    binding = packet["deployment_evidence_binding"]
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=packet,
+        expected_commit="c2b8548",
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+
+    assert packet["expected_commit"] == "c2b8548"
+    assert binding["schema_version"] == "deployment_evidence_binding.v1"
+    assert binding["canonical_tuple_hash"].startswith("sha256:")
+    assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "validated"
+
+
+def test_runtime_readiness_normalizer_does_not_mint_missing_deployment_binding():
+    capture = _gitops_bound_live_evidence()
+    capture.pop("deployment_evidence_binding")
+
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=capture,
+    )
+
+    assert packet["deployment_evidence_binding"] == {}
+
+
+@pytest.mark.parametrize(
+    ("layer", "field", "value", "expected_gap"),
+    [
+        ("gitops_desired_state", "desired_image_set_hash", "", "gitops_desired_state_image_set_hash_invalid"),
+        ("gitops_desired_state", "desired_image_set_hash", "sha256:not-a-digest", "gitops_desired_state_image_set_hash_invalid"),
+        ("argo_reconciliation", "reconciled_ops_revision", "", "argo_reconciliation_revision_invalid"),
+        ("gitops_desired_state", "expected_image_ref_count", None, "gitops_desired_state_expected_image_ref_count_invalid"),
+        ("gitops_desired_state", "expected_image_ref_count", "1", "gitops_desired_state_expected_image_ref_count_invalid"),
+        ("gitops_desired_state", "expected_image_ref_count", True, "gitops_desired_state_expected_image_ref_count_invalid"),
+        ("deployed_identity", "stale_image_ref_count", None, "live_deployed_identity_stale_image_ref_count_invalid"),
+        ("deployed_identity", "stale_image_ref_count", "0", "live_deployed_identity_stale_image_ref_count_invalid"),
+        ("deployed_identity", "stale_image_ref_count", False, "live_deployed_identity_stale_image_ref_count_invalid"),
+        ("gitops_desired_state", "production_mutation_performed", None, "gitops_desired_state_mutation_invalid"),
+        ("argo_reconciliation", "production_mutation_performed", 1, "argo_reconciliation_mutation_invalid"),
+        ("deployed_identity", "production_mutation_performed", "true", "live_deployed_identity_mutation_invalid"),
+    ],
+)
+def test_runtime_readiness_fails_closed_for_malformed_bound_layer_values(
+    layer, field, value, expected_gap
+):
+    evidence = _gitops_bound_live_evidence()
+    evidence[layer][field] = value
+    evidence["deployment_evidence_binding"] = build_deployment_evidence_binding(
+        expected_commit=evidence["expected_commit"],
+        gitops_desired_state=evidence["gitops_desired_state"],
+        argo_reconciliation=evidence["argo_reconciliation"],
+        deployed_identity=evidence["deployed_identity"],
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit="c2b8548",
+    )
+
+    assert report["status"] == "FAIL"
+    assert "ops.gitops_deployment_evidence_binding" in report["failed_claims"]
+    assert expected_gap in report["gaps"]
+
+
+@pytest.mark.parametrize("key", ["image", "images", "image_ref", "image_refs", "manifest_path", "raw_manifest", "docker_image", "unknown_field"])
+def test_runtime_readiness_rejects_unknown_or_raw_binding_layer_keys(key):
+    evidence = _gitops_bound_live_evidence()
+    evidence["gitops_desired_state"][key] = "redacted"
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit="c2b8548",
+    )
+
+    assert report["status"] == "FAIL"
+    assert "ops.gitops_deployment_evidence_binding" in report["failed_claims"]
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["image", "images", "image_ref", "image_refs", "manifest_path", "raw_manifest", "docker_image"],
+)
+def test_runtime_readiness_normalizer_rejects_raw_deployment_layer_keys(key):
+    capture = _gitops_bound_live_evidence()
+    capture.pop("deployment_evidence_binding")
+    capture["gitops_desired_state"][key] = "private/image:tag"
+
+    with pytest.raises(ValueError, match="forbidden field"):
+        build_source_to_candidate_runtime_post_deploy_capture_packet(
+            captured_evidence=capture,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "failed_claim"),
+    [
+        ("sync_status", "OutOfSync", "ops.argo_reconciliation.application_status"),
+        ("health_status", "Degraded", "ops.argo_reconciliation.application_status"),
+        ("production_mutation_performed", 1, "ops.argo_reconciliation.application_status"),
+    ],
+)
+def test_runtime_readiness_fails_for_supplied_invalid_argo_without_binding(
+    field, value, failed_claim
+):
+    evidence = _gitops_bound_live_evidence()
+    evidence.pop("deployment_evidence_binding")
+    evidence["argo_reconciliation"][field] = value
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit="c2b8548",
+    )
+
+    assert report["status"] == "FAIL"
+    assert failed_claim in report["failed_claims"]
+
+
+def test_runtime_readiness_requires_external_expected_commit_anchor_for_binding_validation():
+    evidence = _gitops_bound_live_evidence()
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    assert report["status"] == "PASS_WITH_GAPS"
+    claim = next(item for item in report["claims"] if item["claim_id"] == "ops.gitops_deployment_evidence_binding")
+    assert claim["status"] == "not_validated"
+    assert "external_expected_commit_anchor_unverified" in claim["gaps"]
+
+
+def test_runtime_readiness_rejects_mismatched_external_expected_commit_anchor():
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_gitops_bound_live_evidence(),
+        expected_commit="b" * 40,
+    )
+
+    assert report["status"] == "FAIL"
+    assert "gitops_deployment_evidence_binding_external_expected_commit_mismatch" in report["gaps"]
+
+
+@pytest.mark.parametrize(
+    ("layer", "field", "value", "failed_claim"),
+    [
+        ("gitops_desired_state", "source_commit", "b" * 40, "ops.gitops_desired_state.includes_expected_commit"),
+        ("deployed_identity", "source_commit", "b" * 40, "live.deployed_identity.includes_expected_commit"),
+        ("deployed_identity", "live_image_set_hash", "sha256:" + "b" * 64, "ops.gitops_deployment_evidence_binding"),
+        ("argo_reconciliation", "reconciled_ops_revision", "b" * 40, "ops.gitops_deployment_evidence_binding"),
+    ],
+)
+def test_runtime_readiness_fails_for_supplied_cross_layer_mismatch_without_binding(
+    layer, field, value, failed_claim
+):
+    evidence = _gitops_bound_live_evidence()
+    evidence.pop("deployment_evidence_binding")
+    evidence[layer][field] = value
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit="c2b8548",
+    )
+
+    assert report["status"] == "FAIL"
+    assert failed_claim in report["failed_claims"]
+
+
+def test_runtime_readiness_rejects_gitops_raw_manifest_and_image_refs():
+    capture = _gitops_bound_live_evidence(
+        gitops_desired_state={
+            **_gitops_bound_live_evidence()["gitops_desired_state"],
+            "manifest": "private manifest",
+            "image_refs": ["private/image:tag"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="forbidden field"):
+        build_source_to_candidate_runtime_post_deploy_capture_packet(
+            captured_evidence=capture,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_gap"),
+    [
+        ("desired_commit", "other-commit", "gitops_deployment_evidence_binding_desired_commit_mismatch"),
+        ("image_set", "sha256:" + "b" * 64, "gitops_deployment_evidence_binding_image_set_hash_mismatch"),
+        ("revision", "ops-43", "gitops_deployment_evidence_binding_ops_revision_mismatch"),
+        ("sync", "OutOfSync", "gitops_deployment_evidence_binding_sync_status_mismatch"),
+        ("health", "Degraded", "gitops_deployment_evidence_binding_health_status_mismatch"),
+        ("binding_hash", "sha256:" + "b" * 64, "gitops_deployment_evidence_binding_hash_mismatch"),
+        ("stale_ref_count", 1, "gitops_deployment_evidence_binding_stale_image_ref_count_mismatch"),
+        ("desired_mutation", True, "gitops_deployment_evidence_binding_desired_state_mutation"),
+        ("deployed_mutation", True, "gitops_deployment_evidence_binding_deployed_identity_mutation"),
+    ],
+)
+def test_runtime_readiness_fails_closed_for_gitops_deployment_binding_mismatch(
+    field, value, expected_gap
+):
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=_gitops_bound_live_evidence(),
+    )
+    if field == "desired_commit":
+        packet["gitops_desired_state"]["source_commit"] = value
+    elif field == "image_set":
+        packet["deployed_identity"]["live_image_set_hash"] = value
+    elif field == "revision":
+        packet["argo_reconciliation"]["reconciled_ops_revision"] = value
+    elif field == "sync":
+        packet["argo_reconciliation"]["sync_status"] = value
+    elif field == "health":
+        packet["argo_reconciliation"]["health_status"] = value
+    elif field == "binding_hash":
+        packet["deployment_evidence_binding"]["canonical_tuple_hash"] = value
+    elif field == "stale_ref_count":
+        packet["deployed_identity"]["stale_image_ref_count"] = value
+    elif field == "desired_mutation":
+        packet["gitops_desired_state"]["production_mutation_performed"] = value
+    else:
+        packet["deployed_identity"]["production_mutation_performed"] = value
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=packet,
+        expected_commit="c2b8548",
+    )
+
+    assert report["status"] == "FAIL"
+    assert "ops.gitops_deployment_evidence_binding" in report["failed_claims"]
+    assert expected_gap in report["gaps"]
+
+
+def test_runtime_readiness_keeps_missing_gitops_deployment_binding_as_gap():
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=_gitops_bound_live_evidence(),
+    )
+    packet.pop("deployment_evidence_binding")
+    packet["evidence_provenance"]["mutation_scope"] = "none"
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=packet,
+        expected_commit="c2b8548",
+    )
+
+    assert report["status"] == "PASS_WITH_GAPS"
+    assert "ops.gitops_deployment_evidence_binding" not in report["failed_claims"]
+    assert "gitops_deployment_evidence_binding_unverified" in report["gaps"]
 
 
 def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None):
@@ -785,8 +1079,10 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
         "session_project_rollup_runtime",
         "preference_artifact_memory",
         "permission_sensitive_audit",
-        "agent_context_startup_runtime",
-        "gitops_desired_state",
+            "agent_context_startup_runtime",
+            "gitops_desired_state",
+            "argo_reconciliation",
+            "deployment_evidence_binding",
         "deployed_identity",
         "production_denials",
         "tool_schemas",
@@ -1020,11 +1316,25 @@ def test_runtime_readiness_plan_requests_gitops_desired_state_separately_from_de
 
     assert "collect_gitops_desired_state" in plan["required_steps"]
     assert plan["gap_mapping"]["collect_gitops_desired_state"] == "gitops_desired_state_unverified"
+    assert "collect_argo_reconciliation" in plan["required_steps"]
+    assert plan["gap_mapping"]["collect_argo_reconciliation"] == "argo_reconciliation_unverified"
     assert "gitops_desired_state" in template["required_packet_fields"]
+    assert "argo_reconciliation" in template["required_packet_fields"]
+    assert "deployment_evidence_binding" in template["required_packet_fields"]
     assert (
         template["packet_field_templates"]["gitops_desired_state"]["schema_version"]
         == "gitops_desired_state_identity.v1"
     )
+    assert (
+        template["packet_field_templates"]["argo_reconciliation"]["schema_version"]
+        == "argo_reconciliation_identity.v1"
+    )
+    assert (
+        template["packet_field_templates"]["deployment_evidence_binding"]["schema_version"]
+        == "deployment_evidence_binding.v1"
+    )
+    assert "desired_image_set_hash" in template["packet_field_templates"]["gitops_desired_state"]
+    assert "live_image_set_hash" in template["packet_field_templates"]["deployed_identity"]
 
 
 def test_runtime_readiness_gitops_desired_state_does_not_replace_deployed_identity():
@@ -1052,7 +1362,7 @@ def test_runtime_readiness_gitops_desired_state_does_not_replace_deployed_identi
 
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     assert report["status"] == "PASS_WITH_GAPS"
-    assert claims["ops.gitops_desired_state.includes_expected_commit"]["status"] == "validated"
+    assert claims["ops.gitops_desired_state.includes_expected_commit"]["status"] == "not_validated"
     assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "not_validated"
     assert "gitops_desired_state_unverified" not in report["gaps"]
     assert "live_deployed_identity_unverified" in report["gaps"]
@@ -1084,8 +1394,8 @@ def test_runtime_readiness_fails_when_gitops_desired_state_mismatches_expected_c
 
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     assert report["status"] == "FAIL"
-    assert "ops.gitops_desired_state.includes_expected_commit" in report["failed_claims"]
     assert claims["ops.gitops_desired_state.includes_expected_commit"]["status"] == "failed"
+    assert "ops.gitops_desired_state.includes_expected_commit" in report["failed_claims"]
     assert "gitops_desired_state_expected_commit_mismatch" in report["gaps"]
     assert report["production_mutation_performed"] is False
 
@@ -1119,7 +1429,7 @@ def test_runtime_readiness_does_not_treat_deployed_identity_as_permission_audit(
     assert report["status"] == "PASS_WITH_GAPS"
     assert report["evidence_is_live"] is True
     assert report["production_ready"] is False
-    assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "validated"
+    assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "not_validated"
     assert claims["live.production.permission_sensitive_audit"]["status"] == "not_validated"
     assert claims["live.evidence.provenance"]["status"] == "validated"
     assert "permission_sensitive_audit_unverified" in report["gaps"]
@@ -1137,7 +1447,8 @@ def test_runtime_readiness_keeps_sanitized_live_evidence_at_p7_capability_gap():
     assert report["evidence_is_live"] is False
     assert report["production_ready"] is False
     assert report["production_readiness"] == "not_ready"
-    assert report["gaps"] == ["preference_artifact_collector_capability_missing"]
+    assert "preference_artifact_collector_capability_missing" in report["gaps"]
+    assert "gitops_deployment_evidence_binding_unverified" in report["gaps"]
     claims = {claim["claim_id"]: claim for claim in report["claims"]}
     assert claims["live.mcp.review_tools_loaded"]["status"] == "validated"
     assert claims["live.agent_context.tool_hints"]["status"] == "validated"
@@ -1159,7 +1470,7 @@ def test_runtime_readiness_keeps_sanitized_live_evidence_at_p7_capability_gap():
     assert claims["live.agent_context.startup_read_path"]["status"] == "validated"
     assert claims["live.agent_context.startup_read_path"]["startup_loaded"] is True
     assert "temporal_work_recall" in claims["live.brain_objects_query.route_smokes"]["required_routes"]
-    assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "validated"
+    assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "not_validated"
     assert claims["live.production.source_to_candidate_denial"]["status"] == "denied_as_expected"
     assert claims["live.production.approval_board_denial"]["status"] == "denied_as_expected"
     assert claims["live.production.object_proposal_denial"]["status"] == "denied_as_expected"

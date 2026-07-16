@@ -27,6 +27,7 @@ from .agent_context_consumer import (
 )
 from .authority_policy import knowledge_object_class_from_id
 from .runtime_readiness import (
+    ARGO_RECONCILIATION_SCHEMA,
     ALLOWED_AGENT_CONTEXT_CONSUMERS,
     ALLOWED_AGENT_CONTEXT_TOOL_SAFE_TARGETS,
     EVIDENCE_PROVENANCE_SCHEMA,
@@ -36,6 +37,7 @@ from .runtime_readiness import (
     REQUIRED_SESSION_PROJECT_OBJECT_TYPES,
     RUNTIME_READINESS_AGENT_CONTEXT_TOOL,
     _mint_collector_attested_evidence,
+    build_deployment_evidence_binding,
 )
 
 POST_DEPLOY_MCP_CAPTURE_SCHEMA = "source_to_candidate_runtime_post_deploy_mcp_capture.v1"
@@ -107,6 +109,12 @@ _FORBIDDEN_RUNTIME_INPUT_KEYS = frozenset(
         "hostname",
         "host_topology",
         "ip_address",
+        "image",
+        "image_ref",
+        "manifest",
+        "manifest_path",
+        "raw_manifest",
+        "docker_image",
         "password",
         "private",
         "private_path",
@@ -121,6 +129,25 @@ _FORBIDDEN_RUNTIME_INPUT_KEYS = frozenset(
 )
 _FORBIDDEN_RUNTIME_INPUT_COMPACT_KEYS = frozenset(
     key.replace("_", "") for key in _FORBIDDEN_RUNTIME_INPUT_KEYS
+)
+_GITOPS_DESIRED_STATE_VIEW_KEYS = frozenset(
+    {
+        "schema_version", "images_include_expected_commit", "desired_state_source",
+        "target_revision", "source_commit", "desired_image_set_hash", "ops_revision",
+        "expected_image_ref_count", "production_mutation_performed",
+    }
+)
+_ARGO_RECONCILIATION_VIEW_KEYS = frozenset(
+    {
+        "schema_version", "reconciliation_source", "reconciled_ops_revision",
+        "sync_status", "health_status", "production_mutation_performed",
+    }
+)
+_DEPLOYED_IDENTITY_VIEW_KEYS = frozenset(
+    {
+        "contains_expected_commit", "identity_source", "source_commit",
+        "live_image_set_hash", "stale_image_ref_count", "production_mutation_performed",
+    }
 )
 _RAW_EXTERNAL_REF_MARKERS = (
     "dataset:",
@@ -175,6 +202,8 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
     project: str = "",
     consumer: str = "codex",
     expected_commit: str = "",
+    gitops_desired_state: Mapping[str, Any] | None = None,
+    argo_reconciliation: Mapping[str, Any] | None = None,
     deployed_identity: Mapping[str, Any] | None = None,
     artifact_descriptor: Mapping[str, Any] | None = None,
     collect_agent_context_startup: bool = False,
@@ -275,6 +304,8 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
             )
 
     identity = _deployed_identity_view(deployed_identity)
+    desired_state = _gitops_desired_state_view(gitops_desired_state)
+    argo_state = _argo_reconciliation_view(argo_reconciliation)
     try:
         _reject_forbidden_runtime_input_keys(runtime_packet)
         _reject_forbidden_runtime_input_keys(post_evaluator_runtime_packet)
@@ -313,6 +344,9 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         "runtime_collected_packet": _runtime_collected_packet_summary(attested_runtime_packet),
         "agent_context_product": _agent_context_product_from_context_pack(context_pack),
         "brain_objects_query_smokes": smokes,
+        "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
+        "gitops_desired_state": desired_state,
+        "argo_reconciliation": argo_state,
         "deployed_identity": identity,
         "project_scope": {
             "project": safe_project,
@@ -323,6 +357,13 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         "evidence_provenance": provenance,
         "production_mutation_performed": _runtime_packet_reports_mutation(attested_runtime_packet),
     }
+    if desired_state and argo_state and isinstance(deployed_identity, Mapping):
+        capture["deployment_evidence_binding"] = build_deployment_evidence_binding(
+            expected_commit=expected_commit,
+            gitops_desired_state=desired_state,
+            argo_reconciliation=argo_state,
+            deployed_identity=identity,
+        )
     projection_join = _live_projection_join_from_runtime_packet(attested_runtime_packet)
     if projection_join:
         capture["projection_join"] = projection_join
@@ -2090,20 +2131,50 @@ def _deployed_identity_view(value: Any) -> dict[str, Any]:
             "contains_expected_commit": False,
             "identity_source": "post_deploy_mcp_capture_forbidden_deployed_identity",
         }
-    identity_source = str(value.get("identity_source") or "")
+    if set(value) - _DEPLOYED_IDENTITY_VIEW_KEYS:
+        return {
+            "contains_expected_commit": False,
+            "identity_source": "post_deploy_mcp_capture_rejected_deployed_identity",
+        }
+    projected = _public_safe_mapping(value)
+    identity_source = str(projected.get("identity_source") or "")
     allowed_sources = {
         "redacted_artifact_identity_summary",
         "redacted_live_runtime_evidence",
-        "sanitized_ops_manifest_summary",
     }
     return {
-        "contains_expected_commit": value.get("contains_expected_commit") is True,
-        "identity_source": (
-            identity_source
-            if identity_source in allowed_sources
-            else "redacted_unrecognized_identity_source"
-        ),
+        "contains_expected_commit": projected.get("contains_expected_commit") is True,
+        "identity_source": identity_source if identity_source in allowed_sources else "redacted_unrecognized_identity_source",
+        **{
+            key: projected[key]
+            for key in _DEPLOYED_IDENTITY_VIEW_KEYS - {"contains_expected_commit", "identity_source"}
+            if key in projected
+        },
     }
+
+
+def _gitops_desired_state_view(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    _reject_forbidden_runtime_input_keys(value)
+    if set(value) - _GITOPS_DESIRED_STATE_VIEW_KEYS:
+        raise ValueError("runtime evidence contains an unsupported field")
+    projected = _public_safe_mapping(value)
+    return {
+        key: projected.get(key)
+        for key in _GITOPS_DESIRED_STATE_VIEW_KEYS
+        if key in projected
+    }
+
+
+def _argo_reconciliation_view(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    _reject_forbidden_runtime_input_keys(value)
+    if set(value) - _ARGO_RECONCILIATION_VIEW_KEYS:
+        raise ValueError("runtime evidence contains an unsupported field")
+    projected = _public_safe_mapping(value)
+    return {key: projected.get(key) for key in _ARGO_RECONCILIATION_VIEW_KEYS if key in projected}
 
 
 def _reject_forbidden_runtime_input_keys(value: Any) -> None:

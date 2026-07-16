@@ -688,6 +688,7 @@ def golden_query_eval_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--phase-coverage", action="store_true")
     parser.add_argument("--source-to-authority-gate", action="store_true")
     parser.add_argument("--activation-progress", action="store_true")
+    parser.add_argument("--expected-commit", default="")
     parser.add_argument("--live-evidence-file", default="")
     parser.add_argument("--post-deploy-capture-file", default="")
     args = parser.parse_args(argv)
@@ -702,7 +703,12 @@ def golden_query_eval_main(argv: list[str] | None = None) -> int:
                     label="post-deploy capture",
                 ),
             )
-        _print_json(build_product_activation_progress_report(live_evidence=live_evidence))
+        _print_json(
+            build_product_activation_progress_report(
+                live_evidence=live_evidence,
+                expected_commit=args.expected_commit,
+            )
+        )
         return 0
     if args.source_to_authority_gate:
         _print_json(build_source_to_authority_quality_gate_report())
@@ -728,6 +734,8 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     parser.add_argument("--collect-post-deploy-mcp-capture", action="store_true")
     parser.add_argument("--collect-agent-context-startup", action="store_true")
     parser.add_argument("--mcp-url", default="")
+    parser.add_argument("--gitops-desired-state-file", default="")
+    parser.add_argument("--argo-reconciliation-file", default="")
     parser.add_argument("--deployed-identity-file", default="")
     parser.add_argument("--artifact-descriptor-file", default="")
     parser.add_argument("--repository", default="")
@@ -765,6 +773,22 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
             if args.deployed_identity_file
             else None
         )
+        gitops_desired_state = (
+            _load_json_mapping(
+                args.gitops_desired_state_file,
+                label="gitops desired state",
+            )
+            if args.gitops_desired_state_file
+            else None
+        )
+        argo_reconciliation = (
+            _load_json_mapping(
+                args.argo_reconciliation_file,
+                label="argo reconciliation",
+            )
+            if args.argo_reconciliation_file
+            else None
+        )
         artifact_descriptor = (
             _load_json_mapping(
                 args.artifact_descriptor_file,
@@ -781,6 +805,8 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 branch=args.branch,
                 project=args.project,
                 consumer=args.consumer,
+                gitops_desired_state=gitops_desired_state,
+                argo_reconciliation=argo_reconciliation,
                 deployed_identity=deployed_identity,
                 artifact_descriptor=artifact_descriptor,
                 collect_agent_context_startup=args.collect_agent_context_startup,
