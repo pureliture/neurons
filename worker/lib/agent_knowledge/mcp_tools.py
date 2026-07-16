@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .permission_audit import PERMISSION_AUDIT_TOOL_NAME
+
 TOOL_NAME = "knowledge.search"
 BRAIN_QUERY_TOOL_NAME = "brain.query"
 BRAIN_RESOLVE_TOOL_NAME = "brain.resolve"
@@ -21,6 +23,8 @@ BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME = "brain_source_to_candidate_graph"
 BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME = "brain_candidate_review_edit"
 BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME = "brain_approval_board_decide"
 BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME = "brain_source_to_candidate_runtime_readiness"
+BRAIN_RUNTIME_BUILD_IDENTITY_TOOL_NAME = "brain_runtime_build_identity"
+BRAIN_PERMISSION_SENSITIVE_AUDIT_PROBE_TOOL_NAME = PERMISSION_AUDIT_TOOL_NAME
 BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME = "brain_object_proposal_create"
 BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME = "brain_object_decision_commit"
 BRAIN_REVIEW_PROPOSALS_TOOL_NAME = "brain_review_proposals"
@@ -82,6 +86,8 @@ _DISPATCH_OWNER_BY_TOOL_NAME = {
     BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME: "jsonrpc_brain",
     BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME: "jsonrpc_brain",
     BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_RUNTIME_BUILD_IDENTITY_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_PERMISSION_SENSITIVE_AUDIT_PROBE_TOOL_NAME: "jsonrpc_brain",
     BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: "jsonrpc_brain",
     BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: "jsonrpc_brain",
     BRAIN_REVIEW_PROPOSALS_TOOL_NAME: "jsonrpc_brain",
@@ -539,6 +545,47 @@ def list_tools() -> list[dict]:
                     "project": {"type": "string", "default": ""},
                     "consumer": {"type": "string", "default": "codex"},
                 },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_RUNTIME_BUILD_IDENTITY_TOOL_NAME,
+            "description": "packaged runtime build identity의 고정 public-safe projection을 read-only로 반환한다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": BRAIN_PERMISSION_SENSITIVE_AUDIT_PROBE_TOOL_NAME,
+            "description": "explicit opt-in에서만 current Jenkins build에 결합된 single bounded denial과 전용 audit-store readback을 검증한다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["deny_once"]},
+                    "operation_hash": {
+                        "type": "string",
+                        "pattern": "^sha256:[0-9a-f]{64}$",
+                        "description": "build association hash, packet ops revision, external expected commit, fixed action의 canonical SHA-256이다.",
+                    },
+                    "build_association_hash": {
+                        "type": "string",
+                        "pattern": "^sha256:[0-9a-f]{64}$",
+                        "description": "current Jenkins build externalizable id의 SHA-256이며 raw job id는 허용하지 않는다.",
+                    },
+                    "projected_service_account_token": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 16384,
+                    },
+                },
+                "required": [
+                    "mode",
+                    "operation_hash",
+                    "build_association_hash",
+                    "projected_service_account_token",
+                ],
                 "additionalProperties": False,
             },
         },

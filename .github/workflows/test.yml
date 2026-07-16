@@ -81,6 +81,7 @@ jobs:
           --health-retries 10
     env:
       LEDGER_PG_DSN: postgresql://neurons_test:neurons_test@127.0.0.1:5432/neurons_test
+      REQUIRE_LEDGER_PG_DSN: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -95,6 +96,10 @@ jobs:
       - name: Run PostgreSQL parity tests
         working-directory: worker
         run: uv run --group dev pytest tests/test_pg_parity.py tests/test_ledger_pg_migrate.py -q
+
+      - name: Verify permission audit PostgreSQL marker is read-only
+        working-directory: worker
+        run: uv run --group dev pytest tests/test_pg_parity.py::test_permission_audit_marker_is_read_only_and_xid_free -q
 
   worker-mcp-http-pytest:
     name: worker mcp-http pytest (uv)

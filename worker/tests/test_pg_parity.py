@@ -18,6 +18,8 @@ from agent_knowledge.ledger import Ledger, SESSION_MEMORY_REGENERATION_EVIDENCE_
 from agent_knowledge.postgres_db_adapter import PostgresLedgerDbAdapter
 
 PG_DSN = os.environ.get("LEDGER_PG_DSN", "")
+if os.environ.get("REQUIRE_LEDGER_PG_DSN") == "1" and not PG_DSN:
+    raise RuntimeError("LEDGER_PG_DSN is required by the PostgreSQL CI gate")
 pytestmark = pytest.mark.skipif(not PG_DSN, reason="LEDGER_PG_DSN 미설정 (live Postgres parity)")
 
 SID = "sha256:parity-session"
@@ -33,6 +35,38 @@ def _reset_pg(dsn: str) -> None:
     with psycopg.connect(dsn) as conn:
         conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
         conn.commit()
+
+
+def test_permission_audit_marker_is_read_only_and_xid_free():
+    from agent_knowledge.permission_audit import _read_postgres_database_marker
+
+    _reset_pg(PG_DSN)
+    adapter = PostgresLedgerDbAdapter(PG_DSN, read_only=True)
+    with adapter.connect() as connection:
+        before = connection.execute(
+            """
+            SELECT txid_current_if_assigned()::text AS xid,
+                   current_setting('transaction_read_only') AS transaction_read_only,
+                   to_regprocedure('public.julianday(text)')::text AS compatibility_function
+            """
+        ).fetchone()
+        marker = _read_postgres_database_marker(connection)
+        after = connection.execute(
+            """
+            SELECT txid_current_if_assigned()::text AS xid,
+                   current_setting('transaction_read_only') AS transaction_read_only,
+                   to_regprocedure('public.julianday(text)')::text AS compatibility_function
+            """
+        ).fetchone()
+
+    assert marker["count"] == 1
+    assert marker["hash"].startswith("sha256:")
+    assert before["xid"] is None
+    assert after["xid"] is None
+    assert before["transaction_read_only"] == "on"
+    assert after["transaction_read_only"] == "on"
+    assert before["compatibility_function"] is None
+    assert after["compatibility_function"] is None
 
 
 def _sm(ledger, kid, doc):

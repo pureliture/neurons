@@ -1,0 +1,23 @@
+FROM python:3.13-slim
+
+ARG NEURONS_SOURCE_COMMIT
+RUN printf '%s' "${NEURONS_SOURCE_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'
+LABEL org.opencontainers.image.revision=${NEURONS_SOURCE_COMMIT}
+LABEL org.opencontainers.image.source="https://github.com/pureliture/neurons"
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY lib ./lib
+RUN pip install --no-cache-dir --no-deps .
+
+RUN useradd --create-home --shell /usr/sbin/nologin appuser \
+    && mkdir -p /audit \
+    && chown appuser:appuser /audit
+
+USER appuser
+
+CMD ["permission-audit-store", "--database", "/audit/permission-audit.sqlite3", "--host", "127.0.0.1", "--port", "8771"]

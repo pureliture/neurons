@@ -24,6 +24,8 @@ from .mcp_tools import (
     BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
     BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
     BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+    BRAIN_RUNTIME_BUILD_IDENTITY_TOOL_NAME,
+    BRAIN_PERMISSION_SENSITIVE_AUDIT_PROBE_TOOL_NAME,
     BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
     BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
     BRAIN_DRIFT_EXPLAIN_TOOL_NAME,
@@ -234,6 +236,11 @@ def _tool_dispatch_registry() -> dict[str, ToolDispatch]:
         (
             BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
             _dispatch_brain_source_to_candidate_runtime_readiness_tool,
+        ),
+        (BRAIN_RUNTIME_BUILD_IDENTITY_TOOL_NAME, _dispatch_brain_runtime_build_identity_tool),
+        (
+            BRAIN_PERMISSION_SENSITIVE_AUDIT_PROBE_TOOL_NAME,
+            _dispatch_brain_permission_sensitive_audit_probe_tool,
         ),
         (BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME, _dispatch_brain_object_proposal_create_tool),
         (BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME, _dispatch_brain_object_decision_commit_tool),
@@ -572,6 +579,43 @@ def _dispatch_brain_source_to_candidate_runtime_readiness_tool(
         consumer=str(arguments.get("consumer") or "codex"),
     )
     return _tool_result(result)
+
+
+def _dispatch_brain_runtime_build_identity_tool(
+    tool_name: str,
+    arguments: dict,
+    service: KnowledgeSearchService,
+) -> dict:
+    _ = tool_name
+    if arguments:
+        raise ValueError("runtime build identity takes no arguments")
+    return _tool_result(service.brain_runtime_build_identity())
+
+
+def _dispatch_brain_permission_sensitive_audit_probe_tool(
+    tool_name: str,
+    arguments: dict,
+    service: KnowledgeSearchService,
+) -> dict:
+    _ = tool_name
+    allowed_arguments = {
+        "mode",
+        "operation_hash",
+        "build_association_hash",
+        "projected_service_account_token",
+    }
+    if set(arguments) != allowed_arguments:
+        raise ValueError("unexpected permission audit probe arguments")
+    return _tool_result(
+        service.brain_permission_sensitive_audit_probe(
+            mode=arguments.get("mode"),
+            operation_hash=arguments.get("operation_hash"),
+            build_association_hash=arguments.get("build_association_hash"),
+            projected_service_account_token=arguments.get(
+                "projected_service_account_token"
+            ),
+        )
+    )
 
 
 def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
