@@ -10,7 +10,8 @@ from typing import Any
 RUNTIME_BUILD_IDENTITY_SCHEMA = "brain_runtime_build_identity.v1"
 DEFAULT_RUNTIME_BUILD_IDENTITY_PATH = Path("/app/build-identity.json")
 
-_SOURCE_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+_BUILD_SOURCE_IDENTITY_RE = re.compile(r"^[0-9a-f]{40}$")
+_SOURCE_COMMIT_RE = re.compile(r"^(?!0{40}$)[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PACKAGED_KEYS = frozenset(
     {"schema_version", "source_commit", "build_content_manifest_hash"}
@@ -42,7 +43,7 @@ def write_runtime_build_identity(
     content_root: str | Path,
     output_path: str | Path,
 ) -> dict[str, str]:
-    if _SOURCE_COMMIT_RE.fullmatch(source_commit) is None:
+    if _BUILD_SOURCE_IDENTITY_RE.fullmatch(source_commit) is None:
         raise RuntimeBuildIdentityError("runtime build source commit is invalid")
     root = Path(content_root)
     candidates = [root / "pyproject.toml"]

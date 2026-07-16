@@ -186,6 +186,35 @@ def test_build_identity_writer_binds_full_commit_to_installed_content(tmp_path):
     }
 
 
+def test_local_compose_source_sentinel_cannot_claim_deployable_identity(tmp_path):
+    from agent_knowledge.runtime_build_identity import (
+        RuntimeBuildIdentityError,
+        load_runtime_build_identity,
+        write_runtime_build_identity,
+    )
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'fixture'\n",
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "build-identity.json"
+
+    identity = write_runtime_build_identity(
+        source_commit="0" * 40,
+        content_root=tmp_path,
+        output_path=output_path,
+    )
+
+    assert identity["source_commit"] == "0" * 40
+    with pytest.raises(
+        RuntimeBuildIdentityError,
+        match="packaged runtime build identity commit is invalid",
+    ):
+        load_runtime_build_identity(output_path)
+
+
 def test_build_identity_ignores_generated_python_and_install_cache(tmp_path):
     from agent_knowledge.runtime_build_identity import write_runtime_build_identity
 
