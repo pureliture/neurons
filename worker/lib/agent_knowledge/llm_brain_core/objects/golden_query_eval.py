@@ -392,11 +392,14 @@ def build_source_to_authority_quality_gate_report() -> dict[str, Any]:
 
 
 def build_product_activation_progress_report(
-    *, live_evidence: Mapping[str, Any] | None = None
+    *, live_evidence: Mapping[str, Any] | None = None, expected_commit: str = ""
 ) -> dict[str, Any]:
     phase_coverage = build_phase_golden_query_coverage_report()
     source_gate = build_source_to_authority_quality_gate_report()
-    product_evidence_summary = _product_evidence_summary(live_evidence=live_evidence)
+    product_evidence_summary = _product_evidence_summary(
+        live_evidence=live_evidence,
+        expected_commit=expected_commit,
+    )
     product_evidence_result = evaluate_product_evidence_summary(product_evidence_summary)
     phases_by_id = {
         str(item.get("phase") or ""): item
@@ -597,14 +600,17 @@ def _activation_phase_progress(phase: str, coverage: Mapping[str, Any]) -> dict[
 
 
 def _product_evidence_summary(
-    *, live_evidence: Mapping[str, Any] | None = None
+    *, live_evidence: Mapping[str, Any] | None = None, expected_commit: str = ""
 ) -> list[dict[str, Any]]:
     p2 = _p2_reference_corpus_evidence()
     p3 = _p3_projection_join_evidence(live_evidence=live_evidence)
     p4 = _p4_replacement_current_evidence(live_evidence=live_evidence)
     p6 = _p6_session_project_rollup_evidence(live_evidence=live_evidence)
     p7 = _p7_preference_artifact_evidence(live_evidence=live_evidence)
-    p8 = _p8_runtime_authority_evidence(live_evidence=live_evidence)
+    p8 = _p8_runtime_authority_evidence(
+        live_evidence=live_evidence,
+        expected_commit=expected_commit,
+    )
     p9 = _p9_agent_context_evidence(preference_preview=p7, live_evidence=live_evidence)
     return [p2, p3, p4, p6, p7, p8, p9]
 
@@ -1748,10 +1754,13 @@ def _p7_preference_artifact_product_status(
 
 
 def _p8_runtime_authority_evidence(
-    *, live_evidence: Mapping[str, Any] | None = None
+    *, live_evidence: Mapping[str, Any] | None = None, expected_commit: str = ""
 ) -> dict[str, Any]:
     if live_evidence:
-        live_summary = _p8_live_runtime_authority_evidence(live_evidence)
+        live_summary = _p8_live_runtime_authority_evidence(
+            live_evidence,
+            expected_commit=expected_commit,
+        )
         if live_summary:
             return live_summary
 
@@ -2093,7 +2102,9 @@ def _p8_runtime_authority_evidence(
     }
 
 
-def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dict[str, Any]:
+def _p8_live_runtime_authority_evidence(
+    live_evidence: Mapping[str, Any], *, expected_commit: str = ""
+) -> dict[str, Any]:
     from .runtime_readiness import build_source_to_candidate_runtime_readiness_report
 
     identity = live_evidence.get("deployed_identity")
@@ -2102,10 +2113,13 @@ def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dic
     audit = audit if isinstance(audit, Mapping) else {}
     desired_state = live_evidence.get("gitops_desired_state")
     desired_state = desired_state if isinstance(desired_state, Mapping) else {}
-    if not identity and not audit and not desired_state:
+    argo_reconciliation = live_evidence.get("argo_reconciliation")
+    argo_reconciliation = argo_reconciliation if isinstance(argo_reconciliation, Mapping) else {}
+    binding = live_evidence.get("deployment_evidence_binding")
+    binding = binding if isinstance(binding, Mapping) else {}
+    if not identity and not audit and not desired_state and not argo_reconciliation and not binding:
         return {}
 
-    expected_commit = str(live_evidence.get("expected_commit") or "")
     report = build_source_to_candidate_runtime_readiness_report(
         live_evidence=live_evidence,
         expected_commit=expected_commit,
@@ -2117,9 +2131,11 @@ def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dic
     }
     permission_claim = claims.get("live.production.permission_sensitive_audit", {})
     desired_state_claim = claims.get("ops.gitops_desired_state.includes_expected_commit", {})
+    argo_claim = claims.get("ops.argo_reconciliation.application_status", {})
     identity_claim = claims.get("live.deployed_identity.includes_expected_commit", {})
+    binding_claim = claims.get("ops.gitops_deployment_evidence_binding", {})
     provenance_claim = claims.get("live.evidence.provenance", {})
-    p8_claims = [permission_claim, desired_state_claim, identity_claim]
+    p8_claims = [permission_claim, desired_state_claim, argo_claim, identity_claim, binding_claim]
     claim_gaps = _dedupe(
         [
             *(
@@ -2140,19 +2156,28 @@ def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dic
     evidence_is_live = bool(report.get("evidence_is_live"))
     permission_status = str(permission_claim.get("status") or "not_validated")
     desired_state_status = str(desired_state_claim.get("status") or "not_validated")
+    argo_status = str(argo_claim.get("status") or "not_validated")
     identity_status = str(identity_claim.get("status") or "not_validated")
+    binding_status = str(binding_claim.get("status") or "not_validated")
     provenance_status = _p8_scoped_provenance_status(provenance_claim)
     authority_write_performed = permission_claim.get("production_mutation_performed") is True
     desired_state_mutation_performed = desired_state_claim.get("production_mutation_performed") is True
+    argo_mutation_performed = argo_claim.get("production_mutation_performed") is True
+    deployed_identity_mutation_performed = identity_claim.get("production_mutation_performed") is True
     production_mutation_performed = bool(
         authority_write_performed
         or permission_claim.get("production_mutation_performed") is True
         or desired_state_mutation_performed
+        or argo_mutation_performed
+        or deployed_identity_mutation_performed
+        or binding_claim.get("production_mutation_performed") is True
     )
     status = _p8_runtime_authority_product_status(
         permission_status=permission_status,
         desired_state_status=desired_state_status,
+        argo_status=argo_status,
         identity_status=identity_status,
+        binding_status=binding_status,
         provenance_status=provenance_status,
         evidence_is_live=evidence_is_live,
         production_mutation_performed=production_mutation_performed,
@@ -2180,6 +2205,10 @@ def _p8_live_runtime_authority_evidence(live_evidence: Mapping[str, Any]) -> dic
         "gitops_desired_state_source": str(desired_state_claim.get("desired_state_source") or ""),
         "gitops_desired_state_target_revision": str(desired_state_claim.get("target_revision") or ""),
         "gitops_desired_state_mutation_performed": desired_state_mutation_performed,
+        "argo_reconciliation_claim_status": argo_status,
+        "argo_reconciliation_mutation_performed": argo_mutation_performed,
+        "deployed_identity_mutation_performed": deployed_identity_mutation_performed,
+        "gitops_deployment_binding_claim_status": binding_status,
         "deployed_identity_claim_status": identity_status,
         "source_commit_matches_pr_head": source_commit_matches,
         "deployed_identity_source": str(identity_claim.get("identity_source") or ""),
@@ -2230,7 +2259,9 @@ def _p8_runtime_authority_product_status(
     *,
     permission_status: str,
     desired_state_status: str,
+    argo_status: str,
     identity_status: str,
+    binding_status: str,
     provenance_status: str,
     evidence_is_live: bool,
     production_mutation_performed: bool,
@@ -2239,7 +2270,9 @@ def _p8_runtime_authority_product_status(
     if (
         permission_status == "failed"
         or desired_state_status == "failed"
+        or argo_status == "failed"
         or identity_status == "failed"
+        or binding_status == "failed"
         or provenance_status == "failed"
         or production_mutation_performed
     ):
@@ -2247,7 +2280,9 @@ def _p8_runtime_authority_product_status(
     if (
         permission_status == "validated"
         and desired_state_status == "validated"
+        and argo_status == "validated"
         and identity_status == "validated"
+        and binding_status == "validated"
         and provenance_status == "validated"
         and evidence_is_live
         and not gaps

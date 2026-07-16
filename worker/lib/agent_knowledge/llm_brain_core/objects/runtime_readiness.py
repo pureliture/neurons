@@ -79,6 +79,8 @@ ALLOWED_AGENT_CONTEXT_TOOL_SAFE_TARGETS = {
 }
 EVIDENCE_PROVENANCE_SCHEMA = "source_to_candidate_runtime_evidence_provenance.v1"
 GITOPS_DESIRED_STATE_SCHEMA = "gitops_desired_state_identity.v1"
+ARGO_RECONCILIATION_SCHEMA = "argo_reconciliation_identity.v1"
+DEPLOYMENT_EVIDENCE_BINDING_SCHEMA = "deployment_evidence_binding.v1"
 PROJECTION_JOIN_RUNTIME_SCHEMA = "object_extraction_projection_join_preview.v1"
 SESSION_PROJECT_ROLLUP_RUNTIME_SCHEMA = "session_project_rollup_runtime_evidence.v1"
 SESSION_PROJECT_ROLLUP_PREVIEW_SCHEMA = "object_extraction_session_project_rollup_preview.v1"
@@ -93,6 +95,43 @@ _COLLECTOR_ATTESTABLE_FIELDS = frozenset(
         "preference_artifact_memory",
     }
 )
+
+_GITOPS_DESIRED_STATE_KEYS = frozenset(
+    {
+        "schema_version",
+        "images_include_expected_commit",
+        "desired_state_source",
+        "target_revision",
+        "source_commit",
+        "desired_image_set_hash",
+        "ops_revision",
+        "expected_image_ref_count",
+        "production_mutation_performed",
+    }
+)
+_ARGO_RECONCILIATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "reconciliation_source",
+        "reconciled_ops_revision",
+        "sync_status",
+        "health_status",
+        "production_mutation_performed",
+    }
+)
+_DEPLOYED_IDENTITY_KEYS = frozenset(
+    {
+        "contains_expected_commit",
+        "identity_source",
+        "source_commit",
+        "live_image_set_hash",
+        "stale_image_ref_count",
+        "production_mutation_performed",
+    }
+)
+_DEPLOYMENT_EVIDENCE_BINDING_KEYS = frozenset({"schema_version", "canonical_tuple_hash"})
+_SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_PUBLIC_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@-]{0,119}$")
 
 
 class _CollectorAttestedEvidence(dict[str, Any]):
@@ -171,6 +210,12 @@ _RUNTIME_EVIDENCE_FORBIDDEN_KEYS = frozenset(
         "hostname",
         "host_topology",
         "ip_address",
+        "image",
+        "image_ref",
+        "manifest",
+        "manifest_path",
+        "raw_manifest",
+        "docker_image",
         "password",
         "private",
         "private_path",
@@ -250,6 +295,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
         "collect_permission_sensitive_audit_runtime",
         "probe_agent_context_startup_runtime",
         "collect_gitops_desired_state",
+        "collect_argo_reconciliation",
         "collect_deployed_identity",
         "probe_production_no_mutation_denials",
         "collect_object_authority_gate_policy",
@@ -305,6 +351,8 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
             "raw_dataset_id",
             "raw_document_id",
             "raw_private_runtime_evidence",
+            "raw_gitops_manifest",
+            "raw_image_reference",
         ],
         "gap_mapping": {
             "collect_mcp_tool_inventory": "live_mcp_review_tools_unverified",
@@ -317,6 +365,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
             "collect_permission_sensitive_audit_runtime": "permission_sensitive_audit_unverified",
             "probe_agent_context_startup_runtime": "live_agent_context_startup_unverified",
             "collect_gitops_desired_state": "gitops_desired_state_unverified",
+            "collect_argo_reconciliation": "argo_reconciliation_unverified",
             "collect_deployed_identity": "live_deployed_identity_unverified",
             "probe_production_no_mutation_denials": "production_denial_smokes_unverified",
             "collect_object_authority_gate_policy": "live_object_authority_gate_policy_unverified",
@@ -383,6 +432,8 @@ def build_source_to_candidate_runtime_evidence_packet_template(
             "permission_sensitive_audit",
             "agent_context_startup_runtime",
             "gitops_desired_state",
+            "argo_reconciliation",
+            "deployment_evidence_binding",
             "deployed_identity",
             "production_denials",
             "tool_schemas",
@@ -404,6 +455,21 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
     """Normalize a public-safe post-deploy shadow capture into evaluator input."""
 
     captured = captured_evidence if isinstance(captured_evidence, Mapping) else {}
+    gitops_desired_state = captured.get("gitops_desired_state")
+    argo_reconciliation = captured.get("argo_reconciliation")
+    deployed_identity = captured.get("deployed_identity")
+    _reject_forbidden_runtime_evidence_keys(gitops_desired_state)
+    _reject_forbidden_runtime_evidence_keys(argo_reconciliation)
+    _reject_forbidden_runtime_evidence_keys(deployed_identity)
+    safe_expected_commit = public_safe_text(
+        str(captured.get("expected_commit") or ""), max_chars=80
+    )
+    safe_desired_state = _public_safe_mapping(gitops_desired_state)
+    safe_argo_reconciliation = _public_safe_mapping(argo_reconciliation)
+    safe_deployed_identity = _public_safe_mapping(deployed_identity)
+    supplied_binding = captured.get("deployment_evidence_binding")
+    _reject_forbidden_runtime_evidence_keys(supplied_binding)
+    binding = _public_safe_mapping(supplied_binding) if isinstance(supplied_binding, Mapping) else {}
     collection = captured.get("collection")
     collection = collection if isinstance(collection, Mapping) else {}
     provenance = captured.get("evidence_provenance")
@@ -420,8 +486,11 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         "preference_artifact_memory": _public_safe_mapping(captured.get("preference_artifact_memory")),
         "permission_sensitive_audit": _public_safe_mapping(captured.get("permission_sensitive_audit")),
         "agent_context_startup_runtime": _public_safe_mapping(captured.get("agent_context_startup_runtime")),
-        "gitops_desired_state": _public_safe_mapping(captured.get("gitops_desired_state")),
-        "deployed_identity": _public_safe_mapping(captured.get("deployed_identity")),
+        "expected_commit": safe_expected_commit,
+        "gitops_desired_state": safe_desired_state,
+        "argo_reconciliation": safe_argo_reconciliation,
+        "deployment_evidence_binding": binding,
+        "deployed_identity": safe_deployed_identity,
         "production_denials": _public_safe_mapping(captured.get("production_denials")),
         "tool_schemas": _public_safe_mapping(captured.get("tool_schemas")),
         "production_authority_gate": _public_safe_mapping(captured.get("production_authority_gate")),
@@ -455,6 +524,27 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
             attested_fields=attested_fields,
         )
     return packet
+
+
+def build_deployment_evidence_binding(
+    *,
+    expected_commit: str,
+    gitops_desired_state: Mapping[str, Any],
+    argo_reconciliation: Mapping[str, Any],
+    deployed_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Hash a public consistency binding across desired, Argo, and live identity."""
+
+    canonical_tuple = _deployment_evidence_binding_tuple(
+        expected_commit=expected_commit,
+        gitops_desired_state=gitops_desired_state,
+        argo_reconciliation=argo_reconciliation,
+        deployed_identity=deployed_identity,
+    )
+    return {
+        "schema_version": DEPLOYMENT_EVIDENCE_BINDING_SCHEMA,
+        "canonical_tuple_hash": hash_payload(canonical_tuple),
+    }
 
 
 def build_source_to_candidate_runtime_shadow_readiness_report(
@@ -2159,11 +2249,31 @@ def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
             "images_include_expected_commit": "collector_sets_boolean",
             "desired_state_source": "sanitized_ops_manifest_summary",
             "target_revision": "collector_sets_public_ref",
+            "source_commit": "collector_sets_expected_commit",
+            "desired_image_set_hash": "sha256:<64-hex>",
+            "ops_revision": "collector_sets_public_ref",
+            "expected_image_ref_count": "collector_sets_positive_integer",
             "production_mutation_performed": False,
+        },
+        "argo_reconciliation": {
+            "schema_version": ARGO_RECONCILIATION_SCHEMA,
+            "reconciliation_source": "sanitized_argo_application_summary",
+            "reconciled_ops_revision": "collector_sets_public_ref",
+            "sync_status": "Synced",
+            "health_status": "Healthy",
+            "production_mutation_performed": False,
+        },
+        "deployment_evidence_binding": {
+            "schema_version": DEPLOYMENT_EVIDENCE_BINDING_SCHEMA,
+            "canonical_tuple_hash": "sha256:<64-hex>",
         },
         "deployed_identity": {
             "contains_expected_commit": "collector_sets_boolean",
-            "identity_source": "redacted_artifact_identity_summary",
+            "identity_source": "redacted_live_runtime_evidence",
+            "source_commit": "collector_sets_expected_commit",
+            "live_image_set_hash": "sha256:<64-hex>",
+            "stale_image_ref_count": 0,
+            "production_mutation_performed": False,
         },
         "production_denials": {
             tool_name: {
@@ -2368,6 +2478,14 @@ def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
             "production_mutation_performed": False,
         },
         {
+            "step_id": "collect_argo_reconciliation",
+            "evidence_field": "argo_reconciliation",
+            "required_values": [ARGO_RECONCILIATION_SCHEMA, "Synced", "Healthy"],
+            "safe_target": "sanitized_argo_application_summary",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
             "step_id": "collect_deployed_identity",
             "evidence_field": "deployed_identity",
             "required_values": ["contains_expected_commit"],
@@ -2423,7 +2541,9 @@ def build_source_to_candidate_runtime_readiness_report(
         _live_permission_sensitive_audit_claim(evidence),
         _live_agent_context_startup_claim(evidence),
         _gitops_desired_state_claim(evidence, expected_commit=expected_commit),
+        _argo_reconciliation_claim(evidence),
         _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
+        _deployment_evidence_binding_claim(evidence, expected_commit=expected_commit),
         _live_object_authority_production_gate_policy_claim(evidence),
         _live_object_authority_bounded_execution_claim(evidence),
         _live_object_authority_replacement_current_claim(evidence),
@@ -4342,31 +4462,153 @@ def _agent_context_startup_reports_mutation(
     )
 
 
+def _strict_int_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _is_public_ref(value: Any) -> bool:
+    return isinstance(value, str) and bool(_PUBLIC_REF_RE.fullmatch(value))
+
+
+def _is_sha256_digest(value: Any) -> bool:
+    return isinstance(value, str) and bool(_SHA256_DIGEST_RE.fullmatch(value))
+
+
+def _unknown_keys(value: Mapping[str, Any], allowed: frozenset[str]) -> list[str]:
+    return ["unexpected_field" for key in value if key not in allowed]
+
+
+def _gitops_desired_state_errors(value: Mapping[str, Any]) -> list[str]:
+    if not value:
+        return ["gitops_desired_state_unverified"]
+    errors = _unknown_keys(value, _GITOPS_DESIRED_STATE_KEYS)
+    if value.get("schema_version") != GITOPS_DESIRED_STATE_SCHEMA:
+        errors.append("gitops_desired_state_schema_mismatch")
+    if value.get("images_include_expected_commit") is not True:
+        errors.append("gitops_desired_state_expected_commit_mismatch")
+    if value.get("desired_state_source") != "sanitized_ops_manifest_summary":
+        errors.append("gitops_desired_state_source_invalid")
+    if value.get("target_revision") != "main":
+        errors.append("gitops_desired_state_target_revision_invalid")
+    if not _is_public_ref(value.get("source_commit")):
+        errors.append("gitops_desired_state_source_commit_invalid")
+    if not _is_sha256_digest(value.get("desired_image_set_hash")):
+        errors.append("gitops_desired_state_image_set_hash_invalid")
+    if not _is_public_ref(value.get("ops_revision")):
+        errors.append("gitops_desired_state_ops_revision_invalid")
+    count = _strict_int_or_none(value.get("expected_image_ref_count"))
+    if count is None or count <= 0:
+        errors.append("gitops_desired_state_expected_image_ref_count_invalid")
+    if value.get("production_mutation_performed") is not False:
+        errors.append("gitops_desired_state_mutation_invalid")
+    return _dedupe(errors)
+
+
+def _argo_reconciliation_errors(value: Mapping[str, Any]) -> list[str]:
+    if not value:
+        return ["argo_reconciliation_unverified"]
+    errors = _unknown_keys(value, _ARGO_RECONCILIATION_KEYS)
+    if value.get("schema_version") != ARGO_RECONCILIATION_SCHEMA:
+        errors.append("argo_reconciliation_schema_mismatch")
+    if value.get("reconciliation_source") != "sanitized_argo_application_summary":
+        errors.append("argo_reconciliation_source_invalid")
+    if not _is_public_ref(value.get("reconciled_ops_revision")):
+        errors.append("argo_reconciliation_revision_invalid")
+    if value.get("sync_status") != "Synced":
+        errors.append("argo_reconciliation_sync_status_invalid")
+    if value.get("health_status") != "Healthy":
+        errors.append("argo_reconciliation_health_status_invalid")
+    if value.get("production_mutation_performed") is not False:
+        errors.append("argo_reconciliation_mutation_invalid")
+    return _dedupe(errors)
+
+
+def _deployed_identity_errors(value: Mapping[str, Any]) -> list[str]:
+    if not value:
+        return ["live_deployed_identity_unverified"]
+    errors = _unknown_keys(value, _DEPLOYED_IDENTITY_KEYS)
+    if value.get("contains_expected_commit") is not True:
+        errors.append("live_deployed_identity_expected_commit_unverified")
+    if value.get("identity_source") != "redacted_live_runtime_evidence":
+        errors.append("live_deployed_identity_source_invalid")
+    if not _is_public_ref(value.get("source_commit")):
+        errors.append("live_deployed_identity_source_commit_invalid")
+    if not _is_sha256_digest(value.get("live_image_set_hash")):
+        errors.append("live_deployed_identity_image_set_hash_invalid")
+    if _strict_int_or_none(value.get("stale_image_ref_count")) != 0:
+        errors.append("live_deployed_identity_stale_image_ref_count_invalid")
+    if value.get("production_mutation_performed") is not False:
+        errors.append("live_deployed_identity_mutation_invalid")
+    return _dedupe(errors)
+
+
+def _binding_errors(value: Mapping[str, Any]) -> list[str]:
+    errors = _unknown_keys(value, _DEPLOYMENT_EVIDENCE_BINDING_KEYS)
+    if value.get("schema_version") != DEPLOYMENT_EVIDENCE_BINDING_SCHEMA:
+        errors.append("gitops_deployment_evidence_binding_schema_mismatch")
+    if not _is_sha256_digest(value.get("canonical_tuple_hash")):
+        errors.append("gitops_deployment_evidence_binding_hash_invalid")
+    return _dedupe(errors)
+
+
+def _argo_reconciliation_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    argo = evidence.get("argo_reconciliation")
+    argo = argo if isinstance(argo, Mapping) else {}
+    errors = _argo_reconciliation_errors(argo)
+    return {
+        "claim_id": "ops.argo_reconciliation.application_status",
+        "evidence_class": "argo_reconciliation_identity",
+        "status": "failed" if argo and errors else ("validated" if argo else "not_validated"),
+        "production_mutation_performed": argo.get("production_mutation_performed") is True,
+        "gaps": [] if argo and not errors else errors,
+    }
+
+
 def _gitops_desired_state_claim(evidence: Mapping[str, Any], *, expected_commit: str) -> dict[str, Any]:
     desired = evidence.get("gitops_desired_state")
     desired = desired if isinstance(desired, Mapping) else {}
-    schema = str(desired.get("schema_version") or "")
-    has_expected = desired.get("images_include_expected_commit") is True
-    explicit_mismatch = desired.get("images_include_expected_commit") is False and bool(desired)
-    mutation_performed = desired.get("production_mutation_performed") is True
-    gaps: list[str] = []
-    if not desired:
-        gaps.append("gitops_desired_state_unverified")
-    elif schema != GITOPS_DESIRED_STATE_SCHEMA:
-        gaps.append("gitops_desired_state_schema_mismatch")
-    elif explicit_mismatch:
-        gaps.append("gitops_desired_state_expected_commit_mismatch")
-    elif not has_expected:
-        gaps.append("gitops_desired_state_expected_commit_unverified")
-    if mutation_performed:
-        gaps.append("gitops_desired_state_mutated_production")
-    failed = bool(desired) and (
-        schema != GITOPS_DESIRED_STATE_SCHEMA or explicit_mismatch or mutation_performed
+    errors = _gitops_desired_state_errors(desired)
+    strict_fields_present = any(
+        key in desired
+        for key in (
+            "source_commit",
+            "desired_image_set_hash",
+            "ops_revision",
+            "expected_image_ref_count",
+        )
     )
+    external_commit_mismatch = bool(expected_commit) and (
+        "source_commit" in desired and desired.get("source_commit") != expected_commit
+    )
+    if external_commit_mismatch:
+        errors = _dedupe([*errors, "gitops_desired_state_external_commit_mismatch"])
+    has_expected = desired.get("images_include_expected_commit") is True
+    mutation_performed = desired.get("production_mutation_performed") is True
+    explicitly_invalid = bool(desired) and (
+        (
+            "schema_version" in desired
+            and desired.get("schema_version") != GITOPS_DESIRED_STATE_SCHEMA
+        )
+        or (
+            "images_include_expected_commit" in desired
+            and desired.get("images_include_expected_commit") is not True
+        )
+        or (
+            "production_mutation_performed" in desired
+            and desired.get("production_mutation_performed") is not False
+        )
+        or external_commit_mismatch
+        or (strict_fields_present and bool(errors))
+    )
+    gaps = [] if desired and not errors else (["gitops_desired_state_unverified"] if not desired else errors)
     return {
         "claim_id": "ops.gitops_desired_state.includes_expected_commit",
         "evidence_class": "gitops_desired_state_identity",
-        "status": "failed" if failed else ("validated" if has_expected else "not_validated"),
+        "status": (
+            "failed"
+            if explicitly_invalid
+            else ("validated" if desired and not errors and has_expected else "not_validated")
+        ),
         "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
         "desired_state_source": public_safe_text(
             str(desired.get("desired_state_source") or ""),
@@ -4383,16 +4625,194 @@ def _live_deployed_identity_claim(evidence: Mapping[str, Any], *, expected_commi
     identity = evidence.get("deployed_identity")
     identity = identity if isinstance(identity, Mapping) else {}
     contains_expected = identity.get("contains_expected_commit") is True
-    gaps = [] if contains_expected else ["live_deployed_identity_unverified"]
-    if identity and not contains_expected:
-        gaps.append("live_deployed_identity_expected_commit_unverified")
+    errors = _deployed_identity_errors(identity)
+    strict_fields_present = any(
+        key in identity
+        for key in (
+            "source_commit",
+            "live_image_set_hash",
+            "stale_image_ref_count",
+        )
+    )
+    external_commit_mismatch = bool(expected_commit) and (
+        "source_commit" in identity and identity.get("source_commit") != expected_commit
+    )
+    if external_commit_mismatch:
+        errors = _dedupe([*errors, "live_deployed_identity_external_commit_mismatch"])
+    explicitly_invalid = bool(identity) and (
+        (
+            "production_mutation_performed" in identity
+            and identity.get("production_mutation_performed") is not False
+        )
+        or external_commit_mismatch
+        or (strict_fields_present and bool(errors))
+    )
+    gaps = [] if identity and not errors else (["live_deployed_identity_unverified"] if not identity else errors)
     return {
         "claim_id": "live.deployed_identity.includes_expected_commit",
         "evidence_class": "runtime_artifact_identity",
-        "status": "validated" if contains_expected else "not_validated",
+        "status": (
+            "failed"
+            if explicitly_invalid
+            else ("validated" if identity and not errors and contains_expected else "not_validated")
+        ),
         "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
         "identity_source": public_safe_text(str(identity.get("identity_source") or ""), max_chars=160),
+        "production_mutation_performed": identity.get("production_mutation_performed") is True,
         "gaps": gaps,
+    }
+
+
+def _deployment_evidence_binding_tuple(
+    *,
+    expected_commit: str,
+    gitops_desired_state: Mapping[str, Any],
+    argo_reconciliation: Mapping[str, Any],
+    deployed_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
+        "desired_source_commit": public_safe_text(
+            str(gitops_desired_state.get("source_commit") or ""), max_chars=80
+        ),
+        "deployed_source_commit": public_safe_text(
+            str(deployed_identity.get("source_commit") or ""), max_chars=80
+        ),
+        "desired_image_set_hash": public_safe_text(
+            str(gitops_desired_state.get("desired_image_set_hash") or ""), max_chars=80
+        ),
+        "live_image_set_hash": public_safe_text(
+            str(deployed_identity.get("live_image_set_hash") or ""), max_chars=80
+        ),
+        "ops_revision": public_safe_text(
+            str(gitops_desired_state.get("ops_revision") or ""), max_chars=120
+        ),
+        "reconciled_ops_revision": public_safe_text(
+            str(argo_reconciliation.get("reconciled_ops_revision") or ""), max_chars=120
+        ),
+        "sync_status": public_safe_text(
+            str(argo_reconciliation.get("sync_status") or ""), max_chars=40
+        ),
+        "health_status": public_safe_text(
+            str(argo_reconciliation.get("health_status") or ""), max_chars=40
+        ),
+        "expected_image_ref_count": _strict_int_or_none(gitops_desired_state.get("expected_image_ref_count")),
+        "stale_image_ref_count": _strict_int_or_none(deployed_identity.get("stale_image_ref_count")),
+        "desired_production_mutation_performed": (
+            gitops_desired_state.get("production_mutation_performed") is True
+        ),
+        "argo_production_mutation_performed": (
+            argo_reconciliation.get("production_mutation_performed") is True
+        ),
+        "deployed_production_mutation_performed": (
+            deployed_identity.get("production_mutation_performed") is True
+        ),
+    }
+
+
+def _deployment_evidence_binding_claim(
+    evidence: Mapping[str, Any], *, expected_commit: str
+) -> dict[str, Any]:
+    binding = evidence.get("deployment_evidence_binding")
+    binding = binding if isinstance(binding, Mapping) else {}
+    desired = evidence.get("gitops_desired_state")
+    desired = desired if isinstance(desired, Mapping) else {}
+    argo = evidence.get("argo_reconciliation")
+    argo = argo if isinstance(argo, Mapping) else {}
+    deployed = evidence.get("deployed_identity")
+    deployed = deployed if isinstance(deployed, Mapping) else {}
+    packet_expected_commit = evidence.get("expected_commit")
+    external_expected_commit = expected_commit
+    effective_expected_commit = public_safe_text(
+        str(external_expected_commit or packet_expected_commit or ""), max_chars=80
+    )
+    failures: list[str] = []
+    if (
+        desired.get("source_commit")
+        and deployed.get("source_commit")
+        and desired.get("source_commit") != deployed.get("source_commit")
+    ):
+        failures.append("gitops_deployment_evidence_binding_source_commit_mismatch")
+    if (
+        desired.get("desired_image_set_hash")
+        and deployed.get("live_image_set_hash")
+        and desired.get("desired_image_set_hash") != deployed.get("live_image_set_hash")
+    ):
+        failures.append("gitops_deployment_evidence_binding_image_set_hash_mismatch")
+    if (
+        desired.get("ops_revision")
+        and argo.get("reconciled_ops_revision")
+        and desired.get("ops_revision") != argo.get("reconciled_ops_revision")
+    ):
+        failures.append("gitops_deployment_evidence_binding_ops_revision_mismatch")
+    if binding:
+        failures.extend(_binding_errors(binding))
+        failures.extend(_gitops_desired_state_errors(desired))
+        failures.extend(_argo_reconciliation_errors(argo))
+        failures.extend(_deployed_identity_errors(deployed))
+        if not _is_public_ref(packet_expected_commit):
+            failures.append("gitops_deployment_evidence_binding_packet_expected_commit_invalid")
+        canonical_tuple = _deployment_evidence_binding_tuple(
+            expected_commit=effective_expected_commit,
+            gitops_desired_state=desired,
+            argo_reconciliation=argo,
+            deployed_identity=deployed,
+        )
+        if binding.get("canonical_tuple_hash") != hash_payload(canonical_tuple):
+            failures.append("gitops_deployment_evidence_binding_hash_mismatch")
+        if desired.get("source_commit") != packet_expected_commit:
+            failures.append("gitops_deployment_evidence_binding_desired_commit_mismatch")
+        if deployed.get("source_commit") != packet_expected_commit:
+            failures.append("gitops_deployment_evidence_binding_deployed_commit_mismatch")
+        if external_expected_commit and (
+            not _is_public_ref(external_expected_commit)
+            or packet_expected_commit != external_expected_commit
+            or desired.get("source_commit") != external_expected_commit
+            or deployed.get("source_commit") != external_expected_commit
+        ):
+            failures.append("gitops_deployment_evidence_binding_external_expected_commit_mismatch")
+        if desired.get("desired_image_set_hash") != deployed.get("live_image_set_hash"):
+            failures.append("gitops_deployment_evidence_binding_image_set_hash_mismatch")
+        if desired.get("ops_revision") != argo.get("reconciled_ops_revision"):
+            failures.append("gitops_deployment_evidence_binding_ops_revision_mismatch")
+        if argo.get("sync_status") != "Synced":
+            failures.append("gitops_deployment_evidence_binding_sync_status_mismatch")
+        if argo.get("health_status") != "Healthy":
+            failures.append("gitops_deployment_evidence_binding_health_status_mismatch")
+        if _strict_int_or_none(desired.get("expected_image_ref_count")) is None or desired.get("expected_image_ref_count") <= 0:
+            failures.append("gitops_deployment_evidence_binding_expected_image_ref_count_invalid")
+        if _strict_int_or_none(deployed.get("stale_image_ref_count")) != 0:
+            failures.append("gitops_deployment_evidence_binding_stale_image_ref_count_mismatch")
+        if desired.get("production_mutation_performed") is True:
+            failures.append("gitops_deployment_evidence_binding_desired_state_mutation")
+        if argo.get("production_mutation_performed") is True:
+            failures.append("gitops_deployment_evidence_binding_argo_reconciliation_mutation")
+        if deployed.get("production_mutation_performed") is True:
+            failures.append("gitops_deployment_evidence_binding_deployed_identity_mutation")
+    failures = _dedupe(failures)
+    gaps = list(failures)
+    if binding and not failures and not external_expected_commit:
+        gaps.append("external_expected_commit_anchor_unverified")
+    return {
+        "claim_id": "ops.gitops_deployment_evidence_binding",
+        "evidence_class": "gitops_deployment_evidence_binding",
+        "status": (
+            "failed"
+            if failures
+            else ("validated" if binding and external_expected_commit else "not_validated")
+        ),
+        "expected_commit": effective_expected_commit,
+        "binding_present": bool(binding),
+        "production_mutation_performed": (
+            desired.get("production_mutation_performed") is True
+            or argo.get("production_mutation_performed") is True
+            or deployed.get("production_mutation_performed") is True
+        ),
+        "gaps": (
+            _dedupe([*gaps, "gitops_deployment_evidence_binding_unverified"])
+            if not binding
+            else gaps
+        ),
     }
 
 
