@@ -13,7 +13,10 @@ from agent_knowledge.couchdb_source.session_memory_materializer import (
     update_coverage_with_tool_evidence,
 )
 from agent_knowledge.couchdb_source.build_cli import _select_sessions_needing_projection
-from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
+from agent_knowledge.couchdb_source.source_store import (
+    InMemoryCouchDBSourceStore,
+    payload_hash,
+)
 from agent_knowledge.couchdb_source.tool_evidence_bundler import (
     build_tool_evidence_bundle_documents,
     store_tool_evidence_bundles,
@@ -172,6 +175,62 @@ def test_update_coverage_records_tool_evidence_counts() -> None:
     assert cov["tool_evidence_bundle_count"] == 1
     # project_authority preserved from the import-time manifest
     assert cov["project_authority"]["project"] == "neurons"
+
+
+def test_position_only_chunk_revision_converges_coverage_source_hash() -> None:
+    class _ManifestTraceStore(InMemoryCouchDBSourceStore):
+        manifest_writes: list[tuple[str, str]]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.manifest_writes = []
+
+        def put(self, document):
+            revision = super().put(document)
+            if document.get("doc_type") == dm.SourceDocType.COVERAGE_MANIFEST:
+                self.manifest_writes.append(
+                    (revision.outcome, str(document.get("source_hash") or ""))
+                )
+            return revision
+
+    store = _ManifestTraceStore()
+    _seed_session(store)
+    first_coverage = update_coverage_with_tool_evidence(
+        session_id_hash=_sid(), store=store
+    )
+    first_manifest = store.get(dm.coverage_manifest_doc_id(_sid()))
+    store.manifest_writes.clear()
+
+    revised_chunk = TranscriptChunk.from_text(
+        chunk_id="chunk_00",
+        session_id_hash=_sid(),
+        provider="codex",
+        project="neurons",
+        turn_start_index=20,
+        turn_end_index=20,
+        text="user asked",
+    )
+    revision = store.put(dm.build_conversation_chunk_document(chunk=revised_chunk))
+
+    current_coverage = update_coverage_with_tool_evidence(
+        session_id_hash=_sid(), store=store
+    )
+
+    persisted = store.get(dm.coverage_manifest_doc_id(_sid()))
+    session = store.get(dm.session_doc_id(_sid()))
+    materialized = materialize_session_memory(session_id_hash=_sid(), store=store)
+    assert revision.outcome == "conflict_resolved"
+    assert current_coverage["source_hash"] != first_coverage["source_hash"]
+    assert store.manifest_writes == [
+        ("conflict_resolved", current_coverage["source_hash"])
+    ]
+    assert persisted["_id"] == dm.coverage_manifest_doc_id(_sid())
+    assert persisted["source_hash"] == current_coverage["source_hash"]
+    assert persisted["payload_hash"] == payload_hash(persisted)
+    assert persisted["payload_hash"] != first_manifest["payload_hash"]
+    assert session["source_hash"] == current_coverage["source_hash"]
+    assert materialized.source_hash == current_coverage["source_hash"]
+    assert "coverage_source_hash_mismatch" not in materialized.notes
 
 
 def test_distinct_tool_coverage_revision_invalidates_session_and_graph_currentness() -> None:

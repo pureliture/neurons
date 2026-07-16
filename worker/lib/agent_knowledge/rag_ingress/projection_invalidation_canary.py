@@ -35,6 +35,8 @@ import re
 import signal
 import sys
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -77,6 +79,22 @@ _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_RUNTIME_SECONDS = 300.0
 
 
+@dataclass(frozen=True)
+class _ResolvedCanaryTargets:
+    """Immutable execution snapshot; raw target values never leave this module."""
+
+    couchdb_url: str = field(repr=False)
+    couchdb_db: str = field(repr=False)
+    couchdb_user: str = field(repr=False)
+    couchdb_password_env: str = field(repr=False)
+    couchdb_password: str = field(repr=False)
+    state_db_path: Path = field(repr=False)
+    ledger_path: Path = field(repr=False)
+    runtime_dir: Path = field(repr=False)
+    environ: dict[str, str] = field(repr=False)
+    target_fingerprints: dict[str, str]
+
+
 class CanaryExecutionError(RuntimeError):
     """Redaction-safe stage failure; no lower-level message is retained."""
 
@@ -92,6 +110,128 @@ def _stable_json(value: object) -> str:
 
 def _digest(value: object) -> str:
     return sha256_hash(_stable_json(value))
+
+
+def _normalized_target_fingerprints(
+    target_fingerprints: Mapping[str, object] | None,
+) -> dict[str, str]:
+    if target_fingerprints is None:
+        return {}
+    if not isinstance(target_fingerprints, Mapping):
+        raise ValueError("target fingerprints must be a mapping")
+    normalized: dict[str, str] = {}
+    for name, fingerprint in target_fingerprints.items():
+        target_name = str(name or "").strip()
+        target_value = str(fingerprint or "").strip()
+        if not target_name or _SHA256_REF_RE.fullmatch(target_value) is None:
+            raise ValueError("target fingerprint is invalid")
+        normalized[target_name] = target_value
+    return dict(sorted(normalized.items()))
+
+
+def _target_fingerprint(value: Mapping[str, object]) -> str:
+    return _digest(dict(value))
+
+
+def _target_fingerprint_digest(target_fingerprints: Mapping[str, object] | None) -> str:
+    return _target_fingerprint(_normalized_target_fingerprints(target_fingerprints))
+
+
+def _resolved_path(value: object) -> Path:
+    return Path(str(value or "")).expanduser().resolve(strict=False)
+
+
+def _resolved_qdrant_collection(environ: Mapping[str, str]) -> str:
+    # Keep this default identical to build_cli._build_qdrant_projector without
+    # loading optional Qdrant/Docling dependencies during plan construction.
+    return str(environ.get("QDRANT_COLLECTION") or "neurons_searchable_mirror_poc").strip()
+
+
+def _resolve_canary_targets(
+    args: argparse.Namespace,
+    environ: Mapping[str, str],
+) -> _ResolvedCanaryTargets:
+    """Resolve every writable target once, before approval and live setup.
+
+    CLI argv can omit source and projection destinations because parser defaults
+    and runtime builders read environment.  Binding only argv left room for an
+    environment/default drift to redirect an approved canary.  The plan exposes
+    only fingerprints while this private snapshot keeps the exact values used by
+    the later live setup.
+    """
+
+    frozen_environ = {str(key): str(value) for key, value in environ.items()}
+    couchdb_url = str(args.couchdb_url or "").strip().rstrip("/")
+    couchdb_db = str(args.couchdb_db or "").strip()
+    state_db_path = _resolved_path(args.state_db)
+    ledger_path = _resolved_path(args.ledger)
+    runtime_dir = _resolved_path(args.runtime_dir)
+    graph_uri = str(
+        frozen_environ.get(
+            "LLM_BRAIN_NEO4J_URI",
+            frozen_environ.get("NEO4J_URI", "bolt://localhost:7687"),
+        )
+        or ""
+    ).strip()
+    graph_group = str(frozen_environ.get("LLM_BRAIN_GRAPH_GROUP_ID") or "").strip()
+    target_fingerprints = {
+        "ingress_state_db": _target_fingerprint(
+            {"kind": "ingress_state_db", "path": str(state_db_path)}
+        ),
+        "projection_ledger": _target_fingerprint(
+            {"kind": "projection_ledger", "path": str(ledger_path)}
+        ),
+        "runtime_workspace": _target_fingerprint(
+            {"kind": "runtime_workspace", "path": str(runtime_dir)}
+        ),
+        "couchdb_source": _target_fingerprint(
+            {
+                "kind": "couchdb_source",
+                "base_url": couchdb_url,
+                "database": couchdb_db,
+            }
+        ),
+        "qdrant_collection": _target_fingerprint(
+            {
+                "kind": "qdrant_collection",
+                "base_url": str(frozen_environ.get("QDRANT_URL") or "").strip().rstrip("/"),
+                "collection": _resolved_qdrant_collection(frozen_environ),
+            }
+        ),
+        "graph_store": _target_fingerprint(
+            {
+                "kind": "graph_store",
+                "uri": graph_uri,
+                "group_id": graph_group,
+            }
+        ),
+    }
+    couchdb_password_env = str(args.couchdb_password_env or "").strip()
+    return _ResolvedCanaryTargets(
+        couchdb_url=couchdb_url,
+        couchdb_db=couchdb_db,
+        couchdb_user=str(args.couchdb_user or "").strip(),
+        couchdb_password_env=couchdb_password_env,
+        couchdb_password=str(frozen_environ.get(couchdb_password_env) or ""),
+        state_db_path=state_db_path,
+        ledger_path=ledger_path,
+        runtime_dir=runtime_dir,
+        environ=frozen_environ,
+        target_fingerprints=_normalized_target_fingerprints(target_fingerprints),
+    )
+
+
+def _require_approved_target_fingerprints(
+    approval: Mapping[str, object],
+    *,
+    target_fingerprints: Mapping[str, object],
+) -> None:
+    target = approval.get("target")
+    approved = target.get("target_fingerprints") if isinstance(target, Mapping) else None
+    if _normalized_target_fingerprints(approved) != _normalized_target_fingerprints(
+        target_fingerprints
+    ):
+        raise ApprovalError("approval target fingerprint mismatch")
 
 
 def _validate_observed_at(value: str) -> str:
@@ -182,6 +322,7 @@ def build_canary_plan(
     observed_at: str,
     limit: int,
     max_runtime_seconds: float,
+    target_fingerprints: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     validated = _validated_inputs(
         project=project,
@@ -193,6 +334,9 @@ def build_canary_plan(
         max_runtime_seconds=max_runtime_seconds,
     )
     identity = _canary_identity(validated)
+    resolved_target_fingerprints = _normalized_target_fingerprints(
+        target_fingerprints
+    )
     plan_digest = _digest(
         {
             "operation": CANARY_OPERATION,
@@ -200,6 +344,9 @@ def build_canary_plan(
             "canary_ref": identity["canary_ref"],
             "planned_ingress_enqueue_count": 3,
             "planned_source_chunk_insert_count": 2,
+            "target_fingerprint": _target_fingerprint_digest(
+                resolved_target_fingerprints
+            ),
         }
     )
     return {
@@ -207,6 +354,10 @@ def build_canary_plan(
         "status": "planned",
         "plan_digest": plan_digest,
         "canary_ref": identity["canary_ref"],
+        "target_fingerprints": resolved_target_fingerprints,
+        "target_fingerprint": _target_fingerprint_digest(
+            resolved_target_fingerprints
+        ),
         "bounded_limit": 1,
         "timeout_seconds": _json_number(float(validated["max_runtime_seconds"])),
         "planned_ingress_enqueue_count": 3,
@@ -453,6 +604,7 @@ def run_projection_invalidation_canary(
     observed_at: str,
     limit: int,
     max_runtime_seconds: float,
+    target_fingerprints: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     """Execute one baseline/distinct/duplicate proof with a hard cardinality of one."""
 
@@ -465,7 +617,10 @@ def run_projection_invalidation_canary(
         limit=limit,
         max_runtime_seconds=max_runtime_seconds,
     )
-    plan = build_canary_plan(**validated)
+    plan = build_canary_plan(
+        **validated,
+        target_fingerprints=target_fingerprints,
+    )
     identity = _canary_identity(validated)
     session_id_hash = identity["session_id_hash"]
     baseline_doc = source_store.get(
@@ -837,22 +992,35 @@ def _hard_runtime_timeout(seconds: float):
             )
 
 
-def _execute_live(args: argparse.Namespace, plan: dict[str, Any]) -> dict[str, Any]:
-    del plan
+def _execute_live(
+    args: argparse.Namespace,
+    plan: dict[str, Any],
+    *,
+    resolved_targets: _ResolvedCanaryTargets | None = None,
+) -> dict[str, Any]:
     from ..llm_brain_core.couchdb_projection_cli import _build_source_store
 
-    if str(os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND") or "").strip().lower() != "qdrant":
+    targets = resolved_targets or _resolve_canary_targets(args, os.environ)
+    plan_fingerprints = _normalized_target_fingerprints(
+        plan.get("target_fingerprints")
+    )
+    if plan_fingerprints != targets.target_fingerprints:
+        raise CanaryExecutionError(
+            stage="target_binding", error_class="ResolvedTargetDrift"
+        )
+    if str(targets.environ.get("SESSION_MEMORY_PROJECTION_BACKEND") or "").strip().lower() != "qdrant":
         raise CanaryExecutionError(stage="runtime_setup", error_class="CanonicalBackendNotQdrant")
     source_store = _build_source_store(
-        couchdb_url=str(args.couchdb_url or ""),
-        couchdb_db=str(args.couchdb_db or ""),
-        couchdb_user=str(args.couchdb_user or ""),
-        couchdb_password_env=str(args.couchdb_password_env or ""),
+        couchdb_url=targets.couchdb_url,
+        couchdb_db=targets.couchdb_db,
+        couchdb_user=targets.couchdb_user,
+        couchdb_password_env=targets.couchdb_password_env,
+        couchdb_password=targets.couchdb_password,
     )
-    projector = _build_qdrant_projector(os.environ)
+    projector = _build_qdrant_projector(targets.environ)
     if projector is None:
         raise CanaryExecutionError(stage="runtime_setup", error_class="QdrantProjectorUnavailable")
-    graph_environ = dict(os.environ)
+    graph_environ = dict(targets.environ)
     graph_environ["LLM_BRAIN_GRAPH_EXTRACT_ENTITIES"] = "false"
     graph_adapter = build_graph_adapter_from_env(
         environ=graph_environ,
@@ -861,12 +1029,12 @@ def _execute_live(args: argparse.Namespace, plan: dict[str, Any]) -> dict[str, A
     )
     try:
         return run_projection_invalidation_canary(
-            state_db=RAGIngressStateDB(args.state_db),
-            ledger_path=Path(args.ledger),
+            state_db=RAGIngressStateDB(targets.state_db_path),
+            ledger_path=targets.ledger_path,
             source_store=source_store,
             session_memory_projector=projector,
             graph_adapter=graph_adapter,
-            runtime_dir=Path(args.runtime_dir),
+            runtime_dir=targets.runtime_dir,
             project=args.project,
             provider=args.provider,
             probe_nonce_sha256=args.probe_nonce_sha256,
@@ -874,6 +1042,7 @@ def _execute_live(args: argparse.Namespace, plan: dict[str, Any]) -> dict[str, A
             observed_at=args.observed_at,
             limit=args.limit,
             max_runtime_seconds=args.max_runtime_seconds,
+            target_fingerprints=targets.target_fingerprints,
         )
     finally:
         _close_if_supported(graph_adapter)
@@ -943,6 +1112,7 @@ def main(argv: list[str] | None = None) -> int:
     effective_argv = list(sys.argv[1:] if argv is None else argv)
     args = _build_parser().parse_args(effective_argv)
     try:
+        resolved_targets = _resolve_canary_targets(args, os.environ)
         plan = build_canary_plan(
             project=args.project,
             provider=args.provider,
@@ -951,6 +1121,7 @@ def main(argv: list[str] | None = None) -> int:
             observed_at=args.observed_at,
             limit=args.limit,
             max_runtime_seconds=args.max_runtime_seconds,
+            target_fingerprints=resolved_targets.target_fingerprints,
         )
     except (TypeError, ValueError) as exc:
         print(
@@ -978,6 +1149,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         if float(approval.get("timeout_seconds") or 0) < float(args.max_runtime_seconds):
             raise ApprovalError("approval timeout is below command timeout")
+        _require_approved_target_fingerprints(
+            approval,
+            target_fingerprints=resolved_targets.target_fingerprints,
+        )
     except (ApprovalError, TypeError, ValueError) as exc:
         print(
             json.dumps(
@@ -997,7 +1172,11 @@ def main(argv: list[str] | None = None) -> int:
         with _hard_runtime_timeout(float(args.max_runtime_seconds)):
             hard_timeout_enforced = True
             live_call_started = True
-            report = _execute_live(args, plan)
+            report = _execute_live(
+                args,
+                plan,
+                resolved_targets=resolved_targets,
+            )
     except CanaryExecutionError as exc:
         print(
             json.dumps(

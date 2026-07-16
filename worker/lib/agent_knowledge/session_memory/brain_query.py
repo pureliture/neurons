@@ -302,6 +302,180 @@ def run_brain_query_v2(
     return response
 
 
+def build_temporal_brain_query_response(
+    *,
+    brain_id: str,
+    temporal_response: Mapping[str, Any],
+) -> dict:
+    """Map authoritative temporal WorkUnits into the public ``brain.query`` shape.
+
+    ``brain.query`` historically read only current MemoryCards.  That made an
+    ISO-date question silently return today's cards because it had no event-time
+    evidence lane.  The temporal object route already owns bounded observed-time
+    matching and returns a gap instead of falling back.  This adapter preserves
+    the public query shape while deliberately using only those matched objects.
+    """
+
+    object_pack = temporal_response.get("object_pack")
+    if not isinstance(object_pack, Mapping):
+        object_pack = {}
+    raw_objects = object_pack.get("objects")
+    objects = [dict(item) for item in raw_objects or [] if isinstance(item, Mapping)]
+    gaps = [str(item) for item in object_pack.get("gaps") or [] if str(item)]
+    results: list[dict] = []
+    current: list[dict] = []
+    accepted: list[dict] = []
+    for obj in objects:
+        confidence_value = _finite_score_or_none(
+            (obj.get("confidence") or {}).get("score")
+            if isinstance(obj.get("confidence"), Mapping)
+            else None
+        )
+        if confidence_value is None or confidence_value <= 0.0:
+            continue
+        object_id = str(obj.get("object_id") or "")
+        if not object_id:
+            continue
+        summary = redact_and_bound_evidence_text(
+            str(obj.get("summary") or obj.get("title") or ""),
+            MAX_TRANSCRIPT_SNIPPET_CHARS,
+        )
+        observed_at = str(obj.get("observed_at") or "")
+        payload = obj.get("payload") if isinstance(obj.get("payload"), Mapping) else {}
+        observed_at_start = str(payload.get("observed_at_start") or observed_at)
+        observed_at_end = str(payload.get("observed_at_end") or observed_at)
+        if not observed_at_start or not observed_at_end:
+            continue
+        authority_lane = str(obj.get("authority_lane") or "")
+        currentness = "current" if authority_lane == "accepted_current" else "unknown"
+        source_kind = str(payload.get("source_kind") or "")
+        source_memory_id = str(payload.get("source_memory_id") or "")
+        if source_kind == "memory_card":
+            # WorkUnit object ids are query-object identifiers, not public
+            # MemoryCard ids. Preserve the original canonical card ID for the
+            # long-standing brain.query result/current/accepted contracts, and
+            # emit the object id separately for object-native consumers.
+            if not source_memory_id:
+                gaps.append("temporal_memory_card_identifier_missing")
+                continue
+            approval_state = "approved" if authority_lane.startswith("accepted_") else "unknown"
+            temporal_card = {
+                "brain_id": brain_id,
+                "memory_id": source_memory_id,
+                "object_id": object_id,
+                "source_ref": source_memory_id,
+                "card_type": "work_unit",
+                "title": redact_and_bound_evidence_text(
+                    str(obj.get("title") or summary), MAX_TRANSCRIPT_SNIPPET_CHARS
+                ),
+                "summary": summary,
+                "render_text": summary,
+                "lifecycle_state": str(obj.get("lifecycle_status") or "observed"),
+                "approval_state": approval_state,
+                "freshness": "event_time_matched",
+                "currentness": currentness,
+                "confidence": confidence_value,
+                "authority": authority_lane or "reference_only",
+                "observed_at": observed_at,
+                "observed_at_start": observed_at_start,
+                "observed_at_end": observed_at_end,
+                "score": confidence_value,
+            }
+            result = {
+                "brain_id": brain_id,
+                "result_type": "temporal_work_unit",
+                "summary": summary,
+                "why_retrieved": "matching_observed_event_time",
+                "source_ref": source_memory_id,
+                "memory_id": source_memory_id,
+                "object_id": object_id,
+                "observed_at": observed_at,
+                "observed_at_start": observed_at_start,
+                "observed_at_end": observed_at_end,
+                "freshness": "event_time_matched",
+                "approval_state": approval_state,
+                "privacy": "redacted",
+                "confidence": confidence_value,
+                "conflicts": [],
+                "currentness": currentness,
+                "card_type": "work_unit",
+                "score": confidence_value,
+                "source_kind": source_kind,
+            }
+            results.append(result)
+            if authority_lane == "accepted_current":
+                current.append(temporal_card)
+            if authority_lane in {"accepted_current", "accepted_non_current"}:
+                accepted.append(temporal_card)
+            continue
+        if source_kind == "session_memory_artifact":
+            # An artifact is temporal evidence, not a MemoryCard. Keep it in
+            # results with an explicit type and object provenance, but never
+            # manufacture a memory_id or place it in card authority lanes.
+            results.append(
+                {
+                    "brain_id": brain_id,
+                    "result_type": "temporal_artifact_evidence",
+                    "summary": summary,
+                    "why_retrieved": "matching_observed_event_time",
+                    "source_ref": object_id,
+                    "object_id": object_id,
+                    "observed_at": observed_at,
+                    "observed_at_start": observed_at_start,
+                    "observed_at_end": observed_at_end,
+                    "freshness": "event_time_matched",
+                    "approval_state": "unknown",
+                    "privacy": "redacted",
+                    "confidence": confidence_value,
+                    "conflicts": [],
+                    "currentness": "unknown",
+                    "card_type": "",
+                    "score": confidence_value,
+                    "source_kind": source_kind,
+                }
+            )
+            continue
+        # Old or malformed object packs cannot prove whether this is a card or
+        # merely reference evidence. Fail closed rather than inventing a public
+        # MemoryCard identity from the WorkUnit object id.
+        gaps.append("temporal_source_kind_unresolved")
+
+    confidence = min((item["confidence"] for item in results), default=0.0)
+    if not results:
+        if not gaps:
+            gaps.append("temporal_evidence_missing_or_mismatched")
+        confidence = 0.0
+    audit = object_pack.get("audit") if isinstance(object_pack.get("audit"), Mapping) else {}
+    selector = audit.get("temporal_selector") if isinstance(audit.get("temporal_selector"), Mapping) else {}
+    return {
+        "brain_id": brain_id,
+        "query_intent": "temporal_work_recall",
+        "route": "temporal_work_recall",
+        "temporal_selector": dict(selector),
+        "current": current,
+        "accepted": accepted,
+        "archive": [],
+        "evidence_candidates": [],
+        "promotion_candidates": [],
+        "conflicts": [],
+        "projection_state": {
+            "status": "temporal_evidence_matched" if results else "unavailable",
+            "details": [],
+        },
+        "sources": [
+            {"source": "temporal_event_evidence", "authority": "canonical_artifact_and_card"}
+        ],
+        "results": results,
+        "confidence": confidence,
+        "gaps": gaps,
+        "audit": {
+            "path": "temporal_work_recall",
+            "temporal_selector": dict(selector),
+            "temporal_match_count": len(results),
+        },
+    }
+
+
 def build_brain_query_response_v2(
     *,
     brain_id: str,

@@ -1311,6 +1311,63 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_live_projection_join
     assert "qdrant_projection_hit_missing" not in projection["gaps"]
 
 
+def test_mcp_source_to_candidate_runtime_readiness_excludes_synthetic_canary_graph_episode(
+    tmp_path: Path,
+):
+    graph = FakeGraphMemoryAdapter(
+        [
+            _episode(
+                "RepoDocument",
+                "projection-join-synthetic-canary",
+                {
+                    "brain_id": "/project/neurons",
+                    "provider": "lbrain-temporal-canary",
+                    "summary": "Synthetic source candidate graph projection join probe.",
+                },
+            )
+        ]
+    )
+    service = KnowledgeSearchService(
+        ledger=_ledger(tmp_path),
+        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
+        dataset_ids=[],
+        graph_adapter=graph,
+        mirror_search=lambda query, brain_id: [
+            {
+                "memory_id": "qdrant-hit-1",
+                "summary": "Qdrant projection hit for source-to-candidate join.",
+                "score": 0.81,
+            }
+        ],
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 126,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "collect_shadow_evidence": True,
+                    "evidence_collection_mode": "post_deploy_read_only_smoke",
+                    "evidence_collection_network_used": True,
+                    "repository": "pureliture/neurons",
+                    "branch": "main",
+                    "consumer": "codex",
+                },
+            },
+        },
+        service,
+    )
+
+    projection = response["result"]["structuredContent"]["projection_join"]
+    assert projection["runtime_read_path"]["graph_hit_count"] == 0
+    assert projection["runtime_read_path"]["qdrant_hit_count"] >= 1
+    assert projection["status"] == "pass_with_gaps"
+    assert "graph_projection_hit_missing" in projection["gaps"]
+
+
 def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None) -> dict:
     return {
         "schema_version": "brain_objects_query.v1",
@@ -4903,6 +4960,233 @@ def test_mcp_brain_query_semantic_hits_control_the_public_results_lane(
     assert result["audit"]["native_memory_hits"] == 1
     assert [item["memory_id"] for item in result["results"]] == [expected["memory_id"]]
     assert result["results"][0]["score"] == 0.99
+
+
+def test_mcp_brain_query_temporal_recall_uses_event_time_without_current_card_fallback(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+    date_a = _accepted_task_card(
+        "mem_temporal_date_a",
+        next_action="Complete alpha temporal migration",
+    )
+    date_a.update(
+        {
+            "title": "Alpha temporal migration",
+            "summary": "Alpha temporal migration",
+            "render_text": "Alpha temporal migration",
+            "observed_at_start": "2026-07-09T10:00:00Z",
+            "observed_at_end": "2026-07-09T11:00:00Z",
+        }
+    )
+    date_a["typed_payload"].update(
+        {
+            "task_state": "Alpha temporal migration",
+            "next_action": "Complete alpha temporal migration",
+        }
+    )
+    date_b = _accepted_task_card(
+        "mem_temporal_date_b",
+        next_action="Complete beta temporal migration",
+    )
+    date_b.update(
+        {
+            "title": "Beta temporal migration",
+            "summary": "Beta temporal migration",
+            "render_text": "Beta temporal migration",
+            "observed_at_start": "2026-07-15T10:00:00Z",
+            "observed_at_end": "2026-07-15T11:00:00Z",
+        }
+    )
+    date_b["typed_payload"].update(
+        {
+            "task_state": "Beta temporal migration",
+            "next_action": "Complete beta temporal migration",
+        }
+    )
+    unrelated_same_date = _accepted_task_card(
+        "mem_temporal_same_date_unrelated",
+        next_action="Review the unrelated profile screen",
+    )
+    unrelated_same_date.update(
+        {
+            "title": "Unrelated profile screen review",
+            "summary": "Unrelated profile screen review",
+            "render_text": "Unrelated profile screen review",
+            "observed_at_start": "2026-07-09T10:00:00Z",
+            "observed_at_end": "2026-07-09T11:00:00Z",
+        }
+    )
+    unrelated_same_date["typed_payload"].update(
+        {
+            "task_state": "Unrelated profile screen review",
+            "next_action": "Review the unrelated profile screen",
+        }
+    )
+    service.ledger.upsert_llm_brain_memory_card(date_a)
+    service.ledger.upsert_llm_brain_memory_card(date_b)
+    service.ledger.upsert_llm_brain_memory_card(unrelated_same_date)
+
+    tool = next(tool for tool in list_tools() if tool["name"] == BRAIN_QUERY_TOOL_NAME)
+    properties = tool["inputSchema"]["properties"]
+    assert {"as_of", "date_from", "date_to"}.issubset(properties)
+
+    natural_date_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 204,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_QUERY_TOOL_NAME,
+                "arguments": {
+                    "brain_id": f"/project/{PROJECT}",
+                    "query": "alpha temporal migration on 2026-07-09",
+                },
+            },
+        },
+        service,
+    )
+    explicit_date_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 205,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_QUERY_TOOL_NAME,
+                "arguments": {
+                    "brain_id": f"/project/{PROJECT}",
+                    "query": "beta temporal migration",
+                    "as_of": "2026-07-15T10:30:00Z",
+                },
+            },
+        },
+        service,
+    )
+    range_boundary_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2051,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_QUERY_TOOL_NAME,
+                "arguments": {
+                    "brain_id": f"/project/{PROJECT}",
+                    "query": "beta temporal migration",
+                    "date_from": "2026-07-15T10:00:00Z",
+                    "date_to": "2026-07-15T10:00:00Z",
+                },
+            },
+        },
+        service,
+    )
+    mismatch_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 206,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_QUERY_TOOL_NAME,
+                "arguments": {
+                    "brain_id": f"/project/{PROJECT}",
+                    "query": "beta temporal migration",
+                    "as_of": "2026-07-12T10:30:00Z",
+                },
+            },
+        },
+        service,
+    )
+
+    natural_date = natural_date_response["result"]["structuredContent"]
+    explicit_date = explicit_date_response["result"]["structuredContent"]
+    range_boundary = range_boundary_response["result"]["structuredContent"]
+    mismatch = mismatch_response["result"]["structuredContent"]
+    assert natural_date["route"] == "temporal_work_recall"
+    assert natural_date["temporal_selector"]["source"] == "query_iso_date"
+    assert [item["summary"] for item in natural_date["results"]] == [
+        "Alpha temporal migration"
+    ]
+    assert [item["memory_id"] for item in natural_date["results"]] == [
+        date_a["memory_id"]
+    ]
+    assert [item["source_ref"] for item in natural_date["results"]] == [
+        date_a["memory_id"]
+    ]
+    assert natural_date["results"][0]["object_id"] != date_a["memory_id"]
+    assert [item["summary"] for item in natural_date["current"]] == [
+        "Alpha temporal migration"
+    ]
+    assert [item["memory_id"] for item in natural_date["current"]] == [
+        date_a["memory_id"]
+    ]
+    assert [item["summary"] for item in natural_date["accepted"]] == [
+        "Alpha temporal migration"
+    ]
+    assert [item["memory_id"] for item in natural_date["accepted"]] == [
+        date_a["memory_id"]
+    ]
+    assert explicit_date["route"] == "temporal_work_recall"
+    assert [item["summary"] for item in explicit_date["results"]] == [
+        "Beta temporal migration"
+    ]
+    assert [item["memory_id"] for item in explicit_date["results"]] == [
+        date_b["memory_id"]
+    ]
+    assert [item["source_ref"] for item in explicit_date["results"]] == [
+        date_b["memory_id"]
+    ]
+    assert explicit_date["results"][0]["object_id"] != date_b["memory_id"]
+    assert [item["memory_id"] for item in explicit_date["current"]] == [
+        date_b["memory_id"]
+    ]
+    assert [item["memory_id"] for item in explicit_date["accepted"]] == [
+        date_b["memory_id"]
+    ]
+    assert [item["summary"] for item in range_boundary["results"]] == [
+        "Beta temporal migration"
+    ]
+    assert natural_date["gaps"] == []
+    assert natural_date["confidence"] > 0.0
+    assert mismatch["results"] == []
+    assert mismatch["current"] == []
+    assert mismatch["accepted"] == []
+    assert mismatch["confidence"] == 0.0
+    assert mismatch["gaps"]
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        {"as_of": "not-an-iso-date"},
+        {
+            "date_from": "2026-07-16T00:00:00Z",
+            "date_to": "2026-07-15T00:00:00Z",
+        },
+    ],
+)
+def test_mcp_brain_query_rejects_invalid_temporal_selector(
+    tmp_path: Path,
+    selector: dict[str, str],
+):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 207,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_QUERY_TOOL_NAME,
+                "arguments": {
+                    "brain_id": f"/project/{PROJECT}",
+                    "query": "temporal migration",
+                    **selector,
+                },
+            },
+        },
+        service,
+    )
+
+    assert response["error"]["code"] == -32602
 
 
 def test_mcp_brain_objects_query_roundtrip(tmp_path: Path):

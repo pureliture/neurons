@@ -31,6 +31,7 @@ from agent_knowledge.rag_ingress.state_db import (
     DeliveryJobSpec,
     RAGIngressStateDB,
 )
+from agent_knowledge.rag_ingress import temporal_metadata_backfill as backfill_module
 from agent_knowledge.rag_ingress.temporal_metadata_backfill import (
     BACKFILL_OPERATION,
     backfill_temporal_metadata,
@@ -51,6 +52,26 @@ def _state_db(tmp_path: Path) -> RAGIngressStateDB:
     private.mkdir(mode=0o700)
     os.chmod(private, 0o700)
     return RAGIngressStateDB(private / "state.sqlite")
+
+
+def test_resolved_backfill_target_repr_does_not_disclose_raw_target_or_password() -> None:
+    target = backfill_module._resolve_backfill_target(
+        {
+            "COUCHDB_URL": "https://private-backfill.invalid",
+            "COUCHDB_DB": "private_backfill_source",
+            "COUCHDB_USER": "private-user",
+            "COUCHDB_PASSWORD": "backfill-password-marker",
+        }
+    )
+
+    rendered = repr(target)
+    for private_value in (
+        "private-backfill.invalid",
+        "private_backfill_source",
+        "private-user",
+        "backfill-password-marker",
+    ):
+        assert private_value not in rendered
 
 
 def _payload(
@@ -917,7 +938,12 @@ def test_conflicting_temporal_metadata_for_same_content_revision_fails_closed(tm
     assert store.all_docs() == before
 
 
-def _write_approval(tmp_path: Path, argv: list[str]) -> Path:
+def _write_approval(
+    tmp_path: Path,
+    argv: list[str],
+    *,
+    target_fingerprints: dict[str, str] | None = None,
+) -> Path:
     payload = {
         "schema_version": "agent_knowledge_live_approval.v1",
         "operation": BACKFILL_OPERATION,
@@ -927,6 +953,8 @@ def _write_approval(tmp_path: Path, argv: list[str]) -> Path:
         "rollback_or_abort_criteria": ["abort on any source write error"],
         "command": {"argv": argv},
     }
+    if target_fingerprints is not None:
+        payload["target"] = {"target_fingerprints": target_fingerprints}
     path = tmp_path / "approval.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
@@ -1069,9 +1097,17 @@ def test_cli_defaults_to_dry_run_and_live_requires_exact_argv_approval(tmp_path)
         "--approval",
         "PLACEHOLDER",
     ]
-    drift_approval = _write_approval(tmp_path, drift_argv)
+    drift_approval = _write_approval(
+        tmp_path,
+        drift_argv,
+        target_fingerprints=dry_report["target_fingerprints"],
+    )
     drift_argv[-1] = str(drift_approval)
-    drift_approval = _write_approval(tmp_path, drift_argv)
+    drift_approval = _write_approval(
+        tmp_path,
+        drift_argv,
+        target_fingerprints=dry_report["target_fingerprints"],
+    )
     before_drift = store.all_docs()
     with (
         patch(
@@ -1103,10 +1139,18 @@ def test_cli_defaults_to_dry_run_and_live_requires_exact_argv_approval(tmp_path)
         "--approval",
         "PLACEHOLDER",
     ]
-    approval = _write_approval(tmp_path, approval_argv)
+    approval = _write_approval(
+        tmp_path,
+        approval_argv,
+        target_fingerprints=dry_report["target_fingerprints"],
+    )
     approval_argv[-1] = str(approval)
     # The approval must bind the actual argv, including its own path.
-    approval = _write_approval(tmp_path, approval_argv)
+    approval = _write_approval(
+        tmp_path,
+        approval_argv,
+        target_fingerprints=dry_report["target_fingerprints"],
+    )
     live_argv = approval_argv
     with (
         patch(
@@ -1129,6 +1173,81 @@ def test_cli_defaults_to_dry_run_and_live_requires_exact_argv_approval(tmp_path)
     assert applied["dry_run"] is False
     assert applied["updated_count"] == 1
     assert applied["mutation_performed"] is True
+
+
+def test_cli_rejects_resolved_couchdb_target_drift_before_constructing_writable_store(
+    tmp_path: Path,
+) -> None:
+    state_db = _state_db(tmp_path)
+    _record_payload(state_db, _payload())
+    store = _source_store()
+    argv = [
+        "--state-db",
+        str(state_db.path),
+        "--project",
+        PROJECT,
+        "--limit",
+        "10",
+        "--max-runtime-seconds",
+        "30",
+    ]
+    primary_env = {
+        "COUCHDB_URL": "https://primary-couchdb.invalid",
+        "COUCHDB_DB": "primary_source",
+        "COUCHDB_USER": "user",
+        "COUCHDB_PASSWORD": "password",
+    }
+    with (
+        patch(
+            "agent_knowledge.rag_ingress.temporal_metadata_backfill.CouchDBHttpSourceStore",
+            return_value=store,
+        ),
+        patch.dict(os.environ, primary_env, clear=False),
+        patch("sys.stdout", StringIO()) as output,
+    ):
+        assert main(argv) == 0
+    plan = json.loads(output.getvalue())
+    assert set(plan["target_fingerprints"]) == {"couchdb_source"}
+    assert plan["target_fingerprints"]["couchdb_source"].startswith("sha256:")
+    assert "primary-couchdb" not in json.dumps(plan, sort_keys=True)
+
+    approval_argv = [
+        *argv,
+        "--execute",
+        "--expected-plan-digest",
+        plan["plan_digest"],
+        "--approval",
+        "PLACEHOLDER",
+    ]
+    approval = _write_approval(
+        tmp_path,
+        approval_argv,
+        target_fingerprints=plan["target_fingerprints"],
+    )
+    approval_argv[-1] = str(approval)
+    _write_approval(
+        tmp_path,
+        approval_argv,
+        target_fingerprints=plan["target_fingerprints"],
+    )
+
+    with (
+        patch.dict(
+            os.environ,
+            {**primary_env, "COUCHDB_DB": "drifted_source"},
+            clear=False,
+        ),
+        patch(
+            "agent_knowledge.rag_ingress.temporal_metadata_backfill.CouchDBHttpSourceStore",
+            side_effect=AssertionError("must not construct writable store after target drift"),
+        ) as source_store,
+        patch("sys.stdout", StringIO()) as output,
+    ):
+        assert main(approval_argv) == 2
+    report = json.loads(output.getvalue())
+    assert report["error"] == "approval_rejected"
+    assert report["mutation_performed"] is False
+    source_store.assert_not_called()
 
 
 def test_neuron_knowledge_routes_backfill_as_approval_gated_runtime_command():

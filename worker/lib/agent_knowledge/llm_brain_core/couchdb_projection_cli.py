@@ -535,13 +535,19 @@ def _build_source_store(
     couchdb_db: str,
     couchdb_user: str,
     couchdb_password_env: str,
+    couchdb_password: str | None = None,
 ) -> CouchDBHttpSourceStore:
     if not couchdb_url:
         raise ValueError("COUCHDB_URL is required")
+    password = (
+        os.environ.get(couchdb_password_env, "")
+        if couchdb_password is None
+        else str(couchdb_password)
+    )
     return CouchDBHttpSourceStore(
         base_url=couchdb_url,
         db=couchdb_db,
-        auth_header=_auth_header(couchdb_user, os.environ.get(couchdb_password_env, "")),
+        auth_header=_auth_header(couchdb_user, password),
     )
 
 
