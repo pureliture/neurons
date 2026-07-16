@@ -278,6 +278,10 @@ async def _dispatch_call_tool(
         # stdio handle_jsonrpc_message(-32602)와 동일하게 type name만 노출(redaction 대칭).
         return mcp_types.CallToolResult(
             content=[mcp_types.TextContent(type="text", text=f"invalid params: {type(exc).__name__}")],
+            structuredContent={
+                "error_code": -32602,
+                "error_type": type(exc).__name__,
+            },
             isError=True,
         )
     except Exception as exc:
@@ -290,6 +294,10 @@ async def _dispatch_call_tool(
         )
         return mcp_types.CallToolResult(
             content=[mcp_types.TextContent(type="text", text="internal error")],
+            structuredContent={
+                "error_code": -32603,
+                "error_type": "InternalError",
+            },
             isError=True,
         )
     content = [

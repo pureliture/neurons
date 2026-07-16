@@ -270,6 +270,35 @@ def _artifact_from_dict(parsed: dict[str, Any]) -> SessionMemoryArtifact:
         ontology_version=str(parsed.get("ontology_version") or "1.0.0"),
         extractor_version=str(parsed.get("extractor_version") or "0.1.0"),
         created_at=str(parsed.get("created_at") or ""),
+        source_revision=str(parsed.get("source_revision") or ""),
+        observed_at_start=str(parsed.get("observed_at_start") or ""),
+        observed_at_end=str(parsed.get("observed_at_end") or ""),
+        revision_observed_at_start=str(
+            parsed.get("revision_observed_at_start") or ""
+        ),
+        revision_observed_at_end=str(parsed.get("revision_observed_at_end") or ""),
+        revision_observed_intervals=tuple(
+            (str(interval[0]), str(interval[1]))
+            for interval in (parsed.get("revision_observed_intervals") or ())
+            if isinstance(interval, (list, tuple)) and len(interval) == 2
+        ),
+        revision_temporal_term_bindings=tuple(
+            (
+                str(binding[0]),
+                str(binding[1]),
+                tuple(str(item) for item in binding[2]),
+            )
+            for binding in (parsed.get("revision_temporal_term_bindings") or ())
+            if isinstance(binding, (list, tuple))
+            and len(binding) == 3
+            and isinstance(binding[2], (list, tuple))
+        ),
+        revision_temporal_evidence=str(
+            parsed.get("revision_temporal_evidence") or "legacy"
+        ),
+        search_term_hashes=tuple(parsed.get("search_term_hashes") or ()),
+        materialized_at=str(parsed.get("materialized_at") or ""),
+        materialization_revision=int(parsed.get("materialization_revision") or 0),
     )
 
 

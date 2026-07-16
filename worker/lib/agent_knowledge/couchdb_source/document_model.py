@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from typing import Iterable, Mapping
 
 from ..rag_ingress.rag_ready_document import (
@@ -155,6 +156,138 @@ def build_coverage_hash(content_hashes: Iterable[str]) -> str:
 
     joined = "\n".join(sorted(str(h) for h in content_hashes))
     return sha256_hash(joined)
+
+
+def build_source_hash(
+    conversation_content_hashes: Iterable[str],
+    tool_evidence_coverage_hashes: Iterable[str],
+    *,
+    observed_at_start: str = "",
+    observed_at_end: str = "",
+    conversation_revision_tokens: Iterable[str] = (),
+    tool_evidence_revision_tokens: Iterable[str] = (),
+) -> str:
+    """Deterministic revision of all material source for one session."""
+
+    payload = {
+        "conversation_content_hashes": sorted(str(value) for value in conversation_content_hashes),
+        "tool_evidence_coverage_hashes": sorted(
+            str(value) for value in tool_evidence_coverage_hashes
+        ),
+        "observed_at_start": str(observed_at_start or ""),
+        "observed_at_end": str(observed_at_end or ""),
+        "conversation_revision_tokens": sorted(
+            str(value) for value in conversation_revision_tokens
+        ),
+        "tool_evidence_revision_tokens": sorted(
+            str(value) for value in tool_evidence_revision_tokens
+        ),
+    }
+    return sha256_hash(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+
+
+def build_source_revision_token(
+    document: Mapping[str, object],
+    *,
+    material_hash_field: str,
+) -> str:
+    """Hash one source document's material identity including its event window."""
+
+    payload = {
+        "document_ref_hash": sha256_hash(str(document.get("_id") or "")),
+        "material_hash": str(document.get(material_hash_field) or ""),
+        "observed_at_start": str(document.get("observed_at_start") or ""),
+        "observed_at_end": str(document.get("observed_at_end") or ""),
+        "position": {
+            field: document.get(field)
+            for field in (
+                "turn_start_index",
+                "turn_end_index",
+                "part_index",
+                "part_count",
+                "char_start",
+                "char_end",
+                "evidence_index_start",
+                "evidence_index_end",
+            )
+            if field in document
+        },
+    }
+    return sha256_hash(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def observed_time_bounds(
+    *,
+    sessions: Iterable[Mapping[str, object]],
+    chunks: Iterable[Mapping[str, object]],
+) -> tuple[str, str]:
+    documents = [*sessions, *chunks]
+    starts = [
+        str(value)
+        for document in documents
+        if (value := document.get("observed_at_start") or document.get("started_at"))
+    ]
+    ends = [
+        str(value)
+        for document in documents
+        if (
+            value := document.get("observed_at_end")
+            or document.get("ended_at")
+            or document.get("observed_at_start")
+        )
+    ]
+    start = _chronological_bound(starts, latest=False)
+    end = _chronological_bound(ends, latest=True) or start
+    return start, end
+
+
+def normalize_observed_interval(start: object, end: object) -> tuple[str, str] | None:
+    """Return one UTC-normalized interval, or None for missing/invalid bounds."""
+
+    raw_start = str(start or "").strip()
+    raw_end = str(end or raw_start).strip()
+    if not raw_start or not raw_end:
+        return None
+    parsed: list[datetime] = []
+    for value in (raw_start, raw_end):
+        try:
+            item = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if item.tzinfo is None:
+            item = item.replace(tzinfo=timezone.utc)
+        parsed.append(item.astimezone(timezone.utc))
+    if parsed[0] > parsed[1]:
+        return None
+    return (
+        parsed[0].isoformat().replace("+00:00", "Z"),
+        parsed[1].isoformat().replace("+00:00", "Z"),
+    )
+
+
+def _chronological_bound(values: Iterable[str], *, latest: bool) -> str:
+    parsed_values: list[tuple[datetime, str]] = []
+    fallback_values: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        fallback_values.append(text)
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed_values.append((parsed.astimezone(timezone.utc), text))
+    if parsed_values:
+        selected = max(parsed_values) if latest else min(parsed_values)
+        return selected[1]
+    if not fallback_values:
+        return ""
+    return max(fallback_values) if latest else min(fallback_values)
 
 
 def _hash_hex(value: str) -> str:
@@ -313,6 +446,10 @@ def build_transcript_session_document(*, session: TranscriptSession) -> dict:
         {
             "started_at": session.started_at,
             "ended_at": session.ended_at,
+            "observed_at_start": session.observed_at_start,
+            "observed_at_end": session.observed_at_end,
+            "source_hash": session.source_hash,
+            "materialized_at": session.materialized_at,
             "source_status": session.source_status,
         }
     )
@@ -347,6 +484,8 @@ def build_conversation_chunk_document(*, chunk: TranscriptChunk, source_locator_
             "part_count": chunk.part_count,
             "char_start": chunk.char_start,
             "char_end": chunk.char_end,
+            "observed_at_start": chunk.observed_at_start,
+            "observed_at_end": chunk.observed_at_end,
             "content_hash": content_hash,
             "source_status": chunk.source_status,
             "body": body,
@@ -366,6 +505,8 @@ def build_tool_evidence_bundle_document(
     evidence_index_end: int,
     record_content_hashes: Iterable[str],
     body: str,
+    observed_at_start: str = "",
+    observed_at_end: str = "",
     source_locator_hash: str = "",
     redaction_version: str = REDACTION_VERSION,
 ) -> dict:
@@ -399,6 +540,8 @@ def build_tool_evidence_bundle_document(
             "record_content_hashes": member_hashes,
             "coverage_hash": build_coverage_hash(member_hashes),
             "content_hash": sha256_hash(body),
+            "observed_at_start": observed_at_start,
+            "observed_at_end": observed_at_end or observed_at_start,
             "body": body,
         }
     )
@@ -417,6 +560,10 @@ def build_coverage_manifest_document(
     source_locator_hash: str = "",
     ledger_comparison: Mapping[str, object] | None = None,
     project_authority: Mapping[str, object] | None = None,
+    observed_at_start: str = "",
+    observed_at_end: str = "",
+    conversation_revision_tokens: Iterable[str] = (),
+    tool_evidence_revision_tokens: Iterable[str] = (),
 ) -> dict:
     """Per-session coverage state consumed by the M5 retirement gate.
 
@@ -430,6 +577,8 @@ def build_coverage_manifest_document(
 
     conv_hashes = [str(h) for h in conversation_content_hashes]
     bundle_hashes = [str(h) for h in tool_evidence_coverage_hashes]
+    conversation_coverage_hash = build_coverage_hash(conv_hashes)
+    tool_evidence_coverage_hash = build_coverage_hash(bundle_hashes)
     doc = _base_document(
         doc_type=SourceDocType.COVERAGE_MANIFEST,
         doc_id=coverage_manifest_doc_id(session_id_hash),
@@ -443,8 +592,18 @@ def build_coverage_manifest_document(
         {
             "conversation_chunk_count": conversation_chunk_count,
             "tool_evidence_bundle_count": tool_evidence_bundle_count,
-            "conversation_coverage_hash": build_coverage_hash(conv_hashes),
-            "tool_evidence_coverage_hash": build_coverage_hash(bundle_hashes),
+            "conversation_coverage_hash": conversation_coverage_hash,
+            "tool_evidence_coverage_hash": tool_evidence_coverage_hash,
+            "source_hash": build_source_hash(
+                conv_hashes,
+                bundle_hashes,
+                observed_at_start=observed_at_start,
+                observed_at_end=observed_at_end,
+                conversation_revision_tokens=conversation_revision_tokens,
+                tool_evidence_revision_tokens=tool_evidence_revision_tokens,
+            ),
+            "observed_at_start": observed_at_start,
+            "observed_at_end": observed_at_end,
             "ledger_comparison": dict(ledger_comparison or {}),
             "project_authority": dict(project_authority or {}),
         }
@@ -463,6 +622,9 @@ def build_projection_state_document(
     active_content_hash: str = "",
     failure_reason: str = "",
     source_locator_hash: str = "",
+    source_hash: str = "",
+    projected_source_hash: str = "",
+    materialized_at: str = "",
 ) -> dict:
     """Tracks projection of the derived session-memory to RetiredIndexBridge.
 
@@ -488,6 +650,10 @@ def build_projection_state_document(
         # Defensive: a malformed hash stored here would silently break the
         # authority resolver's currentness match later.
         assert_hash_like("active_content_hash", active_content_hash)
+    if source_hash:
+        assert_hash_like("source_hash", source_hash)
+    if projected_source_hash:
+        assert_hash_like("projected_source_hash", projected_source_hash)
     doc = _base_document(
         doc_type=SourceDocType.PROJECTION_STATE,
         doc_id=projection_state_doc_id(session_id_hash),
@@ -503,6 +669,9 @@ def build_projection_state_document(
             "projection_status": projection_status,
             "session_memory_knowledge_id": session_memory_knowledge_id,
             "active_content_hash": active_content_hash,
+            "source_hash": source_hash,
+            "projected_source_hash": projected_source_hash,
+            "materialized_at": materialized_at,
             "failure_reason": failure_reason,
         }
     )
@@ -563,6 +732,8 @@ __all__ = [
     "build_session_id_hash",
     "build_source_locator_hash",
     "build_coverage_hash",
+    "build_source_hash",
+    "observed_time_bounds",
     "session_doc_id",
     "conversation_chunk_doc_id",
     "tool_evidence_bundle_doc_id",

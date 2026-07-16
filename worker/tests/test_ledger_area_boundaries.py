@@ -51,6 +51,17 @@ def test_tables_partition_is_total_and_exclusive():
     assert union == created
 
 
+def test_external_schema_table_is_counted_only_when_initialize_uses_constant():
+    source = lint._ledger_path().read_text(encoding="utf-8")
+
+    assert "llm_brain_session_memory_artifacts" in lint._created_tables(source)
+
+    without_artifact_schema_use = source.replace("+ _ARTIFACT_SCHEMA", "")
+    assert "llm_brain_session_memory_artifacts" not in lint._created_tables(
+        without_artifact_schema_use
+    )
+
+
 def test_catch_unmapped_table(tmp_path):
     # manifest에 없는 새 테이블이 ledger.py에 생기면 '배정되지 않음' 위반이 나야 한다.
     fake = tmp_path / "ledger.py"

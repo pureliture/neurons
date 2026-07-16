@@ -8,7 +8,10 @@ import pytest
 
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBError, CouchDBHttpSourceStore
-from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
+from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore, SourceStoreConflict
+from agent_knowledge.couchdb_source.session_memory_materializer import (
+    upsert_transcript_session_aggregate,
+)
 from agent_knowledge.transport_contract import ProxyResponse
 from agent_knowledge.session_memory.transcript_model import TranscriptChunk, TranscriptSession
 
@@ -46,7 +49,9 @@ class FakeCouch:
         self.dbs: dict[str, dict[str, dict]] = {}
         self.find_bodies: list[dict] = []
         self.put_conflict_once = False
+        self.put_conflict_always = False
         self._conflicted = False
+        self.on_put_conflict = None
 
     def __call__(self, method: str, url: str, headers: dict, body: bytes) -> ProxyResponse:
         path = urlparse(url).path
@@ -72,8 +77,10 @@ class FakeCouch:
                 return self._json(200, doc) if doc else self._json(404, {"error": "not_found"})
             if method == "PUT":
                 incoming = json.loads(body.decode())
-                if self.put_conflict_once and not self._conflicted:
+                if self.put_conflict_always or (self.put_conflict_once and not self._conflicted):
                     self._conflicted = True
+                    if self.on_put_conflict is not None:
+                        self.on_put_conflict(store, doc_id)
                     return self._json(409, {"error": "conflict"})
                 current = store.get(doc_id)
                 if current is not None and incoming.get("_rev") != current.get("_rev"):
@@ -185,6 +192,150 @@ def test_put_retries_once_on_conflict():
     rev = store.put(_session_doc())
     assert rev.outcome == "accepted"
     assert rev.rev  # succeeded after one 409 retry
+
+
+def test_conditional_temporal_patch_preserves_body_and_content_hash():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    document = _chunk_doc("stable body")
+    first = store.put(document)
+
+    patched = store.patch_observed_time_if_content_hash(
+        doc_id=document["_id"],
+        expected_content_hash=document["content_hash"],
+        expected_rev=first.rev,
+        observed_at_start="2026-07-09T10:00:00Z",
+        observed_at_end="2026-07-09T10:30:00Z",
+    )
+
+    current = store.get(document["_id"])
+    assert current is not None
+    assert patched.rev != first.rev
+    assert current["body"] == document["body"]
+    assert current["content_hash"] == document["content_hash"]
+    assert current["observed_at_start"] == "2026-07-09T10:00:00Z"
+
+
+def test_conditional_temporal_patch_does_not_retry_a_revision_conflict():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    document = _chunk_doc("stable body")
+    first = store.put(document)
+    fake.put_conflict_once = True
+    fake._conflicted = False
+
+    with pytest.raises(SourceStoreConflict):
+        store.patch_observed_time_if_content_hash(
+            doc_id=document["_id"],
+            expected_content_hash=document["content_hash"],
+            expected_rev=first.rev,
+            observed_at_start="2026-07-09T10:00:00Z",
+            observed_at_end="2026-07-09T10:30:00Z",
+        )
+
+    current = store.get(document["_id"])
+    assert current is not None
+    assert current["_rev"] == first.rev
+    assert current["observed_at_start"] == ""
+
+
+def test_conditional_put_does_not_retry_a_revision_conflict():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    document = _session_doc()
+    first = store.put(document)
+    changed = dict(document)
+    changed["materialized_at"] = "2026-07-16T03:00:00Z"
+    fake.put_conflict_once = True
+    fake._conflicted = False
+
+    with pytest.raises(SourceStoreConflict):
+        store.put_if_revision(changed, expected_rev=first.rev)
+
+    current = store.get(document["_id"])
+    assert current is not None
+    assert current["_rev"] == first.rev
+    assert current["materialized_at"] == ""
+
+
+def test_session_aggregate_conflict_rereads_and_remerges_projector_currentness():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    existing = _session_doc()
+    existing.update(
+        {
+            "started_at": "2026-07-09T10:00:00Z",
+            "ended_at": "2026-07-09T11:00:00Z",
+            "observed_at_start": "2026-07-09T10:00:00Z",
+            "observed_at_end": "2026-07-09T11:00:00Z",
+            "materialized_at": "2026-07-15T01:00:00Z",
+            "source_hash": dm.sha256_hash("old-projector-state"),
+            "source_status": "materialized",
+        }
+    )
+    store.put(existing)
+
+    concurrent_source_hash = dm.sha256_hash("concurrent-projector-state")
+
+    def _commit_concurrent_projection(documents: dict[str, dict], doc_id: str) -> None:
+        current = dict(documents[doc_id])
+        current.update(
+            {
+                "_rev": "2-concurrent-projector",
+                "materialized_at": "2026-07-16T02:00:00Z",
+                "source_hash": concurrent_source_hash,
+                "source_status": "materialized",
+            }
+        )
+        documents[doc_id] = current
+
+    fake.put_conflict_once = True
+    fake.on_put_conflict = _commit_concurrent_projection
+    incoming = _session_doc()
+    incoming.update(
+        {
+            "started_at": "2026-07-09T09:00:00Z",
+            "ended_at": "2026-07-09T13:00:00Z",
+            "observed_at_start": "2026-07-09T09:00:00Z",
+            "observed_at_end": "2026-07-09T13:00:00Z",
+        }
+    )
+
+    revision = upsert_transcript_session_aggregate(store=store, incoming=incoming)
+
+    current = store.get(existing["_id"])
+    assert current is not None
+    assert revision.outcome == "conflict_resolved"
+    assert current["_rev"].startswith("3-")
+    assert current["started_at"] == "2026-07-09T09:00:00Z"
+    assert current["ended_at"] == "2026-07-09T13:00:00Z"
+    assert current["observed_at_start"] == "2026-07-09T09:00:00Z"
+    assert current["observed_at_end"] == "2026-07-09T13:00:00Z"
+    assert current["materialized_at"] == "2026-07-16T02:00:00Z"
+    assert current["source_hash"] == concurrent_source_hash
+    assert current["source_status"] == "materialized"
+
+
+def test_session_aggregate_conflict_retry_is_bounded_and_fail_closed():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    existing = _session_doc()
+    store.put(existing)
+    fake.put_conflict_always = True
+    incoming = _session_doc()
+    incoming["observed_at_end"] = "2026-07-09T13:00:00Z"
+
+    with pytest.raises(SourceStoreConflict):
+        store.merge_transcript_session_aggregate(incoming=incoming, max_attempts=2)
+
+    current = store.get(existing["_id"])
+    assert current is not None
+    assert current["observed_at_end"] == ""
 
 
 def test_find_by_session_filters_by_doc_type():

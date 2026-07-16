@@ -151,10 +151,16 @@ class TranscriptSession:
     ended_at: str = ""
     source_status: str = "source_unproven"
     source_locator_hash: str = ""
+    observed_at_start: str = ""
+    observed_at_end: str = ""
+    source_hash: str = ""
+    materialized_at: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "provider", canonicalize_provider(self.provider))
         object.__setattr__(self, "project", canonicalize_project(self.project))
+        object.__setattr__(self, "observed_at_start", self.observed_at_start or self.started_at)
+        object.__setattr__(self, "observed_at_end", self.observed_at_end or self.ended_at)
 
     def to_record(self) -> dict:
         return asdict(self)
@@ -212,6 +218,8 @@ class TranscriptChunk:
     part_count: int = 1
     char_start: int = 0
     char_end: int = 0
+    observed_at_start: str = ""
+    observed_at_end: str = ""
 
     def __post_init__(self) -> None:
         redacted_text = redact_text_v2(self.redacted_text)
@@ -232,6 +240,8 @@ class TranscriptChunk:
         turn_end_index: int,
         text: str,
         source_status: str = "source_locator_private_spool_only",
+        observed_at_start: str = "",
+        observed_at_end: str = "",
     ) -> "TranscriptChunk":
         redacted_text = redact_text_v2(text)
         return cls(
@@ -244,6 +254,8 @@ class TranscriptChunk:
             redacted_text=redacted_text,
             content_hash=_sha256(redacted_text),
             source_status=source_status,
+            observed_at_start=observed_at_start,
+            observed_at_end=observed_at_end,
         )
 
     def title(self) -> str:

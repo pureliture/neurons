@@ -14,14 +14,19 @@ from agent_knowledge.llm_brain_core import (
     FakeGraphMemoryAdapter,
     LedgerSessionMemoryArtifactStore,
     LedgerSourceRefCatalog,
+    SessionMemoryArtifact,
 )
+from agent_knowledge.llm_brain_core._util import hash_payload
 from agent_knowledge.llm_brain_core.runtime import (
+    _legacy_source_event_id,
     brain_event_from_ingress_payload,
     build_runtime_brain_service,
     episode_from_memory_card,
     materialize_artifact_from_couchdb_source,
     replay_ingress_events,
+    session_episode_from_couchdb_source,
     source_ref_from_catalog_event,
+    session_source_revision_from_couchdb_source,
 )
 from agent_knowledge.session_memory.brain_read_model import LegacyLedgerBrainReadModel
 from agent_knowledge.session_memory.transcript_model import (
@@ -47,6 +52,17 @@ def test_runtime_integration_session_artifact_card_source_event_to_contextpack(t
         source_store=source_store,
         artifact_store=artifact_store,
     )
+    raw_source_doc_ids = {
+        str(document.get("_id") or "")
+        for document in source_store.all_docs()
+        if document.get("doc_type")
+        in {dm.SourceDocType.CONVERSATION_CHUNK, dm.SourceDocType.TOOL_EVIDENCE_BUNDLE}
+    }
+    assert raw_source_doc_ids
+    assert all(raw_id not in artifact.summary for raw_id in raw_source_doc_ids)
+    assert "latest_chunk_ref_hash=sha256:" in artifact.summary
+    assert hash_payload("runtime") in artifact.search_term_hashes
+    assert artifact.revision_temporal_evidence == "bounded"
     source_catalog.register(
         source_ref_from_catalog_event(
             {
@@ -123,6 +139,510 @@ def test_runtime_integration_session_artifact_card_source_event_to_contextpack(t
     assert "TOKEN" not in serialized
     assert "dataset_id" not in serialized
     assert "document_id" not in serialized
+
+
+def test_runtime_materialization_tracks_each_same_session_revision_event_window(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    session_id_hash = _seed_couchdb_source(store)
+    artifact_store = LedgerSessionMemoryArtifactStore(Ledger(tmp_path / "ledger.sqlite3"))
+    date_a = materialize_artifact_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+        artifact_store=artifact_store,
+    )
+    later_chunk = TranscriptChunk.from_text(
+        chunk_id="chunk_runtime_002",
+        session_id_hash=session_id_hash,
+        provider=PROVIDER,
+        project=PROJECT,
+        turn_start_index=2,
+        turn_end_index=2,
+        text="Deployment migration completed with bounded verification.",
+        observed_at_start="2026-07-15T10:00:00Z",
+        observed_at_end="2026-07-15T10:30:00Z",
+    )
+    store.put(dm.build_conversation_chunk_document(chunk=later_chunk))
+
+    date_b = materialize_artifact_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+        artifact_store=artifact_store,
+    )
+
+    selected_a = artifact_store.list_observed_interval(
+        project=PROJECT,
+        observed_at_start="2026-06-19T00:00:00Z",
+        observed_at_end="2026-06-19T00:00:00Z",
+    )
+    selected_b = artifact_store.list_observed_interval(
+        project=PROJECT,
+        observed_at_start="2026-07-15T10:15:00Z",
+        observed_at_end="2026-07-15T10:15:00Z",
+    )
+
+    assert date_a.source_revision != date_b.source_revision
+    assert date_b.revision_observed_at_start == "2026-07-15T10:00:00Z"
+    assert date_b.revision_observed_at_end == "2026-07-15T10:30:00Z"
+    assert hash_payload("runtime") in date_a.search_term_hashes
+    assert hash_payload("runtime") not in date_b.search_term_hashes
+    assert hash_payload("deployment") in date_b.search_term_hashes
+    assert [artifact.source_revision for artifact in selected_a] == [date_a.source_revision]
+    assert [artifact.source_revision for artifact in selected_b] == [date_b.source_revision]
+
+
+def test_runtime_materialization_uses_tool_evidence_event_time_for_evidence_only_revision(
+    tmp_path,
+):
+    store = InMemoryCouchDBSourceStore()
+    session_id_hash = _seed_couchdb_source(store)
+    artifact_store = LedgerSessionMemoryArtifactStore(Ledger(tmp_path / "ledger.sqlite3"))
+    date_a = materialize_artifact_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+        artifact_store=artifact_store,
+    )
+    store_tool_evidence_bundles(
+        [
+            ToolEvidenceSummaryRecord(
+                session_id_hash=session_id_hash,
+                provider=PROVIDER,
+                project=PROJECT,
+                category="test_result",
+                outcome="pass",
+                tool_name="uv",
+                command_summary="uv run pytest -q",
+                redacted_summary="Date B evidence-only verification passed.",
+                observed_at="2026-07-15T10:15:00Z",
+                evidence_index=0,
+            )
+        ],
+        store=store,
+    )
+
+    date_b = materialize_artifact_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+        artifact_store=artifact_store,
+    )
+
+    selected_b = artifact_store.list_observed_interval(
+        project=PROJECT,
+        observed_at_start="2026-07-15T10:15:00Z",
+        observed_at_end="2026-07-15T10:15:00Z",
+    )
+    assert date_b.source_revision != date_a.source_revision
+    assert date_b.revision_temporal_evidence == "bounded"
+    assert date_b.revision_observed_at_start == "2026-07-15T10:15:00Z"
+    assert date_b.revision_observed_at_end == "2026-07-15T10:15:00Z"
+    assert [artifact.source_revision for artifact in selected_b] == [
+        date_b.source_revision
+    ]
+
+
+def test_runtime_materialization_retries_until_persisted_snapshot_is_current(tmp_path) -> None:
+    class SourceMutationDuringReadStore(InMemoryCouchDBSourceStore):
+        armed = False
+        injected = False
+
+        def find_by_session(self, *, session_id_hash, doc_type=None):
+            documents = super().find_by_session(
+                session_id_hash=session_id_hash,
+                doc_type=doc_type,
+            )
+            if (
+                self.armed
+                and not self.injected
+                and doc_type == dm.SourceDocType.TOOL_EVIDENCE_BUNDLE
+            ):
+                self.injected = True
+                self.put(
+                    dm.build_conversation_chunk_document(
+                        chunk=TranscriptChunk.from_text(
+                            chunk_id="concurrent_chunk",
+                            session_id_hash=session_id_hash,
+                            provider=PROVIDER,
+                            project=PROJECT,
+                            turn_start_index=2,
+                            turn_end_index=2,
+                            text="Concurrent source revision arrived.",
+                            observed_at_start="2026-07-15T10:00:00Z",
+                            observed_at_end="2026-07-15T10:30:00Z",
+                        )
+                    )
+                )
+            return documents
+
+    store = SourceMutationDuringReadStore()
+    session_id_hash = _seed_couchdb_source(store)
+    artifact_store = LedgerSessionMemoryArtifactStore(
+        Ledger(tmp_path / "ledger.sqlite3")
+    )
+    first = materialize_artifact_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+        artifact_store=artifact_store,
+    )
+    store.armed = True
+
+    episode = session_episode_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+        artifact_store=artifact_store,
+    )
+    current_revision = session_source_revision_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+    )
+    latest = artifact_store.get_latest_for_session(
+        project=PROJECT,
+        session_id_hash=session_id_hash,
+    )
+
+    assert store.injected is True
+    assert latest is not None
+    assert latest.source_revision == current_revision
+    assert latest.source_revision != first.source_revision
+    assert latest.materialization_revision == 2
+    assert len(latest.chunk_refs) == 2
+    assert "Concurrent source revision arrived" in episode.extraction_text
+
+
+def test_runtime_materialization_leaves_latest_unchanged_when_source_never_stabilizes(
+    tmp_path,
+) -> None:
+    class NeverStableSourceStore(InMemoryCouchDBSourceStore):
+        armed = False
+        injected = 0
+
+        def find_by_session(self, *, session_id_hash, doc_type=None):
+            documents = super().find_by_session(
+                session_id_hash=session_id_hash,
+                doc_type=doc_type,
+            )
+            if self.armed and doc_type == dm.SourceDocType.TOOL_EVIDENCE_BUNDLE:
+                self.injected += 1
+                self.put(
+                    dm.build_conversation_chunk_document(
+                        chunk=TranscriptChunk.from_text(
+                            chunk_id=f"unstable_{self.injected}",
+                            session_id_hash=session_id_hash,
+                            provider=PROVIDER,
+                            project=PROJECT,
+                            turn_start_index=100 + self.injected,
+                            turn_end_index=100 + self.injected,
+                            text=f"Unstable source revision {self.injected}.",
+                            observed_at_start="2026-07-15T10:00:00Z",
+                            observed_at_end="2026-07-15T10:00:00Z",
+                        )
+                    )
+                )
+            return documents
+
+    store = NeverStableSourceStore()
+    session_id_hash = _seed_couchdb_source(store)
+    artifact_store = LedgerSessionMemoryArtifactStore(
+        Ledger(tmp_path / "ledger.sqlite3")
+    )
+    first = materialize_artifact_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+        artifact_store=artifact_store,
+    )
+    store.armed = True
+
+    with pytest.raises(RuntimeError, match="did not stabilize"):
+        materialize_artifact_from_couchdb_source(
+            session_id_hash=session_id_hash,
+            source_store=store,
+            artifact_store=artifact_store,
+        )
+
+    latest = artifact_store.get_latest_for_session(
+        project=PROJECT,
+        session_id_hash=session_id_hash,
+    )
+    assert store.injected >= 3
+    assert latest is not None
+    assert latest.artifact_id == first.artifact_id
+    assert latest.source_revision == first.source_revision
+
+
+def test_temporal_revision_fails_closed_when_any_changed_document_lacks_event_time(
+    tmp_path,
+) -> None:
+    store = InMemoryCouchDBSourceStore()
+    session_id_hash = _seed_couchdb_source(store)
+    artifact_store = LedgerSessionMemoryArtifactStore(
+        Ledger(tmp_path / "ledger.sqlite3")
+    )
+    materialize_artifact_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+        artifact_store=artifact_store,
+    )
+    store.put(
+        dm.build_conversation_chunk_document(
+            chunk=TranscriptChunk.from_text(
+                chunk_id="bounded_date_b",
+                session_id_hash=session_id_hash,
+                provider=PROVIDER,
+                project=PROJECT,
+                turn_start_index=2,
+                turn_end_index=2,
+                text="Bounded Date B deployment evidence.",
+                observed_at_start="2026-07-15T10:00:00Z",
+                observed_at_end="2026-07-15T10:30:00Z",
+            )
+        )
+    )
+    store.put(
+        dm.build_conversation_chunk_document(
+            chunk=TranscriptChunk.from_text(
+                chunk_id="missing_time_date_b",
+                session_id_hash=session_id_hash,
+                provider=PROVIDER,
+                project=PROJECT,
+                turn_start_index=3,
+                turn_end_index=3,
+                text="Quasar evidence without an event time.",
+            )
+        )
+    )
+
+    partial = materialize_artifact_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+        artifact_store=artifact_store,
+    )
+    result = BrainReadService(artifact_store=artifact_store).brain_objects_query(
+        repository="neurons",
+        branch="main",
+        query="quasar evidence",
+        current_files=[],
+        route="temporal_work_recall",
+        as_of="2026-07-15T10:15:00Z",
+    )
+
+    assert partial.revision_temporal_evidence == "missing"
+    assert partial.revision_observed_intervals == ()
+    assert result["object_pack"]["objects"] == []
+    assert result["object_pack"]["confidence"]["score"] == 0.0
+    assert result["object_pack"]["gaps"]
+
+
+def test_source_revision_changes_when_middle_chunk_event_time_changes() -> None:
+    store = InMemoryCouchDBSourceStore()
+    session_id_hash = _sid()
+    store.put(
+        dm.build_transcript_session_document(
+            session=TranscriptSession(
+                session_id_hash=session_id_hash,
+                provider=PROVIDER,
+                project=PROJECT,
+                started_at="2026-07-09T09:00:00Z",
+            )
+        )
+    )
+    documents = []
+    for index, hour in enumerate((9, 10, 11), start=1):
+        chunk = TranscriptChunk.from_text(
+            chunk_id=f"middle-time-{index}",
+            session_id_hash=session_id_hash,
+            provider=PROVIDER,
+            project=PROJECT,
+            turn_start_index=index,
+            turn_end_index=index,
+            text=f"Stable temporal content {index}.",
+            observed_at_start=f"2026-07-09T{hour:02d}:00:00Z",
+            observed_at_end=f"2026-07-09T{hour:02d}:10:00Z",
+        )
+        document = dm.build_conversation_chunk_document(chunk=chunk)
+        documents.append(document)
+        store.put(document)
+    before = session_source_revision_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+    )
+
+    changed_middle = {
+        **documents[1],
+        "observed_at_start": "2026-07-09T10:30:00Z",
+        "observed_at_end": "2026-07-09T10:40:00Z",
+    }
+    store.put(changed_middle)
+    after = session_source_revision_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+    )
+
+    assert after != before
+
+
+def test_temporal_artifact_preserves_disjoint_event_intervals(tmp_path) -> None:
+    store = InMemoryCouchDBSourceStore()
+    session_id_hash = _sid()
+    store.put(
+        dm.build_transcript_session_document(
+            session=TranscriptSession(
+                session_id_hash=session_id_hash,
+                provider=PROVIDER,
+                project=PROJECT,
+                started_at="2026-07-09T10:00:00Z",
+                ended_at="2026-07-15T10:30:00Z",
+            )
+        )
+    )
+    for index, (day, subject) in enumerate(((9, "alpha"), (15, "beta")), start=1):
+        store.put(
+            dm.build_conversation_chunk_document(
+                chunk=TranscriptChunk.from_text(
+                    chunk_id=f"disjoint-{day}",
+                    session_id_hash=session_id_hash,
+                    provider=PROVIDER,
+                    project=PROJECT,
+                    turn_start_index=index,
+                    turn_end_index=index,
+                    text=f"Temporal {subject} event on July {day}.",
+                    observed_at_start=f"2026-07-{day:02d}T10:00:00Z",
+                    observed_at_end=f"2026-07-{day:02d}T10:30:00Z",
+                )
+            )
+        )
+    artifact_store = LedgerSessionMemoryArtifactStore(
+        Ledger(tmp_path / "ledger.sqlite3")
+    )
+    artifact = materialize_artifact_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+        artifact_store=artifact_store,
+    )
+
+    middle = artifact_store.list_observed_interval(
+        project=PROJECT,
+        observed_at_start="2026-07-12T10:15:00Z",
+        observed_at_end="2026-07-12T10:15:00Z",
+    )
+    service = BrainReadService(artifact_store=artifact_store)
+    date_a_wrong_subject = service.brain_objects_query(
+        repository="neurons",
+        branch="main",
+        query="beta",
+        current_files=[],
+        route="temporal_work_recall",
+        as_of="2026-07-09T10:15:00Z",
+    )
+    date_a_right_subject = service.brain_objects_query(
+        repository="neurons",
+        branch="main",
+        query="alpha",
+        current_files=[],
+        route="temporal_work_recall",
+        as_of="2026-07-09T10:15:00Z",
+    )
+
+    assert artifact.revision_observed_intervals == (
+        ("2026-07-09T10:00:00Z", "2026-07-09T10:30:00Z"),
+        ("2026-07-15T10:00:00Z", "2026-07-15T10:30:00Z"),
+    )
+    assert len(artifact.revision_temporal_term_bindings) == 2
+    assert middle == []
+    assert date_a_wrong_subject["object_pack"]["objects"] == []
+    assert date_a_wrong_subject["object_pack"]["gaps"]
+    assert len(date_a_right_subject["object_pack"]["objects"]) == 1
+
+
+def test_observed_interval_normalizes_cross_offset_bounds() -> None:
+    assert dm.normalize_observed_interval(
+        "2026-07-09T10:00:00+09:00",
+        "2026-07-09T02:00:00Z",
+    ) == (
+        "2026-07-09T01:00:00Z",
+        "2026-07-09T02:00:00Z",
+    )
+
+
+def test_runtime_rebuild_migrates_legacy_event_ids_without_reclassifying_old_chunks(
+    tmp_path,
+):
+    store = InMemoryCouchDBSourceStore()
+    session_id_hash = _sid()
+    session = TranscriptSession(
+        session_id_hash=session_id_hash,
+        provider=PROVIDER,
+        project=PROJECT,
+        started_at="2026-07-09T10:00:00Z",
+    )
+    store.put(dm.build_transcript_session_document(session=session))
+    date_a_chunk = TranscriptChunk.from_text(
+        chunk_id="legacy_date_a",
+        session_id_hash=session_id_hash,
+        provider=PROVIDER,
+        project=PROJECT,
+        turn_start_index=1,
+        turn_end_index=1,
+        text="Date A temporal deployment work.",
+        observed_at_start="2026-07-09T10:00:00Z",
+        observed_at_end="2026-07-09T10:30:00Z",
+    )
+    store.put(dm.build_conversation_chunk_document(chunk=date_a_chunk))
+    source_docs = store.find_by_session(session_id_hash=session_id_hash)
+    source_revision_a = session_source_revision_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+    )
+    artifact_store = LedgerSessionMemoryArtifactStore(Ledger(tmp_path / "ledger.sqlite3"))
+    legacy_date_a = SessionMemoryArtifact.from_summary(
+        session_id_hash=session_id_hash,
+        project=PROJECT,
+        provider=PROVIDER,
+        summary="Legacy date A snapshot.",
+        source_event_ids=[_legacy_source_event_id(doc) for doc in source_docs],
+        source_revision=source_revision_a,
+        observed_at_start="2026-07-09T10:00:00Z",
+        observed_at_end="2026-07-09T10:30:00Z",
+        materialized_at="2026-07-09T11:00:00Z",
+        materialization_revision=1,
+    )
+    artifact_store.upsert(legacy_date_a)
+    date_b_chunk = TranscriptChunk.from_text(
+        chunk_id="current_date_b",
+        session_id_hash=session_id_hash,
+        provider=PROVIDER,
+        project=PROJECT,
+        turn_start_index=2,
+        turn_end_index=2,
+        text="Date B temporal projection work.",
+        observed_at_start="2026-07-15T10:00:00Z",
+        observed_at_end="2026-07-15T10:30:00Z",
+    )
+    store.put(dm.build_conversation_chunk_document(chunk=date_b_chunk))
+
+    date_b = materialize_artifact_from_couchdb_source(
+        session_id_hash=session_id_hash,
+        source_store=store,
+        artifact_store=artifact_store,
+    )
+
+    selected_a = artifact_store.list_observed_interval(
+        project=PROJECT,
+        observed_at_start="2026-07-09T10:15:00Z",
+        observed_at_end="2026-07-09T10:15:00Z",
+    )
+    selected_b = artifact_store.list_observed_interval(
+        project=PROJECT,
+        observed_at_start="2026-07-15T10:15:00Z",
+        observed_at_end="2026-07-15T10:15:00Z",
+    )
+
+    assert date_b.materialization_revision == 2
+    assert date_b.revision_observed_at_start == "2026-07-15T10:00:00Z"
+    assert date_b.revision_observed_at_end == "2026-07-15T10:30:00Z"
+    # The legacy snapshot has only cumulative session bounds. Temporal recall must
+    # keep it fail-closed until a bounded metadata rebuild supplies revision-level
+    # event evidence; recognizing its legacy event ids must not reclassify it.
+    assert legacy_date_a.revision_temporal_evidence == "legacy"
+    assert selected_a == []
+    assert [artifact.source_revision for artifact in selected_b] == [date_b.source_revision]
 
 
 def test_runtime_connected_incident_drift_persona_paths(tmp_path):
@@ -628,6 +1148,8 @@ def _seed_couchdb_source(store: InMemoryCouchDBSourceStore) -> str:
         turn_start_index=1,
         turn_end_index=1,
         text="User asked to continue runtime integration with Ledger-backed storage.",
+        observed_at_start="2026-06-19T00:00:00Z",
+        observed_at_end="2026-06-19T00:00:00Z",
     )
     chunk_doc = dm.build_conversation_chunk_document(chunk=chunk)
     store.put(chunk_doc)
@@ -652,6 +1174,7 @@ def _seed_couchdb_source(store: InMemoryCouchDBSourceStore) -> str:
                 tool_name="uv",
                 command_summary="uv run pytest -q",
                 redacted_summary="Runtime integration fixture passed.",
+                observed_at="2026-06-19T00:00:00Z",
                 evidence_index=0,
             )
         ],

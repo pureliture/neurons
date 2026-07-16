@@ -6,7 +6,13 @@ from typing import Any
 
 from agent_knowledge.ledger_base import _ensure_column, _table_exists
 
-from .artifact_store import _reject_external_index_fields
+from .artifact_store import (
+    _artifact_currentness_key,
+    _artifact_overlaps_observed_interval,
+    _latest_artifacts_by_session,
+    _reject_external_index_fields,
+    _validate_observed_interval,
+)
 from .graphiti_adapter import _graphiti_group_id, _group_id_for_episode
 from .models import OntologyEpisode, SessionMemoryArtifact, SourceRefRecord
 from .source_ref import SourceRefResolver
@@ -36,8 +42,10 @@ class LedgerSessionMemoryArtifactStore:
                 """
                 INSERT INTO llm_brain_session_memory_artifacts (
                     artifact_id, session_id_hash, project, provider,
-                    content_hash, artifact_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    content_hash, artifact_json, source_revision,
+                    observed_at_start, observed_at_end, materialized_at,
+                    materialization_revision, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(artifact_id) DO NOTHING
                 """,
                 (
@@ -47,8 +55,13 @@ class LedgerSessionMemoryArtifactStore:
                     artifact.provider,
                     artifact.content_hash,
                     payload,
+                    artifact.source_revision,
+                    artifact.observed_at_start,
+                    artifact.observed_at_end,
+                    artifact.materialized_at,
+                    artifact.materialization_revision,
                     artifact.created_at,
-                    artifact.created_at,
+                    artifact.materialized_at or artifact.created_at,
                 ),
             )
             if cursor.rowcount == 1:
@@ -85,27 +98,133 @@ class LedgerSessionMemoryArtifactStore:
             return None
         return _artifact_from_json(str(row["artifact_json"]))
 
+    def get_latest_for_session(
+        self, *, project: str, session_id_hash: str
+    ) -> SessionMemoryArtifact | None:
+        with self._ledger._connect() as connection:
+            if not _table_exists(connection, "llm_brain_session_memory_artifacts"):
+                return None
+            rows = connection.execute(
+                "SELECT artifact_json FROM llm_brain_session_memory_artifacts "
+                "WHERE project = ? AND session_id_hash = ?",
+                (project, session_id_hash),
+            ).fetchall()
+        artifacts = [_artifact_from_json(str(row["artifact_json"])) for row in rows]
+        return max(artifacts, key=_artifact_currentness_key, default=None)
+
     def list_recent(self, *, project: str, limit: int = 10) -> list[SessionMemoryArtifact]:
         bounded = max(1, min(int(limit), 100))
+        artifacts = self._latest_artifacts(project=project)
+        return sorted(artifacts, key=_artifact_currentness_key, reverse=True)[:bounded]
+
+    def list_observed_interval(
+        self,
+        *,
+        project: str,
+        observed_at_start: str,
+        observed_at_end: str,
+        limit: int = 100,
+    ) -> list[SessionMemoryArtifact]:
+        bounded = max(1, min(int(limit), 1000))
+        _validate_observed_interval(observed_at_start, observed_at_end)
+        matching = [
+            artifact
+            for artifact in self._all_artifacts(project=project)
+            if _artifact_overlaps_observed_interval(
+                artifact,
+                observed_at_start=observed_at_start,
+                observed_at_end=observed_at_end,
+            )
+        ]
+        return sorted(
+            _latest_artifacts_by_session(matching),
+            key=_artifact_currentness_key,
+            reverse=True,
+        )[:bounded]
+
+    def list_observed_interval_revisions(
+        self,
+        *,
+        project: str,
+        observed_at_start: str,
+        observed_at_end: str,
+        limit: int = 1000,
+    ) -> list[SessionMemoryArtifact]:
+        bounded = max(1, min(int(limit), 10000))
+        _validate_observed_interval(observed_at_start, observed_at_end)
+        matching = [
+            artifact
+            for artifact in self._all_artifacts(project=project)
+            if _artifact_overlaps_observed_interval(
+                artifact,
+                observed_at_start=observed_at_start,
+                observed_at_end=observed_at_end,
+            )
+        ]
+        return sorted(
+            matching,
+            key=_artifact_currentness_key,
+            reverse=True,
+        )[:bounded]
+
+    def _all_artifacts(self, *, project: str) -> list[SessionMemoryArtifact]:
         with self._ledger._connect() as connection:
             if not _table_exists(connection, "llm_brain_session_memory_artifacts"):
                 return []
             rows = connection.execute(
-                """
-                SELECT artifact_json
-                FROM llm_brain_session_memory_artifacts
-                WHERE project = ?
-                ORDER BY created_at DESC, artifact_id DESC
-                LIMIT ?
-                """,
-                (project, bounded),
+                "SELECT artifact_json FROM llm_brain_session_memory_artifacts "
+                "WHERE project = ?",
+                (project,),
             ).fetchall()
         return [_artifact_from_json(str(row["artifact_json"])) for row in rows]
+
+    def _latest_artifacts(self, *, project: str) -> list[SessionMemoryArtifact]:
+        with self._ledger._connect() as connection:
+            if not _table_exists(connection, "llm_brain_session_memory_artifacts"):
+                return []
+            currentness_columns = {
+                "materialization_revision",
+                "materialized_at",
+                "source_revision",
+            }
+            if currentness_columns <= _table_column_names(
+                connection, "llm_brain_session_memory_artifacts"
+            ):
+                rows = connection.execute(
+                    """
+                    SELECT artifact_json
+                    FROM (
+                        SELECT artifact_json,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY session_id_hash
+                                   ORDER BY materialization_revision DESC,
+                                            materialized_at DESC,
+                                            source_revision DESC,
+                                            created_at DESC,
+                                            artifact_id DESC
+                               ) AS currentness_rank
+                        FROM llm_brain_session_memory_artifacts
+                        WHERE project = ?
+                    ) AS ranked_artifacts
+                    WHERE currentness_rank = 1
+                    """,
+                    (project,),
+                ).fetchall()
+                return [_artifact_from_json(str(row["artifact_json"])) for row in rows]
+            rows = connection.execute(
+                "SELECT artifact_json FROM llm_brain_session_memory_artifacts "
+                "WHERE project = ?",
+                (project,),
+            ).fetchall()
+        return _latest_artifacts_by_session(
+            _artifact_from_json(str(row["artifact_json"])) for row in rows
+        )
 
     def _ensure_schema(self) -> None:
         if getattr(self._ledger, "read_only", False):
             return
         with self._ledger._connect() as connection:
+            _migrate_artifact_currentness(connection)
             connection.executescript(_ARTIFACT_SCHEMA)
 
 
@@ -239,12 +358,14 @@ class LedgerGraphProjectionStateStore:
                 """
                 INSERT INTO llm_brain_graph_projection_state (
                     episode_id, extraction_level, project, entity_type,
-                    natural_id, group_id, brain_id, content_hash,
+                    natural_id, group_id, brain_id, content_hash, source_hash,
                     ontology_version, extractor_version, upsert_result,
                     projected_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(episode_id, extraction_level) DO UPDATE SET
                     upsert_result=excluded.upsert_result,
+                    content_hash=excluded.content_hash,
+                    source_hash=excluded.source_hash,
                     projected_at=excluded.projected_at,
                     updated_at=excluded.updated_at
                 """,
@@ -257,6 +378,7 @@ class LedgerGraphProjectionStateStore:
                     group_id,
                     brain_id,
                     episode.content_hash,
+                    str(episode.payload.get("source_hash") or ""),
                     episode.ontology_version,
                     episode.extractor_version,
                     str(upsert_result or ""),
@@ -305,6 +427,73 @@ class LedgerGraphProjectionStateStore:
             extraction_level=extraction_level,
             entity_type=entity_type,
         )
+
+    def list_projected_source_hashes(
+        self,
+        project: str | None = None,
+        *,
+        extraction_level: str | None = None,
+        entity_type: str | None = None,
+        upsert_results: set[str] | frozenset[str] | None = None,
+    ) -> dict[str, str]:
+        hash_sets = self.list_projected_source_hash_sets(
+            project,
+            extraction_level=extraction_level,
+            entity_type=entity_type,
+            upsert_results=upsert_results,
+        )
+        return {
+            natural_id: max(source_hashes)
+            for natural_id, source_hashes in hash_sets.items()
+            if source_hashes
+        }
+
+    def list_projected_source_hash_sets(
+        self,
+        project: str | None = None,
+        *,
+        extraction_level: str | None = None,
+        entity_type: str | None = None,
+        upsert_results: set[str] | frozenset[str] | None = None,
+    ) -> dict[str, set[str]]:
+        """Return every projected source revision for each natural id.
+
+        A natural id can retain multiple historical graph episodes. Currentness
+        must therefore be an exact pair-membership check, not a last-row-wins
+        mapping whose answer depends on timestamp or episode-id ordering.
+        """
+        clauses: list[str] = ["source_hash <> ''"]
+        params: list[str] = []
+        if project is not None:
+            clauses.append("project = ?")
+            params.append(project)
+        if extraction_level is not None:
+            clauses.append("extraction_level = ?")
+            params.append(str(extraction_level))
+        if entity_type is not None:
+            clauses.append("entity_type = ?")
+            params.append(str(entity_type))
+        if upsert_results:
+            placeholders = ", ".join("?" for _ in upsert_results)
+            clauses.append(f"upsert_result IN ({placeholders})")
+            params.extend(sorted(str(item) for item in upsert_results))
+        where = " WHERE " + " AND ".join(clauses)
+        with self._ledger._connect() as connection:
+            if not _table_exists(connection, "llm_brain_graph_projection_state"):
+                return {}
+            rows = connection.execute(
+                "SELECT natural_id, source_hash "
+                "FROM llm_brain_graph_projection_state"
+                + where,
+                tuple(params),
+            ).fetchall()
+        result: dict[str, set[str]] = {}
+        for row in rows:
+            natural_id = str(row["natural_id"] or "")
+            source_hash = str(row["source_hash"] or "")
+            if natural_id and source_hash:
+                result.setdefault(natural_id, set()).add(source_hash)
+        return result
 
     def list_natural_ids(
         self,
@@ -359,6 +548,11 @@ CREATE TABLE IF NOT EXISTS llm_brain_session_memory_artifacts (
     provider TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     artifact_json TEXT NOT NULL,
+    source_revision TEXT NOT NULL DEFAULT '',
+    observed_at_start TEXT NOT NULL DEFAULT '',
+    observed_at_end TEXT NOT NULL DEFAULT '',
+    materialized_at TEXT NOT NULL DEFAULT '',
+    materialization_revision INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -366,7 +560,40 @@ CREATE INDEX IF NOT EXISTS idx_llm_brain_artifacts_project_created
     ON llm_brain_session_memory_artifacts(project, created_at);
 CREATE INDEX IF NOT EXISTS idx_llm_brain_artifacts_session
     ON llm_brain_session_memory_artifacts(session_id_hash);
+CREATE INDEX IF NOT EXISTS idx_llm_brain_artifacts_observed_currentness
+    ON llm_brain_session_memory_artifacts(
+        project, session_id_hash, materialization_revision,
+        materialized_at, observed_at_start, observed_at_end
+    );
 """
+
+
+def _migrate_artifact_currentness(connection: Any) -> None:
+    table = "llm_brain_session_memory_artifacts"
+    if not _table_exists(connection, table):
+        return
+    _ensure_column(connection, table, "source_revision", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, table, "observed_at_start", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, table, "observed_at_end", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, table, "materialized_at", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(
+        connection,
+        table,
+        "materialization_revision",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+
+
+def _table_column_names(connection: Any, table: str) -> set[str]:
+    if getattr(connection, "dialect", "sqlite") == "postgres":
+        rows = connection.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = ?",
+            (table,),
+        ).fetchall()
+        return {str(row["column_name"]) for row in rows}
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return {str(row["name"]) for row in rows}
 
 
 _SOURCE_REF_SCHEMA = """
@@ -408,6 +635,7 @@ CREATE TABLE IF NOT EXISTS llm_brain_graph_projection_state (
     group_id TEXT NOT NULL DEFAULT '',
     brain_id TEXT DEFAULT '',
     content_hash TEXT NOT NULL DEFAULT '',
+    source_hash TEXT NOT NULL DEFAULT '',
     ontology_version TEXT NOT NULL DEFAULT '',
     extractor_version TEXT NOT NULL DEFAULT '',
     upsert_result TEXT NOT NULL DEFAULT '',
@@ -421,6 +649,10 @@ CREATE INDEX IF NOT EXISTS idx_llm_brain_graph_projection_state_group
     ON llm_brain_graph_projection_state(group_id);
 CREATE INDEX IF NOT EXISTS idx_llm_brain_graph_projection_state_level
     ON llm_brain_graph_projection_state(extraction_level);
+CREATE INDEX IF NOT EXISTS idx_llm_brain_graph_projection_state_currentness
+    ON llm_brain_graph_projection_state(
+        project, extraction_level, entity_type, natural_id, source_hash
+    );
 """
 
 
@@ -442,8 +674,10 @@ def _migrate_extraction_level(connection: Any) -> None:
     table = "llm_brain_graph_projection_state"
     if not _table_exists(connection, table):
         return
-    # Step 1 (always safe / idempotent): ensure the column exists and backfill.
+    # Step 1 (always safe / idempotent): ensure currentness columns exist and
+    # backfill the extraction level before any schema indexes reference them.
     _ensure_column(connection, table, "extraction_level", "TEXT NOT NULL DEFAULT 'episodic'")
+    _ensure_column(connection, table, "source_hash", "TEXT NOT NULL DEFAULT ''")
     connection.execute(
         f"UPDATE {table} SET extraction_level = 'episodic' "
         "WHERE extraction_level IS NULL OR extraction_level = ''"
@@ -463,16 +697,18 @@ def _migrate_extraction_level(connection: Any) -> None:
         DROP INDEX IF EXISTS idx_llm_brain_graph_projection_state_project_projected;
         DROP INDEX IF EXISTS idx_llm_brain_graph_projection_state_group;
         DROP INDEX IF EXISTS idx_llm_brain_graph_projection_state_level;
+        DROP INDEX IF EXISTS idx_llm_brain_graph_projection_state_currentness;
         {_GRAPH_PROJECTION_STATE_SCHEMA}
         INSERT INTO {table} (
             episode_id, extraction_level, project, entity_type, natural_id,
-            group_id, brain_id, content_hash, ontology_version,
+            group_id, brain_id, content_hash, source_hash, ontology_version,
             extractor_version, upsert_result, projected_at, updated_at
         )
         SELECT
             episode_id,
             COALESCE(NULLIF(extraction_level, ''), 'episodic'),
             project, entity_type, natural_id, group_id, brain_id, content_hash,
+            source_hash,
             ontology_version, extractor_version, upsert_result, projected_at,
             updated_at
         FROM {table}_pre_m2;
@@ -528,6 +764,35 @@ def _artifact_from_json(value: str) -> SessionMemoryArtifact:
         ontology_version=str(parsed.get("ontology_version") or "1.0.0"),
         extractor_version=str(parsed.get("extractor_version") or "0.1.0"),
         created_at=str(parsed.get("created_at") or ""),
+        source_revision=str(parsed.get("source_revision") or ""),
+        observed_at_start=str(parsed.get("observed_at_start") or ""),
+        observed_at_end=str(parsed.get("observed_at_end") or ""),
+        revision_observed_at_start=str(
+            parsed.get("revision_observed_at_start") or ""
+        ),
+        revision_observed_at_end=str(parsed.get("revision_observed_at_end") or ""),
+        revision_observed_intervals=tuple(
+            (str(interval[0]), str(interval[1]))
+            for interval in (parsed.get("revision_observed_intervals") or ())
+            if isinstance(interval, (list, tuple)) and len(interval) == 2
+        ),
+        revision_temporal_term_bindings=tuple(
+            (
+                str(binding[0]),
+                str(binding[1]),
+                tuple(str(item) for item in binding[2]),
+            )
+            for binding in (parsed.get("revision_temporal_term_bindings") or ())
+            if isinstance(binding, (list, tuple))
+            and len(binding) == 3
+            and isinstance(binding[2], (list, tuple))
+        ),
+        revision_temporal_evidence=str(
+            parsed.get("revision_temporal_evidence") or "legacy"
+        ),
+        search_term_hashes=tuple(parsed.get("search_term_hashes") or ()),
+        materialized_at=str(parsed.get("materialized_at") or ""),
+        materialization_revision=int(parsed.get("materialization_revision") or 0),
     )
 
 

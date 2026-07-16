@@ -24,6 +24,9 @@ from .llm_brain_core import regression_gate_cli as llm_brain_regression_gate_cli
 from .llm_brain_core.runtime_graph import build_graph_adapter_from_env
 from .mcp_server import KnowledgeSearchService, build_index_client, run_stdio_server
 from .rag_ingress import state_cli
+from .rag_ingress import projection_invalidation_canary
+from .rag_ingress import temporal_metadata_backfill
+from .rag_ingress import temporal_revision_rebuild
 from .session_memory import (
     autopilot_cli,
     cleanup_readiness,
@@ -127,6 +130,9 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "couchdb-graph-bulk-semantic": llm_brain_bulk_semantic_cli.main,
     "couchdb-bulk-semantic-trigger": llm_brain_bulk_semantic_trigger_cli.main,
     "couchdb-graph-status": llm_brain_graph_projection_status_cli.main,
+    "couchdb-projection-invalidation-canary": projection_invalidation_canary.main,
+    "couchdb-temporal-metadata-backfill": temporal_metadata_backfill.main,
+    "couchdb-temporal-revision-rebuild": temporal_revision_rebuild.main,
     "transcript-migration": migration_cli.main,
     "transcript-quality": _pending_server_command("transcript-quality"),
     "transcript-resources": _pending_server_command("transcript-resources"),
@@ -157,6 +163,21 @@ COMMAND_METADATA: dict[str, dict[str, object]] = {
     },
     "object-authority-schema-ensure": {
         "runtime_category": "human_gated_schema_repair",
+        "deletion_candidate": False,
+        "live_mutation_requires_approval": True,
+    },
+    "couchdb-temporal-metadata-backfill": {
+        "runtime_category": "human_gated_metadata_repair",
+        "deletion_candidate": False,
+        "live_mutation_requires_approval": True,
+    },
+    "couchdb-temporal-revision-rebuild": {
+        "runtime_category": "human_gated_additive_repair",
+        "deletion_candidate": False,
+        "live_mutation_requires_approval": True,
+    },
+    "couchdb-projection-invalidation-canary": {
+        "runtime_category": "human_gated_additive_canary",
         "deletion_candidate": False,
         "live_mutation_requires_approval": True,
     },
@@ -209,6 +230,19 @@ def _build_recall_service(args) -> KnowledgeSearchService:
     from .rag_ingress.qdrant_recall import build_qdrant_brain_query_search_from_env
 
     mirror_search = build_qdrant_brain_query_search_from_env(os.environ)
+    semantic_ranker = None
+    if os.environ.get("LLM_BRAIN_EMBEDDING_BASE_URL") and os.environ.get("LLM_BRAIN_EMBEDDING_MODEL"):
+        try:
+            from .session_memory.semantic_ranker import build_embedding_semantic_ranker
+
+            semantic_ranker = build_embedding_semantic_ranker(environ=os.environ)
+        except Exception as exc:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "brain query semantic ranker configured but unavailable: %s",
+                type(exc).__name__,
+            )
     return KnowledgeSearchService(
         ledger=ledger,
         retired_index_bridge=retired_index_bridge,
@@ -217,6 +251,7 @@ def _build_recall_service(args) -> KnowledgeSearchService:
         native_memory_id=args.native_memory_id,
         graph_adapter=graph_adapter,
         mirror_search=mirror_search,
+        semantic_ranker=semantic_ranker,
         allow_restricted_steward=bool(getattr(args, "allow_steward_review_commit", False)),
         allow_steward_auto_accept=False,
         allow_production_object_authority_writes=bool(

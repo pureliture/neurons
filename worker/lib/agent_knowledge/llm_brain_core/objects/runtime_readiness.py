@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
@@ -86,6 +87,12 @@ SESSION_PROJECT_ROLLUP_RUNTIME_SCHEMA = "session_project_rollup_runtime_evidence
 SESSION_PROJECT_ROLLUP_PREVIEW_SCHEMA = "object_extraction_session_project_rollup_preview.v1"
 SESSION_PROJECT_HANDOFF_SCHEMA = "session_project_handoff_pack.v1"
 SESSION_PROJECT_RESUME_SCHEMA = "session_project_resume_context.v1"
+TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_SCHEMA = "temporal_recall_corrective_checkpoint.v1"
+TEMPORAL_CORRECTNESS_RUNTIME_AGGREGATE_SCHEMA = "temporal_correctness_runtime_aggregate.v1"
+TEMPORAL_CORRECTNESS_RUNTIME_POSTCHECK_RECEIPT_SCHEMA = (
+    "temporal_correctness_runtime_postcheck_receipt.v1"
+)
+TEMPORAL_SEMANTIC_RESULT_MIN_SCORE = 0.75
 PREFERENCE_ARTIFACT_MEMORY_RUNTIME_SCHEMA = "preference_artifact_memory_runtime_evidence.v1"
 ARTIFACT_REVIEW_PREFERENCE_CHECK_SCHEMA = "artifact_review_preference_check.v1"
 _COLLECTOR_CAPABILITY = object()
@@ -290,6 +297,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
         "collect_mcp_tool_inventory",
         "collect_agent_context_product",
         "probe_brain_objects_query_routes",
+        "probe_temporal_recall_corrective_checkpoint",
         "probe_projection_join_runtime",
         "probe_source_to_candidate_review_loop",
         "probe_session_project_rollup_runtime",
@@ -360,6 +368,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
             "collect_mcp_tool_inventory": "live_mcp_review_tools_unverified",
             "collect_agent_context_product": "live_agent_context_product_sections_unverified",
             "probe_brain_objects_query_routes": "live_brain_objects_query_route_smokes_unverified",
+            "probe_temporal_recall_corrective_checkpoint": "live_temporal_recall_corrective_checkpoint_unverified",
             "probe_projection_join_runtime": "live_graph_qdrant_projection_join_unproven",
             "probe_source_to_candidate_review_loop": "live_source_to_candidate_review_loop_unverified",
             "probe_session_project_rollup_runtime": "live_session_project_rollup_unverified",
@@ -427,6 +436,7 @@ def build_source_to_candidate_runtime_evidence_packet_template(
             "tool_names",
             "agent_context_product",
             "brain_objects_query_smokes",
+            "temporal_recall_corrective_checkpoint",
             "projection_join",
             "source_to_candidate_review_loop",
             "session_project_rollup_runtime",
@@ -489,6 +499,12 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         "tool_names": _string_list(captured.get("tool_names")),
         "agent_context_product": _public_safe_mapping(captured.get("agent_context_product")),
         "brain_objects_query_smokes": _public_safe_mapping_list(captured.get("brain_objects_query_smokes")),
+        "temporal_recall_corrective_checkpoint": _public_safe_mapping(
+            captured.get("temporal_recall_corrective_checkpoint")
+        ),
+        "temporal_correctness_runtime": _public_safe_mapping(
+            captured.get("temporal_correctness_runtime")
+        ),
         "projection_join": _public_safe_mapping(captured.get("projection_join")),
         "source_to_candidate_review_loop": _public_safe_mapping(captured.get("source_to_candidate_review_loop")),
         "session_project_rollup_runtime": _public_safe_mapping(captured.get("session_project_rollup_runtime")),
@@ -608,6 +624,7 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
     review_loop_runner: Callable[[], Mapping[str, Any]] | None = None,
     session_project_rollup_runner: Callable[[], Mapping[str, Any]] | None = None,
     preference_artifact_memory_runner: Callable[[], Mapping[str, Any]] | None = None,
+    temporal_correctness_runtime_runner: Callable[[], Mapping[str, Any]] | None = None,
     permission_sensitive_audit_runner: Callable[[], Mapping[str, Any]] | None = None,
     agent_context_startup_runner: Callable[[], Mapping[str, Any]] | None = None,
     tool_names: Any = None,
@@ -634,6 +651,9 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
         preference_artifact_memory_runner,
         repository=repository,
     )
+    temporal_correctness_runtime = _collect_temporal_correctness_runtime_shadow(
+        temporal_correctness_runtime_runner,
+    )
     permission_sensitive_audit = _collect_permission_sensitive_audit_shadow(
         permission_sensitive_audit_runner,
     )
@@ -656,6 +676,7 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
         "source_to_candidate_review_loop": review_loop,
         "session_project_rollup_runtime": session_project_rollup,
         "preference_artifact_memory": preference_artifact_memory,
+        "temporal_correctness_runtime": temporal_correctness_runtime,
         "permission_sensitive_audit": permission_sensitive_audit,
         "agent_context_startup_runtime": agent_context_startup,
         "deployed_identity": {
@@ -686,6 +707,9 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
             "preference_artifact_memory_schema": public_safe_text(
                 str(preference_artifact_memory.get("schema_version") or ""),
                 max_chars=80,
+            ),
+            "temporal_correctness_runtime_collected": bool(
+                temporal_correctness_runtime
             ),
             "permission_sensitive_audit_collected": bool(permission_sensitive_audit),
             "permission_sensitive_audit_schema": public_safe_text(
@@ -1802,6 +1826,28 @@ def _collect_preference_artifact_memory_shadow(
     return evidence
 
 
+def _collect_temporal_correctness_runtime_shadow(
+    runner: Callable[[], Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    """Collect only the public-safe aggregate produced by the deployed read path."""
+
+    if runner is None:
+        return {}
+    try:
+        raw = runner()
+    except Exception:
+        return {}
+    if not isinstance(raw, Mapping):
+        return {}
+    safe = _public_safe_mapping(raw)
+    if safe.get("schema_version") != TEMPORAL_CORRECTNESS_RUNTIME_AGGREGATE_SCHEMA:
+        return {}
+    if safe.get("production_mutation_performed") is not False:
+        return {}
+    ensure_public_safe(safe, "TemporalCorrectnessRuntimeReadPathEvidence")
+    return safe
+
+
 def build_permission_sensitive_audit_shadow_evidence() -> dict[str, Any]:
     """Build a branch-local local_test P8 denial/audit summary without mutation."""
 
@@ -2061,6 +2107,28 @@ def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
             }
             for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
         ],
+        "temporal_recall_corrective_checkpoint": {
+            "schema_version": TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_SCHEMA,
+            "evidence_class": "runtime_semantic_acceptance",
+            "required_probes": [
+                "date_a",
+                "date_b",
+                "range_boundary",
+                "mismatch",
+                "nonsense_query",
+                "semantic_query",
+            ],
+            "semantic_result_minimum_score": TEMPORAL_SEMANTIC_RESULT_MIN_SCORE,
+            "runtime_aggregate_schema": TEMPORAL_CORRECTNESS_RUNTIME_AGGREGATE_SCHEMA,
+            "production_mutation_performed": False,
+            "postcheck": {
+                "status": "validated",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+        },
         "projection_join": {
             "schema_version": PROJECTION_JOIN_RUNTIME_SCHEMA,
             "evidence_class": "runtime_projection_join",
@@ -2396,6 +2464,25 @@ def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
             "production_mutation_performed": False,
         },
         {
+            "step_id": "probe_temporal_recall_corrective_checkpoint",
+            "evidence_field": "temporal_recall_corrective_checkpoint",
+            "required_values": [
+                TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_SCHEMA,
+                "date_a_fingerprint_matches",
+                "date_b_fingerprint_matches",
+                "date_ab_distinct",
+                "mismatch_empty_with_gap_and_zero_confidence",
+                "nonsense_query_empty",
+                "semantic_ranker_bound_and_used",
+                "qdrant_semantic_result_lane_used",
+                "projection_hash_current",
+                "entity_aggregate_improved",
+            ],
+            "safe_target": "sanitized_temporal_semantic_acceptance",
+            "mutation_allowed": False,
+            "production_mutation_performed": False,
+        },
+        {
             "step_id": "probe_projection_join_runtime",
             "evidence_field": "projection_join",
             "required_values": [
@@ -2543,6 +2630,7 @@ def build_source_to_candidate_runtime_readiness_report(
         _live_tools_claim(evidence),
         _live_agent_context_tool_hints_claim(evidence),
         _live_agent_context_product_sections_claim(evidence),
+        _live_temporal_recall_corrective_checkpoint_claim(evidence),
         _live_brain_objects_query_route_smokes_claim(evidence),
         _live_source_to_candidate_projection_join_claim(evidence),
         _live_source_to_candidate_review_loop_claim(evidence),
@@ -2905,6 +2993,417 @@ def _agent_context_product_contract_failures(product: Mapping[str, Any]) -> list
     return failures
 
 
+def _live_temporal_recall_corrective_checkpoint_claim(
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    checkpoint = evidence.get("temporal_recall_corrective_checkpoint")
+    checkpoint = checkpoint if isinstance(checkpoint, Mapping) else {}
+    base = {
+        "claim_id": "live.temporal_recall.corrective_checkpoint",
+        "evidence_class": "runtime_semantic_acceptance",
+        "schema_version": public_safe_text(
+            str(checkpoint.get("schema_version") or ""),
+            max_chars=80,
+        ),
+        "production_mutation_performed": checkpoint.get("production_mutation_performed") is True,
+    }
+    if not checkpoint:
+        return {
+            **base,
+            "status": "not_validated",
+            "date_ab_distinct": False,
+            "hash_currentness_validated": False,
+            "entity_aggregate_improved": False,
+            "gaps": ["live_temporal_recall_corrective_checkpoint_unverified"],
+        }
+
+    selector = (
+        checkpoint.get("selector_contract")
+        if isinstance(checkpoint.get("selector_contract"), Mapping)
+        else {}
+    )
+    temporal_query_hash = str(checkpoint.get("temporal_query_hash") or "")
+    date_a = checkpoint.get("date_a") if isinstance(checkpoint.get("date_a"), Mapping) else {}
+    date_b = checkpoint.get("date_b") if isinstance(checkpoint.get("date_b"), Mapping) else {}
+    boundary = (
+        checkpoint.get("range_boundary")
+        if isinstance(checkpoint.get("range_boundary"), Mapping)
+        else {}
+    )
+    mismatch = (
+        checkpoint.get("mismatch")
+        if isinstance(checkpoint.get("mismatch"), Mapping)
+        else {}
+    )
+    nonsense = (
+        checkpoint.get("nonsense_query")
+        if isinstance(checkpoint.get("nonsense_query"), Mapping)
+        else {}
+    )
+    semantic = (
+        checkpoint.get("semantic_query")
+        if isinstance(checkpoint.get("semantic_query"), Mapping)
+        else {}
+    )
+    runtime = (
+        checkpoint.get("runtime_aggregate")
+        if isinstance(checkpoint.get("runtime_aggregate"), Mapping)
+        else {}
+    )
+    runtime_aggregate_source = str(checkpoint.get("runtime_aggregate_source") or "")
+    runtime_postcheck_receipt_hash = str(
+        checkpoint.get("runtime_postcheck_receipt_hash") or ""
+    )
+    currentness = (
+        runtime.get("projection_currentness")
+        if isinstance(runtime.get("projection_currentness"), Mapping)
+        else {}
+    )
+    entity = (
+        runtime.get("entity_projection")
+        if isinstance(runtime.get("entity_projection"), Mapping)
+        else {}
+    )
+    postcheck = (
+        checkpoint.get("postcheck")
+        if isinstance(checkpoint.get("postcheck"), Mapping)
+        else {}
+    )
+
+    expected_a = str(date_a.get("expected_object_fingerprint") or "")
+    observed_a = str(date_a.get("observed_object_fingerprint") or "")
+    expected_b = str(date_b.get("expected_object_fingerprint") or "")
+    observed_b = str(date_b.get("observed_object_fingerprint") or "")
+    expected_identity_a = str(
+        date_a.get("expected_object_identity_fingerprint") or ""
+    )
+    observed_identity_a = str(
+        date_a.get("observed_object_identity_fingerprint") or ""
+    )
+    expected_identity_b = str(
+        date_b.get("expected_object_identity_fingerprint") or ""
+    )
+    observed_identity_b = str(
+        date_b.get("observed_object_identity_fingerprint") or ""
+    )
+    selector_a = str(date_a.get("selector_hash") or "")
+    selector_b = str(date_b.get("selector_hash") or "")
+    date_ab_selectors_distinct = bool(
+        _is_sha256_hash_ref(selector_a)
+        and _is_sha256_hash_ref(selector_b)
+        and selector_a != selector_b
+    )
+    date_ab_object_fingerprints_distinct = bool(
+        expected_a
+        and expected_b
+        and observed_a
+        and observed_b
+        and expected_a != expected_b
+        and observed_a != observed_b
+    )
+    date_ab_identity_distinct = bool(
+        _is_sha256_hash_ref(expected_identity_a)
+        and _is_sha256_hash_ref(observed_identity_a)
+        and _is_sha256_hash_ref(expected_identity_b)
+        and _is_sha256_hash_ref(observed_identity_b)
+        and expected_identity_a == observed_identity_a
+        and expected_identity_b == observed_identity_b
+        and expected_identity_a != expected_identity_b
+        and observed_identity_a != observed_identity_b
+    )
+    date_ab_distinct = bool(
+        date_ab_object_fingerprints_distinct and date_ab_identity_distinct
+    )
+    source_session_count = _strict_int_or_none(
+        currentness.get("source_session_count")
+    )
+    minimum_source_session_count = _strict_int_or_none(
+        currentness.get("minimum_source_session_count")
+    )
+    session_memory_current_count = _strict_int_or_none(
+        currentness.get("session_memory_projection_current_count")
+    )
+    graph_current_count = _strict_int_or_none(
+        currentness.get("graph_projection_current_count")
+    )
+    hash_currentness_validated = (
+        currentness.get("source_hash_match") is True
+        and _strict_int_or_none(currentness.get("source_hash_mismatch_count")) == 0
+        and _strict_int_or_none(currentness.get("stale_projected_session_count")) == 0
+        and source_session_count is not None
+        and minimum_source_session_count is not None
+        and source_session_count >= minimum_source_session_count > 0
+        and graph_current_count == source_session_count
+        and _strict_int_or_none(currentness.get("graph_projection_noncurrent_count"))
+        == 0
+        and session_memory_current_count == source_session_count
+        and _strict_int_or_none(
+            currentness.get("session_memory_projection_noncurrent_count")
+        )
+        == 0
+        and _strict_int_or_none(
+            currentness.get("session_memory_source_hash_mismatch_count")
+        )
+        == 0
+        and _strict_int_or_none(
+            currentness.get("session_memory_stale_projected_session_count")
+        )
+        == 0
+        and _strict_int_or_none(
+            currentness.get("artifact_missing_session_count")
+        )
+        == 0
+        and _strict_int_or_none(currentness.get("artifact_age_unknown_count"))
+        == 0
+        and _strict_int_or_none(
+            currentness.get("artifact_source_hash_mismatch_count")
+        )
+        == 0
+        and currentness.get("artifact_current") is True
+        and currentness.get("graph_run_scope_match") is True
+        and currentness.get("graph_run_fresh") is True
+        and _strict_int_or_none(
+            currentness.get("graph_run_completed_age_seconds")
+        )
+        is not None
+        and _strict_int_or_none(currentness.get("graph_run_max_age_seconds"))
+        is not None
+        and int(currentness.get("graph_run_completed_age_seconds"))
+        <= int(currentness.get("graph_run_max_age_seconds"))
+    )
+    baseline_coverage = _strict_int_or_none(entity.get("baseline_coverage_count"))
+    coverage = _strict_int_or_none(entity.get("coverage_count"))
+    baseline_backlog = _strict_int_or_none(entity.get("baseline_backlog_count"))
+    backlog = _strict_int_or_none(entity.get("backlog_count"))
+    entity_error_count = _strict_int_or_none(entity.get("error_count"))
+    valid_source_count = _strict_int_or_none(entity.get("valid_source_count"))
+    minimum_valid_source_count = _strict_int_or_none(
+        entity.get("minimum_valid_source_count")
+    )
+    entity_counts_valid = all(
+        value is not None and value >= 0
+        for value in (
+            baseline_coverage,
+            coverage,
+            baseline_backlog,
+            backlog,
+            entity_error_count,
+            valid_source_count,
+            minimum_valid_source_count,
+        )
+    )
+    entity_aggregate_improved = bool(
+        entity_counts_valid
+        and entity_error_count == 0
+        and minimum_valid_source_count > 0
+        and valid_source_count >= minimum_valid_source_count
+        and coverage + backlog == valid_source_count
+        and baseline_coverage + baseline_backlog == minimum_valid_source_count
+        and (coverage > baseline_coverage or backlog < baseline_backlog)
+    )
+
+    failures: list[str] = []
+    if checkpoint.get("schema_version") != TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_SCHEMA:
+        failures.append("temporal_corrective_checkpoint_schema_mismatch")
+    if checkpoint.get("evidence_class") != "runtime_semantic_acceptance":
+        failures.append("temporal_corrective_evidence_class_mismatch")
+    if not _is_sha256_hash_ref(temporal_query_hash):
+        failures.append("temporal_corrective_query_hash_invalid")
+    if not all(
+        selector.get(field) is True
+        for field in ("as_of_supported", "date_range_supported", "invalid_range_rejected")
+    ):
+        failures.append("temporal_corrective_selector_contract_incomplete")
+    if (
+        isinstance(selector.get("invalid_range_error_code"), bool)
+        or selector.get("invalid_range_error_code") != -32602
+    ):
+        failures.append("temporal_corrective_invalid_range_error_code_unexpected")
+    for label, probe in (("date_a", date_a), ("date_b", date_b)):
+        if not _is_sha256_hash_ref(str(probe.get("selector_hash") or "")):
+            failures.append(f"temporal_corrective_{label}_selector_hash_invalid")
+        if not _is_sha256_hash_ref(str(probe.get("expected_object_fingerprint") or "")):
+            failures.append(f"temporal_corrective_{label}_expected_fingerprint_invalid")
+        if not _is_sha256_hash_ref(str(probe.get("observed_object_fingerprint") or "")):
+            failures.append(f"temporal_corrective_{label}_observed_fingerprint_invalid")
+        if probe.get("expected_object_fingerprint") != probe.get("observed_object_fingerprint"):
+            failures.append(f"temporal_corrective_{label}_fingerprint_mismatch")
+        if not _is_sha256_hash_ref(
+            str(probe.get("expected_object_identity_fingerprint") or "")
+        ):
+            failures.append(
+                f"temporal_corrective_{label}_expected_identity_fingerprint_invalid"
+            )
+        if not _is_sha256_hash_ref(
+            str(probe.get("observed_object_identity_fingerprint") or "")
+        ):
+            failures.append(
+                f"temporal_corrective_{label}_observed_identity_fingerprint_invalid"
+            )
+        if probe.get("expected_object_identity_fingerprint") != probe.get(
+            "observed_object_identity_fingerprint"
+        ):
+            failures.append(
+                f"temporal_corrective_{label}_identity_fingerprint_mismatch"
+            )
+        if _strict_int_or_none(probe.get("work_unit_count")) != 1:
+            failures.append(f"temporal_corrective_{label}_work_unit_count_invalid")
+        confidence_score = probe.get("confidence_score")
+        if (
+            _strict_int_or_none(probe.get("gap_count")) != 0
+            or isinstance(confidence_score, bool)
+            or not isinstance(confidence_score, (int, float))
+            or not math.isfinite(float(confidence_score))
+            or not 0.0 < float(confidence_score) <= 1.0
+        ):
+            failures.append(f"temporal_corrective_{label}_not_fail_closed")
+    if not date_ab_distinct:
+        failures.append("temporal_corrective_date_fingerprints_not_distinct")
+    if not date_ab_identity_distinct:
+        failures.append("temporal_corrective_date_identities_not_distinct")
+    if not date_ab_selectors_distinct:
+        failures.append("temporal_corrective_date_selectors_not_distinct")
+    if (
+        not _is_sha256_hash_ref(str(boundary.get("selector_hash") or ""))
+        or not _is_sha256_hash_ref(
+            str(boundary.get("expected_object_fingerprint") or "")
+        )
+        or not _is_sha256_hash_ref(
+            str(boundary.get("observed_object_fingerprint") or "")
+        )
+        or boundary.get("expected_object_fingerprint")
+        != boundary.get("observed_object_fingerprint")
+        or not _is_sha256_hash_ref(
+            str(boundary.get("expected_object_identity_fingerprint") or "")
+        )
+        or not _is_sha256_hash_ref(
+            str(boundary.get("observed_object_identity_fingerprint") or "")
+        )
+        or boundary.get("expected_object_identity_fingerprint")
+        != boundary.get("observed_object_identity_fingerprint")
+        or _strict_int_or_none(boundary.get("work_unit_count")) != 1
+        or _strict_int_or_none(boundary.get("gap_count")) != 0
+        or isinstance(boundary.get("confidence_score"), bool)
+        or not isinstance(boundary.get("confidence_score"), (int, float))
+        or not math.isfinite(float(boundary.get("confidence_score")))
+        or not 0.0 < float(boundary.get("confidence_score")) <= 1.0
+    ):
+        failures.append("temporal_corrective_range_boundary_failed")
+    confidence_score = mismatch.get("confidence_score")
+    if (
+        not _is_sha256_hash_ref(str(mismatch.get("selector_hash") or ""))
+        or _strict_int_or_none(mismatch.get("object_count")) != 0
+        or (_strict_int_or_none(mismatch.get("gap_count")) or 0) <= 0
+        or isinstance(confidence_score, bool)
+        or not isinstance(confidence_score, (int, float))
+        or float(confidence_score) != 0.0
+    ):
+        failures.append("temporal_corrective_mismatch_not_fail_closed")
+    if (
+        not _is_sha256_hash_ref(str(nonsense.get("query_hash") or ""))
+        or any(
+            _strict_int_or_none(nonsense.get(field)) != 0
+            for field in ("result_count", "current_count", "accepted_count")
+        )
+    ):
+        failures.append("temporal_corrective_nonsense_query_not_empty")
+    if (
+        nonsense.get("semantic_ranker_bound") is not True
+        or nonsense.get("semantic_ranker_used") is not True
+    ):
+        failures.append("temporal_corrective_semantic_ranker_not_used")
+    if not semantic:
+        failures.append("temporal_corrective_semantic_query_missing")
+    if not _is_sha256_hash_ref(str(semantic.get("query_hash") or "")):
+        failures.append("temporal_corrective_semantic_query_hash_invalid")
+    expected_semantic_fingerprint = str(
+        semantic.get("expected_result_fingerprint") or ""
+    )
+    observed_semantic_fingerprint = str(
+        semantic.get("observed_result_fingerprint") or ""
+    )
+    if (
+        not _is_sha256_hash_ref(expected_semantic_fingerprint)
+        or not _is_sha256_hash_ref(observed_semantic_fingerprint)
+        or expected_semantic_fingerprint != observed_semantic_fingerprint
+    ):
+        failures.append("temporal_corrective_semantic_result_fingerprint_mismatch")
+    if _strict_int_or_none(semantic.get("result_count")) != 1:
+        failures.append("temporal_corrective_semantic_result_count_invalid")
+    if semantic.get("why_retrieved_semantic_match") is not True:
+        failures.append("temporal_corrective_semantic_result_reason_invalid")
+    semantic_score = semantic.get("score")
+    semantic_minimum_score = semantic.get("minimum_score")
+    if (
+        isinstance(semantic_score, bool)
+        or not isinstance(semantic_score, (int, float))
+        or not math.isfinite(float(semantic_score))
+        or float(semantic_score) < TEMPORAL_SEMANTIC_RESULT_MIN_SCORE
+        or isinstance(semantic_minimum_score, bool)
+        or not isinstance(semantic_minimum_score, (int, float))
+        or float(semantic_minimum_score) != TEMPORAL_SEMANTIC_RESULT_MIN_SCORE
+    ):
+        failures.append("temporal_corrective_semantic_result_score_below_threshold")
+    if (
+        semantic.get("semantic_ranker_bound") is not True
+        or semantic.get("semantic_ranker_used") is not True
+    ):
+        failures.append("temporal_corrective_semantic_query_ranker_not_used")
+    if semantic.get("qdrant_semantic_result_lane_used") is not True:
+        failures.append("temporal_corrective_qdrant_semantic_result_lane_not_used")
+    if runtime.get("schema_version") != TEMPORAL_CORRECTNESS_RUNTIME_AGGREGATE_SCHEMA:
+        failures.append("temporal_corrective_runtime_aggregate_schema_mismatch")
+    if runtime_aggregate_source != "live_mcp_runtime_packet":
+        failures.append("temporal_corrective_runtime_aggregate_source_untrusted")
+    if runtime_postcheck_receipt_hash:
+        failures.append("temporal_corrective_runtime_postcheck_receipt_not_allowed")
+    if not hash_currentness_validated:
+        failures.append("temporal_corrective_projection_hash_not_current")
+    if not entity_aggregate_improved:
+        failures.append("temporal_corrective_entity_aggregate_not_improved")
+    if checkpoint.get("production_mutation_performed") is True:
+        failures.append("temporal_corrective_unexpected_production_mutation")
+    if postcheck.get("status") != "validated" or any(
+        postcheck.get(field) is not False
+        for field in (
+            "raw_private_evidence_returned",
+            "secret_returned",
+            "host_topology_returned",
+            "raw_external_ids_returned",
+        )
+    ):
+        failures.append("temporal_corrective_postcheck_failed")
+    return {
+        **base,
+        "status": "failed" if failures else "validated",
+        "date_ab_selectors_distinct": date_ab_selectors_distinct,
+        "date_ab_distinct": date_ab_distinct,
+        "date_ab_identity_distinct": date_ab_identity_distinct,
+        "hash_currentness_validated": hash_currentness_validated,
+        "entity_aggregate_improved": entity_aggregate_improved,
+        "semantic_ranker_bound": nonsense.get("semantic_ranker_bound") is True,
+        "semantic_ranker_used": nonsense.get("semantic_ranker_used") is True,
+        "semantic_query_ranker_bound": semantic.get("semantic_ranker_bound") is True,
+        "semantic_query_ranker_used": semantic.get("semantic_ranker_used") is True,
+        "qdrant_semantic_result_lane_used": (
+            semantic.get("qdrant_semantic_result_lane_used") is True
+        ),
+        "semantic_result_count": _strict_int_or_none(semantic.get("result_count")),
+        "semantic_result_score": (
+            float(semantic_score)
+            if isinstance(semantic_score, (int, float))
+            and not isinstance(semantic_score, bool)
+            and math.isfinite(float(semantic_score))
+            else None
+        ),
+        "semantic_result_minimum_score": TEMPORAL_SEMANTIC_RESULT_MIN_SCORE,
+        "nonsense_result_count": _strict_int_or_none(nonsense.get("result_count")),
+        "entity_coverage_count": coverage,
+        "entity_backlog_count": backlog,
+        "gaps": _dedupe(failures),
+    }
+
+
 def _live_brain_objects_query_route_smokes_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
     smokes = evidence.get("brain_objects_query_smokes")
     smoke_items = [dict(item) for item in smokes if isinstance(item, Mapping)] if isinstance(smokes, list) else []
@@ -2924,6 +3423,8 @@ def _live_brain_objects_query_route_smokes_claim(evidence: Mapping[str, Any]) ->
         if route in by_route
         for failure in _brain_objects_query_smoke_failures(route, by_route[route])
     ]
+    temporal_checkpoint = _live_temporal_recall_corrective_checkpoint_claim(evidence)
+    temporal_semantics_validated = temporal_checkpoint.get("status") == "validated"
     identity = evidence.get("deployed_identity")
     identity = identity if isinstance(identity, Mapping) else {}
     deployed_identity_matches_expected = identity.get("contains_expected_commit") is True
@@ -2954,14 +3455,24 @@ def _live_brain_objects_query_route_smokes_claim(evidence: Mapping[str, Any]) ->
         *_named_gaps("brain_objects_query_route_unimplemented", unimplemented_routes),
         *_named_gaps("shadow_route_smoke_not_implemented", unimplemented_routes),
     ]
+    syntactic_routes = sorted(
+        route for route in by_route if route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
+    )
+    validated_routes = [
+        route
+        for route in syntactic_routes
+        if route != "temporal_work_recall" or temporal_semantics_validated
+    ]
     base = {
         "claim_id": "live.brain_objects_query.route_smokes",
         "evidence_class": "runtime_read_path",
         "required_routes": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
-        "validated_routes": sorted(route for route in by_route if route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
+        "syntactic_routes": syntactic_routes,
+        "validated_routes": validated_routes,
         "missing_routes": missing,
         "unimplemented_routes": unimplemented_routes,
         "route_fallback_interpretation": route_fallback_interpretation,
+        "temporal_semantic_acceptance_status": temporal_checkpoint.get("status"),
         "production_mutation_performed": _object_query_smokes_report_mutation(smoke_items),
     }
     if failures:
@@ -2979,6 +3490,21 @@ def _live_brain_objects_query_route_smokes_claim(evidence: Mapping[str, Any]) ->
                     "live_brain_objects_query_route_smokes_unverified",
                     *unimplemented_gaps,
                     *missing_gaps,
+                ]
+            ),
+        }
+    if not temporal_semantics_validated:
+        return {
+            **base,
+            "status": "not_validated",
+            "gaps": _dedupe(
+                [
+                    *missing_gaps,
+                    *(
+                        temporal_checkpoint.get("gaps")
+                        if isinstance(temporal_checkpoint.get("gaps"), list)
+                        else []
+                    ),
                 ]
             ),
         }

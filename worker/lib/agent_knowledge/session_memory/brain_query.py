@@ -11,6 +11,7 @@ contract: docs/superpowers/specs/2026-06-11-use-brain-ux-design.md
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable, Protocol, runtime_checkable
@@ -25,6 +26,7 @@ BRAIN_ID_PROJECT_PREFIX = "/project/"
 DEFAULT_LIMIT = 8
 MAX_LIMIT = 10
 LEDGER_QUERY_RANKING_CANDIDATE_LIMIT = 50
+SEMANTIC_RESULT_MIN_SCORE = 0.75
 QUERY_RESPONSE_LANES = (
     "current",
     "accepted",
@@ -151,7 +153,7 @@ def _rank_ledger_cards_for_query(
         overlap = len(tokens.intersection(_query_tokens(card_text)))
         phrase_matches = _phrase_match_count(phrases=phrases, card_text=card_text)
         semantic_score = _semantic_score(card)
-        if overlap >= threshold:
+        if overlap >= threshold or semantic_score >= SEMANTIC_RESULT_MIN_SCORE:
             scored.append((index, phrase_matches, overlap, semantic_score, card))
     if phrases:
         max_phrase_matches = max((item[1] for item in scored), default=0)
@@ -164,16 +166,21 @@ def _rank_ledger_cards_for_query(
 
 
 def _semantic_score(card: Mapping[str, Any]) -> float:
-    value = card.get("_semantic_score")
-    if not isinstance(value, (int, float)):
-        return 0.0
-    return float(value)
+    value = _finite_score_or_none(card.get("_semantic_score"))
+    return value if value is not None else 0.0
+
+
+def _finite_score_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    score = float(value)
+    return score if math.isfinite(score) else None
 
 
 def _hit_rank(hit: dict) -> tuple:
     non_raw = 0 if str(hit.get("message_type") or "") != "raw" else 1
-    score = hit.get("score")
-    score_key = -float(score) if isinstance(score, (int, float)) else float("inf")
+    score = _finite_score_or_none(hit.get("score"))
+    score_key = -score if score is not None else float("inf")
     return (non_raw, score_key)
 
 
@@ -241,12 +248,12 @@ def run_brain_query_v2(
     if not normalized:
         return _query_v2_error(brain_id=brain_id, code="invalid_query", message="query must be non-empty")
     bounded_limit = max(1, min(MAX_LIMIT, int(limit)))
-    strict_eval_ranking = query_intent == "eval"
-    candidate_limit = max(bounded_limit, LEDGER_QUERY_RANKING_CANDIDATE_LIMIT) if strict_eval_ranking else bounded_limit
+    strict_relevance = query_intent in {"eval", "session_context"}
+    candidate_limit = max(bounded_limit, LEDGER_QUERY_RANKING_CANDIDATE_LIMIT) if strict_relevance else bounded_limit
     ledger_cards = list_ledger_accepted_cards(read_model, project=project, limit=candidate_limit)
     semantic_ranker_used = False
     semantic_ranker_error_type = ""
-    if strict_eval_ranking and semantic_ranker is not None:
+    if strict_relevance and semantic_ranker is not None:
         try:
             semantic_ranked = semantic_ranker(
                 query=normalized,
@@ -264,7 +271,7 @@ def run_brain_query_v2(
         query=normalized,
         query_terms=query_terms,
         limit=bounded_limit,
-        strict=strict_eval_ranking,
+        strict=strict_relevance,
     )
     index_results = None
     if index_search is not None:
@@ -446,7 +453,7 @@ def _normalize_query_memory_card(*, brain_id: str, card: dict) -> dict:
         "evidence_hashes": [str(item) for item in evidence_hashes],
         "authority": "local_ledger",
         "content_hash": str(normalized.get("content_hash") or normalized.get("card_hash") or ""),
-        "score": normalized.get("_semantic_score") if isinstance(normalized.get("_semantic_score"), (int, float)) else None,
+        "score": _finite_score_or_none(normalized.get("_semantic_score")),
     }
 
 
@@ -484,6 +491,43 @@ def _compat_results_from_query_lanes(response: Mapping[str, Any]) -> list[dict]:
                     "card_type": str(item.get("card_type") or ""),
                     "memory_id": memory_id,
                     "score": item.get("score") if isinstance(item.get("score"), (int, float)) else None,
+                }
+            )
+    for lane_name in ("archive", "evidence_candidates"):
+        lane = response.get(lane_name)
+        if not isinstance(lane, list):
+            continue
+        for item in lane:
+            if not isinstance(item, Mapping):
+                continue
+            score = item.get("score")
+            finite_score = _finite_score_or_none(score)
+            if finite_score is None or finite_score < SEMANTIC_RESULT_MIN_SCORE:
+                continue
+            memory_id = str(item.get("memory_id") or "")
+            if memory_id and memory_id in seen:
+                continue
+            if memory_id:
+                seen.add(memory_id)
+            results.append(
+                {
+                    "brain_id": str(item.get("brain_id") or response.get("brain_id") or ""),
+                    "result_type": str(item.get("result_type") or "semantic_memory"),
+                    "retrieval_lane": str(item.get("retrieval_lane") or ""),
+                    "summary": str(item.get("summary") or ""),
+                    "why_retrieved": "semantic_match",
+                    "source_ref": memory_id,
+                    "observed_at": str(item.get("observed_at") or ""),
+                    "freshness": str(item.get("freshness") or ""),
+                    "approval_state": str(item.get("approval_state") or ""),
+                    "privacy": "redacted",
+                    "confidence": item.get("confidence"),
+                    "conflicts": [],
+                    "currentness": str(item.get("currentness") or ""),
+                    "card_type": str(item.get("card_type") or ""),
+                    "memory_id": memory_id,
+                    "score": finite_score,
+                    "content_hash": str(item.get("content_hash") or ""),
                 }
             )
     return results
@@ -544,6 +588,7 @@ def _sanitize_mirror_item(item: Mapping[str, Any]) -> dict:
         return {"result_type": "index_mirror", "summary": ""}
     sanitized = {
         "result_type": str(item.get("result_type") or "index_mirror"),
+        "retrieval_lane": str(item.get("retrieval_lane") or ""),
         "memory_id": str(item.get("memory_id") or ""),
         "card_type": str(item.get("card_type") or ""),
         "summary": redact_and_bound_evidence_text(
@@ -552,8 +597,9 @@ def _sanitize_mirror_item(item: Mapping[str, Any]) -> dict:
         "currentness": str(item.get("currentness") or "unknown"),
         "authority": "index_mirror",
     }
-    if item.get("score") is not None:
-        sanitized["score"] = item.get("score")
+    finite_score = _finite_score_or_none(item.get("score"))
+    if finite_score is not None:
+        sanitized["score"] = finite_score
     if item.get("content_hash"):
         sanitized["content_hash"] = str(item.get("content_hash"))
     if isinstance(item.get("evidence_hashes"), list):
@@ -676,14 +722,18 @@ def run_brain_query(
                 if not card or str(card.get("state") or "") != "active":
                     dropped += 1
                     continue
-                score = hit.get("score")
-                score_text = f"{score}" if isinstance(score, (int, float)) else "none"
+                raw_score = hit.get("score")
+                score = _finite_score_or_none(raw_score)
+                if isinstance(raw_score, (int, float)) and score is None:
+                    dropped += 1
+                    continue
+                score_text = f"{score}" if score is not None else "none"
                 results.append(
                     build_card_envelope(
                         brain_id=brain_id,
                         card=card,
                         why=f"semantic_match(score={score_text})",
-                        demote=not isinstance(score, (int, float)),
+                        demote=score is None,
                         hit=hit,
                     )
                 )

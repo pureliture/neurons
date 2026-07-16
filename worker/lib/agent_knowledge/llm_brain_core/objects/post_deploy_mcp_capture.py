@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import secrets
@@ -10,6 +11,8 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import unquote, urlparse
+
+from agent_knowledge.mcp_tools import BRAIN_QUERY_TOOL_NAME
 
 from .._util import ensure_public_safe, hash_payload, public_safe_text, require_sha256
 from .artifact_preference_evaluator import (
@@ -36,18 +39,25 @@ from .runtime_readiness import (
     REQUIRED_SESSION_PROJECT_EDGE_TYPES,
     REQUIRED_SESSION_PROJECT_OBJECT_TYPES,
     RUNTIME_READINESS_AGENT_CONTEXT_TOOL,
+    TEMPORAL_CORRECTNESS_RUNTIME_AGGREGATE_SCHEMA,
+    TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_SCHEMA,
+    TEMPORAL_SEMANTIC_RESULT_MIN_SCORE,
     _is_commit_sha,
     _mint_collector_attested_evidence,
     build_deployment_evidence_binding,
 )
 
 POST_DEPLOY_MCP_CAPTURE_SCHEMA = "source_to_candidate_runtime_post_deploy_mcp_capture.v1"
+TEMPORAL_CORRECTNESS_RUNTIME_EXPECTATIONS_SCHEMA = (
+    "temporal_correctness_runtime_expectations.v1"
+)
 AGENT_CONTEXT_STARTUP_SUBPROCESS_TIMEOUT_SECONDS = 60
 _ALLOWED_CAPTURE_TOOL_NAMES = frozenset(
     {
         *REQUIRED_RUNTIME_TOOL_NAMES,
         ARTIFACT_PREFERENCE_EVALUATOR_TOOL,
         "brain_context_resolve",
+        BRAIN_QUERY_TOOL_NAME,
         "brain_object_decision_commit",
         "brain_object_proposal_create",
     }
@@ -207,6 +217,7 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
     argo_reconciliation: Mapping[str, Any] | None = None,
     deployed_identity: Mapping[str, Any] | None = None,
     artifact_descriptor: Mapping[str, Any] | None = None,
+    temporal_acceptance: Mapping[str, Any] | None = None,
     collect_agent_context_startup: bool = False,
     agent_context_startup_runner: Any = None,
     session_factory: Any = None,
@@ -218,6 +229,9 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         validate_artifact_descriptor(artifact_descriptor)
         if artifact_descriptor is not None
         else None
+    )
+    validated_temporal_acceptance = _validate_temporal_acceptance_config(
+        temporal_acceptance
     )
     explicit_project = str(project or "").strip()
     safe_project = public_safe_text(explicit_project, max_chars=120) or "neurons"
@@ -303,6 +317,19 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
                 RUNTIME_READINESS_AGENT_CONTEXT_TOOL,
                 runtime_read_arguments,
             )
+        temporal_checkpoint = (
+            await _collect_temporal_recall_corrective_checkpoint(
+                session,
+                repository=repository,
+                branch=branch,
+                project=safe_project,
+                consumer=consumer,
+                config=validated_temporal_acceptance,
+                runtime_packet=post_evaluator_runtime_packet,
+            )
+            if validated_temporal_acceptance
+            else {}
+        )
 
     identity = _deployed_identity_view(deployed_identity)
     desired_state = _gitops_desired_state_view(gitops_desired_state)
@@ -376,6 +403,8 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
     session_project_rollup = _live_session_project_rollup_from_runtime_packet(attested_runtime_packet)
     if session_project_rollup:
         capture["session_project_rollup_runtime"] = session_project_rollup
+    if temporal_checkpoint:
+        capture["temporal_recall_corrective_checkpoint"] = temporal_checkpoint
     preference_artifact_memory = _live_preference_artifact_memory_from_runtime_packet(attested_runtime_packet)
     if preference_artifact_memory:
         capture["preference_artifact_memory"] = preference_artifact_memory
@@ -813,17 +842,607 @@ async def _call_tool_untrusted_mapping(
     except Exception as exc:  # pragma: no cover - defensive transport guard
         return {
             "collector_error_type": public_safe_text(type(exc).__name__, max_chars=80),
+            "collector_error_code": _mcp_exception_error_code(exc),
             "collector_call_failed": True,
         }
     if getattr(result, "isError", False) is True:
-        return {"collector_call_failed": True, "collector_error_type": "McpToolError"}
+        structured = getattr(result, "structuredContent", None)
+        error_code = (
+            structured.get("error_code")
+            if isinstance(structured, Mapping)
+            else None
+        )
+        return {
+            "collector_call_failed": True,
+            "collector_error_type": "McpToolError",
+            "collector_error_code": error_code if isinstance(error_code, int) else None,
+        }
     structured = getattr(result, "structuredContent", None)
     return dict(structured) if isinstance(structured, Mapping) else {}
+
+
+def _mcp_exception_error_code(exc: Exception) -> int | None:
+    candidates = [
+        getattr(exc, "code", None),
+        getattr(getattr(exc, "error", None), "code", None),
+    ]
+    for candidate in candidates:
+        value = getattr(candidate, "value", candidate)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
 
 
 async def _call_tool_mapping(session: Any, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
     return _public_safe_mapping(
         await _call_tool_untrusted_mapping(session, name, arguments)
+    )
+
+
+def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("temporal acceptance config must be an object")
+    _reject_forbidden_runtime_input_keys(value)
+    config = _public_safe_mapping(value)
+    temporal_query = str(config.get("temporal_query") or "").strip()
+    if not temporal_query or public_safe_text(temporal_query, max_chars=240) != temporal_query:
+        raise ValueError("temporal acceptance temporal_query must be public-safe")
+    required_probes = ("date_a", "date_b", "range_boundary", "mismatch", "invalid_range")
+    for name in required_probes:
+        if not isinstance(config.get(name), Mapping):
+            raise ValueError(f"temporal acceptance {name} is required")
+    for name in ("date_a", "date_b"):
+        probe = config[name]
+        if probe.get("query") not in (None, "", temporal_query):
+            raise ValueError(f"temporal acceptance {name}.query must equal temporal_query")
+        if not str(probe.get("as_of") or "").strip():
+            raise ValueError(f"temporal acceptance {name}.as_of is required")
+        require_sha256(
+            str(probe.get("expected_object_fingerprint") or ""),
+            f"temporal acceptance {name}.expected_object_fingerprint",
+        )
+        require_sha256(
+            str(probe.get("expected_object_identity_fingerprint") or ""),
+            f"temporal acceptance {name}.expected_object_identity_fingerprint",
+        )
+    if (
+        config["date_a"].get("expected_object_identity_fingerprint")
+        == config["date_b"].get("expected_object_identity_fingerprint")
+    ):
+        raise ValueError(
+            "temporal acceptance date object identities must be distinct"
+        )
+    boundary = config["range_boundary"]
+    if boundary.get("query") not in (None, "", temporal_query):
+        raise ValueError(
+            "temporal acceptance range_boundary.query must equal temporal_query"
+        )
+    if not str(boundary.get("date_from") or "").strip() or not str(
+        boundary.get("date_to") or ""
+    ).strip():
+        raise ValueError("temporal acceptance range boundary is incomplete")
+    require_sha256(
+        str(boundary.get("expected_object_fingerprint") or ""),
+        "temporal acceptance range_boundary.expected_object_fingerprint",
+    )
+    require_sha256(
+        str(boundary.get("expected_object_identity_fingerprint") or ""),
+        "temporal acceptance range_boundary.expected_object_identity_fingerprint",
+    )
+    if not str(config["mismatch"].get("as_of") or "").strip():
+        raise ValueError("temporal acceptance mismatch.as_of is required")
+    if config["mismatch"].get("query") not in (None, "", temporal_query):
+        raise ValueError("temporal acceptance mismatch.query must equal temporal_query")
+    invalid_range = config["invalid_range"]
+    if not str(invalid_range.get("date_from") or "").strip() or not str(
+        invalid_range.get("date_to") or ""
+    ).strip():
+        raise ValueError("temporal acceptance invalid range is incomplete")
+    if not str(config.get("nonsense_query") or "").strip():
+        raise ValueError("temporal acceptance nonsense_query is required")
+    semantic_query = config.get("semantic_query")
+    if not isinstance(semantic_query, Mapping):
+        raise ValueError("temporal acceptance semantic_query is required")
+    query = str(semantic_query.get("query") or "").strip()
+    if not query or public_safe_text(query, max_chars=240) != query:
+        raise ValueError("temporal acceptance semantic_query.query must be public-safe")
+    require_sha256(
+        str(semantic_query.get("expected_result_fingerprint") or ""),
+        "temporal acceptance semantic_query.expected_result_fingerprint",
+    )
+    if "runtime_aggregate" in config:
+        raise ValueError(
+            "temporal acceptance runtime_aggregate is untrusted; use runtime_postcheck_receipt"
+        )
+    if "runtime_postcheck_receipt" in config:
+        raise ValueError(
+            "temporal acceptance runtime_postcheck_receipt is untrusted; "
+            "runtime aggregate must come from the live MCP runtime packet"
+        )
+    expectations = config.get("runtime_expectations")
+    if not isinstance(expectations, Mapping):
+        raise ValueError("temporal acceptance runtime_expectations is required")
+    if (
+        expectations.get("schema_version")
+        != TEMPORAL_CORRECTNESS_RUNTIME_EXPECTATIONS_SCHEMA
+    ):
+        raise ValueError("temporal acceptance runtime_expectations schema is invalid")
+    for field in ("baseline_coverage_count", "baseline_backlog_count"):
+        if _strict_nonnegative_int(expectations.get(field)) is None:
+            raise ValueError(
+                f"temporal acceptance runtime_expectations.{field} is invalid"
+            )
+    for field in ("minimum_source_session_count", "minimum_valid_source_count"):
+        value = _strict_nonnegative_int(expectations.get(field))
+        if value is None or value <= 0:
+            raise ValueError(
+                f"temporal acceptance runtime_expectations.{field} is invalid"
+            )
+    if (
+        int(expectations["baseline_coverage_count"])
+        + int(expectations["baseline_backlog_count"])
+        != int(expectations["minimum_valid_source_count"])
+    ):
+        raise ValueError(
+            "temporal acceptance runtime_expectations baseline cardinality is invalid"
+        )
+    max_artifact_age_seconds = expectations.get("max_artifact_age_seconds")
+    if (
+        not isinstance(max_artifact_age_seconds, int)
+        or isinstance(max_artifact_age_seconds, bool)
+        or not 0 < max_artifact_age_seconds <= 604800
+    ):
+        raise ValueError(
+            "temporal acceptance runtime_expectations.max_artifact_age_seconds is invalid"
+        )
+    return config
+
+
+async def _collect_temporal_recall_corrective_checkpoint(
+    session: Any,
+    *,
+    repository: str,
+    branch: str,
+    project: str,
+    consumer: str,
+    config: Mapping[str, Any],
+    runtime_packet: Mapping[str, Any],
+) -> dict[str, Any]:
+    async def query_objects(
+        selector: Mapping[str, Any], *, query: str = "temporal work recall"
+    ) -> dict[str, Any]:
+        return await _call_tool_untrusted_mapping(
+            session,
+            "brain_objects_query",
+            {
+                "repository": repository,
+                "branch": branch,
+                "project": project,
+                "query": public_safe_text(query, max_chars=240),
+                "current_files": [],
+                "route": "temporal_work_recall",
+                "response_mode": "full",
+                "consumer": consumer,
+                **dict(selector),
+            },
+        )
+
+    date_a_config = config["date_a"]
+    date_b_config = config["date_b"]
+    boundary_config = config["range_boundary"]
+    mismatch_config = config["mismatch"]
+    invalid_config = config["invalid_range"]
+    date_a_selector = {"as_of": str(date_a_config.get("as_of") or "")}
+    date_b_selector = {"as_of": str(date_b_config.get("as_of") or "")}
+    boundary_selector = {
+        "date_from": str(boundary_config.get("date_from") or ""),
+        "date_to": str(boundary_config.get("date_to") or ""),
+    }
+    mismatch_selector = {"as_of": str(mismatch_config.get("as_of") or "")}
+    invalid_selector = {
+        "date_from": str(invalid_config.get("date_from") or ""),
+        "date_to": str(invalid_config.get("date_to") or ""),
+    }
+    temporal_query = public_safe_text(
+        str(config.get("temporal_query") or ""), max_chars=240
+    )
+    date_a_raw = await query_objects(
+        date_a_selector,
+        query=temporal_query,
+    )
+    date_b_raw = await query_objects(
+        date_b_selector,
+        query=temporal_query,
+    )
+    boundary_raw = await query_objects(
+        boundary_selector,
+        query=temporal_query,
+    )
+    mismatch_raw = await query_objects(
+        mismatch_selector,
+        query=temporal_query,
+    )
+    invalid_raw = await query_objects(invalid_selector, query=temporal_query)
+    nonsense_query = public_safe_text(str(config.get("nonsense_query") or ""), max_chars=240)
+    nonsense_raw = await _call_tool_untrusted_mapping(
+        session,
+        BRAIN_QUERY_TOOL_NAME,
+        {
+            "brain_id": f"/project/{project}",
+            "query": nonsense_query,
+            "limit": 8,
+        },
+    )
+    semantic_query_config = config["semantic_query"]
+    semantic_query = public_safe_text(
+        str(semantic_query_config.get("query") or ""),
+        max_chars=240,
+    )
+    semantic_raw = await _call_tool_untrusted_mapping(
+        session,
+        BRAIN_QUERY_TOOL_NAME,
+        {
+            "brain_id": f"/project/{project}",
+            "query": semantic_query,
+            "limit": 8,
+        },
+    )
+    runtime_aggregate, runtime_aggregate_source, runtime_receipt_hash = (
+        _trusted_temporal_runtime_aggregate(
+            runtime_packet=runtime_packet,
+            runtime_expectations=config["runtime_expectations"],
+        )
+    )
+    checkpoint = {
+        "schema_version": TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_SCHEMA,
+        "evidence_class": "runtime_semantic_acceptance",
+        "temporal_query_hash": hash_payload(temporal_query),
+        "selector_contract": {
+            "as_of_supported": _temporal_object_call_succeeded(date_a_raw)
+            and _temporal_object_call_succeeded(date_b_raw),
+            "date_range_supported": _temporal_object_call_succeeded(boundary_raw),
+            "invalid_range_rejected": (
+                invalid_raw.get("collector_call_failed") is True
+                and invalid_raw.get("collector_error_code") == -32602
+            ),
+            "invalid_range_error_type": str(
+                invalid_raw.get("collector_error_type") or ""
+            ),
+            "invalid_range_error_code": invalid_raw.get("collector_error_code"),
+        },
+        "date_a": _temporal_object_probe_summary(
+            date_a_raw,
+            selector=date_a_selector,
+            expected_fingerprint=str(date_a_config.get("expected_object_fingerprint") or ""),
+            expected_identity_fingerprint=str(
+                date_a_config.get("expected_object_identity_fingerprint") or ""
+            ),
+        ),
+        "date_b": _temporal_object_probe_summary(
+            date_b_raw,
+            selector=date_b_selector,
+            expected_fingerprint=str(date_b_config.get("expected_object_fingerprint") or ""),
+            expected_identity_fingerprint=str(
+                date_b_config.get("expected_object_identity_fingerprint") or ""
+            ),
+        ),
+        "range_boundary": _temporal_object_probe_summary(
+            boundary_raw,
+            selector=boundary_selector,
+            expected_fingerprint=str(boundary_config.get("expected_object_fingerprint") or ""),
+            expected_identity_fingerprint=str(
+                boundary_config.get("expected_object_identity_fingerprint") or ""
+            ),
+        ),
+        "mismatch": _temporal_mismatch_probe_summary(
+            mismatch_raw,
+            selector=mismatch_selector,
+        ),
+        "nonsense_query": _nonsense_brain_query_summary(
+            nonsense_raw,
+            query=nonsense_query,
+        ),
+        "semantic_query": _semantic_brain_query_summary(
+            semantic_raw,
+            query=semantic_query,
+            expected_fingerprint=str(
+                semantic_query_config.get("expected_result_fingerprint") or ""
+            ),
+        ),
+        "runtime_aggregate": runtime_aggregate,
+        "runtime_aggregate_source": runtime_aggregate_source,
+        "runtime_postcheck_receipt_hash": runtime_receipt_hash,
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": any(
+            _mapping_reports_mutation(item)
+            for item in (
+                date_a_raw,
+                date_b_raw,
+                boundary_raw,
+                mismatch_raw,
+                nonsense_raw,
+                semantic_raw,
+            )
+        ),
+    }
+    ensure_public_safe(checkpoint, "TemporalRecallCorrectiveCheckpoint")
+    return checkpoint
+
+
+def _temporal_object_call_succeeded(value: Mapping[str, Any]) -> bool:
+    object_pack = value.get("object_pack") if isinstance(value.get("object_pack"), Mapping) else {}
+    return (
+        value.get("collector_call_failed") is not True
+        and value.get("schema_version") == "brain_objects_query.v1"
+        and str(value.get("route") or object_pack.get("route") or "") == "temporal_work_recall"
+        and object_pack.get("schema_version") == "object_pack.v1"
+    )
+
+
+def _temporal_object_probe_summary(
+    value: Mapping[str, Any],
+    *,
+    selector: Mapping[str, str],
+    expected_fingerprint: str,
+    expected_identity_fingerprint: str,
+) -> dict[str, Any]:
+    safe = _remote_mapping_or_failure(value)
+    object_pack = safe.get("object_pack") if isinstance(safe.get("object_pack"), Mapping) else {}
+    objects = object_pack.get("objects") if isinstance(object_pack.get("objects"), list) else []
+    gaps = object_pack.get("gaps") if isinstance(object_pack.get("gaps"), list) else []
+    confidence = (
+        object_pack.get("confidence")
+        if isinstance(object_pack.get("confidence"), Mapping)
+        else {}
+    )
+    confidence_score = confidence.get("score")
+    work_units = [
+        item
+        for item in objects
+        if isinstance(item, Mapping) and str(item.get("object_type") or "") == "WorkUnit"
+    ]
+    observed_fingerprint = hash_payload(work_units[0]) if len(work_units) == 1 else ""
+    observed_identity_fingerprint = (
+        _temporal_work_unit_identity_fingerprint(work_units[0])
+        if len(work_units) == 1
+        else ""
+    )
+    return {
+        "selector_hash": hash_payload(dict(selector)),
+        "expected_object_fingerprint": expected_fingerprint,
+        "observed_object_fingerprint": observed_fingerprint,
+        "expected_object_identity_fingerprint": expected_identity_fingerprint,
+        "observed_object_identity_fingerprint": observed_identity_fingerprint,
+        "work_unit_count": len(work_units),
+        "gap_count": len(gaps),
+        "confidence_score": (
+            float(confidence_score)
+            if isinstance(confidence_score, (int, float))
+            and not isinstance(confidence_score, bool)
+            and math.isfinite(float(confidence_score))
+            else None
+        ),
+    }
+
+
+def _temporal_work_unit_identity_fingerprint(work_unit: Mapping[str, Any]) -> str:
+    payload = (
+        work_unit.get("payload")
+        if isinstance(work_unit.get("payload"), Mapping)
+        else {}
+    )
+    return hash_payload(
+        {
+            "object_id": str(work_unit.get("object_id") or ""),
+            "content_hash": str(work_unit.get("content_hash") or ""),
+            "source_revision": str(payload.get("source_revision") or ""),
+        }
+    )
+
+
+def _temporal_mismatch_probe_summary(
+    value: Mapping[str, Any],
+    *,
+    selector: Mapping[str, str],
+) -> dict[str, Any]:
+    safe = _remote_mapping_or_failure(value)
+    object_pack = safe.get("object_pack") if isinstance(safe.get("object_pack"), Mapping) else {}
+    objects = object_pack.get("objects") if isinstance(object_pack.get("objects"), list) else []
+    gaps = object_pack.get("gaps") if isinstance(object_pack.get("gaps"), list) else []
+    confidence = (
+        object_pack.get("confidence")
+        if isinstance(object_pack.get("confidence"), Mapping)
+        else {}
+    )
+    score = confidence.get("score")
+    return {
+        "selector_hash": hash_payload(dict(selector)),
+        "object_count": len(objects),
+        "gap_count": len(gaps),
+        "confidence_score": score if isinstance(score, (int, float)) and not isinstance(score, bool) else None,
+    }
+
+
+def _nonsense_brain_query_summary(value: Mapping[str, Any], *, query: str) -> dict[str, Any]:
+    safe = _remote_mapping_or_failure(value)
+    audit = safe.get("audit") if isinstance(safe.get("audit"), Mapping) else {}
+    return {
+        "query_hash": hash_payload(query),
+        "result_count": len(safe.get("results")) if isinstance(safe.get("results"), list) else -1,
+        "current_count": len(safe.get("current")) if isinstance(safe.get("current"), list) else -1,
+        "accepted_count": len(safe.get("accepted")) if isinstance(safe.get("accepted"), list) else -1,
+        "semantic_ranker_bound": audit.get("semantic_ranker_bound") is True,
+        "semantic_ranker_used": audit.get("semantic_ranker_used") is True,
+    }
+
+
+def _semantic_brain_query_summary(
+    value: Mapping[str, Any],
+    *,
+    query: str,
+    expected_fingerprint: str,
+) -> dict[str, Any]:
+    safe = _remote_mapping_or_failure(value)
+    results = safe.get("results") if isinstance(safe.get("results"), list) else []
+    result = results[0] if len(results) == 1 and isinstance(results[0], Mapping) else {}
+    audit = safe.get("audit") if isinstance(safe.get("audit"), Mapping) else {}
+    score = result.get("score")
+    return {
+        "query_hash": hash_payload(query),
+        "expected_result_fingerprint": expected_fingerprint,
+        "observed_result_fingerprint": hash_payload(result) if result else "",
+        "result_count": len(results),
+        "why_retrieved_semantic_match": result.get("why_retrieved") == "semantic_match",
+        "score": (
+            float(score)
+            if isinstance(score, (int, float)) and not isinstance(score, bool)
+            and math.isfinite(float(score))
+            else None
+        ),
+        "minimum_score": TEMPORAL_SEMANTIC_RESULT_MIN_SCORE,
+        "semantic_ranker_bound": audit.get("semantic_ranker_bound") is True,
+        "semantic_ranker_used": audit.get("semantic_ranker_used") is True,
+        "qdrant_semantic_result_lane_used": (
+            result.get("retrieval_lane") == "qdrant_semantic"
+        ),
+    }
+
+
+def _temporal_runtime_aggregate_view(packet: Mapping[str, Any]) -> dict[str, Any]:
+    raw = (
+        packet.get("temporal_correctness_runtime")
+        if isinstance(packet.get("temporal_correctness_runtime"), Mapping)
+        else {}
+    )
+    currentness = (
+        raw.get("projection_currentness")
+        if isinstance(raw.get("projection_currentness"), Mapping)
+        else {}
+    )
+    entity = raw.get("entity_projection") if isinstance(raw.get("entity_projection"), Mapping) else {}
+    return {
+        "schema_version": (
+            TEMPORAL_CORRECTNESS_RUNTIME_AGGREGATE_SCHEMA
+            if raw.get("schema_version") == TEMPORAL_CORRECTNESS_RUNTIME_AGGREGATE_SCHEMA
+            else ""
+        ),
+        "projection_currentness": {
+            "source_hash_match": currentness.get("source_hash_match")
+            if isinstance(currentness.get("source_hash_match"), bool)
+            else None,
+            "stale_projected_session_count": _strict_nonnegative_int(
+                currentness.get("stale_projected_session_count")
+            ),
+            "artifact_current": currentness.get("artifact_current")
+            if isinstance(currentness.get("artifact_current"), bool)
+            else None,
+            "graph_run_scope_match": currentness.get("graph_run_scope_match")
+            if isinstance(currentness.get("graph_run_scope_match"), bool)
+            else None,
+            "graph_run_fresh": currentness.get("graph_run_fresh")
+            if isinstance(currentness.get("graph_run_fresh"), bool)
+            else None,
+            **{
+                field: _strict_nonnegative_int(currentness.get(field))
+                for field in (
+                    "source_session_count",
+                    "minimum_source_session_count",
+                    "source_hash_mismatch_count",
+                    "graph_projection_current_count",
+                    "graph_projection_noncurrent_count",
+                    "session_memory_projection_current_count",
+                    "session_memory_projection_noncurrent_count",
+                    "session_memory_source_hash_mismatch_count",
+                    "session_memory_stale_projected_session_count",
+                    "artifact_missing_session_count",
+                    "artifact_age_unknown_count",
+                    "artifact_source_hash_mismatch_count",
+                    "oldest_artifact_age_seconds",
+                    "graph_run_completed_age_seconds",
+                    "graph_run_max_age_seconds",
+                )
+            },
+        },
+        "entity_projection": {
+            field: _strict_nonnegative_int(entity.get(field))
+            for field in (
+                "baseline_coverage_count",
+                "coverage_count",
+                "baseline_backlog_count",
+                "backlog_count",
+                "valid_source_count",
+                "minimum_valid_source_count",
+                "error_count",
+            )
+        },
+    }
+
+
+def _trusted_temporal_runtime_aggregate(
+    *,
+    runtime_packet: Mapping[str, Any],
+    runtime_expectations: Mapping[str, Any],
+) -> tuple[dict[str, Any], str, str]:
+    live_view = _temporal_runtime_aggregate_view(runtime_packet)
+    if live_view.get("schema_version") == TEMPORAL_CORRECTNESS_RUNTIME_AGGREGATE_SCHEMA:
+        currentness = dict(live_view.get("projection_currentness") or {})
+        entity = dict(live_view.get("entity_projection") or {})
+        oldest_age = _strict_nonnegative_int(
+            currentness.get("oldest_artifact_age_seconds")
+        )
+        max_age = int(runtime_expectations["max_artifact_age_seconds"])
+        currentness["artifact_current"] = bool(
+            currentness.get("artifact_current") is True
+            and currentness.get("source_hash_mismatch_count") == 0
+            and currentness.get("artifact_missing_session_count") == 0
+            and currentness.get("artifact_age_unknown_count") == 0
+            and currentness.get("artifact_source_hash_mismatch_count") == 0
+            and oldest_age is not None
+            and oldest_age <= max_age
+        )
+        currentness["minimum_source_session_count"] = int(
+            runtime_expectations["minimum_source_session_count"]
+        )
+        entity["baseline_coverage_count"] = int(
+            runtime_expectations["baseline_coverage_count"]
+        )
+        entity["baseline_backlog_count"] = int(
+            runtime_expectations["baseline_backlog_count"]
+        )
+        entity["minimum_valid_source_count"] = int(
+            runtime_expectations["minimum_valid_source_count"]
+        )
+        return (
+            {
+                **live_view,
+                "projection_currentness": currentness,
+                "entity_projection": entity,
+            },
+            "live_mcp_runtime_packet",
+            "",
+        )
+    return live_view, "missing", ""
+
+
+def _strict_nonnegative_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _mapping_reports_mutation(value: Mapping[str, Any]) -> bool:
+    object_pack = value.get("object_pack") if isinstance(value.get("object_pack"), Mapping) else {}
+    return (
+        value.get("production_mutation_performed") is True
+        or value.get("mutation_performed") is True
+        or object_pack.get("production_mutation_performed") is True
+        or object_pack.get("mutation_performed") is True
     )
 
 
