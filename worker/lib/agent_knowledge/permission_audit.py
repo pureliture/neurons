@@ -326,8 +326,10 @@ class PostgresDatabaseMutationMarkerReader:
 
 def _read_postgres_database_marker(connection: Any) -> dict[str, Any]:
     row = connection.execute(PostgresDatabaseMutationMarkerReader._SQL).fetchone()
-    wal_lsn = str(row.get("wal_lsn") if row is not None else "")
-    snapshot = str(row.get("transaction_snapshot") if row is not None else "")
+    wal_lsn = str(row.get("wal_lsn") or "") if row is not None else ""
+    snapshot = (
+        str(row.get("transaction_snapshot") or "") if row is not None else ""
+    )
     if not wal_lsn or not snapshot or len(wal_lsn) > 80 or len(snapshot) > 4096:
         raise RuntimeError("PostgreSQL mutation marker is unavailable")
     result = {

@@ -406,6 +406,52 @@ def test_postgres_database_marker_is_one_bounded_read_only_statement():
     assert "from " not in normalized_sql
 
 
+@pytest.mark.parametrize(
+    ("wal_lsn", "transaction_snapshot"),
+    (
+        (None, "100:100:"),
+        ("0/16B6A80", None),
+    ),
+)
+def test_postgres_database_marker_rejects_null_database_fields(
+    wal_lsn,
+    transaction_snapshot,
+):
+    from agent_knowledge.permission_audit import PostgresDatabaseMutationMarkerReader
+
+    class Result:
+        def fetchone(self):
+            return {
+                "wal_lsn": wal_lsn,
+                "transaction_snapshot": transaction_snapshot,
+            }
+
+    class Connection:
+        dialect = "postgres"
+
+        def execute(self, _sql):
+            return Result()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class Adapter:
+        is_file_backed = False
+
+    class ReadOnlyLedger:
+        read_only = True
+        _db_adapter = Adapter()
+
+        def _connect(self):
+            return Connection()
+
+    with pytest.raises(RuntimeError, match="PostgreSQL mutation marker is unavailable"):
+        PostgresDatabaseMutationMarkerReader(ReadOnlyLedger())()
+
+
 def test_recall_service_wiring_enables_audit_only_with_explicit_cli_flag(tmp_path):
     from agent_knowledge import cli
 
