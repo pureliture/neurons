@@ -560,6 +560,85 @@ def test_status_counts_source_hash_mismatch_as_stale_backlog(tmp_path):
     assert report["artifact_age"]["artifact_source_hash_mismatch_count"] == 1
 
 
+def test_status_digest_changes_for_same_session_distinct_source_revision(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    raw_id = "status-digest-source-change"
+    _seed_session(store, raw_id=raw_id, body="Initial graph source.")
+    _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=1,
+    )
+    before = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+    )
+
+    _seed_session(store, raw_id=raw_id, body="Distinct graph source revision.")
+    after = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+    )
+
+    assert before["source"]["session_count"] == after["source"]["session_count"] == 1
+    before_state = before["projection_state"]
+    after_state = after["projection_state"]
+    for field in (
+        "source_state_digest",
+        "graph_projection_state_digest",
+        "session_memory_projection_state_digest",
+        "source_projection_state_digest",
+    ):
+        assert before_state[field].startswith("sha256:")
+        assert after_state[field].startswith("sha256:")
+    assert before_state["source_state_digest"] != after_state["source_state_digest"]
+    assert (
+        before_state["source_projection_state_digest"]
+        != after_state["source_projection_state_digest"]
+    )
+    assert (
+        before_state["graph_projection_state_digest"]
+        == after_state["graph_projection_state_digest"]
+    )
+
+
+def test_status_digest_is_stable_for_same_session_exact_duplicate(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    raw_id = "status-digest-exact-duplicate"
+    body = "Stable graph source."
+    _seed_session(store, raw_id=raw_id, body=body)
+    _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=1,
+    )
+    before = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+    )
+
+    _seed_session(store, raw_id=raw_id, body=body)
+    after = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+    )
+
+    assert (
+        before["projection_state"]["source_projection_state_digest"]
+        == after["projection_state"]["source_projection_state_digest"]
+    )
+
+
 def test_status_includes_stale_canonical_session_memory_projection_currentness(tmp_path):
     store = InMemoryCouchDBSourceStore()
     session_id_hash = _seed_session(

@@ -1750,6 +1750,20 @@ class KnowledgeSearchService:
         stale_projected = int(
             projection.get("stale_projected_session_count") or 0
         )
+        state_digests = {
+            field: str(projection.get(field) or "")
+            for field in (
+                "source_state_digest",
+                "graph_projection_state_digest",
+                "session_memory_projection_state_digest",
+                "source_projection_state_digest",
+            )
+        }
+        if any(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None
+            for value in state_digests.values()
+        ):
+            raise ValueError("projection state digest is missing or invalid")
         evidence = {
             "schema_version": "temporal_correctness_runtime_aggregate.v1",
             "projection_currentness": {
@@ -1764,6 +1778,7 @@ class KnowledgeSearchService:
                         session_memory_stale,
                     )
                 ),
+                **state_digests,
                 "source_hash_mismatch_count": source_hash_mismatch,
                 "stale_projected_session_count": stale_projected,
                 "source_session_count": int(source.get("session_count") or 0),

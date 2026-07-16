@@ -88,6 +88,9 @@ SESSION_PROJECT_ROLLUP_PREVIEW_SCHEMA = "object_extraction_session_project_rollu
 SESSION_PROJECT_HANDOFF_SCHEMA = "session_project_handoff_pack.v1"
 SESSION_PROJECT_RESUME_SCHEMA = "session_project_resume_context.v1"
 TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_SCHEMA = "temporal_recall_corrective_checkpoint.v1"
+TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_READINESS_SCHEMA = (
+    "temporal_recall_corrective_checkpoint_readiness.v1"
+)
 TEMPORAL_CORRECTNESS_RUNTIME_AGGREGATE_SCHEMA = "temporal_correctness_runtime_aggregate.v1"
 TEMPORAL_CORRECTNESS_RUNTIME_POSTCHECK_RECEIPT_SCHEMA = (
     "temporal_correctness_runtime_postcheck_receipt.v1"
@@ -3126,6 +3129,15 @@ def _live_temporal_recall_corrective_checkpoint_claim(
     graph_current_count = _strict_int_or_none(
         currentness.get("graph_projection_current_count")
     )
+    state_digest_validated = all(
+        _is_sha256_hash_ref(str(currentness.get(field) or ""))
+        for field in (
+            "source_state_digest",
+            "graph_projection_state_digest",
+            "session_memory_projection_state_digest",
+            "source_projection_state_digest",
+        )
+    )
     hash_currentness_validated = (
         currentness.get("source_hash_match") is True
         and _strict_int_or_none(currentness.get("source_hash_mismatch_count")) == 0
@@ -3359,6 +3371,8 @@ def _live_temporal_recall_corrective_checkpoint_claim(
         failures.append("temporal_corrective_runtime_postcheck_receipt_not_allowed")
     if not hash_currentness_validated:
         failures.append("temporal_corrective_projection_hash_not_current")
+    if not state_digest_validated:
+        failures.append("temporal_corrective_projection_state_digest_invalid")
     if not entity_aggregate_improved:
         failures.append("temporal_corrective_entity_aggregate_not_improved")
     if checkpoint.get("production_mutation_performed") is True:
@@ -3380,6 +3394,7 @@ def _live_temporal_recall_corrective_checkpoint_claim(
         "date_ab_distinct": date_ab_distinct,
         "date_ab_identity_distinct": date_ab_identity_distinct,
         "hash_currentness_validated": hash_currentness_validated,
+        "state_digest_validated": state_digest_validated,
         "entity_aggregate_improved": entity_aggregate_improved,
         "semantic_ranker_bound": nonsense.get("semantic_ranker_bound") is True,
         "semantic_ranker_used": nonsense.get("semantic_ranker_used") is True,
@@ -3402,6 +3417,31 @@ def _live_temporal_recall_corrective_checkpoint_claim(
         "entity_backlog_count": backlog,
         "gaps": _dedupe(failures),
     }
+
+
+def build_temporal_recall_corrective_checkpoint_readiness_report(
+    *,
+    checkpoint: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Evaluate only the temporal corrective checkpoint, without deployment binding."""
+
+    safe_checkpoint = _public_safe_mapping(checkpoint)
+    claim = _live_temporal_recall_corrective_checkpoint_claim(
+        {"temporal_recall_corrective_checkpoint": safe_checkpoint}
+    )
+    validated = claim.get("status") == "validated"
+    report = {
+        "schema_version": TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_READINESS_SCHEMA,
+        "status": "PASS" if validated else "FAIL",
+        "production_mutation_performed": (
+            claim.get("production_mutation_performed") is True
+        ),
+        "failed_claims": [] if validated else [str(claim["claim_id"])],
+        "gaps": _dedupe(claim.get("gaps", [])),
+        "claim": claim,
+    }
+    ensure_public_safe(report, "TemporalRecallCorrectiveCheckpointReadiness")
+    return report
 
 
 def _live_brain_objects_query_route_smokes_claim(evidence: Mapping[str, Any]) -> dict[str, Any]:
