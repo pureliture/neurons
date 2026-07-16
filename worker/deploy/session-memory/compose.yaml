@@ -8,6 +8,8 @@ services:
     build:
       context: ../..            # worker/ (pyproject.toml, lib, deploy)
       dockerfile: Dockerfile.session-memory
+      args:
+        NEURONS_SOURCE_COMMIT: ${NEURONS_SOURCE_COMMIT:-0000000000000000000000000000000000000000}
     image: session-memory-worker:local
     container_name: session-memory-worker
     restart: unless-stopped
