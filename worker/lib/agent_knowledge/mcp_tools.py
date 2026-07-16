@@ -317,6 +317,9 @@ def list_tools() -> list[dict]:
                     "project": {"type": "string"},
                     "object_types": {"type": "array", "items": {"type": "string"}, "default": []},
                     "route": {"type": "string"},
+                    "as_of": {"type": "string", "description": "ISO-8601 instant or UTC calendar date for temporal recall."},
+                    "date_from": {"type": "string", "description": "Inclusive ISO-8601 instant or UTC calendar-date range start."},
+                    "date_to": {"type": "string", "description": "Inclusive ISO-8601 instant or UTC calendar-date range end."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
                     "response_mode": {"type": "string", "enum": ["full", "compact", "degraded"], "default": "full"},
                     "consumer": {

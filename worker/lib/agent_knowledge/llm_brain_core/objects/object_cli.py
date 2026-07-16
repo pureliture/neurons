@@ -142,6 +142,9 @@ def object_query_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--current-file", action="append", default=[])
     parser.add_argument("--object-type", action="append", default=[])
     parser.add_argument("--route", default="")
+    parser.add_argument("--as-of", default="")
+    parser.add_argument("--date-from", default="")
+    parser.add_argument("--date-to", default="")
     parser.add_argument("--limit", type=_non_negative_int, default=20)
     parser.add_argument("--response-mode", choices=["full", "compact", "degraded"], default="full")
     parser.add_argument("--consumer", choices=["unspecified", "codex", "claude-code", "gemini", "hermes"], default="unspecified")
@@ -157,6 +160,9 @@ def object_query_main(argv: list[str] | None = None) -> int:
         limit=args.limit,
         response_mode=args.response_mode,
         consumer=args.consumer,
+        as_of=args.as_of,
+        date_from=args.date_from,
+        date_to=args.date_to,
     )
     _print_json(result)
     return 0
@@ -738,6 +744,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     parser.add_argument("--argo-reconciliation-file", default="")
     parser.add_argument("--deployed-identity-file", default="")
     parser.add_argument("--artifact-descriptor-file", default="")
+    parser.add_argument("--temporal-acceptance-file", default="")
     parser.add_argument("--repository", default="")
     parser.add_argument("--branch", default="")
     parser.add_argument("--project", default="")
@@ -797,6 +804,14 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
             if args.artifact_descriptor_file
             else None
         )
+        temporal_acceptance = (
+            _load_json_mapping(
+                args.temporal_acceptance_file,
+                label="temporal acceptance",
+            )
+            if args.temporal_acceptance_file
+            else None
+        )
         capture = asyncio.run(
             collect_source_to_candidate_post_deploy_mcp_capture(
                 mcp_url=args.mcp_url,
@@ -809,6 +824,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 argo_reconciliation=argo_reconciliation,
                 deployed_identity=deployed_identity,
                 artifact_descriptor=artifact_descriptor,
+                temporal_acceptance=temporal_acceptance,
                 collect_agent_context_startup=args.collect_agent_context_startup,
             )
         )

@@ -54,6 +54,7 @@ def build_qdrant_brain_query_search(
                     # this search is always over the session-memory profile; the raw
                     # mirror hit's result_type is the generic "searchable_mirror".
                     "result_type": "session_memory",
+                    "retrieval_lane": "qdrant_semantic",
                     "memory_id": str(hit.get("memory_id") or ""),
                     # session-memory points carry no card_type -> archive lane
                     "card_type": "",

@@ -76,6 +76,7 @@ def test_qdrant_recall_returns_brain_query_item_shape():
     item = results[0]
     assert item["content_hash"] == mat.content_hash
     assert item["result_type"] == "session_memory"
+    assert item["retrieval_lane"] == "qdrant_semantic"
     assert item["card_type"] == ""  # -> archive lane
     assert item["currentness"] == "current"
     assert item["memory_id"]  # populated from the mirror payload
@@ -108,3 +109,9 @@ def test_brain_query_archive_lane_filled_by_qdrant_recall():
     assert resp["audit"]["index_bound"] is True
     # the session-memory hit lands in the archive lane (no ledger card to dedup against)
     assert any(it.get("content_hash") == mat.content_hash for it in resp["archive"])
+    semantic_result = next(
+        item for item in resp["results"] if item.get("content_hash") == mat.content_hash
+    )
+    assert semantic_result["result_type"] == "session_memory"
+    assert semantic_result["retrieval_lane"] == "qdrant_semantic"
+    assert semantic_result["why_retrieved"] == "semantic_match"

@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
-from agent_knowledge.couchdb_source.document_model import SourceDocType
+from agent_knowledge.couchdb_source.document_model import (
+    SourceDocType,
+    build_source_hash,
+    build_source_revision_token,
+    normalize_observed_interval,
+    observed_time_bounds,
+)
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 
 from ._util import (
@@ -31,6 +38,7 @@ from .source_ref import SourceRefCatalog, SourceRefResolver
 __all__ = [
     "episode_from_memory_card",
     "materialize_artifact_from_couchdb_source",
+    "session_source_revision_from_couchdb_source",
     "session_episode_from_couchdb_source",
     "extraction_text_from_couchdb_chunks",
     "brain_event_from_ingress_payload",
@@ -67,6 +75,60 @@ def materialize_artifact_from_couchdb_source(
     ontology_version: str = "1.0.0",
     extractor_version: str = "runtime.1",
 ) -> SessionMemoryArtifact:
+    artifact, _chunks = _materialize_artifact_with_snapshot(
+        session_id_hash=session_id_hash,
+        source_store=source_store,
+        artifact_store=artifact_store,
+        ontology_version=ontology_version,
+        extractor_version=extractor_version,
+    )
+    return artifact
+
+
+def _materialize_artifact_with_snapshot(
+    *,
+    session_id_hash: str,
+    source_store: CouchDBSourceStore,
+    artifact_store: SessionMemoryArtifactStore | None = None,
+    ontology_version: str = "1.0.0",
+    extractor_version: str = "runtime.1",
+    max_attempts: int = 3,
+) -> tuple[SessionMemoryArtifact, tuple[Mapping[str, Any], ...]]:
+    """Persist only an eventually-current bounded source snapshot.
+
+    CouchDB source families are read independently. A source write can land
+    between those reads, so each candidate is compared with a fresh full source
+    revision before it is persisted. Failed attempts never enter the artifact
+    store or influence delta/currentness selection.
+    """
+
+    for _attempt in range(max_attempts):
+        artifact, chunks = _materialize_artifact_from_couchdb_source_once(
+            session_id_hash=session_id_hash,
+            source_store=source_store,
+            artifact_store=artifact_store,
+            ontology_version=ontology_version,
+            extractor_version=extractor_version,
+        )
+        current_source_revision = session_source_revision_from_couchdb_source(
+            session_id_hash=session_id_hash,
+            source_store=source_store,
+        )
+        if current_source_revision == artifact.source_revision:
+            if artifact_store is not None:
+                artifact_store.upsert(artifact)
+            return artifact, chunks
+    raise RuntimeError("session source revision did not stabilize during materialization")
+
+
+def _materialize_artifact_from_couchdb_source_once(
+    *,
+    session_id_hash: str,
+    source_store: CouchDBSourceStore,
+    artifact_store: SessionMemoryArtifactStore | None = None,
+    ontology_version: str = "1.0.0",
+    extractor_version: str = "runtime.1",
+) -> tuple[SessionMemoryArtifact, tuple[Mapping[str, Any], ...]]:
     """Build a core artifact from CouchDB source docs without copying source bodies."""
 
     sessions = source_store.find_by_session(
@@ -88,6 +150,59 @@ def materialize_artifact_from_couchdb_source(
     _validate_session_doc_scope(sessions + chunks + evidence, provider=provider, project=project)
     chunks = sorted(chunks, key=lambda doc: (doc.get("turn_start_index", 0), doc.get("_id", "")))
     evidence = sorted(evidence, key=lambda doc: (doc.get("part_index", 0), doc.get("_id", "")))
+    observed_at_start, observed_at_end = _source_observed_bounds(
+        sessions,
+        chunks,
+        evidence,
+    )
+    source_revision = _source_revision_from_documents(
+        sessions=sessions,
+        chunks=chunks,
+        evidence=evidence,
+    )
+    previous_artifact = (
+        artifact_store.get_latest_for_session(
+            project=project,
+            session_id_hash=session_id_hash,
+        )
+        if artifact_store is not None
+        else None
+    )
+    materialization_revision = _next_materialization_revision(
+        artifact_store=artifact_store,
+        project=project,
+        session_id_hash=session_id_hash,
+        source_revision=source_revision,
+    )
+    materialized_at = utc_now_iso()
+    source_event_ids = [
+        _source_event_id(doc) for doc in sessions + chunks + evidence
+    ]
+    (
+        revision_observed_at_start,
+        revision_observed_at_end,
+        revision_observed_intervals,
+        revision_temporal_evidence,
+    ) = _revision_observed_bounds(
+        previous_artifact=previous_artifact,
+        source_revision=source_revision,
+        sessions=sessions,
+        chunks=chunks,
+        evidence=evidence,
+    )
+    search_term_hashes = _revision_search_term_hashes(
+        previous_artifact=previous_artifact,
+        source_revision=source_revision,
+        chunks=chunks,
+        evidence=evidence,
+    )
+    revision_temporal_term_bindings = _revision_temporal_term_bindings(
+        previous_artifact=previous_artifact,
+        source_revision=source_revision,
+        sessions=sessions,
+        chunks=chunks,
+        evidence=evidence,
+    )
     summary = public_safe_text(
         " ".join(
             [
@@ -105,16 +220,337 @@ def materialize_artifact_from_couchdb_source(
         project=project,
         provider=provider,
         summary=summary,
-        source_event_ids=[_source_event_id(doc) for doc in sessions + chunks + evidence],
+        source_event_ids=source_event_ids,
         chunk_refs=[str(doc.get("_id") or "") for doc in chunks],
         tool_evidence_refs=[str(doc.get("_id") or "") for doc in evidence],
         ontology_version=ontology_version,
         extractor_version=extractor_version,
-        created_at=str((sessions[0] if sessions else chunks[0]).get("started_at") or utc_now_iso()),
+        created_at=observed_at_start or materialized_at,
+        source_revision=source_revision,
+        observed_at_start=observed_at_start,
+        observed_at_end=observed_at_end,
+        revision_observed_at_start=revision_observed_at_start,
+        revision_observed_at_end=revision_observed_at_end,
+        revision_observed_intervals=revision_observed_intervals,
+        revision_temporal_term_bindings=revision_temporal_term_bindings,
+        revision_temporal_evidence=revision_temporal_evidence,
+        search_term_hashes=search_term_hashes,
+        materialized_at=materialized_at,
+        materialization_revision=materialization_revision,
     )
-    if artifact_store is not None:
-        artifact_store.upsert(artifact)
-    return artifact
+    return artifact, tuple(chunks)
+
+
+def session_source_revision_from_couchdb_source(
+    *, session_id_hash: str, source_store: CouchDBSourceStore
+) -> str:
+    sessions = source_store.find_by_session(
+        session_id_hash=session_id_hash,
+        doc_type=SourceDocType.TRANSCRIPT_SESSION,
+    )
+    chunks = source_store.find_by_session(
+        session_id_hash=session_id_hash,
+        doc_type=SourceDocType.CONVERSATION_CHUNK,
+    )
+    evidence = source_store.find_by_session(
+        session_id_hash=session_id_hash,
+        doc_type=SourceDocType.TOOL_EVIDENCE_BUNDLE,
+    )
+    return _source_revision_from_documents(
+        sessions=sessions,
+        chunks=chunks,
+        evidence=evidence,
+    )
+
+
+def _source_revision_from_documents(
+    *,
+    sessions: list[Mapping[str, Any]],
+    chunks: list[Mapping[str, Any]],
+    evidence: list[Mapping[str, Any]],
+) -> str:
+    """Hash exactly one captured source snapshot.
+
+    Callers that already loaded the source documents must not re-read the store:
+    doing so can bind an artifact body from revision N to the hash from revision
+    N+1 when a chunk arrives between reads.
+    """
+
+    observed_at_start, observed_at_end = _source_observed_bounds(
+        sessions,
+        chunks,
+        evidence,
+    )
+    return build_source_hash(
+        [str(doc.get("content_hash") or "") for doc in chunks],
+        [str(doc.get("coverage_hash") or "") for doc in evidence],
+        observed_at_start=observed_at_start,
+        observed_at_end=observed_at_end,
+        conversation_revision_tokens=[
+            build_source_revision_token(doc, material_hash_field="content_hash")
+            for doc in chunks
+        ],
+        tool_evidence_revision_tokens=[
+            build_source_revision_token(doc, material_hash_field="content_hash")
+            for doc in evidence
+        ],
+    )
+
+
+def _revision_search_term_hashes(
+    *,
+    previous_artifact: SessionMemoryArtifact | None,
+    source_revision: str,
+    chunks: list[Mapping[str, Any]],
+    evidence: list[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Index only the subject terms introduced by this materialization.
+
+    A cumulative snapshot still carries cumulative source refs and content hash,
+    but temporal relevance belongs to its delta. Otherwise a Date B snapshot
+    silently inherits a Date A subject and satisfies an unrelated Date B query.
+    """
+
+    if previous_artifact is None:
+        changed_chunks = chunks
+        changed_evidence = evidence
+    elif previous_artifact.source_revision == source_revision:
+        return previous_artifact.search_term_hashes
+    else:
+        previous_event_ids = set(previous_artifact.source_event_ids)
+        changed_chunks = [
+            document
+            for document in chunks
+            if _source_event_id(document) not in previous_event_ids
+            and _legacy_source_event_id(document) not in previous_event_ids
+        ]
+        changed_evidence = [
+            document
+            for document in evidence
+            if _source_event_id(document) not in previous_event_ids
+            and _legacy_source_event_id(document) not in previous_event_ids
+        ]
+    return _artifact_search_term_hashes(
+        chunks=changed_chunks,
+        evidence=changed_evidence,
+    )
+
+
+def _revision_temporal_term_bindings(
+    *,
+    previous_artifact: SessionMemoryArtifact | None,
+    source_revision: str,
+    sessions: list[Mapping[str, Any]],
+    chunks: list[Mapping[str, Any]],
+    evidence: list[Mapping[str, Any]],
+) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+    """Bind each revision-local subject index to its own event-time interval.
+
+    A revision may materialize several source documents at once.  Keeping only
+    an interval union and a term union lets a term introduced at Date C borrow
+    a Date B interval.  This mapping is deliberately document-granular and
+    fails closed when any contributing document has incomplete event time.
+    """
+
+    if previous_artifact is not None and previous_artifact.source_revision == source_revision:
+        return previous_artifact.revision_temporal_term_bindings
+
+    if previous_artifact is None:
+        changed_documents = [*chunks, *evidence]
+        if not changed_documents:
+            changed_documents = list(sessions)
+    else:
+        previous_event_ids = set(previous_artifact.source_event_ids)
+        changed_documents = [
+            document
+            for document in [*chunks, *evidence]
+            if _source_event_id(document) not in previous_event_ids
+            and _legacy_source_event_id(document) not in previous_event_ids
+        ]
+        if not changed_documents:
+            changed_documents = [
+                document
+                for document in sessions
+                if _source_event_id(document) not in previous_event_ids
+                and _legacy_source_event_id(document) not in previous_event_ids
+            ]
+
+    grouped: dict[tuple[str, str], set[str]] = {}
+    for document in changed_documents:
+        start = str(
+            document.get("observed_at_start")
+            or document.get("started_at")
+            or ""
+        )
+        end = str(
+            document.get("observed_at_end")
+            or document.get("ended_at")
+            or start
+        )
+        interval = normalize_observed_interval(start, end)
+        if interval is None:
+            return ()
+        doc_type = str(document.get("doc_type") or "")
+        hashes = _artifact_search_term_hashes(
+            chunks=[document] if doc_type == SourceDocType.CONVERSATION_CHUNK else [],
+            evidence=[document] if doc_type == SourceDocType.TOOL_EVIDENCE_BUNDLE else [],
+        )
+        grouped.setdefault(interval, set()).update(hashes)
+    return tuple(
+        (start, end, tuple(sorted(hashes)))
+        for (start, end), hashes in sorted(grouped.items())
+    )
+
+
+def _source_observed_bounds(
+    sessions: list[Mapping[str, Any]],
+    chunks: list[Mapping[str, Any]],
+    evidence: list[Mapping[str, Any]] | None = None,
+) -> tuple[str, str]:
+    return observed_time_bounds(
+        sessions=sessions,
+        chunks=[*chunks, *(evidence or [])],
+    )
+
+
+def _revision_observed_bounds(
+    *,
+    previous_artifact: SessionMemoryArtifact | None,
+    source_revision: str,
+    sessions: list[Mapping[str, Any]],
+    chunks: list[Mapping[str, Any]],
+    evidence: list[Mapping[str, Any]],
+) -> tuple[str, str, tuple[tuple[str, str], ...], str]:
+    """Return the event-time window introduced by this source revision.
+
+    Full-session observed bounds are cumulative and therefore cannot distinguish
+    two revisions of one long-running session.  Revision bounds are derived only
+    from newly observed source events.  A same-source rebuild preserves the
+    previous decision, while a metadata-only change without event time is marked
+    missing so temporal recall fails closed instead of falling back to the latest
+    cumulative snapshot.
+    """
+
+    if previous_artifact is not None and previous_artifact.source_revision == source_revision:
+        return (
+            previous_artifact.revision_observed_at_start,
+            previous_artifact.revision_observed_at_end,
+            previous_artifact.revision_observed_intervals,
+            previous_artifact.revision_temporal_evidence,
+        )
+
+    if previous_artifact is None:
+        changed_documents = [*chunks, *evidence]
+        if not changed_documents:
+            changed_documents = list(sessions)
+    else:
+        previous_event_ids = set(previous_artifact.source_event_ids)
+        changed_chunks = [
+            doc
+            for doc in chunks
+            if _source_event_id(doc) not in previous_event_ids
+            and _legacy_source_event_id(doc) not in previous_event_ids
+        ]
+        changed_evidence = [
+            doc
+            for doc in evidence
+            if _source_event_id(doc) not in previous_event_ids
+            and _legacy_source_event_id(doc) not in previous_event_ids
+        ]
+        changed_documents = [*changed_chunks, *changed_evidence]
+        if not changed_documents:
+            changed_sessions = [
+                doc
+                for doc in sessions
+                if _source_event_id(doc) not in previous_event_ids
+                and _legacy_source_event_id(doc) not in previous_event_ids
+            ]
+            changed_documents = changed_sessions
+    intervals, complete = _source_observed_intervals(changed_documents)
+    if not complete:
+        return "", "", (), "missing"
+    if previous_artifact is None and not intervals and (chunks or evidence):
+        intervals, complete = _source_observed_intervals(sessions)
+        if not complete:
+            return "", "", (), "missing"
+    if intervals:
+        return (
+            min(start for start, _end in intervals),
+            max(end for _start, end in intervals),
+            intervals,
+            "bounded",
+        )
+    return "", "", (), "missing"
+
+
+def _source_observed_intervals(
+    documents: list[Mapping[str, Any]],
+) -> tuple[tuple[tuple[str, str], ...], bool]:
+    intervals: set[tuple[str, str]] = set()
+    for document in documents:
+        start = str(
+            document.get("observed_at_start")
+            or document.get("started_at")
+            or ""
+        )
+        end = str(
+            document.get("observed_at_end")
+            or document.get("ended_at")
+            or start
+        )
+        normalized = normalize_observed_interval(start, end)
+        if normalized is None:
+            return (), False
+        intervals.add(normalized)
+    return tuple(sorted(intervals)), True
+
+
+def _artifact_search_term_hashes(
+    *, chunks: list[Mapping[str, Any]], evidence: list[Mapping[str, Any]]
+) -> tuple[str, ...]:
+    """Build a bounded, one-way subject index without persisting source prose."""
+
+    text = "\n".join(
+        [
+            *(_strip_chunk_metadata_header(str(doc.get("body") or "")) for doc in chunks),
+            *(str(doc.get("body") or "") for doc in evidence),
+        ]
+    )
+    terms: set[str] = set()
+    for raw in re.findall(r"[A-Za-z0-9가-힣_-]+", text):
+        term = raw.casefold()
+        if len(term) <= 1 or term.isdigit():
+            continue
+        terms.add(term)
+        for suffix in ("으로", "에서", "에게", "한테", "까지", "부터", "처럼", "보다", "로"):
+            if term.endswith(suffix) and len(term) > len(suffix) + 1:
+                terms.add(term[: -len(suffix)])
+                break
+        for suffix in ("ment", "ing", "ed"):
+            if term.endswith(suffix) and len(term) > len(suffix) + 3:
+                terms.add(term[: -len(suffix)])
+                break
+    return tuple(hash_payload(term) for term in sorted(terms)[:512])
+
+
+def _next_materialization_revision(
+    *,
+    artifact_store: SessionMemoryArtifactStore | None,
+    project: str,
+    session_id_hash: str,
+    source_revision: str,
+) -> int:
+    if artifact_store is None:
+        return 1
+    latest = artifact_store.get_latest_for_session(
+        project=project,
+        session_id_hash=session_id_hash,
+    )
+    if latest is None:
+        return 1
+    if latest.source_revision and latest.source_revision == source_revision:
+        return max(latest.materialization_revision, 1)
+    return max(latest.materialization_revision, 0) + 1
 
 
 def extraction_text_from_couchdb_chunks(
@@ -141,6 +577,14 @@ def extraction_text_from_couchdb_chunks(
         session_id_hash=session_id_hash,
         doc_type=SourceDocType.CONVERSATION_CHUNK,
     )
+    return _extraction_text_from_chunks(chunks, max_chars=max_chars)
+
+
+def _extraction_text_from_chunks(
+    chunks: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+    *,
+    max_chars: int = _MAX_EXTRACTION_CHARS,
+) -> str:
     chunks = sorted(chunks, key=_conversation_chunk_order_key)
     # Accumulate against the budget and stop early so a large session never
     # materializes the full concatenation before the cap is applied. Bounding here
@@ -230,16 +674,15 @@ def session_episode_from_couchdb_source(
     JSON (recall-safe); only the entity-pass extraction input becomes real prose.
     """
 
-    artifact = materialize_artifact_from_couchdb_source(
+    artifact, captured_chunks = _materialize_artifact_with_snapshot(
         session_id_hash=session_id_hash,
         source_store=source_store,
         artifact_store=artifact_store,
         ontology_version=ontology_version,
         extractor_version=extractor_version,
     )
-    extraction_text = extraction_text_from_couchdb_chunks(
-        session_id_hash=session_id_hash,
-        source_store=source_store,
+    extraction_text = _extraction_text_from_chunks(
+        captured_chunks,
     )
     return episode_from_session_artifact(artifact, extraction_text=extraction_text)
 
@@ -353,14 +796,14 @@ def _latest_chunk_hint(chunks: list[dict]) -> str:
     if not chunks:
         return "no conversation chunks."
     latest = chunks[-1]
-    return f"latest_chunk_ref={latest.get('_id', '')}."
+    return f"latest_chunk_ref_hash={hash_payload(str(latest.get('_id') or ''))}."
 
 
 def _latest_evidence_hint(evidence: list[dict]) -> str:
     if not evidence:
         return "no tool evidence bundles."
     latest = evidence[-1]
-    return f"latest_tool_evidence_ref={latest.get('_id', '')}."
+    return f"latest_tool_evidence_ref_hash={hash_payload(str(latest.get('_id') or ''))}."
 
 
 def _validate_session_doc_scope(docs: list[Mapping[str, Any]], *, provider: str, project: str) -> None:
@@ -388,6 +831,13 @@ def _safe_size(value: Any) -> int:
 
 
 def _source_event_id(doc: Mapping[str, Any]) -> str:
+    doc_id = str(doc.get("_id") or "")
+    return f"evt:{short_hash([doc_id, doc.get('content_hash', ''), doc.get('coverage_hash', ''), doc.get('observed_at_start', ''), doc.get('observed_at_end', '')])}"
+
+
+def _legacy_source_event_id(doc: Mapping[str, Any]) -> str:
+    """Identity written before temporal metadata became material source state."""
+
     doc_id = str(doc.get("_id") or "")
     return f"evt:{short_hash([doc_id, doc.get('content_hash', ''), doc.get('coverage_hash', '')])}"
 

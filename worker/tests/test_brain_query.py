@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from agent_knowledge.session_memory.brain_query import (
     project_from_brain_id,
     run_brain_query,
@@ -557,6 +561,144 @@ def test_brain_query_v2_uses_injected_semantic_ranker_for_eval_candidates():
     assert len(calls[0]["cards"]) == 2
     assert [item["memory_id"] for item in result["results"]] == ["mem_high_vector"]
     assert result["audit"]["semantic_ranker_used"] is True
+
+
+def test_brain_query_v2_session_context_returns_exact_relevance_without_recent_padding():
+    read_model = _AcceptedCardReadModel(
+        [
+            _card(memory_id="mem_recent_noise", summary="general current operating note"),
+            _card(memory_id="mem_weak_overlap", summary="temporal unrelated note"),
+            _card(
+                memory_id="mem_exact_temporal",
+                summary="temporal recall correctness exact evidence",
+            ),
+        ]
+    )
+
+    exact = run_brain_query_v2(
+        read_model=read_model,
+        brain_id="/project/p",
+        query="temporal recall correctness exact evidence",
+        limit=5,
+    )
+    nonsense = run_brain_query_v2(
+        read_model=read_model,
+        brain_id="/project/p",
+        query="quasar marmalade unrelated nonsense",
+        limit=5,
+    )
+
+    assert [item["memory_id"] for item in exact["results"]] == ["mem_exact_temporal"]
+    assert [item["memory_id"] for item in exact["current"]] == ["mem_exact_temporal"]
+    assert [item["memory_id"] for item in exact["accepted"]] == ["mem_exact_temporal"]
+    assert nonsense["results"] == []
+    assert nonsense["current"] == []
+    assert nonsense["accepted"] == []
+
+
+def test_brain_query_v2_session_context_semantic_ranker_controls_results_lane():
+    read_model = _AcceptedCardReadModel(
+        [
+            _card(memory_id="mem_low_vector", summary="temporal recall evidence"),
+            _card(memory_id="mem_high_vector", summary="temporal recall evidence"),
+        ]
+    )
+    calls = []
+
+    def semantic_ranker(**kwargs):
+        calls.append(kwargs)
+        ranked = []
+        for card in kwargs["cards"]:
+            copy = dict(card)
+            copy["_semantic_score"] = 0.99 if card["memory_id"] == "mem_high_vector" else 0.10
+            ranked.append(copy)
+        return sorted(ranked, key=lambda item: item["_semantic_score"], reverse=True)
+
+    result = run_brain_query_v2(
+        read_model=read_model,
+        brain_id="/project/p",
+        query="temporal recall evidence",
+        limit=1,
+        semantic_ranker=semantic_ranker,
+    )
+
+    assert calls and calls[0]["query"] == "temporal recall evidence"
+    assert len(calls[0]["cards"]) == 2
+    assert [item["memory_id"] for item in result["results"]] == ["mem_high_vector"]
+    assert result["results"][0]["score"] == 0.99
+    assert result["audit"]["semantic_ranker_used"] is True
+
+
+def test_brain_query_v2_promotes_only_high_confidence_semantic_hits_to_results_lane():
+    def index_search(_query, _brain_id):
+        return [
+            {
+                "result_type": "qdrant_semantic",
+                "memory_id": "semantic_high",
+                "summary": "Paraphrased temporal currentness evidence",
+                "score": 0.91,
+                "currentness": "searchable_reference",
+            },
+            {
+                "result_type": "qdrant_semantic",
+                "memory_id": "semantic_low",
+                "summary": "Weak unrelated nearest neighbor",
+                "score": 0.4,
+                "currentness": "searchable_reference",
+            },
+        ]
+
+    result = run_brain_query_v2(
+        read_model=_AcceptedCardReadModel([]),
+        index_search=index_search,
+        brain_id="/project/p",
+        query="how is temporal projection currentness verified",
+        limit=5,
+    )
+
+    assert [item["memory_id"] for item in result["results"]] == ["semantic_high"]
+    assert result["results"][0]["why_retrieved"] == "semantic_match"
+    assert result["results"][0]["score"] == 0.91
+
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), float("-inf")])
+def test_brain_query_v2_rejects_non_finite_semantic_scores(score):
+    def index_search(_query, _brain_id):
+        return [
+            {
+                "result_type": "qdrant_semantic",
+                "memory_id": "semantic_non_finite",
+                "summary": "Untrusted non-finite semantic result",
+                "score": score,
+                "currentness": "searchable_reference",
+            }
+        ]
+
+    result = run_brain_query_v2(
+        read_model=_AcceptedCardReadModel([]),
+        index_search=index_search,
+        brain_id="/project/p",
+        query="temporal projection currentness",
+        limit=5,
+    )
+
+    assert result["results"] == []
+    json.dumps(result, allow_nan=False)
+
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), float("-inf")])
+def test_native_semantic_query_rejects_non_finite_scores(score):
+    read_model = _CardReadModel([_card(memory_id="mem_a")])
+
+    result = run_brain_query(
+        read_model=read_model,
+        semantic_recall=lambda _query, _brain_id: [_hit("mem:mem_a", score=score)],
+        brain_id="/project/p",
+        query="temporal projection currentness",
+    )
+
+    assert result["results"] == []
+    json.dumps(result, allow_nan=False)
 
 
 # --- brain.resolve ---

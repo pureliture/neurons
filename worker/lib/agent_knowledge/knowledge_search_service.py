@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import copy
+import math
+import os
 import re
 import sqlite3
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
@@ -13,6 +16,8 @@ from .llm_brain_core.document_bridge import RetiredIndexBridgeDocumentBridge
 from .llm_brain_core.graph import GraphMemoryAdapter
 from .llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore, LedgerSourceRefCatalog
 from .llm_brain_core.runtime import build_runtime_brain_service
+from .llm_brain_core.couchdb_projection_cli import _build_source_store, _project_ref
+from .llm_brain_core.graph_projection_status_cli import build_graph_projection_status
 from .llm_brain_core.objects.extraction_pipeline import (
     run_graph_search_projection_join_preview,
     run_source_to_candidate_graph_activation_preview,
@@ -44,7 +49,11 @@ from .index_client import RetiredIndexBridgeHttpClient
 from .public_safe_util import ensure_public_safe, public_safe_text, require_sha256, sha256_text, short_hash
 from .session_memory.memory_card import validate_memory_card_envelope
 from .session_memory.memory_promotion import commit_stale, commit_supersession
-from .session_memory.brain_query import resolve_brain_ids, run_brain_query_v2
+from .session_memory.brain_query import (
+    SEMANTIC_RESULT_MIN_SCORE,
+    resolve_brain_ids,
+    run_brain_query_v2,
+)
 from .session_memory.brain_read_model import LegacyLedgerBrainReadModel, build_semantic_recall
 
 
@@ -54,6 +63,45 @@ class DisabledRetiredIndexBridgeClient:
 
     def search_messages(self, *args, **kwargs) -> dict:
         return {"status_code": 200, "json": {"code": 0, "data": []}}
+
+
+def _parse_utc_runtime_timestamp(value: object, *, field: str) -> datetime:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field} is missing")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field} is invalid") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field} is invalid")
+    return parsed.astimezone(timezone.utc)
+
+
+def _native_semantic_memory_scores(hits: list[dict]) -> dict[str, float]:
+    """Map only explicit MemoryCard semantic hits into a fail-closed ranker."""
+
+    scores: dict[str, float] = {}
+    for hit in hits:
+        if not isinstance(hit, Mapping):
+            continue
+        score = hit.get("score")
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(float(score))
+            or float(score) < SEMANTIC_RESULT_MIN_SCORE
+        ):
+            continue
+        memory_id = str(hit.get("memory_id") or "")
+        if not memory_id:
+            session_tag = str(hit.get("session_tag") or "")
+            if session_tag.startswith("mem:"):
+                memory_id = session_tag.removeprefix("mem:")
+        if not memory_id:
+            continue
+        scores[memory_id] = max(scores.get(memory_id, 0.0), float(score))
+    return scores
 
 
 _APPROVAL_BOARD_PRODUCTION_REQUIRED_TRUE_FIELDS = (
@@ -887,6 +935,7 @@ class KnowledgeSearchService:
         authorized_reader: AuthorizedMemoryReader | None = None,
         read_pipeline: AuthorizedMemoryReader | None = None,
         mirror_search=None,
+        semantic_ranker=None,
         allow_restricted_steward: bool = False,
         allow_steward_auto_accept: bool = False,
         allow_local_test_object_authority_writes: bool = False,
@@ -910,6 +959,7 @@ class KnowledgeSearchService:
         # mirror. When set it REPLACES the RetiredIndexBridge archive search (which is off in the
         # live MCP anyway). None -> legacy behaviour (RetiredIndexBridge if dataset_ids, else empty).
         self._mirror_search = mirror_search
+        self._semantic_ranker = semantic_ranker
         self.authorized_reader = authorized_reader or read_pipeline or MemoryReadPipeline(
             ledger=ledger,
             retired_index_bridge=retired_index_bridge,
@@ -1114,6 +1164,9 @@ class KnowledgeSearchService:
         limit: int = 20,
         response_mode: str = "full",
         consumer: str = "unspecified",
+        as_of: str = "",
+        date_from: str = "",
+        date_to: str = "",
     ) -> dict[str, Any]:
         result = self.core_brain(project=project or "").brain_objects_query(
             repository=repository,
@@ -1126,6 +1179,9 @@ class KnowledgeSearchService:
             limit=limit,
             response_mode=response_mode,
             consumer=consumer,
+            as_of=as_of,
+            date_from=date_from,
+            date_to=date_to,
         )
         return self._overlay_object_authority_states(result)
 
@@ -1524,6 +1580,7 @@ class KnowledgeSearchService:
             network_used = bool(evidence_collection_network_used)
             projection_join_runner = None
             preference_artifact_memory_runner = None
+            temporal_correctness_runtime_runner = None
             if collection_mode == "post_deploy_read_only_smoke" and network_used:
                 projection_join_runner = lambda: self._projection_join_runtime_read_path_evidence(
                     repository=repository,
@@ -1537,6 +1594,11 @@ class KnowledgeSearchService:
                     project=resolved_project,
                     consumer=consumer,
                 )
+                temporal_correctness_runtime_runner = (
+                    lambda: self._temporal_correctness_runtime_read_path_evidence(
+                        project=resolved_project,
+                    )
+                )
             return build_source_to_candidate_runtime_collected_shadow_evidence_packet(
                 expected_commit=expected_commit,
                 repository=repository,
@@ -1546,6 +1608,9 @@ class KnowledgeSearchService:
                 route_runner=route_runner,
                 projection_join_runner=projection_join_runner,
                 preference_artifact_memory_runner=preference_artifact_memory_runner,
+                temporal_correctness_runtime_runner=(
+                    temporal_correctness_runtime_runner
+                ),
                 collection_mode=collection_mode,
                 network_used=network_used,
             )
@@ -1571,6 +1636,183 @@ class KnowledgeSearchService:
             live_evidence=dict(live_evidence) if isinstance(live_evidence, Mapping) else None,
             expected_commit=expected_commit,
         )
+
+    def _temporal_correctness_runtime_read_path_evidence(
+        self,
+        *,
+        project: str,
+    ) -> dict[str, Any]:
+        """Read current projection/artifact aggregates from production authorities."""
+
+        source_store = _build_source_store(
+            couchdb_url=os.environ.get("COUCHDB_URL", ""),
+            couchdb_db=os.environ.get("COUCHDB_DB", "transcript_source"),
+            couchdb_user=os.environ.get("COUCHDB_USER", ""),
+            couchdb_password_env="COUCHDB_PASSWORD",
+        )
+        runtime_dir_text = str(os.environ.get("LLM_BRAIN_GRAPH_RUNTIME_DIR") or "")
+        if not runtime_dir_text:
+            raise ValueError("LLM_BRAIN_GRAPH_RUNTIME_DIR is required")
+        runtime_dir = Path(runtime_dir_text)
+        status = build_graph_projection_status(
+            ledger_path=self.ledger.path,
+            source_store=source_store,
+            project=project,
+            progress_jsonl=[runtime_dir / "graph-trigger-progress.jsonl"],
+            dead_letter_jsonl=[runtime_dir / "graph-trigger-dead-letter.jsonl"],
+        )
+        projection = (
+            status.get("projection_state")
+            if isinstance(status.get("projection_state"), Mapping)
+            else {}
+        )
+        source = (
+            status.get("source")
+            if isinstance(status.get("source"), Mapping)
+            else {}
+        )
+        artifact = (
+            status.get("artifact_age")
+            if isinstance(status.get("artifact_age"), Mapping)
+            else {}
+        )
+        progress = (
+            status.get("progress")
+            if isinstance(status.get("progress"), Mapping)
+            else {}
+        )
+        entity_run = (
+            progress.get("latest_entity_run")
+            if isinstance(progress.get("latest_entity_run"), Mapping)
+            else {}
+        )
+        if not entity_run.get("event_counts"):
+            raise ValueError("graph progress evidence is missing")
+        if entity_run.get("completed") is not True:
+            raise ValueError("latest graph projection run did not complete")
+        if str(entity_run.get("status") or "") != "ok":
+            raise ValueError("latest graph projection run is not ok")
+        if (
+            entity_run.get("scope_consistent") is not True
+            or entity_run.get("project_set") is not True
+            or str(entity_run.get("project_ref") or "")
+            != _project_ref(project)
+            or str(entity_run.get("provider") or "")
+            or str(entity_run.get("target_extraction_level") or "")
+            != "entity"
+        ):
+            raise ValueError("graph projection run scope does not match")
+        graph_started_at = _parse_utc_runtime_timestamp(
+            entity_run.get("started_at"),
+            field="latest graph projection run started_at",
+        )
+        graph_completed_at = _parse_utc_runtime_timestamp(
+            entity_run.get("completed_at"),
+            field="latest graph projection run completed_at",
+        )
+        if graph_started_at > graph_completed_at:
+            raise ValueError("latest graph projection run timestamps are invalid")
+        try:
+            graph_max_age_seconds = int(
+                os.environ.get("LLM_BRAIN_GRAPH_RUN_MAX_AGE_SECONDS", "900")
+            )
+        except ValueError as exc:
+            raise ValueError("LLM_BRAIN_GRAPH_RUN_MAX_AGE_SECONDS is invalid") from exc
+        if graph_max_age_seconds < 1 or graph_max_age_seconds > 86400:
+            raise ValueError("LLM_BRAIN_GRAPH_RUN_MAX_AGE_SECONDS is invalid")
+        graph_age_seconds = int(
+            (datetime.now(timezone.utc) - graph_completed_at).total_seconds()
+        )
+        if graph_age_seconds < -60:
+            raise ValueError("latest graph projection run timestamps are invalid")
+        graph_age_seconds = max(0, graph_age_seconds)
+        if graph_age_seconds > graph_max_age_seconds:
+            raise ValueError("latest graph projection run is stale")
+        artifact_missing = int(artifact.get("artifact_missing_session_count") or 0)
+        artifact_unknown = int(artifact.get("artifact_age_unknown_count") or 0)
+        artifact_mismatch = int(
+            artifact.get("artifact_source_hash_mismatch_count") or 0
+        )
+        session_memory_noncurrent = int(
+            projection.get("session_memory_projection_noncurrent_count") or 0
+        )
+        graph_current = int(projection.get("episodic_session_projected") or 0)
+        graph_noncurrent = int(projection.get("episodic_session_noncurrent") or 0)
+        session_memory_mismatch = int(
+            projection.get("session_memory_source_hash_mismatch_count") or 0
+        )
+        session_memory_stale = int(
+            projection.get("session_memory_stale_projected_session_count") or 0
+        )
+        source_hash_mismatch = int(
+            projection.get("source_hash_mismatch_count") or 0
+        )
+        stale_projected = int(
+            projection.get("stale_projected_session_count") or 0
+        )
+        evidence = {
+            "schema_version": "temporal_correctness_runtime_aggregate.v1",
+            "projection_currentness": {
+                "source_hash_match": all(
+                    value == 0
+                    for value in (
+                        source_hash_mismatch,
+                        stale_projected,
+                        graph_noncurrent,
+                        session_memory_noncurrent,
+                        session_memory_mismatch,
+                        session_memory_stale,
+                    )
+                ),
+                "source_hash_mismatch_count": source_hash_mismatch,
+                "stale_projected_session_count": stale_projected,
+                "source_session_count": int(source.get("session_count") or 0),
+                "graph_projection_current_count": graph_current,
+                "graph_projection_noncurrent_count": graph_noncurrent,
+                "session_memory_projection_current_count": int(
+                    projection.get("session_memory_projection_current_count") or 0
+                ),
+                "session_memory_projection_noncurrent_count": session_memory_noncurrent,
+                "session_memory_source_hash_mismatch_count": session_memory_mismatch,
+                "session_memory_stale_projected_session_count": session_memory_stale,
+                "artifact_current": (
+                    artifact_missing == 0
+                    and artifact_unknown == 0
+                    and artifact_mismatch == 0
+                ),
+                "artifact_missing_session_count": artifact_missing,
+                "artifact_age_unknown_count": artifact_unknown,
+                "artifact_source_hash_mismatch_count": artifact_mismatch,
+                "oldest_artifact_age_seconds": int(
+                    artifact.get("oldest_artifact_age_seconds") or 0
+                ),
+                "graph_run_scope_match": True,
+                "graph_run_fresh": True,
+                "graph_run_completed_age_seconds": graph_age_seconds,
+                "graph_run_max_age_seconds": graph_max_age_seconds,
+            },
+            "entity_projection": {
+                "valid_source_count": int(
+                    projection.get("entity_valid_source_sessions") or 0
+                ),
+                "coverage_count": int(
+                    projection.get("entity_session_projected") or 0
+                ),
+                "backlog_count": int(
+                    projection.get("entity_session_backlog") or 0
+                ),
+                "error_count": int(
+                    max(
+                        int(entity_run.get("failed") or 0),
+                        int(projection.get("entity_source_invalid") or 0),
+                        int(entity_run.get("dead_letter_count") or 0),
+                    )
+                ),
+            },
+            "production_mutation_performed": False,
+        }
+        ensure_public_safe(evidence, "TemporalCorrectnessRuntimeReadPathEvidence")
+        return evidence
 
     def _preference_artifact_memory_runtime_read_path_evidence(
         self,
@@ -1899,6 +2141,36 @@ class KnowledgeSearchService:
         index_search = self._mirror_search or (
             self._brain_query_index_search if self.dataset_ids else None
         )
+        semantic_hits: list[dict] = []
+        semantic_failure_type = ""
+        effective_semantic_ranker = self._semantic_ranker
+        if self.native_memory_id:
+            semantic = build_semantic_recall(
+                ledger=self.ledger,
+                retired_index_bridge=self.retired_index_bridge,
+                memory_id=self.native_memory_id,
+            )
+            try:
+                semantic_hits = semantic(query, brain_id)
+            except (OSError, RuntimeError, ValueError, KeyError, TypeError, sqlite3.DatabaseError) as exc:
+                semantic_hits = []
+                semantic_failure_type = type(exc).__name__
+            native_scores = _native_semantic_memory_scores(semantic_hits)
+            if native_scores:
+                def _native_semantic_ranker(**kwargs):
+                    ranked = []
+                    for card in kwargs.get("cards") or []:
+                        memory_id = str(card.get("memory_id") or "")
+                        score = native_scores.get(memory_id)
+                        if score is None:
+                            continue
+                        enriched = dict(card)
+                        enriched["_semantic_score"] = score
+                        ranked.append(enriched)
+                    ranked.sort(key=lambda card: (-float(card.get("_semantic_score") or 0.0), str(card.get("memory_id") or "")))
+                    return ranked[: max(0, int(kwargs.get("limit") or 0))]
+
+                effective_semantic_ranker = _native_semantic_ranker
         result = run_brain_query_v2(
             read_model=read_model,
             index_search=index_search,
@@ -1906,19 +2178,9 @@ class KnowledgeSearchService:
             query=query,
             query_intent="session_context",
             limit=limit,
+            semantic_ranker=effective_semantic_ranker,
         )
         if self.native_memory_id:
-            semantic = build_semantic_recall(
-                ledger=self.ledger,
-                retired_index_bridge=self.retired_index_bridge,
-                memory_id=self.native_memory_id,
-            )
-            semantic_failure_type = ""
-            try:
-                semantic_hits = semantic(query, brain_id)
-            except (OSError, RuntimeError, ValueError, KeyError, TypeError, sqlite3.DatabaseError) as exc:
-                semantic_hits = []
-                semantic_failure_type = type(exc).__name__
             audit = dict(result.get("audit") or {})
             audit["native_memory_bound"] = True
             audit["native_memory_hits"] = len(semantic_hits)

@@ -9,6 +9,7 @@ import os
 import sys
 import time
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,10 +26,14 @@ from .ledger_adapter import (
 )
 from .models import PROJECTION_SCHEMA_VERSION
 from .projection import GraphProjectionWorker
-from .runtime import session_episode_from_couchdb_source
+from .runtime import (
+    session_episode_from_couchdb_source,
+    session_source_revision_from_couchdb_source,
+)
 from .runtime_graph import build_graph_adapter_from_env
 
 COUCHDB_GRAPH_PROJECTION_SCHEMA_VERSION = "llm_brain_couchdb_graph_projection.v1"
+GRAPH_PROJECTION_CURSOR_SCHEMA_VERSION = "llm_brain_graph_projection_cursor.v1"
 SOURCE_INVALID_UPSERT_RESULTS = frozenset({"source_invalid", "invalid_source"})
 
 
@@ -145,23 +150,39 @@ def run_couchdb_projection(
             if bool(getattr(graph, "_extract_entities", False))
             else EXTRACTION_LEVEL_EPISODIC
         )
-        sessions = _select_sessions(
+        cursor_scope_ref = _scheduler_cursor_scope_ref(
+            project=project,
+            provider=provider,
+            extraction_level=target_level,
+            resume=resume,
+            include_current=bool(reextract_entities),
+        )
+        cursor_offset = _read_scheduler_cursor(
+            runtime_dir,
+            scope_ref=cursor_scope_ref,
+        )
+        eligible_sessions = _select_sessions(
             source_store,
             project=project,
             provider=provider,
-            limit=limit,
-            projection_state_store=(
-                projection_state_store if (resume and not reextract_entities) else None
-            ),
-            extraction_level=(
-                target_level if (resume and not reextract_entities) else None
-            ),
+            limit=0,
+            projection_state_store=projection_state_store if resume else None,
+            extraction_level=target_level if resume else None,
+            include_current=bool(reextract_entities),
         )
+        effective_cursor_offset = (
+            cursor_offset % len(eligible_sessions) if eligible_sessions else 0
+        )
+        eligible_sessions = _rotate_sessions(
+            eligible_sessions,
+            offset=effective_cursor_offset,
+        )
+        sessions = eligible_sessions[: int(limit)] if limit > 0 else eligible_sessions
         total_available = _count_sessions(source_store, project=project, provider=provider)
         report_every = max(1, int(report_every))
         max_projects = max(0, int(max_projects))
 
-        projected_cache: dict[str, set[str]] = {}
+        projected_cache: dict[str, dict[str, set[str]]] = {}
         durations: list[int] = []
         by_provider: Counter[str] = Counter()
         by_project: Counter[str] = Counter()
@@ -170,14 +191,24 @@ def run_couchdb_projection(
         processed = 0
         stopped_after_max_projects = False
         started = time.monotonic()
+        started_at = _utc_now_iso()
+        run_id = "run:" + hashlib.sha256(
+            f"{time.time_ns()}:{os.getpid()}".encode("utf-8")
+        ).hexdigest()
 
         _write_jsonl(
             progress_jsonl,
             {
                 "event": "start",
+                "run_id": run_id,
                 "selected": len(sessions),
                 "total_available": total_available,
                 "limit": int(limit),
+                "project_set": bool(project),
+                "project_ref": _project_ref(project),
+                "provider": provider,
+                "target_extraction_level": target_level,
+                "started_at": started_at,
             },
         )
 
@@ -200,14 +231,19 @@ def run_couchdb_projection(
                 )
                 if resume and not reextract_entities:
                     if session_project not in projected_cache:
-                        projected_cache[session_project] = set(
-                            projection_state_store.list_projected_natural_ids(
+                        projected_cache[session_project] = (
+                            projection_state_store.list_projected_source_hash_sets(
                                 session_project,
                                 extraction_level=target_level,
                                 entity_type="Session",
                             )
                         )
-                    if episode.natural_id in projected_cache[session_project]:
+                    episode_source_hash = str(episode.payload.get("source_hash") or "")
+                    if (
+                        episode_source_hash
+                        and episode_source_hash
+                        in projected_cache[session_project].get(episode.natural_id, set())
+                    ):
                         skipped_resumed += 1
                         status = "skipped_resumed"
                     else:
@@ -217,7 +253,9 @@ def run_couchdb_projection(
                         skipped_disabled += sd
                         failed += f
                         if not f and not sd:
-                            projected_cache[session_project].add(episode.natural_id)
+                            projected_cache[session_project].setdefault(
+                                episode.natural_id, set()
+                            ).add(episode_source_hash)
                 else:
                     status, reason, p, d, sd, f = _project_one(worker, episode)
                     projected += p
@@ -229,6 +267,7 @@ def run_couchdb_projection(
                     _write_dead_letter(
                         dead_letter_jsonl,
                         session=session,
+                        run_id=run_id,
                         reason_code=reason,
                         stage="project",
                     )
@@ -240,6 +279,7 @@ def run_couchdb_projection(
                 _write_dead_letter(
                     dead_letter_jsonl,
                     session=session,
+                    run_id=run_id,
                     reason_code=reason,
                     stage="materialize_or_project",
                 )
@@ -250,6 +290,7 @@ def run_couchdb_projection(
                     progress_jsonl,
                     {
                         "event": "progress",
+                        "run_id": run_id,
                         "index": index,
                         "selected": len(sessions),
                         "status": status,
@@ -271,12 +312,47 @@ def run_couchdb_projection(
         elapsed_total_ms = int((time.monotonic() - started) * 1000)
         attempted = processed
         status = "ok" if failed == 0 else ("partial" if projected or duplicates or skipped_resumed else "failed")
+        removed_from_pending = (
+            0
+            if reextract_entities
+            else min(attempted, projected + duplicates + skipped_resumed)
+        )
+        cursor_advance = max(0, attempted - removed_from_pending)
+        next_cursor_offset = effective_cursor_offset + cursor_advance
+        _write_scheduler_cursor(
+            runtime_dir,
+            scope_ref=cursor_scope_ref,
+            offset=next_cursor_offset,
+        )
+        _write_jsonl(
+            progress_jsonl,
+            {
+                "event": "complete",
+                "run_id": run_id,
+                "status": status,
+                "selected": len(sessions),
+                "attempted": attempted,
+                "projected": projected,
+                "duplicates": duplicates,
+                "failed": failed,
+                "skipped_resumed": skipped_resumed,
+                "skipped_disabled": skipped_disabled,
+                "elapsed_total_ms": elapsed_total_ms,
+                "project_set": bool(project),
+                "project_ref": _project_ref(project),
+                "provider": provider,
+                "target_extraction_level": target_level,
+                "started_at": started_at,
+                "completed_at": _utc_now_iso(),
+            },
+        )
         return {
             "schema_version": COUCHDB_GRAPH_PROJECTION_SCHEMA_VERSION,
             "projection_schema_version": PROJECTION_SCHEMA_VERSION,
             "status": status,
             "canonical_counts": {
                 "source_sessions": total_available,
+                "eligible_sessions": len(eligible_sessions),
                 "selected_sessions": len(sessions),
             },
             "filters": {
@@ -285,12 +361,21 @@ def run_couchdb_projection(
                 "provider": provider,
             },
             "limit": int(limit),
-            "truncated": bool((limit > 0 and total_available > len(sessions)) or stopped_after_max_projects),
+            "truncated": bool(
+                (limit > 0 and len(eligible_sessions) > len(sessions))
+                or stopped_after_max_projects
+            ),
             "graph_enabled": bool(enable_graph),
             "target_extraction_level": target_level,
             "runtime_lock": {
                 "enabled": runtime_dir is not None,
                 "acquired": runtime_dir is not None,
+            },
+            "scheduler": {
+                "persistent_cursor_enabled": runtime_dir is not None,
+                "scope_ref": cursor_scope_ref,
+                "cursor_offset": effective_cursor_offset,
+                "cursor_advance": cursor_advance,
             },
             "projection": {
                 "attempted": attempted,
@@ -351,6 +436,99 @@ def _release_runtime_lock(lock_handle: Any) -> None:
         lock_handle.close()
 
 
+def _scheduler_cursor_scope_ref(
+    *,
+    project: str,
+    provider: str,
+    extraction_level: str,
+    resume: bool,
+    include_current: bool,
+) -> str:
+    payload = json.dumps(
+        {
+            "extraction_level": extraction_level,
+            "include_current": bool(include_current),
+            "project": project,
+            "provider": provider,
+            "resume": bool(resume),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _read_scheduler_cursor(runtime_dir: Path | None, *, scope_ref: str) -> int:
+    if runtime_dir is None:
+        return 0
+    path = runtime_dir / "graph-projection-cursor.json"
+    if not path.exists():
+        return 0
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("graph scheduler cursor is invalid") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != GRAPH_PROJECTION_CURSOR_SCHEMA_VERSION:
+        raise ValueError("graph scheduler cursor is invalid")
+    scopes = payload.get("scopes")
+    if not isinstance(scopes, dict):
+        raise ValueError("graph scheduler cursor is invalid")
+    entry = scopes.get(scope_ref)
+    if entry is None:
+        return 0
+    if not isinstance(entry, dict):
+        raise ValueError("graph scheduler cursor is invalid")
+    offset = entry.get("offset")
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("graph scheduler cursor is invalid")
+    return offset
+
+
+def _write_scheduler_cursor(
+    runtime_dir: Path | None,
+    *,
+    scope_ref: str,
+    offset: int,
+) -> None:
+    if runtime_dir is None:
+        return
+    path = runtime_dir / "graph-projection-cursor.json"
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("graph scheduler cursor is invalid") from exc
+        if not isinstance(payload, dict) or payload.get("schema_version") != GRAPH_PROJECTION_CURSOR_SCHEMA_VERSION:
+            raise ValueError("graph scheduler cursor is invalid")
+        scopes = payload.get("scopes")
+        if not isinstance(scopes, dict):
+            raise ValueError("graph scheduler cursor is invalid")
+    else:
+        payload = {
+            "schema_version": GRAPH_PROJECTION_CURSOR_SCHEMA_VERSION,
+            "scopes": {},
+        }
+        scopes = payload["scopes"]
+    scopes[scope_ref] = {"offset": max(0, int(offset))}
+    temporary = runtime_dir / f".graph-projection-cursor.{os.getpid()}.tmp"
+    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.chmod(0o600)
+    temporary.replace(path)
+
+
+def _rotate_sessions(
+    sessions: list[dict[str, Any]],
+    *,
+    offset: int,
+) -> list[dict[str, Any]]:
+    if not sessions:
+        return []
+    normalized = max(0, int(offset)) % len(sessions)
+    if normalized == 0:
+        return list(sessions)
+    return [*sessions[normalized:], *sessions[:normalized]]
+
+
 def _build_source_store(
     *,
     couchdb_url: str,
@@ -394,30 +572,68 @@ def _select_sessions(
     limit: int,
     projection_state_store: LedgerGraphProjectionStateStore | None = None,
     extraction_level: str | None = None,
+    include_current: bool = False,
 ) -> list[dict[str, Any]]:
     sessions = source_store.find_by_type(
         SourceDocType.TRANSCRIPT_SESSION,
-        fields=["session_id_hash", "project", "provider"],
+        fields=["session_id_hash", "project", "provider", "source_hash"],
     )
     filtered = _filter_sessions(sessions, project=project, provider=provider)
-    processed_by_project = _processed_session_natural_ids_by_project(
+    for session in filtered:
+        session_id_hash = str(session.get("session_id_hash") or "")
+        session["source_hash"] = session_source_revision_from_couchdb_source(
+            session_id_hash=session_id_hash,
+            source_store=source_store,
+        )
+    projected_by_project = _projected_session_source_hashes_by_project(
         filtered,
         projection_state_store=projection_state_store,
         extraction_level=extraction_level,
     )
-    if processed_by_project:
-        filtered.sort(
-            key=lambda session: (
-                _session_natural_id(str(session.get("session_id_hash") or ""))
-                in processed_by_project.get(str(session.get("project") or ""), set()),
-                *_session_sort_key(session),
-            )
+    current_counts: Counter[str] = Counter()
+    pending: list[dict[str, Any]] = []
+    current: list[dict[str, Any]] = []
+    for session in filtered:
+        session_project = str(session.get("project") or "")
+        natural_id = _session_natural_id(str(session.get("session_id_hash") or ""))
+        source_hash = str(session.get("source_hash") or "")
+        is_current = bool(source_hash) and (
+            source_hash
+            in projected_by_project.get(session_project, {}).get(natural_id, set())
         )
-    else:
-        filtered.sort(key=_session_sort_key)
+        if is_current:
+            current_counts[session_project] += 1
+            current.append(session)
+        else:
+            pending.append(session)
+    filtered = _round_robin_sessions(pending, current_counts=current_counts)
+    if include_current:
+        filtered.extend(_round_robin_sessions(current, current_counts=current_counts))
     if limit <= 0:
         return filtered
     return filtered[: int(limit)]
+
+
+def _round_robin_sessions(
+    sessions: list[dict[str, Any]], *, current_counts: Counter[str]
+) -> list[dict[str, Any]]:
+    by_project: dict[str, list[dict[str, Any]]] = {}
+    for session in sessions:
+        by_project.setdefault(str(session.get("project") or ""), []).append(session)
+    for project_sessions in by_project.values():
+        project_sessions.sort(key=_session_sort_key)
+    project_order = sorted(by_project, key=lambda value: (current_counts[value], value))
+    ordered: list[dict[str, Any]] = []
+    while project_order:
+        remaining: list[str] = []
+        for session_project in project_order:
+            project_sessions = by_project[session_project]
+            if project_sessions:
+                ordered.append(project_sessions.pop(0))
+            if project_sessions:
+                remaining.append(session_project)
+        project_order = remaining
+    return ordered
 
 
 def _count_sessions(source_store: CouchDBSourceStore, *, project: str, provider: str) -> int:
@@ -454,45 +670,40 @@ def _session_natural_id(session_id_hash: str) -> str:
     return str(session_id_hash or "").replace(":", "_")
 
 
-def _processed_session_natural_ids_by_project(
+def _projected_session_source_hashes_by_project(
     sessions: list[dict[str, Any]],
     *,
     projection_state_store: LedgerGraphProjectionStateStore | None,
     extraction_level: str | None,
-) -> dict[str, set[str]]:
+) -> dict[str, dict[str, set[str]]]:
     if projection_state_store is None or extraction_level is None:
         return {}
     projects = sorted({str(session.get("project") or "") for session in sessions})
 
-    def _processed_for(query_project: str | None) -> set[str]:
-        natural_ids = set(
-            projection_state_store.list_projected_natural_ids(
-                query_project,
-                extraction_level=extraction_level,
-                entity_type="Session",
-            )
+    def _projected_for(query_project: str | None) -> dict[str, set[str]]:
+        projected = projection_state_store.list_projected_source_hash_sets(
+            query_project,
+            extraction_level=extraction_level,
+            entity_type="Session",
         )
         if extraction_level != EXTRACTION_LEVEL_ENTITY:
-            # Source-invalid sessions are classified at the semantic/entity pass,
-            # but the lightweight episodic trigger must not keep selecting them
-            # forever after the valid-source ceiling has been reached.
-            natural_ids.update(
-                projection_state_store.list_natural_ids(
-                    query_project,
-                    extraction_level=EXTRACTION_LEVEL_ENTITY,
-                    entity_type="Session",
-                    upsert_results=SOURCE_INVALID_UPSERT_RESULTS,
-                )
+            source_invalid = projection_state_store.list_projected_source_hash_sets(
+                query_project,
+                extraction_level=EXTRACTION_LEVEL_ENTITY,
+                entity_type="Session",
+                upsert_results=SOURCE_INVALID_UPSERT_RESULTS,
             )
-        return natural_ids
+            for natural_id, source_hashes in source_invalid.items():
+                projected.setdefault(natural_id, set()).update(source_hashes)
+        return projected
 
     # `natural_id` is globally unique per session, so for multi-project selections a
     # single global query (project=None) is equivalent to per-project queries and
     # avoids an N+1 round-trip; a session's id only appears under its own project.
     if len(projects) > 1:
-        shared = _processed_for(None)
+        shared = _projected_for(None)
         return {session_project: shared for session_project in projects}
-    return {session_project: _processed_for(session_project) for session_project in projects}
+    return {session_project: _projected_for(session_project) for session_project in projects}
 
 
 def _project_one(worker: GraphProjectionWorker, episode: Any) -> tuple[str, str, int, int, int, int]:
@@ -531,6 +742,7 @@ def _write_dead_letter(
     path: Path | None,
     *,
     session: dict[str, Any],
+    run_id: str = "",
     reason_code: str,
     stage: str,
 ) -> None:
@@ -538,6 +750,7 @@ def _write_dead_letter(
         path,
         {
             "session_id_hash": str(session.get("session_id_hash") or ""),
+            "run_id": run_id,
             "project_ref": _project_ref(str(session.get("project") or "")),
             "provider": str(session.get("provider") or ""),
             "reason_code": reason_code,
@@ -560,6 +773,10 @@ def _p95(values: list[int]) -> int:
     ordered = sorted(values)
     index = max(0, math.ceil(len(ordered) * 0.95) - 1)
     return int(ordered[index])
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _project_ref(project: str) -> str:

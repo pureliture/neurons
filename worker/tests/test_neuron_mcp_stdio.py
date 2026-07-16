@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,7 @@ from agent_knowledge.mcp_server import (
     list_tools,
 )
 from agent_knowledge import mcp_tools
+from agent_knowledge import knowledge_search_service as knowledge_search_service_module
 from agent_knowledge.mcp_tools import tool_contract_registry, tool_registry, tool_names
 from agent_knowledge.session_memory.memory_card import build_memory_candidate
 from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
@@ -2791,6 +2793,294 @@ def test_mcp_local_runtime_collector_keeps_route_alignment_but_does_not_fabricat
     assert replay_packet["collector"]["readiness_claim"] == "collector_packet_not_live_evidence"
 
 
+def test_mcp_live_runtime_collector_includes_temporal_currentness_from_read_path(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+    aggregate = {
+        "schema_version": "temporal_correctness_runtime_aggregate.v1",
+        "projection_currentness": {
+            "source_hash_match": True,
+            "source_hash_mismatch_count": 0,
+            "stale_projected_session_count": 0,
+            "source_session_count": 126,
+            "graph_projection_current_count": 126,
+            "graph_projection_noncurrent_count": 0,
+            "session_memory_projection_current_count": 126,
+            "session_memory_projection_noncurrent_count": 0,
+            "session_memory_source_hash_mismatch_count": 0,
+            "session_memory_stale_projected_session_count": 0,
+            "artifact_current": True,
+            "artifact_missing_session_count": 0,
+            "artifact_age_unknown_count": 0,
+            "artifact_source_hash_mismatch_count": 0,
+            "oldest_artifact_age_seconds": 60,
+            "graph_run_scope_match": True,
+            "graph_run_fresh": True,
+            "graph_run_completed_age_seconds": 5,
+            "graph_run_max_age_seconds": 900,
+        },
+        "entity_projection": {
+            "valid_source_count": 126,
+            "coverage_count": 16,
+            "backlog_count": 110,
+            "error_count": 0,
+        },
+        "production_mutation_performed": False,
+    }
+    service._temporal_correctness_runtime_read_path_evidence = (  # type: ignore[method-assign]
+        lambda *, project: aggregate
+    )
+
+    packet = service.brain_source_to_candidate_runtime_readiness(
+        collect_shadow_evidence=True,
+        evidence_collection_mode="post_deploy_read_only_smoke",
+        evidence_collection_network_used=True,
+        repository=FIXTURE_REPOSITORY,
+        branch=FIXTURE_BRANCH,
+        project=PROJECT,
+        consumer="codex",
+    )
+
+    assert packet["temporal_correctness_runtime"] == aggregate
+    assert packet["collector"]["temporal_correctness_runtime_collected"] is True
+    assert packet["production_mutation_performed"] is False
+
+
+def _temporal_graph_runtime_status(
+    *,
+    completed: bool,
+    status: str,
+    dead_letters: int = 0,
+    project_ref: str = "",
+    completed_at: str = "",
+):
+    project_ref = project_ref or knowledge_search_service_module._project_ref(PROJECT)
+    completed_at = completed_at or datetime.now(timezone.utc).isoformat()
+    completed_timestamp = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+    return {
+        "source": {"session_count": 126},
+        "projection_state": {
+            "source_hash_mismatch_count": 0,
+            "stale_projected_session_count": 0,
+            "episodic_session_projected": 126,
+            "episodic_session_noncurrent": 0,
+            "session_memory_projection_current_count": 126,
+            "session_memory_projection_noncurrent_count": 0,
+            "session_memory_source_hash_mismatch_count": 0,
+            "session_memory_stale_projected_session_count": 0,
+            "entity_source_invalid": 0,
+            "entity_session_projected": 16,
+            "entity_session_backlog": 110,
+            "entity_valid_source_sessions": 126,
+        },
+        "artifact_age": {
+            "artifact_missing_session_count": 0,
+            "artifact_age_unknown_count": 0,
+            "artifact_source_hash_mismatch_count": 0,
+            "oldest_artifact_age_seconds": 60,
+        },
+        "progress": {
+            "event_counts": {"start": 1, "complete": int(completed)},
+            "latest_run_completed": completed,
+            "latest_run_status": status,
+            "latest_run_ref": "sha256:runtime-run",
+            "latest_run_project_set": True,
+            "latest_run_project_ref": project_ref,
+            "latest_run_provider": "",
+            "latest_run_target_extraction_level": "entity",
+            "latest_run_scope_consistent": True,
+            "latest_run_started_at": (
+                completed_timestamp - timedelta(seconds=5)
+            ).isoformat(),
+            "latest_run_completed_at": completed_at,
+            "failed": 0,
+            "latest_entity_run": {
+                "event_counts": {"start": 1, "complete": int(completed)},
+                "completed": completed,
+                "status": status,
+                "project_set": True,
+                "project_ref": project_ref,
+                "provider": "",
+                "target_extraction_level": "entity",
+                "scope_consistent": True,
+                "started_at": (
+                    completed_timestamp - timedelta(seconds=5)
+                ).isoformat(),
+                "completed_at": completed_at,
+                "failed": 0,
+                "dead_letter_count": dead_letters,
+            },
+        },
+        "dead_letter": {
+            "count": dead_letters,
+            "total_count": dead_letters,
+            "failure_reasons": ({"SyntheticFailure": dead_letters} if dead_letters else {}),
+        },
+    }
+
+
+def test_temporal_runtime_read_path_rejects_stale_canonical_projection_currentness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = _service(tmp_path)
+    monkeypatch.setenv("LLM_BRAIN_GRAPH_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr(
+        knowledge_search_service_module,
+        "_build_source_store",
+        lambda **_kwargs: object(),
+    )
+    stale_status = _temporal_graph_runtime_status(completed=True, status="ok")
+    stale_status["projection_state"].update(
+        {
+            "source_hash_mismatch_count": 1,
+            "stale_projected_session_count": 1,
+            "session_memory_projection_current_count": 125,
+            "session_memory_projection_noncurrent_count": 1,
+            "session_memory_source_hash_mismatch_count": 1,
+            "session_memory_stale_projected_session_count": 1,
+        }
+    )
+    monkeypatch.setattr(
+        knowledge_search_service_module,
+        "build_graph_projection_status",
+        lambda **_kwargs: stale_status,
+    )
+
+    evidence = service._temporal_correctness_runtime_read_path_evidence(
+        project=PROJECT
+    )
+
+    currentness = evidence["projection_currentness"]
+    assert currentness["source_hash_match"] is False
+    assert currentness["session_memory_projection_noncurrent_count"] == 1
+    assert currentness["session_memory_source_hash_mismatch_count"] == 1
+    assert currentness["session_memory_stale_projected_session_count"] == 1
+
+
+def test_temporal_runtime_read_path_rejects_started_but_incomplete_graph_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = _service(tmp_path)
+    monkeypatch.setenv("LLM_BRAIN_GRAPH_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr(
+        knowledge_search_service_module,
+        "_build_source_store",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        knowledge_search_service_module,
+        "build_graph_projection_status",
+        lambda **_kwargs: _temporal_graph_runtime_status(completed=False, status=""),
+    )
+
+    with pytest.raises(ValueError, match="latest graph projection run did not complete"):
+        service._temporal_correctness_runtime_read_path_evidence(project=PROJECT)
+
+
+def test_temporal_runtime_read_path_rejects_non_ok_graph_terminal_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = _service(tmp_path)
+    monkeypatch.setenv("LLM_BRAIN_GRAPH_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr(
+        knowledge_search_service_module,
+        "_build_source_store",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        knowledge_search_service_module,
+        "build_graph_projection_status",
+        lambda **_kwargs: _temporal_graph_runtime_status(
+            completed=True,
+            status="partial",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="latest graph projection run is not ok"):
+        service._temporal_correctness_runtime_read_path_evidence(project=PROJECT)
+
+
+def test_temporal_runtime_read_path_counts_latest_run_dead_letters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = _service(tmp_path)
+    monkeypatch.setenv("LLM_BRAIN_GRAPH_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr(
+        knowledge_search_service_module,
+        "_build_source_store",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        knowledge_search_service_module,
+        "build_graph_projection_status",
+        lambda **_kwargs: _temporal_graph_runtime_status(
+            completed=True,
+            status="ok",
+            dead_letters=2,
+        ),
+    )
+
+    evidence = service._temporal_correctness_runtime_read_path_evidence(project=PROJECT)
+
+    assert evidence["entity_projection"]["error_count"] == 2
+
+
+def test_temporal_runtime_read_path_rejects_graph_run_for_another_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = _service(tmp_path)
+    monkeypatch.setenv("LLM_BRAIN_GRAPH_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr(
+        knowledge_search_service_module,
+        "_build_source_store",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        knowledge_search_service_module,
+        "build_graph_projection_status",
+        lambda **_kwargs: _temporal_graph_runtime_status(
+            completed=True,
+            status="ok",
+            project_ref="sha256:another-project",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="graph projection run scope does not match"):
+        service._temporal_correctness_runtime_read_path_evidence(project=PROJECT)
+
+
+def test_temporal_runtime_read_path_rejects_stale_successful_graph_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = _service(tmp_path)
+    monkeypatch.setenv("LLM_BRAIN_GRAPH_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("LLM_BRAIN_GRAPH_RUN_MAX_AGE_SECONDS", "900")
+    monkeypatch.setattr(
+        knowledge_search_service_module,
+        "_build_source_store",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        knowledge_search_service_module,
+        "build_graph_projection_status",
+        lambda **_kwargs: _temporal_graph_runtime_status(
+            completed=True,
+            status="ok",
+            completed_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="latest graph projection run is stale"):
+        service._temporal_correctness_runtime_read_path_evidence(project=PROJECT)
+
+
 def test_mcp_artifact_preference_supersession_links_distinct_memory_cards_reciprocally(tmp_path: Path):
     service = _service(tmp_path)
     service.allow_production_object_authority_writes = True
@@ -4448,7 +4738,7 @@ def test_mcp_brain_query_roundtrip(tmp_path: Path):
             "method": "tools/call",
             "params": {
                 "name": BRAIN_QUERY_TOOL_NAME,
-                "arguments": {"brain_id": f"/project/{PROJECT}", "query": "언어 선호"},
+                    "arguments": {"brain_id": f"/project/{PROJECT}", "query": "한국어로 응답한다"},
             },
         },
         service,
@@ -4458,6 +4748,130 @@ def test_mcp_brain_query_roundtrip(tmp_path: Path):
     assert result["audit"]["path"] == "ledger_precedence_v2"
     assert result["current"][0]["summary"] == "한국어로 응답한다"
     assert json.loads(response["result"]["content"][0]["text"]) == result
+
+
+def test_mcp_brain_query_returns_only_exact_relevance_and_nonsense_is_empty(tmp_path: Path):
+    service = _service(tmp_path)
+    service.ledger.upsert_llm_brain_memory_card(
+        _accepted_task_card(
+            "mem_brain_query_unrelated",
+            next_action="Continue unrelated deployment bookkeeping",
+        )
+    )
+    expected = next(
+        card
+        for card in service.ledger.list_llm_brain_memory_cards(
+            project=PROJECT,
+            accepted_only=True,
+            limit=20,
+        )
+        if card["summary"] == "한국어로 응답한다"
+    )
+
+    exact_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 201,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_QUERY_TOOL_NAME,
+                "arguments": {
+                    "brain_id": f"/project/{PROJECT}",
+                    "query": "한국어로 응답한다",
+                },
+            },
+        },
+        service,
+    )
+    nonsense_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 202,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_QUERY_TOOL_NAME,
+                "arguments": {
+                    "brain_id": f"/project/{PROJECT}",
+                    "query": "quasar marmalade unrelated nonsense",
+                },
+            },
+        },
+        service,
+    )
+
+    exact = exact_response["result"]["structuredContent"]
+    nonsense = nonsense_response["result"]["structuredContent"]
+    assert [item["memory_id"] for item in exact["results"]] == [expected["memory_id"]]
+    assert [item["memory_id"] for item in exact["current"]] == [expected["memory_id"]]
+    assert [item["memory_id"] for item in exact["accepted"]] == [expected["memory_id"]]
+    assert nonsense["results"] == []
+    assert nonsense["current"] == []
+    assert nonsense["accepted"] == []
+
+
+def test_mcp_brain_query_semantic_hits_control_the_public_results_lane(
+    tmp_path: Path,
+    monkeypatch,
+):
+    service = _service(tmp_path)
+    service.ledger.upsert_llm_brain_memory_card(
+        _accepted_task_card(
+            "mem_semantic_unrelated",
+            next_action="Continue unrelated runtime bookkeeping",
+        )
+    )
+    expected = next(
+        card
+        for card in service.ledger.list_llm_brain_memory_cards(
+            project=PROJECT,
+            accepted_only=True,
+            limit=20,
+        )
+        if card["summary"] == "한국어로 응답한다"
+    )
+    service.native_memory_id = "mem_native"
+
+    def semantic_recall_factory(**kwargs):
+        def recall(query: str, brain_id: str) -> list[dict]:
+            return [
+                {
+                    "kind": "native_memory",
+                    "session_tag": f"mem:{expected['memory_id']}",
+                    "brain_id": brain_id,
+                    "message_type": "semantic",
+                    "content": "Korean natural-language response preference",
+                    "score": 0.99,
+                    "tier": "low",
+                }
+            ]
+
+        return recall
+
+    monkeypatch.setattr(
+        "agent_knowledge.knowledge_search_service.build_semantic_recall",
+        semantic_recall_factory,
+    )
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 203,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_QUERY_TOOL_NAME,
+                "arguments": {
+                    "brain_id": f"/project/{PROJECT}",
+                    "query": "language response preference",
+                },
+            },
+        },
+        service,
+    )
+
+    result = response["result"]["structuredContent"]
+    assert result["audit"]["native_memory_hits"] == 1
+    assert [item["memory_id"] for item in result["results"]] == [expected["memory_id"]]
+    assert result["results"][0]["score"] == 0.99
 
 
 def test_mcp_brain_objects_query_roundtrip(tmp_path: Path):
@@ -4556,12 +4970,13 @@ def test_mcp_brain_objects_query_default_route_returns_agent_context_objects(tmp
 
 def test_mcp_brain_objects_query_temporal_route_returns_current_work_objects(tmp_path: Path):
     service = _service(tmp_path)
-    service.ledger.upsert_llm_brain_memory_card(
-        _accepted_task_card(
-            "mem_temporal_work_recall",
-            next_action="Continue P6 temporal repo recall object query route",
-        )
+    temporal_card = _accepted_task_card(
+        "mem_temporal_work_recall",
+        next_action="Continue P6 temporal repo recall object query route",
     )
+    temporal_card["observed_at_start"] = "2026-07-09T00:00:00Z"
+    temporal_card["observed_at_end"] = "2026-07-09T23:59:59Z"
+    service.ledger.upsert_llm_brain_memory_card(temporal_card)
 
     response = handle_jsonrpc_message(
         {
@@ -4576,7 +4991,8 @@ def test_mcp_brain_objects_query_temporal_route_returns_current_work_objects(tmp
                     "query": "어제 이 repo에서 뭐 했어? 작업 재개하려면 뭐 봐야 해?",
                     "current_files": ["docs/specs/roadmap.md"],
                     "consumer": "codex",
-                    "response_mode": "compact",
+                        "response_mode": "compact",
+                        "as_of": "2026-07-09T12:00:00Z",
                 },
             },
         },
@@ -4590,7 +5006,8 @@ def test_mcp_brain_objects_query_temporal_route_returns_current_work_objects(tmp
     assert any(obj["object_type"] == "WorkUnit" for obj in pack["objects"])
     assert any("Resume fixture mem_temporal_work_recall" in obj["title"] for obj in pack["objects"])
     assert pack["recommended_actions"]
-    assert pack["audit"]["source_pack_names"] == ["current_work", "required_verification"]
+    assert pack["audit"]["object_pack_route_source"] == "temporal_evidence_filter"
+    assert pack["audit"]["temporal_match_count"] == 1
     assert pack["response_mode"] == "compact"
 
 
@@ -6225,7 +6642,7 @@ def test_brain_query_semantic_recall_type_error_is_audited(tmp_path: Path, monke
         broken_semantic_recall,
     )
 
-    result = service.brain_query(brain_id=f"/project/{PROJECT}", query="언어 선호")
+    result = service.brain_query(brain_id=f"/project/{PROJECT}", query="한국어로 응답한다")
 
     assert result["current"][0]["summary"] == "한국어로 응답한다"
     assert result["audit"]["native_memory_bound"] is True

@@ -160,21 +160,22 @@ def run_couchdb_bulk_semantic_projection(
     extractor = extractor or OpenAICompatibleBulkSemanticExtractor.from_env()
     writer = writer or DeterministicGraphitiSemanticWriter.from_env()
 
-    selected = _select_sessions(
+    eligible_sessions = _select_sessions(
         source_store,
         project=project,
         provider=provider,
-        limit=limit,
+        limit=0,
         projection_state_store=projection_state_store,
         extraction_level=EXTRACTION_LEVEL_ENTITY,
     )
+    selected = eligible_sessions[: int(limit)] if limit > 0 else eligible_sessions
     total_available = _count_sessions(source_store, project=project, provider=provider)
     max_sessions_per_call = max(1, int(max_sessions_per_call))
     max_session_chars = max(200, int(max_session_chars))
     report_every = max(1, int(report_every))
     max_projects = max(0, int(max_projects))
 
-    projected_cache: dict[str, set[str]] = {}
+    projected_cache: dict[str, dict[str, set[str]]] = {}
     by_provider: Counter[str] = Counter()
     by_project: Counter[str] = Counter()
     failure_reasons: Counter[str] = Counter()
@@ -215,14 +216,19 @@ def run_couchdb_bulk_semantic_projection(
                 break
             try:
                 if session_project not in projected_cache:
-                    projected_cache[session_project] = set(
-                        projection_state_store.list_projected_natural_ids(
+                    projected_cache[session_project] = (
+                        projection_state_store.list_projected_source_hash_sets(
                             session_project,
                             extraction_level=EXTRACTION_LEVEL_ENTITY,
                             entity_type="Session",
                         )
                     )
-                if natural_id in projected_cache[session_project]:
+                source_hash = str(session.get("source_hash") or "")
+                if (
+                    source_hash
+                    and source_hash
+                    in projected_cache[session_project].get(natural_id, set())
+                ):
                     skipped_resumed += 1
                     status = "skipped_resumed"
                 else:
@@ -335,6 +341,7 @@ def run_couchdb_bulk_semantic_projection(
         "status": status,
         "canonical_counts": {
             "source_sessions": total_available,
+            "eligible_sessions": len(eligible_sessions),
             "selected_sessions": len(selected),
         },
         "filters": {
@@ -343,7 +350,10 @@ def run_couchdb_bulk_semantic_projection(
             "provider": provider,
         },
         "limit": int(limit),
-        "truncated": bool((limit > 0 and total_available > len(selected)) or stopped_after_max_projects),
+        "truncated": bool(
+            (limit > 0 and len(eligible_sessions) > len(selected))
+            or stopped_after_max_projects
+        ),
         "target_extraction_level": EXTRACTION_LEVEL_ENTITY,
         "runtime_lock": {
             "enabled": runtime_dir is not None,
@@ -385,7 +395,7 @@ def _flush_batch_items(
     extractor: Any,
     writer: Any,
     projection_state_store: LedgerGraphProjectionStateStore,
-    projected_cache: dict[str, set[str]],
+    projected_cache: dict[str, dict[str, set[str]]],
     dead_letter_jsonl: Path | None,
     failure_reasons: Counter[str],
     allow_empty_sessions: bool,
@@ -445,7 +455,7 @@ def _flush_batch_items_as_singletons(
     extractor: Any,
     writer: Any,
     projection_state_store: LedgerGraphProjectionStateStore,
-    projected_cache: dict[str, set[str]],
+    projected_cache: dict[str, dict[str, set[str]]],
     dead_letter_jsonl: Path | None,
     failure_reasons: Counter[str],
     allow_empty_sessions: bool,
@@ -494,7 +504,7 @@ def _extract_write_and_mark(
     extractor: Any,
     writer: Any,
     projection_state_store: LedgerGraphProjectionStateStore,
-    projected_cache: dict[str, set[str]],
+    projected_cache: dict[str, dict[str, set[str]]],
     allow_empty_sessions: bool,
 ) -> Any:
     batch_inputs = [item for _session, item in batch_items]
@@ -515,7 +525,9 @@ def _extract_write_and_mark(
             extraction_level=EXTRACTION_LEVEL_ENTITY,
         )
         project = str(episode.payload.get("project") or "")
-        projected_cache.setdefault(project, set()).add(episode.natural_id)
+        projected_cache.setdefault(project, {}).setdefault(
+            episode.natural_id, set()
+        ).add(str(episode.payload.get("source_hash") or ""))
     return report
 
 

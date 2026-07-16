@@ -35,27 +35,38 @@ def _build_auth_header(user: str, password: str) -> str:
 def _select_sessions_needing_projection(
     store, limit: int, *, project: str = "", provider: str = ""
 ) -> list[dict]:
-    """Return transcript_session docs whose projection_state is missing or not PROJECTED.
+    """Return sessions whose projected revision is not the current source revision.
 
     When ``project``/``provider`` are set the selection is scoped to that subset so a
     scoped migration flow does not materialize out-of-scope sessions in the
     session-memory step.
     """
-    from .document_model import ProjectionStatus, SourceDocType, projection_state_doc_id
+    from .document_model import (
+        ProjectionStatus,
+        SourceDocType,
+        projection_state_doc_id,
+    )
 
     scope_selector = _scope_selector(project=project, provider=provider)
     states = store.find_by_type(
         SourceDocType.PROJECTION_STATE,
-        fields=["_id", "session_id_hash", "projection_status"],
+        fields=[
+            "_id",
+            "session_id_hash",
+            "projection_status",
+            "source_hash",
+            "projected_source_hash",
+        ],
         selector={"projection_status": ProjectionStatus.PROJECTED, **scope_selector},
     )
-    projected_session_ids = {
-        session_id_hash
+    projected_source_hashes = {
+        session_id_hash: str(state.get("projected_source_hash") or "")
         for state in states
         if (session_id_hash := str(state.get("session_id_hash") or ""))
         and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
         and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
     }
+    from ..llm_brain_core.runtime import session_source_revision_from_couchdb_source
     selected: list[dict] = []
     sessions = iter(
         _iter_by_type(
@@ -74,7 +85,16 @@ def _select_sessions_needing_projection(
         session_id_hash = str(session.get("session_id_hash") or "")
         if not session_id_hash:
             continue
-        if session_id_hash not in projected_session_ids:
+        projected_source_hash = projected_source_hashes.get(session_id_hash, "")
+        current_source_hash = session_source_revision_from_couchdb_source(
+            session_id_hash=session_id_hash,
+            source_store=store,
+        )
+        if (
+            not projected_source_hash
+            or not current_source_hash
+            or projected_source_hash != current_source_hash
+        ):
             selected.append(session)
     return selected
 

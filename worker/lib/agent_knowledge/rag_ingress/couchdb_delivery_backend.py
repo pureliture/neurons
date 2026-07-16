@@ -25,10 +25,10 @@ Gap handling
   so this is fine.
 - ``source_locator_hash``: private Mac path, not sent to the server.  Passed
   as ``""`` (the builder's accepted default for live ingress).
-- ``started_at``/``ended_at``: not in the payload.  The session doc is upserted
-  with empty timestamps; if it already exists those fields are preserved.
-- ``transcript_session`` upsert: the store's idempotent put ensures the session
-  doc is created on first chunk arrival and unchanged on subsequent chunks.
+- ``started_at``/``ended_at``: derived from the payload's redacted observed-time
+  metadata. Aggregate coverage refresh widens the session bounds as chunks arrive.
+- ``transcript_session`` upsert: the deterministic document id keeps exact
+  duplicates idempotent while distinct chunks refresh source currentness.
 
 Fail-closed gate (mirrors RetiredIndexBridgeDeliveryBackend)
 -------------------------------------------------
@@ -50,17 +50,16 @@ import datetime
 
 from ..couchdb_source.couchdb_http_store import CouchDBError
 from ..couchdb_source.document_model import (
-    ProjectionStatus,
-    SourceDocType,
     build_conversation_chunk_document,
-    build_coverage_manifest_document,
-    build_projection_state_document,
     build_transcript_session_document,
     conversation_chunk_doc_id,
-    coverage_manifest_doc_id,
-    projection_state_doc_id,
     session_doc_id,
     sha256_hash,
+)
+from ..couchdb_source.session_memory_materializer import (
+    mark_projection_pending_if_source_changed,
+    upsert_transcript_session_aggregate,
+    update_coverage_with_tool_evidence,
 )
 from ..couchdb_source.source_store import CouchDBSourceStore
 from ..session_memory.transcript_model import REDACTION_VERSION, TranscriptChunk, TranscriptSession
@@ -77,10 +76,6 @@ from .delivery_executor import (
 )
 from .server_runtime import apply_server_redaction, public_ingress_leak_violations
 from .state_db import RAGIngressStateDB
-
-
-def _now_iso() -> str:
-    return datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
 
 
 class CouchDBDeliveryBackend:
@@ -121,10 +116,12 @@ class CouchDBDeliveryBackend:
                 status="payload_unavailable" if gate == PAYLOAD_MISSING else "payload_integrity_mismatch",
             )
 
-        # --- Gate 2: idempotent early-out (chunk doc already in CouchDB) ------
+        # --- Gate 2: detect an idempotent retry --------------------------------
+        # A previous attempt may have persisted the deterministic session/chunk
+        # documents and then failed before coverage/projection currentness was
+        # refreshed.  Remember that this is an existing delivery for evidence,
+        # but always run the aggregate reconciliation below.
         existing = self.find_by_natural_key(job.idempotency_key, job.payload_hash)
-        if existing is not None:
-            return existing
 
         # --- Gate 3: apply full server-side public-ingress redaction ----------
         payload = apply_server_redaction(payload)
@@ -157,6 +154,8 @@ class CouchDBDeliveryBackend:
         project = str(metadata.get("project") or source.get("project") or "")
         chunk_id = str(metadata.get("chunk_id") or "")
         redaction_version = str(pkg.get("redactionVersion") or REDACTION_VERSION)
+        observed_at_start = str(metadata.get("observed_at_start") or "")
+        observed_at_end = str(metadata.get("observed_at_end") or observed_at_start)
 
         # Positional chunk metadata -- fall back to 0/1 if dendrite didn't emit them
         turn_start_index = int(metadata.get("turn_start_index") or 0)
@@ -198,16 +197,20 @@ class CouchDBDeliveryBackend:
             part_count=part_count,
             char_start=char_start,
             char_end=char_end,
+            observed_at_start=observed_at_start,
+            observed_at_end=observed_at_end,
         )
 
         session = TranscriptSession(
             session_id_hash=session_id_hash,
             provider=provider,
             project=project,
-            started_at="",  # not available in live ingress payload
-            ended_at="",
+            started_at=observed_at_start,
+            ended_at=observed_at_end,
             source_status="source_unproven",
             source_locator_hash="",  # private Mac path; not sent server-side
+            observed_at_start=observed_at_start,
+            observed_at_end=observed_at_end,
         )
 
         db_name = getattr(self._store, "db", "couchdb")
@@ -215,46 +218,32 @@ class CouchDBDeliveryBackend:
         doc_ref = session_doc_id(session_id_hash)
 
         try:
-            # --- Build + put transcript_session (upsert; first chunk wins) ---
+            # Persist the chunk first; a retry can then reconcile the aggregate
+            # without overwriting a newer session envelope with this one-chunk view.
             session_doc = build_transcript_session_document(session=session)
-            self._store.put(session_doc)
-
-            # --- Build + put conversation_chunk ---------------------------------
             chunk_doc = build_conversation_chunk_document(chunk=chunk, source_locator_hash="")
-            self._store.put(chunk_doc)
+            chunk_revision = self._store.put(chunk_doc)
+            upsert_transcript_session_aggregate(
+                store=self._store,
+                incoming=session_doc,
+            )
 
-            # --- Upsert coverage_manifest (incremental / partial) ---------------
-            # For live ingress we emit a single-chunk coverage manifest covering
-            # this chunk only.  A full session-level reconciler (the materialiser
-            # already in session_memory_materializer) will merge all chunks later.
-            # build_coverage_manifest_document is the reused builder; the content
-            # hash used here is the chunk's public-ingress body hash.
-            chunk_content_hash = str(chunk_doc.get("content_hash") or "")
-            coverage_doc = build_coverage_manifest_document(
+            # --- Refresh aggregate source currentness ---------------------------
+            coverage_doc = update_coverage_with_tool_evidence(
+                session_id_hash=session_id_hash,
+                store=self._store,
+            )
+            source_hash = str((coverage_doc or {}).get("source_hash") or "")
+
+            # --- Upsert projection_state (mark dirty / pending) -----------------
+            mark_projection_pending_if_source_changed(
                 session_id_hash=session_id_hash,
                 provider=provider,
                 project=project,
-                conversation_chunk_count=1,
-                tool_evidence_bundle_count=0,
-                conversation_content_hashes=[chunk_content_hash],
-                tool_evidence_coverage_hashes=[],
-                source_locator_hash="",
+                source_hash=source_hash,
+                store=self._store,
+                source_changed=chunk_revision.outcome != "duplicate",
             )
-            self._store.put(coverage_doc)
-
-            # --- Upsert projection_state (mark dirty / pending) -----------------
-            # Always write/refresh pending so the downstream projector picks up
-            # the new or updated session.
-            existing_proj = self._store.get(projection_state_doc_id(session_id_hash))
-            if existing_proj is None or existing_proj.get("projection_status") != ProjectionStatus.PROJECTED:
-                proj_doc = build_projection_state_document(
-                    session_id_hash=session_id_hash,
-                    provider=provider,
-                    project=project,
-                    projection_status=ProjectionStatus.PENDING,
-                    source_locator_hash="",
-                )
-                self._store.put(proj_doc)
 
         except CouchDBError as exc:
             # Network/store errors mid-flight: the PUT may have reached CouchDB
@@ -269,7 +258,7 @@ class CouchDBDeliveryBackend:
             payload_hash=job.payload_hash,
             dataset_ref=dataset_ref,
             document_ref=doc_ref,
-            run="couchdb_put",
+            run="couchdb_existing" if existing is not None else "couchdb_put",
             status="succeeded",
             observed_at=datetime.datetime.now(tz=datetime.timezone.utc),
         )

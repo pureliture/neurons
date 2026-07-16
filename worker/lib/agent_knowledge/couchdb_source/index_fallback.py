@@ -23,6 +23,7 @@ from .document_model import (
     SourceRedactionLeak,
     build_conversation_chunk_document,
     build_coverage_manifest_document,
+    build_source_revision_token,
     build_transcript_session_document,
 )
 from ..session_memory.transcript_model import TranscriptChunk, TranscriptSession, canonicalize_project
@@ -138,6 +139,10 @@ def reconstruct_sessions(
                 session_id_hash=sid, provider=provider, project=project,
                 conversation_chunk_count=len(chunk_docs), tool_evidence_bundle_count=0,
                 conversation_content_hashes=content_hashes, tool_evidence_coverage_hashes=[],
+                conversation_revision_tokens=[
+                    build_source_revision_token(doc, material_hash_field="content_hash")
+                    for doc in chunk_docs
+                ],
                 project_authority={
                     "project": project, "source": RETIRED_INDEX_BRIDGE_FALLBACK_STATUS, "ambiguous": True,
                     "eligible_for_retirement": False,
