@@ -143,6 +143,7 @@ _DEPLOYED_IDENTITY_KEYS = frozenset(
 _DEPLOYMENT_EVIDENCE_BINDING_KEYS = frozenset({"schema_version", "canonical_tuple_hash"})
 _SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_LOCAL_COMMIT_SENTINEL = "0" * 40
 _PUBLIC_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@-]{0,119}$")
 _MALFORMED_EVIDENCE_TYPE_FIELD = "malformed_evidence_type"
 
@@ -5255,7 +5256,11 @@ def _is_public_ref(value: Any) -> bool:
 
 
 def _is_commit_sha(value: Any) -> bool:
-    return isinstance(value, str) and bool(_COMMIT_SHA_RE.fullmatch(value))
+    return (
+        isinstance(value, str)
+        and value != _LOCAL_COMMIT_SENTINEL
+        and bool(_COMMIT_SHA_RE.fullmatch(value))
+    )
 
 
 def _is_sha256_digest(value: Any) -> bool:
