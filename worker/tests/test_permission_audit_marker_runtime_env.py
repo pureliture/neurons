@@ -613,6 +613,167 @@ def test_sqlite_private_snapshot_refresh_preserves_inode_and_commit_boundary(
     writer.close()
 
 
+def test_sqlite_wal_checksum_corruption_fails_via_private_snapshot_pragma(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from agent_knowledge.native_exact_mutation_markers import (
+        NativeExactMutationMarkerContract,
+        NativeExactMutationMarkerError,
+        SQLiteExactMutationMarkerProvider,
+    )
+    import agent_knowledge.permission_audit_marker_runtime_env as runtime_env
+
+    database = tmp_path / "wal-checksum.sqlite3"
+    writer = sqlite3.connect(database)
+    assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute("CREATE TABLE fixture (value TEXT)")
+    writer.execute("INSERT INTO fixture(value) VALUES ('committed')")
+    writer.commit()
+    schema_version = writer.execute("PRAGMA schema_version").fetchone()[0]
+
+    pinned = runtime_env._SQLitePinnedFile()
+    runtime_env._SQLiteFileInspector(pinned).inspect(database)
+    wal_fd = pinned._sidecar_fds["-wal"]
+    header = os.pread(wal_fd, 32, 0)
+    page_size = int.from_bytes(header[8:12], "big")
+    if page_size == 1:
+        page_size = 65_536
+    frame_size = 24 + page_size
+    wal_length = os.fstat(wal_fd).st_size
+    frame_count = (wal_length - 32) // frame_size
+    assert frame_count > 0
+    checksum_offset = 32 + (frame_count - 1) * frame_size + 16
+    checksum_byte = os.pread(wal_fd, 1, checksum_offset)
+    assert len(checksum_byte) == 1
+    writable_wal = os.open(str(database) + "-wal", os.O_WRONLY)
+    try:
+        os.pwrite(
+            writable_wal,
+            bytes((checksum_byte[0] ^ 0x01,)),
+            checksum_offset,
+        )
+    finally:
+        os.close(writable_wal)
+
+    original_connect = runtime_env._connect_sqlite_uri
+    connection_attempts: list[str] = []
+
+    def recording_connect(database_uri: str):
+        connection_attempts.append(database_uri)
+        return original_connect(database_uri)
+
+    monkeypatch.setattr(
+        runtime_env,
+        "_connect_sqlite_uri",
+        recording_connect,
+    )
+    connector = runtime_env._SQLiteReadOnlyConnector(pinned)
+    provider = SQLiteExactMutationMarkerProvider(
+        NativeExactMutationMarkerContract(
+            plane="product_db",
+            storage_identity="fixed-production-scope",
+            schema_generation=_sha("a"),
+            config_generation=_sha("b"),
+            reader_contract="sqlite_mode_ro_query_only.v1",
+            writer_registry=("fixed-writer",),
+        ),
+        path=database,
+        connector=connector,
+        file_inspector=runtime_env._SQLiteFileInspector(pinned),
+        expected_schema_version=schema_version,
+    )
+
+    with pytest.raises(NativeExactMutationMarkerError) as error:
+        provider.read_marker()
+
+    assert str(error.value) == "SQLite exact marker schema drift detected"
+    assert len(connection_attempts) == 1
+    assert str(database) not in connection_attempts[0]
+    assert "neurons-sqlite-marker-ephemeral-" in connection_attempts[0]
+    assert str(database) not in str(error.value)
+    assert checksum_byte.hex() not in str(error.value)
+    assert capsys.readouterr() == ("", "")
+    connector.close()
+    writer.close()
+
+
+def test_sqlite_ephemeral_snapshot_is_not_provider_public_projection(
+    tmp_path,
+    capsys,
+):
+    from agent_knowledge.native_exact_mutation_markers import (
+        NativeExactMutationMarkerContract,
+        SQLiteExactMutationMarkerProvider,
+    )
+    from agent_knowledge.permission_audit_marker_runtime_env import (
+        _SQLiteFileInspector,
+        _SQLitePinnedFile,
+        _SQLiteReadOnlyConnector,
+    )
+
+    protected_row_value = "protected-row-value-must-never-be-projected"
+    database = tmp_path / "wal-private-snapshot.sqlite3"
+    writer = sqlite3.connect(database)
+    assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("CREATE TABLE fixture (value TEXT)")
+    writer.execute(
+        "INSERT INTO fixture(value) VALUES (?)",
+        (protected_row_value,),
+    )
+    writer.commit()
+    schema_version = writer.execute("PRAGMA schema_version").fetchone()[0]
+    source_entries = {item.name for item in tmp_path.iterdir()}
+
+    pinned = _SQLitePinnedFile()
+    connector = _SQLiteReadOnlyConnector(pinned)
+    provider = SQLiteExactMutationMarkerProvider(
+        NativeExactMutationMarkerContract(
+            plane="product_db",
+            storage_identity="fixed-production-scope",
+            schema_generation=_sha("a"),
+            config_generation=_sha("b"),
+            reader_contract="sqlite_mode_ro_query_only.v1",
+            writer_registry=("fixed-writer",),
+        ),
+        path=database,
+        connector=connector,
+        file_inspector=_SQLiteFileInspector(pinned),
+        expected_schema_version=schema_version,
+    )
+
+    marker = provider.read_marker()
+    snapshot_directory = Path(str(pinned._snapshot_directory))
+    snapshot_generation_hash = str(pinned._snapshot_generation_hash)
+    public_projection = json.dumps(marker, sort_keys=True)
+
+    # This source-layer contract owns the provider projection and verifies that
+    # no source-adjacent output file appears. Archive and public-console
+    # enforcement remain the ops collector's cross-repository responsibility.
+    assert snapshot_directory.is_dir()
+    assert "neurons-sqlite-marker-ephemeral-" in snapshot_directory.name
+    for protected in (
+        protected_row_value,
+        str(database),
+        str(snapshot_directory),
+        snapshot_generation_hash,
+        "marker.sqlite3-wal",
+        "marker.sqlite3-shm",
+    ):
+        assert protected not in public_projection
+    assert capsys.readouterr() == ("", "")
+
+    connector.close()
+    assert not snapshot_directory.exists()
+    assert {item.name for item in tmp_path.iterdir()} == source_entries
+    writer.close()
+
+
 @pytest.mark.parametrize("suffix", ("-wal", "-shm"))
 def test_sqlite_pinned_file_rejects_wal_or_shm_replacement(tmp_path, suffix):
     from agent_knowledge.permission_audit_marker_runtime_env import (
