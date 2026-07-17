@@ -451,6 +451,28 @@ def test_independent_product_mutation_sentinel_rejects_bound_methods_from_same_o
         )
 
 
+def test_independent_product_mutation_sentinel_rejects_repeated_bound_method():
+    """매 property access가 새 bound method를 만들어도 owner 중복은 거부한다."""
+    from agent_knowledge.permission_audit import IndependentProductMutationSentinelReader
+
+    class SharedProvider:
+        def read(self):
+            return {"count": 1, "hash": "sha256:" + "f" * 64}
+
+    shared = SharedProvider()
+
+    with pytest.raises(ValueError, match="distinct mutation sentinel providers"):
+        IndependentProductMutationSentinelReader(
+            {
+                "authority_ledger": shared.read,
+                "corpus": shared.read,
+                "queue": shared.read,
+                "index": shared.read,
+                "product_db": shared.read,
+            }
+        )
+
+
 def test_postgres_database_marker_reads_one_public_safe_product_plane_marker():
     from agent_knowledge.permission_audit import PostgresDatabaseMutationMarkerReader
     from agent_knowledge.postgres_db_adapter import _PgRow

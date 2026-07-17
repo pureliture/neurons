@@ -60,7 +60,9 @@ jobs:
         # live Postgres parity 테스트는 LEDGER_PG_DSN 미설정 시 skipif로 자동 skip된다.
         # --group dev: pytest는 dev dependency group으로 선언돼 있어 명시적으로 설치해야
         # clean 러너(전역 pytest 없음)에서 `Failed to spawn: pytest`가 나지 않는다.
-        run: uv run --group dev pytest -q
+        # 전체 worker 회귀는 MCP transport wiring도 import하므로 mcp-http extra를
+        # 같이 설치해 optional dependency 누락을 fail-closed로 드러낸다.
+        run: uv run --group dev --extra mcp-http pytest -q
 
   worker-postgres-parity:
     name: worker PostgreSQL parity (uv)
