@@ -13,6 +13,7 @@ import pytest
 
 from agent_knowledge.rag_ingress.retired_index_bridge import BackendDocumentHandle, IndexStatus
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
+    FOUNDATION_DIRECT_WRITE_CONTRACT,
     DEFAULT_COLLECTION_NAME,
     HashEmbeddingProvider,
     PassthroughMarkdownNormalizer,
@@ -27,6 +28,7 @@ def _adapter(client: InMemoryQdrantClient | None = None):
     client = client or InMemoryQdrantClient()
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=HashEmbeddingProvider(size=32),
     )

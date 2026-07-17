@@ -146,23 +146,39 @@ class InMemoryQdrantClient:
         return list(self._payload_indexes.get(collection_name, []))
 
     # -- writes ---------------------------------------------------------------
-    def upsert(self, *, collection_name: str, points: list[Any]) -> dict[str, Any]:
+    def upsert(
+        self,
+        *,
+        collection_name: str,
+        points: list[Any],
+        wait: bool = True,
+        ordering: Any = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         store = self._collections.setdefault(collection_name, {})
         for point in points:
             point_id = _point_field(point, "id")
             vector = _point_field(point, "vector") or []
             payload = _point_field(point, "payload") or {}
             store[point_id] = {"vector": list(vector), "payload": dict(payload)}
-        return {"status": "completed"}
+        return {"status": "completed", "operation_id": 1}
 
-    def delete(self, *, collection_name: str, points_selector: Any) -> dict[str, Any]:
+    def delete(
+        self,
+        *,
+        collection_name: str,
+        points_selector: Any,
+        wait: bool = True,
+        ordering: Any = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         store = self._collections.get(collection_name, {})
         removed = 0
         for point_id in _selector_ids(points_selector):
             if point_id in store:
                 del store[point_id]
                 removed += 1
-        return {"status": "completed", "removed": removed}
+        return {"status": "completed", "operation_id": 1, "removed": removed}
 
     # -- reads ----------------------------------------------------------------
     def retrieve(

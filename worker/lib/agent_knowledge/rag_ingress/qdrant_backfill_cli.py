@@ -9,9 +9,9 @@
 
 사용법(argparse 순서): GLOBAL 옵션(--collection / --checkpoint / --submitted /
 --qdrant-url / --embedding-concurrency)은 서브커맨드 앞에 오고, 서브커맨드 전용
-옵션(--limit / --create-collection)은 서브커맨드 뒤에 온다::
+옵션(--limit)은 서브커맨드 뒤에 온다::
 
-    qdrant-backfill --collection NAME --qdrant-url URL run --limit 10 --create-collection
+    qdrant-backfill --collection NAME --qdrant-url URL run --limit 10
     qdrant-backfill --collection NAME --submitted FILE rollback
 
 source/authority: CouchDB source plane(go-forward recall authority; ledger
@@ -21,9 +21,9 @@ source/authority: CouchDB source plane(go-forward recall authority; ledger
 안전장치:
 - ``run``은 명시적 ``--collection``이 필수라서 live upsert가 default 이름으로
   흘러갈 수 없다(staging 이름은 허용되며, live 이름은 operator가 직접 입력할 때만 쓴다).
-- ``run``/``rollback``은 ``ensure_collection=False``로 adapter를 만든다: 존재하지
-  않는 target collection은 fail-closed이며(서버측에서 조용히 생성되지 않는다),
-  ``run``은 최초 staging 셋업을 위해 ``--create-collection``을 넘길 수 있다.
+- ``run``/``rollback``은 collection을 절대 생성하지 않는다. 존재하지 않는 target은
+  fail-closed이며 initial provisioning은 별도 operator-only API 소유다. 레거시
+  ``--create-collection`` 입력도 명시적으로 거부한다.
 - MIRROR-ONLY: CLI는 CouchDB primary나 RetiredIndexBridge에 쓰지 않고, dual-write backend도
   만들지 않는다. backfill은 CouchDB를 읽고(read-only materialize) Qdrant point만
   upsert/delete한다. RetiredIndexBridge는 parity의 primary fetch에서만 닿고 backfill에서는 닿지 않는다.
@@ -41,6 +41,13 @@ import os
 from pathlib import Path
 from typing import Any
 
+from agent_knowledge.qdrant_write_gateway_runtime import (
+    QdrantMutationSource,
+    QdrantWriteActivation,
+    qdrant_write_activation_from_environment,
+    qdrant_write_gateway_generation_from_environment,
+)
+
 from .qdrant_backfill import (
     backfill_session_memory,
     iter_projected_session_memories,
@@ -49,6 +56,8 @@ from .qdrant_backfill import (
 
 # live mirror collection 이름(``run``에서는 operator가 직접 입력해야 한다).
 LIVE_COLLECTION_NAME = "neurons_mirror_gemini_3072_v1"
+RUN_QDRANT_MUTATION_SOURCE = QdrantMutationSource.BACKFILL
+ROLLBACK_QDRANT_MUTATION_SOURCE = QdrantMutationSource.REPAIR
 
 
 # --------------------------------------------------------------------------- IO
@@ -139,36 +148,74 @@ def _build_store(args):
     return CouchDBHttpSourceStore(base_url=couchdb_url, db=couchdb_db, auth_header=auth_header)
 
 
-def _build_adapter(args, *, collection_name: str, ensure_collection: bool):
+def _build_adapter(
+    args,
+    *,
+    collection_name: str,
+    source: QdrantMutationSource,
+    ensure_collection: bool = False,
+):
     """remote mirror adapter를 만든다.
 
-    run/rollback에서는 ``ensure_collection``이 False다: 존재하지 않는 target
-    collection은 서버측에서 조용히 생성되지 않고 fail-closed된다(해당 collection
-    이름을 담은 SystemExit). 최초 생성을 원하면 ``run``에 ``--create-collection``을 넘긴다.
+    run/rollback에서는 ``ensure_collection``이 False다. 존재하지 않는 target
+    collection은 서버측에서 조용히 생성되지 않고 fail-closed된다. True는 레거시
+    CLI 입력 방어용이며 operator-only provisioning 경계로 보내기 위해 거부한다.
     """
+    if ensure_collection:
+        raise SystemExit(
+            "collection activation is operator-only; use the explicit operator provisioning API"
+        )
     from .qdrant_docling_mirror import (
+        FOUNDATION_DIRECT_WRITE_CONTRACT,
         PassthroughMarkdownNormalizer,
         build_remote_qdrant_docling_mirror_adapter,
+        build_remote_qdrant_docling_sidecar_adapter,
     )
     from .qdrant_embedding import build_openai_embedding_provider
 
     # --qdrant-url가 QDRANT_URL env보다 우선한다(help 문구와 일치). 배포 러너는
     # QDRANT_URL env를 세팅하므로 env는 fallback으로 유지한다.
     url = str(args.qdrant_url or os.environ.get("QDRANT_URL") or "").strip()
-    adapter = build_remote_qdrant_docling_mirror_adapter(
-        url=url,
-        collection_name=collection_name,
-        embedding_provider=build_openai_embedding_provider(environ=os.environ),
-        normalizer=PassthroughMarkdownNormalizer(),
-        ensure_collection=ensure_collection,
-    )
+    activation = qdrant_write_activation_from_environment(os.environ)
+    if activation is QdrantWriteActivation.FOUNDATION_INACTIVE:
+        raise SystemExit("Qdrant write activation is not active")
+    common = {
+        "collection_name": collection_name,
+        "embedding_provider": build_openai_embedding_provider(environ=os.environ),
+        "normalizer": PassthroughMarkdownNormalizer(),
+    }
+    if activation is QdrantWriteActivation.FOUNDATION_DIRECT:
+        adapter = build_remote_qdrant_docling_mirror_adapter(
+            url=url,
+            direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
+            **common,
+        )
+    else:
+        adapter = build_remote_qdrant_docling_sidecar_adapter(
+            read_url=url,
+            read_api_key_path=str(os.environ.get("QDRANT_READ_API_KEY_FILE") or ""),
+            gateway_endpoint=str(
+                os.environ.get("QDRANT_WRITE_GATEWAY_ENDPOINT") or ""
+            ),
+            gateway_token_path=str(
+                os.environ.get("QDRANT_WRITE_GATEWAY_TOKEN_FILE") or ""
+            ),
+            gateway_ca_path=str(
+                os.environ.get("QDRANT_WRITE_GATEWAY_CA_FILE") or ""
+            ),
+            gateway_generation=qdrant_write_gateway_generation_from_environment(
+                os.environ
+            ),
+            source=source,
+            **common,
+        )
     if not ensure_collection:
         exists = adapter.collection_exists()
         if exists is False:
             raise SystemExit(
                 f"target collection이 존재하지 않는다: {collection_name!r}. "
-                "암묵적 생성을 거부한다. 새 collection을 만들려면 --create-collection"
-                "(run 전용)을 넘기거나 --collection 이름을 고쳐라."
+                "암묵적 생성을 거부한다. operator-only provisioning API로 먼저 "
+                "활성화하거나 --collection 이름을 고쳐라."
             )
     return adapter
 
@@ -208,11 +255,12 @@ def _cmd_run(args) -> int:
     if not args.collection:
         raise SystemExit("run에는 명시적 --collection이 필요하다(우발적 live write를 막기 위해 default를 거부)")
     store = _build_store(args)
-    # 기본: collection을 절대 생성하지 않는다(오타는 fail-closed). --create-collection은
-    # staging 셋업 한정으로 최초 생성을 opt-in한다.
+    # collection을 절대 생성하지 않는다. 레거시 --create-collection도 operator-only
+    # provisioning 경계를 우회할 수 없으며 _build_adapter에서 거부된다.
     adapter = _build_adapter(
         args,
         collection_name=args.collection,
+        source=RUN_QDRANT_MUTATION_SOURCE,
         ensure_collection=bool(getattr(args, "create_collection", False)),
     )
     already = _load_checkpoint_hashes(args.checkpoint)
@@ -245,7 +293,12 @@ def _cmd_rollback(args) -> int:
         raise SystemExit("rollback에는 명시적 --collection이 필요하다")
     # rollback은 collection을 절대 생성하지 않는다: 존재하지 않는 collection에서의
     # 삭제는 의미가 없고 오타는 반드시 fail-closed되어야 한다.
-    adapter = _build_adapter(args, collection_name=args.collection, ensure_collection=False)
+    adapter = _build_adapter(
+        args,
+        collection_name=args.collection,
+        source=ROLLBACK_QDRANT_MUTATION_SOURCE,
+        ensure_collection=False,
+    )
     submitted = _load_submitted_jsonl(args.submitted)
     report = rollback_submitted(adapter=adapter, submitted=submitted)
     out = report.to_dict()
@@ -311,7 +364,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--create-collection",
         action="store_true",
-        help="없는 collection의 최초 생성을 허용한다(staging 셋업 전용; 기본 off)",
+        help="레거시 호환 입력; operator-only provisioning 경계 때문에 항상 거부된다",
     )
     sub.add_parser("rollback", help="기록된 point를 삭제한다(--submitted 필수)")
     sub.add_parser("parity", help="parity soak 엔트리포인트")

@@ -17,6 +17,7 @@ from agent_knowledge.rag_ingress.qdrant_authority_join import (
     join_mirror_hits_to_authority,
 )
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
+    FOUNDATION_DIRECT_WRITE_CONTRACT,
     HashEmbeddingProvider,
     PassthroughMarkdownNormalizer,
     QdrantDoclingMirrorAdapter,
@@ -155,6 +156,7 @@ def test_unresolved_hit_dropped_by_default_kept_flagged_otherwise():
 def _adapter():
     return QdrantDoclingMirrorAdapter(
         client=InMemoryQdrantClient(),
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=HashEmbeddingProvider(size=32),
     )

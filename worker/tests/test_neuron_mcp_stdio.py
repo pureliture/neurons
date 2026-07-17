@@ -1325,20 +1325,23 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_
     assert packet["preference_artifact_memory"]["preference_object_pack"]["proposal_preference_count"] >= 1
     assert packet["preference_artifact_memory"]["html_visualization_route_smoke"]["route"] == "html_visualization_preference"
     assert packet["preference_artifact_memory"]["artifact_review_check"]["raw_artifact_body_returned"] is False
-    assert packet["permission_sensitive_audit"]["schema_version"] == "permission_sensitive_runtime_audit_evidence.v1"
-    assert len(packet["permission_sensitive_audit"]["audit_events"]) == 3
-    assert {event["action"] for event in packet["permission_sensitive_audit"]["audit_events"]} == {
-        BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
-        BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
-        BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
-    }
-    assert all(
-        event["permission"] == "denied"
-        and event["authority_write_performed"] is False
-        and event["production_mutation_performed"] is False
-        for event in packet["permission_sensitive_audit"]["audit_events"]
+    assert "permission_sensitive_audit" not in packet
+    assert packet["collector"]["permission_sensitive_audit_collected"] is False
+    assert packet["collector"]["permission_sensitive_audit_collection_status"] == (
+        "not_collected"
     )
-    assert packet["permission_sensitive_audit"]["audit_store"]["status"] == "recorded"
+    assert packet["collector"]["permission_sensitive_audit_schema"] == ""
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=packet)
+    permission_claim = next(
+        claim
+        for claim in report["claims"]
+        if claim["claim_id"] == "live.production.permission_sensitive_audit"
+    )
+    assert permission_claim["status"] == "not_validated"
+    assert permission_claim["gaps"] == [
+        "permission_sensitive_audit_unverified",
+        "product_marker_audit_unverified",
+    ]
     assert packet["agent_context_startup_runtime"]["schema_version"] == "agent_context_startup_runtime_evidence.v1"
     assert packet["agent_context_startup_runtime"]["startup_context"]["loaded_on_startup"] is True
     assert packet["agent_context_startup_runtime"]["startup_context"]["surface_policy"]["mutation_allowed"] is False

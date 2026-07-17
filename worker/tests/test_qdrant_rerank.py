@@ -14,6 +14,7 @@ from agent_knowledge.rag_ingress.qdrant_authority_join import (
     join_mirror_hits_to_authority,
 )
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
+    FOUNDATION_DIRECT_WRITE_CONTRACT,
     HashEmbeddingProvider,
     PassthroughMarkdownNormalizer,
     QdrantDoclingMirrorAdapter,
@@ -176,6 +177,7 @@ def test_query_then_rerank_then_authority_join_compose():
     client = InMemoryQdrantClient()
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=HashEmbeddingProvider(size=32),
     )

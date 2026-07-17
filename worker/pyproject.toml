@@ -41,6 +41,8 @@ dev = [
 
 [project.scripts]
 neuron-knowledge = "agent_knowledge.cli:main"
+neurons-qdrant-write-gateway = "agent_knowledge.qdrant_write_gateway_server:main"
+product-marker-activation = "agent_knowledge.product_marker_activation_cli:main"
 rag-ingress-queue = "agent_knowledge.rag_ingress.server_runtime:main"
 rag-ingress-worker = "agent_knowledge.rag_ingress.shadow_worker:main"
 rag-ingress-state = "agent_knowledge.rag_ingress.state_cli:main"

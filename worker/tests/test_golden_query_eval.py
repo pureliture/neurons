@@ -1406,12 +1406,12 @@ def test_product_activation_progress_keeps_p2_to_p9_scope_visible():
     assert evidence["P8"]["runtime_evidence_collector_preference_proposal_count"] >= 1
     assert evidence["P8"]["runtime_evidence_collector_preference_html_route"] == "html_visualization_preference"
     assert evidence["P8"]["runtime_evidence_collector_preference_artifact_check_status"] == "pass"
-    assert (
-        evidence["P8"]["runtime_evidence_collector_permission_audit_schema"]
-        == "permission_sensitive_runtime_audit_evidence.v1"
+    assert evidence["P8"]["runtime_evidence_collector_permission_audit_collection_status"] == (
+        "not_collected"
     )
-    assert evidence["P8"]["runtime_evidence_collector_permission_audit_event_count"] == 3
-    assert evidence["P8"]["runtime_evidence_collector_permission_audit_store_status"] == "recorded"
+    assert evidence["P8"]["runtime_evidence_collector_permission_audit_schema"] == ""
+    assert evidence["P8"]["runtime_evidence_collector_permission_audit_event_count"] == 0
+    assert evidence["P8"]["runtime_evidence_collector_permission_audit_store_status"] == ""
     assert (
         evidence["P8"]["runtime_evidence_collector_agent_context_startup_schema"]
         == "agent_context_startup_runtime_evidence.v1"
@@ -1806,6 +1806,34 @@ def test_product_activation_progress_keeps_p8_permission_audit_gap_when_identity
     assert p8_summary["source_commit_matches_pr_head"] is True
     assert report["next_phase"] == "P8"
     assert report["production_mutation_performed"] is False
+
+
+def test_product_activation_progress_audit_off_has_exact_two_p8_gaps():
+    evidence = _valid_p6_p7_p8_runtime_evidence(live=True)
+    evidence.pop("permission_sensitive_audit")
+
+    report = build_product_activation_progress_report(
+        live_evidence=evidence,
+        expected_commit=evidence["expected_commit"],
+    )
+
+    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
+    p8 = next(
+        item for item in report["product_evidence_summary"] if item["phase"] == "P8"
+    )
+
+    assert checks["P8"]["result"] == "PASS_WITH_GAPS"
+    assert checks["P8"]["gaps"] == [
+        "p8_permission_sensitive_audit_unverified",
+        "p8_product_marker_audit_unverified",
+    ]
+    assert p8["status"] == "PASS_WITH_GAPS"
+    assert p8["gaps"] == [
+        "permission_sensitive_audit_unverified",
+        "product_marker_audit_unverified",
+    ]
+    assert p8["permission_audit_claim_status"] == "not_validated"
+    assert p8["production_mutation_performed"] is False
 
 
 def test_product_activation_progress_keeps_p8_live_gap_for_local_replay_runtime_authority_evidence():
@@ -2541,6 +2569,7 @@ def test_product_evidence_summary_marks_p8_runtime_unverified_as_gap_not_pass():
                 "runtime_evidence_collector_preference_proposal_count": 1,
                 "runtime_evidence_collector_preference_html_route": "html_visualization_preference",
                 "runtime_evidence_collector_preference_artifact_check_status": "pass",
+                "runtime_evidence_collector_permission_audit_collection_status": "collected",
                 "runtime_evidence_collector_permission_audit_schema": "permission_sensitive_runtime_audit_evidence.v1",
                 "runtime_evidence_collector_permission_audit_event_count": 3,
                 "runtime_evidence_collector_permission_audit_store_status": "recorded",

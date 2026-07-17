@@ -570,6 +570,9 @@ def _dispatch_brain_source_to_candidate_runtime_readiness_tool(
         if isinstance(shadow_evidence, Mapping)
         else None,
         expected_commit=str(arguments.get("expected_commit") or ""),
+        expected_build_association_hash=str(
+            arguments.get("expected_build_association_hash") or ""
+        ),
         evidence_collection_plan=arguments.get("evidence_collection_plan") is True,
         evidence_packet_template=arguments.get("evidence_packet_template") is True,
         collect_shadow_evidence=arguments.get("collect_shadow_evidence") is True,

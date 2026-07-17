@@ -17,6 +17,13 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from agent_knowledge.qdrant_write_gateway_runtime import (
+    QdrantMutationSource,
+    QdrantWriteActivation,
+    qdrant_write_activation_from_environment,
+    qdrant_write_gateway_generation_from_environment,
+)
+
 from .retired_index_bridge import (
     BackendDocumentHandle,
     BackendStatusDetail,
@@ -26,6 +33,7 @@ from .retired_index_bridge import (
 from .rag_ready_document import RagReadyDocument
 
 MirrorOutcomeHook = Optional[Callable[["MirrorWriteOutcome"], None]]
+QDRANT_MUTATION_SOURCE = QdrantMutationSource.NORMAL_INGEST
 
 
 @dataclass(frozen=True)
@@ -108,20 +116,41 @@ def build_qdrant_mirror_from_env(environ: Any) -> Any | None:
     path only); tests inject a mirror builder instead.
     """
 
-    url = str(environ.get("QDRANT_URL") or "").strip()
-    if not url:
+    activation = qdrant_write_activation_from_environment(environ)
+    if activation is QdrantWriteActivation.FOUNDATION_INACTIVE:
+        return None
+    read_url = str(environ.get("QDRANT_URL") or "").strip()
+    if not read_url:
         return None
     from .qdrant_docling_mirror import (
         DEFAULT_COLLECTION_NAME,
+        FOUNDATION_DIRECT_WRITE_CONTRACT,
         PassthroughMarkdownNormalizer,
         build_remote_qdrant_docling_mirror_adapter,
+        build_remote_qdrant_docling_sidecar_adapter,
     )
     from .qdrant_embedding import build_openai_embedding_provider
 
     collection = str(environ.get("QDRANT_COLLECTION") or DEFAULT_COLLECTION_NAME).strip()
-    return build_remote_qdrant_docling_mirror_adapter(
-        url=url,
+    if activation is QdrantWriteActivation.FOUNDATION_DIRECT:
+        return build_remote_qdrant_docling_mirror_adapter(
+            url=read_url,
+            collection_name=collection,
+            embedding_provider=build_openai_embedding_provider(environ=environ),
+            normalizer=PassthroughMarkdownNormalizer(),
+            direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
+        )
+    return build_remote_qdrant_docling_sidecar_adapter(
+        read_url=read_url,
+        read_api_key_path=str(environ.get("QDRANT_READ_API_KEY_FILE") or ""),
+        gateway_endpoint=str(environ.get("QDRANT_WRITE_GATEWAY_ENDPOINT") or ""),
+        gateway_token_path=str(
+            environ.get("QDRANT_WRITE_GATEWAY_TOKEN_FILE") or ""
+        ),
+        gateway_ca_path=str(environ.get("QDRANT_WRITE_GATEWAY_CA_FILE") or ""),
+        gateway_generation=qdrant_write_gateway_generation_from_environment(environ),
         collection_name=collection,
+        source=QDRANT_MUTATION_SOURCE,
         embedding_provider=build_openai_embedding_provider(environ=environ),
         normalizer=PassthroughMarkdownNormalizer(),
     )
