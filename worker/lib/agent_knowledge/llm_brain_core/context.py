@@ -64,7 +64,7 @@ def _recall_safe_artifacts(artifacts: list[Any]) -> list[Any]:
 def _is_synthetic_canary_episode(episode: Any) -> bool:
     payload = getattr(episode, "payload", None)
     if not isinstance(payload, Mapping):
-        return False
+        return True
     source_providers = payload.get("source_providers", ())
     if not isinstance(source_providers, (list, tuple, set, frozenset)):
         source_providers = (source_providers,)
