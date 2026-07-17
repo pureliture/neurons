@@ -3,10 +3,16 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+from .production_authority_permission import (
+    PRODUCTION_OBJECT_AUTHORITY_WRITE_CAPABILITY,
+    allowed_object_class_gap,
+    evaluate_production_object_authority_permission,
+)
 
 
 SINGLE_BOUNDED_DENIAL_ACTION = "single_bounded_denial.v1"
@@ -22,9 +28,34 @@ CREATE TABLE IF NOT EXISTS permission_denials (
     permission TEXT NOT NULL CHECK (permission = 'denied'),
     authority_write_performed INTEGER NOT NULL CHECK (authority_write_performed = 0),
     production_mutation_performed INTEGER NOT NULL CHECK (production_mutation_performed = 0),
-    appended_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    appended_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (actor_ref_hash)
 )
 """
+_CANONICAL_DECISION_KEYS = frozenset(
+    {
+        "allowed",
+        "gate_provided",
+        "missing_gate_evidence",
+        "approval_ref_hash",
+        "project",
+        "target_object_id",
+    }
+)
+_REQUIRED_AUDIT_DENIAL_GAPS = frozenset(
+    {
+        "approved",
+        "approval_ref",
+        "single_project_single_object_scope",
+        "project_scope_match",
+        "max_objects_1",
+        "configured_deployed_mcp_identity_matches_source",
+        "read_after_write_smoke_plan",
+        "rollback_or_supersession_plan",
+        "no_raw_private_evidence",
+        allowed_object_class_gap(),
+    }
+)
 
 
 class PermissionAuditStoreError(RuntimeError):
@@ -34,8 +65,18 @@ class PermissionAuditStoreError(RuntimeError):
 class PermissionAuditStore:
     """Append/read-back store isolated from product authority and corpus state."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        denial_policy_evaluator: Callable[..., Mapping[str, Any]] = (
+            evaluate_production_object_authority_permission
+        ),
+    ) -> None:
+        if not callable(denial_policy_evaluator):
+            raise ValueError("permission-audit denial policy evaluator is required")
         self._path = Path(path)
+        self._denial_policy_evaluator = denial_policy_evaluator
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self._path, timeout=30) as connection:
             connection.execute(_STORE_SCHEMA)
@@ -61,6 +102,7 @@ class PermissionAuditStore:
             "check (permission = 'denied')",
             "check (authority_write_performed = 0)",
             "check (production_mutation_performed = 0)",
+            "unique (actor_ref_hash)",
         )
         if (
             [str(row[1]) for row in columns] != expected_columns
@@ -86,23 +128,56 @@ class PermissionAuditStore:
         with sqlite3.connect(self._path, timeout=30, isolation_level=None) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                cursor = connection.execute(
+                existing = connection.execute(
                     """
-                    INSERT INTO permission_denials (
-                        request_hash,
-                        schema_version,
-                        actor_ref_hash,
-                        append_attempt_hash,
-                        action,
-                        permission,
-                        authority_write_performed,
-                        production_mutation_performed
-                    ) VALUES (?, 'permission_audit_store_event.v2', ?, ?, ?, 'denied', 0, 0)
-                    ON CONFLICT(request_hash) DO NOTHING
+                    SELECT request_hash, actor_ref_hash
+                    FROM permission_denials
+                    WHERE request_hash = ? OR actor_ref_hash = ?
                     """,
-                    (request_hash, actor_ref_hash, append_attempt_hash, action),
-                )
-                appended = cursor.rowcount
+                    (request_hash, actor_ref_hash),
+                ).fetchall()
+                if len(existing) > 1:
+                    raise PermissionAuditStoreError(
+                        "permission-audit single-winner invariant failed"
+                    )
+                if existing:
+                    existing_request_hash, existing_actor_ref_hash = existing[0]
+                    if (
+                        existing_request_hash != request_hash
+                        or existing_actor_ref_hash != actor_ref_hash
+                    ):
+                        raise PermissionAuditStoreError(
+                            "permission-audit bound actor already consumed"
+                        )
+                    appended = 0
+                else:
+                    decision = self._denial_policy_evaluator(
+                        {},
+                        capability=PRODUCTION_OBJECT_AUTHORITY_WRITE_CAPABILITY,
+                        action=action,
+                        # Prove that the human gate itself denies the request even
+                        # under the maximally permissive product capability state.
+                        # This sidecar has no product write client or credential.
+                        service_write_enabled=True,
+                        ledger_read_only=False,
+                    )
+                    _validate_canonical_denial_decision(decision)
+                    cursor = connection.execute(
+                        """
+                        INSERT INTO permission_denials (
+                            request_hash,
+                            schema_version,
+                            actor_ref_hash,
+                            append_attempt_hash,
+                            action,
+                            permission,
+                            authority_write_performed,
+                            production_mutation_performed
+                        ) VALUES (?, 'permission_audit_store_event.v2', ?, ?, ?, 'denied', 0, 0)
+                        """,
+                        (request_hash, actor_ref_hash, append_attempt_hash, action),
+                    )
+                    appended = cursor.rowcount
                 connection.execute("COMMIT")
             except BaseException:
                 connection.execute("ROLLBACK")
@@ -126,7 +201,18 @@ class PermissionAuditStore:
             "read_after_write_status": "validated",
             "request_hash": request_hash,
             "append_attempt_hash": readback["append_attempt_hash"],
+            "schema_version": "bounded_permission_denial_result.v1",
+            "action": readback["action"],
+            "ledger_scope": "production",
+            "permission": readback["permission"],
+            "authority_write_performed": readback["authority_write_performed"],
             "production_mutation_performed": False,
+            "actor_ref_hash": readback["actor_ref_hash"],
+            "protected_values_returned": False,
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
         }
 
     def readback(self, *, request_hash: str) -> dict[str, object]:
@@ -184,6 +270,24 @@ class PermissionAuditStore:
             "authority_write_performed": False,
             "production_mutation_performed": False,
         }
+
+
+def _validate_canonical_denial_decision(value: Mapping[str, Any]) -> None:
+    if not isinstance(value, Mapping) or set(value) != _CANONICAL_DECISION_KEYS:
+        raise PermissionAuditStoreError("permission-audit denial policy mismatch")
+    missing = value.get("missing_gate_evidence")
+    if (
+        value.get("allowed") is not False
+        or value.get("gate_provided") is not False
+        or not isinstance(missing, list)
+        or not _REQUIRED_AUDIT_DENIAL_GAPS.issubset(set(missing))
+        or "service_production_object_authority_write_flag" in missing
+        or "writable_ledger" in missing
+        or value.get("approval_ref_hash") != ""
+        or value.get("project") != ""
+        or value.get("target_object_id") != ""
+    ):
+        raise PermissionAuditStoreError("permission-audit denial policy mismatch")
 
 
 def _require_hash_ref(value: str, *, field: str) -> None:

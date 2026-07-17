@@ -4955,6 +4955,8 @@ def _deployment_evidence_binding_claim(
         str(external_expected_commit or packet_expected_commit or ""), max_chars=80
     )
     failures: list[str] = []
+    if binding and external_expected_commit and not _is_commit_sha(external_expected_commit):
+        failures.append("external_expected_commit_anchor_invalid")
     if (
         desired.get("source_commit")
         and deployed.get("source_commit")

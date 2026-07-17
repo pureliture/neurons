@@ -24,6 +24,28 @@ class _Response:
         return self._payload[:limit] if limit >= 0 else self._payload
 
 
+def _bounded_store_result(*, request_hash, actor_ref_hash, append_count=1):
+    return {
+        "status": "recorded",
+        "append_count": append_count,
+        "stored_row_count": 1,
+        "read_after_write_status": "validated",
+        "request_hash": request_hash,
+        "schema_version": "bounded_permission_denial_result.v1",
+        "action": "single_bounded_denial.v1",
+        "ledger_scope": "production",
+        "permission": "denied",
+        "authority_write_performed": False,
+        "production_mutation_performed": False,
+        "actor_ref_hash": actor_ref_hash,
+        "protected_values_returned": False,
+        "raw_private_evidence_returned": False,
+        "secret_returned": False,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": False,
+    }
+
+
 def test_kubernetes_token_reviewer_uses_fixed_audience_and_does_not_return_credentials():
     from agent_knowledge.permission_audit import (
         KubernetesTokenReviewer,
@@ -185,13 +207,11 @@ def test_audit_store_client_rejects_non_loopback_and_returns_sanitized_result():
         body = json.loads(request.data)
         return _Response(
             {
-                "status": "recorded",
-                "append_count": 1,
-                "stored_row_count": 1,
-                "read_after_write_status": "validated",
-                "request_hash": body["request_hash"],
+                **_bounded_store_result(
+                    request_hash=body["request_hash"],
+                    actor_ref_hash=body["actor_ref_hash"],
+                ),
                 "append_attempt_hash": body["append_attempt_hash"],
-                "production_mutation_performed": False,
             }
         )
 
@@ -207,15 +227,10 @@ def test_audit_store_client_rejects_non_loopback_and_returns_sanitized_result():
 
     assert requests[0][0].full_url == "http://127.0.0.1:8771/append-denied-once"
     assert requests[0][1]["timeout"] == 5
-    assert result["append_count"] == 1
-    assert set(result) == {
-        "status",
-        "append_count",
-        "stored_row_count",
-        "read_after_write_status",
-        "request_hash",
-        "production_mutation_performed",
-    }
+    assert result == _bounded_store_result(
+        request_hash="sha256:" + "d" * 64,
+        actor_ref_hash="sha256:" + "c" * 64,
+    )
 
 
 def test_audit_store_client_recovers_lost_append_response_with_one_readback_only():
@@ -262,14 +277,10 @@ def test_audit_store_client_recovers_lost_append_response_with_one_readback_only
         "readback",
     ]
     assert requests[1][1] == {"request_hash": "sha256:" + "d" * 64}
-    assert result == {
-        "status": "recorded",
-        "append_count": 1,
-        "stored_row_count": 1,
-        "read_after_write_status": "validated",
-        "request_hash": "sha256:" + "d" * 64,
-        "production_mutation_performed": False,
-    }
+    assert result == _bounded_store_result(
+        request_hash="sha256:" + "d" * 64,
+        actor_ref_hash="sha256:" + "c" * 64,
+    )
 
 
 def test_audit_store_client_does_not_claim_old_row_after_lost_append_response():
@@ -357,17 +368,53 @@ def test_independent_product_mutation_sentinel_calls_each_actual_plane_once():
         )
 
 
-def test_postgres_database_marker_is_one_bounded_read_only_statement():
+def test_independent_product_mutation_sentinel_rejects_bound_methods_from_same_owner():
+    from agent_knowledge.permission_audit import IndependentProductMutationSentinelReader
+
+    class SharedProvider:
+        def authority_ledger(self):
+            return {"count": 1, "hash": "sha256:" + "1" * 64}
+
+        def corpus(self):
+            return {"count": 2, "hash": "sha256:" + "2" * 64}
+
+        def queue(self):
+            return {"count": 3, "hash": "sha256:" + "3" * 64}
+
+        def index(self):
+            return {"count": 4, "hash": "sha256:" + "4" * 64}
+
+        def product_db(self):
+            return {"count": 5, "hash": "sha256:" + "5" * 64}
+
+    shared = SharedProvider()
+
+    with pytest.raises(ValueError, match="distinct mutation sentinel providers"):
+        IndependentProductMutationSentinelReader(
+            {
+                "authority_ledger": shared.authority_ledger,
+                "corpus": shared.corpus,
+                "queue": shared.queue,
+                "index": shared.index,
+                "product_db": shared.product_db,
+            }
+        )
+
+
+def test_postgres_database_marker_reads_one_public_safe_product_plane_marker():
     from agent_knowledge.permission_audit import PostgresDatabaseMutationMarkerReader
+    from agent_knowledge.postgres_db_adapter import _PgRow
 
     statements = []
 
     class Result:
-        def fetchone(self):
-            return {
-                "wal_lsn": "0/16B6A80",
-                "transaction_snapshot": "100:100:",
-            }
+        def fetchall(self):
+            return [
+                _PgRow(
+                    (11, "sha256:" + "5" * 64),
+                    ("count", "hash"),
+                )
+            ]
 
     class Connection:
         dialect = "postgres"
@@ -396,35 +443,33 @@ def test_postgres_database_marker_is_one_bounded_read_only_statement():
     state = PostgresDatabaseMutationMarkerReader(ReadOnlyLedger())()
 
     normalized_sql = " ".join(statements[0].split()).lower()
-    assert state["count"] == 1
-    assert state["hash"].startswith("sha256:")
+    assert state == {"count": 11, "hash": "sha256:" + "5" * 64}
     assert len(statements) == 1
-    assert "pg_current_wal_lsn()" in normalized_sql
-    assert "txid_current_snapshot()" in normalized_sql
-    assert "count(" not in normalized_sql
+    assert "from public.permission_audit_product_db_mutation_marker_v1" in normalized_sql
+    assert "mutation_count as count" in normalized_sql
+    assert "mutation_hash as hash" in normalized_sql
+    assert "limit 2" in normalized_sql
+    assert "pg_current_wal_lsn" not in normalized_sql
+    assert "txid" not in normalized_sql
     assert "xmin" not in normalized_sql
-    assert "from " not in normalized_sql
 
 
 @pytest.mark.parametrize(
-    ("wal_lsn", "transaction_snapshot"),
+    ("count", "marker_hash"),
     (
-        (None, "100:100:"),
-        ("0/16B6A80", None),
+        (None, "sha256:" + "5" * 64),
+        (11, None),
     ),
 )
-def test_postgres_database_marker_rejects_null_database_fields(
-    wal_lsn,
-    transaction_snapshot,
+def test_postgres_database_marker_rejects_null_product_plane_fields(
+    count,
+    marker_hash,
 ):
     from agent_knowledge.permission_audit import PostgresDatabaseMutationMarkerReader
 
     class Result:
-        def fetchone(self):
-            return {
-                "wal_lsn": wal_lsn,
-                "transaction_snapshot": transaction_snapshot,
-            }
+        def fetchall(self):
+            return [{"count": count, "hash": marker_hash}]
 
     class Connection:
         dialect = "postgres"
@@ -487,7 +532,7 @@ def test_recall_service_wiring_enables_audit_only_with_explicit_cli_flag(tmp_pat
     assert disabled._permission_audit_product_sentinel_reader is None
 
 
-def test_recall_service_allows_audit_only_with_five_explicit_independent_providers(
+def test_recall_service_allows_audit_only_with_sentinels_and_atomic_store(
     tmp_path,
 ):
     from agent_knowledge import cli
@@ -523,6 +568,8 @@ def test_recall_service_allows_audit_only_with_five_explicit_independent_provide
     )
 
     assert enabled.allow_permission_sensitive_audit_probe is True
+    assert not hasattr(enabled, "_permission_audit_denial_request")
+    assert callable(enabled._permission_audit_store_append)
     assert enabled._permission_audit_product_sentinel_reader is not None
 
 
