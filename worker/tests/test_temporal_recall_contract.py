@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
-from agent_knowledge.llm_brain_core.context import BrainReadService
+from agent_knowledge.knowledge_search_service import (
+    _is_synthetic_canary_episode as _knowledge_search_is_synthetic_canary_episode,
+)
+from agent_knowledge.llm_brain_core.context import (
+    BrainReadService,
+    _is_synthetic_canary_episode as _context_is_synthetic_canary_episode,
+)
 from agent_knowledge.llm_brain_core.temporal import TemporalSelectorError, parse_temporal_selector
 from agent_knowledge.llm_brain_core._util import hash_payload
 from agent_knowledge.session_memory.brain_query import build_temporal_brain_query_response
@@ -49,6 +56,13 @@ class _RecordingBrainQueryService:
             "route": "temporal_work_recall",
             "results": [],
         }
+
+
+def test_malformed_graph_payload_is_excluded_from_every_recall_lane() -> None:
+    malformed = SimpleNamespace(payload=["not-a-mapping"])
+
+    assert _context_is_synthetic_canary_episode(malformed)
+    assert _knowledge_search_is_synthetic_canary_episode(malformed)
 
 
 def _mcp_object_query(service: object, **selector: str) -> dict:
@@ -782,9 +796,21 @@ def test_synthetic_canary_graph_episode_is_excluded_from_memory_search() -> None
         },
         observed_at="2026-07-15T11:02:00Z",
     )
+    canary_fact = OntologyEpisode.from_payload(
+        event_id="canary-graph-fact-event",
+        entity_type="GraphFact",
+        natural_id="canary-graph-fact",
+        payload={
+            "brain_id": "/project/neurons",
+            "project": "neurons",
+            "source_providers": ["lbrain-temporal-canary"],
+            "fact": "Synthetic canary graph fact",
+        },
+        observed_at="2026-07-15T11:02:00Z",
+    )
     service = BrainReadService(
         graph_adapter=FakeGraphMemoryAdapter(
-            [episode_from_session_artifact(canary), canary_task]
+            [episode_from_session_artifact(canary), canary_task, canary_fact]
         )
     )
 
