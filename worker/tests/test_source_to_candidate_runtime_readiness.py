@@ -374,6 +374,38 @@ def test_runtime_readiness_rejects_mismatched_external_expected_commit_anchor():
     assert "gitops_deployment_evidence_binding_external_expected_commit_mismatch" in report["gaps"]
 
 
+def test_runtime_readiness_rejects_all_zero_production_commit_anchor():
+    zero_commit = "0" * 40
+    evidence = _gitops_bound_live_evidence()
+    evidence["expected_commit"] = zero_commit
+    evidence["gitops_desired_state"]["source_commit"] = zero_commit
+    evidence["deployed_identity"]["source_commit"] = zero_commit
+    evidence["deployment_evidence_binding"] = build_deployment_evidence_binding(
+        expected_commit=zero_commit,
+        gitops_desired_state=evidence["gitops_desired_state"],
+        argo_reconciliation=evidence["argo_reconciliation"],
+        deployed_identity=evidence["deployed_identity"],
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit=zero_commit,
+    )
+
+    claim = next(
+        item
+        for item in report["claims"]
+        if item["claim_id"] == "ops.gitops_deployment_evidence_binding"
+    )
+    assert report["status"] == "FAIL"
+    assert claim["status"] == "failed"
+    assert "external_expected_commit_anchor_invalid" in claim["gaps"]
+    assert (
+        "gitops_deployment_evidence_binding_packet_expected_commit_invalid"
+        in claim["gaps"]
+    )
+
+
 @pytest.mark.parametrize(
     ("layer", "field", "value", "failed_claim"),
     [
