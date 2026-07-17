@@ -32,6 +32,7 @@ from ..model_connectors.structured_response import (
 _GRAPHITI_GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
 _MAX_EDGE_PROVENANCE_IDS = 500
+_MAX_EDGE_PROVENANCE_LOOKUPS_IN_FLIGHT = 8
 
 # Default async-call timeouts (seconds). Reads (search/retrieve) are expected to
 # return in seconds; writes (entity extraction via the LLM) can take much
@@ -487,19 +488,55 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 if missing_source_ids:
                     from graphiti_core.nodes import EpisodicNode
 
-                    for episode_id in missing_source_ids:
+                    async def _hydrate_source(episode_id: str) -> Any:
+                        return await EpisodicNode.get_by_uuid(self._graphiti.driver, episode_id)
+
+                    remaining_source_ids = iter(missing_source_ids)
+                    lookup_tasks: set[asyncio.Task[Any]] = set()
+
+                    def _start_next_lookup() -> bool:
+                        try:
+                            episode_id = next(remaining_source_ids)
+                        except StopIteration:
+                            return False
+                        lookup_tasks.add(asyncio.create_task(_hydrate_source(episode_id)))
+                        return True
+
+                    while (
+                        len(lookup_tasks) < _MAX_EDGE_PROVENANCE_LOOKUPS_IN_FLIGHT
+                        and _start_next_lookup()
+                    ):
+                        pass
+                    while lookup_tasks:
                         remaining_seconds = provenance_deadline - loop.time()
                         if remaining_seconds <= 0:
                             break
-                        try:
-                            node = await asyncio.wait_for(
-                                EpisodicNode.get_by_uuid(self._graphiti.driver, episode_id),
-                                timeout=remaining_seconds,
-                            )
-                        except Exception:
-                            continue
-                        if node is not None:
-                            hydrated_source_nodes.append(node)
+                        done, _ = await asyncio.wait(
+                            lookup_tasks,
+                            timeout=remaining_seconds,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if not done:
+                            break
+                        lookup_tasks.difference_update(done)
+                        for task in done:
+                            try:
+                                node = task.result()
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception:
+                                continue
+                            if node is not None:
+                                hydrated_source_nodes.append(node)
+                        while (
+                            len(lookup_tasks) < _MAX_EDGE_PROVENANCE_LOOKUPS_IN_FLIGHT
+                            and _start_next_lookup()
+                        ):
+                            pass
+                    if lookup_tasks:
+                        for task in lookup_tasks:
+                            task.cancel()
+                        await asyncio.gather(*lookup_tasks, return_exceptions=True)
             return (
                 list(edges or []),
                 episodes,
