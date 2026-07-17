@@ -17,6 +17,7 @@ from agent_knowledge.llm_brain_core.graphiti_adapter import (
     GraphitiNeo4jConfig,
     GraphitiNeo4jGraphMemoryAdapter,
     _AsyncLoopRunner,
+    _MAX_EDGE_PROVENANCE_LOOKUPS_IN_FLIGHT,
     _is_list_annotation,
     _placeholder_api_key,
     _ReasoningOpenAIGenericClient,
@@ -562,22 +563,117 @@ def test_graphiti_adapter_hydrates_recent_window_miss_and_rejects_scope_mismatch
     assert "edge_provenance_unresolved" in result.details
 
 
-def test_graphiti_adapter_bounds_slow_provenance_hydration_to_read_deadline(monkeypatch):
-    """Slow exact lookup degrades before it can consume another read window."""
+def test_graphiti_adapter_hydrates_missing_edge_sources_concurrently_within_deadline(monkeypatch):
+    """Independent exact sources must share one bounded read window fairly."""
     from graphiti_core.nodes import EpisodicNode
 
     graphiti = _FakeGraphiti()
-    graphiti.edges.append(
-        SimpleNamespace(
-            uuid="edge-slow-provenance",
-            name="RELATES_TO",
-            fact="Slow provenance must not extend the graph read.",
-            valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
-            invalid_at=None,
-            source_node_uuid="node-slow-a",
-            target_node_uuid="node-slow-b",
-            episodes=["slow-source-episode"],
+    source_count = _MAX_EDGE_PROVENANCE_LOOKUPS_IN_FLIGHT + 1
+    sources = [
+        _episode(
+            "Task",
+            f"task:concurrent-edge-source-{index}",
+            {
+                "brain_id": "/project/neurons",
+                "provider": "codex",
+                "task": f"Concurrent source {index}",
+            },
         )
+        for index in range(source_count)
+    ]
+    nodes = {
+        source.episode_id: SimpleNamespace(content=json.dumps(source.to_dict(), ensure_ascii=True, sort_keys=True))
+        for source in sources
+    }
+    active = 0
+    peak_active = 0
+    capacity_started = asyncio.Event()
+
+    async def _get_by_uuid(_driver, episode_id):
+        nonlocal active, peak_active
+        active += 1
+        peak_active = max(peak_active, active)
+        if active == _MAX_EDGE_PROVENANCE_LOOKUPS_IN_FLIGHT:
+            capacity_started.set()
+        try:
+            await capacity_started.wait()
+            await asyncio.sleep(0)
+            return nodes[episode_id]
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(EpisodicNode, "get_by_uuid", staticmethod(_get_by_uuid))
+    graphiti.edges.extend(
+        [
+            SimpleNamespace(
+                uuid=f"edge-concurrent-{index}",
+                name="RELATES_TO",
+                fact=f"Concurrent provenance {index} is retained.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid=f"node-concurrent-{index}-a",
+                target_node_uuid=f"node-concurrent-{index}-b",
+                episodes=[source.episode_id],
+            )
+            for index, source in enumerate(sources)
+        ]
+    )
+    runner = _AsyncLoopRunner(default_timeout=1)
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        read_timeout_seconds=0.2,
+        runner=runner,
+    )
+    try:
+        result = adapter.search_context(
+            brain_id="/project/neurons",
+            query="concurrent provenance",
+            entity_types=None,
+            limit=10,
+        )
+    finally:
+        runner.shutdown()
+
+    graph_facts = [episode for episode in result.episodes if episode.entity_type == "GraphFact"]
+    assert result.status == "available"
+    assert len(graph_facts) == source_count
+    assert peak_active == _MAX_EDGE_PROVENANCE_LOOKUPS_IN_FLIGHT
+
+
+def test_graphiti_adapter_bounds_slow_provenance_hydration_to_read_deadline(monkeypatch):
+    """A slow exact lookup degrades without blocking independent normal evidence."""
+    from graphiti_core.nodes import EpisodicNode
+
+    graphiti = _FakeGraphiti()
+    normal = _episode(
+        "Task",
+        "task:fast-source-during-slow-hydration",
+        {"brain_id": "/project/neurons", "provider": "codex", "task": "Fast graph source"},
+    )
+    graphiti.edges.extend(
+        [
+            SimpleNamespace(
+                uuid="edge-slow-provenance",
+                name="RELATES_TO",
+                fact="Slow provenance must not extend the graph read.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-slow-a",
+                target_node_uuid="node-slow-b",
+                episodes=["slow-source-episode"],
+            ),
+            SimpleNamespace(
+                uuid="edge-fast-provenance",
+                name="RELATES_TO",
+                fact="Fast provenance remains available.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-fast-a",
+                target_node_uuid="node-fast-b",
+                episodes=[normal.episode_id],
+            ),
+        ]
     )
 
     async def _slow_search(query, *, group_ids=None, num_results=10):
@@ -585,7 +681,9 @@ def test_graphiti_adapter_bounds_slow_provenance_hydration_to_read_deadline(monk
         await asyncio.sleep(0.12)
         return list(graphiti.edges)
 
-    async def _slow_get_by_uuid(_driver, _episode_id):
+    async def _slow_get_by_uuid(_driver, episode_id):
+        if episode_id == normal.episode_id:
+            return SimpleNamespace(content=json.dumps(normal.to_dict(), ensure_ascii=True, sort_keys=True))
         await asyncio.sleep(1)
         raise AssertionError("read timeout must cancel slow provenance lookup")
 
@@ -612,7 +710,8 @@ def test_graphiti_adapter_bounds_slow_provenance_hydration_to_read_deadline(monk
 
     assert elapsed < 0.28
     assert result.status == "degraded"
-    assert not [episode for episode in result.episodes if episode.entity_type == "GraphFact"]
+    graph_facts = [episode for episode in result.episodes if episode.entity_type == "GraphFact"]
+    assert [episode.payload["provider"] for episode in graph_facts] == ["codex"]
 
 
 def test_graphiti_adapter_keeps_episode_retrieval_when_edge_index_is_missing():
