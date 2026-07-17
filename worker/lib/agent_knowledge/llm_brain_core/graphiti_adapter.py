@@ -30,6 +30,8 @@ from ..model_connectors.structured_response import (
 )
 
 _GRAPHITI_GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
+_MAX_EDGE_PROVENANCE_IDS = 500
 
 # Default async-call timeouts (seconds). Reads (search/retrieve) are expected to
 # return in seconds; writes (entity extraction via the LLM) can take much
@@ -438,7 +440,12 @@ class GraphitiNeo4jGraphMemoryAdapter:
         group_id = _graphiti_group_id(brain_id or self._default_group_id)
         group_ids = [group_id] if group_id else None
 
-        async def _call() -> tuple[list[Any], list[Any], list[str], bool]:
+        async def _call() -> tuple[list[Any], list[Any], list[Any], list[str], bool]:
+            loop = asyncio.get_running_loop()
+            # Leave a small margin before the outer runner deadline so a slow
+            # provenance hydration degrades this read instead of starting a
+            # second full timeout window after search/retrieve has completed.
+            provenance_deadline = loop.time() + (self._read_timeout_seconds * 0.9)
             details: list[str] = ["graphiti_neo4j"]
             edge_degraded = False
             try:
@@ -451,34 +458,112 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 edges = []
                 edge_degraded = True
                 details.append(f"edge_search:{type(exc).__name__}")
-            episodes = await self._graphiti.retrieve_episodes(
-                reference_time=datetime.now(timezone.utc),
-                last_n=max(bounded * 5, bounded),
-                group_ids=group_ids,
+            episodes = list(
+                await self._graphiti.retrieve_episodes(
+                    reference_time=datetime.now(timezone.utc),
+                    last_n=max(bounded * 5, bounded),
+                    group_ids=group_ids,
+                )
+                or []
             )
-            return list(edges or []), list(episodes or []), details, edge_degraded
+            hydrated_source_nodes: list[Any] = []
+            edge_source_ids = _edge_source_episode_ids(list(edges or []))
+            if len(edge_source_ids) <= _MAX_EDGE_PROVENANCE_IDS:
+                known_source_ids = {
+                    episode.episode_id
+                    for episode_node in episodes
+                    if (episode := _episode_node_to_ontology(episode_node)) is not None
+                    and _episode_matches_graph_group(
+                        episode,
+                        expected_group_id=group_id,
+                        default_group_id=self._default_group_id,
+                    )
+                }
+                missing_source_ids = [
+                    episode_id
+                    for episode_id in edge_source_ids
+                    if episode_id not in known_source_ids
+                ]
+                if missing_source_ids:
+                    from graphiti_core.nodes import EpisodicNode
+
+                    for episode_id in missing_source_ids:
+                        remaining_seconds = provenance_deadline - loop.time()
+                        if remaining_seconds <= 0:
+                            break
+                        try:
+                            node = await asyncio.wait_for(
+                                EpisodicNode.get_by_uuid(self._graphiti.driver, episode_id),
+                                timeout=remaining_seconds,
+                            )
+                        except Exception:
+                            continue
+                        if node is not None:
+                            hydrated_source_nodes.append(node)
+            return (
+                list(edges or []),
+                episodes,
+                hydrated_source_nodes,
+                details,
+                edge_degraded,
+            )
 
         try:
-            edges, episodes, details, edge_degraded = self._runner.run(
+            edges, episodes, hydrated_source_nodes, details, edge_degraded = self._runner.run(
                 _call, timeout=self._read_timeout_seconds
             )
         except Exception as exc:
             return GraphMemoryResult(status="error", details=(type(exc).__name__,))
 
+        canonical_episodes = [
+            episode
+            for episode_node in episodes
+            if (episode := _episode_node_to_ontology(episode_node)) is not None
+            and _episode_matches_graph_group(
+                episode,
+                expected_group_id=group_id,
+                default_group_id=self._default_group_id,
+            )
+        ]
+        source_episodes_by_id = {episode.episode_id: episode for episode in canonical_episodes}
+        for source_node in hydrated_source_nodes:
+            episode = _episode_node_to_ontology(source_node)
+            if episode is None:
+                continue
+            if not _episode_matches_graph_group(
+                episode,
+                expected_group_id=group_id,
+                default_group_id=self._default_group_id,
+            ):
+                continue
+            source_episodes_by_id[episode.episode_id] = episode
+
         wanted = set(entity_types or [])
         terms = _terms(query)
         converted: list[OntologyEpisode] = []
-        for episode_node in episodes:
-            episode = _episode_node_to_ontology(episode_node)
-            if episode is None:
-                continue
+        for episode in canonical_episodes:
             if wanted and episode.entity_type not in wanted:
                 continue
             if terms and not _matches(episode.search_text(), terms):
                 continue
             converted.append(episode)
+        edge_provenance_degraded = False
         for edge in edges:
-            episode = _edge_to_ontology(edge)
+            source_episodes = _resolved_edge_source_episodes(
+                edge,
+                source_episodes_by_id=source_episodes_by_id,
+                expected_group_id=group_id,
+                default_group_id=self._default_group_id,
+            )
+            if source_episodes is None:
+                edge_provenance_degraded = True
+                continue
+            if any(
+                _episode_provider(episode) == _SYNTHETIC_CANARY_PROVIDER
+                for episode in source_episodes
+            ):
+                continue
+            episode = _edge_to_ontology(edge, source_episodes=source_episodes)
             if wanted and episode.entity_type not in wanted:
                 continue
             converted.append(episode)
@@ -487,11 +572,16 @@ class GraphitiNeo4jGraphMemoryAdapter:
         # Edge (relationship) search failure with surviving episode reads is a
         # partial result, not a healthy 'available' one. Separate it so downstream
         # gates cannot read a false-healthy graph_status.
-        if edge_degraded:
+        if edge_degraded or edge_provenance_degraded:
+            result_details = [*details]
+            if edge_provenance_degraded:
+                result_details.append("edge_provenance_unresolved")
+            if edge_degraded:
+                result_details.append("graph_edge_degraded")
             return GraphMemoryResult(
                 status="degraded",
                 episodes=tuple(converted[:bounded]),
-                details=tuple([*details, "graph_edge_degraded"]),
+                details=tuple(result_details),
             )
         return GraphMemoryResult(
             status="available",
@@ -1053,16 +1143,23 @@ def _episode_node_to_ontology(node: Any) -> OntologyEpisode | None:
     )
 
 
-def _edge_to_ontology(edge: Any) -> OntologyEpisode:
+def _edge_to_ontology(
+    edge: Any,
+    *,
+    source_episodes: tuple[OntologyEpisode, ...],
+) -> OntologyEpisode:
     edge_uuid = public_safe_text(str(getattr(edge, "uuid", "") or getattr(edge, "name", "") or ""), max_chars=200)
     fact = public_safe_text(str(getattr(edge, "fact", "") or getattr(edge, "name", "") or ""), max_chars=1024)
     valid_at = _datetime_to_iso(getattr(edge, "valid_at", None) or getattr(edge, "reference_time", None))
     invalid_at = _datetime_to_iso(getattr(edge, "invalid_at", None) or getattr(edge, "expired_at", None))
+    source_providers = sorted({_episode_provider(episode) for episode in source_episodes})
     payload = {
         "graphiti_edge_uuid": edge_uuid,
         "fact": fact,
         "source_node_uuid": public_safe_text(str(getattr(edge, "source_node_uuid", "") or ""), max_chars=200),
         "target_node_uuid": public_safe_text(str(getattr(edge, "target_node_uuid", "") or ""), max_chars=200),
+        "provider": source_providers[0] if len(source_providers) == 1 else "",
+        "source_providers": source_providers,
     }
     return OntologyEpisode.from_payload(
         event_id=f"evt:graphiti:{short_hash([edge_uuid, fact])}",
@@ -1075,6 +1172,70 @@ def _edge_to_ontology(edge: Any) -> OntologyEpisode:
         reference_time=valid_at or "unknown",
         extractor_version="graphiti-edge.1",
     )
+
+
+def _edge_source_episode_ids(edges: list[Any]) -> list[str]:
+    source_ids: list[str] = []
+    seen: set[str] = set()
+    for edge in edges:
+        raw_episode_ids = getattr(edge, "episodes", ())
+        if not isinstance(raw_episode_ids, (list, tuple, set, frozenset)):
+            continue
+        for episode_id in raw_episode_ids:
+            normalized = str(episode_id or "").strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                source_ids.append(normalized)
+    return source_ids
+
+
+def _resolved_edge_source_episodes(
+    edge: Any,
+    *,
+    source_episodes_by_id: dict[str, OntologyEpisode],
+    expected_group_id: str,
+    default_group_id: str,
+) -> tuple[OntologyEpisode, ...] | None:
+    raw_episode_ids = getattr(edge, "episodes", ())
+    if not isinstance(raw_episode_ids, (list, tuple, set, frozenset)):
+        return None
+    source_ids = tuple(
+        dict.fromkeys(
+            str(episode_id or "").strip()
+            for episode_id in raw_episode_ids
+            if str(episode_id or "").strip()
+        )
+    )
+    if not source_ids or len(source_ids) > _MAX_EDGE_PROVENANCE_IDS:
+        return None
+    source_episodes = tuple(source_episodes_by_id.get(episode_id) for episode_id in source_ids)
+    if any(episode is None for episode in source_episodes):
+        return None
+    resolved = tuple(episode for episode in source_episodes if episode is not None)
+    if any(
+        not _episode_provider(episode)
+        or not _episode_matches_graph_group(
+            episode,
+            expected_group_id=expected_group_id,
+            default_group_id=default_group_id,
+        )
+        for episode in resolved
+    ):
+        return None
+    return resolved
+
+
+def _episode_provider(episode: OntologyEpisode) -> str:
+    return str(episode.payload.get("provider") or "").strip().casefold()
+
+
+def _episode_matches_graph_group(
+    episode: OntologyEpisode,
+    *,
+    expected_group_id: str,
+    default_group_id: str,
+) -> bool:
+    return _graphiti_group_id(_group_id_for_episode(episode, default_group_id)) == expected_group_id
 
 
 def _group_id_for_episode(episode: OntologyEpisode, default_group_id: str) -> str:

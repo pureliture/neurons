@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -281,7 +282,11 @@ def test_episodic_default_path_still_saves_single_node_after_helper_extraction()
 
 def test_graphiti_adapter_search_rehydrates_domain_episode_and_graph_fact():
     graphiti = _FakeGraphiti()
-    task = _episode("Task", "task:graphiti", {"brain_id": "/project/neurons", "task": "Graphiti adapter"})
+    task = _episode(
+        "Task",
+        "task:graphiti",
+        {"brain_id": "/project/neurons", "provider": "codex", "task": "Graphiti adapter"},
+    )
     graphiti.episodes.append(
         SimpleNamespace(
             content=json.dumps(task.to_dict(), ensure_ascii=True, sort_keys=True),
@@ -297,6 +302,7 @@ def test_graphiti_adapter_search_rehydrates_domain_episode_and_graph_fact():
             invalid_at=None,
             source_node_uuid="node-a",
             target_node_uuid="node-b",
+            episodes=[task.episode_id],
         )
     )
     adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
@@ -319,6 +325,294 @@ def test_graphiti_adapter_search_rehydrates_domain_episode_and_graph_fact():
     assert {episode.entity_type for episode in all_results.episodes} == {"Task", "GraphFact"}
     assert graphiti.search_calls[0]["group_ids"][0].startswith("brain_")
     assert "/" not in graphiti.search_calls[0]["group_ids"][0]
+
+
+def test_graphiti_adapter_fails_closed_for_unresolved_or_canary_edge_provenance():
+    """Entity edges must inherit trusted source provider provenance before recall."""
+    graphiti = _FakeGraphiti()
+    normal = _episode(
+        "Task",
+        "task:normal-edge-source",
+        {"brain_id": "/project/neurons", "provider": "codex", "task": "Normal graph source"},
+    )
+    canary = _episode(
+        "Task",
+        "task:canary-edge-source",
+        {
+            "brain_id": "/project/neurons",
+            "provider": "lbrain-temporal-canary",
+            "task": "Synthetic graph source",
+        },
+    )
+    other_scope = _episode(
+        "Task",
+        "task:other-scope-edge-source",
+        {"brain_id": "/project/other", "provider": "codex", "task": "Other graph source"},
+    )
+    providerless = _episode(
+        "Task",
+        "task:providerless-edge-source",
+        {"brain_id": "/project/neurons", "task": "Unbound graph source"},
+    )
+    graphiti.episodes.extend(
+        [
+            SimpleNamespace(content=json.dumps(normal.to_dict(), ensure_ascii=True, sort_keys=True)),
+            SimpleNamespace(content=json.dumps(canary.to_dict(), ensure_ascii=True, sort_keys=True)),
+            SimpleNamespace(content=json.dumps(other_scope.to_dict(), ensure_ascii=True, sort_keys=True)),
+            SimpleNamespace(content=json.dumps(providerless.to_dict(), ensure_ascii=True, sort_keys=True)),
+        ]
+    )
+    graphiti.edges.extend(
+        [
+            SimpleNamespace(
+                uuid="edge-normal-provenance",
+                name="RELATES_TO",
+                fact="Normal edge provenance is retained.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-normal-a",
+                target_node_uuid="node-normal-b",
+                episodes=[normal.episode_id],
+            ),
+            SimpleNamespace(
+                uuid="edge-canary-provenance",
+                name="RELATES_TO",
+                fact="Synthetic edge provenance must not reach recall.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-canary-a",
+                target_node_uuid="node-canary-b",
+                episodes=[canary.episode_id],
+            ),
+            SimpleNamespace(
+                uuid="edge-mixed-provenance",
+                name="RELATES_TO",
+                fact="Mixed edge provenance must not reach recall.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-mixed-a",
+                target_node_uuid="node-mixed-b",
+                episodes=[normal.episode_id, canary.episode_id],
+            ),
+            SimpleNamespace(
+                uuid="edge-cross-scope-provenance",
+                name="RELATES_TO",
+                fact="Cross-scope edge provenance must not reach recall.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-other-a",
+                target_node_uuid="node-other-b",
+                episodes=[other_scope.episode_id],
+            ),
+            SimpleNamespace(
+                uuid="edge-providerless-provenance",
+                name="RELATES_TO",
+                fact="Providerless edge provenance must not reach recall.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-providerless-a",
+                target_node_uuid="node-providerless-b",
+                episodes=[providerless.episode_id],
+            ),
+            SimpleNamespace(
+                uuid="edge-unresolved-provenance",
+                name="RELATES_TO",
+                fact="Unresolved edge provenance must not reach recall.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-missing-a",
+                target_node_uuid="node-missing-b",
+                episodes=["missing-source-episode"],
+            ),
+            SimpleNamespace(
+                uuid="edge-empty-provenance",
+                name="RELATES_TO",
+                fact="Empty edge provenance must not reach recall.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-empty-a",
+                target_node_uuid="node-empty-b",
+                episodes=[],
+            ),
+        ]
+    )
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+
+    result = adapter.search_context(
+        brain_id="/project/neurons",
+        query="edge provenance",
+        entity_types=None,
+        limit=10,
+    )
+
+    graph_facts = [episode for episode in result.episodes if episode.entity_type == "GraphFact"]
+    assert len(graph_facts) == 1
+    assert graph_facts[0].payload["provider"] == "codex"
+    assert graph_facts[0].payload["source_providers"] == ["codex"]
+    assert result.status == "degraded"
+    assert "edge_provenance_unresolved" in result.details
+
+
+def test_graphiti_adapter_resolves_edge_provenance_within_single_read_deadline():
+    """A missing provenance lookup must not start a second full read timeout."""
+
+    class _RecordingRunner:
+        def __init__(self) -> None:
+            self.timeouts: list[float] = []
+
+        def run(self, coroutine_factory, *, timeout):  # noqa: ANN001
+            self.timeouts.append(float(timeout))
+            return asyncio.run(coroutine_factory())
+
+    graphiti = _FakeGraphiti()
+    graphiti.edges.append(
+        SimpleNamespace(
+            uuid="edge-missing-deadline",
+            name="RELATES_TO",
+            fact="Missing provenance must not extend the read deadline.",
+            valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+            invalid_at=None,
+            source_node_uuid="node-missing-a",
+            target_node_uuid="node-missing-b",
+            episodes=["missing-source-episode"],
+        )
+    )
+    runner = _RecordingRunner()
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        read_timeout_seconds=0.5,
+        runner=runner,
+    )
+
+    result = adapter.search_context(
+        brain_id="/project/neurons",
+        query="missing provenance",
+        entity_types=None,
+        limit=10,
+    )
+
+    assert result.status == "degraded"
+    assert not [episode for episode in result.episodes if episode.entity_type == "GraphFact"]
+    assert runner.timeouts == [0.5]
+
+
+def test_graphiti_adapter_hydrates_recent_window_miss_and_rejects_scope_mismatch(monkeypatch):
+    """Exact hydration keeps normal edges while dropping sources outside the graph scope."""
+    from graphiti_core.nodes import EpisodicNode
+
+    graphiti = _FakeGraphiti()
+    normal = _episode(
+        "Task",
+        "task:hydrated-edge-source",
+        {"brain_id": "/project/neurons", "provider": "codex", "task": "Hydrated graph source"},
+    )
+    other_scope = _episode(
+        "Task",
+        "task:hydrated-other-scope-source",
+        {"brain_id": "/project/other", "provider": "codex", "task": "Other graph source"},
+    )
+    nodes = {
+        normal.episode_id: SimpleNamespace(content=json.dumps(normal.to_dict(), ensure_ascii=True, sort_keys=True)),
+        other_scope.episode_id: SimpleNamespace(
+            content=json.dumps(other_scope.to_dict(), ensure_ascii=True, sort_keys=True)
+        ),
+    }
+
+    async def _get_by_uuid(_driver, episode_id):
+        return nodes[episode_id]
+
+    monkeypatch.setattr(EpisodicNode, "get_by_uuid", staticmethod(_get_by_uuid))
+    graphiti.edges.extend(
+        [
+            SimpleNamespace(
+                uuid="edge-hydrated-normal",
+                name="RELATES_TO",
+                fact="Hydrated normal provenance is retained.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-normal-a",
+                target_node_uuid="node-normal-b",
+                episodes=[normal.episode_id],
+            ),
+            SimpleNamespace(
+                uuid="edge-hydrated-other-scope",
+                name="RELATES_TO",
+                fact="Hydrated cross-scope provenance is rejected.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-other-a",
+                target_node_uuid="node-other-b",
+                episodes=[other_scope.episode_id],
+            ),
+        ]
+    )
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+
+    result = adapter.search_context(
+        brain_id="/project/neurons",
+        query="hydrated provenance",
+        entity_types=None,
+        limit=10,
+    )
+
+    graph_facts = [episode for episode in result.episodes if episode.entity_type == "GraphFact"]
+    assert [episode.payload["source_providers"] for episode in graph_facts] == [["codex"]]
+    assert result.status == "degraded"
+    assert "edge_provenance_unresolved" in result.details
+
+
+def test_graphiti_adapter_bounds_slow_provenance_hydration_to_read_deadline(monkeypatch):
+    """Slow exact lookup degrades before it can consume another read window."""
+    from graphiti_core.nodes import EpisodicNode
+
+    graphiti = _FakeGraphiti()
+    graphiti.edges.append(
+        SimpleNamespace(
+            uuid="edge-slow-provenance",
+            name="RELATES_TO",
+            fact="Slow provenance must not extend the graph read.",
+            valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+            invalid_at=None,
+            source_node_uuid="node-slow-a",
+            target_node_uuid="node-slow-b",
+            episodes=["slow-source-episode"],
+        )
+    )
+
+    async def _slow_search(query, *, group_ids=None, num_results=10):
+        _ = (query, group_ids, num_results)
+        await asyncio.sleep(0.12)
+        return list(graphiti.edges)
+
+    async def _slow_get_by_uuid(_driver, _episode_id):
+        await asyncio.sleep(1)
+        raise AssertionError("read timeout must cancel slow provenance lookup")
+
+    graphiti.search = _slow_search  # type: ignore[method-assign]
+    monkeypatch.setattr(EpisodicNode, "get_by_uuid", staticmethod(_slow_get_by_uuid))
+    runner = _AsyncLoopRunner(default_timeout=1)
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        graphiti,
+        default_group_id="/project/neurons",
+        read_timeout_seconds=0.2,
+        runner=runner,
+    )
+    started = time.monotonic()
+    try:
+        result = adapter.search_context(
+            brain_id="/project/neurons",
+            query="slow provenance",
+            entity_types=None,
+            limit=10,
+        )
+    finally:
+        runner.shutdown()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.28
+    assert result.status == "degraded"
+    assert not [episode for episode in result.episodes if episode.entity_type == "GraphFact"]
 
 
 def test_graphiti_adapter_keeps_episode_retrieval_when_edge_index_is_missing():
