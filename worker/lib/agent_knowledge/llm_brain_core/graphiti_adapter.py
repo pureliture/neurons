@@ -1249,15 +1249,17 @@ def _resolved_edge_source_episodes(
     if any(episode is None for episode in source_episodes):
         return None
     resolved = tuple(episode for episode in source_episodes if episode is not None)
+    providers = {_episode_provider(episode) for episode in resolved}
     if any(
-        not _episode_provider(episode)
-        or not _episode_matches_graph_group(
+        not _episode_matches_graph_group(
             episode,
             expected_group_id=expected_group_id,
             default_group_id=default_group_id,
         )
         for episode in resolved
     ):
+        return None
+    if len(providers) != 1 or not next(iter(providers), ""):
         return None
     return resolved
 

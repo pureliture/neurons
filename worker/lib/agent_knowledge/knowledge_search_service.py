@@ -69,7 +69,7 @@ def _is_synthetic_canary_episode(episode: object) -> bool:
     if payload is None and isinstance(episode, Mapping):
         payload = episode.get("payload")
     if not isinstance(payload, Mapping):
-        return False
+        return True
     source_providers = payload.get("source_providers", ())
     if not isinstance(source_providers, (list, tuple, set, frozenset)):
         source_providers = (source_providers,)

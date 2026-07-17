@@ -345,6 +345,11 @@ def test_graphiti_adapter_fails_closed_for_unresolved_or_canary_edge_provenance(
             "task": "Synthetic graph source",
         },
     )
+    alternate_provider = _episode(
+        "Task",
+        "task:alternate-provider-edge-source",
+        {"brain_id": "/project/neurons", "provider": "claude", "task": "Alternate graph source"},
+    )
     other_scope = _episode(
         "Task",
         "task:other-scope-edge-source",
@@ -359,6 +364,7 @@ def test_graphiti_adapter_fails_closed_for_unresolved_or_canary_edge_provenance(
         [
             SimpleNamespace(content=json.dumps(normal.to_dict(), ensure_ascii=True, sort_keys=True)),
             SimpleNamespace(content=json.dumps(canary.to_dict(), ensure_ascii=True, sort_keys=True)),
+            SimpleNamespace(content=json.dumps(alternate_provider.to_dict(), ensure_ascii=True, sort_keys=True)),
             SimpleNamespace(content=json.dumps(other_scope.to_dict(), ensure_ascii=True, sort_keys=True)),
             SimpleNamespace(content=json.dumps(providerless.to_dict(), ensure_ascii=True, sort_keys=True)),
         ]
@@ -394,6 +400,16 @@ def test_graphiti_adapter_fails_closed_for_unresolved_or_canary_edge_provenance(
                 source_node_uuid="node-mixed-a",
                 target_node_uuid="node-mixed-b",
                 episodes=[normal.episode_id, canary.episode_id],
+            ),
+            SimpleNamespace(
+                uuid="edge-mixed-normal-provider-provenance",
+                name="RELATES_TO",
+                fact="Mixed normal providers must not reach recall.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-mixed-normal-a",
+                target_node_uuid="node-mixed-normal-b",
+                episodes=[normal.episode_id, alternate_provider.episode_id],
             ),
             SimpleNamespace(
                 uuid="edge-cross-scope-provenance",
