@@ -73,6 +73,34 @@ def _sentinel():
     }
 
 
+def _bounded_denial_result(**kwargs):
+    return {
+        "schema_version": "bounded_permission_denial_result.v1",
+        "action": "single_bounded_denial.v1",
+        "ledger_scope": "production",
+        "permission": "denied",
+        "authority_write_performed": False,
+        "production_mutation_performed": False,
+        "actor_ref_hash": kwargs["actor_ref_hash"],
+        "request_hash": kwargs["request_hash"],
+        "protected_values_returned": False,
+        "raw_private_evidence_returned": False,
+        "secret_returned": False,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": False,
+    }
+
+
+def _store_result(*, append_count=1, **kwargs):
+    return {
+        "status": "recorded",
+        "append_count": append_count,
+        "stored_row_count": 1,
+        "read_after_write_status": "validated",
+        **_bounded_denial_result(**kwargs),
+    }
+
+
 def _service(tmp_path, **kwargs):
     return KnowledgeSearchService(
         ledger=Ledger(tmp_path / "ledger.sqlite3"),
@@ -182,14 +210,7 @@ def test_enabled_probe_returns_one_sanitized_denial_and_validated_readback(tmp_p
 
     def append(**kwargs):
         store_calls.append(kwargs)
-        return {
-            "status": "recorded",
-            "append_count": 1,
-            "stored_row_count": 1,
-            "read_after_write_status": "validated",
-            "request_hash": kwargs["request_hash"],
-            "production_mutation_performed": False,
-        }
+        return _store_result(**kwargs)
 
     def sentinel():
         sentinel_calls.append(True)
@@ -259,6 +280,92 @@ def test_enabled_probe_returns_one_sanitized_denial_and_validated_readback(tmp_p
     assert "system:serviceaccount:jenkins:neurons-release-production-evidence" not in serialized
     assert "evidence-pod" not in serialized
     assert "fixture-pod-uid" not in serialized
+
+
+def test_enabled_probe_executes_one_atomic_store_action_and_records_only_its_result(
+    tmp_path,
+):
+    store_calls = []
+
+    def append(**kwargs):
+        store_calls.append(kwargs)
+        return _store_result(**kwargs)
+
+    service = _service(
+        tmp_path,
+        allow_permission_sensitive_audit_probe=True,
+        permission_audit_token_reviewer=lambda _token: _token_review_response(),
+        permission_audit_store_append=append,
+        permission_audit_product_sentinel_reader=_sentinel,
+    )
+
+    result = service.brain_permission_sensitive_audit_probe(
+        mode="deny_once",
+        operation_hash=OPERATION_HASH,
+        build_association_hash=BUILD_ASSOCIATION_HASH,
+        projected_service_account_token=PROJECTED_TOKEN,
+    )
+
+    assert store_calls == [
+        {
+            "request_hash": OPERATION_HASH,
+            "actor_ref_hash": result["audit_events"][0]["actor_ref_hash"],
+            "action": "single_bounded_denial.v1",
+        }
+    ]
+    assert result["permission_action_count"] == 1
+    assert result["audit_events"] == [
+        {
+            "schema_version": "runtime_permission_audit_event.v2",
+            "event_type": "permission_sensitive_runtime_action",
+            "action": "single_bounded_denial.v1",
+            "ledger_scope": "production",
+            "permission": "denied",
+            "authority_write_performed": False,
+            "production_mutation_performed": False,
+            "actor_ref_hash": result["audit_events"][0]["actor_ref_hash"],
+            "request_hash": OPERATION_HASH,
+            "protected_values_returned": False,
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        }
+    ]
+    assert len(store_calls) == 1
+
+
+def test_probe_rejects_allowed_atomic_store_action_result(tmp_path):
+    calls = {"store": 0, "sentinel": 0}
+
+    def append(**kwargs):
+        calls["store"] += 1
+        return {**_store_result(**kwargs), "permission": "allowed"}
+
+    def sentinel():
+        calls["sentinel"] += 1
+        return _sentinel()
+
+    service = _service(
+        tmp_path,
+        allow_permission_sensitive_audit_probe=True,
+        permission_audit_token_reviewer=lambda _token: _token_review_response(),
+        permission_audit_store_append=append,
+        permission_audit_product_sentinel_reader=sentinel,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="permission audit bounded denial result is malformed",
+    ):
+        service.brain_permission_sensitive_audit_probe(
+            mode="deny_once",
+            operation_hash=OPERATION_HASH,
+            build_association_hash=BUILD_ASSOCIATION_HASH,
+            projected_service_account_token=PROJECTED_TOKEN,
+        )
+
+    assert calls == {"store": 1, "sentinel": 1}
 
 
 def test_probe_dispatch_rejects_extra_arguments_before_reading_token(tmp_path):
@@ -343,14 +450,10 @@ def test_duplicate_operation_reports_zero_action_and_no_new_event(tmp_path):
         tmp_path,
         allow_permission_sensitive_audit_probe=True,
         permission_audit_token_reviewer=lambda _token: _token_review_response(),
-        permission_audit_store_append=lambda **kwargs: {
-            "status": "recorded",
-            "append_count": 0,
-            "stored_row_count": 1,
-            "read_after_write_status": "validated",
-            "request_hash": kwargs["request_hash"],
-            "production_mutation_performed": False,
-        },
+        permission_audit_store_append=lambda **kwargs: _store_result(
+            append_count=0,
+            **kwargs,
+        ),
         permission_audit_product_sentinel_reader=_sentinel,
     )
 

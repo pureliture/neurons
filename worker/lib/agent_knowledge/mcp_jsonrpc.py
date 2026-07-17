@@ -59,6 +59,12 @@ from .mcp_tools import (
     tool_contract_registry,
 )
 from .public_safe_util import public_safe_text, sha256_text, short_hash
+from .production_authority_permission import (
+    ALLOWED_PRODUCTION_DECISION_TYPES,
+    ALLOWED_PRODUCTION_PROPOSAL_TYPES,
+    PRODUCTION_OBJECT_AUTHORITY_WRITE_CAPABILITY,
+    evaluate_production_object_authority_permission,
+)
 from .session_memory.brain_steward import StewardPermissionError
 
 _STEWARD_TOOL_NAMES = frozenset(
@@ -77,24 +83,6 @@ ToolHandler = Callable[[dict, KnowledgeSearchService], dict]
 ToolDispatch = Callable[[str, dict, KnowledgeSearchService], dict]
 StewardReadProposalDispatch = Callable[[str, dict, object], dict]
 StewardRestrictedDispatch = Callable[[str, dict, object], dict]
-
-_ALLOWED_PRODUCTION_PROPOSAL_TYPES = (
-    "propose_current",
-    "propose_stale",
-    "propose_supersede",
-    "propose_retire",
-    "request_evidence",
-)
-_ALLOWED_PRODUCTION_DECISION_TYPES = (
-    "accept_current",
-    "reject_candidate",
-    "commit_supersession",
-    "commit_stale",
-    "retire",
-    "archive_only",
-    "rollback_decision",
-)
-
 
 @dataclass(frozen=True)
 class ToolRuntimeContract:
@@ -621,7 +609,11 @@ def _dispatch_brain_permission_sensitive_audit_probe_tool(
 def _dispatch_brain_object_proposal_create_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
     ledger_scope = str(arguments.get("ledger_scope") or "production")
     if ledger_scope != "local_test":
-        gate = _production_object_authority_gate(arguments, service=service)
+        gate = _production_object_authority_gate(
+            arguments,
+            service=service,
+            action=tool_name,
+        )
         if not gate["allowed"]:
             reason = (
                 "proposal_write_requires_local_test_ledger_or_later_production_gate"
@@ -716,7 +708,11 @@ def _attach_proposed_object_snapshot(
 def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
     ledger_scope = str(arguments.get("ledger_scope") or "production")
     if ledger_scope != "local_test":
-        gate = _production_object_authority_gate(arguments, service=service)
+        gate = _production_object_authority_gate(
+            arguments,
+            service=service,
+            action=tool_name,
+        )
         if not gate["allowed"]:
             reason = (
                 "restricted_tool_requires_human_gate"
@@ -803,65 +799,24 @@ def _local_test_object_authority_writes_allowed(service: KnowledgeSearchService)
     )
 
 
-def _production_object_authority_gate(arguments: Mapping[str, Any], *, service: KnowledgeSearchService) -> dict[str, Any]:
-    gate = arguments.get("production_gate")
-    gate_provided = isinstance(gate, Mapping)
-    gate = gate if isinstance(gate, Mapping) else {}
-    project = _project_arg(dict(arguments))
-    target_object_id = public_safe_text(str(arguments.get("target_object_id") or ""), max_chars=180)
-    approval_ref = public_safe_text(str(gate.get("approval_ref") or ""), max_chars=160)
-    required_true_fields = (
-        "configured_deployed_mcp_identity_matches_source",
-        "read_after_write_smoke_plan",
-        "rollback_or_supersession_plan",
-        "no_raw_private_evidence",
+def _production_object_authority_gate(
+    arguments: Mapping[str, Any],
+    *,
+    service: KnowledgeSearchService,
+    action: str,
+) -> dict[str, Any]:
+    decision = evaluate_production_object_authority_permission(
+        arguments,
+        capability=PRODUCTION_OBJECT_AUTHORITY_WRITE_CAPABILITY,
+        action=action,
+        service_write_enabled=bool(
+            getattr(service, "allow_production_object_authority_writes", False)
+        ),
+        ledger_read_only=bool(getattr(service.ledger, "read_only", True)),
     )
-    missing: list[str] = []
-    if not bool(getattr(service, "allow_production_object_authority_writes", False)):
-        missing.append("service_production_object_authority_write_flag")
-    if bool(getattr(service.ledger, "read_only", True)):
-        missing.append("writable_ledger")
-    if gate.get("approved") is not True:
-        missing.append("approved")
-    if not approval_ref:
-        missing.append("approval_ref")
-    if str(gate.get("scope") or "") != "single_project_single_object":
-        missing.append("single_project_single_object_scope")
-    if not project or public_safe_text(str(gate.get("project") or ""), max_chars=120) != project:
-        missing.append("project_scope_match")
-    try:
-        max_objects = int(gate.get("max_objects") or 0)
-    except (TypeError, ValueError):
-        max_objects = 0
-    if max_objects != 1:
-        missing.append("max_objects_1")
-    for field in required_true_fields:
-        if gate.get(field) is not True:
-            missing.append(field)
-    if not is_allowed_object_target(target_object_id):
-        missing.append(allowed_object_class_gap())
-    proposed_object = arguments.get("proposed_object")
-    if proposed_object is not None:
-        if not isinstance(proposed_object, Mapping):
-            missing.append("proposed_object_shape")
-        else:
-            proposed_object_id = public_safe_text(str(proposed_object.get("object_id") or ""), max_chars=180)
-            proposed_object_type = public_safe_text(str(proposed_object.get("object_type") or ""), max_chars=120)
-            if proposed_object_id != target_object_id:
-                missing.append("proposed_object_target_match")
-            if not proposed_object_type or not is_allowed_object_target(
-                target_object_id,
-                object_type=proposed_object_type,
-            ):
-                missing.append(allowed_object_class_gap())
-    if "proposal_type" in arguments:
-        proposal_type = public_safe_text(str(arguments.get("proposal_type") or ""), max_chars=120)
-        if proposal_type not in _ALLOWED_PRODUCTION_PROPOSAL_TYPES:
-            missing.append("allowed_proposal_type")
-    if "decision_type" in arguments:
-        decision_type = public_safe_text(str(arguments.get("decision_type") or ""), max_chars=120)
-        if decision_type not in _ALLOWED_PRODUCTION_DECISION_TYPES:
-            missing.append("allowed_decision_type")
+    missing = list(decision["missing_gate_evidence"])
+    project = str(decision["project"])
+    target_object_id = str(decision["target_object_id"])
     if "proposal_id" in arguments:
         proposal_id = public_safe_text(str(arguments.get("proposal_id") or ""), max_chars=180)
         proposal = service.ledger.get_object_review_proposal(proposal_id) if proposal_id else {}
@@ -882,16 +837,9 @@ def _production_object_authority_gate(arguments: Mapping[str, Any], *, service: 
                 missing.append("proposal_ledger_scope_match")
             if not is_allowed_object_target(proposal_target, object_type=proposal_object_type):
                 missing.append(allowed_object_class_gap())
-    missing = list(dict.fromkeys(missing))
-    allowed = not missing
-    return {
-        "allowed": allowed,
-        "gate_provided": gate_provided,
-        "missing_gate_evidence": missing,
-        "approval_ref_hash": sha256_text(approval_ref) if approval_ref else "",
-        "project": project,
-        "target_object_id": target_object_id,
-    }
+    decision["missing_gate_evidence"] = list(dict.fromkeys(missing))
+    decision["allowed"] = not decision["missing_gate_evidence"]
+    return decision
 
 
 def _production_authority_promotion_plan(arguments: Mapping[str, object], *, gate: Mapping[str, Any] | None = None) -> dict:
@@ -917,8 +865,8 @@ def _production_authority_promotion_plan(arguments: Mapping[str, object], *, gat
         "project": project,
         "missing_gate_evidence": missing_gate_evidence,
         "allowed_object_classes": allowed_object_classes_list(),
-        "allowed_proposal_types": list(_ALLOWED_PRODUCTION_PROPOSAL_TYPES),
-        "allowed_decision_types": list(_ALLOWED_PRODUCTION_DECISION_TYPES),
+        "allowed_proposal_types": list(ALLOWED_PRODUCTION_PROPOSAL_TYPES),
+        "allowed_decision_types": list(ALLOWED_PRODUCTION_DECISION_TYPES),
         "reviewer_role": "human_object_authority_reviewer",
         "required_gate_evidence": [
             "configured_deployed_mcp_identity_matches_source",

@@ -6,6 +6,7 @@ import secrets
 import ssl
 import urllib.request
 from collections.abc import Callable, Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -38,9 +39,6 @@ _STORE_RESULT_KEYS = frozenset(
         "production_mutation_performed",
     }
 )
-_STORE_APPEND_RESPONSE_KEYS = frozenset(
-    {*_STORE_RESULT_KEYS, "append_attempt_hash"}
-)
 _STORE_READBACK_KEYS = frozenset(
     {
         "schema_version",
@@ -66,6 +64,29 @@ _SENTINEL_KEYS = frozenset(
     }
 )
 _SENTINEL_VALUE_KEYS = frozenset({"count", "hash"})
+_BOUNDED_DENIAL_RESULT_KEYS = frozenset(
+    {
+        "schema_version",
+        "action",
+        "ledger_scope",
+        "permission",
+        "authority_write_performed",
+        "production_mutation_performed",
+        "actor_ref_hash",
+        "request_hash",
+        "protected_values_returned",
+        "raw_private_evidence_returned",
+        "secret_returned",
+        "host_topology_returned",
+        "raw_external_ids_returned",
+    }
+)
+_INTERNAL_STORE_RESULT_KEYS = frozenset(
+    {*_STORE_RESULT_KEYS, *_BOUNDED_DENIAL_RESULT_KEYS}
+)
+_STORE_APPEND_RESPONSE_KEYS = frozenset(
+    {*_INTERNAL_STORE_RESULT_KEYS, "append_attempt_hash"}
+)
 
 _SENTINEL_PLANE_NAMES = (
     "authority_ledger",
@@ -191,6 +212,7 @@ class LoopbackPermissionAuditStoreClient:
             return _normalize_store_append_response(
                 result,
                 request_hash=payload["request_hash"],
+                actor_ref_hash=payload["actor_ref_hash"],
                 append_attempt_hash=payload["append_attempt_hash"],
             )
         except Exception:
@@ -215,6 +237,7 @@ def _normalize_store_append_response(
     value: Any,
     *,
     request_hash: str,
+    actor_ref_hash: str,
     append_attempt_hash: str,
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != _STORE_APPEND_RESPONSE_KEYS:
@@ -235,7 +258,12 @@ def _normalize_store_append_response(
         or value.get("production_mutation_performed") is not False
     ):
         raise ValueError("permission audit store response is malformed")
-    return {str(key): value[key] for key in _STORE_RESULT_KEYS}
+    _validated_bounded_denial_result(
+        {str(key): value[key] for key in _BOUNDED_DENIAL_RESULT_KEYS},
+        request_hash=request_hash,
+        actor_ref_hash=actor_ref_hash,
+    )
+    return {str(key): value[key] for key in _INTERNAL_STORE_RESULT_KEYS}
 
 
 def _normalize_recovered_store_readback(
@@ -271,7 +299,18 @@ def _normalize_recovered_store_readback(
         "stored_row_count": 1,
         "read_after_write_status": "validated",
         "request_hash": request_hash,
+        "schema_version": "bounded_permission_denial_result.v1",
+        "action": action,
+        "ledger_scope": "production",
+        "permission": "denied",
+        "authority_write_performed": False,
         "production_mutation_performed": False,
+        "actor_ref_hash": actor_ref_hash,
+        "protected_values_returned": False,
+        "raw_private_evidence_returned": False,
+        "secret_returned": False,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": False,
     }
 
 
@@ -285,7 +324,12 @@ class IndependentProductMutationSentinelReader:
             raise ValueError("all independent mutation sentinel providers are required")
         if any(not callable(providers[name]) for name in _SENTINEL_PLANE_NAMES):
             raise ValueError("all independent mutation sentinel providers are required")
-        if len({id(providers[name]) for name in _SENTINEL_PLANE_NAMES}) != len(
+        if len(
+            {
+                _sentinel_provider_identity(providers[name])
+                for name in _SENTINEL_PLANE_NAMES
+            }
+        ) != len(
             _SENTINEL_PLANE_NAMES
         ):
             raise ValueError("distinct mutation sentinel providers are required")
@@ -299,12 +343,26 @@ class IndependentProductMutationSentinelReader:
         return result
 
 
+def _sentinel_provider_identity(
+    provider: Callable[[], Mapping[str, Any]],
+) -> tuple[str, int]:
+    candidate: Any = provider
+    while isinstance(candidate, partial):
+        candidate = candidate.func
+    owner = getattr(candidate, "__self__", None)
+    if owner is not None:
+        return ("bound_owner", id(owner))
+    return ("callable", id(candidate))
+
+
 class PostgresDatabaseMutationMarkerReader:
-    """One consistent DB-level marker; no table scan, DDL, or xid allocation."""
+    """Read one product-plane-owned public-safe marker without global DB state."""
 
     _SQL = """
-        SELECT pg_current_wal_lsn()::text AS wal_lsn,
-               txid_current_snapshot()::text AS transaction_snapshot
+        SELECT mutation_count AS count,
+               mutation_hash AS hash
+        FROM public.permission_audit_product_db_mutation_marker_v1
+        LIMIT 2
     """
 
     def __init__(self, ledger: Any) -> None:
@@ -325,23 +383,21 @@ class PostgresDatabaseMutationMarkerReader:
 
 
 def _read_postgres_database_marker(connection: Any) -> dict[str, Any]:
-    row = connection.execute(PostgresDatabaseMutationMarkerReader._SQL).fetchone()
-    wal_lsn = str(row.get("wal_lsn") or "") if row is not None else ""
-    snapshot = (
-        str(row.get("transaction_snapshot") or "") if row is not None else ""
-    )
-    if not wal_lsn or not snapshot or len(wal_lsn) > 80 or len(snapshot) > 4096:
+    rows = connection.execute(PostgresDatabaseMutationMarkerReader._SQL).fetchall()
+    if len(rows) != 1:
         raise RuntimeError("PostgreSQL mutation marker is unavailable")
-    result = {
-        "count": 1,
-        "hash": hash_payload(
+    row = rows[0]
+    try:
+        if set(row.keys()) != _SENTINEL_VALUE_KEYS:
+            raise ValueError("unexpected marker columns")
+        return _validated_plane_sentinel(
             {
-                "transaction_snapshot": snapshot,
-                "wal_lsn": wal_lsn,
+                "count": row.get("count"),
+                "hash": row.get("hash"),
             }
-        ),
-    }
-    return _validated_plane_sentinel(result)
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise RuntimeError("PostgreSQL mutation marker is unavailable") from None
 
 
 def _validate_token_review_url(value: str) -> None:
@@ -436,44 +492,40 @@ def run_permission_sensitive_audit_probe(
         or len(projected_service_account_token) > 16384
     ):
         raise ValueError("permission audit token is invalid")
-    if token_reviewer is None or store_append is None or product_sentinel_reader is None:
+    if (
+        token_reviewer is None
+        or store_append is None
+        or product_sentinel_reader is None
+    ):
         raise RuntimeError("permission audit probe configuration is incomplete")
 
     actor_ref_hash = _validated_actor_ref_hash(token_reviewer(projected_service_account_token))
     before = _validated_product_sentinel(product_sentinel_reader())
-    store = _validated_store_result(
+    store_result = _validated_store_result(
         store_append(
             request_hash=request_hash,
             actor_ref_hash=actor_ref_hash,
             action=PERMISSION_AUDIT_POLICY,
         ),
         request_hash=request_hash,
+        actor_ref_hash=actor_ref_hash,
     )
     after = _validated_product_sentinel(product_sentinel_reader())
     sentinels_match = before == after
-    action_count = int(store["append_count"])
-    events = (
-        [
-            {
-                "schema_version": PERMISSION_AUDIT_EVENT_SCHEMA,
-                "event_type": "permission_sensitive_runtime_action",
-                "action": PERMISSION_AUDIT_POLICY,
-                "ledger_scope": "production",
-                "permission": "denied",
-                "authority_write_performed": False,
-                "production_mutation_performed": False,
-                "actor_ref_hash": actor_ref_hash,
-                "request_hash": request_hash,
-                "protected_values_returned": False,
-                "raw_private_evidence_returned": False,
-                "secret_returned": False,
-                "host_topology_returned": False,
-                "raw_external_ids_returned": False,
-            }
-        ]
-        if action_count == 1
-        else []
-    )
+    action_count = int(store_result["append_count"])
+    events = []
+    if action_count == 1:
+        events.append(
+            _validated_bounded_denial_result(
+                {
+                    str(key): store_result[key]
+                    for key in _BOUNDED_DENIAL_RESULT_KEYS
+                },
+                request_hash=request_hash,
+                actor_ref_hash=actor_ref_hash,
+            )
+        )
+    store = {str(key): store_result[key] for key in _STORE_RESULT_KEYS}
     evidence = {
         "schema_version": PERMISSION_AUDIT_EVIDENCE_SCHEMA,
         "policy": PERMISSION_AUDIT_POLICY,
@@ -496,6 +548,48 @@ def run_permission_sensitive_audit_probe(
     }
     ensure_public_safe(evidence, "PermissionSensitiveAuditEvidence")
     return evidence
+
+
+def _validated_bounded_denial_result(
+    value: Mapping[str, Any],
+    *,
+    request_hash: str,
+    actor_ref_hash: str,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != _BOUNDED_DENIAL_RESULT_KEYS:
+        raise ValueError("permission audit bounded denial result is malformed")
+    if (
+        value.get("schema_version") != "bounded_permission_denial_result.v1"
+        or value.get("action") != PERMISSION_AUDIT_POLICY
+        or value.get("ledger_scope") != "production"
+        or value.get("permission") != "denied"
+        or value.get("authority_write_performed") is not False
+        or value.get("production_mutation_performed") is not False
+        or value.get("actor_ref_hash") != actor_ref_hash
+        or value.get("request_hash") != request_hash
+        or any(
+            value.get(field) is not False
+            for field in (
+                "protected_values_returned",
+                "raw_private_evidence_returned",
+                "secret_returned",
+                "host_topology_returned",
+                "raw_external_ids_returned",
+            )
+        )
+    ):
+        raise ValueError("permission audit bounded denial result is malformed")
+    event = {
+        "schema_version": PERMISSION_AUDIT_EVENT_SCHEMA,
+        "event_type": "permission_sensitive_runtime_action",
+        **{
+            key: value[key]
+            for key in _BOUNDED_DENIAL_RESULT_KEYS
+            if key != "schema_version"
+        },
+    }
+    ensure_public_safe(event, "PermissionAuditBoundedDenialEvent")
+    return event
 
 
 def _validated_actor_ref_hash(review: Mapping[str, Any]) -> str:
@@ -565,8 +659,9 @@ def _validated_store_result(
     value: Mapping[str, Any],
     *,
     request_hash: str,
+    actor_ref_hash: str,
 ) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or set(value) != _STORE_RESULT_KEYS:
+    if not isinstance(value, Mapping) or set(value) != _INTERNAL_STORE_RESULT_KEYS:
         raise ValueError("permission audit store result is malformed")
     append_count = value.get("append_count")
     stored_row_count = value.get("stored_row_count")
@@ -581,6 +676,11 @@ def _validated_store_result(
         or value.get("production_mutation_performed") is not False
     ):
         raise ValueError("permission audit store result is malformed")
-    result = {str(key): value[key] for key in _STORE_RESULT_KEYS}
+    _validated_bounded_denial_result(
+        {str(key): value[key] for key in _BOUNDED_DENIAL_RESULT_KEYS},
+        request_hash=request_hash,
+        actor_ref_hash=actor_ref_hash,
+    )
+    result = {str(key): value[key] for key in _INTERNAL_STORE_RESULT_KEYS}
     ensure_public_safe(result, "PermissionAuditStoreResult")
     return result

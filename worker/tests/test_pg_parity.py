@@ -37,10 +37,35 @@ def _reset_pg(dsn: str) -> None:
         conn.commit()
 
 
+def _install_permission_audit_product_db_marker_view(dsn: str) -> None:
+    with psycopg.connect(dsn) as conn:
+        conn.execute(
+            """
+            CREATE TABLE public.permission_audit_product_db_marker_fixture (
+                mutation_count bigint NOT NULL,
+                mutation_hash text NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO public.permission_audit_product_db_marker_fixture VALUES (%s, %s)",
+            (0, "sha256:" + "5" * 64),
+        )
+        conn.execute(
+            """
+            CREATE VIEW public.permission_audit_product_db_mutation_marker_v1 AS
+            SELECT mutation_count, mutation_hash
+            FROM public.permission_audit_product_db_marker_fixture
+            """
+        )
+        conn.commit()
+
+
 def test_permission_audit_marker_is_read_only_and_xid_free():
     from agent_knowledge.permission_audit import _read_postgres_database_marker
 
     _reset_pg(PG_DSN)
+    _install_permission_audit_product_db_marker_view(PG_DSN)
     adapter = PostgresLedgerDbAdapter(PG_DSN, read_only=True)
     with adapter.connect() as connection:
         before = connection.execute(
@@ -59,7 +84,7 @@ def test_permission_audit_marker_is_read_only_and_xid_free():
             """
         ).fetchone()
 
-    assert marker["count"] == 1
+    assert marker["count"] == 0
     assert marker["hash"].startswith("sha256:")
     assert before["xid"] is None
     assert after["xid"] is None
@@ -67,6 +92,26 @@ def test_permission_audit_marker_is_read_only_and_xid_free():
     assert after["transaction_read_only"] == "on"
     assert before["compatibility_function"] is None
     assert after["compatibility_function"] is None
+
+
+def test_permission_audit_marker_ignores_unrelated_cluster_database_writes():
+    from agent_knowledge.permission_audit import _read_postgres_database_marker
+
+    _reset_pg(PG_DSN)
+    _install_permission_audit_product_db_marker_view(PG_DSN)
+    adapter = PostgresLedgerDbAdapter(PG_DSN, read_only=True)
+    with adapter.connect() as connection:
+        before = _read_postgres_database_marker(connection)
+
+    with psycopg.connect(PG_DSN) as connection:
+        connection.execute("CREATE TABLE unrelated_runtime_activity (value integer)")
+        connection.execute("INSERT INTO unrelated_runtime_activity VALUES (1)")
+        connection.commit()
+
+    with adapter.connect() as connection:
+        after = _read_postgres_database_marker(connection)
+
+    assert after == before
 
 
 def _sm(ledger, kid, doc):

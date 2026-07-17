@@ -189,6 +189,64 @@ def test_runtime_readiness_normalizes_and_validates_gitops_deployment_evidence_b
     assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "validated"
 
 
+def test_deployment_evidence_binding_v1_preserves_golden_tuple_hash_and_claim_id():
+    evidence = _gitops_bound_live_evidence()
+    canonical_tuple = {
+        "expected_commit": _BOUND_SOURCE_COMMIT,
+        "desired_source_commit": _BOUND_SOURCE_COMMIT,
+        "deployed_source_commit": _BOUND_SOURCE_COMMIT,
+        "desired_image_set_hash": "sha256:" + "a" * 64,
+        "live_image_set_hash": "sha256:" + "a" * 64,
+        "ops_revision": "a" * 40,
+        "reconciled_ops_revision": "a" * 40,
+        "sync_status": "Synced",
+        "health_status": "Healthy",
+        "expected_image_ref_count": 1,
+        "stale_image_ref_count": 0,
+        "desired_production_mutation_performed": False,
+        "argo_production_mutation_performed": False,
+        "deployed_production_mutation_performed": False,
+    }
+
+    assert set(canonical_tuple) == {
+        "expected_commit",
+        "desired_source_commit",
+        "deployed_source_commit",
+        "desired_image_set_hash",
+        "live_image_set_hash",
+        "ops_revision",
+        "reconciled_ops_revision",
+        "sync_status",
+        "health_status",
+        "expected_image_ref_count",
+        "stale_image_ref_count",
+        "desired_production_mutation_performed",
+        "argo_production_mutation_performed",
+        "deployed_production_mutation_performed",
+    }
+    assert hash_payload(canonical_tuple) == (
+        "sha256:dc12138cb1402b37a74a8efca884c229541ab47ca3954c0dbf907a203bebf0ba"
+    )
+    assert evidence["deployment_evidence_binding"] == {
+        "schema_version": "deployment_evidence_binding.v1",
+        "canonical_tuple_hash": (
+            "sha256:dc12138cb1402b37a74a8efca884c229541ab47ca3954c0dbf907a203bebf0ba"
+        ),
+    }
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+    )
+    claim = next(
+        item
+        for item in report["claims"]
+        if item["claim_id"] == "ops.gitops_deployment_evidence_binding"
+    )
+    assert claim["claim_id"] == "ops.gitops_deployment_evidence_binding"
+    assert claim["status"] == "validated"
+
+
 def test_runtime_readiness_normalizer_does_not_mint_missing_deployment_binding():
     capture = _gitops_bound_live_evidence()
     capture.pop("deployment_evidence_binding")
@@ -2042,27 +2100,30 @@ def test_runtime_readiness_v2_binds_operation_to_current_packet(mutation, expect
     assert expected_gap in claim["gaps"]
 
 
-def test_runtime_readiness_v2_does_not_conflate_jenkins_build_with_packet_binding_hash():
+def test_runtime_readiness_v2_accepts_fresh_build_anchors_for_same_deployment_tuple():
     packet = _gitops_bound_live_evidence()
-    audit = _single_bounded_denial_audit_v2(
-        build_association_hash="sha256:" + "f" * 64,
-    )
-    assert audit["build_association_hash"] != packet["deployment_evidence_binding"][
-        "canonical_tuple_hash"
-    ]
-    packet["permission_sensitive_audit"] = audit
+    binding_hash = packet["deployment_evidence_binding"]["canonical_tuple_hash"]
+    operation_hashes = []
 
-    report = build_source_to_candidate_runtime_readiness_report(
-        live_evidence=packet,
-        expected_commit=_BOUND_SOURCE_COMMIT,
-    )
+    for digit in ("d", "f"):
+        build_association_hash = "sha256:" + digit * 64
+        assert build_association_hash != binding_hash
+        audit = _single_bounded_denial_audit_v2(
+            build_association_hash=build_association_hash,
+        )
+        operation_hashes.append(audit["audit_events"][0]["request_hash"])
+        report = build_source_to_candidate_runtime_readiness_report(
+            live_evidence={**packet, "permission_sensitive_audit": audit},
+            expected_commit=_BOUND_SOURCE_COMMIT,
+        )
+        claim = next(
+            item
+            for item in report["claims"]
+            if item["claim_id"] == "live.production.permission_sensitive_audit"
+        )
+        assert claim["status"] == "validated"
 
-    claim = next(
-        item
-        for item in report["claims"]
-        if item["claim_id"] == "live.production.permission_sensitive_audit"
-    )
-    assert claim["status"] == "validated"
+    assert operation_hashes[0] != operation_hashes[1]
 
 
 def test_runtime_readiness_v2_requires_exact_build_association_schema_field():

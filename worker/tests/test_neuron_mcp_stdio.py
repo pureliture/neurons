@@ -58,6 +58,7 @@ from agent_knowledge.llm_brain_core.knowledge_objects import EvidenceRef, Knowle
 from agent_knowledge.llm_brain_core.models import CONTEXT_PACK_SCHEMA_VERSION, OntologyEpisode
 from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
+    build_deployment_evidence_binding,
     build_source_to_candidate_runtime_readiness_report,
 )
 from agent_knowledge.llm_brain_core.objects.artifact_preference_evaluator import (
@@ -944,6 +945,110 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
     assert "bounded_production_authority_execution_unverified" in report["gaps"]
     assert "live_session_project_rollup_unverified" not in report["gaps"]
     assert "live_agent_context_startup_unverified" in report["gaps"]
+
+
+def _bound_deployment_evidence(expected_commit: str) -> dict:
+    gitops_desired_state = {
+        "schema_version": "gitops_desired_state_identity.v1",
+        "images_include_expected_commit": True,
+        "desired_state_source": "sanitized_ops_manifest_summary",
+        "target_revision": "main",
+        "source_commit": expected_commit,
+        "desired_image_set_hash": "sha256:" + "a" * 64,
+        "ops_revision": "a" * 40,
+        "expected_image_ref_count": 1,
+        "production_mutation_performed": False,
+    }
+    argo_reconciliation = {
+        "schema_version": "argo_reconciliation_identity.v1",
+        "reconciliation_source": "sanitized_argo_application_summary",
+        "reconciled_ops_revision": "a" * 40,
+        "sync_status": "Synced",
+        "health_status": "Healthy",
+        "production_mutation_performed": False,
+    }
+    deployed_identity = {
+        "contains_expected_commit": True,
+        "identity_source": "redacted_live_runtime_evidence",
+        "source_commit": expected_commit,
+        "live_image_set_hash": "sha256:" + "a" * 64,
+        "stale_image_ref_count": 0,
+        "production_mutation_performed": False,
+    }
+    return {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "expected_commit": expected_commit,
+        "gitops_desired_state": gitops_desired_state,
+        "argo_reconciliation": argo_reconciliation,
+        "deployed_identity": deployed_identity,
+        "deployment_evidence_binding": build_deployment_evidence_binding(
+            expected_commit=expected_commit,
+            gitops_desired_state=gitops_desired_state,
+            argo_reconciliation=argo_reconciliation,
+            deployed_identity=deployed_identity,
+        ),
+    }
+
+
+def test_mcp_runtime_readiness_uses_independently_supplied_external_expected_commit(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+    packet_commit = "c" * 40
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1201,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "live_evidence": _bound_deployment_evidence(packet_commit),
+                    "expected_commit": "b" * 40,
+                },
+            },
+        },
+        service,
+    )
+
+    report = response["result"]["structuredContent"]
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert report["status"] == "FAIL"
+    assert (
+        "gitops_deployment_evidence_binding_external_expected_commit_mismatch"
+        in claims["ops.gitops_deployment_evidence_binding"]["gaps"]
+    )
+
+
+def test_mcp_runtime_readiness_fails_closed_for_malformed_external_expected_commit(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1202,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "live_evidence": _bound_deployment_evidence("c" * 40),
+                    "expected_commit": "main",
+                },
+            },
+        },
+        service,
+    )
+
+    report = response["result"]["structuredContent"]
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert report["status"] == "FAIL"
+    assert (
+        "external_expected_commit_anchor_invalid"
+        in claims["ops.gitops_deployment_evidence_binding"]["gaps"]
+    )
 
 
 def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_plan(tmp_path: Path):

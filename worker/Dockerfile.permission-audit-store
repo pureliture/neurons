@@ -13,6 +13,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY lib ./lib
 RUN pip install --no-cache-dir --no-deps .
+RUN permission-audit-store --help >/dev/null
 
 RUN useradd --create-home --shell /usr/sbin/nologin appuser \
     && mkdir -p /audit \
