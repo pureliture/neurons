@@ -121,10 +121,17 @@ class _PgConnection:
 
     dialect = "postgres"
 
-    def __init__(self, dsn: str):
+    def __init__(self, dsn: str, *, read_only: bool = False):
         self._conn = psycopg.connect(dsn, row_factory=_pg_row_factory)
         self.row_factory = None  # 호환용: callers가 sqlite3.Row를 set해도 무시(_PgRow 고정)
-        self._ensure_compat_functions()
+        self._read_only = bool(read_only)
+        if self._read_only:
+            # TokenReview/audit sentinel 같은 read-only runtime이 connection 생성만으로
+            # CREATE OR REPLACE FUNCTION을 실행하지 않도록 DB 자체 read-only transaction
+            # mode를 먼저 고정한다.
+            self._conn.read_only = True
+        else:
+            self._ensure_compat_functions()
 
     def _ensure_compat_functions(self) -> None:
         # SQLite 호환 함수(julianday) 보장 — idempotent CREATE OR REPLACE, 연결당 1회.
@@ -177,9 +184,10 @@ class PostgresLedgerDbAdapter(ILedgerCoreDbAdapter):
 
     is_file_backed = False
 
-    def __init__(self, dsn: str):
+    def __init__(self, dsn: str, *, read_only: bool = False):
         self.dsn = dsn
+        self.read_only = bool(read_only)
 
     def connect(self, *, configure_journal: bool = False) -> _PgConnection:
         # configure_journal(WAL)은 SQLite 전용 — Postgres에선 무의미(no-op).
-        return _PgConnection(self.dsn)
+        return _PgConnection(self.dsn, read_only=self.read_only)

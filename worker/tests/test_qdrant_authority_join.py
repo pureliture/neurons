@@ -17,6 +17,8 @@ from agent_knowledge.rag_ingress.qdrant_authority_join import (
     join_mirror_hits_to_authority,
 )
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
+    DEFAULT_COLLECTION_NAME,
+    FOUNDATION_DIRECT_WRITE_CONTRACT,
     HashEmbeddingProvider,
     PassthroughMarkdownNormalizer,
     QdrantDoclingMirrorAdapter,
@@ -153,8 +155,14 @@ def test_unresolved_hit_dropped_by_default_kept_flagged_otherwise():
 # --- end-to-end: real ledger, authorized survives, superseded dropped --------
 
 def _adapter():
+    client = InMemoryQdrantClient()
+    client.create_collection(
+        DEFAULT_COLLECTION_NAME,
+        vectors_config={"size": 32, "distance": "Cosine"},
+    )
     return QdrantDoclingMirrorAdapter(
-        client=InMemoryQdrantClient(),
+        client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=HashEmbeddingProvider(size=32),
     )

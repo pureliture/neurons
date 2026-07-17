@@ -13,10 +13,12 @@ import agent_knowledge.rag_ingress.qdrant_embedding as embedding_mod
 import agent_knowledge.rag_ingress.qdrant_backfill_cli as cli_mod
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
+    FOUNDATION_DIRECT_WRITE_CONTRACT,
     HashEmbeddingProvider,
     PassthroughMarkdownNormalizer,
     QdrantDoclingMirrorAdapter,
 )
+from agent_knowledge.qdrant_write_gateway_runtime import QdrantMutationSource
 from agent_knowledge.rag_ingress.qdrant_docling_testing import InMemoryQdrantClient
 
 VECTOR_SIZE = 64
@@ -55,16 +57,41 @@ def patched_qdrant(monkeypatch, shared_client):
     fail-closed / opt-in-create 동작이 충실히 검증된다.
     """
 
-    def _fake_builder(*, url, collection_name, embedding_provider=None, normalizer=None, ensure_collection=True):
+    monkeypatch.setenv("QDRANT_WRITE_ACTIVATION", "remote_gateway")
+    monkeypatch.setenv(
+        "QDRANT_WRITE_GATEWAY_ENDPOINT", "https://gateway.invalid:8443"
+    )
+    monkeypatch.setenv("QDRANT_WRITE_GATEWAY_GENERATION", "7")
+    monkeypatch.setenv("QDRANT_WRITE_GATEWAY_TOKEN_FILE", "/fixed/token")
+    monkeypatch.setenv("QDRANT_WRITE_GATEWAY_CA_FILE", "/fixed/ca.pem")
+    monkeypatch.setenv("QDRANT_READ_API_KEY_FILE", "/fixed/read-api-key")
+
+    def _fake_builder(
+        *,
+        read_url,
+        read_api_key_path,
+        gateway_endpoint,
+        gateway_token_path,
+        gateway_ca_path,
+        gateway_generation,
+        collection_name,
+        source,
+        embedding_provider=None,
+        normalizer=None,
+    ):
         return QdrantDoclingMirrorAdapter(
             client=shared_client,
             collection_name=collection_name,
             normalizer=PassthroughMarkdownNormalizer(),
             embedding_provider=HashEmbeddingProvider(size=VECTOR_SIZE),
-            ensure_collection=ensure_collection,
+            direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         )
 
-    monkeypatch.setattr(mirror_mod, "build_remote_qdrant_docling_mirror_adapter", _fake_builder)
+    monkeypatch.setattr(
+        mirror_mod,
+        "build_remote_qdrant_docling_sidecar_adapter",
+        _fake_builder,
+    )
     monkeypatch.setattr(
         embedding_mod,
         "build_openai_embedding_provider",
@@ -79,23 +106,56 @@ def test_run_absent_collection_without_create_fails_closed(patched_qdrant):
     client = patched_qdrant
     assert not client.collection_exists("typo_collection")
     with pytest.raises(SystemExit) as exc:
-        cli_mod._build_adapter(_args(), collection_name="typo_collection", ensure_collection=False)
+        cli_mod._build_adapter(
+            _args(),
+            collection_name="typo_collection",
+            source=QdrantMutationSource.BACKFILL,
+            ensure_collection=False,
+        )
     assert "typo_collection" in str(exc.value)
     assert not client.collection_exists("typo_collection")
 
 
-def test_run_create_collection_flag_creates_once(patched_qdrant):
+def test_unknown_collection_probe_fails_closed(patched_qdrant, monkeypatch):
+    class UnknownCollectionAdapter:
+        def collection_exists(self):
+            return None
+
+    monkeypatch.setattr(
+        mirror_mod,
+        "build_remote_qdrant_docling_sidecar_adapter",
+        lambda **kwargs: UnknownCollectionAdapter(),
+    )
+    with pytest.raises(SystemExit, match="존재를 확인할 수 없다"):
+        cli_mod._build_adapter(
+            _args(),
+            collection_name="unknown_collection",
+            source=QdrantMutationSource.BACKFILL,
+        )
+
+
+def test_run_create_collection_flag_is_operator_only(patched_qdrant):
     client = patched_qdrant
     assert not client.collection_exists("staging_mirror")
-    adapter = cli_mod._build_adapter(_args(), collection_name="staging_mirror", ensure_collection=True)
-    assert client.collection_exists("staging_mirror")
-    assert adapter.collection_vector_size() == VECTOR_SIZE
+    with pytest.raises(SystemExit, match="operator-only"):
+        cli_mod._build_adapter(
+            _args(),
+            collection_name="staging_mirror",
+            source=QdrantMutationSource.BACKFILL,
+            ensure_collection=True,
+        )
+    assert not client.collection_exists("staging_mirror")
 
 
 def test_existing_collection_no_create_succeeds(patched_qdrant):
     client = patched_qdrant
     client.create_collection("live_mirror", vectors_config={"size": VECTOR_SIZE, "distance": "Cosine"})
-    adapter = cli_mod._build_adapter(_args(), collection_name="live_mirror", ensure_collection=False)
+    adapter = cli_mod._build_adapter(
+        _args(),
+        collection_name="live_mirror",
+        source=QdrantMutationSource.BACKFILL,
+        ensure_collection=False,
+    )
     assert adapter.collection_name == "live_mirror"
     assert client.point_count("live_mirror") == 0
 

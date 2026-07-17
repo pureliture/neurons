@@ -21,6 +21,7 @@ from agent_knowledge.session_memory.brain_query import run_brain_query_v2
 from agent_knowledge.rag_ingress.qdrant_backfill import backfill_session_memory
 from agent_knowledge.rag_ingress.qdrant_recall import build_qdrant_brain_query_search
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
+    FOUNDATION_DIRECT_WRITE_CONTRACT,
     HashEmbeddingProvider,
     PassthroughMarkdownNormalizer,
     QdrantDoclingMirrorAdapter,
@@ -99,7 +100,17 @@ def _seed_projected(
 
 
 def _adapter(client):
-    return QdrantDoclingMirrorAdapter(client=client, collection_name="recall_mirror", normalizer=PassthroughMarkdownNormalizer(), embedding_provider=HashEmbeddingProvider(size=VECTOR_SIZE))
+    client.create_collection(
+        "recall_mirror",
+        vectors_config={"size": VECTOR_SIZE, "distance": "Cosine"},
+    )
+    return QdrantDoclingMirrorAdapter(
+        client=client,
+        collection_name="recall_mirror",
+        normalizer=PassthroughMarkdownNormalizer(),
+        embedding_provider=HashEmbeddingProvider(size=VECTOR_SIZE),
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
+    )
 
 
 def _world():

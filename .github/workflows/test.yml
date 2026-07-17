@@ -60,7 +60,9 @@ jobs:
         # live Postgres parity 테스트는 LEDGER_PG_DSN 미설정 시 skipif로 자동 skip된다.
         # --group dev: pytest는 dev dependency group으로 선언돼 있어 명시적으로 설치해야
         # clean 러너(전역 pytest 없음)에서 `Failed to spawn: pytest`가 나지 않는다.
-        run: uv run --group dev pytest -q
+        # 전체 worker 회귀는 MCP transport wiring도 import하므로 mcp-http extra를
+        # 같이 설치해 optional dependency 누락을 fail-closed로 드러낸다.
+        run: uv run --group dev --extra mcp-http pytest -q
 
   worker-postgres-parity:
     name: worker PostgreSQL parity (uv)
@@ -81,6 +83,7 @@ jobs:
           --health-retries 10
     env:
       LEDGER_PG_DSN: postgresql://neurons_test:neurons_test@127.0.0.1:5432/neurons_test
+      REQUIRE_LEDGER_PG_DSN: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -95,6 +98,10 @@ jobs:
       - name: Run PostgreSQL parity tests
         working-directory: worker
         run: uv run --group dev pytest tests/test_pg_parity.py tests/test_ledger_pg_migrate.py -q
+
+      - name: Verify permission audit PostgreSQL marker is read-only
+        working-directory: worker
+        run: uv run --group dev pytest tests/test_pg_parity.py::test_permission_audit_marker_is_read_only_and_xid_free -q
 
   worker-mcp-http-pytest:
     name: worker mcp-http pytest (uv)

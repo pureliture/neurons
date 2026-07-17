@@ -107,10 +107,13 @@ services:
     # delivers to RetiredIndexBridge. WorkQueue allows ONE consumer of this durable — do not
     # run this alongside another consumer of rag_target_delivery_worker (e.g. a
     # separate live compose project). Live re-deploy is a separate goal.
-    build: ./worker
+    build:
+      context: ./worker
+      args:
+        NEURONS_SOURCE_COMMIT: ${NEURONS_SOURCE_COMMIT:-0000000000000000000000000000000000000000}
     restart: unless-stopped
     labels:
-      org.opencontainers.image.revision: ${RAG_INGRESS_SOURCE_REVISION:-local}
+      org.opencontainers.image.revision: ${NEURONS_SOURCE_COMMIT:-0000000000000000000000000000000000000000}
       com.local.rag-ingress-queue.runtime: ubuntu-smoke
     environment:
       <<: *retired-index-bridge-env
@@ -234,6 +237,8 @@ services:
     build:
       context: ./worker
       dockerfile: Dockerfile.tools
+      args:
+        NEURONS_SOURCE_COMMIT: ${NEURONS_SOURCE_COMMIT:-0000000000000000000000000000000000000000}
     restart: unless-stopped
     command: ["sleep", "infinity"]
     environment:
@@ -250,7 +255,10 @@ services:
 
   llm-brain-graph-trigger:
     profiles: ["llm-brain-core"]
-    build: ./worker
+    build:
+      context: ./worker
+      args:
+        NEURONS_SOURCE_COMMIT: ${NEURONS_SOURCE_COMMIT:-0000000000000000000000000000000000000000}
     restart: unless-stopped
     command:
       - sh
@@ -297,7 +305,10 @@ services:
   # and the episodic hot path serialize on one lock (no concurrent Neo4j writes).
   llm-brain-bulk-semantic-trigger:
     profiles: ["llm-brain-bulk-semantic"]
-    build: ./worker
+    build:
+      context: ./worker
+      args:
+        NEURONS_SOURCE_COMMIT: ${NEURONS_SOURCE_COMMIT:-0000000000000000000000000000000000000000}
     restart: unless-stopped
     command:
       - sh
@@ -388,6 +399,8 @@ services:
     build:
       context: ./worker
       dockerfile: Dockerfile.mcp-http
+      args:
+        NEURONS_SOURCE_COMMIT: ${NEURONS_SOURCE_COMMIT:-0000000000000000000000000000000000000000}
     restart: unless-stopped
     network_mode: host
     command:
