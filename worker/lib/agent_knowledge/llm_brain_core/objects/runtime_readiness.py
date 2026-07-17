@@ -268,6 +268,7 @@ _PERMISSION_AUDIT_V2_KEYS = frozenset(
         "schema_version",
         "policy",
         "build_association_hash",
+        "product_marker_evidence",
         "transport_call_count",
         "permission_action_count",
         "audit_events",
@@ -307,7 +308,7 @@ _PERMISSION_AUDIT_STORE_V2_KEYS = frozenset(
 _PERMISSION_AUDIT_POSTCHECK_V2_KEYS = frozenset(
     {
         "status",
-        "product_mutation_sentinels_match",
+        "product_mutation_markers_match",
         "unexpected_runtime_mutation_count",
         "protected_values_returned",
         "raw_private_evidence_returned",
@@ -316,6 +317,44 @@ _PERMISSION_AUDIT_POSTCHECK_V2_KEYS = frozenset(
         "raw_external_ids_returned",
     }
 )
+_PRODUCT_MARKER_EVIDENCE_KEYS = frozenset(
+    {
+        "schema_version",
+        "external_build_association_hash",
+        "marker_count",
+        "markers",
+        "reset_or_decrease_count",
+        "production_mutation_performed",
+    }
+)
+_PRODUCT_MARKER_RECORD_KEYS = frozenset(
+    {
+        "plane",
+        "generation_hash",
+        "event_position_hash",
+        "marker_hash",
+        "in_flight_count",
+        "in_flight_status",
+        "coverage_hash",
+        "coverage_status",
+        "pre_post_status",
+        "read_scope_status",
+    }
+)
+_PRODUCT_MARKER_PLANES = (
+    "authority_ledger",
+    "corpus",
+    "queue",
+    "index",
+    "product_db",
+)
+_PRODUCT_MARKER_IN_FLIGHT_STATUS = {
+    "authority_ledger": "clear",
+    "corpus": "atomic_commit_boundary",
+    "queue": "atomic_commit_boundary",
+    "index": "clear",
+    "product_db": "atomic_commit_boundary",
+}
 AGENT_CONTEXT_STARTUP_RUNTIME_SCHEMA = "agent_context_startup_runtime_evidence.v1"
 REQUIRED_SESSION_PROJECT_OBJECT_TYPES = ("Device", "Session", "Repository", "Branch", "WorkUnit")
 REQUIRED_SESSION_PROJECT_EDGE_TYPES = (
@@ -571,7 +610,6 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         "session_project_rollup_runtime": _public_safe_mapping(captured.get("session_project_rollup_runtime")),
         "session_project_rollup_runtime_present": "session_project_rollup_runtime" in captured,
         "preference_artifact_memory": _public_safe_mapping(captured.get("preference_artifact_memory")),
-        "permission_sensitive_audit": _public_safe_mapping(captured.get("permission_sensitive_audit")),
         "agent_context_startup_runtime": _public_safe_mapping(captured.get("agent_context_startup_runtime")),
         "expected_commit": safe_expected_commit,
         "gitops_desired_state": safe_desired_state,
@@ -603,6 +641,10 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         "production_mutation_performed": captured.get("production_mutation_performed") is True
         or captured.get("mutation_performed") is True,
     }
+    if "permission_sensitive_audit" in captured:
+        packet["permission_sensitive_audit"] = _public_safe_mapping(
+            captured.get("permission_sensitive_audit")
+        )
     ensure_public_safe(packet, "SourceToCandidateRuntimeShadowEvidencePacket")
     attested_fields = _collector_attested_fields(captured)
     if attested_fields:
@@ -638,6 +680,7 @@ def build_source_to_candidate_runtime_shadow_readiness_report(
     *,
     captured_evidence: Mapping[str, Any],
     expected_commit: str = "",
+    expected_build_association_hash: str = "",
 ) -> dict[str, Any]:
     packet = build_source_to_candidate_runtime_shadow_evidence_packet(
         captured_evidence=captured_evidence,
@@ -645,6 +688,7 @@ def build_source_to_candidate_runtime_shadow_readiness_report(
     return build_source_to_candidate_runtime_readiness_report(
         live_evidence=packet,
         expected_commit=expected_commit,
+        expected_build_association_hash=expected_build_association_hash,
     )
 
 
@@ -663,6 +707,7 @@ def build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
     *,
     captured_evidence: Mapping[str, Any],
     expected_commit: str = "",
+    expected_build_association_hash: str = "",
 ) -> dict[str, Any]:
     packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
         captured_evidence=captured_evidence,
@@ -670,6 +715,7 @@ def build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
     return build_source_to_candidate_runtime_readiness_report(
         live_evidence=packet,
         expected_commit=expected_commit,
+        expected_build_association_hash=expected_build_association_hash,
     )
 
 
@@ -738,7 +784,6 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
         "session_project_rollup_runtime": session_project_rollup,
         "preference_artifact_memory": preference_artifact_memory,
         "temporal_correctness_runtime": temporal_correctness_runtime,
-        "permission_sensitive_audit": permission_sensitive_audit,
         "agent_context_startup_runtime": agent_context_startup,
         "deployed_identity": {
             "contains_expected_commit": False,
@@ -773,6 +818,9 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
                 temporal_correctness_runtime
             ),
             "permission_sensitive_audit_collected": bool(permission_sensitive_audit),
+            "permission_sensitive_audit_collection_status": (
+                "collected" if permission_sensitive_audit else "not_collected"
+            ),
             "permission_sensitive_audit_schema": public_safe_text(
                 str(permission_sensitive_audit.get("schema_version") or ""),
                 max_chars=80,
@@ -799,6 +847,8 @@ def build_source_to_candidate_runtime_collected_shadow_evidence_packet(
         },
         "production_mutation_performed": False,
     }
+    if permission_sensitive_audit:
+        capture["permission_sensitive_audit"] = permission_sensitive_audit
     packet = build_source_to_candidate_runtime_shadow_evidence_packet(captured_evidence=capture)
     packet["collector"] = capture["collector"]
     ensure_public_safe(packet, "SourceToCandidateRuntimeCollectedShadowEvidencePacket")
@@ -1958,12 +2008,10 @@ def build_permission_sensitive_audit_shadow_evidence() -> dict[str, Any]:
 def _collect_permission_sensitive_audit_shadow(
     permission_sensitive_audit_runner: Callable[[], Mapping[str, Any]] | None,
 ) -> dict[str, Any]:
+    if permission_sensitive_audit_runner is None:
+        return {}
     try:
-        raw = (
-            permission_sensitive_audit_runner()
-            if permission_sensitive_audit_runner is not None
-            else build_permission_sensitive_audit_shadow_evidence()
-        )
+        raw = permission_sensitive_audit_runner()
     except Exception as exc:  # pragma: no cover - defensive public-safe guard
         raw = {
             "schema_version": PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA,
@@ -2682,6 +2730,7 @@ def build_source_to_candidate_runtime_readiness_report(
     *,
     live_evidence: Mapping[str, Any] | None = None,
     expected_commit: str = "",
+    expected_build_association_hash: str = "",
 ) -> dict[str, Any]:
     evidence = live_evidence if isinstance(live_evidence, Mapping) else {}
     local_gate = build_source_to_authority_quality_gate_report()
@@ -2700,6 +2749,7 @@ def build_source_to_candidate_runtime_readiness_report(
         _live_permission_sensitive_audit_claim(
             evidence,
             expected_commit=expected_commit,
+            expected_build_association_hash=expected_build_association_hash,
         ),
         _live_agent_context_startup_claim(evidence),
         _gitops_desired_state_claim(evidence, expected_commit=expected_commit),
@@ -4381,6 +4431,7 @@ def _live_permission_sensitive_audit_claim(
     evidence: Mapping[str, Any],
     *,
     expected_commit: str,
+    expected_build_association_hash: str,
 ) -> dict[str, Any]:
     audit = evidence.get("permission_sensitive_audit")
     audit = audit if isinstance(audit, Mapping) else {}
@@ -4392,7 +4443,10 @@ def _live_permission_sensitive_audit_claim(
             "schema_version": "",
             "event_count": 0,
             "production_mutation_performed": False,
-            "gaps": ["permission_sensitive_audit_unverified"],
+            "gaps": [
+                "permission_sensitive_audit_unverified",
+                "product_marker_audit_unverified",
+            ],
         }
     events_raw = audit.get("audit_events")
     events = [dict(item) for item in events_raw if isinstance(item, Mapping)] if isinstance(events_raw, list) else []
@@ -4410,6 +4464,7 @@ def _live_permission_sensitive_audit_claim(
             postcheck=postcheck,
             evidence=evidence,
             expected_commit=expected_commit,
+            expected_build_association_hash=expected_build_association_hash,
         )
         if is_single_bounded_v2
         else _permission_sensitive_audit_failures(
@@ -4450,8 +4505,24 @@ def _single_bounded_denial_audit_failures(
     postcheck: Mapping[str, Any],
     evidence: Mapping[str, Any],
     expected_commit: str,
+    expected_build_association_hash: str,
 ) -> list[str]:
     failures: list[str] = []
+    marker_evidence = audit.get("product_marker_evidence")
+    if not isinstance(marker_evidence, Mapping):
+        failures.append(
+            "permission_sensitive_audit_v2_product_marker_evidence_missing"
+        )
+    else:
+        failures.extend(
+            _product_marker_evidence_failures(
+                marker_evidence,
+                audit_build_association_hash=str(
+                    audit.get("build_association_hash") or ""
+                ),
+                expected_build_association_hash=expected_build_association_hash,
+            )
+        )
     raw_events = audit.get("audit_events")
     if (
         not isinstance(raw_events, list)
@@ -4506,9 +4577,26 @@ def _single_bounded_denial_audit_failures(
     audit_association_hash = audit.get("build_association_hash")
     if not _is_sha256_digest(audit_association_hash):
         failures.append("permission_sensitive_audit_v2_build_association_invalid")
+    if not expected_build_association_hash:
+        failures.append(
+            "permission_sensitive_audit_v2_external_build_association_missing"
+        )
+    elif not _is_sha256_digest(expected_build_association_hash):
+        failures.append(
+            "permission_sensitive_audit_v2_external_build_association_invalid"
+        )
+    elif audit_association_hash != expected_build_association_hash:
+        failures.append(
+            "permission_sensitive_audit_v2_external_build_association_mismatch"
+        )
+    operation_association_hash = (
+        expected_build_association_hash
+        if _is_sha256_digest(expected_build_association_hash)
+        else str(audit_association_hash or "")
+    )
     try:
         expected_operation_hash = build_permission_audit_operation_hash(
-            build_association_hash=str(audit_association_hash or ""),
+            build_association_hash=operation_association_hash,
             ops_revision=str(desired.get("ops_revision") or ""),
             expected_commit=expected_commit,
         )
@@ -4540,8 +4628,8 @@ def _single_bounded_denial_audit_failures(
         failures.append("permission_sensitive_audit_v2_store_mutation_invalid")
     if postcheck.get("status") != "validated":
         failures.append("permission_sensitive_audit_v2_postcheck_invalid")
-    if postcheck.get("product_mutation_sentinels_match") is not True:
-        failures.append("permission_sensitive_audit_v2_product_mutation_sentinel_mismatch")
+    if postcheck.get("product_mutation_markers_match") is not True:
+        failures.append("permission_sensitive_audit_v2_product_mutation_marker_mismatch")
     if _strict_int_or_none(postcheck.get("unexpected_runtime_mutation_count")) != 0:
         failures.append("permission_sensitive_audit_v2_unexpected_runtime_mutation")
     for field in (
@@ -4556,6 +4644,100 @@ def _single_bounded_denial_audit_failures(
     if audit.get("production_mutation_performed") is not False:
         failures.append("permission_sensitive_audit_v2_production_mutation_invalid")
     return _dedupe(failures)
+
+
+def _product_marker_evidence_failures(
+    marker_evidence: Mapping[str, Any],
+    *,
+    audit_build_association_hash: str,
+    expected_build_association_hash: str,
+) -> list[str]:
+    failures: list[str] = []
+    if set(marker_evidence) != _PRODUCT_MARKER_EVIDENCE_KEYS:
+        failures.append(
+            "permission_sensitive_audit_v2_product_marker_evidence_shape_invalid"
+        )
+    if marker_evidence.get("schema_version") != "product_mutation_marker_evidence.v1":
+        failures.append(
+            "permission_sensitive_audit_v2_product_marker_evidence_schema_mismatch"
+        )
+    marker_association_hash = marker_evidence.get("external_build_association_hash")
+    if not _is_sha256_digest(marker_association_hash):
+        failures.append(
+            "permission_sensitive_audit_v2_product_marker_association_invalid"
+        )
+    elif (
+        marker_association_hash != audit_build_association_hash
+        or marker_association_hash != expected_build_association_hash
+    ):
+        failures.append(
+            "permission_sensitive_audit_v2_product_marker_association_mismatch"
+        )
+
+    markers = marker_evidence.get("markers")
+    marker_count = _strict_int_or_none(marker_evidence.get("marker_count"))
+    if (
+        marker_count != len(_PRODUCT_MARKER_PLANES)
+        or not isinstance(markers, list)
+        or len(markers) != len(_PRODUCT_MARKER_PLANES)
+    ):
+        failures.append("permission_sensitive_audit_v2_product_marker_count_invalid")
+        markers = markers if isinstance(markers, list) else []
+
+    for index, expected_plane in enumerate(_PRODUCT_MARKER_PLANES):
+        marker = markers[index] if index < len(markers) else None
+        if not isinstance(marker, Mapping):
+            failures.append(
+                f"permission_sensitive_audit_v2_product_marker_missing:{expected_plane}"
+            )
+            continue
+        if set(marker) != _PRODUCT_MARKER_RECORD_KEYS:
+            failures.append(
+                f"permission_sensitive_audit_v2_product_marker_shape_invalid:{expected_plane}"
+            )
+        if marker.get("plane") != expected_plane:
+            failures.append(
+                f"permission_sensitive_audit_v2_product_marker_plane_mismatch:{expected_plane}"
+            )
+        for field in (
+            "generation_hash",
+            "event_position_hash",
+            "marker_hash",
+            "coverage_hash",
+        ):
+            if not _is_sha256_digest(marker.get(field)):
+                failures.append(
+                    f"permission_sensitive_audit_v2_product_marker_{field}_invalid:{expected_plane}"
+                )
+        if (
+            _strict_int_or_none(marker.get("in_flight_count")) != 0
+            or marker.get("in_flight_status")
+            != _PRODUCT_MARKER_IN_FLIGHT_STATUS[expected_plane]
+        ):
+            failures.append(
+                f"permission_sensitive_audit_v2_product_marker_in_flight_invalid:{expected_plane}"
+            )
+        if marker.get("coverage_status") != "validated":
+            failures.append(
+                f"permission_sensitive_audit_v2_product_marker_coverage_invalid:{expected_plane}"
+            )
+        if marker.get("pre_post_status") != "equal":
+            failures.append(
+                f"permission_sensitive_audit_v2_product_marker_pre_post_mismatch:{expected_plane}"
+            )
+        if marker.get("read_scope_status") != "read_only":
+            failures.append(
+                f"permission_sensitive_audit_v2_product_marker_read_scope_invalid:{expected_plane}"
+            )
+    if _strict_int_or_none(marker_evidence.get("reset_or_decrease_count")) != 0:
+        failures.append(
+            "permission_sensitive_audit_v2_product_marker_reset_or_decrease_invalid"
+        )
+    if marker_evidence.get("production_mutation_performed") is not False:
+        failures.append(
+            "permission_sensitive_audit_v2_product_marker_production_mutation_invalid"
+        )
+    return failures
 
 
 def _permission_sensitive_audit_failures(
@@ -4660,7 +4842,7 @@ def _permission_sensitive_audit_reports_mutation(
     return (
         audit.get("production_mutation_performed") is True
         or store.get("production_mutation_performed") is True
-        or postcheck.get("product_mutation_sentinels_match") is False
+        or postcheck.get("product_mutation_markers_match") is False
         or (
             unexpected_mutation_count is not None
             and unexpected_mutation_count > 0

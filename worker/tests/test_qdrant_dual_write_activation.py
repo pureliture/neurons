@@ -48,6 +48,10 @@ def test_none_primary_stays_none():
 def test_build_qdrant_mirror_from_env_returns_none_without_url():
     assert build_qdrant_mirror_from_env({}) is None
     assert build_qdrant_mirror_from_env({"QDRANT_URL": ""}) is None
+    assert (
+        build_qdrant_mirror_from_env({"QDRANT_URL": "https://qdrant.invalid"})
+        is None
+    )
 
 
 def test_builder_exception_fails_safe_to_primary_not_crash(capsys):

@@ -25,6 +25,7 @@ from agent_knowledge.rag_ingress.qdrant_backfill_parity import (
     run_parity_soak,
 )
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
+    FOUNDATION_DIRECT_WRITE_CONTRACT,
     HashEmbeddingProvider,
     PassthroughMarkdownNormalizer,
     QdrantDoclingMirrorAdapter,
@@ -100,6 +101,7 @@ def _seed_projected_session(store, sid, **kw):
 def _adapter(client, *, collection="parity_mirror"):
     return QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         collection_name=collection,
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=HashEmbeddingProvider(size=VECTOR_SIZE),

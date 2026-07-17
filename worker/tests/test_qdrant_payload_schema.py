@@ -9,6 +9,7 @@ privacy_class) works through query_mirror_candidates.
 from __future__ import annotations
 
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
+    FOUNDATION_DIRECT_WRITE_CONTRACT,
     DEFAULT_COLLECTION_NAME,
     PAYLOAD_INDEX_FIELDS,
     HashEmbeddingProvider,
@@ -23,6 +24,7 @@ def _adapter(client: InMemoryQdrantClient | None = None):
     client = client or InMemoryQdrantClient()
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=HashEmbeddingProvider(size=32),
     )
@@ -42,12 +44,11 @@ def _doc(*, body: str, privacy: str = "private", result_type: str = "approved_me
     )
 
 
-def test_payload_indexes_declared_at_collection_create():
+def test_adapter_construction_never_declares_payload_indexes():
     client = InMemoryQdrantClient()
-    _adapter(client)  # construction triggers _ensure_collection
+    _adapter(client)
     declared = client.payload_indexes(DEFAULT_COLLECTION_NAME)
-    for field in PAYLOAD_INDEX_FIELDS:
-        assert field in declared
+    assert declared == []
 
 
 def test_adapter_close_closes_client_and_embedding_provider():
@@ -70,6 +71,7 @@ def test_adapter_close_closes_client_and_embedding_provider():
 
     QdrantDoclingMirrorAdapter(
         client=_Client(),
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=_Embedding(),
     ).close()
@@ -133,8 +135,14 @@ def test_query_filter_shape_includes_privacy_class_clause():
     adapter.query_mirror_candidates(
         "decision", target_profile="derived-memory-items", privacy_class="private", limit=5
     )
-    must = client.last_query_filter["must"]  # dict-shape filter (no qdrant_client installed)
-    keys = {cond["key"]: cond["match"]["value"] for cond in must}
+    query_filter = client.last_query_filter
+    must = query_filter["must"] if isinstance(query_filter, dict) else query_filter.must
+    keys = {}
+    for condition in must:
+        if isinstance(condition, dict):
+            keys[condition["key"]] = condition["match"]["value"]
+        else:
+            keys[condition.key] = condition.match.value
     assert keys.get("privacy_class") == "private"
     assert keys.get("target_profile") == "derived-memory-items"
 

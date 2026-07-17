@@ -533,6 +533,14 @@ def list_tools() -> list[dict]:
                 "properties": {
                     "live_evidence": {"type": "object", "default": {}},
                     "expected_commit": {"type": "string"},
+                    "expected_build_association_hash": {
+                        "type": "string",
+                        "pattern": "^sha256:[0-9a-f]{64}$",
+                        "description": (
+                            "controller Run action에서 packet과 별도로 전달한 "
+                            "external build association anchor다."
+                        ),
+                    },
                     "evidence_collection_plan": {"type": "boolean", "default": False},
                     "evidence_packet_template": {"type": "boolean", "default": False},
                     "collect_shadow_evidence": {"type": "boolean", "default": False},

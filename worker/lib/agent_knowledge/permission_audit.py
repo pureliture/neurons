@@ -95,6 +95,37 @@ _SENTINEL_PLANE_NAMES = (
     "index",
     "product_db",
 )
+_MARKER_SNAPSHOT_KEYS = frozenset(
+    {
+        "schema_version",
+        "marker_count",
+        "markers",
+        "reset_or_decrease_count",
+        "production_mutation_performed",
+    }
+)
+_MARKER_SNAPSHOT_RECORD_KEYS = frozenset(
+    {
+        "plane",
+        "generation_hash",
+        "event_position_hash",
+        "marker_hash",
+        "in_flight_count",
+        "in_flight_status",
+        "coverage_hash",
+        "coverage_status",
+        "read_scope_status",
+        "reset_or_decrease_count",
+        "read_call_count",
+    }
+)
+_MARKER_IN_FLIGHT_STATUS = {
+    "authority_ledger": "clear",
+    "corpus": "atomic_commit_boundary",
+    "queue": "atomic_commit_boundary",
+    "index": "clear",
+    "product_db": "atomic_commit_boundary",
+}
 
 
 class KubernetesTokenReviewer:
@@ -343,6 +374,86 @@ class IndependentProductMutationSentinelReader:
         return result
 
 
+class IndependentProductMutationMarkerReader:
+    """Hold the PostgreSQL no-writer fence around one exact five-plane audit."""
+
+    _NATIVE_PLANES = ("corpus", "queue", "index", "product_db")
+
+    def __init__(
+        self,
+        *,
+        authority_fence_factory: Callable[[], Any],
+        providers: Mapping[str, Callable[[], Mapping[str, Any]]],
+    ) -> None:
+        if not callable(authority_fence_factory):
+            raise ValueError("PostgreSQL exact marker fence factory is required")
+        if not isinstance(providers, Mapping) or set(providers) != set(
+            self._NATIVE_PLANES
+        ):
+            raise ValueError("all independent exact marker providers are required")
+        if any(not callable(providers[name]) for name in self._NATIVE_PLANES):
+            raise ValueError("all independent exact marker providers are required")
+        provider_identities = {
+            _sentinel_provider_identity(providers[name])
+            for name in self._NATIVE_PLANES
+        }
+        provider_identities.add(_sentinel_provider_identity(authority_fence_factory))
+        if len(provider_identities) != len(_SENTINEL_PLANE_NAMES):
+            raise ValueError("distinct exact marker providers are required")
+        self._authority_fence_factory = authority_fence_factory
+        self._providers = {name: providers[name] for name in self._NATIVE_PLANES}
+
+    def run_audit_window(
+        self,
+        action: Callable[[], Any],
+    ) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+        if not callable(action):
+            raise ValueError("permission audit action is required")
+        fence = self._authority_fence_factory()
+        if not callable(getattr(fence, "read_marker", None)) or not callable(
+            getattr(fence, "release", None)
+        ):
+            raise RuntimeError("PostgreSQL exact marker fence is malformed")
+        try:
+            before = self._read_snapshot(fence)
+            action_result = action()
+            after = self._read_snapshot(fence)
+            return before, action_result, after
+        finally:
+            fence.release()
+
+    def _read_snapshot(self, fence: Any) -> dict[str, Any]:
+        records = [self._marker_record(fence.read_marker(), "authority_ledger")]
+        records.extend(
+            self._marker_record(self._providers[plane](), plane)
+            for plane in self._NATIVE_PLANES
+        )
+        return _validated_product_marker_snapshot(
+            {
+                "schema_version": "product_mutation_marker_snapshot.v1",
+                "marker_count": len(records),
+                "markers": records,
+                "reset_or_decrease_count": sum(
+                    int(record["reset_or_decrease_count"]) for record in records
+                ),
+                "production_mutation_performed": False,
+            }
+        )
+
+    @staticmethod
+    def _marker_record(value: Any, expected_plane: str) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            as_evidence = getattr(value, "as_evidence", None)
+            value = as_evidence() if callable(as_evidence) else value
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != _MARKER_SNAPSHOT_RECORD_KEYS
+            or value.get("plane") != expected_plane
+        ):
+            raise ValueError("permission audit exact marker record is malformed")
+        return dict(value)
+
+
 def _sentinel_provider_identity(
     provider: Callable[[], Mapping[str, Any]],
 ) -> tuple[str, int]:
@@ -475,7 +586,7 @@ def run_permission_sensitive_audit_probe(
     projected_service_account_token: str,
     token_reviewer: Callable[[str], Mapping[str, Any]] | None,
     store_append: Callable[..., Mapping[str, Any]] | None,
-    product_sentinel_reader: Callable[[], Mapping[str, Any]] | None,
+    product_sentinel_reader: Any | None,
 ) -> dict[str, Any]:
     if not enabled:
         raise RuntimeError("permission audit probe is disabled")
@@ -500,18 +611,33 @@ def run_permission_sensitive_audit_probe(
         raise RuntimeError("permission audit probe configuration is incomplete")
 
     actor_ref_hash = _validated_actor_ref_hash(token_reviewer(projected_service_account_token))
-    before = _validated_product_sentinel(product_sentinel_reader())
-    store_result = _validated_store_result(
-        store_append(
+    def append_once() -> Mapping[str, Any]:
+        return store_append(
             request_hash=request_hash,
             actor_ref_hash=actor_ref_hash,
             action=PERMISSION_AUDIT_POLICY,
-        ),
+        )
+
+    audit_window = getattr(product_sentinel_reader, "run_audit_window", None)
+    if not callable(audit_window):
+        raise RuntimeError("permission audit exact marker window is required")
+    before_raw, store_raw, after_raw = audit_window(append_once)
+    before = _validated_product_marker_snapshot(before_raw)
+    after = _validated_product_marker_snapshot(after_raw)
+    store_result = _validated_store_result(
+        store_raw,
         request_hash=request_hash,
         actor_ref_hash=actor_ref_hash,
     )
-    after = _validated_product_sentinel(product_sentinel_reader())
-    sentinels_match = before == after
+    product_marker_evidence = _build_product_marker_evidence(
+        before=before,
+        after=after,
+        external_build_association_hash=association_hash,
+    )
+    sentinels_match = all(
+        marker["pre_post_status"] == "equal"
+        for marker in product_marker_evidence["markers"]
+    )
     action_count = int(store_result["append_count"])
     events = []
     if action_count == 1:
@@ -530,13 +656,14 @@ def run_permission_sensitive_audit_probe(
         "schema_version": PERMISSION_AUDIT_EVIDENCE_SCHEMA,
         "policy": PERMISSION_AUDIT_POLICY,
         "build_association_hash": association_hash,
+        "product_marker_evidence": product_marker_evidence,
         "transport_call_count": 1,
         "permission_action_count": action_count,
         "audit_events": events,
         "audit_store": store,
         "postcheck": {
             "status": "validated" if sentinels_match else "failed",
-            "product_mutation_sentinels_match": sentinels_match,
+            "product_mutation_markers_match": sentinels_match,
             "unexpected_runtime_mutation_count": 0 if sentinels_match else 1,
             "protected_values_returned": False,
             "raw_private_evidence_returned": False,
@@ -653,6 +780,134 @@ def _validated_product_sentinel(value: Mapping[str, Any]) -> dict[str, Any]:
         normalized[name] = {"count": count, "hash": digest}
     ensure_public_safe(normalized, "ProductMutationSentinel")
     return normalized
+
+
+def _validated_product_marker_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != _MARKER_SNAPSHOT_KEYS:
+        raise ValueError("permission audit exact marker snapshot is malformed")
+    markers = value.get("markers")
+    if (
+        value.get("schema_version") != "product_mutation_marker_snapshot.v1"
+        or value.get("marker_count") != len(_SENTINEL_PLANE_NAMES)
+        or isinstance(value.get("marker_count"), bool)
+        or not isinstance(markers, list)
+        or len(markers) != len(_SENTINEL_PLANE_NAMES)
+        or value.get("reset_or_decrease_count") != 0
+        or isinstance(value.get("reset_or_decrease_count"), bool)
+        or value.get("production_mutation_performed") is not False
+    ):
+        raise ValueError("permission audit exact marker snapshot is malformed")
+
+    normalized_markers: list[dict[str, Any]] = []
+    for expected_plane, item in zip(_SENTINEL_PLANE_NAMES, markers, strict=True):
+        if not isinstance(item, Mapping) or set(item) != _MARKER_SNAPSHOT_RECORD_KEYS:
+            raise ValueError("permission audit exact marker snapshot is malformed")
+        if (
+            item.get("plane") != expected_plane
+            or item.get("in_flight_count") != 0
+            or isinstance(item.get("in_flight_count"), bool)
+            or item.get("in_flight_status") != _MARKER_IN_FLIGHT_STATUS[expected_plane]
+            or item.get("coverage_status") != "validated"
+            or item.get("read_scope_status") != "read_only"
+            or item.get("reset_or_decrease_count") != 0
+            or isinstance(item.get("reset_or_decrease_count"), bool)
+            or item.get("read_call_count") != 1
+            or isinstance(item.get("read_call_count"), bool)
+        ):
+            raise ValueError("permission audit exact marker snapshot is malformed")
+        normalized_markers.append(
+            {
+                "plane": expected_plane,
+                "generation_hash": require_sha256(
+                    str(item.get("generation_hash") or ""),
+                    "marker generation hash",
+                ),
+                "event_position_hash": require_sha256(
+                    str(item.get("event_position_hash") or ""),
+                    "marker event position hash",
+                ),
+                "marker_hash": require_sha256(
+                    str(item.get("marker_hash") or ""),
+                    "marker hash",
+                ),
+                "in_flight_count": 0,
+                "in_flight_status": _MARKER_IN_FLIGHT_STATUS[expected_plane],
+                "coverage_hash": require_sha256(
+                    str(item.get("coverage_hash") or ""),
+                    "marker coverage hash",
+                ),
+                "coverage_status": "validated",
+                "read_scope_status": "read_only",
+                "reset_or_decrease_count": 0,
+                "read_call_count": 1,
+            }
+        )
+    normalized = {
+        "schema_version": "product_mutation_marker_snapshot.v1",
+        "marker_count": len(_SENTINEL_PLANE_NAMES),
+        "markers": normalized_markers,
+        "reset_or_decrease_count": 0,
+        "production_mutation_performed": False,
+    }
+    ensure_public_safe(normalized, "ProductMutationMarkerSnapshot")
+    return normalized
+
+
+def _build_product_marker_evidence(
+    *,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    external_build_association_hash: str,
+) -> dict[str, Any]:
+    before_markers = before["markers"]
+    after_markers = after["markers"]
+    markers: list[dict[str, Any]] = []
+    for before_marker, after_marker in zip(
+        before_markers,
+        after_markers,
+        strict=True,
+    ):
+        pre_post_equal = all(
+            before_marker[field] == after_marker[field]
+            for field in (
+                "plane",
+                "generation_hash",
+                "event_position_hash",
+                "marker_hash",
+                "in_flight_count",
+                "in_flight_status",
+                "coverage_hash",
+                "coverage_status",
+                "read_scope_status",
+            )
+        )
+        markers.append(
+            {
+                "plane": after_marker["plane"],
+                "generation_hash": after_marker["generation_hash"],
+                "event_position_hash": after_marker["event_position_hash"],
+                "marker_hash": after_marker["marker_hash"],
+                "in_flight_count": after_marker["in_flight_count"],
+                "in_flight_status": after_marker["in_flight_status"],
+                "coverage_hash": after_marker["coverage_hash"],
+                "coverage_status": after_marker["coverage_status"],
+                "pre_post_status": "equal" if pre_post_equal else "changed",
+                "read_scope_status": after_marker["read_scope_status"],
+            }
+        )
+    evidence = {
+        "schema_version": "product_mutation_marker_evidence.v1",
+        "external_build_association_hash": require_sha256(
+            external_build_association_hash,
+            "external build association hash",
+        ),
+        "marker_count": len(markers),
+        "markers": markers,
+        "reset_or_decrease_count": 0,
+        "production_mutation_performed": False,
+    }
+    ensure_public_safe(evidence, "ProductMutationMarkerEvidence")
+    return evidence
 
 
 def _validated_store_result(

@@ -1075,14 +1075,20 @@ def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
         failures.append("p8_post_deploy_capture_unexpected_report_status")
     if bool(evidence.get("runtime_evidence_post_deploy_capture_production_ready")):
         failures.append("p8_post_deploy_capture_claims_production_ready")
-    if evidence.get("runtime_evidence_collector_permission_audit_schema") != (
-        "permission_sensitive_runtime_audit_evidence.v1"
-    ):
-        failures.append("p8_permission_sensitive_audit_collector_missing")
-    if int(evidence.get("runtime_evidence_collector_permission_audit_event_count") or 0) < 2:
-        failures.append("p8_permission_sensitive_audit_events_missing")
-    if evidence.get("runtime_evidence_collector_permission_audit_store_status") != "recorded":
-        failures.append("p8_permission_sensitive_audit_store_not_recorded")
+    permission_audit_collection_status = evidence.get(
+        "runtime_evidence_collector_permission_audit_collection_status"
+    )
+    if permission_audit_collection_status == "collected":
+        if evidence.get("runtime_evidence_collector_permission_audit_schema") != (
+            "permission_sensitive_runtime_audit_evidence.v1"
+        ):
+            failures.append("p8_permission_sensitive_audit_collector_missing")
+        if int(evidence.get("runtime_evidence_collector_permission_audit_event_count") or 0) < 2:
+            failures.append("p8_permission_sensitive_audit_events_missing")
+        if evidence.get("runtime_evidence_collector_permission_audit_store_status") != "recorded":
+            failures.append("p8_permission_sensitive_audit_store_not_recorded")
+    elif permission_audit_collection_status != "not_collected":
+        failures.append("p8_permission_sensitive_audit_collection_status_invalid")
     if evidence.get("runtime_evidence_collector_agent_context_startup_schema") != (
         "agent_context_startup_runtime_evidence.v1"
     ):
@@ -1160,6 +1166,16 @@ def _p8_evidence_gaps(evidence: Mapping[str, Any]) -> list[str]:
         gaps.append("p8_runtime_evidence_packet_template_not_live_evidence")
     if evidence.get("runtime_evidence_collector_readiness_claim") == "collector_packet_not_live_evidence":
         gaps.append("p8_runtime_evidence_collector_not_live_evidence")
+    if (
+        evidence.get("runtime_evidence_collector_permission_audit_collection_status")
+        == "not_collected"
+    ):
+        gaps.extend(
+            (
+                "p8_permission_sensitive_audit_unverified",
+                "p8_product_marker_audit_unverified",
+            )
+        )
     if evidence.get("shadow_route_smoke_readiness_claim") == "request_only_not_live_evidence":
         gaps.append("p8_shadow_route_smoke_collection_pending")
         gaps.extend(
@@ -2076,6 +2092,9 @@ def _p8_runtime_authority_evidence(
         ),
         "runtime_evidence_collector_permission_audit_schema": str(
             collector_permission_audit.get("schema_version") or ""
+        ),
+        "runtime_evidence_collector_permission_audit_collection_status": str(
+            collector.get("permission_sensitive_audit_collection_status") or ""
         ),
         "runtime_evidence_collector_permission_audit_expected_schema": PERMISSION_SENSITIVE_AUDIT_RUNTIME_SCHEMA,
         "runtime_evidence_collector_permission_audit_event_count": len(

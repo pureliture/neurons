@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 
 from .couchdb_source import build_cli as couchdb_build_cli
 from .couchdb_source import migration_flow_cli as couchdb_migration_flow_cli
@@ -26,9 +26,12 @@ from .mcp_server import KnowledgeSearchService, build_index_client, run_stdio_se
 from .permission_audit import (
     DEFAULT_PERMISSION_AUDIT_STORE_URL,
     DEFAULT_TOKEN_REVIEW_URL,
-    IndependentProductMutationSentinelReader,
+    IndependentProductMutationMarkerReader,
     KubernetesTokenReviewer,
     LoopbackPermissionAuditStoreClient,
+)
+from .permission_audit_marker_runtime_env import (
+    build_production_permission_audit_marker_reader,
 )
 from .rag_ingress import state_cli
 from .rag_ingress import projection_invalidation_canary
@@ -203,7 +206,8 @@ class _ServiceWiringError(Exception):
 def _build_recall_service(
     args,
     *,
-    permission_audit_sentinel_providers: Mapping[str, Callable] | None = None,
+    permission_audit_marker_reader: IndependentProductMutationMarkerReader
+    | None = None,
 ) -> KnowledgeSearchService:
     """mcp-stdio / mcp-http 공통 recall service 와이어링(단일 권위).
 
@@ -264,20 +268,27 @@ def _build_recall_service(
     product_sentinel_reader = None
     if audit_probe_enabled:
         try:
-            product_sentinel_reader = IndependentProductMutationSentinelReader(
-                permission_audit_sentinel_providers or {}
-            )
+            if permission_audit_marker_reader is None:
+                permission_audit_marker_reader = (
+                    build_production_permission_audit_marker_reader(os.environ)
+                )
+            if not isinstance(
+                permission_audit_marker_reader,
+                IndependentProductMutationMarkerReader,
+            ):
+                raise ValueError("exact marker reader unavailable")
+            product_sentinel_reader = permission_audit_marker_reader
             token_reviewer = KubernetesTokenReviewer(
                 str(getattr(args, "permission_audit_token_review_url", ""))
             )
             store_client = LoopbackPermissionAuditStoreClient(
                 str(getattr(args, "permission_audit_store_url", ""))
             )
-        except ValueError as exc:
+        except Exception as exc:
             message = (
-                "permission audit sentinel providers unavailable"
-                if "sentinel providers" in str(exc)
-                else f"permission audit wiring failed: {type(exc).__name__}"
+                "permission audit exact marker reader unavailable"
+                if "exact marker reader unavailable" in str(exc)
+                else "permission audit exact marker configuration invalid"
             )
             raise _ServiceWiringError(
                 2,

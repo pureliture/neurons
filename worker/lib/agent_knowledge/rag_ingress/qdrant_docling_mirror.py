@@ -26,6 +26,10 @@ from agent_knowledge.public_safe_util import (
     require_sha256,
 )
 from agent_knowledge.redaction import redact_public_ingress_text
+from agent_knowledge.qdrant_write_gateway_runtime import (
+    FoundationDirectWriteContract,
+    QdrantWriteActivation,
+)
 
 from .retired_index_bridge import (
     BackendDocumentHandle,
@@ -59,6 +63,12 @@ PAYLOAD_INDEX_FIELDS = (
 EVIDENCE_PACKET_SCHEMA = "agent_knowledge_searchable_mirror_gate_evidence.v1"
 MIRROR_AUTHORITY = "searchable_runtime_mirror"
 MIRROR_BACKEND = "qdrant_docling"
+FOUNDATION_DIRECT_WRITE_CONTRACT = FoundationDirectWriteContract(
+    activation=QdrantWriteActivation.FOUNDATION_DIRECT,
+    phase="pr_c_foundation_compatibility",
+    audit_status="pending",
+    coverage_status="pending",
+)
 
 
 class SearchableMirrorUnavailable(RuntimeError):
@@ -232,14 +242,37 @@ class QdrantDoclingMirrorAdapter:
         collection_name: str = DEFAULT_COLLECTION_NAME,
         normalizer: MarkdownNormalizer | None = None,
         embedding_provider: EmbeddingProvider | None = None,
-        ensure_collection: bool = True,
+        write_transport: Any | None = None,
+        direct_write_contract: FoundationDirectWriteContract | None = None,
+        ensure_collection: bool = False,
     ) -> None:
         self._client = client
         self._collection_name = str(collection_name or DEFAULT_COLLECTION_NAME)
+        if write_transport is not None and direct_write_contract is not None:
+            raise ValueError("qdrant_write_transport_conflict")
+        if direct_write_contract is not None:
+            if not isinstance(direct_write_contract, FoundationDirectWriteContract):
+                raise ValueError("foundation_direct_contract_invalid")
+            from agent_knowledge.qdrant_write_gateway_runtime import (
+                DEFAULT_QDRANT_MARKER_COLLECTION,
+                DirectQdrantWriteTransport,
+                QdrantCollectionPolicy,
+            )
+
+            policy = QdrantCollectionPolicy(
+                product_collections=(self._collection_name,),
+                marker_collection=DEFAULT_QDRANT_MARKER_COLLECTION,
+            )
+            write_transport = DirectQdrantWriteTransport(
+                client=client,
+                collection_name=self._collection_name,
+                policy=policy,
+            )
+        self._write_transport = write_transport
         self._normalizer = normalizer or DoclingMarkdownNormalizer()
         self._embedding = embedding_provider or HashEmbeddingProvider()
         if ensure_collection:
-            self._ensure_collection()
+            raise SearchableMirrorUnavailable("implicit_collection_provisioning_disabled")
 
     def submit_document(
         self,
@@ -247,6 +280,8 @@ class QdrantDoclingMirrorAdapter:
         *,
         on_step_complete=None,
     ) -> BackendSubmitResult:
+        if self._write_transport is None:
+            raise SearchableMirrorUnavailable("qdrant_write_transport_required")
         markdown = self._normalizer.normalize(document)
         safe_markdown = _validate_mirror_text(markdown)
         vector = self._embedding.embed(safe_markdown)
@@ -258,9 +293,8 @@ class QdrantDoclingMirrorAdapter:
             idempotency_key=document.idempotency_key,
             content_hash=document.content_hash,
         )
-        self._client.upsert(
-            collection_name=self._collection_name,
-            points=[_point_struct(point_id=point_id, vector=vector, payload=payload)],
+        self._write_transport.upsert_points(
+            points=[_point_struct(point_id=point_id, vector=vector, payload=payload)]
         )
         if on_step_complete is not None:
             on_step_complete("qdrant_upsert", document_ref=point_id)
@@ -396,46 +430,6 @@ class QdrantDoclingMirrorAdapter:
                 continue
             closer()
 
-    def _ensure_collection(self) -> None:
-        exists = False
-        if hasattr(self._client, "collection_exists"):
-            try:
-                exists = bool(self._client.collection_exists(self._collection_name))
-            except Exception as exc:
-                raise SearchableMirrorUnavailable("Qdrant collection probe failed") from exc
-        else:
-            try:
-                self._client.get_collection(self._collection_name)
-                exists = True
-            except Exception as exc:
-                if not _is_qdrant_not_found_error(exc):
-                    raise SearchableMirrorUnavailable("Qdrant collection probe failed") from exc
-                exists = False
-        if exists:
-            return
-        self._client.create_collection(
-            collection_name=self._collection_name,
-            vectors_config=_vector_params(self._embedding.size),
-        )
-        self._ensure_payload_indexes()
-
-    def _ensure_payload_indexes(self) -> None:
-        # Declared at create time so production filters (target_profile,
-        # privacy_class, result_type, ...) don't full-scan. No-op when the client
-        # does not support payload indexes (e.g. a minimal local/fake client).
-        creator = getattr(self._client, "create_payload_index", None)
-        if not callable(creator):
-            return
-        for field in PAYLOAD_INDEX_FIELDS:
-            try:
-                creator(
-                    collection_name=self._collection_name,
-                    field_name=field,
-                    field_schema=_keyword_index_schema(),
-                )
-            except Exception as exc:
-                raise SearchableMirrorUnavailable("Qdrant payload index create failed") from exc
-
     def delete_document(
         self, handle: BackendDocumentHandle, *, missing_ok: bool = True
     ) -> MirrorDeletionResult:
@@ -447,6 +441,8 @@ class QdrantDoclingMirrorAdapter:
         target the same neutral seam for the mirror.
         """
 
+        if self._write_transport is None:
+            raise SearchableMirrorUnavailable("qdrant_write_transport_required")
         if handle.dataset_ref != _dataset_ref(self._collection_name):
             return MirrorDeletionResult(
                 status="collection_mismatch",
@@ -456,9 +452,9 @@ class QdrantDoclingMirrorAdapter:
         existed = bool(self._retrieve_points([handle.document_ref]))
         if not existed and not missing_ok:
             raise ValueError("mirror point not found and missing_ok is False")
-        self._client.delete(
-            collection_name=self._collection_name,
+        self._write_transport.delete_points(
             points_selector=_points_selector([handle.document_ref]),
+            item_count=1,
         )
         return MirrorDeletionResult(
             status="deleted" if existed else "absent",
@@ -572,8 +568,9 @@ def build_local_qdrant_docling_mirror_adapter(
     collection_name: str = DEFAULT_COLLECTION_NAME,
     embedding_provider: EmbeddingProvider | None = None,
     normalizer: MarkdownNormalizer | None = None,
+    write_transport: Any | None = None,
 ) -> QdrantDoclingMirrorAdapter:
-    """Create a local Qdrant adapter using qdrant-client local mode."""
+    """Create a read-only local adapter unless an explicit transport is supplied."""
 
     try:
         from qdrant_client import QdrantClient
@@ -587,6 +584,7 @@ def build_local_qdrant_docling_mirror_adapter(
         collection_name=collection_name,
         embedding_provider=embedding_provider,
         normalizer=normalizer,
+        write_transport=write_transport,
     )
 
 
@@ -596,7 +594,9 @@ def build_remote_qdrant_docling_mirror_adapter(
     collection_name: str = DEFAULT_COLLECTION_NAME,
     embedding_provider: EmbeddingProvider | None = None,
     normalizer: MarkdownNormalizer | None = None,
-    ensure_collection: bool = True,
+    write_transport: Any | None = None,
+    direct_write_contract: FoundationDirectWriteContract | None = None,
+    ensure_collection: bool = False,
 ) -> QdrantDoclingMirrorAdapter:
     """Create a Qdrant adapter against a remote server URL (e.g. compose service).
 
@@ -604,10 +604,9 @@ def build_remote_qdrant_docling_mirror_adapter(
     activation when ``QDRANT_URL`` is configured; tests inject a fake client to the
     adapter directly and never exercise this network path.
 
-    ``ensure_collection`` defaults True (legacy dual-write behaviour: create the
-    collection if absent). A backfill ``run``/``rollback`` passes False so a
-    typo'd collection name fails closed instead of silently creating an empty
-    server-side collection (which would also make any dim guard moot).
+    Collection creation is never implicit. Product writers must use the gateway
+    builder and pass its typed transport; this legacy builder is read-only unless
+    an explicit Foundation compatibility transport is supplied.
     """
 
     if not url:
@@ -623,7 +622,69 @@ def build_remote_qdrant_docling_mirror_adapter(
         collection_name=collection_name,
         embedding_provider=embedding_provider,
         normalizer=normalizer,
+        write_transport=write_transport,
+        direct_write_contract=direct_write_contract,
         ensure_collection=ensure_collection,
+    )
+
+
+def build_remote_qdrant_docling_sidecar_adapter(
+    *,
+    read_url: str,
+    read_api_key_path: str | Path,
+    gateway_endpoint: str,
+    gateway_token_path: str | Path,
+    gateway_ca_path: str | Path,
+    gateway_generation: int,
+    collection_name: str,
+    source: Any,
+    embedding_provider: EmbeddingProvider | None = None,
+    normalizer: MarkdownNormalizer | None = None,
+) -> QdrantDoclingMirrorAdapter:
+    """Build a read client plus the central sidecar HTTPS write transport.
+
+    The writer process owns no Qdrant write credential and never constructs a
+    Qdrant-backed marker/product mutation wrapper.
+    """
+
+    from agent_knowledge.qdrant_write_gateway_http import (
+        RemoteQdrantGatewayTransport,
+        read_projected_qdrant_api_key,
+        validate_qdrant_read_base_url,
+    )
+
+    try:
+        validated_read_url = validate_qdrant_read_base_url(read_url)
+    except Exception:
+        raise SearchableMirrorUnavailable("qdrant_read_url_invalid") from None
+    try:
+        from qdrant_client import QdrantClient
+    except ImportError as exc:  # pragma: no cover - optional dependency guard
+        raise SearchableMirrorUnavailable(
+            "qdrant-client is not installed; install the searchable mirror optional dependencies"
+        ) from exc
+    read_client = QdrantClient(
+        url=validated_read_url,
+        api_key=read_projected_qdrant_api_key(read_api_key_path),
+        timeout=5,
+        prefer_grpc=False,
+        trust_env=False,
+        follow_redirects=False,
+    )
+    transport = RemoteQdrantGatewayTransport(
+        endpoint=gateway_endpoint,
+        source=source,
+        generation=gateway_generation,
+        collection_name=collection_name,
+        token_path=gateway_token_path,
+        ca_path=gateway_ca_path,
+    )
+    return QdrantDoclingMirrorAdapter(
+        client=read_client,
+        collection_name=collection_name,
+        embedding_provider=embedding_provider,
+        normalizer=normalizer,
+        write_transport=transport,
     )
 
 
@@ -1081,6 +1142,7 @@ def _evidence_section_status(packet_valid: bool, claimed: bool) -> str:
 __all__ = [
     "DoclingMarkdownNormalizer",
     "EVIDENCE_PACKET_SCHEMA",
+    "FOUNDATION_DIRECT_WRITE_CONTRACT",
     "HashEmbeddingProvider",
     "MIRROR_AUTHORITY",
     "MIRROR_BACKEND",
@@ -1092,6 +1154,7 @@ __all__ = [
     "SearchableMirrorHit",
     "SearchableMirrorUnavailable",
     "build_local_qdrant_docling_mirror_adapter",
+    "build_remote_qdrant_docling_sidecar_adapter",
     "build_searchable_mirror_gate_report",
     "point_id_for_natural_key",
 ]

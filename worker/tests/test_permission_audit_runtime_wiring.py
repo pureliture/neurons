@@ -46,6 +46,56 @@ def _bounded_store_result(*, request_hash, actor_ref_hash, append_count=1):
     }
 
 
+def _exact_marker_reader():
+    from agent_knowledge.permission_audit import IndependentProductMutationMarkerReader
+
+    statuses = {
+        "authority_ledger": "clear",
+        "corpus": "atomic_commit_boundary",
+        "queue": "atomic_commit_boundary",
+        "index": "clear",
+        "product_db": "atomic_commit_boundary",
+    }
+
+    def record(plane):
+        index = tuple(statuses).index(plane) + 1
+        return {
+            "plane": plane,
+            "generation_hash": "sha256:" + "a" * 64,
+            "event_position_hash": "sha256:" + format(index, "x") * 64,
+            "marker_hash": "sha256:" + format(index + 5, "x") * 64,
+            "in_flight_count": 0,
+            "in_flight_status": statuses[plane],
+            "coverage_hash": "sha256:" + format(index + 10, "x") * 64,
+            "coverage_status": "validated",
+            "read_scope_status": "read_only",
+            "reset_or_decrease_count": 0,
+            "read_call_count": 1,
+        }
+
+    class Fence:
+        def read_marker(self):
+            return record("authority_ledger")
+
+        def release(self):
+            return None
+
+    class Provider:
+        def __init__(self, plane):
+            self.plane = plane
+
+        def __call__(self):
+            return record(self.plane)
+
+    return IndependentProductMutationMarkerReader(
+        authority_fence_factory=Fence,
+        providers={
+            plane: Provider(plane)
+            for plane in ("corpus", "queue", "index", "product_db")
+        },
+    )
+
+
 def test_kubernetes_token_reviewer_uses_fixed_audience_and_does_not_return_credentials():
     from agent_knowledge.permission_audit import (
         KubernetesTokenReviewer,
@@ -521,7 +571,7 @@ def test_recall_service_wiring_enables_audit_only_with_explicit_cli_flag(tmp_pat
     disabled = cli._build_recall_service(
         Namespace(**base, allow_permission_sensitive_audit_probe=False)
     )
-    with pytest.raises(cli._ServiceWiringError, match="sentinel providers unavailable"):
+    with pytest.raises(cli._ServiceWiringError, match="exact marker reader unavailable"):
         cli._build_recall_service(
             Namespace(**base, allow_permission_sensitive_audit_probe=True)
         )
@@ -532,7 +582,7 @@ def test_recall_service_wiring_enables_audit_only_with_explicit_cli_flag(tmp_pat
     assert disabled._permission_audit_product_sentinel_reader is None
 
 
-def test_recall_service_allows_audit_only_with_sentinels_and_atomic_store(
+def test_recall_service_allows_audit_only_with_exact_markers_and_atomic_store(
     tmp_path,
 ):
     from agent_knowledge import cli
@@ -555,22 +605,144 @@ def test_recall_service_allows_audit_only_with_sentinels_and_atomic_store(
             "https://kubernetes.default.svc/apis/authentication.k8s.io/v1/tokenreviews"
         ),
     )
-    providers = {
-        name: (lambda value=index: {"count": value, "hash": "sha256:" + "a" * 64})
-        for index, name in enumerate(
-            ("authority_ledger", "corpus", "queue", "index", "product_db")
-        )
-    }
+    marker_reader = _exact_marker_reader()
 
     enabled = cli._build_recall_service(
         args,
-        permission_audit_sentinel_providers=providers,
+        permission_audit_marker_reader=marker_reader,
     )
 
     assert enabled.allow_permission_sensitive_audit_probe is True
     assert not hasattr(enabled, "_permission_audit_denial_request")
     assert callable(enabled._permission_audit_store_append)
-    assert enabled._permission_audit_product_sentinel_reader is not None
+    assert enabled._permission_audit_product_sentinel_reader is marker_reader
+
+
+def test_recall_service_builds_exact_marker_reader_from_production_environment(
+    monkeypatch,
+    tmp_path,
+):
+    from agent_knowledge import cli
+
+    ledger_path = tmp_path / "ledger.sqlite3"
+    Ledger(ledger_path)
+    marker_reader = _exact_marker_reader()
+    calls = []
+
+    def build_reader(environ):
+        calls.append(environ)
+        return marker_reader
+
+    monkeypatch.setattr(
+        cli,
+        "build_production_permission_audit_marker_reader",
+        build_reader,
+        raising=False,
+    )
+    args = Namespace(
+        ledger=str(ledger_path),
+        dataset_id=[],
+        allow_private_results=False,
+        native_memory_id="",
+        enable_graph=False,
+        graph_required=False,
+        allow_steward_proposals=False,
+        allow_steward_review_commit=False,
+        allow_object_authority_production_writes=False,
+        allow_permission_sensitive_audit_probe=True,
+        permission_audit_store_url="http://127.0.0.1:8771",
+        permission_audit_token_review_url=(
+            "https://kubernetes.default.svc/apis/authentication.k8s.io/v1/tokenreviews"
+        ),
+    )
+
+    service = cli._build_recall_service(args)
+
+    assert calls == [cli.os.environ]
+    assert service._permission_audit_product_sentinel_reader is marker_reader
+
+
+def test_recall_service_audit_off_never_calls_production_marker_factory(
+    monkeypatch,
+    tmp_path,
+):
+    from agent_knowledge import cli
+
+    ledger_path = tmp_path / "ledger.sqlite3"
+    Ledger(ledger_path)
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "build_production_permission_audit_marker_reader",
+        lambda _environ: calls.append("marker") or _exact_marker_reader(),
+    )
+    args = Namespace(
+        ledger=str(ledger_path),
+        dataset_id=[],
+        allow_private_results=False,
+        native_memory_id="",
+        enable_graph=False,
+        graph_required=False,
+        allow_steward_proposals=False,
+        allow_steward_review_commit=False,
+        allow_object_authority_production_writes=False,
+        allow_permission_sensitive_audit_probe=False,
+        permission_audit_store_url="http://127.0.0.1:8771",
+        permission_audit_token_review_url=(
+            "https://kubernetes.default.svc/apis/authentication.k8s.io/v1/tokenreviews"
+        ),
+    )
+
+    service = cli._build_recall_service(args)
+
+    assert calls == []
+    assert service._permission_audit_product_sentinel_reader is None
+
+
+@pytest.mark.parametrize("transport", ("stdio", "http"))
+def test_mcp_transports_auto_wire_production_marker_reader(
+    monkeypatch,
+    tmp_path,
+    transport,
+):
+    from agent_knowledge import cli
+    from agent_knowledge import mcp_http_server
+
+    ledger_path = tmp_path / "ledger.sqlite3"
+    Ledger(ledger_path)
+    marker_reader = _exact_marker_reader()
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "build_production_permission_audit_marker_reader",
+        lambda environ: calls.append(("marker", environ)) or marker_reader,
+    )
+    monkeypatch.setattr(
+        cli,
+        "run_stdio_server",
+        lambda service: calls.append(("stdio", service)),
+    )
+    monkeypatch.setattr(
+        mcp_http_server,
+        "serve",
+        lambda service, **_kwargs: calls.append(("http", service)),
+    )
+    argv = [
+        "--ledger",
+        str(ledger_path),
+        "--allow-permission-sensitive-audit-probe",
+    ]
+
+    result = (
+        cli._mcp_stdio_main(argv)
+        if transport == "stdio"
+        else cli._mcp_http_main(argv)
+    )
+
+    assert result == 0
+    assert [name for name, _ in calls] == ["marker", transport]
+    service = calls[-1][1]
+    assert service._permission_audit_product_sentinel_reader is marker_reader
 
 
 def test_permission_audit_cli_flag_is_declared_without_env_alias(capsys):

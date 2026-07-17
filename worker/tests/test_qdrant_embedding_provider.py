@@ -15,6 +15,7 @@ import pytest
 
 from agent_knowledge.rag_ingress.retired_index_bridge import IndexStatus
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
+    FOUNDATION_DIRECT_WRITE_CONTRACT,
     PassthroughMarkdownNormalizer,
     QdrantDoclingMirrorAdapter,
     SearchableMirrorUnavailable,
@@ -159,6 +160,7 @@ def test_provider_satisfies_adapter_embedding_protocol_end_to_end():
     )
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=provider,
     )
@@ -190,6 +192,7 @@ def test_submit_document_size_guard_rejects_mismatched_vector_no_point_written()
     client = InMemoryQdrantClient()
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=_WrongSizeProvider(),
     )
