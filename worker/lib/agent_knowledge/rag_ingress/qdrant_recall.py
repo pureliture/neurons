@@ -20,8 +20,23 @@ from .qdrant_authority_join import join_mirror_hits_to_authority
 from .qdrant_couchdb_authority import CouchDBProjectionStateAuthorityResolver
 
 DEFAULT_RECALL_LIMIT = 8
+_SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
 
 BrainQuerySearch = Callable[[str, str], list[dict[str, Any]]]
+
+
+def _is_synthetic_canary_authority_hit(hit: dict[str, Any]) -> bool:
+    """Keep additive projection canaries out of public mirror recall lanes.
+
+    ``provider`` is deliberately read only after ``join_mirror_hits_to_authority``
+    has replaced mirror metadata with the CouchDB authority record.  A raw mirror
+    payload is not trusted for this exclusion decision.
+    """
+
+    return (
+        str(hit.get("provider") or "").strip().casefold()
+        == _SYNTHETIC_CANARY_PROVIDER
+    )
 
 
 def build_qdrant_brain_query_search(
@@ -49,11 +64,14 @@ def build_qdrant_brain_query_search(
         joined = join_mirror_hits_to_authority(raw, resolver=resolver, drop_unresolved=True)
         results: list[dict[str, Any]] = []
         for hit in joined:
+            if _is_synthetic_canary_authority_hit(hit):
+                continue
             results.append(
                 {
                     # this search is always over the session-memory profile; the raw
                     # mirror hit's result_type is the generic "searchable_mirror".
                     "result_type": "session_memory",
+                    "retrieval_lane": "qdrant_semantic",
                     "memory_id": str(hit.get("memory_id") or ""),
                     # session-memory points carry no card_type -> archive lane
                     "card_type": "",

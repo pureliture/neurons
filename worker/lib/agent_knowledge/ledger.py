@@ -1056,7 +1056,9 @@ class Ledger(
         # this ledger module. By initialize-time this module is fully loaded, so
         # referencing the single-source schema constant here is safe.
         from .llm_brain_core.ledger_adapter import (
+            _ARTIFACT_SCHEMA,
             _GRAPH_PROJECTION_STATE_SCHEMA,
+            _migrate_artifact_currentness,
             _migrate_extraction_level,
         )
 
@@ -1065,6 +1067,7 @@ class Ledger(
             # BEFORE the schema script runs: the script's extraction_level index
             # must not execute before the migration adds that column. No-op on a
             # fresh ledger (table absent) and on an already-new-shape table.
+            _migrate_artifact_currentness(connection)
             _migrate_extraction_level(connection)
             connection.executescript(
                 """
@@ -1322,20 +1325,6 @@ class Ledger(
                     job_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS llm_brain_session_memory_artifacts (
-                    artifact_id TEXT PRIMARY KEY,
-                    session_id_hash TEXT NOT NULL,
-                    project TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    content_hash TEXT NOT NULL,
-                    artifact_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_llm_brain_artifacts_project_created
-                    ON llm_brain_session_memory_artifacts(project, created_at);
-                CREATE INDEX IF NOT EXISTS idx_llm_brain_artifacts_session
-                    ON llm_brain_session_memory_artifacts(session_id_hash);
                 CREATE TABLE IF NOT EXISTS llm_brain_source_refs (
                     source_ref_id TEXT PRIMARY KEY,
                     device_id_hash TEXT NOT NULL,
@@ -1717,6 +1706,7 @@ class Ledger(
                 # ledger_adapter so the table is declared in exactly one place.
                 # The pre-M2 -> composite-unique migration already ran above so the
                 # extraction_level column exists before this script's level index.
+                + _ARTIFACT_SCHEMA
                 + _GRAPH_PROJECTION_STATE_SCHEMA
             )
             _migrate_backend_neutral_index_schema(connection)

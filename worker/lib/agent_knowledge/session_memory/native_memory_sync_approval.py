@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 
@@ -35,8 +36,7 @@ def validate_memory_enqueue_approval(
         raise ApprovalError("live approval is not approved")
     if payload.get("redaction_required") is not True:
         raise ApprovalError("redaction is required")
-    if int(payload.get("timeout_seconds") or 0) <= 0:
-        raise ApprovalError("timeout_seconds is required")
+    _validated_timeout_seconds(payload)
     if not payload.get("rollback_or_abort_criteria"):
         raise ApprovalError("abort criteria are required")
     approved_argv = (payload.get("command") or {}).get("argv")
@@ -100,9 +100,7 @@ def validate_goal3_live_approval(
         raise ApprovalError("redaction is required")
     if not payload.get("rollback_or_abort_criteria"):
         raise ApprovalError("abort criteria are required")
-    timeout_seconds = float(payload.get("timeout_seconds") or 0)
-    if timeout_seconds <= 0:
-        raise ApprovalError("timeout_seconds is required")
+    timeout_seconds = _validated_timeout_seconds(payload)
     target = payload.get("target") or {}
     if target.get("dataset_id") != dataset_id:
         raise ApprovalError("approval dataset_id mismatch")
@@ -124,6 +122,21 @@ def _reject_secret_approval_path(path: Path) -> None:
         raise ApprovalError("approval path boundary rejected private OpenClaw path")
     if path.name == "secrets.json":
         raise ApprovalError("approval path boundary rejected secret approval path")
+
+
+def _validated_timeout_seconds(payload: dict) -> float:
+    raw_timeout = payload.get("timeout_seconds")
+    if isinstance(raw_timeout, bool):
+        raise ApprovalError("timeout_seconds must be a positive finite number")
+    try:
+        timeout_seconds = float(raw_timeout or 0)
+    except (TypeError, ValueError) as exc:
+        # Never include the malformed source value in an error that may reach a
+        # live CLI traceback or structured failure report.
+        raise ApprovalError("timeout_seconds must be a positive finite number") from exc
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ApprovalError("timeout_seconds must be a positive finite number")
+    return timeout_seconds
 
 
 def _approval_operation_matches(payload: dict, operation: str) -> bool:

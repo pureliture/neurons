@@ -428,7 +428,9 @@ def test_neuron_knowledge_object_query_infers_temporal_route(capsys):
     assert rc == 0
     assert report["route"] == "temporal_work_recall"
     assert report["object_pack"]["route"] == "temporal_work_recall"
-    assert report["object_pack"]["audit"]["source_pack_names"] == ["current_work", "required_verification"]
+    assert report["object_pack"]["audit"]["object_pack_route_source"] == "temporal_evidence_filter"
+    assert report["object_pack"]["objects"] == []
+    assert report["object_pack"]["gaps"]
     assert "object_pack_route_not_implemented" not in report["object_pack"]["gaps"]
 
 

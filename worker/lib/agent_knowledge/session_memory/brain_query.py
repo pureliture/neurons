@@ -11,6 +11,7 @@ contract: docs/superpowers/specs/2026-06-11-use-brain-ux-design.md
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable, Protocol, runtime_checkable
@@ -25,6 +26,7 @@ BRAIN_ID_PROJECT_PREFIX = "/project/"
 DEFAULT_LIMIT = 8
 MAX_LIMIT = 10
 LEDGER_QUERY_RANKING_CANDIDATE_LIMIT = 50
+SEMANTIC_RESULT_MIN_SCORE = 0.75
 QUERY_RESPONSE_LANES = (
     "current",
     "accepted",
@@ -151,7 +153,7 @@ def _rank_ledger_cards_for_query(
         overlap = len(tokens.intersection(_query_tokens(card_text)))
         phrase_matches = _phrase_match_count(phrases=phrases, card_text=card_text)
         semantic_score = _semantic_score(card)
-        if overlap >= threshold:
+        if overlap >= threshold or semantic_score >= SEMANTIC_RESULT_MIN_SCORE:
             scored.append((index, phrase_matches, overlap, semantic_score, card))
     if phrases:
         max_phrase_matches = max((item[1] for item in scored), default=0)
@@ -164,16 +166,21 @@ def _rank_ledger_cards_for_query(
 
 
 def _semantic_score(card: Mapping[str, Any]) -> float:
-    value = card.get("_semantic_score")
-    if not isinstance(value, (int, float)):
-        return 0.0
-    return float(value)
+    value = _finite_score_or_none(card.get("_semantic_score"))
+    return value if value is not None else 0.0
+
+
+def _finite_score_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    score = float(value)
+    return score if math.isfinite(score) else None
 
 
 def _hit_rank(hit: dict) -> tuple:
     non_raw = 0 if str(hit.get("message_type") or "") != "raw" else 1
-    score = hit.get("score")
-    score_key = -float(score) if isinstance(score, (int, float)) else float("inf")
+    score = _finite_score_or_none(hit.get("score"))
+    score_key = -score if score is not None else float("inf")
     return (non_raw, score_key)
 
 
@@ -241,12 +248,12 @@ def run_brain_query_v2(
     if not normalized:
         return _query_v2_error(brain_id=brain_id, code="invalid_query", message="query must be non-empty")
     bounded_limit = max(1, min(MAX_LIMIT, int(limit)))
-    strict_eval_ranking = query_intent == "eval"
-    candidate_limit = max(bounded_limit, LEDGER_QUERY_RANKING_CANDIDATE_LIMIT) if strict_eval_ranking else bounded_limit
+    strict_relevance = query_intent in {"eval", "session_context"}
+    candidate_limit = max(bounded_limit, LEDGER_QUERY_RANKING_CANDIDATE_LIMIT) if strict_relevance else bounded_limit
     ledger_cards = list_ledger_accepted_cards(read_model, project=project, limit=candidate_limit)
     semantic_ranker_used = False
     semantic_ranker_error_type = ""
-    if strict_eval_ranking and semantic_ranker is not None:
+    if strict_relevance and semantic_ranker is not None:
         try:
             semantic_ranked = semantic_ranker(
                 query=normalized,
@@ -264,7 +271,7 @@ def run_brain_query_v2(
         query=normalized,
         query_terms=query_terms,
         limit=bounded_limit,
-        strict=strict_eval_ranking,
+        strict=strict_relevance,
     )
     index_results = None
     if index_search is not None:
@@ -293,6 +300,180 @@ def run_brain_query_v2(
     if semantic_ranker_error_type:
         response["audit"]["semantic_ranker_error_type"] = semantic_ranker_error_type
     return response
+
+
+def build_temporal_brain_query_response(
+    *,
+    brain_id: str,
+    temporal_response: Mapping[str, Any],
+) -> dict:
+    """Map authoritative temporal WorkUnits into the public ``brain.query`` shape.
+
+    ``brain.query`` historically read only current MemoryCards.  That made an
+    ISO-date question silently return today's cards because it had no event-time
+    evidence lane.  The temporal object route already owns bounded observed-time
+    matching and returns a gap instead of falling back.  This adapter preserves
+    the public query shape while deliberately using only those matched objects.
+    """
+
+    object_pack = temporal_response.get("object_pack")
+    if not isinstance(object_pack, Mapping):
+        object_pack = {}
+    raw_objects = object_pack.get("objects")
+    objects = [dict(item) for item in raw_objects or [] if isinstance(item, Mapping)]
+    gaps = [str(item) for item in object_pack.get("gaps") or [] if str(item)]
+    results: list[dict] = []
+    current: list[dict] = []
+    accepted: list[dict] = []
+    for obj in objects:
+        confidence_value = _finite_score_or_none(
+            (obj.get("confidence") or {}).get("score")
+            if isinstance(obj.get("confidence"), Mapping)
+            else None
+        )
+        if confidence_value is None or confidence_value <= 0.0:
+            continue
+        object_id = str(obj.get("object_id") or "")
+        if not object_id:
+            continue
+        summary = redact_and_bound_evidence_text(
+            str(obj.get("summary") or obj.get("title") or ""),
+            MAX_TRANSCRIPT_SNIPPET_CHARS,
+        )
+        observed_at = str(obj.get("observed_at") or "")
+        payload = obj.get("payload") if isinstance(obj.get("payload"), Mapping) else {}
+        observed_at_start = str(payload.get("observed_at_start") or observed_at)
+        observed_at_end = str(payload.get("observed_at_end") or observed_at)
+        if not observed_at_start or not observed_at_end:
+            continue
+        authority_lane = str(obj.get("authority_lane") or "")
+        currentness = "current" if authority_lane == "accepted_current" else "unknown"
+        source_kind = str(payload.get("source_kind") or "")
+        source_memory_id = str(payload.get("source_memory_id") or "")
+        if source_kind == "memory_card":
+            # WorkUnit object ids are query-object identifiers, not public
+            # MemoryCard ids. Preserve the original canonical card ID for the
+            # long-standing brain.query result/current/accepted contracts, and
+            # emit the object id separately for object-native consumers.
+            if not source_memory_id:
+                gaps.append("temporal_memory_card_identifier_missing")
+                continue
+            approval_state = "approved" if authority_lane.startswith("accepted_") else "unknown"
+            temporal_card = {
+                "brain_id": brain_id,
+                "memory_id": source_memory_id,
+                "object_id": object_id,
+                "source_ref": source_memory_id,
+                "card_type": "work_unit",
+                "title": redact_and_bound_evidence_text(
+                    str(obj.get("title") or summary), MAX_TRANSCRIPT_SNIPPET_CHARS
+                ),
+                "summary": summary,
+                "render_text": summary,
+                "lifecycle_state": str(obj.get("lifecycle_status") or "observed"),
+                "approval_state": approval_state,
+                "freshness": "event_time_matched",
+                "currentness": currentness,
+                "confidence": confidence_value,
+                "authority": authority_lane or "reference_only",
+                "observed_at": observed_at,
+                "observed_at_start": observed_at_start,
+                "observed_at_end": observed_at_end,
+                "score": confidence_value,
+            }
+            result = {
+                "brain_id": brain_id,
+                "result_type": "temporal_work_unit",
+                "summary": summary,
+                "why_retrieved": "matching_observed_event_time",
+                "source_ref": source_memory_id,
+                "memory_id": source_memory_id,
+                "object_id": object_id,
+                "observed_at": observed_at,
+                "observed_at_start": observed_at_start,
+                "observed_at_end": observed_at_end,
+                "freshness": "event_time_matched",
+                "approval_state": approval_state,
+                "privacy": "redacted",
+                "confidence": confidence_value,
+                "conflicts": [],
+                "currentness": currentness,
+                "card_type": "work_unit",
+                "score": confidence_value,
+                "source_kind": source_kind,
+            }
+            results.append(result)
+            if authority_lane == "accepted_current":
+                current.append(temporal_card)
+            if authority_lane in {"accepted_current", "accepted_non_current"}:
+                accepted.append(temporal_card)
+            continue
+        if source_kind == "session_memory_artifact":
+            # An artifact is temporal evidence, not a MemoryCard. Keep it in
+            # results with an explicit type and object provenance, but never
+            # manufacture a memory_id or place it in card authority lanes.
+            results.append(
+                {
+                    "brain_id": brain_id,
+                    "result_type": "temporal_artifact_evidence",
+                    "summary": summary,
+                    "why_retrieved": "matching_observed_event_time",
+                    "source_ref": object_id,
+                    "object_id": object_id,
+                    "observed_at": observed_at,
+                    "observed_at_start": observed_at_start,
+                    "observed_at_end": observed_at_end,
+                    "freshness": "event_time_matched",
+                    "approval_state": "unknown",
+                    "privacy": "redacted",
+                    "confidence": confidence_value,
+                    "conflicts": [],
+                    "currentness": "unknown",
+                    "card_type": "",
+                    "score": confidence_value,
+                    "source_kind": source_kind,
+                }
+            )
+            continue
+        # Old or malformed object packs cannot prove whether this is a card or
+        # merely reference evidence. Fail closed rather than inventing a public
+        # MemoryCard identity from the WorkUnit object id.
+        gaps.append("temporal_source_kind_unresolved")
+
+    confidence = min((item["confidence"] for item in results), default=0.0)
+    if not results:
+        if not gaps:
+            gaps.append("temporal_evidence_missing_or_mismatched")
+        confidence = 0.0
+    audit = object_pack.get("audit") if isinstance(object_pack.get("audit"), Mapping) else {}
+    selector = audit.get("temporal_selector") if isinstance(audit.get("temporal_selector"), Mapping) else {}
+    return {
+        "brain_id": brain_id,
+        "query_intent": "temporal_work_recall",
+        "route": "temporal_work_recall",
+        "temporal_selector": dict(selector),
+        "current": current,
+        "accepted": accepted,
+        "archive": [],
+        "evidence_candidates": [],
+        "promotion_candidates": [],
+        "conflicts": [],
+        "projection_state": {
+            "status": "temporal_evidence_matched" if results else "unavailable",
+            "details": [],
+        },
+        "sources": [
+            {"source": "temporal_event_evidence", "authority": "canonical_artifact_and_card"}
+        ],
+        "results": results,
+        "confidence": confidence,
+        "gaps": gaps,
+        "audit": {
+            "path": "temporal_work_recall",
+            "temporal_selector": dict(selector),
+            "temporal_match_count": len(results),
+        },
+    }
 
 
 def build_brain_query_response_v2(
@@ -446,7 +627,7 @@ def _normalize_query_memory_card(*, brain_id: str, card: dict) -> dict:
         "evidence_hashes": [str(item) for item in evidence_hashes],
         "authority": "local_ledger",
         "content_hash": str(normalized.get("content_hash") or normalized.get("card_hash") or ""),
-        "score": normalized.get("_semantic_score") if isinstance(normalized.get("_semantic_score"), (int, float)) else None,
+        "score": _finite_score_or_none(normalized.get("_semantic_score")),
     }
 
 
@@ -484,6 +665,43 @@ def _compat_results_from_query_lanes(response: Mapping[str, Any]) -> list[dict]:
                     "card_type": str(item.get("card_type") or ""),
                     "memory_id": memory_id,
                     "score": item.get("score") if isinstance(item.get("score"), (int, float)) else None,
+                }
+            )
+    for lane_name in ("archive", "evidence_candidates"):
+        lane = response.get(lane_name)
+        if not isinstance(lane, list):
+            continue
+        for item in lane:
+            if not isinstance(item, Mapping):
+                continue
+            score = item.get("score")
+            finite_score = _finite_score_or_none(score)
+            if finite_score is None or finite_score < SEMANTIC_RESULT_MIN_SCORE:
+                continue
+            memory_id = str(item.get("memory_id") or "")
+            if memory_id and memory_id in seen:
+                continue
+            if memory_id:
+                seen.add(memory_id)
+            results.append(
+                {
+                    "brain_id": str(item.get("brain_id") or response.get("brain_id") or ""),
+                    "result_type": str(item.get("result_type") or "semantic_memory"),
+                    "retrieval_lane": str(item.get("retrieval_lane") or ""),
+                    "summary": str(item.get("summary") or ""),
+                    "why_retrieved": "semantic_match",
+                    "source_ref": memory_id,
+                    "observed_at": str(item.get("observed_at") or ""),
+                    "freshness": str(item.get("freshness") or ""),
+                    "approval_state": str(item.get("approval_state") or ""),
+                    "privacy": "redacted",
+                    "confidence": item.get("confidence"),
+                    "conflicts": [],
+                    "currentness": str(item.get("currentness") or ""),
+                    "card_type": str(item.get("card_type") or ""),
+                    "memory_id": memory_id,
+                    "score": finite_score,
+                    "content_hash": str(item.get("content_hash") or ""),
                 }
             )
     return results
@@ -544,6 +762,7 @@ def _sanitize_mirror_item(item: Mapping[str, Any]) -> dict:
         return {"result_type": "index_mirror", "summary": ""}
     sanitized = {
         "result_type": str(item.get("result_type") or "index_mirror"),
+        "retrieval_lane": str(item.get("retrieval_lane") or ""),
         "memory_id": str(item.get("memory_id") or ""),
         "card_type": str(item.get("card_type") or ""),
         "summary": redact_and_bound_evidence_text(
@@ -552,8 +771,9 @@ def _sanitize_mirror_item(item: Mapping[str, Any]) -> dict:
         "currentness": str(item.get("currentness") or "unknown"),
         "authority": "index_mirror",
     }
-    if item.get("score") is not None:
-        sanitized["score"] = item.get("score")
+    finite_score = _finite_score_or_none(item.get("score"))
+    if finite_score is not None:
+        sanitized["score"] = finite_score
     if item.get("content_hash"):
         sanitized["content_hash"] = str(item.get("content_hash"))
     if isinstance(item.get("evidence_hashes"), list):
@@ -676,14 +896,18 @@ def run_brain_query(
                 if not card or str(card.get("state") or "") != "active":
                     dropped += 1
                     continue
-                score = hit.get("score")
-                score_text = f"{score}" if isinstance(score, (int, float)) else "none"
+                raw_score = hit.get("score")
+                score = _finite_score_or_none(raw_score)
+                if isinstance(raw_score, (int, float)) and score is None:
+                    dropped += 1
+                    continue
+                score_text = f"{score}" if score is not None else "none"
                 results.append(
                     build_card_envelope(
                         brain_id=brain_id,
                         card=card,
                         why=f"semantic_match(score={score_text})",
-                        demote=not isinstance(score, (int, float)),
+                        demote=score is None,
                         hit=hit,
                     )
                 )

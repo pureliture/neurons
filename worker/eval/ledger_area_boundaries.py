@@ -62,6 +62,14 @@ FORBIDDEN_CROSS_AREA_INHERITED_CALLS = {
     },
 }
 
+# Ledger._initialize installs a small number of schemas whose canonical SQL
+# lives in an adapter module. The lint resolves only explicitly registered
+# constants, and only when ledger.py both imports and evaluates the constant.
+# This preserves the total-table guard without duplicating schema SQL.
+EXTERNAL_LEDGER_SCHEMA_CONSTANTS: dict[str, tuple[str, str]] = {
+    "_ARTIFACT_SCHEMA": ("llm_brain_core/ledger_adapter.py", "_ARTIFACT_SCHEMA"),
+}
+
 # 두 비-core 영역 이상을 정당하게 가로지르는 Ledger 메서드의 frozen allowlist.
 # 값 = 그 메서드가 닿는 비-core 영역 집합(현재 실측, 동결). 신규 cross-area 메서드는
 # 여기 없으면 위반 → 4-area 경계를 새로 침범하는 결합이 회귀로 잡힌다.
@@ -93,9 +101,50 @@ def _ledger_path(start: Path | None = None) -> Path:
 
 
 def _created_tables(source: str) -> set[str]:
+    tables = _created_tables_in_text(source)
+    tree = ast.parse(source)
+    imported = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.level == 1
+        and node.module == "llm_brain_core.ledger_adapter"
+        for alias in node.names
+    }
+    used = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+    for local_name in sorted(imported & used & set(EXTERNAL_LEDGER_SCHEMA_CONSTANTS)):
+        relative_path, constant_name = EXTERNAL_LEDGER_SCHEMA_CONSTANTS[local_name]
+        schema_path = _ledger_path().parent / relative_path
+        schema_source = schema_path.read_text(encoding="utf-8")
+        schema_value = _string_constant(schema_source, constant_name)
+        tables.update(_created_tables_in_text(schema_value))
+    return tables
+
+
+def _created_tables_in_text(source: str) -> set[str]:
     return set(
         re.findall(r"CREATE TABLE (?:IF NOT EXISTS )?([a-z_]+)", source, re.IGNORECASE)
     )
+
+
+def _string_constant(source: str, name: str) -> str:
+    tree = ast.parse(source)
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if any(isinstance(target, ast.Name) and target.id == name for target in targets):
+            value = ast.literal_eval(node.value)
+            if isinstance(value, str):
+                return value
+    raise ValueError(f"external ledger schema constant {name!r} is missing or non-string")
 
 
 def _ledger_class(tree: ast.AST) -> ast.ClassDef:

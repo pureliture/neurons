@@ -360,6 +360,8 @@ def _dispatch_brain_evidence_get_tool(tool_name: str, arguments: dict, service: 
 
 
 def _dispatch_brain_objects_query_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    from .llm_brain_core.temporal import validate_explicit_temporal_selector
+
     repository = _require_non_empty_string(arguments, "repository", tool_name=tool_name)
     branch = _require_non_empty_string(arguments, "branch", tool_name=tool_name)
     query = _require_non_empty_string(arguments, "query", tool_name=tool_name)
@@ -370,6 +372,15 @@ def _dispatch_brain_objects_query_tool(tool_name: str, arguments: dict, service:
     if not isinstance(object_types, list):
         raise ValueError("object_types must be an array")
     project = _project_arg(arguments)
+    as_of = str(arguments.get("as_of") or "")
+    date_from = str(arguments.get("date_from") or "")
+    date_to = str(arguments.get("date_to") or "")
+    validate_explicit_temporal_selector(
+        as_of=as_of,
+        date_from=date_from,
+        date_to=date_to,
+        route=str(arguments.get("route") or ""),
+    )
     result = service.brain_objects_query(
         repository=repository,
         branch=branch,
@@ -381,6 +392,9 @@ def _dispatch_brain_objects_query_tool(tool_name: str, arguments: dict, service:
         limit=_bounded_limit(arguments.get("limit"), default=20, maximum=50),
         response_mode=_response_mode(arguments),
         consumer=_consumer(arguments),
+        as_of=as_of,
+        date_from=date_from,
+        date_to=date_to,
     )
     return _tool_result(result)
 
@@ -903,12 +917,26 @@ def _dispatch_brain_review_proposals_tool(tool_name: str, arguments: dict, servi
 
 
 def _dispatch_brain_query_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
+    from .llm_brain_core.temporal import validate_explicit_temporal_selector
+
     brain_id = _require_non_empty_string(arguments, "brain_id", tool_name=tool_name)
     query = _require_non_empty_string(arguments, "query", tool_name=tool_name)
+    as_of = str(arguments.get("as_of") or "")
+    date_from = str(arguments.get("date_from") or "")
+    date_to = str(arguments.get("date_to") or "")
+    validate_explicit_temporal_selector(
+        as_of=as_of,
+        date_from=date_from,
+        date_to=date_to,
+        route="temporal_work_recall",
+    )
     result = service.brain_query(
         brain_id=brain_id,
         query=query,
         limit=_bounded_limit(arguments.get("limit"), default=8, maximum=10),
+        as_of=as_of,
+        date_from=date_from,
+        date_to=date_to,
     )
     return _tool_result(result)
 

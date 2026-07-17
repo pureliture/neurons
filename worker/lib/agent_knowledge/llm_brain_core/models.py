@@ -30,6 +30,31 @@ ResolutionState = Literal[
 ]
 
 
+def _canonical_temporal_term_bindings(
+    values: Any,
+) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+    canonical: set[tuple[str, str, tuple[str, ...]]] = set()
+    for index, value in enumerate(values or ()):
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            raise ValueError(
+                f"revision_temporal_term_bindings[{index}] must contain start, end, and hashes"
+            )
+        start = str(value[0] or "")
+        end = str(value[1] or "")
+        if not start or not end:
+            raise ValueError(
+                f"revision_temporal_term_bindings[{index}] requires both bounds"
+            )
+        hashes = tuple(sorted({str(item or "") for item in (value[2] or ())}))
+        for hash_index, item in enumerate(hashes):
+            require_sha256(
+                item,
+                f"revision_temporal_term_bindings[{index}].hashes[{hash_index}]",
+            )
+        canonical.add((start, end, hashes))
+    return tuple(sorted(canonical))
+
+
 @dataclass(frozen=True)
 class StatusBlock:
     status: str
@@ -55,18 +80,66 @@ class SessionMemoryArtifact:
     ontology_version: str = "1.0.0"
     extractor_version: str = "0.1.0"
     created_at: str = ""
+    source_revision: str = ""
+    observed_at_start: str = ""
+    observed_at_end: str = ""
+    revision_observed_at_start: str = ""
+    revision_observed_at_end: str = ""
+    revision_observed_intervals: tuple[tuple[str, str], ...] = ()
+    revision_temporal_term_bindings: tuple[
+        tuple[str, str, tuple[str, ...]], ...
+    ] = ()
+    revision_temporal_evidence: Literal["legacy", "bounded", "missing"] = "legacy"
+    search_term_hashes: tuple[str, ...] = ()
+    materialized_at: str = ""
+    materialization_revision: int = 0
 
     def __post_init__(self) -> None:
         require_opaque_id(self.artifact_id, "artifact_id")
         require_sha256(self.session_id_hash, "session_id_hash")
         require_sha256(self.content_hash, "content_hash")
+        if self.source_revision:
+            require_sha256(self.source_revision, "source_revision")
+        for index, value in enumerate(self.search_term_hashes):
+            require_sha256(value, f"search_term_hashes[{index}]")
+        if self.revision_temporal_evidence not in {"legacy", "bounded", "missing"}:
+            raise ValueError("revision_temporal_evidence is unsupported")
+        canonical_intervals = tuple(
+            sorted(
+                {
+                    (str(start or ""), str(end or ""))
+                    for start, end in self.revision_observed_intervals
+                    if str(start or "") and str(end or "")
+                }
+            )
+        )
+        canonical_bindings = _canonical_temporal_term_bindings(
+            self.revision_temporal_term_bindings
+        )
+        if self.revision_temporal_evidence == "bounded" and not (
+            canonical_intervals
+            or (self.revision_observed_at_start and self.revision_observed_at_end)
+        ):
+            raise ValueError("bounded revision temporal evidence requires both bounds")
+        if int(self.materialization_revision) < 0:
+            raise ValueError("materialization_revision must be non-negative")
         object.__setattr__(self, "project", require_non_empty(self.project, "project"))
         object.__setattr__(self, "provider", require_non_empty(self.provider, "provider"))
         object.__setattr__(self, "summary", public_safe_text(self.summary, max_chars=2048))
         object.__setattr__(self, "source_event_ids", tuple(self.source_event_ids))
         object.__setattr__(self, "chunk_refs", tuple(self.chunk_refs))
         object.__setattr__(self, "tool_evidence_refs", tuple(self.tool_evidence_refs))
+        object.__setattr__(self, "revision_observed_intervals", canonical_intervals)
+        object.__setattr__(
+            self, "revision_temporal_term_bindings", canonical_bindings
+        )
+        object.__setattr__(
+            self,
+            "search_term_hashes",
+            tuple(sorted(set(self.search_term_hashes))),
+        )
         object.__setattr__(self, "created_at", self.created_at or utc_now_iso())
+        object.__setattr__(self, "materialization_revision", int(self.materialization_revision))
         ensure_public_safe(self.to_dict(), "SessionMemoryArtifact")
 
     @classmethod
@@ -83,19 +156,77 @@ class SessionMemoryArtifact:
         ontology_version: str = "1.0.0",
         extractor_version: str = "0.1.0",
         created_at: str = "",
+        source_revision: str = "",
+        observed_at_start: str = "",
+        observed_at_end: str = "",
+        revision_observed_at_start: str = "",
+        revision_observed_at_end: str = "",
+        revision_observed_intervals: list[tuple[str, str]]
+        | tuple[tuple[str, str], ...] = (),
+        revision_temporal_term_bindings: Any = (),
+        revision_temporal_evidence: Literal["legacy", "bounded", "missing"] = "legacy",
+        search_term_hashes: list[str] | tuple[str, ...] = (),
+        materialized_at: str = "",
+        materialization_revision: int = 0,
     ) -> "SessionMemoryArtifact":
         safe_summary = public_safe_text(summary, max_chars=2048)
-        content_hash = hash_payload(
-            {
-                "session_id_hash": session_id_hash,
-                "project": project,
-                "provider": provider,
-                "source_event_ids": list(source_event_ids),
-                "summary": safe_summary,
-                "ontology_version": ontology_version,
-                "extractor_version": extractor_version,
-            }
+        canonical_search_term_hashes = tuple(sorted(set(search_term_hashes)))
+        canonical_revision_observed_intervals = tuple(
+            sorted(
+                {
+                    (str(start or ""), str(end or ""))
+                    for start, end in revision_observed_intervals
+                    if str(start or "") and str(end or "")
+                }
+            )
         )
+        canonical_temporal_term_bindings = _canonical_temporal_term_bindings(
+            revision_temporal_term_bindings
+        )
+        canonical_revision_temporal_evidence = revision_temporal_evidence
+        if (
+            canonical_revision_temporal_evidence == "legacy"
+            and (
+                canonical_revision_observed_intervals
+                or (revision_observed_at_start and revision_observed_at_end)
+            )
+        ):
+            canonical_revision_temporal_evidence = "bounded"
+        content_payload: dict[str, Any] = {
+            "session_id_hash": session_id_hash,
+            "project": project,
+            "provider": provider,
+            "source_event_ids": list(source_event_ids),
+            "summary": safe_summary,
+            "ontology_version": ontology_version,
+            "extractor_version": extractor_version,
+            "source_revision": source_revision,
+        }
+        if revision_observed_at_start or revision_observed_at_end:
+            content_payload["revision_observed_at_start"] = revision_observed_at_start
+            content_payload["revision_observed_at_end"] = revision_observed_at_end
+        if canonical_revision_observed_intervals:
+            content_payload["revision_observed_intervals"] = [
+                list(interval) for interval in canonical_revision_observed_intervals
+            ]
+        if canonical_temporal_term_bindings:
+            content_payload["revision_temporal_term_bindings"] = [
+                [start, end, list(hashes)]
+                for start, end, hashes in canonical_temporal_term_bindings
+            ]
+        if canonical_revision_temporal_evidence != "legacy":
+            content_payload["revision_temporal_evidence"] = (
+                canonical_revision_temporal_evidence
+            )
+        if canonical_search_term_hashes:
+            content_payload["search_term_hashes"] = list(canonical_search_term_hashes)
+        # A materialization revision identifies an occurrence, not merely the
+        # source content.  Including positive revisions lets A -> B -> A restore
+        # create a new current artifact while revision-0 legacy identities stay
+        # byte-for-byte compatible.
+        if materialization_revision > 0:
+            content_payload["materialization_revision"] = materialization_revision
+        content_hash = hash_payload(content_payload)
         artifact_id = f"session-memory:{short_hash([session_id_hash, content_hash])}"
         return cls(
             artifact_id=artifact_id,
@@ -110,6 +241,17 @@ class SessionMemoryArtifact:
             ontology_version=ontology_version,
             extractor_version=extractor_version,
             created_at=created_at,
+            source_revision=source_revision,
+            observed_at_start=observed_at_start,
+            observed_at_end=observed_at_end,
+            revision_observed_at_start=revision_observed_at_start,
+            revision_observed_at_end=revision_observed_at_end,
+            revision_observed_intervals=canonical_revision_observed_intervals,
+            revision_temporal_term_bindings=canonical_temporal_term_bindings,
+            revision_temporal_evidence=canonical_revision_temporal_evidence,
+            search_term_hashes=canonical_search_term_hashes,
+            materialized_at=materialized_at,
+            materialization_revision=materialization_revision,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -117,6 +259,14 @@ class SessionMemoryArtifact:
         data["source_event_ids"] = list(self.source_event_ids)
         data["chunk_refs"] = list(self.chunk_refs)
         data["tool_evidence_refs"] = list(self.tool_evidence_refs)
+        data["search_term_hashes"] = list(self.search_term_hashes)
+        data["revision_observed_intervals"] = [
+            list(interval) for interval in self.revision_observed_intervals
+        ]
+        data["revision_temporal_term_bindings"] = [
+            [start, end, list(hashes)]
+            for start, end, hashes in self.revision_temporal_term_bindings
+        ]
         return data
 
 

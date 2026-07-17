@@ -152,6 +152,7 @@ def test_schema_single_source_initialize_matches_store(tmp_path: Path):
         "group_id",
         "brain_id",
         "content_hash",
+        "source_hash",
         "ontology_version",
         "extractor_version",
         "upsert_result",
@@ -161,6 +162,37 @@ def test_schema_single_source_initialize_matches_store(tmp_path: Path):
     assert initialize_columns == expected
     assert store_columns == expected
     assert initialize_columns == store_columns
+
+
+def test_projected_source_hash_sets_preserve_multiple_revisions_for_one_natural_id(
+    tmp_path: Path,
+):
+    store = LedgerGraphProjectionStateStore(_ledger(tmp_path))
+    natural_id = "session:stable"
+    old_source_hash = _h("old-source")
+    current_source_hash = _h("current-source")
+
+    for suffix, source_hash in (
+        ("old-revision", old_source_hash),
+        ("current-revision", current_source_hash),
+    ):
+        episode = OntologyEpisode.from_payload(
+            event_id=f"evt:{suffix}",
+            entity_type="Session",
+            natural_id=natural_id,
+            payload={
+                "project": "neurons",
+                "brain_id": "/project/neurons",
+                "source_hash": source_hash,
+            },
+        )
+        store.mark_projected(episode, "inserted", extraction_level="entity")
+
+    assert store.list_projected_source_hash_sets(
+        project="neurons",
+        extraction_level="entity",
+        entity_type="Session",
+    ) == {natural_id: {old_source_hash, current_source_hash}}
 
 
 def test_pre_m2_rebuild_keeps_indexes_on_new_table(tmp_path: Path):
@@ -216,6 +248,7 @@ def test_pre_m2_rebuild_keeps_indexes_on_new_table(tmp_path: Path):
     assert f"idx_{table}_project_projected" in index_names
     assert f"idx_{table}_group" in index_names
     assert f"idx_{table}_level" in index_names
+    assert f"idx_{table}_currentness" in index_names
     assert copied is not None and copied["extraction_level"] == "episodic"
 
 

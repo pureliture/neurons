@@ -51,8 +51,10 @@ from .document_model import (  # noqa: F401
 from .source_store import (  # noqa: F401
     CouchDBSourceStore,
     InMemoryCouchDBSourceStore,
+    SourceStoreConflict,
     SourceStoreError,
     StoredRevision,
+    merge_transcript_session_documents,
     payload_hash,
     validate_for_write,
 )
