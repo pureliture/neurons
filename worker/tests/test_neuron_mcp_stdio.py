@@ -1422,11 +1422,11 @@ def test_mcp_source_to_candidate_runtime_readiness_excludes_synthetic_canary_gra
     graph = FakeGraphMemoryAdapter(
         [
             _episode(
-                "RepoDocument",
+                "GraphFact",
                 "projection-join-synthetic-canary",
                 {
                     "brain_id": "/project/neurons",
-                    "provider": "lbrain-temporal-canary",
+                    "source_providers": ["lbrain-temporal-canary"],
                     "summary": "Synthetic source candidate graph projection join probe.",
                 },
             )
