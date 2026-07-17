@@ -17,6 +17,7 @@ from agent_knowledge.llm_brain_core.graphiti_adapter import (
     GraphitiNeo4jConfig,
     GraphitiNeo4jGraphMemoryAdapter,
     _AsyncLoopRunner,
+    _graphiti_group_id,
     _MAX_EDGE_PROVENANCE_LOOKUPS_IN_FLIGHT,
     _is_list_annotation,
     _placeholder_api_key,
@@ -529,10 +530,24 @@ def test_graphiti_adapter_hydrates_recent_window_miss_and_rejects_scope_mismatch
         "task:hydrated-other-scope-source",
         {"brain_id": "/project/other", "provider": "codex", "task": "Other graph source"},
     )
+    legacy_other_scope = _episode(
+        "Task",
+        "task:hydrated-legacy-other-scope-source",
+        {"provider": "codex", "task": "Legacy other graph source"},
+    )
+    expected_group_id = _graphiti_group_id("/project/neurons")
     nodes = {
-        normal.episode_id: SimpleNamespace(content=json.dumps(normal.to_dict(), ensure_ascii=True, sort_keys=True)),
+        normal.episode_id: SimpleNamespace(
+            content=json.dumps(normal.to_dict(), ensure_ascii=True, sort_keys=True),
+            group_id=expected_group_id,
+        ),
         other_scope.episode_id: SimpleNamespace(
-            content=json.dumps(other_scope.to_dict(), ensure_ascii=True, sort_keys=True)
+            content=json.dumps(other_scope.to_dict(), ensure_ascii=True, sort_keys=True),
+            group_id=_graphiti_group_id("/project/other"),
+        ),
+        legacy_other_scope.episode_id: SimpleNamespace(
+            content=json.dumps(legacy_other_scope.to_dict(), ensure_ascii=True, sort_keys=True),
+            group_id=_graphiti_group_id("/project/other"),
         ),
     }
 
@@ -562,6 +577,16 @@ def test_graphiti_adapter_hydrates_recent_window_miss_and_rejects_scope_mismatch
                 target_node_uuid="node-other-b",
                 episodes=[other_scope.episode_id],
             ),
+            SimpleNamespace(
+                uuid="edge-hydrated-legacy-other-scope",
+                name="RELATES_TO",
+                fact="Hydrated legacy cross-scope provenance is rejected.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-legacy-other-a",
+                target_node_uuid="node-legacy-other-b",
+                episodes=[legacy_other_scope.episode_id],
+            ),
         ]
     )
     adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
@@ -585,6 +610,7 @@ def test_graphiti_adapter_hydrates_missing_edge_sources_concurrently_within_dead
 
     graphiti = _FakeGraphiti()
     source_count = _MAX_EDGE_PROVENANCE_LOOKUPS_IN_FLIGHT + 1
+    expected_group_id = _graphiti_group_id("/project/neurons")
     sources = [
         _episode(
             "Task",
@@ -598,7 +624,10 @@ def test_graphiti_adapter_hydrates_missing_edge_sources_concurrently_within_dead
         for index in range(source_count)
     ]
     nodes = {
-        source.episode_id: SimpleNamespace(content=json.dumps(source.to_dict(), ensure_ascii=True, sort_keys=True))
+        source.episode_id: SimpleNamespace(
+            content=json.dumps(source.to_dict(), ensure_ascii=True, sort_keys=True),
+            group_id=expected_group_id,
+        )
         for source in sources
     }
     active = 0
@@ -667,6 +696,7 @@ def test_graphiti_adapter_bounds_slow_provenance_hydration_to_read_deadline(monk
         "task:fast-source-during-slow-hydration",
         {"brain_id": "/project/neurons", "provider": "codex", "task": "Fast graph source"},
     )
+    expected_group_id = _graphiti_group_id("/project/neurons")
     graphiti.edges.extend(
         [
             SimpleNamespace(
@@ -699,7 +729,10 @@ def test_graphiti_adapter_bounds_slow_provenance_hydration_to_read_deadline(monk
 
     async def _slow_get_by_uuid(_driver, episode_id):
         if episode_id == normal.episode_id:
-            return SimpleNamespace(content=json.dumps(normal.to_dict(), ensure_ascii=True, sort_keys=True))
+            return SimpleNamespace(
+                content=json.dumps(normal.to_dict(), ensure_ascii=True, sort_keys=True),
+                group_id=expected_group_id,
+            )
         await asyncio.sleep(1)
         raise AssertionError("read timeout must cancel slow provenance lookup")
 
