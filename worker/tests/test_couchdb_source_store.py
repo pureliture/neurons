@@ -8,6 +8,9 @@ from agent_knowledge.couchdb_source.source_store import (
     InMemoryCouchDBSourceStore,
     SourceStoreError,
 )
+from agent_knowledge.couchdb_source.session_memory_materializer import (
+    upsert_transcript_session_aggregate,
+)
 from agent_knowledge.session_memory.transcript_model import TranscriptChunk, TranscriptSession
 
 
@@ -66,6 +69,144 @@ def test_put_is_idempotent_for_identical_content() -> None:
     second = store.put(_chunk_doc("same body"))
     assert second.outcome == "duplicate"
     assert second.rev == first.rev  # no revision churn on identical re-put
+
+
+def test_identity_upgrade_keeps_exact_legacy_duplicate_idempotent() -> None:
+    store = InMemoryCouchDBSourceStore()
+    document = _chunk_doc("legacy identity body")
+    first = store.put(document)
+    store._docs[document["_id"]]["payload_hash"] = document["content_hash"]
+
+    duplicate = store.put(document)
+
+    assert duplicate.outcome == "duplicate"
+    assert duplicate.rev == first.rev
+
+
+def test_put_preserves_later_temporal_metadata_for_identical_chunk_body() -> None:
+    store = InMemoryCouchDBSourceStore()
+    original = _chunk_doc("same body")
+    first = store.put(original)
+    enriched = dict(original)
+    enriched["observed_at_start"] = "2026-07-09T10:00:00Z"
+    enriched["observed_at_end"] = "2026-07-09T10:30:00Z"
+
+    second = store.put(enriched)
+
+    stored = store.get(original["_id"])
+    assert stored is not None
+    assert second.outcome == "conflict_resolved"
+    assert second.rev != first.rev
+    assert stored["observed_at_start"] == "2026-07-09T10:00:00Z"
+    assert stored["observed_at_end"] == "2026-07-09T10:30:00Z"
+
+
+def test_session_aggregate_merge_preserves_projector_currentness_and_extends_bounds() -> None:
+    store = InMemoryCouchDBSourceStore()
+    existing = _session_doc()
+    existing.update(
+        {
+            "started_at": "2026-07-09T10:00:00Z",
+            "ended_at": "2026-07-09T11:00:00Z",
+            "observed_at_start": "2026-07-09T10:00:00Z",
+            "observed_at_end": "2026-07-09T11:00:00Z",
+            "materialized_at": "2026-07-16T01:00:00Z",
+            "source_hash": dm.sha256_hash("projector-current"),
+            "source_status": "materialized",
+        }
+    )
+    store.put(existing)
+
+    incoming = _session_doc()
+    incoming.update(
+        {
+            "started_at": "2026-07-09T09:00:00Z",
+            "ended_at": "2026-07-09T13:00:00Z",
+            "observed_at_start": "2026-07-09T09:00:00Z",
+            "observed_at_end": "2026-07-09T13:00:00Z",
+            "materialized_at": "2026-07-15T01:00:00Z",
+            "source_hash": dm.sha256_hash("stale-incoming"),
+            "source_status": "source_unproven",
+        }
+    )
+
+    revision = upsert_transcript_session_aggregate(store=store, incoming=incoming)
+
+    current = store.get(existing["_id"])
+    assert current is not None
+    assert revision.outcome == "conflict_resolved"
+    assert current["started_at"] == "2026-07-09T09:00:00Z"
+    assert current["ended_at"] == "2026-07-09T13:00:00Z"
+    assert current["observed_at_start"] == "2026-07-09T09:00:00Z"
+    assert current["observed_at_end"] == "2026-07-09T13:00:00Z"
+    assert current["materialized_at"] == "2026-07-16T01:00:00Z"
+    assert current["source_hash"] == dm.sha256_hash("projector-current")
+    assert current["source_status"] == "materialized"
+
+
+def test_tool_evidence_same_body_with_distinct_coverage_is_a_new_revision() -> None:
+    store = InMemoryCouchDBSourceStore()
+    original = dm.build_tool_evidence_bundle_document(
+        session_id_hash=_sid(),
+        provider="codex",
+        project="neurons",
+        part_index=1,
+        part_count=1,
+        evidence_index_start=0,
+        evidence_index_end=0,
+        record_content_hashes=[dm.sha256_hash("record-a")],
+        body="same public evidence summary",
+    )
+    changed = dm.build_tool_evidence_bundle_document(
+        session_id_hash=_sid(),
+        provider="codex",
+        project="neurons",
+        part_index=1,
+        part_count=1,
+        evidence_index_start=0,
+        evidence_index_end=0,
+        record_content_hashes=[dm.sha256_hash("record-b")],
+        body="same public evidence summary",
+    )
+
+    first = store.put(original)
+    second = store.put(changed)
+    duplicate = store.put(changed)
+
+    assert second.outcome == "conflict_resolved"
+    assert second.rev != first.rev
+    assert duplicate.outcome == "duplicate"
+    assert duplicate.rev == second.rev
+    assert store.get(changed["_id"])["coverage_hash"] == changed["coverage_hash"]
+
+
+def test_conversation_chunk_same_body_with_distinct_position_is_a_new_revision() -> None:
+    store = InMemoryCouchDBSourceStore()
+    original = _chunk_doc("same positioned body")
+    moved = dict(original)
+    moved.update(
+        {
+            "turn_start_index": 2,
+            "turn_end_index": 3,
+            "part_index": 2,
+            "part_count": 3,
+            "char_start": 20,
+            "char_end": 40,
+        }
+    )
+
+    first = store.put(original)
+    second = store.put(moved)
+    duplicate = store.put(moved)
+
+    assert second.outcome == "conflict_resolved"
+    assert second.rev != first.rev
+    assert duplicate.outcome == "duplicate"
+    assert duplicate.rev == second.rev
+    assert store.get(moved["_id"])["char_start"] == 20
+    assert dm.build_source_revision_token(
+        original, material_hash_field="content_hash"
+    ) != dm.build_source_revision_token(moved, material_hash_field="content_hash")
 
 
 def test_put_conflict_resolved_bumps_rev_for_changed_content() -> None:

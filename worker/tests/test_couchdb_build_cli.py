@@ -30,6 +30,9 @@ from agent_knowledge.couchdb_source.session_memory_materializer import (
     materialize_and_project,
 )
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
+from agent_knowledge.llm_brain_core.runtime import (
+    session_source_revision_from_couchdb_source,
+)
 from agent_knowledge.session_memory.transcript_model import (
     TranscriptChunk,
     TranscriptSession,
@@ -76,6 +79,14 @@ def _build_synthetic_session(
         tool_evidence_bundle_count=0,
         conversation_content_hashes=[chunk_doc["content_hash"]],
         tool_evidence_coverage_hashes=[],
+        conversation_revision_tokens=[
+            dm.build_source_revision_token(
+                chunk_doc,
+                material_hash_field="content_hash",
+            )
+        ],
+        observed_at_start=session.started_at,
+        observed_at_end=session.started_at,
         project_authority={"project": project, "ambiguous": False, "eligible_for_retirement": True},
     )
     store.put(cov)
@@ -84,6 +95,10 @@ def _build_synthetic_session(
 
 def _mark_projected(store: InMemoryCouchDBSourceStore, sid: str, provider: str, project: str) -> None:
     """Mark a session as already projected (PROJECTED status)."""
+    source_hash = session_source_revision_from_couchdb_source(
+        session_id_hash=sid,
+        source_store=store,
+    )
     state = dm.build_projection_state_document(
         session_id_hash=sid,
         provider=provider,
@@ -92,6 +107,8 @@ def _mark_projected(store: InMemoryCouchDBSourceStore, sid: str, provider: str, 
         session_memory_knowledge_id="index-ref-fake",
         active_content_hash="sha256:" + "a" * 64,
     )
+    state["source_hash"] = source_hash
+    state["projected_source_hash"] = source_hash
     store.put(state)
 
 
@@ -301,6 +318,12 @@ def _run(argv: list[str], store: InMemoryCouchDBSourceStore, *, projector=None, 
         def put(self, *a, **kw):
             return store.put(*a, **kw)
 
+        def put_if_revision(self, *a, **kw):
+            return store.put_if_revision(*a, **kw)
+
+        def merge_transcript_session_aggregate(self, *a, **kw):
+            return store.merge_transcript_session_aggregate(*a, **kw)
+
         def find_by_session(self, *a, **kw):
             return store.find_by_session(*a, **kw)
 
@@ -354,6 +377,104 @@ class TestSelectSessionsNeedingProjection:
         sids = {s.get("session_id_hash") for s in selected}
         assert sid1 not in sids
         assert sid2 in sids
+
+    def test_reselects_projected_session_when_source_changes_but_state_is_untouched(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(
+            store, provider="claude", project="neurons", raw_id="source-changed"
+        )
+        _mark_projected(store, sid, "claude", "neurons")
+        state_id = dm.projection_state_doc_id(sid)
+        state_before = store.get(state_id)
+
+        distinct_chunk = TranscriptChunk.from_text(
+            chunk_id="chunk_01",
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            turn_start_index=1,
+            turn_end_index=1,
+            text="a distinct follow-up was observed",
+        )
+        store.put(dm.build_conversation_chunk_document(chunk=distinct_chunk))
+
+        assert store.get(state_id) == state_before
+
+        selected = _select_sessions_needing_projection(store, limit=0)
+
+        assert [row["session_id_hash"] for row in selected] == [sid]
+        raw_source_hash = session_source_revision_from_couchdb_source(
+            session_id_hash=sid,
+            source_store=store,
+        )
+
+        materialize_and_project(
+            session_id_hash=sid,
+            store=store,
+            projector=RecordingSessionMemoryProjector(),
+        )
+
+        coverage = store.get(dm.coverage_manifest_doc_id(sid))
+        projected = store.get(dm.projection_state_doc_id(sid))
+        assert coverage is not None
+        assert projected is not None
+        assert coverage["conversation_chunk_count"] == 2
+        assert coverage["source_hash"] == raw_source_hash
+        assert projected["projected_source_hash"] == raw_source_hash
+        assert _select_sessions_needing_projection(store, limit=0) == []
+
+    def test_exact_duplicate_source_keeps_projected_session_skipped(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(
+            store, provider="claude", project="neurons", raw_id="exact-duplicate"
+        )
+        _mark_projected(store, sid, "claude", "neurons")
+
+        duplicate = TranscriptChunk.from_text(
+            chunk_id="chunk_00",
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            turn_start_index=0,
+            turn_end_index=0,
+            text="user asked; assistant answered",
+        )
+        stored = store.put(dm.build_conversation_chunk_document(chunk=duplicate))
+
+        assert stored.outcome == "duplicate"
+        assert _select_sessions_needing_projection(store, limit=0) == []
+
+    def test_ignores_stale_state_source_hash_when_source_matches_projected_hash(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(
+            store, provider="claude", project="neurons", raw_id="state-only-drift"
+        )
+        _mark_projected(store, sid, "claude", "neurons")
+        state_id = dm.projection_state_doc_id(sid)
+        state = dict(store.get(state_id) or {})
+        state["source_hash"] = dm.sha256_hash("stale state-only source revision")
+        store.put(state)
+
+        assert _select_sessions_needing_projection(store, limit=0) == []
+
+    def test_reselects_legacy_projected_session_without_matching_source_hash(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(
+            store, provider="claude", project="neurons", raw_id="legacy-unknown-source"
+        )
+        legacy = dm.build_projection_state_document(
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            projection_status=dm.ProjectionStatus.PROJECTED,
+            session_memory_knowledge_id="index-ref-fake",
+            active_content_hash="sha256:" + "a" * 64,
+        )
+        store.put(legacy)
+
+        selected = _select_sessions_needing_projection(store, limit=0)
+
+        assert [row["session_id_hash"] for row in selected] == [sid]
 
     def test_ignores_projected_state_with_non_authoritative_id(self) -> None:
         store = InMemoryCouchDBSourceStore()
@@ -421,6 +542,7 @@ class TestSelectSessionsNeedingProjection:
             sid = _build_synthetic_session(store, provider="claude", project="neurons", raw_id=f"done-{i}")
             _mark_projected(store, sid, "claude", "neurons")
         pending = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="pending")
+        store.get_count = 0
 
         selected = _select_sessions_needing_projection(store, limit=1)
 

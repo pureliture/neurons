@@ -310,7 +310,7 @@ def test_bulk_semantic_marks_only_writer_confirmed_episodes(tmp_path):
         extractor=_FakeBulkExtractor(),
         writer=resume_writer,
     )
-    assert resume["projection"]["skipped_resumed"] == 3
+    assert resume["projection"]["skipped_resumed"] == 0
     assert resume["projection"]["projected"] == 2
     assert resume_writer.calls and len(resume_writer.calls[0]) == 2
 
@@ -344,7 +344,8 @@ def test_bulk_semantic_resume_skips_without_llm_call(tmp_path):
     )
 
     assert second["projection"]["projected"] == 0
-    assert second["projection"]["skipped_resumed"] == 3
+    assert second["projection"]["attempted"] == 0
+    assert second["projection"]["skipped_resumed"] == 0
     assert second["semantic"]["llm_batches"] == 0
     assert second["projection"]["failed"] == 0
 
@@ -378,11 +379,43 @@ def test_bulk_semantic_limited_resume_prioritizes_unprojected_sessions(tmp_path)
         writer=writer,
     )
 
-    assert second["projection"]["attempted"] == 2
+    assert second["projection"]["attempted"] == 1
     assert second["projection"]["projected"] == 1
-    assert second["projection"]["skipped_resumed"] == 1
+    assert second["projection"]["skipped_resumed"] == 0
     assert second["projection"]["failed"] == 0
     assert writer.calls and len(writer.calls[0]) == 1
+
+
+def test_bulk_semantic_source_hash_change_reprojects_same_session(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    raw_id = "bulk-source-change"
+    _seed_session(store, raw_id=raw_id, body="Initial Graphiti source body.")
+    first = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=1,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=1,
+        extractor=_FakeBulkExtractor(),
+        writer=_FakeBulkWriter(),
+    )
+    assert first["projection"]["projected"] == 1
+
+    _seed_session(store, raw_id=raw_id, body="Changed Graphiti source body.")
+    second = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=1,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=1,
+        extractor=_FakeBulkExtractor(),
+        writer=_FakeBulkWriter(),
+    )
+
+    assert second["projection"]["projected"] == 1
+    assert second["projection"]["skipped_resumed"] == 0
 
 
 def test_bulk_semantic_max_projects_caps_below_batch_size(tmp_path):

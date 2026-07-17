@@ -320,8 +320,8 @@ class TestIdempotency:
 
         assert result.status == "submitted"
 
-    def test_resubmit_does_not_overwrite_projected_state(self):
-        """이미 PROJECTED인 경우 projection_state를 덮어쓰지 않는다."""
+    def test_exact_duplicate_preserves_projected_source_hash(self):
+        """exact duplicate는 current projection을 dirty로 만들지 않는다."""
         store = InMemoryCouchDBSourceStore()
         adapter = _adapter(store)
         payload = _ingress_payload()
@@ -329,17 +329,62 @@ class TestIdempotency:
 
         adapter.submit_document(document)
 
-        # 외부에서 PROJECTED로 승격
         proj_id = projection_state_doc_id(SESSION_ID_HASH)
         proj_doc = dict(store.get(proj_id))
-        proj_doc["projection_status"] = ProjectionStatus.PROJECTED
+        source_hash = proj_doc["source_hash"]
+        proj_doc.update(
+            {
+                "projection_status": ProjectionStatus.PROJECTED,
+                "active_content_hash": sha256_hash("projected session memory"),
+                "projected_source_hash": source_hash,
+            }
+        )
         store.put(proj_doc)
+        session_id = session_doc_id(SESSION_ID_HASH)
+        session_before = dict(store.get(session_id))
+        session_before["materialized_at"] = "2026-07-16T01:00:00Z"
+        store.put(session_before)
+        session_before = dict(store.get(session_id))
 
-        # 동일 doc 재전송 — PROJECTED 상태 보존되어야 함
         adapter.submit_document(document)
 
         proj_after = store.get(proj_id)
         assert proj_after["projection_status"] == ProjectionStatus.PROJECTED
+        assert proj_after["source_hash"] == source_hash
+        assert proj_after["projected_source_hash"] == source_hash
+        assert store.get(session_id) == session_before
+
+    def test_distinct_chunk_marks_projected_session_pending_and_changes_source_hash(self):
+        store = InMemoryCouchDBSourceStore()
+        adapter = _adapter(store)
+        first = _document_from_payload(_ingress_payload())
+        second = _document_from_payload(
+            _ingress_payload(
+                idempotency_key="idem_index_2",
+                chunk_id="chunk_index_002",
+                body="A distinct later conversation chunk.",
+            )
+        )
+
+        adapter.submit_document(first)
+        proj_id = projection_state_doc_id(SESSION_ID_HASH)
+        projected = dict(store.get(proj_id))
+        first_source_hash = projected["source_hash"]
+        projected.update(
+            {
+                "projection_status": ProjectionStatus.PROJECTED,
+                "active_content_hash": sha256_hash("projected session memory"),
+                "projected_source_hash": first_source_hash,
+            }
+        )
+        store.put(projected)
+
+        adapter.submit_document(second)
+
+        after = store.get(proj_id)
+        assert after["projection_status"] == ProjectionStatus.PENDING
+        assert after["source_hash"] != first_source_hash
+        assert after["projected_source_hash"] == first_source_hash
 
 
 # ---------------------------------------------------------------------------

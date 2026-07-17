@@ -10,7 +10,10 @@ a coverage hash. Records are already public-ingress-redacted
 
 from __future__ import annotations
 
-from .document_model import build_tool_evidence_bundle_document
+from .document_model import (
+    build_tool_evidence_bundle_document,
+    normalize_observed_interval,
+)
 from .source_store import CouchDBSourceStore, StoredRevision
 from ..session_memory.transcript_model import (
     MAX_PACKED_TRANSCRIPT_BODY_CHARS,
@@ -47,10 +50,34 @@ def build_tool_evidence_bundle_documents(
     if len(session_ids) != 1:
         raise ValueError("tool evidence bundling is per-session; mixed session_id_hash given")
 
-    parts = chunk_tool_evidence_records(ordered, max_chars=max_chars)
+    sized_parts = chunk_tool_evidence_records(ordered, max_chars=max_chars)
+    # A bundle is the smallest temporal relevance unit downstream.  Never put
+    # records with different (or invalid/missing) event times behind one bounded
+    # interval, otherwise one record's terms can borrow another record's date.
+    parts: list[list[ToolEvidenceSummaryRecord]] = []
+    for sized_part in sized_parts:
+        current: list[ToolEvidenceSummaryRecord] = []
+        current_interval: tuple[str, str] | None | object = object()
+        for record in sized_part:
+            interval = normalize_observed_interval(
+                str(record.observed_at or ""),
+                str(record.observed_at or ""),
+            )
+            if current and interval != current_interval:
+                parts.append(current)
+                current = []
+            current.append(record)
+            current_interval = interval
+        if current:
+            parts.append(current)
     part_count = len(parts)
     docs: list[dict] = []
     for part_index, part in enumerate(parts, start=1):
+        interval = normalize_observed_interval(
+            str(part[0].observed_at or ""),
+            str(part[0].observed_at or ""),
+        )
+        observed_at_start, observed_at_end = interval or ("", "")
         docs.append(
             build_tool_evidence_bundle_document(
                 session_id_hash=part[0].session_id_hash,
@@ -62,6 +89,8 @@ def build_tool_evidence_bundle_documents(
                 evidence_index_end=max(record.evidence_index for record in part),
                 record_content_hashes=[record.content_hash for record in part],
                 body=_bundle_body(part),
+                observed_at_start=observed_at_start,
+                observed_at_end=observed_at_end,
             )
         )
     return docs

@@ -29,6 +29,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..couchdb_source.document_model import ProjectionStatus, projection_state_doc_id
+from ..llm_brain_core.runtime import session_source_revision_from_couchdb_source
 
 
 class CouchDBProjectionStateAuthorityResolver:
@@ -48,16 +49,17 @@ class CouchDBProjectionStateAuthorityResolver:
             return None
         if str(state.get("projection_status") or "") != ProjectionStatus.PROJECTED:
             return None
-        # Currentness check. ``active_content_hash`` is a field added with the mirror
-        # work; projection_state docs written BEFORE it (the ~3577 legacy projected
-        # sessions) do not carry it. For those legacy docs we resolve on
-        # projection_status alone -- a backfilled point is current by construction
-        # (its content_hash comes from re-materializing the CURRENT CouchDB source).
-        # Once a session is (re-)projected through the forward hook, active_content_hash
-        # is populated and this tightens to a strict latest-wins match, so a stale
-        # point for a re-projected session is then dropped.
+        # Status alone is not currentness evidence. Legacy rows are unresolved
+        # until a rebuild records both active body and projected source revision.
         active = str(state.get("active_content_hash") or "")
-        if active and active != content_hash:
+        projected_source_hash = str(state.get("projected_source_hash") or "")
+        if not active or active != content_hash or not projected_source_hash:
+            return None
+        current_source_hash = session_source_revision_from_couchdb_source(
+            session_id_hash=session_id_hash,
+            source_store=self._store,
+        )
+        if not current_source_hash or projected_source_hash != current_source_hash:
             return None
         # Optional scope filters (provider/project), parity with the ledger resolver.
         for key in ("provider", "project"):

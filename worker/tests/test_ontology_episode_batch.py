@@ -9,6 +9,7 @@ from agent_knowledge.llm_brain_core import (
     build_ontology_episode_batch_report,
 )
 from agent_knowledge.llm_brain_core.models import SessionMemoryArtifact
+from agent_knowledge.llm_brain_core.ontology import episode_from_session_artifact
 
 
 def test_ontology_episode_batch_maps_artifacts_cards_and_source_refs():
@@ -64,6 +65,37 @@ def test_ontology_episode_batch_maps_artifacts_cards_and_source_refs():
     assert episodes[-1].payload["brain_id"] == "/project/neurons"
     assert episodes[-1].payload["project"] == "neurons"
     assert "specs/design.md" not in str(episodes[-1].to_dict())
+
+
+def test_session_episode_identity_ignores_volatile_rebuild_time_for_same_source() -> None:
+    first = SessionMemoryArtifact.from_summary(
+        session_id_hash=_h("stable-session"),
+        project="neurons",
+        provider="codex",
+        summary="Stable source artifact.",
+        source_event_ids=["evt_stable_source"],
+        source_revision=_h("stable-source-revision"),
+        materialization_revision=3,
+        materialized_at="2026-07-15T10:00:00Z",
+    )
+    rebuilt = SessionMemoryArtifact.from_summary(
+        session_id_hash=_h("stable-session"),
+        project="neurons",
+        provider="codex",
+        summary="Stable source artifact.",
+        source_event_ids=["evt_stable_source"],
+        source_revision=_h("stable-source-revision"),
+        materialization_revision=3,
+        materialized_at="2026-07-16T10:00:00Z",
+    )
+
+    first_episode = episode_from_session_artifact(first)
+    rebuilt_episode = episode_from_session_artifact(rebuilt)
+
+    assert first.artifact_id == rebuilt.artifact_id
+    assert first.content_hash == rebuilt.content_hash
+    assert first_episode.episode_id == rebuilt_episode.episode_id
+    assert first_episode.content_hash == rebuilt_episode.content_hash
 
 
 def test_projection_worker_projects_full_ontology_batch_and_context_uses_graph_task():

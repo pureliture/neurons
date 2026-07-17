@@ -7,6 +7,7 @@ import pytest
 
 from agent_knowledge.cli import main
 from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
+from agent_knowledge.llm_brain_core.objects import object_cli
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     EVIDENCE_PROVENANCE_SCHEMA,
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
@@ -21,6 +22,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_shadow_readiness_report,
     build_source_to_candidate_runtime_shadow_evidence_packet,
     build_preference_artifact_memory_runtime_evidence,
+    build_temporal_recall_corrective_checkpoint_readiness_report,
 )
 from agent_knowledge.public_safe_util import hash_payload
 from agent_knowledge.permission_audit_contract import (
@@ -57,6 +59,7 @@ def _sanitized_live_evidence(**overrides):
             _brain_objects_query_smoke("html_visualization_preference"),
             _brain_objects_query_smoke("deployment_runtime_truth", gaps=["runtime_evidence_unverified"]),
         ],
+        "temporal_recall_corrective_checkpoint": _temporal_recall_corrective_checkpoint(),
         "projection_join": _projection_join_runtime_evidence(),
         "source_to_candidate_review_loop": _source_to_candidate_review_loop_evidence(),
         "session_project_rollup_runtime": _session_project_rollup_runtime_evidence(),
@@ -607,6 +610,428 @@ def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None):
             "gaps": list(gaps or []),
         },
     }
+
+
+def _temporal_recall_corrective_checkpoint(**overrides):
+    expected_a = "sha256:" + "a" * 64
+    expected_b = "sha256:" + "b" * 64
+    identity_a = "sha256:" + "d" * 64
+    identity_b = "sha256:" + "e" * 64
+    checkpoint = {
+        "schema_version": "temporal_recall_corrective_checkpoint.v1",
+        "evidence_class": "runtime_semantic_acceptance",
+        "temporal_query_hash": "sha256:" + "0" * 64,
+        "selector_contract": {
+            "as_of_supported": True,
+            "date_range_supported": True,
+            "invalid_range_rejected": True,
+            "invalid_range_error_type": "McpToolError",
+            "invalid_range_error_code": -32602,
+        },
+        "date_a": {
+            "selector_hash": "sha256:" + "1" * 64,
+            "expected_object_fingerprint": expected_a,
+            "observed_object_fingerprint": expected_a,
+            "expected_object_identity_fingerprint": identity_a,
+            "observed_object_identity_fingerprint": identity_a,
+            "work_unit_count": 1,
+            "gap_count": 0,
+            "confidence_score": 0.9,
+        },
+        "date_b": {
+            "selector_hash": "sha256:" + "2" * 64,
+            "expected_object_fingerprint": expected_b,
+            "observed_object_fingerprint": expected_b,
+            "expected_object_identity_fingerprint": identity_b,
+            "observed_object_identity_fingerprint": identity_b,
+            "work_unit_count": 1,
+            "gap_count": 0,
+            "confidence_score": 0.9,
+        },
+        "range_boundary": {
+            "selector_hash": "sha256:" + "3" * 64,
+            "expected_object_fingerprint": expected_a,
+            "observed_object_fingerprint": expected_a,
+            "expected_object_identity_fingerprint": identity_a,
+            "observed_object_identity_fingerprint": identity_a,
+            "work_unit_count": 1,
+            "gap_count": 0,
+            "confidence_score": 0.9,
+        },
+        "mismatch": {
+            "selector_hash": "sha256:" + "4" * 64,
+            "object_count": 0,
+            "gap_count": 1,
+            "confidence_score": 0.0,
+        },
+        "nonsense_query": {
+            "query_hash": "sha256:" + "5" * 64,
+            "result_count": 0,
+            "current_count": 0,
+            "accepted_count": 0,
+            "semantic_ranker_bound": True,
+            "semantic_ranker_used": True,
+        },
+        "semantic_query": {
+            "query_hash": "sha256:" + "6" * 64,
+            "expected_result_fingerprint": "sha256:" + "c" * 64,
+            "observed_result_fingerprint": "sha256:" + "c" * 64,
+            "result_count": 1,
+            "why_retrieved_semantic_match": True,
+            "score": 0.91,
+            "minimum_score": 0.75,
+            "semantic_ranker_bound": True,
+            "semantic_ranker_used": True,
+            "qdrant_semantic_result_lane_used": True,
+        },
+        "runtime_aggregate": {
+            "schema_version": "temporal_correctness_runtime_aggregate.v1",
+            "projection_currentness": {
+                "source_hash_match": True,
+                "source_state_digest": "sha256:" + "1" * 64,
+                "graph_projection_state_digest": "sha256:" + "2" * 64,
+                "session_memory_projection_state_digest": "sha256:" + "3" * 64,
+                "source_projection_state_digest": "sha256:" + "4" * 64,
+                "source_hash_mismatch_count": 0,
+                "stale_projected_session_count": 0,
+                "source_session_count": 126,
+                "minimum_source_session_count": 126,
+                "graph_projection_current_count": 126,
+                "graph_projection_noncurrent_count": 0,
+                "session_memory_projection_current_count": 126,
+                "session_memory_projection_noncurrent_count": 0,
+                "session_memory_source_hash_mismatch_count": 0,
+                "session_memory_stale_projected_session_count": 0,
+                "artifact_current": True,
+                "artifact_missing_session_count": 0,
+                "artifact_age_unknown_count": 0,
+                "artifact_source_hash_mismatch_count": 0,
+                "oldest_artifact_age_seconds": 60,
+                "graph_run_scope_match": True,
+                "graph_run_fresh": True,
+                "graph_run_completed_age_seconds": 5,
+                "graph_run_max_age_seconds": 900,
+            },
+            "entity_projection": {
+                "valid_source_count": 126,
+                "minimum_valid_source_count": 126,
+                "baseline_coverage_count": 15,
+                "coverage_count": 16,
+                "baseline_backlog_count": 111,
+                "backlog_count": 110,
+                "error_count": 0,
+            },
+        },
+        "runtime_aggregate_source": "live_mcp_runtime_packet",
+        "runtime_postcheck_receipt_hash": "",
+        "postcheck": {
+            "status": "validated",
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": False,
+    }
+    checkpoint.update(overrides)
+    return checkpoint
+
+
+def test_runtime_readiness_requires_temporal_corrective_checkpoint_before_semantic_validation():
+    evidence = _sanitized_live_evidence()
+    evidence.pop("temporal_recall_corrective_checkpoint")
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    checkpoint = claims["live.temporal_recall.corrective_checkpoint"]
+    route_smokes = claims["live.brain_objects_query.route_smokes"]
+    assert checkpoint["status"] == "not_validated"
+    assert route_smokes["status"] == "not_validated"
+    assert "temporal_work_recall" not in route_smokes["validated_routes"]
+    assert "live_temporal_recall_corrective_checkpoint_unverified" in report["gaps"]
+
+
+@pytest.mark.parametrize(
+    "digest_field",
+    (
+        "source_state_digest",
+        "graph_projection_state_digest",
+        "session_memory_projection_state_digest",
+        "source_projection_state_digest",
+    ),
+)
+def test_temporal_checkpoint_readiness_requires_each_projection_state_digest(
+    digest_field,
+):
+    checkpoint = _temporal_recall_corrective_checkpoint()
+    checkpoint["runtime_aggregate"]["projection_currentness"][digest_field] = ""
+
+    report = build_temporal_recall_corrective_checkpoint_readiness_report(
+        checkpoint=checkpoint
+    )
+
+    assert report["status"] == "FAIL"
+    assert report["failed_claims"] == [
+        "live.temporal_recall.corrective_checkpoint"
+    ]
+    assert "temporal_corrective_projection_state_digest_invalid" in report["gaps"]
+
+
+def test_runtime_readiness_rejects_positive_temporal_probe_with_gap() -> None:
+    checkpoint = _temporal_recall_corrective_checkpoint()
+    checkpoint["date_a"] = {**checkpoint["date_a"], "gap_count": 1}
+    evidence = _sanitized_live_evidence(
+        temporal_recall_corrective_checkpoint=checkpoint
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claim = next(
+        claim
+        for claim in report["claims"]
+        if claim["claim_id"] == "live.temporal_recall.corrective_checkpoint"
+    )
+    assert claim["status"] == "failed"
+    assert "temporal_corrective_date_a_not_fail_closed" in claim["gaps"]
+
+
+def test_runtime_readiness_rejects_internal_error_as_invalid_range_proof() -> None:
+    checkpoint = _temporal_recall_corrective_checkpoint()
+    checkpoint["selector_contract"] = {
+        **checkpoint["selector_contract"],
+        "invalid_range_error_type": "McpError",
+        "invalid_range_error_code": -32603,
+    }
+    evidence = _sanitized_live_evidence(
+        temporal_recall_corrective_checkpoint=checkpoint
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claim = next(
+        claim
+        for claim in report["claims"]
+        if claim["claim_id"] == "live.temporal_recall.corrective_checkpoint"
+    )
+    assert claim["status"] == "failed"
+    assert "temporal_corrective_invalid_range_error_code_unexpected" in claim["gaps"]
+
+
+def test_runtime_readiness_validates_complete_temporal_corrective_checkpoint():
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_sanitized_live_evidence()
+    )
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    checkpoint = claims["live.temporal_recall.corrective_checkpoint"]
+    route_smokes = claims["live.brain_objects_query.route_smokes"]
+    assert checkpoint["status"] == "validated"
+    assert checkpoint["date_ab_distinct"] is True
+    assert checkpoint["hash_currentness_validated"] is True
+    assert checkpoint["entity_aggregate_improved"] is True
+    assert checkpoint["qdrant_semantic_result_lane_used"] is True
+    assert route_smokes["status"] == "validated"
+    assert "temporal_work_recall" in route_smokes["validated_routes"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_gap"),
+    [
+        (
+            lambda checkpoint: checkpoint["date_b"].update(
+                expected_object_fingerprint=checkpoint["date_a"]["expected_object_fingerprint"],
+                observed_object_fingerprint=checkpoint["date_a"]["expected_object_fingerprint"],
+            ),
+            "temporal_corrective_date_fingerprints_not_distinct",
+        ),
+        (
+            lambda checkpoint: checkpoint["date_b"].update(
+                expected_object_identity_fingerprint=checkpoint["date_a"][
+                    "expected_object_identity_fingerprint"
+                ],
+                observed_object_identity_fingerprint=checkpoint["date_a"][
+                    "observed_object_identity_fingerprint"
+                ],
+            ),
+            "temporal_corrective_date_identities_not_distinct",
+        ),
+        (
+            lambda checkpoint: checkpoint["date_b"].update(
+                selector_hash=checkpoint["date_a"]["selector_hash"],
+            ),
+            "temporal_corrective_date_selectors_not_distinct",
+        ),
+        (
+            lambda checkpoint: checkpoint["range_boundary"].update(
+                expected_object_fingerprint="not-a-fingerprint",
+                observed_object_fingerprint="not-a-fingerprint",
+            ),
+            "temporal_corrective_range_boundary_failed",
+        ),
+        (
+            lambda checkpoint: checkpoint["mismatch"].update(object_count=1, gap_count=0),
+            "temporal_corrective_mismatch_not_fail_closed",
+        ),
+        (
+            lambda checkpoint: checkpoint["nonsense_query"].update(
+                result_count=1,
+                semantic_ranker_used=False,
+            ),
+            "temporal_corrective_nonsense_query_not_empty",
+        ),
+        (
+            lambda checkpoint: checkpoint.pop("semantic_query"),
+            "temporal_corrective_semantic_query_missing",
+        ),
+        (
+            lambda checkpoint: checkpoint["semantic_query"].update(result_count=2),
+            "temporal_corrective_semantic_result_count_invalid",
+        ),
+        (
+            lambda checkpoint: checkpoint["semantic_query"].update(
+                observed_result_fingerprint="sha256:" + "d" * 64,
+            ),
+            "temporal_corrective_semantic_result_fingerprint_mismatch",
+        ),
+        (
+            lambda checkpoint: checkpoint["semantic_query"].update(
+                why_retrieved_semantic_match=False,
+            ),
+            "temporal_corrective_semantic_result_reason_invalid",
+        ),
+        (
+            lambda checkpoint: checkpoint["semantic_query"].update(score=0.74),
+            "temporal_corrective_semantic_result_score_below_threshold",
+        ),
+        (
+            lambda checkpoint: checkpoint["semantic_query"].update(score=float("nan")),
+            "temporal_corrective_semantic_result_score_below_threshold",
+        ),
+        (
+            lambda checkpoint: checkpoint["semantic_query"].update(
+                qdrant_semantic_result_lane_used=False,
+            ),
+            "temporal_corrective_qdrant_semantic_result_lane_not_used",
+        ),
+        (
+            lambda checkpoint: checkpoint["semantic_query"].update(
+                semantic_ranker_used=False,
+            ),
+            "temporal_corrective_semantic_query_ranker_not_used",
+        ),
+        (
+            lambda checkpoint: checkpoint["runtime_aggregate"]["projection_currentness"].update(
+                source_hash_match=False,
+                stale_projected_session_count=1,
+            ),
+            "temporal_corrective_projection_hash_not_current",
+        ),
+        (
+            lambda checkpoint: checkpoint["runtime_aggregate"]["projection_currentness"].update(
+                source_projection_state_digest="",
+            ),
+            "temporal_corrective_projection_state_digest_invalid",
+        ),
+        (
+            lambda checkpoint: checkpoint["runtime_aggregate"]["projection_currentness"].update(
+                source_hash_match=False,
+                session_memory_projection_current_count=125,
+                session_memory_projection_noncurrent_count=1,
+                session_memory_source_hash_mismatch_count=1,
+                session_memory_stale_projected_session_count=1,
+            ),
+            "temporal_corrective_projection_hash_not_current",
+        ),
+        (
+            lambda checkpoint: checkpoint["runtime_aggregate"]["projection_currentness"].update(
+                graph_projection_current_count=125,
+                graph_projection_noncurrent_count=1,
+            ),
+            "temporal_corrective_projection_hash_not_current",
+        ),
+        (
+            lambda checkpoint: (
+                checkpoint["runtime_aggregate"]["projection_currentness"].update(
+                    source_session_count=0,
+                    minimum_source_session_count=0,
+                    graph_projection_current_count=0,
+                    graph_projection_noncurrent_count=0,
+                    session_memory_projection_current_count=0,
+                    session_memory_projection_noncurrent_count=0,
+                ),
+                checkpoint["runtime_aggregate"]["entity_projection"].update(
+                    baseline_coverage_count=0,
+                    coverage_count=0,
+                    baseline_backlog_count=0,
+                    backlog_count=0,
+                    valid_source_count=0,
+                    minimum_valid_source_count=0,
+                ),
+            ),
+            "temporal_corrective_projection_hash_not_current",
+        ),
+        (
+            lambda checkpoint: checkpoint["runtime_aggregate"]["projection_currentness"].update(
+                graph_run_scope_match=False,
+            ),
+            "temporal_corrective_projection_hash_not_current",
+        ),
+        (
+            lambda checkpoint: checkpoint["runtime_aggregate"]["projection_currentness"].update(
+                graph_run_fresh=False,
+                graph_run_completed_age_seconds=901,
+            ),
+            "temporal_corrective_projection_hash_not_current",
+        ),
+        (
+            lambda checkpoint: checkpoint["runtime_aggregate"]["entity_projection"].update(
+                coverage_count=15,
+                backlog_count=111,
+            ),
+            "temporal_corrective_entity_aggregate_not_improved",
+        ),
+    ],
+)
+def test_runtime_readiness_fails_closed_for_incorrect_temporal_checkpoint(
+    mutation,
+    expected_gap,
+):
+    evidence = _sanitized_live_evidence()
+    mutation(evidence["temporal_recall_corrective_checkpoint"])
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert report["status"] == "FAIL"
+    assert claims["live.temporal_recall.corrective_checkpoint"]["status"] == "failed"
+    assert expected_gap in report["gaps"]
+
+
+def test_runtime_readiness_allows_live_corpus_growth_above_bounded_baseline() -> None:
+    evidence = _sanitized_live_evidence()
+    checkpoint = evidence["temporal_recall_corrective_checkpoint"]
+    checkpoint["runtime_aggregate"]["projection_currentness"].update(
+        source_session_count=127,
+        graph_projection_current_count=127,
+        session_memory_projection_current_count=127,
+    )
+    checkpoint["runtime_aggregate"]["entity_projection"].update(
+        valid_source_count=127,
+        coverage_count=17,
+        backlog_count=110,
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=evidence)
+
+    claim = next(
+        claim
+        for claim in report["claims"]
+        if claim["claim_id"] == "live.temporal_recall.corrective_checkpoint"
+    )
+    assert claim["status"] == "validated"
+    assert claim["hash_currentness_validated"] is True
+    assert claim["entity_aggregate_improved"] is True
 
 
 def _source_to_candidate_review_loop_evidence(**overrides):
@@ -1316,15 +1741,16 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
         "tool_names",
         "agent_context_product",
         "brain_objects_query_smokes",
+        "temporal_recall_corrective_checkpoint",
         "projection_join",
         "source_to_candidate_review_loop",
         "session_project_rollup_runtime",
         "preference_artifact_memory",
         "permission_sensitive_audit",
-            "agent_context_startup_runtime",
-            "gitops_desired_state",
-            "argo_reconciliation",
-            "deployment_evidence_binding",
+        "agent_context_startup_runtime",
+        "gitops_desired_state",
+        "argo_reconciliation",
+        "deployment_evidence_binding",
         "deployed_identity",
         "production_denials",
         "tool_schemas",
@@ -1332,6 +1758,12 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
         "evidence_provenance",
     ]
     assert template["packet_field_templates"]["schema_version"] == "source_to_candidate_runtime_evidence.v1"
+    assert (
+        template["packet_field_templates"]["temporal_recall_corrective_checkpoint"][
+            "schema_version"
+        ]
+        == "temporal_recall_corrective_checkpoint.v1"
+    )
     assert "projection_join" in template["required_packet_fields"]
     assert "source_to_candidate_review_loop" in template["required_packet_fields"]
     assert "session_project_rollup_runtime" in template["required_packet_fields"]
@@ -4769,6 +5201,180 @@ def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys)
     ]["gaps"]
     assert claims["live.production.permission_sensitive_audit"]["status"] == "validated"
     assert claims["live.agent_context.startup_read_path"]["status"] == "validated"
+
+
+def test_neuron_knowledge_runtime_readiness_cli_collects_temporal_checkpoint_without_deployment_binding(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    acceptance_file = tmp_path / "temporal-acceptance.json"
+    acceptance_file.write_text("{}", encoding="utf-8")
+    received: dict = {}
+
+    async def _collect_temporal_checkpoint(**kwargs):
+        received.update(kwargs)
+        return {
+            "schema_version": "temporal_recall_corrective_checkpoint_capture.v1",
+            "collection": {
+                "mode": "temporal_corrective_checkpoint_read_only",
+                "network_used": True,
+                "mutation_scope": "none",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+            "temporal_recall_corrective_checkpoint": (
+                _temporal_recall_corrective_checkpoint()
+            ),
+            "production_mutation_performed": False,
+        }
+
+    monkeypatch.setattr(
+        object_cli,
+        "collect_temporal_recall_corrective_checkpoint",
+        _collect_temporal_checkpoint,
+    )
+
+    exit_code = main(
+        [
+            "source-to-candidate-runtime-readiness",
+            "--collect-temporal-corrective-checkpoint",
+            "--mcp-url",
+            "https://mcp.example.test/mcp",
+            "--temporal-acceptance-file",
+            str(acceptance_file),
+            "--repository",
+            "pureliture/neurons",
+            "--branch",
+            "main",
+            "--project",
+            "neurons",
+            "--consumer",
+            "codex",
+        ]
+    )
+
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["schema_version"] == "temporal_recall_corrective_checkpoint_capture.v1"
+    readiness = output["checkpoint_readiness"]
+    assert readiness["schema_version"] == (
+        "temporal_recall_corrective_checkpoint_readiness.v1"
+    )
+    assert readiness["status"] == "PASS"
+    assert readiness["production_mutation_performed"] is False
+    assert readiness["failed_claims"] == []
+    assert readiness["gaps"] == []
+    assert readiness["claim"]["status"] == "validated"
+    assert received["temporal_acceptance"] == {}
+    assert received["project"] == "neurons"
+    assert "deployed_identity" not in received
+    assert "gitops_desired_state" not in received
+    assert "argo_reconciliation" not in received
+
+
+def test_temporal_checkpoint_cli_returns_failure_exit_for_invalid_checkpoint(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    acceptance_file = tmp_path / "temporal-acceptance.json"
+    acceptance_file.write_text("{}", encoding="utf-8")
+    failed_checkpoint = _temporal_recall_corrective_checkpoint()
+    failed_checkpoint["runtime_aggregate"]["projection_currentness"][
+        "source_projection_state_digest"
+    ] = ""
+
+    async def _collect_temporal_checkpoint(**_kwargs):
+        return {
+            "schema_version": "temporal_recall_corrective_checkpoint_capture.v1",
+            "collection": {
+                "mode": "temporal_corrective_checkpoint_read_only",
+                "network_used": True,
+                "mutation_scope": "none",
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            },
+            "temporal_recall_corrective_checkpoint": failed_checkpoint,
+            "production_mutation_performed": False,
+        }
+
+    monkeypatch.setattr(
+        object_cli,
+        "collect_temporal_recall_corrective_checkpoint",
+        _collect_temporal_checkpoint,
+    )
+
+    exit_code = main(
+        [
+            "source-to-candidate-runtime-readiness",
+            "--collect-temporal-corrective-checkpoint",
+            "--mcp-url",
+            "https://mcp.example.test/mcp",
+            "--temporal-acceptance-file",
+            str(acceptance_file),
+            "--project",
+            "neurons",
+        ]
+    )
+
+    assert exit_code == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["checkpoint_readiness"]["status"] == "FAIL"
+    assert output["checkpoint_readiness"]["failed_claims"] == [
+        "live.temporal_recall.corrective_checkpoint"
+    ]
+    assert (
+        "temporal_corrective_projection_state_digest_invalid"
+        in output["checkpoint_readiness"]["gaps"]
+    )
+
+
+@pytest.mark.parametrize(
+    "conflicting_args",
+    [
+        ["--live-evidence-file", "ignored.json"],
+        ["--normalize-post-deploy-capture-file", "ignored.json"],
+        ["--post-deploy-capture-file", "ignored.json"],
+        ["--normalize-shadow-evidence-file", "ignored.json"],
+        ["--shadow-evidence-file", "ignored.json"],
+        ["--evidence-collection-plan"],
+        ["--evidence-packet-template"],
+        ["--collect-shadow-evidence"],
+        ["--collect-post-deploy-mcp-capture"],
+        ["--collect-agent-context-startup"],
+        ["--gitops-desired-state-file", "ignored.json"],
+        ["--argo-reconciliation-file", "ignored.json"],
+        ["--deployed-identity-file", "ignored.json"],
+        ["--artifact-descriptor-file", "ignored.json"],
+    ],
+)
+def test_temporal_checkpoint_cli_rejects_other_modes_and_deployment_binding_inputs(
+    tmp_path,
+    conflicting_args,
+):
+    acceptance_file = tmp_path / "temporal-acceptance.json"
+    acceptance_file.write_text("{}", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "source-to-candidate-runtime-readiness",
+            "--collect-temporal-corrective-checkpoint",
+            "--mcp-url",
+            "https://mcp.example.test/mcp",
+            "--temporal-acceptance-file",
+            str(acceptance_file),
+            "--project",
+            "neurons",
+            *conflicting_args,
+        ]
+    )
+
+    assert exit_code == 2
 
 
 def test_neuron_knowledge_runtime_readiness_cli_normalizes_shadow_evidence_file(tmp_path, capsys):

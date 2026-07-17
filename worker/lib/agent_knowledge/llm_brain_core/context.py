@@ -4,19 +4,24 @@ import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Callable
 
-from ._util import ensure_public_safe, public_safe_text
+from ._util import ensure_public_safe, hash_payload, public_safe_text
 from .artifact_store import InMemorySessionMemoryArtifactStore, SessionMemoryArtifactStore
 from .context_builder import (
     ContextPackBuilder,
     NON_CURRENT_AUTHORITY,
+    artifact_field,
+    artifact_summary,
     decision_view as _decision_view,
     incident_records as _incident_records,
     persona_view as _persona_view,
     split_incident_lanes as _split_incident_lanes,
+    task_title,
+    is_current_nonterminal,
 )
 from .document_bridge import DisabledDocumentBridge, DocumentBridge
 from .graph import GraphMemoryAdapter, NullGraphMemoryAdapter
-from .models import EvidenceRequest
+from .models import EvidenceRequest, GraphMemoryResult
+from .objects.knowledge_objects import KnowledgeObjectEnvelope
 from .objects.object_packs import (
     build_code_change_impact_pack,
     build_documentation_cleanup_pack,
@@ -24,6 +29,12 @@ from .objects.object_packs import (
 )
 from .objects.reference_corpus import default_corpus_policy_status
 from .source_ref import SourceRefResolver
+from .temporal import (
+    TemporalSelector,
+    TemporalSelectorError,
+    validate_explicit_temporal_selector,
+    parse_temporal_selector,
+)
 
 if TYPE_CHECKING:
     # `brain_context_resolve` is annotated `-> ContextPack`. With
@@ -34,6 +45,44 @@ if TYPE_CHECKING:
 
 ACCEPTED_LIFECYCLE_STATES = {"accepted", "human_accepted", "auto_accepted"}
 ACCEPTED_APPROVAL_STATES = {"approved", "auto_accepted"}
+_SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
+
+
+def _is_synthetic_canary_artifact(artifact: Any) -> bool:
+    """Keep additive projection probes outside every user recall lane."""
+
+    return (
+        str(artifact_field(artifact, "provider") or "").strip().casefold()
+        == _SYNTHETIC_CANARY_PROVIDER
+    )
+
+
+def _recall_safe_artifacts(artifacts: list[Any]) -> list[Any]:
+    return [artifact for artifact in artifacts if not _is_synthetic_canary_artifact(artifact)]
+
+
+def _is_synthetic_canary_episode(episode: Any) -> bool:
+    payload = getattr(episode, "payload", None)
+    return (
+        isinstance(payload, Mapping)
+        and str(payload.get("provider") or "").strip().casefold()
+        == _SYNTHETIC_CANARY_PROVIDER
+    )
+
+
+def _recall_safe_graph_result(graph_result: GraphMemoryResult) -> GraphMemoryResult:
+    episodes = tuple(
+        episode
+        for episode in graph_result.episodes
+        if not _is_synthetic_canary_episode(episode)
+    )
+    if len(episodes) == len(graph_result.episodes):
+        return graph_result
+    return GraphMemoryResult(
+        status=graph_result.status,
+        episodes=episodes,
+        details=graph_result.details,
+    )
 
 
 class BrainReadService:
@@ -74,14 +123,18 @@ class BrainReadService:
     ) -> ContextPack:
         project_name = project or project_from_repository(repository)
         brain_id = f"/project/{project_name}"
-        artifacts = self.artifact_store.list_recent(project=project_name, limit=limit)
+        artifacts = _recall_safe_artifacts(
+            self.artifact_store.list_recent(project=project_name, limit=limit)
+        )
         cards = _project_cards(self.memory_cards, project_name)
         query = " ".join([repository, branch, current_request, " ".join(current_files)])
-        graph_result = self.graph_adapter.search_context(
-            brain_id=brain_id,
-            query=query,
-            entity_types=["Task", "Decision", "Incident", "PersonaFact", "File", "SourceRef"],
-            limit=limit,
+        graph_result = _recall_safe_graph_result(
+            self.graph_adapter.search_context(
+                brain_id=brain_id,
+                query=query,
+                entity_types=["Task", "Decision", "Incident", "PersonaFact", "File", "SourceRef"],
+                limit=limit,
+            )
         )
         bridge_result = self.document_bridge.search_documents(
             query=current_request,
@@ -127,11 +180,13 @@ class BrainReadService:
             for card in _project_cards(self.memory_cards, project)
             if (not wanted or str(card.get("card_type")) in wanted) and _matches_terms(card, terms)
         ][:bounded]
-        graph = self.graph_adapter.search_context(
-            brain_id=f"/project/{project}",
-            query=query,
-            entity_types=card_types,
-            limit=bounded,
+        graph = _recall_safe_graph_result(
+            self.graph_adapter.search_context(
+                brain_id=f"/project/{project}",
+                query=query,
+                entity_types=card_types,
+                limit=bounded,
+            )
         )
         result = {
             "memory_status": {"status": "available", "authority": "canonical_card", "count": len(cards)},
@@ -155,10 +210,45 @@ class BrainReadService:
         limit: int = 20,
         response_mode: str = "full",
         consumer: str = "unspecified",
+        as_of: str = "",
+        date_from: str = "",
+        date_to: str = "",
     ) -> dict[str, Any]:
         project_name = project or project_from_repository(repository)
-        selected_route = route or _route_for_query(query)
-        route_source = "explicit" if route else "inferred"
+        validate_explicit_temporal_selector(
+            as_of=as_of,
+            date_from=date_from,
+            date_to=date_to,
+            route=route,
+        )
+        has_explicit_temporal_selector = bool(as_of or date_from or date_to)
+        query_temporal_selector = (
+            parse_temporal_selector(query=query)
+            if not has_explicit_temporal_selector
+            else None
+        )
+        if (
+            query_temporal_selector is not None
+            and route
+            and route != "temporal_work_recall"
+        ):
+            raise TemporalSelectorError(
+                "query temporal selectors require route temporal_work_recall"
+            )
+        selected_route = (
+            "temporal_work_recall"
+            if has_explicit_temporal_selector or query_temporal_selector is not None
+            else route or _route_for_query(query)
+        )
+        route_source = (
+            "temporal_selector"
+            if has_explicit_temporal_selector and not route
+            else "explicit"
+            if route
+            else "query_temporal_selector"
+            if query_temporal_selector is not None
+            else "inferred"
+        )
         pack = self.brain_context_resolve(
             repository=repository,
             branch=branch,
@@ -205,11 +295,41 @@ class BrainReadService:
                 consumer=consumer,
             )
         elif selected_route == "temporal_work_recall":
-            object_pack = _context_authority_object_pack(
-                pack,
+            selector = parse_temporal_selector(
+                as_of=as_of,
+                date_from=date_from,
+                date_to=date_to,
+                query=query,
+            )
+            selector_bounds = selector.to_audit_dict() if selector is not None else {}
+            list_revisions = getattr(
+                self.artifact_store,
+                "list_observed_interval_revisions",
+                None,
+            )
+            if not callable(list_revisions):
+                # Compatibility for external adapters that have not adopted the
+                # all-revisions seam yet. Built-in stores always provide it.
+                list_revisions = self.artifact_store.list_observed_interval
+            artifacts = _recall_safe_artifacts(
+                list_revisions(
+                    project=project_name,
+                    observed_at_start=str(selector_bounds.get("start") or ""),
+                    observed_at_end=str(selector_bounds.get("end") or ""),
+                    limit=10000,
+                )
+                if selector is not None
+                else []
+            )
+            object_pack = _temporal_work_object_pack(
+                cards=_project_cards(self.memory_cards, project_name),
+                artifacts=artifacts,
+                selector=selector,
+                project=project_name,
+                query=query,
                 route=selected_route,
-                pack_names=("current_work", "required_verification"),
                 consumer=consumer,
+                limit=min(max(int(limit or 20), 1), 50),
             )
         else:
             object_pack = _context_authority_object_pack(
@@ -436,11 +556,13 @@ class BrainReadService:
         return result
 
     def brain_incident_search(self, *, symptom: str, project: str, limit: int = 5) -> dict[str, Any]:
-        graph = self.graph_adapter.search_context(
-            brain_id=f"/project/{project}",
-            query=symptom,
-            entity_types=["Incident", "Symptom", "Attempt", "Fix", "Verification"],
-            limit=max(limit * 4, 10),
+        graph = _recall_safe_graph_result(
+            self.graph_adapter.search_context(
+                brain_id=f"/project/{project}",
+                query=symptom,
+                entity_types=["Incident", "Symptom", "Attempt", "Fix", "Verification"],
+                limit=max(limit * 4, 10),
+            )
         )
         reusable, do_not_apply = _split_incident_lanes(_incident_records(graph), limit=limit)
         result = {
@@ -453,11 +575,13 @@ class BrainReadService:
         return result
 
     def brain_incident_replay(self, *, incident_id: str, project: str) -> dict[str, Any]:
-        graph = self.graph_adapter.search_context(
-            brain_id=f"/project/{project}",
-            query=incident_id,
-            entity_types=["Incident", "Symptom", "Hypothesis", "Attempt", "Fix", "Verification"],
-            limit=20,
+        graph = _recall_safe_graph_result(
+            self.graph_adapter.search_context(
+                brain_id=f"/project/{project}",
+                query=incident_id,
+                entity_types=["Incident", "Symptom", "Hypothesis", "Attempt", "Fix", "Verification"],
+                limit=20,
+            )
         )
         timeline = sorted(
             [episode.to_dict() for episode in graph.episodes],
@@ -662,6 +786,478 @@ def _context_authority_object_pack(
     return merged
 
 
+def _temporal_work_object_pack(
+    *,
+    cards: list[dict[str, Any]],
+    artifacts: list[Any],
+    selector: TemporalSelector | None,
+    project: str,
+    query: str,
+    route: str,
+    consumer: str,
+    limit: int,
+) -> dict[str, Any]:
+    """Return only WorkUnits backed by matching observed/event time evidence.
+
+    Temporal recall intentionally does not merge ``current_work`` or
+    ``required_verification`` packs. Those packs describe now; using them as a
+    historical fallback is the correctness bug this route must fail closed on.
+    """
+
+    result = _empty_read_object_pack(route=route, consumer=consumer)
+    if selector is None:
+        result["gaps"].append("temporal_selector_required")
+        result["confidence"] = {"score": 0.0, "basis": "temporal_evidence_absent"}
+        result["audit"].update(
+            {
+                "object_pack_route_source": "temporal_evidence_filter",
+                "temporal_candidate_count": 0,
+                "temporal_missing_time_count": 0,
+            }
+        )
+        return result
+
+    relevance_terms = _temporal_relevance_terms(query, project=project)
+    candidates: list[dict[str, Any]] = []
+    non_authoritative_card_count = 0
+    for card in cards:
+        if str(card.get("card_type") or "").casefold() not in {"task", "work", "work_unit"}:
+            continue
+        typed_payload = card.get("typed_payload") if isinstance(card.get("typed_payload"), Mapping) else {}
+        lane = _temporal_task_card_authority_lane(card, typed_payload)
+        if not lane:
+            non_authoritative_card_count += 1
+            continue
+        candidates.append(
+            {
+                "natural_key": str(card.get("memory_id") or card.get("title") or ""),
+                "title": task_title(card),
+                "content_hash": str(card.get("content_hash") or card.get("card_hash") or ""),
+                "observed_at_start": str(card.get("observed_at_start") or card.get("observed_at") or ""),
+                "observed_at_end": str(card.get("observed_at_end") or card.get("observed_at") or ""),
+                "authority_lane": lane,
+                "lifecycle_status": "current" if lane == "accepted_current" else "observed",
+                "verification_state": "freshness_checked" if lane == "accepted_current" else "unverified",
+                "review_state": "accepted",
+                "confidence_score": 0.9 if lane == "accepted_current" else 0.55,
+                "recommended_action": "resume_work" if lane == "accepted_current" else "",
+                "source_kind": "memory_card",
+                "source_object_type": "MemoryCard:task",
+                # The object envelope has its own deterministic object_id. Keep
+                # the canonical card identifier as a distinct provenance field
+                # so the public brain.query compatibility adapter never swaps
+                # its stable memory_id for a WorkUnit id.
+                "source_memory_id": str(card.get("memory_id") or ""),
+                "source_revision": str(card.get("source_revision") or card.get("content_hash") or ""),
+                "relevance_text": " ".join(
+                    str(value or "")
+                    for value in (
+                        card.get("title"),
+                        card.get("summary"),
+                        typed_payload.get("task_state"),
+                        typed_payload.get("next_action"),
+                    )
+                ),
+            }
+        )
+    for artifact in artifacts:
+        revision_temporal_evidence = str(
+            artifact_field(artifact, "revision_temporal_evidence") or "legacy"
+        )
+        artifact_observed_start = str(
+            artifact_field(artifact, "revision_observed_at_start")
+            if revision_temporal_evidence == "bounded"
+            else artifact_field(artifact, "observed_at_start")
+            or ""
+        )
+        artifact_observed_end = str(
+            artifact_field(artifact, "revision_observed_at_end")
+            if revision_temporal_evidence == "bounded"
+            else artifact_field(artifact, "observed_at_end")
+            or ""
+        )
+        candidates.append(
+            {
+                "natural_key": str(artifact_field(artifact, "artifact_id") or artifact_summary(artifact)),
+                "title": artifact_summary(artifact),
+                "content_hash": str(artifact_field(artifact, "content_hash") or ""),
+                "observed_at_start": artifact_observed_start,
+                "observed_at_end": artifact_observed_end,
+                "observed_intervals": tuple(
+                    tuple(interval)
+                    for interval in (
+                        artifact_field(artifact, "revision_observed_intervals")
+                        or ()
+                    )
+                    if isinstance(interval, (list, tuple)) and len(interval) == 2
+                ),
+                "temporal_term_bindings": tuple(
+                    (
+                        str(binding[0]),
+                        str(binding[1]),
+                        tuple(binding[2]),
+                    )
+                    for binding in (
+                        artifact_field(
+                            artifact, "revision_temporal_term_bindings"
+                        )
+                        or ()
+                    )
+                    if isinstance(binding, (list, tuple))
+                    and len(binding) == 3
+                    and isinstance(binding[2], (list, tuple))
+                ),
+                "temporal_evidence_kind": revision_temporal_evidence,
+                "confidence_score": (
+                    0.7 if revision_temporal_evidence == "bounded" else 0.0
+                ),
+                "authority_lane": "reference_only",
+                "source_kind": "session_memory_artifact",
+                "source_object_type": "SessionMemoryArtifact",
+                "source_revision": str(artifact_field(artifact, "source_revision") or ""),
+                "relevance_text": artifact_summary(artifact),
+                "relevance_hashes": tuple(
+                    artifact_field(artifact, "search_term_hashes") or ()
+                ),
+                # Internal-only grouping/currentness fields. They are consumed
+                # before KnowledgeObjectEnvelope construction and never emitted.
+                "session_group_key": str(
+                    artifact_field(artifact, "session_id_hash") or ""
+                ),
+                "artifact_currentness": (
+                    int(artifact_field(artifact, "materialization_revision") or 0),
+                    str(artifact_field(artifact, "materialized_at") or ""),
+                    str(artifact_field(artifact, "source_revision") or ""),
+                    str(artifact_field(artifact, "created_at") or ""),
+                    str(artifact_field(artifact, "artifact_id") or ""),
+                ),
+            }
+        )
+
+    missing_time_count = 0
+    irrelevant_count = 0
+    matched: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if (
+            candidate.get("source_kind") == "session_memory_artifact"
+            and candidate.get("temporal_evidence_kind") != "bounded"
+        ):
+            # Cumulative/legacy session bounds cannot prove which revision was
+            # observed at the requested event time. Keep temporal recall closed
+            # until the bounded metadata rebuild supplies revision evidence.
+            missing_time_count += 1
+            continue
+        observed_intervals = tuple(candidate.get("observed_intervals") or ())
+        if observed_intervals:
+            matching_intervals = [
+                (str(interval[0]), str(interval[1]))
+                for interval in observed_intervals
+                if selector.matches(
+                    observed_at_start=str(interval[0]),
+                    observed_at_end=str(interval[1]),
+                )
+            ]
+            if not matching_intervals:
+                continue
+            temporal_term_bindings = tuple(
+                candidate.get("temporal_term_bindings") or ()
+            )
+            if candidate.get("source_kind") == "session_memory_artifact":
+                if temporal_term_bindings:
+                    matching_bindings = [
+                        binding
+                        for binding in temporal_term_bindings
+                        if selector.matches(
+                            observed_at_start=str(binding[0]),
+                            observed_at_end=str(binding[1]),
+                        )
+                    ]
+                    if not matching_bindings:
+                        continue
+                    candidate = {
+                        **candidate,
+                        "relevance_hashes": tuple(
+                            sorted(
+                                {
+                                    str(term_hash)
+                                    for binding in matching_bindings
+                                    for term_hash in binding[2]
+                                }
+                            )
+                        ),
+                    }
+                elif len(observed_intervals) != 1:
+                    # Old multi-interval artifacts cannot prove which term
+                    # belongs to which interval.  They remain readable through
+                    # non-temporal lanes but fail closed here until rebuilt.
+                    missing_time_count += 1
+                    continue
+            selected_interval = max(matching_intervals)
+            candidate = {
+                **candidate,
+                "observed_at_start": selected_interval[0],
+                "observed_at_end": selected_interval[1],
+            }
+        observed_start = str(candidate.get("observed_at_start") or "")
+        observed_end = str(candidate.get("observed_at_end") or "")
+        if not observed_start and not observed_end:
+            missing_time_count += 1
+            continue
+        if not observed_intervals and not selector.matches(
+            observed_at_start=observed_start,
+            observed_at_end=observed_end,
+        ):
+            continue
+        if relevance_terms and not _temporal_candidate_is_relevant(
+            str(candidate.get("relevance_text") or ""),
+            relevance_terms,
+            tuple(candidate.get("relevance_hashes") or ()),
+        ):
+            irrelevant_count += 1
+            continue
+        matched.append(candidate)
+    # Multiple bounded revisions of one session can overlap the same date. Pick
+    # the latest revision only *after* semantic relevance is known; collapsing in
+    # the store first lets a newer unrelated revision hide an older relevant one.
+    latest_relevant_by_session: dict[str, dict[str, Any]] = {}
+    ungrouped: list[dict[str, Any]] = []
+    for candidate in matched:
+        session_group_key = str(candidate.get("session_group_key") or "")
+        if not session_group_key:
+            ungrouped.append(candidate)
+            continue
+        existing = latest_relevant_by_session.get(session_group_key)
+        if existing is None or tuple(candidate.get("artifact_currentness") or ()) > tuple(
+            existing.get("artifact_currentness") or ()
+        ):
+            latest_relevant_by_session[session_group_key] = candidate
+    matched = [*ungrouped, *latest_relevant_by_session.values()]
+    matched.sort(
+        key=lambda item: (
+            str(item.get("observed_at_start") or item.get("observed_at_end") or ""),
+            str(item.get("natural_key") or ""),
+        ),
+        reverse=True,
+    )
+
+    for candidate in matched[: max(1, int(limit))]:
+        lane = str(candidate["authority_lane"])
+        content_hash = str(candidate.get("content_hash") or "")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", content_hash):
+            content_hash = hash_payload(
+                [
+                    "temporal_work_recall",
+                    candidate.get("natural_key"),
+                    candidate.get("observed_at_start"),
+                    candidate.get("observed_at_end"),
+                ]
+            )
+        observed_at = str(candidate.get("observed_at_start") or candidate.get("observed_at_end") or "")
+        obj = KnowledgeObjectEnvelope.from_parts(
+            object_type="WorkUnit",
+            natural_key=str(candidate.get("natural_key") or candidate.get("title") or ""),
+            scope={"project": project},
+            title=str(candidate.get("title") or ""),
+            summary=str(candidate.get("title") or ""),
+            lifecycle_status=str(candidate.get("lifecycle_status") or "observed"),
+            authority_lane=lane,
+            verification_state=str(candidate.get("verification_state") or "unverified"),
+            review_state=str(candidate.get("review_state") or "not_required"),
+            content_hash=content_hash,
+            observed_at=observed_at,
+            confidence={
+                "score": float(candidate.get("confidence_score") or 0.0),
+                "basis": "matching_temporal_evidence",
+            },
+            recommended_action=str(candidate.get("recommended_action") or ""),
+            freshness={"status": "event_time_matched"},
+            payload={
+                "source_kind": candidate.get("source_kind"),
+                "source_object_type": candidate.get("source_object_type"),
+                "source_memory_id": candidate.get("source_memory_id"),
+                "observed_at_start": candidate.get("observed_at_start"),
+                "observed_at_end": candidate.get("observed_at_end"),
+                "source_revision": candidate.get("source_revision"),
+            },
+        ).to_dict()
+        obj["valid_from"] = str(candidate.get("observed_at_start") or "")
+        obj["valid_to"] = str(candidate.get("observed_at_end") or "")
+        result["objects"].append(obj)
+        result["lanes"][lane].append(obj)
+        action = str(candidate.get("recommended_action") or "")
+        if action:
+            result["recommended_actions"].append({"object_id": obj["object_id"], "action": action})
+
+    if not result["objects"]:
+        if irrelevant_count:
+            result["gaps"].append("temporal_evidence_no_relevant_match")
+        else:
+            result["gaps"].append(
+                "temporal_evidence_missing" if missing_time_count else "temporal_evidence_no_match"
+            )
+        result["confidence"] = {"score": 0.0, "basis": "temporal_evidence_absent_or_mismatched"}
+    else:
+        if (
+            result["lanes"]["accepted_non_current"]
+            and not result["lanes"]["accepted_current"]
+            and not result["lanes"]["reference_only"]
+        ):
+            result["gaps"].append("temporal_current_authority_missing")
+        result["confidence"] = {
+            "score": min(float(obj.get("confidence", {}).get("score") or 0.0) for obj in result["objects"]),
+            "basis": "matching_observed_event_time",
+        }
+    result["audit"].update(
+        {
+            "object_pack_route_source": "temporal_evidence_filter",
+            "temporal_selector": selector.to_audit_dict(),
+            "temporal_candidate_count": len(candidates),
+            "temporal_match_count": len(result["objects"]),
+            "temporal_missing_time_count": missing_time_count,
+            "temporal_irrelevant_count": irrelevant_count,
+            "temporal_relevance_term_count": len(relevance_terms),
+            "temporal_non_authoritative_card_count": non_authoritative_card_count,
+        }
+    )
+    ensure_public_safe(result, "TemporalWorkObjectPack")
+    return result
+
+
+_TEMPORAL_QUERY_GENERIC_TERMS = frozenset(
+    {
+        "am",
+        "are",
+        "as",
+        "be",
+        "been",
+        "being",
+        "can",
+        "could",
+        "date",
+        "did",
+        "do",
+        "does",
+        "from",
+        "had",
+        "has",
+        "have",
+        "history",
+        "how",
+        "on",
+        "is",
+        "may",
+        "might",
+        "must",
+        "recall",
+        "repo",
+        "repository",
+        "result",
+        "session",
+        "shall",
+        "should",
+        "temporal",
+        "the",
+        "to",
+        "today",
+        "we",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "why",
+        "will",
+        "work",
+        "would",
+        "yesterday",
+        "그날",
+        "결과",
+        "기억",
+        "날짜",
+        "당시",
+        "무엇",
+        "봐야",
+        "세션",
+        "시간",
+        "어제",
+        "오늘",
+        "작업",
+        "재개",
+        "재개하려면",
+        "했나",
+        "했다",
+        "했어",
+        "해야",
+        "해",
+        "회상",
+        "was",
+        "were",
+    }
+)
+
+
+def _temporal_relevance_terms(query: str, *, project: str) -> set[str]:
+    without_dates = re.sub(
+        r"(?<!\d)\d{4}-\d{2}-\d{2}(?:[Tt ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:[Zz]|[+-]\d{2}:?\d{2})?)?(?!\d)",
+        " ",
+        str(query or ""),
+    )
+    project_terms = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9가-힣_-]+", str(project or ""))
+        if len(token) > 1
+    }
+    return {
+        token
+        for token in (
+            _temporal_query_term(value)
+            for value in re.findall(r"[A-Za-z0-9가-힣_-]+", without_dates)
+            if len(value) > 1
+        )
+        if token
+        if token not in _TEMPORAL_QUERY_GENERIC_TERMS
+        and token not in project_terms
+        and not token.isdigit()
+    }
+
+
+def _temporal_query_term(value: str) -> str:
+    token = value.casefold()
+    for suffix in ("으로", "에서", "에게", "한테", "까지", "부터", "처럼", "보다", "로"):
+        if token.endswith(suffix) and len(token) > len(suffix) + 1:
+            return token[: -len(suffix)]
+    for suffix in ("ment", "ing", "ed"):
+        if token.endswith(suffix) and len(token) > len(suffix) + 3:
+            return token[: -len(suffix)]
+    return token
+
+
+def _temporal_candidate_is_relevant(
+    text: str,
+    terms: set[str],
+    term_hashes: tuple[str, ...] = (),
+) -> bool:
+    candidate_terms = {
+        token
+        for token in (
+            _temporal_query_term(value)
+            for value in re.findall(r"[A-Za-z0-9가-힣_-]+", str(text or ""))
+            if len(value) > 1
+        )
+        if token
+    }
+    hashed = set(term_hashes)
+    matched_count = sum(
+        1 for term in terms if term in candidate_terms or hash_payload(term) in hashed
+    )
+    if len(terms) <= 1:
+        return matched_count == len(terms)
+    required_count = max(2, (len(terms) * 3 + 4) // 5)
+    return matched_count >= required_count
+
+
 def _html_visualization_preference_object_pack(
     pack: Mapping[str, Any],
     *,
@@ -839,10 +1435,13 @@ def _object_pack_view(
     view = dict(pack)
     wanted = {item for item in object_types if item}
     if wanted:
+        pre_filter_objects = [
+            obj for obj in view.get("objects", []) if isinstance(obj, Mapping)
+        ]
         objects = [
             dict(obj)
-            for obj in view.get("objects", [])
-            if isinstance(obj, Mapping) and str(obj.get("object_type")) in wanted
+            for obj in pre_filter_objects
+            if str(obj.get("object_type")) in wanted
         ]
         object_ids = {str(obj.get("object_id")) for obj in objects}
         view["objects"] = objects
@@ -861,6 +1460,24 @@ def _object_pack_view(
             for action in view.get("recommended_actions", [])
             if isinstance(action, Mapping) and str(action.get("object_id")) in object_ids
         ]
+        if (
+            str(view.get("route") or "") == "temporal_work_recall"
+            and pre_filter_objects
+            and not objects
+        ):
+            gaps = [str(gap) for gap in view.get("gaps", []) if str(gap or "")]
+            filter_gap = "temporal_object_type_filter_no_matching_evidence"
+            if filter_gap not in gaps:
+                gaps.append(filter_gap)
+            view["gaps"] = gaps
+            view["confidence"] = {
+                "score": 0.0,
+                "basis": "temporal_object_type_filter_no_match",
+            }
+            temporal_audit = dict(view.get("audit") or {})
+            temporal_audit["temporal_pre_filter_match_count"] = len(pre_filter_objects)
+            temporal_audit["temporal_match_count"] = 0
+            view["audit"] = temporal_audit
     audit = dict(view.get("audit") or {})
     audit["object_type_filter"] = sorted(wanted)
     view["audit"] = audit
@@ -973,6 +1590,22 @@ def _is_accepted_card(card: Mapping[str, Any]) -> bool:
     if lifecycle:
         return lifecycle in ACCEPTED_LIFECYCLE_STATES and approval in ACCEPTED_APPROVAL_STATES
     return str(card.get("state") or "") == "active"
+
+
+def _temporal_task_card_authority_lane(
+    card: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> str:
+    if not _is_accepted_card(card):
+        return ""
+    currentness = str(card.get("currentness") or "").casefold()
+    if currentness == "current" and is_current_nonterminal(card, payload):
+        return "accepted_current"
+    if currentness in NON_CURRENT_AUTHORITY or (
+        currentness == "current" and not is_current_nonterminal(card, payload)
+    ):
+        return "accepted_non_current"
+    return ""
 
 
 def _project_cards(cards: list[dict[str, Any]], project: str) -> list[dict[str, Any]]:

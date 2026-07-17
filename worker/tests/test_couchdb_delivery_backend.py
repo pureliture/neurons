@@ -16,15 +16,21 @@ import os
 
 import pytest
 
+from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBError
 from agent_knowledge.couchdb_source.document_model import (
     SourceDocType,
     ProjectionStatus,
+    build_projection_state_document,
     conversation_chunk_doc_id,
     coverage_manifest_doc_id,
     projection_state_doc_id,
     session_doc_id,
     sha256_hash,
 )
+from agent_knowledge.couchdb_source.session_memory_materializer import (
+    mark_projection_pending_if_source_changed,
+)
+from agent_knowledge.couchdb_source.build_cli import _select_sessions_needing_projection
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
 from agent_knowledge.rag_ingress.backfill_apply import apply_backfill_to_state_db
 from agent_knowledge.rag_ingress.couchdb_delivery_backend import CouchDBDeliveryBackend
@@ -41,6 +47,86 @@ SESSION_ID_HASH = sha256_hash("codex:test-session-1")
 CHUNK_ID = "chunk_abc123"
 PROVIDER = "codex"
 PROJECT = "neurons"
+
+
+def test_source_hash_mismatch_recovers_pending_even_when_chunk_retry_is_duplicate():
+    store = InMemoryCouchDBSourceStore()
+    old_source_hash = sha256_hash("old-source")
+    new_source_hash = sha256_hash("new-source")
+    store.put(
+        build_projection_state_document(
+            session_id_hash=SESSION_ID_HASH,
+            provider=PROVIDER,
+            project=PROJECT,
+            projection_status=ProjectionStatus.PROJECTED,
+            active_content_hash=sha256_hash("old-artifact"),
+            source_hash=old_source_hash,
+            projected_source_hash=old_source_hash,
+        )
+    )
+
+    mark_projection_pending_if_source_changed(
+        session_id_hash=SESSION_ID_HASH,
+        provider=PROVIDER,
+        project=PROJECT,
+        source_hash=new_source_hash,
+        store=store,
+        source_changed=False,
+    )
+
+    state = store.get(projection_state_doc_id(SESSION_ID_HASH))
+    assert state["projection_status"] == ProjectionStatus.PENDING
+    assert state["source_hash"] == new_source_hash
+    assert state["projected_source_hash"] == old_source_hash
+
+
+def test_pending_cas_does_not_overwrite_just_completed_same_source_projection():
+    desired_source_hash = sha256_hash("desired-source")
+
+    class _CompleteProjectionBeforePendingCAS(InMemoryCouchDBSourceStore):
+        armed = False
+
+        def put_if_revision(self, document, *, expected_rev):
+            if self.armed:
+                self.armed = False
+                current = dict(self.get(document["_id"]))
+                current.update(
+                    {
+                        "projection_status": ProjectionStatus.PROJECTED,
+                        "active_content_hash": sha256_hash("completed-artifact"),
+                        "source_hash": desired_source_hash,
+                        "projected_source_hash": desired_source_hash,
+                    }
+                )
+                super().put(current)
+            return super().put_if_revision(document, expected_rev=expected_rev)
+
+    store = _CompleteProjectionBeforePendingCAS()
+    state_id = projection_state_doc_id(SESSION_ID_HASH)
+    store.put(
+        build_projection_state_document(
+            session_id_hash=SESSION_ID_HASH,
+            provider=PROVIDER,
+            project=PROJECT,
+            projection_status=ProjectionStatus.PENDING,
+            source_hash=sha256_hash("older-source"),
+        )
+    )
+    store.armed = True
+
+    returned = mark_projection_pending_if_source_changed(
+        session_id_hash=SESSION_ID_HASH,
+        provider=PROVIDER,
+        project=PROJECT,
+        source_hash=desired_source_hash,
+        store=store,
+        source_changed=True,
+    )
+
+    current = store.get(state_id)
+    assert current["projection_status"] == ProjectionStatus.PROJECTED
+    assert current["projected_source_hash"] == desired_source_hash
+    assert returned["projection_status"] == ProjectionStatus.PROJECTED
 
 
 def _body(text: str = "This is a test conversation transcript body.") -> str:
@@ -238,6 +324,76 @@ def test_submit_idempotent_resubmit_returns_existing_evidence(tmp_path):
         by_type[dt] = by_type.get(dt, 0) + 1
     assert by_type.get(SourceDocType.TRANSCRIPT_SESSION, 0) == 1
     assert by_type.get(SourceDocType.CONVERSATION_CHUNK, 0) == 1
+
+
+def test_exact_duplicate_preserves_projected_source_hash_and_is_not_reselected(tmp_path):
+    state_db = _state_db(tmp_path)
+    payload = _payload()
+    _seed(state_db, payload)
+    store = InMemoryCouchDBSourceStore()
+    backend = _backend(state_db, store)
+
+    backend.submit(_job_view(state_db, "idem_key_1"))
+    state_id = projection_state_doc_id(SESSION_ID_HASH)
+    projected = dict(store.get(state_id))
+    source_hash = projected["source_hash"]
+    projected.update(
+        {
+            "projection_status": ProjectionStatus.PROJECTED,
+            "active_content_hash": sha256_hash("projected session memory"),
+            "projected_source_hash": source_hash,
+        }
+    )
+    store.put(projected)
+    session_id = session_doc_id(SESSION_ID_HASH)
+    session_before = dict(store.get(session_id))
+    session_before["materialized_at"] = "2026-07-16T01:00:00Z"
+    store.put(session_before)
+    session_before = dict(store.get(session_id))
+
+    backend.submit(_job_view(state_db, "idem_key_1"))
+
+    after = store.get(state_id)
+    assert after["projection_status"] == ProjectionStatus.PROJECTED
+    assert after["source_hash"] == source_hash
+    assert after["projected_source_hash"] == source_hash
+    assert store.get(session_id) == session_before
+    assert _select_sessions_needing_projection(store, limit=0) == []
+
+
+def test_distinct_chunk_dirties_projection_changes_source_hash_and_is_reselected(tmp_path):
+    state_db = _state_db(tmp_path)
+    first = _payload()
+    second = _payload(
+        idempotency_key="idem_key_2",
+        chunk_id="chunk_def456",
+        body="A distinct later conversation chunk.",
+    )
+    _seed(state_db, first, second)
+    store = InMemoryCouchDBSourceStore()
+    backend = _backend(state_db, store)
+
+    backend.submit(_job_view(state_db, "idem_key_1"))
+    state_id = projection_state_doc_id(SESSION_ID_HASH)
+    projected = dict(store.get(state_id))
+    first_source_hash = projected["source_hash"]
+    projected.update(
+        {
+            "projection_status": ProjectionStatus.PROJECTED,
+            "active_content_hash": sha256_hash("projected session memory"),
+            "projected_source_hash": first_source_hash,
+        }
+    )
+    store.put(projected)
+
+    backend.submit(_job_view(state_db, "idem_key_2"))
+
+    after = store.get(state_id)
+    assert after["projection_status"] == ProjectionStatus.PENDING
+    assert after["source_hash"] != first_source_hash
+    assert after["projected_source_hash"] == first_source_hash
+    selected = _select_sessions_needing_projection(store, limit=0)
+    assert [row["session_id_hash"] for row in selected] == [SESSION_ID_HASH]
 
 
 def test_find_by_natural_key_returns_none_for_missing_chunk(tmp_path):
@@ -438,8 +594,6 @@ def test_status_returns_unknown_for_missing_doc(tmp_path):
 
 def test_submit_raises_uncertain_on_couchdb_error(tmp_path):
     """CouchDB PUT 실패 시 DeliveryOutcomeUncertain이 발생한다."""
-    from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBError
-
     class FailingStore:
         db = "failing"
 
@@ -462,6 +616,74 @@ def test_submit_raises_uncertain_on_couchdb_error(tmp_path):
 
     with pytest.raises(DeliveryOutcomeUncertain):
         backend.submit(_job_view(state_db, "idem_key_1"))
+
+
+def test_exact_duplicate_retry_reconciles_coverage_and_projection_after_partial_put(tmp_path):
+    """chunk PUT 뒤 aggregate 갱신이 실패해도 exact retry가 currentness를 복구한다."""
+
+    class FailNextCoveragePutStore(InMemoryCouchDBSourceStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_next_coverage_put = False
+
+        def put(self, document):
+            if (
+                self.fail_next_coverage_put
+                and document.get("doc_type") == SourceDocType.COVERAGE_MANIFEST
+            ):
+                self.fail_next_coverage_put = False
+                raise CouchDBError("injected aggregate write failure")
+            return super().put(document)
+
+    state_db = _state_db(tmp_path)
+    first = _payload()
+    second = _payload(
+        idempotency_key="idem_key_2",
+        chunk_id="chunk_def456",
+        body="A distinct later conversation chunk.",
+    )
+    _seed(state_db, first, second)
+    store = FailNextCoveragePutStore()
+    backend = _backend(state_db, store)
+
+    backend.submit(_job_view(state_db, "idem_key_1"))
+    state_id = projection_state_doc_id(SESSION_ID_HASH)
+    projected = dict(store.get(state_id))
+    projected_source_hash = projected["source_hash"]
+    projected.update(
+        {
+            "projection_status": ProjectionStatus.PROJECTED,
+            "active_content_hash": sha256_hash("projected session memory"),
+            "projected_source_hash": projected_source_hash,
+        }
+    )
+    store.put(projected)
+
+    store.fail_next_coverage_put = True
+    retry_job = _job_view(state_db, "idem_key_2")
+
+    with pytest.raises(DeliveryOutcomeUncertain):
+        backend.submit(retry_job)
+
+    assert store.get(conversation_chunk_doc_id(SESSION_ID_HASH, "chunk_def456")) is not None
+    stale_coverage = store.get(coverage_manifest_doc_id(SESSION_ID_HASH))
+    assert stale_coverage is not None
+    assert stale_coverage["conversation_chunk_count"] == 1
+    assert store.get(state_id)["projection_status"] == ProjectionStatus.PROJECTED
+
+    evidence = backend.submit(retry_job)
+
+    assert evidence.status == "succeeded"
+    assert evidence.run == "couchdb_existing"
+    coverage = store.get(coverage_manifest_doc_id(SESSION_ID_HASH))
+    assert coverage is not None
+    assert coverage["conversation_chunk_count"] == 2
+    assert coverage["source_hash"] != projected_source_hash
+    projection = store.get(state_id)
+    assert projection is not None
+    assert projection["projection_status"] == ProjectionStatus.PENDING
+    assert projection["source_hash"] == coverage["source_hash"]
+    assert projection["projected_source_hash"] == projected_source_hash
 
 
 # ---------------------------------------------------------------------------
