@@ -86,6 +86,20 @@ def test_foundation_default_is_inactive_even_when_qdrant_url_exists() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "builder",
+    (build_cli._build_forward_mirror_sink, build_cli._build_qdrant_projector),
+)
+def test_projection_builders_fall_back_when_qdrant_activation_is_malformed(builder) -> None:
+    environ = {
+        "MIRROR_DUAL_WRITE": "1",
+        "QDRANT_URL": "https://qdrant.invalid",
+        "QDRANT_WRITE_ACTIVATION": "malformed",
+    }
+
+    assert builder(environ) is None
+
+
 def test_foundation_direct_is_typed_pr_c_only_and_audit_coverage_pending() -> None:
     contract = mirror_mod.FOUNDATION_DIRECT_WRITE_CONTRACT
 

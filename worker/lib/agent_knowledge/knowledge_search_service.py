@@ -1524,11 +1524,10 @@ class KnowledgeSearchService:
             missing.append("single_project_single_object_scope")
         if not project or project != candidate_project:
             missing.append("project_scope_match")
-        try:
-            max_objects = int(gate.get("max_objects") or 0)
-        except (TypeError, ValueError):
-            max_objects = 0
-        if max_objects != 1:
+        max_objects = gate.get("max_objects")
+        # ``bool`` is an ``int`` subclass and coercing arbitrary values here
+        # would let a JSON-ish gate widen the one-object production boundary.
+        if type(max_objects) is not int or max_objects != 1:
             missing.append("max_objects_1")
         if decision_count != 1:
             missing.append("approval_board_single_decision")

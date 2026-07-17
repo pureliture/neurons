@@ -347,6 +347,9 @@ class QdrantWriteGateway:
             minimum_position=start_receipt.event_position + 1,
         )
 
+        if product_failed:
+            raise QdrantGatewayProductError("product_mutation_failed") from None
+
         clear_event = MarkerClearEvent(
             operation_ref=operation_ref,
             terminal_marker_hash=terminal_receipt.marker_hash,
@@ -359,9 +362,6 @@ class QdrantWriteGateway:
             ),
             minimum_position=terminal_receipt.event_position,
         )
-
-        if product_failed:
-            raise QdrantGatewayProductError("product_mutation_failed") from None
 
         return GatewayMutationResult(
             operation_ref=operation_ref,

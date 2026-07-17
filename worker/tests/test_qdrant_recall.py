@@ -100,6 +100,10 @@ def _seed_projected(
 
 
 def _adapter(client):
+    client.create_collection(
+        "recall_mirror",
+        vectors_config={"size": VECTOR_SIZE, "distance": "Cosine"},
+    )
     return QdrantDoclingMirrorAdapter(
         client=client,
         collection_name="recall_mirror",

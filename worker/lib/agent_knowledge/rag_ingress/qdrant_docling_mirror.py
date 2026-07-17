@@ -450,8 +450,16 @@ class QdrantDoclingMirrorAdapter:
                 existed=False,
             )
         existed = bool(self._retrieve_points([handle.document_ref]))
-        if not existed and not missing_ok:
-            raise ValueError("mirror point not found and missing_ok is False")
+        if not existed:
+            if not missing_ok:
+                raise ValueError("mirror point not found and missing_ok is False")
+            # A confirmed absent point is an idempotent no-op.  In particular,
+            # do not send a mutation through the write transport for this case.
+            return MirrorDeletionResult(
+                status="absent",
+                document_ref=handle.document_ref,
+                existed=False,
+            )
         self._write_transport.delete_points(
             points_selector=_points_selector([handle.document_ref]),
             item_count=1,

@@ -155,7 +155,9 @@ class InMemoryQdrantClient:
         ordering: Any = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        store = self._collections.setdefault(collection_name, {})
+        if collection_name not in self._collections:
+            raise ValueError("collection_not_found")
+        store = self._collections[collection_name]
         for point in points:
             point_id = _point_field(point, "id")
             vector = _point_field(point, "vector") or []
@@ -172,7 +174,9 @@ class InMemoryQdrantClient:
         ordering: Any = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        store = self._collections.get(collection_name, {})
+        if collection_name not in self._collections:
+            raise ValueError("collection_not_found")
+        store = self._collections[collection_name]
         removed = 0
         for point_id in _selector_ids(points_selector):
             if point_id in store:
@@ -189,7 +193,9 @@ class InMemoryQdrantClient:
         with_payload: bool = True,
         with_vectors: bool = False,
     ) -> list[dict[str, Any]]:
-        store = self._collections.get(collection_name, {})
+        if collection_name not in self._collections:
+            raise ValueError("collection_not_found")
+        store = self._collections[collection_name]
         results: list[dict[str, Any]] = []
         for point_id in ids:
             record = store.get(point_id)
@@ -211,7 +217,9 @@ class InMemoryQdrantClient:
         limit: int,
         query_filter: Any = None,
     ) -> dict[str, Any]:
-        store = self._collections.get(collection_name, {})
+        if collection_name not in self._collections:
+            raise ValueError("collection_not_found")
+        store = self._collections[collection_name]
         # record for tests that assert the server-side filter shape independently
         # of the adapter's client-side defence-in-depth re-check.
         self.last_query_filter = query_filter

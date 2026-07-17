@@ -126,6 +126,11 @@ def _seed_projected_session(store, sid, **kw):
 
 def _adapter(client=None, *, collection="test_mirror", size=VECTOR_SIZE):
     client = client or InMemoryQdrantClient()
+    if not client.collection_exists(collection):
+        client.create_collection(
+            collection,
+            vectors_config={"size": size, "distance": "Cosine"},
+        )
     return QdrantDoclingMirrorAdapter(
         client=client,
         direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,

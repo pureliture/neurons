@@ -22,6 +22,10 @@ from agent_knowledge.rag_ingress.rag_ready_document import build_rag_ready_docum
 
 def _adapter(client: InMemoryQdrantClient | None = None):
     client = client or InMemoryQdrantClient()
+    client.create_collection(
+        DEFAULT_COLLECTION_NAME,
+        vectors_config={"size": 32, "distance": "Cosine"},
+    )
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
         direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,

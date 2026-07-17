@@ -46,7 +46,10 @@ def write_runtime_build_identity(
     if _BUILD_SOURCE_IDENTITY_RE.fullmatch(source_commit) is None:
         raise RuntimeBuildIdentityError("runtime build source commit is invalid")
     root = Path(content_root)
-    candidates = [root / "pyproject.toml"]
+    pyproject_path = root / "pyproject.toml"
+    if not pyproject_path.is_file():
+        raise RuntimeBuildIdentityError("runtime build root pyproject is missing")
+    candidates = [pyproject_path]
     lib_root = root / "lib"
     if lib_root.is_dir():
         candidates.extend(

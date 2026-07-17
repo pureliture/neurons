@@ -234,7 +234,7 @@ def test_non_monotonic_terminal_receipt_leaves_start_unresolved() -> None:
     assert [call[0] for call in marker.calls] == ["start", "terminal"]
 
 
-def test_product_failure_is_not_retried_and_gets_resolved_failure_terminal() -> None:
+def test_product_failure_is_not_retried_and_leaves_failure_terminal_unresolved() -> None:
     marker = FakeMarkerStore()
     product_calls = 0
 
@@ -255,9 +255,9 @@ def test_product_failure_is_not_retried_and_gets_resolved_failure_terminal() -> 
 
     assert product_calls == 1
     assert str(caught.value) == "product_mutation_failed"
-    assert [call[0] for call in marker.calls] == ["start", "terminal", "clear"]
+    assert [call[0] for call in marker.calls] == ["start", "terminal"]
     assert marker.calls[1][1].outcome == "failed"
-    assert marker.unresolved == set()
+    assert len(marker.unresolved) == 1
 
 
 @pytest.mark.parametrize("fail_at", ["terminal", "clear"])

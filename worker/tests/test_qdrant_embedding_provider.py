@@ -15,6 +15,7 @@ import pytest
 
 from agent_knowledge.rag_ingress.retired_index_bridge import IndexStatus
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
+    DEFAULT_COLLECTION_NAME,
     FOUNDATION_DIRECT_WRITE_CONTRACT,
     PassthroughMarkdownNormalizer,
     QdrantDoclingMirrorAdapter,
@@ -154,6 +155,10 @@ def test_build_provider_rejects_unknown_embedding_provider():
 
 def test_provider_satisfies_adapter_embedding_protocol_end_to_end():
     client = InMemoryQdrantClient()
+    client.create_collection(
+        DEFAULT_COLLECTION_NAME,
+        vectors_config={"size": 16, "distance": "Cosine"},
+    )
     provider = build_openai_embedding_provider(
         environ={"LLM_BRAIN_EMBEDDING_MODEL": "bge-m3", "LLM_BRAIN_EMBEDDING_DIM": "16"},
         embed_fn=_fake_embed(16),
@@ -190,6 +195,10 @@ class _WrongSizeProvider:
 
 def test_submit_document_size_guard_rejects_mismatched_vector_no_point_written():
     client = InMemoryQdrantClient()
+    client.create_collection(
+        DEFAULT_COLLECTION_NAME,
+        vectors_config={"size": 16, "distance": "Cosine"},
+    )
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
         direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,

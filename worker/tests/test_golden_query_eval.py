@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from agent_knowledge.llm_brain_core.golden_query_eval import (
     GOLDEN_QUERIES,
     REQUIRED_QUALITY_AXES,
@@ -14,6 +16,7 @@ from agent_knowledge.llm_brain_core.golden_query_eval import (
     evaluate_object_pack_response,
     evaluate_product_evidence_summary,
 )
+from agent_knowledge.llm_brain_core.objects import golden_query_eval as golden_query_eval_objects
 from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
 from agent_knowledge.llm_brain_core.object_packs import build_code_change_impact_pack
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
@@ -663,6 +666,45 @@ def _permission_sensitive_audit_runtime_evidence() -> dict:
         },
         "production_mutation_performed": False,
     }
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "event_count", "expected_failure"),
+    (
+        ("permission_sensitive_runtime_audit_evidence.v1", 2, ""),
+        ("permission_sensitive_runtime_audit_evidence.v2", 1, ""),
+        (
+            "permission_sensitive_runtime_audit_evidence.v1",
+            1,
+            "p8_permission_sensitive_audit_events_missing",
+        ),
+        (
+            "permission_sensitive_runtime_audit_evidence.v2",
+            2,
+            "p8_permission_sensitive_audit_events_missing",
+        ),
+        (
+            "permission_sensitive_runtime_audit_evidence.v3",
+            1,
+            "p8_permission_sensitive_audit_schema_unknown",
+        ),
+    ),
+)
+def test_p8_collector_audit_event_count_depends_on_schema_version(
+    schema_version: str,
+    event_count: int,
+    expected_failure: str,
+) -> None:
+    failures = golden_query_eval_objects._p8_evidence_failures(
+        {
+            "runtime_evidence_collector_permission_audit_collection_status": "collected",
+            "runtime_evidence_collector_permission_audit_schema": schema_version,
+            "runtime_evidence_collector_permission_audit_event_count": event_count,
+            "runtime_evidence_collector_permission_audit_store_status": "recorded",
+        }
+    )
+
+    assert (expected_failure in failures) is bool(expected_failure)
 
 
 def _valid_p8_runtime_evidence(*, live: bool = True):

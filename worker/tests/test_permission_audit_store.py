@@ -239,6 +239,17 @@ def test_canonical_policy_rejects_overlength_approval_reference():
     assert "approval_ref" in decision["missing_gate_evidence"]
 
 
+@pytest.mark.parametrize("max_objects", [True, 1.0, "1"])
+def test_canonical_policy_requires_exact_integer_max_objects(max_objects):
+    arguments = _valid_production_authority_arguments()
+    arguments["production_gate"]["max_objects"] = max_objects
+
+    decision = _evaluate_production_authority(arguments)
+
+    assert decision["allowed"] is False
+    assert "max_objects_1" in decision["missing_gate_evidence"]
+
+
 def test_canonical_policy_preserves_exact_valid_scope_and_target_identity():
     arguments = _valid_production_authority_arguments()
 

@@ -99,6 +99,10 @@ def _seed_projected_session(store, sid, **kw):
 
 
 def _adapter(client, *, collection="parity_mirror"):
+    client.create_collection(
+        collection,
+        vectors_config={"size": VECTOR_SIZE, "distance": "Cosine"},
+    )
     return QdrantDoclingMirrorAdapter(
         client=client,
         direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,

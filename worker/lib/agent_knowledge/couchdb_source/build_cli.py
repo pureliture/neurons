@@ -398,13 +398,13 @@ def _build_forward_mirror_sink(environ):
 
     if str(environ.get("MIRROR_DUAL_WRITE") or "").strip() != "1":
         return None
-    activation = qdrant_write_activation_from_environment(environ)
-    if activation is QdrantWriteActivation.FOUNDATION_INACTIVE:
-        return None
-    url = str(environ.get("QDRANT_URL") or "").strip()
-    if not url:
-        return None
     try:
+        activation = qdrant_write_activation_from_environment(environ)
+        if activation is QdrantWriteActivation.FOUNDATION_INACTIVE:
+            return None
+        url = str(environ.get("QDRANT_URL") or "").strip()
+        if not url:
+            return None
         from ..rag_ingress.qdrant_backfill import QdrantSessionMemoryMirrorSink
         from ..rag_ingress.qdrant_docling_mirror import (
             DEFAULT_COLLECTION_NAME,
@@ -463,13 +463,13 @@ def _build_qdrant_projector(environ):
     nothing this run rather than silently dropping sessions).
     """
 
-    activation = qdrant_write_activation_from_environment(environ)
-    if activation is QdrantWriteActivation.FOUNDATION_INACTIVE:
-        return None
-    url = str(environ.get("QDRANT_URL") or "").strip()
-    if not url:
-        return None
     try:
+        activation = qdrant_write_activation_from_environment(environ)
+        if activation is QdrantWriteActivation.FOUNDATION_INACTIVE:
+            return None
+        url = str(environ.get("QDRANT_URL") or "").strip()
+        if not url:
+            return None
         from ..rag_ingress.qdrant_backfill import (
             QdrantSessionMemoryMirrorSink,
             QdrantSessionMemoryProjector,

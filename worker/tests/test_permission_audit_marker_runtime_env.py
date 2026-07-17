@@ -696,7 +696,11 @@ def test_sqlite_wal_checksum_corruption_fails_via_private_snapshot_pragma(
     assert str(database) not in connection_attempts[0]
     assert "neurons-sqlite-marker-ephemeral-" in connection_attempts[0]
     assert str(database) not in str(error.value)
-    assert checksum_byte.hex() not in str(error.value)
+    # A single byte's bare hex text can naturally occur in ordinary words
+    # (for example, ``ed`` in ``detected``). Check representations that would
+    # actually disclose the private byte instead of a substring coincidence.
+    assert repr(checksum_byte) not in str(error.value)
+    assert f"0x{checksum_byte.hex()}" not in str(error.value)
     assert capsys.readouterr() == ("", "")
     connector.close()
     writer.close()

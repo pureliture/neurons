@@ -199,7 +199,7 @@ class CouchDBExactMutationMarkerProvider(_PrePostProvider):
             expected_continuity_anchor_hash,
             "CouchDB",
         )
-        self._previous: tuple[int, int, int, int] | None = None
+        self._previous: tuple[int, int] | None = None
         self._capture_open = False
 
     def __call__(self) -> dict[str, object]:
@@ -234,12 +234,7 @@ class CouchDBExactMutationMarkerProvider(_PrePostProvider):
             doc_del_count = _strict_counter(
                 info["doc_del_count"], source="CouchDB"
             )
-            current = (
-                update_position,
-                purge_position,
-                doc_count,
-                doc_del_count,
-            )
+            current = (update_position, purge_position)
             if self._previous is not None and any(
                 after < before
                 for before, after in zip(self._previous, current, strict=True)
@@ -408,17 +403,9 @@ class NatsJetStreamExactMutationMarkerProvider(_PrePostProvider):
                     for key in self._CONSUMER_KEYS
                     if key != "generation_hash"
                 }
-                if parsed["ack_floor_stream_seq"] > parsed["delivered_stream_seq"]:
-                    raise NativeExactMutationMarkerError(
-                        "NATS exact marker metadata is malformed"
-                    )
                 if (
-                    parsed["delivered_stream_seq"]
-                    - parsed["ack_floor_stream_seq"]
-                    != parsed["num_ack_pending"]
-                    or stream_counters["last_seq"]
-                    - parsed["delivered_stream_seq"]
-                    != parsed["num_pending"]
+                    parsed["ack_floor_stream_seq"] > parsed["delivered_stream_seq"]
+                    or parsed["delivered_stream_seq"] > stream_counters["last_seq"]
                 ):
                     raise NativeExactMutationMarkerError(
                         "NATS exact marker metadata is malformed"
@@ -432,12 +419,15 @@ class NatsJetStreamExactMutationMarkerProvider(_PrePostProvider):
                         parsed["ack_floor_stream_seq"],
                     )
                 )
-            if stream_counters["messages"] > 0 and (
-                stream_counters["first_seq"] > stream_counters["last_seq"]
-                or stream_counters["last_seq"]
-                - stream_counters["first_seq"]
-                + 1
-                != stream_counters["messages"] + stream_counters["num_deleted"]
+            if (
+                stream_counters["messages"] > 0
+                and (
+                    stream_counters["first_seq"] > stream_counters["last_seq"]
+                    or stream_counters["last_seq"]
+                    - stream_counters["first_seq"]
+                    + 1
+                    != stream_counters["messages"] + stream_counters["num_deleted"]
+                )
             ):
                 raise NativeExactMutationMarkerError(
                     "NATS exact marker metadata is malformed"
@@ -552,7 +542,6 @@ class SQLiteExactMutationMarkerProvider(_PrePostProvider):
         self._file_identity_hash: str | None = None
         self._permission_hash: str | None = None
         self._sidecar_identity_hash: str | None = None
-        self._previous: tuple[int, int, int] | None = None
         self._capture_open = False
 
     def __call__(self) -> dict[str, object]:
@@ -633,18 +622,6 @@ class SQLiteExactMutationMarkerProvider(_PrePostProvider):
                 raise NativeExactMutationMarkerError(
                     "SQLite exact marker schema drift detected"
                 )
-            current = (
-                values["data_version"],
-                values["page_count"],
-                values["freelist_count"],
-            )
-            if self._previous is not None and any(
-                after < before
-                for before, after in zip(self._previous, current, strict=True)
-            ):
-                raise NativeExactMutationMarkerError(
-                    "SQLite exact marker decreased or recreated"
-                )
             event_payload = {
                 "data_version": values["data_version"],
                 "schema_version": values["schema_version"],
@@ -667,7 +644,6 @@ class SQLiteExactMutationMarkerProvider(_PrePostProvider):
             self._file_identity_hash = file_identity_hash
             self._permission_hash = permission_hash
             self._sidecar_identity_hash = sidecar_identity_hash
-            self._previous = current
             return marker
         except NativeExactMutationMarkerError:
             raise

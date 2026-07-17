@@ -26,6 +26,10 @@ from agent_knowledge.rag_ingress.rag_ready_document import build_rag_ready_docum
 
 def _adapter(client: InMemoryQdrantClient | None = None):
     client = client or InMemoryQdrantClient()
+    client.create_collection(
+        DEFAULT_COLLECTION_NAME,
+        vectors_config={"size": 32, "distance": "Cosine"},
+    )
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
         direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
@@ -136,6 +140,25 @@ def test_delete_missing_ok_false_raises():
             content_hash="sha256:absent",
             missing_ok=False,
         )
+
+
+def test_delete_absent_missing_ok_does_not_use_write_transport():
+    adapter, _ = _adapter()
+
+    class FailOnDeleteTransport:
+        def delete_points(self, **kwargs):
+            raise AssertionError("absent delete must not reach the transport")
+
+    adapter._write_transport = FailOnDeleteTransport()
+    deletion = adapter.delete_document(
+        BackendDocumentHandle(
+            dataset_ref=f"qdrant:{DEFAULT_COLLECTION_NAME}",
+            document_ref="confirmed-absent-point",
+        )
+    )
+
+    assert deletion.status == "absent"
+    assert deletion.existed is False
 
 
 def test_delete_document_collection_mismatch_is_no_op():

@@ -14,6 +14,7 @@ from agent_knowledge.rag_ingress.qdrant_authority_join import (
     join_mirror_hits_to_authority,
 )
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
+    DEFAULT_COLLECTION_NAME,
     FOUNDATION_DIRECT_WRITE_CONTRACT,
     HashEmbeddingProvider,
     PassthroughMarkdownNormalizer,
@@ -175,6 +176,10 @@ def test_reranker_timeout_env_rejects_non_finite_values(monkeypatch):
 
 def test_query_then_rerank_then_authority_join_compose():
     client = InMemoryQdrantClient()
+    client.create_collection(
+        DEFAULT_COLLECTION_NAME,
+        vectors_config={"size": 32, "distance": "Cosine"},
+    )
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
         direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
