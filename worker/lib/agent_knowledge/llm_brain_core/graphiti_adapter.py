@@ -564,6 +564,9 @@ class GraphitiNeo4jGraphMemoryAdapter:
         ]
         source_episodes_by_id = {episode.episode_id: episode for episode in canonical_episodes}
         for source_node in hydrated_source_nodes:
+            source_group_id = _graphiti_group_id(str(getattr(source_node, "group_id", "") or ""))
+            if source_group_id != group_id:
+                continue
             episode = _episode_node_to_ontology(source_node)
             if episode is None:
                 continue
