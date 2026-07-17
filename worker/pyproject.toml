@@ -14,6 +14,7 @@ dependencies = [
     "nats-py>=2.6",
     "psycopg[binary]>=3.3.4",
     "pyyaml>=6.0.3",
+    "qdrant-client>=1.10",
     "sqlalchemy>=2.0.51",
 ]
 
@@ -26,9 +27,10 @@ mcp-client = ["mcp>=1.28.0"]
 # 실측 확정한 1.28.0으로 핀한다(StreamableHTTPSessionManager + low-level Server
 # 데코레이터 등록 + Tool/CallToolResult camelCase 필드를 이 버전에서 검증).
 mcp-http = ["mcp>=1.28.0"]
-# Qdrant+Docling searchable mirror PoC. 기본 worker runtime은 이 extra 없이
-# 동작하고, local smoke / Ubuntu dry-run 검증에서만 명시적으로 설치한다.
-searchable-mirror = ["docling>=2", "qdrant-client>=1.10"]
+# Qdrant+Docling searchable mirror PoC. Docling은 local smoke / Ubuntu dry-run
+# 검증에서만 명시적으로 설치한다. Qdrant client는 product marker와 중앙 write
+# gateway의 fail-closed runtime contract가 사용하므로 기본 dependency다.
+searchable-mirror = ["docling>=2"]
 
 [dependency-groups]
 # 테스트 러너는 런타임 의존성이 아니라 dev group으로 선언한다. CI의 clean
