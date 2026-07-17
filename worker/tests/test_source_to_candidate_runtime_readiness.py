@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -24,6 +25,9 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     build_temporal_recall_corrective_checkpoint_readiness_report,
 )
 from agent_knowledge.public_safe_util import hash_payload
+from agent_knowledge.permission_audit_contract import (
+    build_permission_audit_operation_hash,
+)
 
 
 _BOUND_SOURCE_COMMIT = "c" * 40
@@ -188,6 +192,64 @@ def test_runtime_readiness_normalizes_and_validates_gitops_deployment_evidence_b
     assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "validated"
 
 
+def test_deployment_evidence_binding_v1_preserves_golden_tuple_hash_and_claim_id():
+    evidence = _gitops_bound_live_evidence()
+    canonical_tuple = {
+        "expected_commit": _BOUND_SOURCE_COMMIT,
+        "desired_source_commit": _BOUND_SOURCE_COMMIT,
+        "deployed_source_commit": _BOUND_SOURCE_COMMIT,
+        "desired_image_set_hash": "sha256:" + "a" * 64,
+        "live_image_set_hash": "sha256:" + "a" * 64,
+        "ops_revision": "a" * 40,
+        "reconciled_ops_revision": "a" * 40,
+        "sync_status": "Synced",
+        "health_status": "Healthy",
+        "expected_image_ref_count": 1,
+        "stale_image_ref_count": 0,
+        "desired_production_mutation_performed": False,
+        "argo_production_mutation_performed": False,
+        "deployed_production_mutation_performed": False,
+    }
+
+    assert set(canonical_tuple) == {
+        "expected_commit",
+        "desired_source_commit",
+        "deployed_source_commit",
+        "desired_image_set_hash",
+        "live_image_set_hash",
+        "ops_revision",
+        "reconciled_ops_revision",
+        "sync_status",
+        "health_status",
+        "expected_image_ref_count",
+        "stale_image_ref_count",
+        "desired_production_mutation_performed",
+        "argo_production_mutation_performed",
+        "deployed_production_mutation_performed",
+    }
+    assert hash_payload(canonical_tuple) == (
+        "sha256:dc12138cb1402b37a74a8efca884c229541ab47ca3954c0dbf907a203bebf0ba"
+    )
+    assert evidence["deployment_evidence_binding"] == {
+        "schema_version": "deployment_evidence_binding.v1",
+        "canonical_tuple_hash": (
+            "sha256:dc12138cb1402b37a74a8efca884c229541ab47ca3954c0dbf907a203bebf0ba"
+        ),
+    }
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+    )
+    claim = next(
+        item
+        for item in report["claims"]
+        if item["claim_id"] == "ops.gitops_deployment_evidence_binding"
+    )
+    assert claim["claim_id"] == "ops.gitops_deployment_evidence_binding"
+    assert claim["status"] == "validated"
+
+
 def test_runtime_readiness_normalizer_does_not_mint_missing_deployment_binding():
     capture = _gitops_bound_live_evidence()
     capture.pop("deployment_evidence_binding")
@@ -310,6 +372,38 @@ def test_runtime_readiness_rejects_mismatched_external_expected_commit_anchor():
 
     assert report["status"] == "FAIL"
     assert "gitops_deployment_evidence_binding_external_expected_commit_mismatch" in report["gaps"]
+
+
+def test_runtime_readiness_rejects_all_zero_production_commit_anchor():
+    zero_commit = "0" * 40
+    evidence = _gitops_bound_live_evidence()
+    evidence["expected_commit"] = zero_commit
+    evidence["gitops_desired_state"]["source_commit"] = zero_commit
+    evidence["deployed_identity"]["source_commit"] = zero_commit
+    evidence["deployment_evidence_binding"] = build_deployment_evidence_binding(
+        expected_commit=zero_commit,
+        gitops_desired_state=evidence["gitops_desired_state"],
+        argo_reconciliation=evidence["argo_reconciliation"],
+        deployed_identity=evidence["deployed_identity"],
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit=zero_commit,
+    )
+
+    claim = next(
+        item
+        for item in report["claims"]
+        if item["claim_id"] == "ops.gitops_deployment_evidence_binding"
+    )
+    assert report["status"] == "FAIL"
+    assert claim["status"] == "failed"
+    assert "external_expected_commit_anchor_invalid" in claim["gaps"]
+    assert (
+        "gitops_deployment_evidence_binding_packet_expected_commit_invalid"
+        in claim["gaps"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -1219,6 +1313,111 @@ def _permission_sensitive_audit_evidence(**overrides):
     return evidence
 
 
+def _product_marker_evidence(*, build_association_hash):
+    in_flight_statuses = (
+        "clear",
+        "atomic_commit_boundary",
+        "atomic_commit_boundary",
+        "clear",
+        "atomic_commit_boundary",
+    )
+    markers = []
+    for index, (plane, in_flight_status) in enumerate(
+        zip(
+            ("authority_ledger", "corpus", "queue", "index", "product_db"),
+            in_flight_statuses,
+            strict=True,
+        ),
+        start=1,
+    ):
+        markers.append(
+            {
+                "plane": plane,
+                "generation_hash": "sha256:" + "a" * 64,
+                "event_position_hash": "sha256:" + format(index, "x") * 64,
+                "marker_hash": "sha256:" + format(index + 5, "x") * 64,
+                "in_flight_count": 0,
+                "in_flight_status": in_flight_status,
+                "coverage_hash": "sha256:" + format(index + 10, "x") * 64,
+                "coverage_status": "validated",
+                "pre_post_status": "equal",
+                "read_scope_status": "read_only",
+            }
+        )
+    return {
+        "schema_version": "product_mutation_marker_evidence.v1",
+        "external_build_association_hash": build_association_hash,
+        "marker_count": 5,
+        "markers": markers,
+        "reset_or_decrease_count": 0,
+        "production_mutation_performed": False,
+    }
+
+
+def _single_bounded_denial_audit_v2(
+    *,
+    build_association_hash="sha256:" + "e" * 64,
+    ops_revision="a" * 40,
+    expected_commit=_BOUND_SOURCE_COMMIT,
+    request_hash=None,
+    **overrides,
+):
+    request_hash = request_hash or build_permission_audit_operation_hash(
+        build_association_hash=build_association_hash,
+        ops_revision=ops_revision,
+        expected_commit=expected_commit,
+    )
+    evidence = {
+        "schema_version": "permission_sensitive_runtime_audit_evidence.v2",
+        "policy": "single_bounded_denial.v1",
+        "build_association_hash": build_association_hash,
+        "product_marker_evidence": _product_marker_evidence(
+            build_association_hash=build_association_hash,
+        ),
+        "transport_call_count": 1,
+        "permission_action_count": 1,
+        "audit_events": [
+            {
+                "schema_version": "runtime_permission_audit_event.v2",
+                "event_type": "permission_sensitive_runtime_action",
+                "action": "single_bounded_denial.v1",
+                "ledger_scope": "production",
+                "permission": "denied",
+                "authority_write_performed": False,
+                "production_mutation_performed": False,
+                "actor_ref_hash": "sha256:" + "c" * 64,
+                "request_hash": request_hash,
+                "protected_values_returned": False,
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            }
+        ],
+        "audit_store": {
+            "status": "recorded",
+            "append_count": 1,
+            "stored_row_count": 1,
+            "read_after_write_status": "validated",
+            "request_hash": request_hash,
+            "production_mutation_performed": False,
+        },
+        "postcheck": {
+            "status": "validated",
+            "product_mutation_markers_match": True,
+            "unexpected_runtime_mutation_count": 0,
+            "protected_values_returned": False,
+            "raw_private_evidence_returned": False,
+            "secret_returned": False,
+            "host_topology_returned": False,
+            "raw_external_ids_returned": False,
+        },
+        "production_mutation_performed": False,
+    }
+    evidence.update(overrides)
+    return evidence
+
+
 def _agent_context_startup_runtime_evidence(**overrides):
     evidence = {
         "schema_version": "agent_context_startup_runtime_evidence.v1",
@@ -1623,7 +1822,6 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
         "source_to_candidate_review_loop",
         "session_project_rollup_runtime",
         "preference_artifact_memory",
-        "permission_sensitive_audit",
         "agent_context_startup_runtime",
         "gitops_desired_state",
         "argo_reconciliation",
@@ -1644,6 +1842,7 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
     assert "projection_join" in template["required_packet_fields"]
     assert "source_to_candidate_review_loop" in template["required_packet_fields"]
     assert "session_project_rollup_runtime" in template["required_packet_fields"]
+    assert "permission_sensitive_audit" not in template["required_packet_fields"]
     assert template["packet_field_templates"]["evidence_provenance"]["schema_version"] == EVIDENCE_PROVENANCE_SCHEMA
     assert (
         template["packet_field_templates"]["projection_join"]["schema_version"]
@@ -1843,6 +2042,7 @@ def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation(
     assert "live_preference_artifact_memory_unverified" in report["gaps"]
     assert "accepted_preference_context_pack_live_unproven" in report["gaps"]
     assert "permission_sensitive_audit_unverified" in report["gaps"]
+    assert "product_marker_audit_unverified" in report["gaps"]
     assert "live_agent_context_startup_unverified" in report["gaps"]
     assert "production_startup_read_path_unproven" in report["gaps"]
     assert "live_deployed_identity_unverified" in report["gaps"]
@@ -2236,6 +2436,374 @@ def test_runtime_readiness_fails_when_permission_sensitive_audit_is_unsafe_or_in
     assert "permission_sensitive_audit_store_not_recorded" in report["gaps"]
     assert "permission_sensitive_audit_raw_private_evidence_returned" in report["gaps"]
     assert "permission_sensitive_audit_host_topology_returned" in report["gaps"]
+
+
+def test_runtime_readiness_validates_single_bounded_denial_v2_without_breaking_v1():
+    v2_audit = _single_bounded_denial_audit_v2()
+    v2_report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_gitops_bound_live_evidence(
+            permission_sensitive_audit=v2_audit
+        ),
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        expected_build_association_hash=v2_audit["build_association_hash"],
+    )
+    v1_report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_sanitized_live_evidence()
+    )
+
+    v2_claim = next(
+        claim
+        for claim in v2_report["claims"]
+        if claim["claim_id"] == "live.production.permission_sensitive_audit"
+    )
+    v1_claim = next(
+        claim
+        for claim in v1_report["claims"]
+        if claim["claim_id"] == "live.production.permission_sensitive_audit"
+    )
+    assert v2_claim["status"] == "validated"
+    assert v2_claim["schema_version"] == "permission_sensitive_runtime_audit_evidence.v2"
+    assert v2_claim["event_count"] == 1
+    assert v2_claim["required_actions"] == ["single_bounded_denial.v1"]
+    assert v1_claim["status"] == "validated"
+    assert v1_claim["event_count"] == 3
+
+
+@pytest.mark.parametrize(
+    "layer",
+    ["audit", "event", "store", "postcheck"],
+)
+def test_runtime_readiness_v2_rejects_unknown_fields(layer):
+    audit = copy.deepcopy(_single_bounded_denial_audit_v2())
+    targets = {
+        "audit": audit,
+        "event": audit["audit_events"][0],
+        "store": audit["audit_store"],
+        "postcheck": audit["postcheck"],
+    }
+    targets[layer]["unexpected_field"] = "must-fail"
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_gitops_bound_live_evidence(permission_sensitive_audit=audit),
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        expected_build_association_hash=audit["build_association_hash"],
+    )
+
+    claim = next(
+        claim
+        for claim in report["claims"]
+        if claim["claim_id"] == "live.production.permission_sensitive_audit"
+    )
+    assert claim["status"] == "failed"
+    assert "permission_sensitive_audit_v2_unexpected_field" in claim["gaps"]
+
+
+def test_runtime_readiness_v2_rejects_filtered_malformed_event_entries():
+    audit = copy.deepcopy(_single_bounded_denial_audit_v2())
+    audit["audit_events"].append("malformed-event")
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_gitops_bound_live_evidence(permission_sensitive_audit=audit),
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        expected_build_association_hash=audit["build_association_hash"],
+    )
+
+    claim = next(
+        claim
+        for claim in report["claims"]
+        if claim["claim_id"] == "live.production.permission_sensitive_audit"
+    )
+    assert claim["status"] == "failed"
+    assert "permission_sensitive_audit_v2_event_shape_invalid" in claim["gaps"]
+
+
+def test_runtime_readiness_v2_surfaces_product_marker_mismatch_as_mutation():
+    audit = copy.deepcopy(_single_bounded_denial_audit_v2())
+    audit["postcheck"].update(
+        {
+            "status": "failed",
+            "product_mutation_markers_match": False,
+            "unexpected_runtime_mutation_count": 1,
+        }
+    )
+    audit["product_marker_evidence"]["markers"][0]["pre_post_status"] = "changed"
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_gitops_bound_live_evidence(permission_sensitive_audit=audit),
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        expected_build_association_hash=audit["build_association_hash"],
+    )
+
+    claim = next(
+        claim
+        for claim in report["claims"]
+        if claim["claim_id"] == "live.production.permission_sensitive_audit"
+    )
+    assert claim["status"] == "failed"
+    assert claim["production_mutation_performed"] is True
+    assert "permission_sensitive_audit_v2_product_mutation_marker_mismatch" in claim["gaps"]
+    assert (
+        "permission_sensitive_audit_v2_product_marker_pre_post_mismatch:authority_ledger"
+        in claim["gaps"]
+    )
+    assert "permission_sensitive_audit_v2_unexpected_runtime_mutation" in claim["gaps"]
+
+
+def test_runtime_readiness_v2_duplicate_transport_result_fails_proof():
+    audit = copy.deepcopy(_single_bounded_denial_audit_v2())
+    audit["permission_action_count"] = 0
+    audit["audit_events"] = []
+    audit["audit_store"]["append_count"] = 0
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_gitops_bound_live_evidence(permission_sensitive_audit=audit),
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        expected_build_association_hash=audit["build_association_hash"],
+    )
+
+    claim = next(
+        claim
+        for claim in report["claims"]
+        if claim["claim_id"] == "live.production.permission_sensitive_audit"
+    )
+    assert claim["status"] == "failed"
+    assert claim["event_count"] == 0
+    assert "permission_sensitive_audit_v2_permission_action_count_invalid" in claim["gaps"]
+    assert "permission_sensitive_audit_v2_append_count_invalid" in claim["gaps"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_gap"),
+    [
+        (
+            "build_association",
+            "permission_sensitive_audit_v2_external_build_association_mismatch",
+        ),
+        ("operation_hash", "permission_sensitive_audit_v2_operation_hash_mismatch"),
+        ("transport_retry", "permission_sensitive_audit_v2_transport_call_count_invalid"),
+        ("old_ops_revision", "permission_sensitive_audit_v2_operation_hash_mismatch"),
+        ("other_expected_commit", "permission_sensitive_audit_v2_operation_hash_mismatch"),
+    ],
+)
+def test_runtime_readiness_v2_binds_operation_to_current_packet(mutation, expected_gap):
+    packet = _gitops_bound_live_evidence()
+    audit = copy.deepcopy(_single_bounded_denial_audit_v2())
+    external_expected_commit = _BOUND_SOURCE_COMMIT
+    if mutation == "build_association":
+        audit["build_association_hash"] = "sha256:" + "f" * 64
+    elif mutation == "operation_hash":
+        audit["audit_events"][0]["request_hash"] = "sha256:" + "e" * 64
+        audit["audit_store"]["request_hash"] = "sha256:" + "e" * 64
+    elif mutation == "transport_retry":
+        audit["transport_call_count"] = 2
+    elif mutation == "old_ops_revision":
+        packet["gitops_desired_state"]["ops_revision"] = "b" * 40
+        packet["argo_reconciliation"]["reconciled_ops_revision"] = "b" * 40
+        packet["deployment_evidence_binding"] = build_deployment_evidence_binding(
+            expected_commit=_BOUND_SOURCE_COMMIT,
+            gitops_desired_state=packet["gitops_desired_state"],
+            argo_reconciliation=packet["argo_reconciliation"],
+            deployed_identity=packet["deployed_identity"],
+        )
+    else:
+        external_expected_commit = "b" * 40
+    packet["permission_sensitive_audit"] = audit
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=packet,
+        expected_commit=external_expected_commit,
+        expected_build_association_hash=audit["product_marker_evidence"][
+            "external_build_association_hash"
+        ],
+    )
+
+    claim = next(
+        item
+        for item in report["claims"]
+        if item["claim_id"] == "live.production.permission_sensitive_audit"
+    )
+    assert claim["status"] == "failed"
+    assert expected_gap in claim["gaps"]
+
+
+def test_runtime_readiness_v2_accepts_fresh_build_anchors_for_same_deployment_tuple():
+    packet = _gitops_bound_live_evidence()
+    binding_hash = packet["deployment_evidence_binding"]["canonical_tuple_hash"]
+    operation_hashes = []
+
+    for digit in ("d", "f"):
+        build_association_hash = "sha256:" + digit * 64
+        assert build_association_hash != binding_hash
+        audit = _single_bounded_denial_audit_v2(
+            build_association_hash=build_association_hash,
+        )
+        operation_hashes.append(audit["audit_events"][0]["request_hash"])
+        report = build_source_to_candidate_runtime_readiness_report(
+            live_evidence={**packet, "permission_sensitive_audit": audit},
+            expected_commit=_BOUND_SOURCE_COMMIT,
+            expected_build_association_hash=build_association_hash,
+        )
+        claim = next(
+            item
+            for item in report["claims"]
+            if item["claim_id"] == "live.production.permission_sensitive_audit"
+        )
+        assert claim["status"] == "validated"
+
+    assert operation_hashes[0] != operation_hashes[1]
+
+
+def test_runtime_readiness_v2_requires_exact_build_association_schema_field():
+    audit = _single_bounded_denial_audit_v2()
+    audit.pop("build_association_hash")
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_gitops_bound_live_evidence(permission_sensitive_audit=audit),
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        expected_build_association_hash=audit["product_marker_evidence"][
+            "external_build_association_hash"
+        ],
+    )
+
+    claim = next(
+        item
+        for item in report["claims"]
+        if item["claim_id"] == "live.production.permission_sensitive_audit"
+    )
+    assert claim["status"] == "failed"
+    assert "permission_sensitive_audit_v2_evidence_shape_invalid" in claim["gaps"]
+
+
+def test_runtime_readiness_v2_rejects_self_asserted_build_association_without_external_anchor():
+    audit = _single_bounded_denial_audit_v2()
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_gitops_bound_live_evidence(permission_sensitive_audit=audit),
+        expected_commit=_BOUND_SOURCE_COMMIT,
+    )
+
+    claim = next(
+        item
+        for item in report["claims"]
+        if item["claim_id"] == "live.production.permission_sensitive_audit"
+    )
+    assert claim["status"] == "failed"
+    assert (
+        "permission_sensitive_audit_v2_external_build_association_missing"
+        in claim["gaps"]
+    )
+
+
+def test_runtime_readiness_v2_requires_exact_five_product_marker_evidence():
+    audit = _single_bounded_denial_audit_v2()
+    audit.pop("product_marker_evidence")
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_gitops_bound_live_evidence(permission_sensitive_audit=audit),
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        expected_build_association_hash=audit["build_association_hash"],
+    )
+
+    claim = next(
+        item
+        for item in report["claims"]
+        if item["claim_id"] == "live.production.permission_sensitive_audit"
+    )
+    assert claim["status"] == "failed"
+    assert "permission_sensitive_audit_v2_product_marker_evidence_missing" in claim[
+        "gaps"
+    ]
+
+
+def test_runtime_readiness_v2_validates_exact_five_product_marker_evidence():
+    audit = _single_bounded_denial_audit_v2()
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_gitops_bound_live_evidence(permission_sensitive_audit=audit),
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        expected_build_association_hash=audit["build_association_hash"],
+    )
+
+    claim = next(
+        item
+        for item in report["claims"]
+        if item["claim_id"] == "live.production.permission_sensitive_audit"
+    )
+    assert claim["status"] == "validated"
+    assert claim["gaps"] == []
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_gap"),
+    [
+        (
+            "duplicate_plane",
+            "permission_sensitive_audit_v2_product_marker_plane_mismatch:corpus",
+        ),
+        (
+            "in_flight",
+            "permission_sensitive_audit_v2_product_marker_in_flight_invalid:index",
+        ),
+        (
+            "coverage",
+            "permission_sensitive_audit_v2_product_marker_coverage_invalid:queue",
+        ),
+        (
+            "pre_post",
+            "permission_sensitive_audit_v2_product_marker_pre_post_mismatch:product_db",
+        ),
+        (
+            "read_scope",
+            "permission_sensitive_audit_v2_product_marker_read_scope_invalid:corpus",
+        ),
+        (
+            "reset",
+            "permission_sensitive_audit_v2_product_marker_reset_or_decrease_invalid",
+        ),
+        (
+            "association",
+            "permission_sensitive_audit_v2_product_marker_association_mismatch",
+        ),
+    ],
+)
+def test_runtime_readiness_v2_fails_closed_for_exact_marker_mutation(
+    mutation,
+    expected_gap,
+):
+    audit = copy.deepcopy(_single_bounded_denial_audit_v2())
+    external_association = audit["build_association_hash"]
+    markers = audit["product_marker_evidence"]["markers"]
+    if mutation == "duplicate_plane":
+        markers[1]["plane"] = "authority_ledger"
+    elif mutation == "in_flight":
+        markers[3]["in_flight_count"] = 1
+        markers[3]["in_flight_status"] = "unresolved"
+    elif mutation == "coverage":
+        markers[2]["coverage_status"] = "failed"
+    elif mutation == "pre_post":
+        markers[4]["pre_post_status"] = "changed"
+    elif mutation == "read_scope":
+        markers[1]["read_scope_status"] = "write_capable"
+    elif mutation == "reset":
+        audit["product_marker_evidence"]["reset_or_decrease_count"] = 1
+    else:
+        audit["product_marker_evidence"]["external_build_association_hash"] = (
+            "sha256:" + "f" * 64
+        )
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_gitops_bound_live_evidence(permission_sensitive_audit=audit),
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        expected_build_association_hash=external_association,
+    )
+
+    claim = next(
+        item
+        for item in report["claims"]
+        if item["claim_id"] == "live.production.permission_sensitive_audit"
+    )
+    assert claim["status"] == "failed"
+    assert expected_gap in claim["gaps"]
 
 
 def test_runtime_readiness_fails_when_agent_context_startup_runtime_is_unsafe_or_incomplete():
@@ -4839,9 +5407,10 @@ def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys)
     assert packet["preference_artifact_memory"]["schema_version"] == "preference_artifact_memory_runtime_evidence.v1"
     assert packet["preference_artifact_memory"]["preference_object_pack"]["accepted_preference_count"] >= 1
     assert packet["preference_artifact_memory"]["artifact_review_check"]["status"] == "pass"
-    assert packet["permission_sensitive_audit"]["schema_version"] == "permission_sensitive_runtime_audit_evidence.v1"
-    assert len(packet["permission_sensitive_audit"]["audit_events"]) == 3
-    assert packet["permission_sensitive_audit"]["audit_store"]["status"] == "recorded"
+    assert "permission_sensitive_audit" not in packet
+    assert packet["collector"]["permission_sensitive_audit_collected"] is False
+    assert packet["collector"]["permission_sensitive_audit_collection_status"] == "not_collected"
+    assert packet["collector"]["permission_sensitive_audit_schema"] == ""
     assert packet["agent_context_startup_runtime"]["schema_version"] == "agent_context_startup_runtime_evidence.v1"
     assert packet["agent_context_startup_runtime"]["startup_context"]["loaded_on_startup"] is True
     assert packet["agent_context_startup_runtime"]["startup_context"]["section_counts"]["current_authority"] >= 1
@@ -4861,7 +5430,11 @@ def test_neuron_knowledge_runtime_readiness_cli_collects_shadow_evidence(capsys)
     assert "preference_artifact_collector_capability_missing" in claims[
         "live.preference_artifact.memory"
     ]["gaps"]
-    assert claims["live.production.permission_sensitive_audit"]["status"] == "validated"
+    assert claims["live.production.permission_sensitive_audit"]["status"] == "not_validated"
+    assert claims["live.production.permission_sensitive_audit"]["gaps"] == [
+        "permission_sensitive_audit_unverified",
+        "product_marker_audit_unverified",
+    ]
     assert claims["live.agent_context.startup_read_path"]["status"] == "validated"
 
 

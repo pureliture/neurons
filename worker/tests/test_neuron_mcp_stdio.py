@@ -60,6 +60,7 @@ from agent_knowledge.llm_brain_core.knowledge_objects import EvidenceRef, Knowle
 from agent_knowledge.llm_brain_core.models import CONTEXT_PACK_SCHEMA_VERSION, OntologyEpisode
 from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
+    build_deployment_evidence_binding,
     build_source_to_candidate_runtime_readiness_report,
 )
 from agent_knowledge.llm_brain_core.objects.artifact_preference_evaluator import (
@@ -948,6 +949,110 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_
     assert "live_agent_context_startup_unverified" in report["gaps"]
 
 
+def _bound_deployment_evidence(expected_commit: str) -> dict:
+    gitops_desired_state = {
+        "schema_version": "gitops_desired_state_identity.v1",
+        "images_include_expected_commit": True,
+        "desired_state_source": "sanitized_ops_manifest_summary",
+        "target_revision": "main",
+        "source_commit": expected_commit,
+        "desired_image_set_hash": "sha256:" + "a" * 64,
+        "ops_revision": "a" * 40,
+        "expected_image_ref_count": 1,
+        "production_mutation_performed": False,
+    }
+    argo_reconciliation = {
+        "schema_version": "argo_reconciliation_identity.v1",
+        "reconciliation_source": "sanitized_argo_application_summary",
+        "reconciled_ops_revision": "a" * 40,
+        "sync_status": "Synced",
+        "health_status": "Healthy",
+        "production_mutation_performed": False,
+    }
+    deployed_identity = {
+        "contains_expected_commit": True,
+        "identity_source": "redacted_live_runtime_evidence",
+        "source_commit": expected_commit,
+        "live_image_set_hash": "sha256:" + "a" * 64,
+        "stale_image_ref_count": 0,
+        "production_mutation_performed": False,
+    }
+    return {
+        "schema_version": "source_to_candidate_runtime_evidence.v1",
+        "expected_commit": expected_commit,
+        "gitops_desired_state": gitops_desired_state,
+        "argo_reconciliation": argo_reconciliation,
+        "deployed_identity": deployed_identity,
+        "deployment_evidence_binding": build_deployment_evidence_binding(
+            expected_commit=expected_commit,
+            gitops_desired_state=gitops_desired_state,
+            argo_reconciliation=argo_reconciliation,
+            deployed_identity=deployed_identity,
+        ),
+    }
+
+
+def test_mcp_runtime_readiness_uses_independently_supplied_external_expected_commit(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+    packet_commit = "c" * 40
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1201,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "live_evidence": _bound_deployment_evidence(packet_commit),
+                    "expected_commit": "b" * 40,
+                },
+            },
+        },
+        service,
+    )
+
+    report = response["result"]["structuredContent"]
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert report["status"] == "FAIL"
+    assert (
+        "gitops_deployment_evidence_binding_external_expected_commit_mismatch"
+        in claims["ops.gitops_deployment_evidence_binding"]["gaps"]
+    )
+
+
+def test_mcp_runtime_readiness_fails_closed_for_malformed_external_expected_commit(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1202,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "live_evidence": _bound_deployment_evidence("c" * 40),
+                    "expected_commit": "main",
+                },
+            },
+        },
+        service,
+    )
+
+    report = response["result"]["structuredContent"]
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+    assert report["status"] == "FAIL"
+    assert (
+        "external_expected_commit_anchor_invalid"
+        in claims["ops.gitops_deployment_evidence_binding"]["gaps"]
+    )
+
+
 def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_plan(tmp_path: Path):
     service = _service(tmp_path)
 
@@ -1034,7 +1139,7 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_templ
         template["packet_field_templates"]["preference_artifact_memory"]["schema_version"]
         == "preference_artifact_memory_runtime_evidence.v1"
     )
-    assert "permission_sensitive_audit" in template["required_packet_fields"]
+    assert "permission_sensitive_audit" not in template["required_packet_fields"]
     assert (
         template["packet_field_templates"]["permission_sensitive_audit"]["schema_version"]
         == "permission_sensitive_runtime_audit_evidence.v1"
@@ -1220,20 +1325,23 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_
     assert packet["preference_artifact_memory"]["preference_object_pack"]["proposal_preference_count"] >= 1
     assert packet["preference_artifact_memory"]["html_visualization_route_smoke"]["route"] == "html_visualization_preference"
     assert packet["preference_artifact_memory"]["artifact_review_check"]["raw_artifact_body_returned"] is False
-    assert packet["permission_sensitive_audit"]["schema_version"] == "permission_sensitive_runtime_audit_evidence.v1"
-    assert len(packet["permission_sensitive_audit"]["audit_events"]) == 3
-    assert {event["action"] for event in packet["permission_sensitive_audit"]["audit_events"]} == {
-        BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
-        BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
-        BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
-    }
-    assert all(
-        event["permission"] == "denied"
-        and event["authority_write_performed"] is False
-        and event["production_mutation_performed"] is False
-        for event in packet["permission_sensitive_audit"]["audit_events"]
+    assert "permission_sensitive_audit" not in packet
+    assert packet["collector"]["permission_sensitive_audit_collected"] is False
+    assert packet["collector"]["permission_sensitive_audit_collection_status"] == (
+        "not_collected"
     )
-    assert packet["permission_sensitive_audit"]["audit_store"]["status"] == "recorded"
+    assert packet["collector"]["permission_sensitive_audit_schema"] == ""
+    report = build_source_to_candidate_runtime_readiness_report(live_evidence=packet)
+    permission_claim = next(
+        claim
+        for claim in report["claims"]
+        if claim["claim_id"] == "live.production.permission_sensitive_audit"
+    )
+    assert permission_claim["status"] == "not_validated"
+    assert permission_claim["gaps"] == [
+        "permission_sensitive_audit_unverified",
+        "product_marker_audit_unverified",
+    ]
     assert packet["agent_context_startup_runtime"]["schema_version"] == "agent_context_startup_runtime_evidence.v1"
     assert packet["agent_context_startup_runtime"]["startup_context"]["loaded_on_startup"] is True
     assert packet["agent_context_startup_runtime"]["startup_context"]["surface_policy"]["mutation_allowed"] is False
@@ -5807,6 +5915,37 @@ def test_mcp_object_proposal_create_local_test_and_production_denial(tmp_path: P
     assert denied["reason"] == "proposal_write_requires_local_test_ledger_or_later_production_gate"
     assert denied["proposal_write_performed"] is False
     assert denied["authoritative_memory_changed"] is False
+
+
+@pytest.mark.parametrize("max_objects", [True, 1.0, "1"])
+def test_approval_board_production_gate_requires_exact_integer_max_objects(
+    tmp_path: Path,
+    max_objects,
+):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+
+    gate = service._approval_board_production_gate(
+        {
+            "approved": True,
+            "approval_ref": "preapproved-user-gate-2026-07-06",
+            "scope": "single_project_single_object",
+            "project": PROJECT,
+            "max_objects": max_objects,
+            "configured_deployed_mcp_identity_matches_source": True,
+            "read_after_write_smoke_plan": True,
+            "rollback_or_supersession_plan": True,
+            "no_raw_private_evidence": True,
+        },
+        target_object_id="ko:RepoDocument:production-gate-smoke",
+        target_project=PROJECT,
+        target_object_type="RepoDocument",
+        decision_count=1,
+        action="promote",
+    )
+
+    assert gate["allowed"] is False
+    assert "max_objects_1" in gate["missing_gate_evidence"]
 
 
 def test_mcp_object_authority_production_gate_writes_single_object_with_postcheck(tmp_path: Path):

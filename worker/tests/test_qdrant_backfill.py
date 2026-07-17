@@ -40,6 +40,7 @@ from agent_knowledge.rag_ingress.qdrant_backfill import (
     rollback_submitted,
 )
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
+    FOUNDATION_DIRECT_WRITE_CONTRACT,
     HashEmbeddingProvider,
     PassthroughMarkdownNormalizer,
     QdrantDoclingMirrorAdapter,
@@ -125,8 +126,14 @@ def _seed_projected_session(store, sid, **kw):
 
 def _adapter(client=None, *, collection="test_mirror", size=VECTOR_SIZE):
     client = client or InMemoryQdrantClient()
+    if not client.collection_exists(collection):
+        client.create_collection(
+            collection,
+            vectors_config={"size": size, "distance": "Cosine"},
+        )
     return QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         collection_name=collection,
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=HashEmbeddingProvider(size=size),
@@ -514,6 +521,7 @@ def test_embedding_dim_mismatch_raises_before_write():
     client.create_collection("dim_mirror", vectors_config={"size": 128, "distance": "Cosine"})
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         collection_name="dim_mirror",
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=HashEmbeddingProvider(size=64),

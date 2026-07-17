@@ -7,6 +7,7 @@ import pytest
 
 from agent_knowledge.rag_ingress.retired_index_bridge import BackendDocumentHandle, IndexStatus
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
+    FOUNDATION_DIRECT_WRITE_CONTRACT,
     EVIDENCE_PACKET_SCHEMA,
     HashEmbeddingProvider,
     MIRROR_AUTHORITY,
@@ -33,8 +34,17 @@ class _FakeQdrantClient:
         self.collections[collection_name] = {}
         self.created.append((collection_name, vectors_config))
 
-    def upsert(self, *, collection_name: str, points: list[object]) -> None:
-        self.collections.setdefault(collection_name, {})
+    def upsert(
+        self,
+        *,
+        collection_name: str,
+        points: list[object],
+        wait: bool = True,
+        ordering=None,
+        **kwargs,
+    ) -> dict[str, object]:
+        if collection_name not in self.collections:
+            raise ValueError("collection_not_found")
         for point in points:
             point_id = _point_field(point, "id")
             self.collections[collection_name][point_id] = {
@@ -42,6 +52,7 @@ class _FakeQdrantClient:
                 "vector": _point_field(point, "vector"),
                 "payload": _point_field(point, "payload"),
             }
+        return {"status": "completed", "operation_id": 1}
 
     def retrieve(self, *, collection_name: str, ids: list[str], with_payload=True, with_vectors=False):
         _ = with_payload
@@ -94,11 +105,21 @@ class _WrongSizeEmbedding:
         return [1.0]
 
 
+def _created_fake_client(client_type=_FakeQdrantClient):
+    client = client_type()
+    client.create_collection(
+        collection_name="mirror_test",
+        vectors_config={"size": 8, "distance": "Cosine"},
+    )
+    return client
+
+
 def test_qdrant_docling_adapter_upserts_normalized_markdown_and_reports_status():
-    client = _FakeQdrantClient()
+    client = _created_fake_client()
     document = _document(body="Ledger stays canonical. Mirror is search only.")
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         collection_name="mirror_test",
         normalizer=_StaticNormalizer("# Normalized\nLedger stays canonical."),
         embedding_provider=HashEmbeddingProvider(size=8),
@@ -120,10 +141,11 @@ def test_qdrant_docling_adapter_upserts_normalized_markdown_and_reports_status()
 
 
 def test_qdrant_docling_adapter_natural_key_is_exact_and_blank_keys_fail_closed():
-    client = _FakeQdrantClient()
+    client = _created_fake_client()
     document = _document()
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         collection_name="mirror_test",
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=HashEmbeddingProvider(size=8),
@@ -156,9 +178,10 @@ def test_qdrant_docling_adapter_natural_key_is_exact_and_blank_keys_fail_closed(
 
 
 def test_qdrant_docling_adapter_query_returns_mirror_labeled_hits():
-    client = _FakeQdrantClient()
+    client = _created_fake_client()
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         collection_name="mirror_test",
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=HashEmbeddingProvider(size=8),
@@ -178,9 +201,10 @@ def test_qdrant_docling_adapter_query_returns_mirror_labeled_hits():
 
 
 def test_qdrant_docling_adapter_filters_target_profile_before_limit():
-    client = _FakeQdrantClient()
+    client = _created_fake_client()
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         collection_name="mirror_test",
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=HashEmbeddingProvider(size=8),
@@ -195,9 +219,10 @@ def test_qdrant_docling_adapter_filters_target_profile_before_limit():
 
 
 def test_qdrant_docling_adapter_accepts_list_query_response():
-    client = _ListQueryQdrantClient()
+    client = _created_fake_client(_ListQueryQdrantClient)
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         collection_name="mirror_test",
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=HashEmbeddingProvider(size=8),
@@ -213,6 +238,7 @@ def test_qdrant_docling_adapter_accepts_list_query_response():
 def test_qdrant_docling_adapter_query_checks_embedding_size():
     adapter = QdrantDoclingMirrorAdapter(
         client=_FakeQdrantClient(),
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         collection_name="mirror_test",
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=_WrongSizeEmbedding(),
@@ -223,9 +249,10 @@ def test_qdrant_docling_adapter_query_checks_embedding_size():
 
 
 def test_qdrant_docling_adapter_blocks_new_private_content_from_normalizer():
-    client = _FakeQdrantClient()
+    client = _created_fake_client()
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         collection_name="mirror_test",
         normalizer=_StaticNormalizer("leak /Users/example/.codex/private/session.jsonl"),
         embedding_provider=HashEmbeddingProvider(size=8),
@@ -234,13 +261,14 @@ def test_qdrant_docling_adapter_blocks_new_private_content_from_normalizer():
     with pytest.raises(ValueError, match="private content"):
         adapter.submit_document(_document())
 
-    assert client.collections["mirror_test"] == {}
+    assert client.collections.get("mirror_test", {}) == {}
 
 
 def test_qdrant_docling_adapter_blocks_nested_secret_like_metadata():
-    client = _FakeQdrantClient()
+    client = _created_fake_client()
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
         collection_name="mirror_test",
         normalizer=PassthroughMarkdownNormalizer(),
         embedding_provider=HashEmbeddingProvider(size=8),
@@ -250,7 +278,14 @@ def test_qdrant_docling_adapter_blocks_nested_secret_like_metadata():
         adapter.submit_document(_document(metadata={"nested": {"api_key": "redacted-but-key-is-secret"}}))
 
 
-def test_qdrant_docling_adapter_does_not_create_collection_after_probe_error():
+def test_fake_qdrant_client_rejects_upsert_to_missing_collection():
+    client = _FakeQdrantClient()
+
+    with pytest.raises(ValueError, match="collection_not_found"):
+        client.upsert(collection_name="missing", points=[])
+
+
+def test_qdrant_docling_adapter_constructor_never_probes_or_creates_collection():
     class BoomClient:
         def __init__(self) -> None:
             self.created = False
@@ -266,13 +301,12 @@ def test_qdrant_docling_adapter_does_not_create_collection_after_probe_error():
 
     client = BoomClient()
 
-    with pytest.raises(SearchableMirrorUnavailable, match="collection probe failed"):
-        QdrantDoclingMirrorAdapter(client=client)
+    QdrantDoclingMirrorAdapter(client=client)
 
     assert client.created is False
 
 
-def test_qdrant_docling_adapter_wraps_collection_exists_probe_error():
+def test_qdrant_docling_adapter_read_probe_fails_closed_without_creation():
     class BoomClient:
         def collection_exists(self, collection_name):
             _ = collection_name
@@ -283,11 +317,11 @@ def test_qdrant_docling_adapter_wraps_collection_exists_probe_error():
             _ = vectors_config
             raise AssertionError("must not create after probe failure")
 
-    with pytest.raises(SearchableMirrorUnavailable, match="collection probe failed"):
-        QdrantDoclingMirrorAdapter(client=BoomClient())
+    adapter = QdrantDoclingMirrorAdapter(client=BoomClient())
+    assert adapter.collection_exists() is None
 
 
-def test_qdrant_docling_adapter_treats_string_404_as_collection_missing():
+def test_qdrant_docling_adapter_treats_string_404_as_missing_without_creation():
     class NotFound(Exception):
         status_code = "404"
 
@@ -306,9 +340,10 @@ def test_qdrant_docling_adapter_treats_string_404_as_collection_missing():
 
     client = Client()
 
-    QdrantDoclingMirrorAdapter(client=client)
+    adapter = QdrantDoclingMirrorAdapter(client=client)
 
-    assert client.created is True
+    assert adapter.collection_exists() is False
+    assert client.created is False
 
 
 def test_searchable_mirror_gate_blocks_failover_without_evidence_packet():

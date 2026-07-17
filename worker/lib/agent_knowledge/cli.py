@@ -23,6 +23,16 @@ from .llm_brain_core import projection_cli as llm_brain_projection_cli
 from .llm_brain_core import regression_gate_cli as llm_brain_regression_gate_cli
 from .llm_brain_core.runtime_graph import build_graph_adapter_from_env
 from .mcp_server import KnowledgeSearchService, build_index_client, run_stdio_server
+from .permission_audit import (
+    DEFAULT_PERMISSION_AUDIT_STORE_URL,
+    DEFAULT_TOKEN_REVIEW_URL,
+    IndependentProductMutationMarkerReader,
+    KubernetesTokenReviewer,
+    LoopbackPermissionAuditStoreClient,
+)
+from .permission_audit_marker_runtime_env import (
+    build_production_permission_audit_marker_reader,
+)
 from .rag_ingress import state_cli
 from .rag_ingress import projection_invalidation_canary
 from .rag_ingress import temporal_metadata_backfill
@@ -193,7 +203,12 @@ class _ServiceWiringError(Exception):
         self.message = message
 
 
-def _build_recall_service(args) -> KnowledgeSearchService:
+def _build_recall_service(
+    args,
+    *,
+    permission_audit_marker_reader: IndependentProductMutationMarkerReader
+    | None = None,
+) -> KnowledgeSearchService:
     """mcp-stdio / mcp-http 공통 recall service 와이어링(단일 권위).
 
     두 transport main이 동일 service를 조립하던 복제 seam을 제거한다. 실패 시
@@ -231,7 +246,9 @@ def _build_recall_service(args) -> KnowledgeSearchService:
 
     mirror_search = build_qdrant_brain_query_search_from_env(os.environ)
     semantic_ranker = None
-    if os.environ.get("LLM_BRAIN_EMBEDDING_BASE_URL") and os.environ.get("LLM_BRAIN_EMBEDDING_MODEL"):
+    if os.environ.get("LLM_BRAIN_EMBEDDING_BASE_URL") and os.environ.get(
+        "LLM_BRAIN_EMBEDDING_MODEL"
+    ):
         try:
             from .session_memory.semantic_ranker import build_embedding_semantic_ranker
 
@@ -243,6 +260,41 @@ def _build_recall_service(args) -> KnowledgeSearchService:
                 "brain query semantic ranker configured but unavailable: %s",
                 type(exc).__name__,
             )
+    audit_probe_enabled = bool(
+        getattr(args, "allow_permission_sensitive_audit_probe", False)
+    )
+    token_reviewer = None
+    store_append = None
+    product_sentinel_reader = None
+    if audit_probe_enabled:
+        try:
+            if permission_audit_marker_reader is None:
+                permission_audit_marker_reader = (
+                    build_production_permission_audit_marker_reader(os.environ)
+                )
+            if not isinstance(
+                permission_audit_marker_reader,
+                IndependentProductMutationMarkerReader,
+            ):
+                raise ValueError("exact marker reader unavailable")
+            product_sentinel_reader = permission_audit_marker_reader
+            token_reviewer = KubernetesTokenReviewer(
+                str(getattr(args, "permission_audit_token_review_url", ""))
+            )
+            store_client = LoopbackPermissionAuditStoreClient(
+                str(getattr(args, "permission_audit_store_url", ""))
+            )
+        except Exception as exc:
+            message = (
+                "permission audit exact marker reader unavailable"
+                if "exact marker reader unavailable" in str(exc)
+                else "permission audit exact marker configuration invalid"
+            )
+            raise _ServiceWiringError(
+                2,
+                message,
+            ) from exc
+        store_append = store_client.append_denied_once
     return KnowledgeSearchService(
         ledger=ledger,
         retired_index_bridge=retired_index_bridge,
@@ -257,6 +309,10 @@ def _build_recall_service(args) -> KnowledgeSearchService:
         allow_production_object_authority_writes=bool(
             getattr(args, "allow_object_authority_production_writes", False)
         ),
+        allow_permission_sensitive_audit_probe=audit_probe_enabled,
+        permission_audit_token_reviewer=token_reviewer,
+        permission_audit_store_append=store_append,
+        permission_audit_product_sentinel_reader=product_sentinel_reader,
     )
 
 
@@ -283,6 +339,21 @@ def _add_recall_service_arguments(parser) -> None:
         "--allow-object-authority-production-writes",
         action="store_true",
         help="enable explicitly gated object authority production writes; every write still requires a per-call production_gate",
+    )
+    parser.add_argument(
+        "--allow-permission-sensitive-audit-probe",
+        action="store_true",
+        help="enable the single bounded denial audit probe; disabled by default",
+    )
+    parser.add_argument(
+        "--permission-audit-store-url",
+        default=DEFAULT_PERMISSION_AUDIT_STORE_URL,
+        help="loopback-only dedicated permission audit store endpoint",
+    )
+    parser.add_argument(
+        "--permission-audit-token-review-url",
+        default=DEFAULT_TOKEN_REVIEW_URL,
+        help="explicit Kubernetes TokenReview API endpoint",
     )
 
 

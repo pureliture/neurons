@@ -7,6 +7,11 @@
 # bare run never attaches to the live WorkQueue.
 FROM python:3.13-slim
 
+ARG NEURONS_SOURCE_COMMIT
+RUN printf '%s' "${NEURONS_SOURCE_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'
+LABEL org.opencontainers.image.revision=${NEURONS_SOURCE_COMMIT}
+LABEL org.opencontainers.image.source="https://github.com/pureliture/neurons"
+
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV INGEST_STATE_DB_PATH=/var/lib/agent-knowledge/ingest-state/ingest-state.sqlite

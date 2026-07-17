@@ -23,8 +23,16 @@ import json
 import os
 import sys
 
+from agent_knowledge.qdrant_write_gateway_runtime import (
+    QdrantMutationSource,
+    QdrantWriteActivation,
+    qdrant_write_activation_from_environment,
+    qdrant_write_gateway_generation_from_environment,
+)
+
 BUILD_CLI_SCHEMA_VERSION = "couchdb_session_memory_build.v1"
 BUILD_CLI_OPERATION = "couchdb_session_memory_build"
+QDRANT_MUTATION_SOURCE = QdrantMutationSource.PROJECTION
 
 
 def _build_auth_header(user: str, password: str) -> str:
@@ -390,26 +398,54 @@ def _build_forward_mirror_sink(environ):
 
     if str(environ.get("MIRROR_DUAL_WRITE") or "").strip() != "1":
         return None
-    url = str(environ.get("QDRANT_URL") or "").strip()
-    if not url:
-        return None
     try:
+        activation = qdrant_write_activation_from_environment(environ)
+        if activation is QdrantWriteActivation.FOUNDATION_INACTIVE:
+            return None
+        url = str(environ.get("QDRANT_URL") or "").strip()
+        if not url:
+            return None
         from ..rag_ingress.qdrant_backfill import QdrantSessionMemoryMirrorSink
         from ..rag_ingress.qdrant_docling_mirror import (
             DEFAULT_COLLECTION_NAME,
+            FOUNDATION_DIRECT_WRITE_CONTRACT,
             PassthroughMarkdownNormalizer,
             build_remote_qdrant_docling_mirror_adapter,
+            build_remote_qdrant_docling_sidecar_adapter,
         )
         from ..rag_ingress.qdrant_embedding import build_openai_embedding_provider
 
         collection = str(environ.get("QDRANT_COLLECTION") or DEFAULT_COLLECTION_NAME).strip()
-        adapter = build_remote_qdrant_docling_mirror_adapter(
-            url=url,
-            collection_name=collection,
-            embedding_provider=build_openai_embedding_provider(environ=environ),
-            normalizer=PassthroughMarkdownNormalizer(),
-            ensure_collection=False,
-        )
+        common = {
+            "collection_name": collection,
+            "embedding_provider": build_openai_embedding_provider(environ=environ),
+            "normalizer": PassthroughMarkdownNormalizer(),
+        }
+        if activation is QdrantWriteActivation.FOUNDATION_DIRECT:
+            adapter = build_remote_qdrant_docling_mirror_adapter(
+                url=url,
+                direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
+                **common,
+            )
+        else:
+            adapter = build_remote_qdrant_docling_sidecar_adapter(
+                read_url=url,
+                read_api_key_path=str(environ.get("QDRANT_READ_API_KEY_FILE") or ""),
+                gateway_endpoint=str(
+                    environ.get("QDRANT_WRITE_GATEWAY_ENDPOINT") or ""
+                ),
+                gateway_token_path=str(
+                    environ.get("QDRANT_WRITE_GATEWAY_TOKEN_FILE") or ""
+                ),
+                gateway_ca_path=str(
+                    environ.get("QDRANT_WRITE_GATEWAY_CA_FILE") or ""
+                ),
+                gateway_generation=qdrant_write_gateway_generation_from_environment(
+                    environ
+                ),
+                source=QDRANT_MUTATION_SOURCE,
+                **common,
+            )
         return QdrantSessionMemoryMirrorSink(adapter)
     except Exception:
         # Mirror misconfig must never block the canonical builder.
@@ -427,29 +463,57 @@ def _build_qdrant_projector(environ):
     nothing this run rather than silently dropping sessions).
     """
 
-    url = str(environ.get("QDRANT_URL") or "").strip()
-    if not url:
-        return None
     try:
+        activation = qdrant_write_activation_from_environment(environ)
+        if activation is QdrantWriteActivation.FOUNDATION_INACTIVE:
+            return None
+        url = str(environ.get("QDRANT_URL") or "").strip()
+        if not url:
+            return None
         from ..rag_ingress.qdrant_backfill import (
             QdrantSessionMemoryMirrorSink,
             QdrantSessionMemoryProjector,
         )
         from ..rag_ingress.qdrant_docling_mirror import (
             DEFAULT_COLLECTION_NAME,
+            FOUNDATION_DIRECT_WRITE_CONTRACT,
             PassthroughMarkdownNormalizer,
             build_remote_qdrant_docling_mirror_adapter,
+            build_remote_qdrant_docling_sidecar_adapter,
         )
         from ..rag_ingress.qdrant_embedding import build_openai_embedding_provider
 
         collection = str(environ.get("QDRANT_COLLECTION") or DEFAULT_COLLECTION_NAME).strip()
-        adapter = build_remote_qdrant_docling_mirror_adapter(
-            url=url,
-            collection_name=collection,
-            embedding_provider=build_openai_embedding_provider(environ=environ),
-            normalizer=PassthroughMarkdownNormalizer(),
-            ensure_collection=False,
-        )
+        common = {
+            "collection_name": collection,
+            "embedding_provider": build_openai_embedding_provider(environ=environ),
+            "normalizer": PassthroughMarkdownNormalizer(),
+        }
+        if activation is QdrantWriteActivation.FOUNDATION_DIRECT:
+            adapter = build_remote_qdrant_docling_mirror_adapter(
+                url=url,
+                direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
+                **common,
+            )
+        else:
+            adapter = build_remote_qdrant_docling_sidecar_adapter(
+                read_url=url,
+                read_api_key_path=str(environ.get("QDRANT_READ_API_KEY_FILE") or ""),
+                gateway_endpoint=str(
+                    environ.get("QDRANT_WRITE_GATEWAY_ENDPOINT") or ""
+                ),
+                gateway_token_path=str(
+                    environ.get("QDRANT_WRITE_GATEWAY_TOKEN_FILE") or ""
+                ),
+                gateway_ca_path=str(
+                    environ.get("QDRANT_WRITE_GATEWAY_CA_FILE") or ""
+                ),
+                gateway_generation=qdrant_write_gateway_generation_from_environment(
+                    environ
+                ),
+                source=QDRANT_MUTATION_SOURCE,
+                **common,
+            )
         return QdrantSessionMemoryProjector(QdrantSessionMemoryMirrorSink(adapter))
     except Exception:
         return None

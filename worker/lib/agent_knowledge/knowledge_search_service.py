@@ -47,6 +47,11 @@ from .llm_brain_core.objects.runtime_readiness import (
 from .memory_read_pipeline import AuthorizedMemoryReader, MemoryReadPipeline, MemorySearchQuery
 from .index_client import RetiredIndexBridgeHttpClient
 from .public_safe_util import ensure_public_safe, public_safe_text, require_sha256, sha256_text, short_hash
+from .permission_audit import run_permission_sensitive_audit_probe
+from .runtime_build_identity import (
+    load_runtime_build_identity,
+    validate_runtime_build_identity_projection,
+)
 from .session_memory.memory_card import validate_memory_card_envelope
 from .session_memory.memory_promotion import commit_stale, commit_supersession
 from .session_memory.brain_query import (
@@ -962,6 +967,11 @@ class KnowledgeSearchService:
         allow_steward_auto_accept: bool = False,
         allow_local_test_object_authority_writes: bool = False,
         allow_production_object_authority_writes: bool = False,
+        runtime_build_identity_reader: Callable[[], Mapping[str, Any]] | None = None,
+        allow_permission_sensitive_audit_probe: bool = False,
+        permission_audit_token_reviewer: Callable[[str], Mapping[str, Any]] | None = None,
+        permission_audit_store_append: Callable[..., Mapping[str, Any]] | None = None,
+        permission_audit_product_sentinel_reader: Callable[[], Mapping[str, Any]] | None = None,
     ):
         self.ledger = ledger
         self.retired_index_bridge = retired_index_bridge
@@ -976,6 +986,17 @@ class KnowledgeSearchService:
         self.allow_steward_auto_accept = bool(allow_steward_auto_accept)
         self.allow_local_test_object_authority_writes = bool(allow_local_test_object_authority_writes)
         self.allow_production_object_authority_writes = bool(allow_production_object_authority_writes)
+        self._runtime_build_identity_reader = (
+            runtime_build_identity_reader or load_runtime_build_identity
+        )
+        self.allow_permission_sensitive_audit_probe = bool(
+            allow_permission_sensitive_audit_probe
+        )
+        self._permission_audit_token_reviewer = permission_audit_token_reviewer
+        self._permission_audit_store_append = permission_audit_store_append
+        self._permission_audit_product_sentinel_reader = (
+            permission_audit_product_sentinel_reader
+        )
         # M8 read cutover: a Qdrant-backed (query, brain_id) -> list[dict] callable
         # that fills brain.query's archive/evidence lanes from the Qdrant searchable
         # mirror. When set it REPLACES the RetiredIndexBridge archive search (which is off in the
@@ -996,6 +1017,32 @@ class KnowledgeSearchService:
         """세션 card snapshot을 비워 다음 brain tool 호출이 ledger를 다시 읽게 한다."""
 
         self._brain_card_cache.invalidate()
+
+    def brain_runtime_build_identity(self) -> dict[str, Any]:
+        identity = validate_runtime_build_identity_projection(
+            dict(self._runtime_build_identity_reader())
+        )
+        ensure_public_safe(identity, "BrainRuntimeBuildIdentity")
+        return identity
+
+    def brain_permission_sensitive_audit_probe(
+        self,
+        *,
+        mode: str,
+        operation_hash: str,
+        build_association_hash: str,
+        projected_service_account_token: str,
+    ) -> dict[str, Any]:
+        return run_permission_sensitive_audit_probe(
+            enabled=self.allow_permission_sensitive_audit_probe,
+            mode=mode,
+            operation_hash=operation_hash,
+            build_association_hash=build_association_hash,
+            projected_service_account_token=projected_service_account_token,
+            token_reviewer=self._permission_audit_token_reviewer,
+            store_append=self._permission_audit_store_append,
+            product_sentinel_reader=self._permission_audit_product_sentinel_reader,
+        )
 
     def brain_steward(self):
         """proposal-only Brain Steward 서비스. restricted 위임은 flag 로만 열린다."""
@@ -1477,11 +1524,10 @@ class KnowledgeSearchService:
             missing.append("single_project_single_object_scope")
         if not project or project != candidate_project:
             missing.append("project_scope_match")
-        try:
-            max_objects = int(gate.get("max_objects") or 0)
-        except (TypeError, ValueError):
-            max_objects = 0
-        if max_objects != 1:
+        max_objects = gate.get("max_objects")
+        # ``bool`` is an ``int`` subclass and coercing arbitrary values here
+        # would let a JSON-ish gate widen the one-object production boundary.
+        if type(max_objects) is not int or max_objects != 1:
             missing.append("max_objects_1")
         if decision_count != 1:
             missing.append("approval_board_single_decision")
@@ -1553,6 +1599,7 @@ class KnowledgeSearchService:
         normalize_shadow_evidence: Mapping[str, Any] | None = None,
         shadow_evidence: Mapping[str, Any] | None = None,
         expected_commit: str = "",
+        expected_build_association_hash: str = "",
         evidence_collection_plan: bool = False,
         evidence_packet_template: bool = False,
         collect_shadow_evidence: bool = False,
@@ -1644,6 +1691,7 @@ class KnowledgeSearchService:
             return build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
                 captured_evidence=dict(post_deploy_capture),
                 expected_commit=expected_commit,
+                expected_build_association_hash=expected_build_association_hash,
             )
         if isinstance(normalize_shadow_evidence, Mapping):
             return build_source_to_candidate_runtime_shadow_evidence_packet(
@@ -1653,10 +1701,12 @@ class KnowledgeSearchService:
             return build_source_to_candidate_runtime_shadow_readiness_report(
                 captured_evidence=dict(shadow_evidence),
                 expected_commit=expected_commit,
+                expected_build_association_hash=expected_build_association_hash,
             )
         return build_source_to_candidate_runtime_readiness_report(
             live_evidence=dict(live_evidence) if isinstance(live_evidence, Mapping) else None,
             expected_commit=expected_commit,
+            expected_build_association_hash=expected_build_association_hash,
         )
 
     def _temporal_correctness_runtime_read_path_evidence(
