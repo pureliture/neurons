@@ -211,9 +211,9 @@ def _build_adapter(
         )
     if not ensure_collection:
         exists = adapter.collection_exists()
-        if exists is False:
+        if exists is not True:
             raise SystemExit(
-                f"target collection이 존재하지 않는다: {collection_name!r}. "
+                f"target collection 존재를 확인할 수 없다: {collection_name!r}. "
                 "암묵적 생성을 거부한다. operator-only provisioning API로 먼저 "
                 "활성화하거나 --collection 이름을 고쳐라."
             )

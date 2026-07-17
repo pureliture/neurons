@@ -116,6 +116,24 @@ def test_run_absent_collection_without_create_fails_closed(patched_qdrant):
     assert not client.collection_exists("typo_collection")
 
 
+def test_unknown_collection_probe_fails_closed(patched_qdrant, monkeypatch):
+    class UnknownCollectionAdapter:
+        def collection_exists(self):
+            return None
+
+    monkeypatch.setattr(
+        mirror_mod,
+        "build_remote_qdrant_docling_sidecar_adapter",
+        lambda **kwargs: UnknownCollectionAdapter(),
+    )
+    with pytest.raises(SystemExit, match="존재를 확인할 수 없다"):
+        cli_mod._build_adapter(
+            _args(),
+            collection_name="unknown_collection",
+            source=QdrantMutationSource.BACKFILL,
+        )
+
+
 def test_run_create_collection_flag_is_operator_only(patched_qdrant):
     client = patched_qdrant
     assert not client.collection_exists("staging_mirror")

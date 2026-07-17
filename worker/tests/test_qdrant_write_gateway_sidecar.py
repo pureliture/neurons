@@ -774,7 +774,7 @@ def test_readiness_fails_closed_when_any_read_only_anchor_is_invalid(
     )
 
 
-def test_product_failure_is_sanitized_terminalized_cleared_and_not_retried() -> None:
+def test_product_failure_is_sanitized_terminalized_unresolved_and_not_retried() -> None:
     app, reviewer, product, marker, token = _application(fail_product=True)
 
     response = _request(app, token, _body())
@@ -787,9 +787,9 @@ def test_product_failure_is_sanitized_terminalized_cleared_and_not_retried() -> 
     assert len(reviewer.calls) == 1
     assert [name for name, _ in product.calls] == ["get_collection", "upsert"]
     marker_writes = [kwargs for name, kwargs in marker.calls if name == "upsert"]
-    assert len(marker_writes) == 3
+    assert len(marker_writes) == 2
+    assert marker_writes[0]["points"][0].payload["unresolved"] is True
     assert any(point.payload.get("outcome") == "failed" for point in marker_writes[1]["points"])
-    assert marker_writes[2]["points"][0].payload["unresolved"] is False
     assert "protected" not in response.body.decode("utf-8")
 
 
@@ -802,7 +802,7 @@ def test_product_failure_is_sanitized_terminalized_cleared_and_not_retried() -> 
         object(),
     ),
 )
-def test_non_completed_or_malformed_product_ack_is_failed_terminalized_and_cleared(
+def test_non_completed_or_malformed_product_ack_is_failed_terminalized_unresolved(
     product_result: object,
 ) -> None:
     app, reviewer, product, marker, token = _application(
@@ -816,13 +816,12 @@ def test_non_completed_or_malformed_product_ack_is_failed_terminalized_and_clear
     assert len(reviewer.calls) == 1
     assert [name for name, _ in product.calls] == ["get_collection", "upsert"]
     marker_writes = [kwargs for name, kwargs in marker.calls if name == "upsert"]
-    assert len(marker_writes) == 3
+    assert len(marker_writes) == 2
     assert marker_writes[0]["points"][0].payload["phase"] == "start"
+    assert marker_writes[0]["points"][0].payload["unresolved"] is True
     assert marker_writes[1]["points"][0].payload["outcome"] == "failed"
-    assert marker_writes[2]["points"][0].payload["unresolved"] is False
     assert product.shared_order == [
         "marker:upsert",
         "product:upsert",
-        "marker:upsert",
         "marker:upsert",
     ]

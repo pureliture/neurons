@@ -1822,7 +1822,6 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
         "source_to_candidate_review_loop",
         "session_project_rollup_runtime",
         "preference_artifact_memory",
-        "permission_sensitive_audit",
         "agent_context_startup_runtime",
         "gitops_desired_state",
         "argo_reconciliation",
@@ -1843,6 +1842,7 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
     assert "projection_join" in template["required_packet_fields"]
     assert "source_to_candidate_review_loop" in template["required_packet_fields"]
     assert "session_project_rollup_runtime" in template["required_packet_fields"]
+    assert "permission_sensitive_audit" not in template["required_packet_fields"]
     assert template["packet_field_templates"]["evidence_provenance"]["schema_version"] == EVIDENCE_PROVENANCE_SCHEMA
     assert (
         template["packet_field_templates"]["projection_join"]["schema_version"]

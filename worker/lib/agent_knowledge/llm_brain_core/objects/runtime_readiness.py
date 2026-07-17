@@ -541,7 +541,6 @@ def build_source_to_candidate_runtime_evidence_packet_template(
             "source_to_candidate_review_loop",
             "session_project_rollup_runtime",
             "preference_artifact_memory",
-            "permission_sensitive_audit",
             "agent_context_startup_runtime",
             "gitops_desired_state",
             "argo_reconciliation",

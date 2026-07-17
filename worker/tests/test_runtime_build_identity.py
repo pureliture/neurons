@@ -186,6 +186,23 @@ def test_build_identity_writer_binds_full_commit_to_installed_content(tmp_path):
     }
 
 
+def test_build_identity_requires_root_pyproject(tmp_path):
+    from agent_knowledge.runtime_build_identity import (
+        RuntimeBuildIdentityError,
+        write_runtime_build_identity,
+    )
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeBuildIdentityError, match="root pyproject is missing"):
+        write_runtime_build_identity(
+            source_commit="a" * 40,
+            content_root=tmp_path,
+            output_path=tmp_path / "build-identity.json",
+        )
+
+
 def test_local_compose_source_sentinel_cannot_claim_deployable_identity(tmp_path):
     from agent_knowledge.runtime_build_identity import (
         RuntimeBuildIdentityError,

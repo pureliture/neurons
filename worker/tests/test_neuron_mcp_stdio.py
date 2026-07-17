@@ -1139,7 +1139,7 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_templ
         template["packet_field_templates"]["preference_artifact_memory"]["schema_version"]
         == "preference_artifact_memory_runtime_evidence.v1"
     )
-    assert "permission_sensitive_audit" in template["required_packet_fields"]
+    assert "permission_sensitive_audit" not in template["required_packet_fields"]
     assert (
         template["packet_field_templates"]["permission_sensitive_audit"]["schema_version"]
         == "permission_sensitive_runtime_audit_evidence.v1"
@@ -5915,6 +5915,37 @@ def test_mcp_object_proposal_create_local_test_and_production_denial(tmp_path: P
     assert denied["reason"] == "proposal_write_requires_local_test_ledger_or_later_production_gate"
     assert denied["proposal_write_performed"] is False
     assert denied["authoritative_memory_changed"] is False
+
+
+@pytest.mark.parametrize("max_objects", [True, 1.0, "1"])
+def test_approval_board_production_gate_requires_exact_integer_max_objects(
+    tmp_path: Path,
+    max_objects,
+):
+    service = _service(tmp_path)
+    service.allow_production_object_authority_writes = True
+
+    gate = service._approval_board_production_gate(
+        {
+            "approved": True,
+            "approval_ref": "preapproved-user-gate-2026-07-06",
+            "scope": "single_project_single_object",
+            "project": PROJECT,
+            "max_objects": max_objects,
+            "configured_deployed_mcp_identity_matches_source": True,
+            "read_after_write_smoke_plan": True,
+            "rollback_or_supersession_plan": True,
+            "no_raw_private_evidence": True,
+        },
+        target_object_id="ko:RepoDocument:production-gate-smoke",
+        target_project=PROJECT,
+        target_object_type="RepoDocument",
+        decision_count=1,
+        action="promote",
+    )
+
+    assert gate["allowed"] is False
+    assert "max_objects_1" in gate["missing_gate_evidence"]
 
 
 def test_mcp_object_authority_production_gate_writes_single_object_with_postcheck(tmp_path: Path):

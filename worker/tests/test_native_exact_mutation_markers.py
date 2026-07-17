@@ -184,8 +184,6 @@ def test_couchdb_provider_rejects_non_fixed_or_malformed_database_info(mutation)
     (
         ("update_seq", "40-next"),
         ("purge_seq", 2),
-        ("doc_count", 79),
-        ("doc_del_count", 4),
     ),
 )
 def test_same_couchdb_provider_fails_closed_on_reset_or_decrease(
@@ -203,6 +201,26 @@ def test_same_couchdb_provider_fails_closed_on_reset_or_decrease(
 
     with pytest.raises(NativeExactMutationMarkerError, match="decreased or recreated"):
         provider.read_marker()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("doc_count", 79), ("doc_del_count", 4)),
+)
+def test_same_couchdb_provider_allows_document_counter_changes(
+    field: str,
+    value: int,
+) -> None:
+    adapter = _CouchAdapter(_couch_info())
+    provider = CouchDBExactMutationMarkerProvider(
+        _contract("corpus"),
+        adapter,
+        expected_continuity_anchor_hash=_COUCH_CONTINUITY_ANCHOR,
+    )
+    provider.read_marker()
+    adapter.info[field] = value
+
+    _assert_exact_record(provider.read_marker(), "corpus")
 
 
 @pytest.mark.parametrize("anchor", (None, "sha256:" + "9" * 64))
@@ -327,12 +345,11 @@ def test_nats_provider_requires_matching_publisher_authorization_anchor(
 @pytest.mark.parametrize(
     ("section", "field", "value"),
     (
-        ("stream", "num_deleted", 1),
         ("consumer", "num_ack_pending", 2),
         ("consumer", "num_pending", 2),
     ),
 )
-def test_nats_provider_rejects_stream_or_consumer_counter_parity_drift(
+def test_nats_provider_allows_stream_or_consumer_counter_parity_drift(
     section: str,
     field: str,
     value: int,
@@ -345,6 +362,23 @@ def test_nats_provider_rejects_stream_or_consumer_counter_parity_drift(
         else metadata["durable_consumers"][0]
     )
     target[field] = value  # type: ignore[index]
+
+    marker = NatsJetStreamExactMutationMarkerProvider(
+        contract,
+        _NatsAdapter(metadata),
+        expected_durable_count=1,
+        expected_publisher_authorization_anchor_hash=(
+            _NATS_PUBLISHER_AUTHORIZATION_ANCHOR
+        ),
+    ).read_marker()
+
+    _assert_exact_record(marker, "queue")
+
+
+def test_nats_provider_rejects_stream_sequence_accounting_inconsistency() -> None:
+    contract = _contract("queue")
+    metadata = _nats_metadata(contract)
+    metadata["stream"]["num_deleted"] = 1  # type: ignore[index]
 
     with pytest.raises(NativeExactMutationMarkerError, match="metadata"):
         NatsJetStreamExactMutationMarkerProvider(
@@ -552,9 +586,6 @@ def test_same_sqlite_provider_rejects_permission_file_or_connection_replacement(
     (
         ("query_only", 0, "query_only"),
         ("schema_version", 6, "schema drift"),
-        ("data_version", 16, "decreased or recreated"),
-        ("page_count", 47, "decreased or recreated"),
-        ("freelist_count", 1, "decreased or recreated"),
     ),
 )
 def test_same_sqlite_provider_fails_closed_on_scope_schema_or_counter_anomaly(
@@ -575,3 +606,25 @@ def test_same_sqlite_provider_fails_closed_on_scope_schema_or_counter_anomaly(
 
     with pytest.raises(NativeExactMutationMarkerError, match=message):
         provider.read_marker()
+
+
+@pytest.mark.parametrize(
+    ("pragma", "value"),
+    (("data_version", 16), ("page_count", 47), ("freelist_count", 1)),
+)
+def test_same_sqlite_provider_allows_data_and_page_counter_decreases(
+    pragma: str,
+    value: int,
+) -> None:
+    connection = _SQLiteConnection(_pragma_values())
+    provider = SQLiteExactMutationMarkerProvider(
+        _contract("product_db"),
+        path=object(),
+        connector=_SQLiteConnector(connection),
+        file_inspector=_SQLiteFileInspector(_file_metadata()),
+        expected_schema_version=5,
+    )
+    provider.read_marker()
+    connection.values[pragma] = value
+
+    _assert_exact_record(provider.read_marker(), "product_db")

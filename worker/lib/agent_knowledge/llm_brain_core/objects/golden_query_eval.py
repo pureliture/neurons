@@ -1079,12 +1079,26 @@ def _p8_evidence_failures(evidence: Mapping[str, Any]) -> list[str]:
         "runtime_evidence_collector_permission_audit_collection_status"
     )
     if permission_audit_collection_status == "collected":
-        if evidence.get("runtime_evidence_collector_permission_audit_schema") != (
-            "permission_sensitive_runtime_audit_evidence.v1"
-        ):
-            failures.append("p8_permission_sensitive_audit_collector_missing")
-        if int(evidence.get("runtime_evidence_collector_permission_audit_event_count") or 0) < 2:
-            failures.append("p8_permission_sensitive_audit_events_missing")
+        audit_schema = evidence.get("runtime_evidence_collector_permission_audit_schema")
+        audit_event_count = evidence.get(
+            "runtime_evidence_collector_permission_audit_event_count"
+        )
+        if audit_schema == "permission_sensitive_runtime_audit_evidence.v1":
+            if (
+                isinstance(audit_event_count, bool)
+                or not isinstance(audit_event_count, int)
+                or audit_event_count < 2
+            ):
+                failures.append("p8_permission_sensitive_audit_events_missing")
+        elif audit_schema == "permission_sensitive_runtime_audit_evidence.v2":
+            if (
+                isinstance(audit_event_count, bool)
+                or not isinstance(audit_event_count, int)
+                or audit_event_count != 1
+            ):
+                failures.append("p8_permission_sensitive_audit_events_missing")
+        else:
+            failures.append("p8_permission_sensitive_audit_schema_unknown")
         if evidence.get("runtime_evidence_collector_permission_audit_store_status") != "recorded":
             failures.append("p8_permission_sensitive_audit_store_not_recorded")
     elif permission_audit_collection_status != "not_collected":

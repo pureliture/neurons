@@ -43,7 +43,8 @@ class _FakeQdrantClient:
         ordering=None,
         **kwargs,
     ) -> dict[str, object]:
-        self.collections.setdefault(collection_name, {})
+        if collection_name not in self.collections:
+            raise ValueError("collection_not_found")
         for point in points:
             point_id = _point_field(point, "id")
             self.collections[collection_name][point_id] = {
@@ -104,8 +105,17 @@ class _WrongSizeEmbedding:
         return [1.0]
 
 
+def _created_fake_client(client_type=_FakeQdrantClient):
+    client = client_type()
+    client.create_collection(
+        collection_name="mirror_test",
+        vectors_config={"size": 8, "distance": "Cosine"},
+    )
+    return client
+
+
 def test_qdrant_docling_adapter_upserts_normalized_markdown_and_reports_status():
-    client = _FakeQdrantClient()
+    client = _created_fake_client()
     document = _document(body="Ledger stays canonical. Mirror is search only.")
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
@@ -131,7 +141,7 @@ def test_qdrant_docling_adapter_upserts_normalized_markdown_and_reports_status()
 
 
 def test_qdrant_docling_adapter_natural_key_is_exact_and_blank_keys_fail_closed():
-    client = _FakeQdrantClient()
+    client = _created_fake_client()
     document = _document()
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
@@ -168,7 +178,7 @@ def test_qdrant_docling_adapter_natural_key_is_exact_and_blank_keys_fail_closed(
 
 
 def test_qdrant_docling_adapter_query_returns_mirror_labeled_hits():
-    client = _FakeQdrantClient()
+    client = _created_fake_client()
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
         direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
@@ -191,7 +201,7 @@ def test_qdrant_docling_adapter_query_returns_mirror_labeled_hits():
 
 
 def test_qdrant_docling_adapter_filters_target_profile_before_limit():
-    client = _FakeQdrantClient()
+    client = _created_fake_client()
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
         direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
@@ -209,7 +219,7 @@ def test_qdrant_docling_adapter_filters_target_profile_before_limit():
 
 
 def test_qdrant_docling_adapter_accepts_list_query_response():
-    client = _ListQueryQdrantClient()
+    client = _created_fake_client(_ListQueryQdrantClient)
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
         direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
@@ -239,7 +249,7 @@ def test_qdrant_docling_adapter_query_checks_embedding_size():
 
 
 def test_qdrant_docling_adapter_blocks_new_private_content_from_normalizer():
-    client = _FakeQdrantClient()
+    client = _created_fake_client()
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
         direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
@@ -255,7 +265,7 @@ def test_qdrant_docling_adapter_blocks_new_private_content_from_normalizer():
 
 
 def test_qdrant_docling_adapter_blocks_nested_secret_like_metadata():
-    client = _FakeQdrantClient()
+    client = _created_fake_client()
     adapter = QdrantDoclingMirrorAdapter(
         client=client,
         direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
@@ -266,6 +276,13 @@ def test_qdrant_docling_adapter_blocks_nested_secret_like_metadata():
 
     with pytest.raises(ValueError, match="secret-like metadata key rejected"):
         adapter.submit_document(_document(metadata={"nested": {"api_key": "redacted-but-key-is-secret"}}))
+
+
+def test_fake_qdrant_client_rejects_upsert_to_missing_collection():
+    client = _FakeQdrantClient()
+
+    with pytest.raises(ValueError, match="collection_not_found"):
+        client.upsert(collection_name="missing", points=[])
 
 
 def test_qdrant_docling_adapter_constructor_never_probes_or_creates_collection():

@@ -168,6 +168,14 @@ def _call_name(node: ast.Call) -> str:
     return ""
 
 
+def _is_allowlisted_callsite(
+    relative_path: str,
+    scope: str,
+    mutation_name: str,
+) -> bool:
+    return (relative_path, scope, mutation_name) in ALLOWED_QDRANT_MUTATION_CALLS
+
+
 def test_qdrant_mutation_surface_has_exact_gateway_owned_ast_allowlist() -> None:
     package_root = Path(__file__).parents[1] / "lib" / "agent_knowledge"
     observed_allowed: set[tuple[str, str, str]] = set()
@@ -220,8 +228,8 @@ def test_qdrant_mutation_surface_has_exact_gateway_owned_ast_allowlist() -> None
                 or not (qdrant_tainted or receiver_tainted)
             ):
                 continue
-            callsite = (Path(relative).name, scope, mutation_name)
-            if callsite in ALLOWED_QDRANT_MUTATION_CALLS:
+            callsite = (relative, scope, mutation_name)
+            if _is_allowlisted_callsite(*callsite):
                 observed_allowed.add(callsite)
             else:
                 violations.append(f"{relative}:{scope}:{mutation_name}")
@@ -242,6 +250,19 @@ def test_qdrant_mutation_surface_has_exact_gateway_owned_ast_allowlist() -> None
     assert observed_allowed == ALLOWED_QDRANT_MUTATION_CALLS
 
 
+def test_qdrant_mutation_allowlist_rejects_nested_same_basename_callsite() -> None:
+    assert _is_allowlisted_callsite(
+        "qdrant_write_gateway_runtime.py",
+        "_QdrantProductMutationAdapter.upsert_points",
+        "upsert",
+    )
+    assert not _is_allowlisted_callsite(
+        "nested/qdrant_write_gateway_runtime.py",
+        "_QdrantProductMutationAdapter.upsert_points",
+        "upsert",
+    )
+
+
 def test_operator_api_calls_have_one_exact_cli_allowlist() -> None:
     package_root = Path(__file__).parents[1] / "lib" / "agent_knowledge"
     observed: set[tuple[str, str, str]] = set()
@@ -255,7 +276,7 @@ def test_operator_api_calls_have_one_exact_cli_allowlist() -> None:
             name = _call_name(node)
             if name not in OPERATOR_APIS:
                 continue
-            callsite = (Path(relative).name, scope, name)
+            callsite = (relative, scope, name)
             observed.add(callsite)
             if callsite not in ALLOWED_OPERATOR_CALLS:
                 violations.append(f"{relative}:{scope}:{name}")

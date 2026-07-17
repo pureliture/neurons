@@ -105,11 +105,8 @@ def evaluate_production_object_authority_permission(
         or gate_project != project
     ):
         missing.append("project_scope_match")
-    try:
-        max_objects = int(gate.get("max_objects") or 0)
-    except (TypeError, ValueError):
-        max_objects = 0
-    if max_objects != 1:
+    max_objects = gate.get("max_objects")
+    if type(max_objects) is not int or max_objects != 1:
         missing.append("max_objects_1")
     for field in _REQUIRED_TRUE_FIELDS:
         if gate.get(field) is not True:
