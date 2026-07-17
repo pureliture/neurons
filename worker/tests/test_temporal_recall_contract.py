@@ -782,9 +782,21 @@ def test_synthetic_canary_graph_episode_is_excluded_from_memory_search() -> None
         },
         observed_at="2026-07-15T11:02:00Z",
     )
+    canary_fact = OntologyEpisode.from_payload(
+        event_id="canary-graph-fact-event",
+        entity_type="GraphFact",
+        natural_id="canary-graph-fact",
+        payload={
+            "brain_id": "/project/neurons",
+            "project": "neurons",
+            "source_providers": ["lbrain-temporal-canary"],
+            "fact": "Synthetic canary graph fact",
+        },
+        observed_at="2026-07-15T11:02:00Z",
+    )
     service = BrainReadService(
         graph_adapter=FakeGraphMemoryAdapter(
-            [episode_from_session_artifact(canary), canary_task]
+            [episode_from_session_artifact(canary), canary_task, canary_fact]
         )
     )
 
