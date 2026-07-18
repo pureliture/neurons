@@ -721,14 +721,13 @@ def test_recall_service_audit_off_never_calls_production_marker_factory(
     assert service._permission_audit_product_sentinel_reader is None
 
 
-@pytest.mark.parametrize("transport", ("stdio", "http"))
-def test_mcp_transports_auto_wire_production_marker_reader(
+def _assert_mcp_transport_auto_wires_production_marker_reader(
     monkeypatch,
     tmp_path,
-    transport,
+    *,
+    transport: str,
 ):
     from agent_knowledge import cli
-    from agent_knowledge import mcp_http_server
 
     ledger_path = tmp_path / "ledger.sqlite3"
     Ledger(ledger_path)
@@ -744,27 +743,45 @@ def test_mcp_transports_auto_wire_production_marker_reader(
         "run_stdio_server",
         lambda service: calls.append(("stdio", service)),
     )
-    monkeypatch.setattr(
-        mcp_http_server,
-        "serve",
-        lambda service, **_kwargs: calls.append(("http", service)),
-    )
     argv = [
         "--ledger",
         str(ledger_path),
         "--allow-permission-sensitive-audit-probe",
     ]
 
-    result = (
-        cli._mcp_stdio_main(argv)
-        if transport == "stdio"
-        else cli._mcp_http_main(argv)
-    )
+    if transport == "stdio":
+        result = cli._mcp_stdio_main(argv)
+    else:
+        pytest.importorskip("mcp", reason="HTTP MCP transport is optional")
+        from agent_knowledge import mcp_http_server
+
+        monkeypatch.setattr(
+            mcp_http_server,
+            "serve",
+            lambda service, **_kwargs: calls.append(("http", service)),
+        )
+        result = cli._mcp_http_main(argv)
 
     assert result == 0
     assert [name for name, _ in calls] == ["marker", transport]
     service = calls[-1][1]
     assert service._permission_audit_product_sentinel_reader is marker_reader
+
+
+def test_mcp_stdio_auto_wires_production_marker_reader(monkeypatch, tmp_path):
+    _assert_mcp_transport_auto_wires_production_marker_reader(
+        monkeypatch,
+        tmp_path,
+        transport="stdio",
+    )
+
+
+def test_mcp_http_auto_wires_production_marker_reader(monkeypatch, tmp_path):
+    _assert_mcp_transport_auto_wires_production_marker_reader(
+        monkeypatch,
+        tmp_path,
+        transport="http",
+    )
 
 
 def test_permission_audit_cli_flag_is_declared_without_env_alias(capsys):
