@@ -752,7 +752,6 @@ def _assert_mcp_transport_auto_wires_production_marker_reader(
     if transport == "stdio":
         result = cli._mcp_stdio_main(argv)
     else:
-        pytest.importorskip("mcp", reason="HTTP MCP transport is optional")
         from agent_knowledge import mcp_http_server
 
         monkeypatch.setattr(
@@ -776,12 +775,20 @@ def test_mcp_stdio_auto_wires_production_marker_reader(monkeypatch, tmp_path):
     )
 
 
-def test_mcp_http_auto_wires_production_marker_reader(monkeypatch, tmp_path):
-    _assert_mcp_transport_auto_wires_production_marker_reader(
-        monkeypatch,
-        tmp_path,
-        transport="http",
-    )
+try:
+    import mcp as _mcp
+except ImportError:
+    _mcp = None
+
+
+if _mcp is not None:
+
+    def test_mcp_http_auto_wires_production_marker_reader(monkeypatch, tmp_path):
+        _assert_mcp_transport_auto_wires_production_marker_reader(
+            monkeypatch,
+            tmp_path,
+            transport="http",
+        )
 
 
 def test_permission_audit_cli_flag_is_declared_without_env_alias(capsys):
