@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 from pathlib import Path
 from typing import Any
 
@@ -468,6 +469,38 @@ def test_progress_jsonl_uses_project_ref_not_raw_project(tmp_path):
     assert events[-1]["event"] == "complete"
     assert events[-1]["completed_at"].endswith("Z")
     assert events[-1]["project_ref"] == events[0]["project_ref"]
+
+
+def test_projection_report_run_ref_binds_status_without_exposing_raw_run_id(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="run-ref-binding")
+    progress = tmp_path / "progress.jsonl"
+    dead_letter = tmp_path / "dead-letter.jsonl"
+
+    report = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=1,
+        progress_jsonl=progress,
+        dead_letter_jsonl=dead_letter,
+    )
+    status = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+        progress_jsonl=[progress],
+        dead_letter_jsonl=[dead_letter],
+    )
+
+    raw_run_id = str(json.loads(progress.read_text(encoding="utf-8").splitlines()[0])["run_id"])
+    assert report["run_ref"] == "sha256:" + hashlib.sha256(raw_run_id.encode("utf-8")).hexdigest()[:12]
+    assert re.fullmatch(r"sha256:[0-9a-f]{12}", report["run_ref"])
+    assert report["run_ref"] == status["progress"]["latest_entity_run"]["run_ref"]
+    rendered_report = json.dumps(report, sort_keys=True)
+    assert "run_id" not in rendered_report
+    assert raw_run_id not in rendered_report
 
 
 def test_runtime_lock_skips_without_calling_graph_adapter(tmp_path):
