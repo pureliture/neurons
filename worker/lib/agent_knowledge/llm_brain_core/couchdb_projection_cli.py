@@ -350,6 +350,10 @@ def run_couchdb_projection(
             "schema_version": COUCHDB_GRAPH_PROJECTION_SCHEMA_VERSION,
             "projection_schema_version": PROJECTION_SCHEMA_VERSION,
             "status": status,
+            # The runtime status command exposes the same one-way reference.
+            # Keep the raw progress run id private while allowing an activation
+            # guard to bind its postcheck to this exact projection execution.
+            "run_ref": _project_ref(run_id),
             "canonical_counts": {
                 "source_sessions": total_available,
                 "eligible_sessions": len(eligible_sessions),
