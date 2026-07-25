@@ -68,6 +68,7 @@ _COVERAGE_FIELDS = [
     "source_hash",
 ]
 _EXECUTION_SCAN_MULTIPLIER = 2
+_EXPECTED_INVENTORY_REQUEST_COUNT = 2 + (2 * len(_FAMILY_TYPES))
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SESSION_FIELDS = [
     "_id",
@@ -112,6 +113,12 @@ def _sha256(value: str) -> str:
 def _auth_header(user: str, password: str) -> str:
     token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
     return f"Basic {token}"
+
+
+def _per_request_timeout_seconds(max_runtime_seconds: float) -> float:
+    """Reserve the whole bounded budget across the inventory's fixed request set."""
+
+    return min(30.0, float(max_runtime_seconds) / _EXPECTED_INVENTORY_REQUEST_COUNT)
 
 
 def _validate_bounds(*, project: str, limit: int, max_runtime_seconds: float) -> None:
@@ -586,7 +593,7 @@ def inventory_temporal_evidence(
     duplicate_transcript_session_count = sum(
         max(0, len(documents) - 1) for documents in parent_by_session.values()
     )
-    session_mismatch_count = len((child_sessions | manifest_sessions) - parent_sessions)
+    session_mismatch_count = len(manifest_sessions - parent_sessions)
     coverage_count_mismatch_count = 0
     coverage_count_invalid_count = 0
     for session_id_hash, manifests in manifests_by_session.items():
@@ -620,7 +627,6 @@ def inventory_temporal_evidence(
         + coverage_count_mismatch_count
         + coverage_count_invalid_count
         + missing_parent_session_id_count
-        + missing_child_session_id_count
         + missing_chunk_session_id_count
         + missing_bundle_session_id_count
         + missing_manifest_session_id_count
@@ -729,7 +735,9 @@ def main(argv: list[str] | None = None) -> int:
             base_url=couchdb_url,
             db=str(os.environ.get("COUCHDB_DB") or "transcript_source"),
             auth_header=_auth_header(user, password) if user else "",
-            request_timeout_seconds=min(float(args.max_runtime_seconds), 30.0),
+            request_timeout_seconds=_per_request_timeout_seconds(
+                float(args.max_runtime_seconds)
+            ),
         )
         inventory = inventory_temporal_evidence(
             source_store=source_store,
