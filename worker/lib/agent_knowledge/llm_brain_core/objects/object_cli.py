@@ -736,6 +736,11 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     parser.add_argument("--normalize-shadow-evidence-file", default="")
     parser.add_argument("--shadow-evidence-file", default="")
     parser.add_argument("--expected-commit", default="")
+    parser.add_argument(
+        "--evaluation-scope",
+        choices=["full", "deployment_evidence_binding"],
+        default="full",
+    )
     parser.add_argument("--evidence-collection-plan", action="store_true")
     parser.add_argument("--evidence-packet-template", action="store_true")
     parser.add_argument("--collect-shadow-evidence", action="store_true")
@@ -913,6 +918,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
             build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
                 captured_evidence=capture,
                 expected_commit=args.expected_commit,
+                evaluation_scope=args.evaluation_scope,
             )
         )
         _print_json(output)
@@ -961,6 +967,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 label="post-deploy capture",
             ),
             expected_commit=args.expected_commit,
+            evaluation_scope=args.evaluation_scope,
         )
         _print_json(report)
         return 1 if report["status"] == "FAIL" else 0
@@ -981,6 +988,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 label="shadow evidence",
             ),
             expected_commit=args.expected_commit,
+            evaluation_scope=args.evaluation_scope,
         )
         _print_json(report)
         return 1 if report["status"] == "FAIL" else 0
@@ -992,6 +1000,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     report = build_source_to_candidate_runtime_readiness_report(
         live_evidence=live_evidence,
         expected_commit=args.expected_commit,
+        evaluation_scope=args.evaluation_scope,
     )
     _print_json(report)
     return 1 if report["status"] == "FAIL" else 0

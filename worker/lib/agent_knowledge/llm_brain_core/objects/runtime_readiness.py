@@ -83,6 +83,16 @@ EVIDENCE_PROVENANCE_SCHEMA = "source_to_candidate_runtime_evidence_provenance.v1
 GITOPS_DESIRED_STATE_SCHEMA = "gitops_desired_state_identity.v1"
 ARGO_RECONCILIATION_SCHEMA = "argo_reconciliation_identity.v1"
 DEPLOYMENT_EVIDENCE_BINDING_SCHEMA = "deployment_evidence_binding.v1"
+RUNTIME_READINESS_EVALUATION_SCOPE_FULL = "full"
+RUNTIME_READINESS_EVALUATION_SCOPE_DEPLOYMENT_EVIDENCE_BINDING = (
+    "deployment_evidence_binding"
+)
+RUNTIME_READINESS_EVALUATION_SCOPES = frozenset(
+    {
+        RUNTIME_READINESS_EVALUATION_SCOPE_FULL,
+        RUNTIME_READINESS_EVALUATION_SCOPE_DEPLOYMENT_EVIDENCE_BINDING,
+    }
+)
 PROJECTION_JOIN_RUNTIME_SCHEMA = "object_extraction_projection_join_preview.v1"
 SESSION_PROJECT_ROLLUP_RUNTIME_SCHEMA = "session_project_rollup_runtime_evidence.v1"
 SESSION_PROJECT_ROLLUP_PREVIEW_SCHEMA = "object_extraction_session_project_rollup_preview.v1"
@@ -680,6 +690,7 @@ def build_source_to_candidate_runtime_shadow_readiness_report(
     captured_evidence: Mapping[str, Any],
     expected_commit: str = "",
     expected_build_association_hash: str = "",
+    evaluation_scope: str = RUNTIME_READINESS_EVALUATION_SCOPE_FULL,
 ) -> dict[str, Any]:
     packet = build_source_to_candidate_runtime_shadow_evidence_packet(
         captured_evidence=captured_evidence,
@@ -688,6 +699,7 @@ def build_source_to_candidate_runtime_shadow_readiness_report(
         live_evidence=packet,
         expected_commit=expected_commit,
         expected_build_association_hash=expected_build_association_hash,
+        evaluation_scope=evaluation_scope,
     )
 
 
@@ -707,6 +719,7 @@ def build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
     captured_evidence: Mapping[str, Any],
     expected_commit: str = "",
     expected_build_association_hash: str = "",
+    evaluation_scope: str = RUNTIME_READINESS_EVALUATION_SCOPE_FULL,
 ) -> dict[str, Any]:
     packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
         captured_evidence=captured_evidence,
@@ -715,6 +728,7 @@ def build_source_to_candidate_runtime_post_deploy_capture_readiness_report(
         live_evidence=packet,
         expected_commit=expected_commit,
         expected_build_association_hash=expected_build_association_hash,
+        evaluation_scope=evaluation_scope,
     )
 
 
@@ -2730,39 +2744,20 @@ def build_source_to_candidate_runtime_readiness_report(
     live_evidence: Mapping[str, Any] | None = None,
     expected_commit: str = "",
     expected_build_association_hash: str = "",
+    evaluation_scope: str = RUNTIME_READINESS_EVALUATION_SCOPE_FULL,
 ) -> dict[str, Any]:
     evidence = live_evidence if isinstance(live_evidence, Mapping) else {}
+    resolved_evaluation_scope = _resolve_runtime_readiness_evaluation_scope(
+        evaluation_scope
+    )
     local_gate = build_source_to_authority_quality_gate_report()
-    claims = [
-        _local_product_surface_claim(local_gate),
-        _live_evidence_provenance_claim(evidence),
-        _live_tools_claim(evidence),
-        _live_agent_context_tool_hints_claim(evidence),
-        _live_agent_context_product_sections_claim(evidence),
-        _live_temporal_recall_corrective_checkpoint_claim(evidence),
-        _live_brain_objects_query_route_smokes_claim(evidence),
-        _live_source_to_candidate_projection_join_claim(evidence),
-        _live_source_to_candidate_review_loop_claim(evidence),
-        _live_session_project_rollup_claim(evidence),
-        _live_preference_artifact_memory_claim(evidence),
-        _live_permission_sensitive_audit_claim(
-            evidence,
-            expected_commit=expected_commit,
-            expected_build_association_hash=expected_build_association_hash,
-        ),
-        _live_agent_context_startup_claim(evidence),
-        _gitops_desired_state_claim(evidence, expected_commit=expected_commit),
-        _argo_reconciliation_claim(evidence),
-        _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
-        _deployment_evidence_binding_claim(evidence, expected_commit=expected_commit),
-        _live_object_authority_production_gate_policy_claim(evidence),
-        _live_object_authority_bounded_execution_claim(evidence),
-        _live_object_authority_replacement_current_claim(evidence),
-        *[
-            _production_denial_claim(evidence, claim_id=claim_id, tool_name=tool_name)
-            for claim_id, tool_name in PRODUCTION_DENIAL_CLAIMS
-        ],
-    ]
+    claims = _runtime_readiness_claims(
+        evidence,
+        local_gate=local_gate,
+        expected_commit=expected_commit,
+        expected_build_association_hash=expected_build_association_hash,
+        evaluation_scope=resolved_evaluation_scope,
+    )
     gaps = _dedupe(
         gap
         for claim in claims
@@ -2778,6 +2773,7 @@ def build_source_to_candidate_runtime_readiness_report(
     production_ready = status == "PASS" and evidence_is_live
     report = {
         "schema_version": "source_to_candidate_runtime_readiness.v1",
+        "evaluation_scope": resolved_evaluation_scope,
         "status": status,
         "claims": claims,
         "failed_claims": failed,
@@ -2800,6 +2796,59 @@ def build_source_to_candidate_runtime_readiness_report(
     }
     ensure_public_safe(report, "SourceToCandidateRuntimeReadiness")
     return report
+
+
+def _resolve_runtime_readiness_evaluation_scope(value: str) -> str:
+    scope = str(value or RUNTIME_READINESS_EVALUATION_SCOPE_FULL)
+    if scope not in RUNTIME_READINESS_EVALUATION_SCOPES:
+        raise ValueError("unsupported runtime readiness evaluation scope")
+    return scope
+
+
+def _runtime_readiness_claims(
+    evidence: Mapping[str, Any],
+    *,
+    local_gate: Mapping[str, Any],
+    expected_commit: str,
+    expected_build_association_hash: str,
+    evaluation_scope: str,
+) -> list[dict[str, Any]]:
+    deployment_binding_claims = [
+        _live_evidence_provenance_claim(evidence),
+        _gitops_desired_state_claim(evidence, expected_commit=expected_commit),
+        _argo_reconciliation_claim(evidence),
+        _live_deployed_identity_claim(evidence, expected_commit=expected_commit),
+        _deployment_evidence_binding_claim(evidence, expected_commit=expected_commit),
+    ]
+    if evaluation_scope == RUNTIME_READINESS_EVALUATION_SCOPE_DEPLOYMENT_EVIDENCE_BINDING:
+        return deployment_binding_claims
+    return [
+        _local_product_surface_claim(local_gate),
+        deployment_binding_claims[0],
+        _live_tools_claim(evidence),
+        _live_agent_context_tool_hints_claim(evidence),
+        _live_agent_context_product_sections_claim(evidence),
+        _live_temporal_recall_corrective_checkpoint_claim(evidence),
+        _live_brain_objects_query_route_smokes_claim(evidence),
+        _live_source_to_candidate_projection_join_claim(evidence),
+        _live_source_to_candidate_review_loop_claim(evidence),
+        _live_session_project_rollup_claim(evidence),
+        _live_preference_artifact_memory_claim(evidence),
+        _live_permission_sensitive_audit_claim(
+            evidence,
+            expected_commit=expected_commit,
+            expected_build_association_hash=expected_build_association_hash,
+        ),
+        _live_agent_context_startup_claim(evidence),
+        *deployment_binding_claims[1:],
+        _live_object_authority_production_gate_policy_claim(evidence),
+        _live_object_authority_bounded_execution_claim(evidence),
+        _live_object_authority_replacement_current_claim(evidence),
+        *[
+            _production_denial_claim(evidence, claim_id=claim_id, tool_name=tool_name)
+            for claim_id, tool_name in PRODUCTION_DENIAL_CLAIMS
+        ],
+    ]
 
 
 def _local_product_surface_claim(local_gate: Mapping[str, Any]) -> dict[str, Any]:

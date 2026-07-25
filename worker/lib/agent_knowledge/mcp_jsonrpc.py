@@ -573,6 +573,7 @@ def _dispatch_brain_source_to_candidate_runtime_readiness_tool(
         expected_build_association_hash=str(
             arguments.get("expected_build_association_hash") or ""
         ),
+        evaluation_scope=str(arguments.get("evaluation_scope") or "full"),
         evidence_collection_plan=arguments.get("evidence_collection_plan") is True,
         evidence_packet_template=arguments.get("evidence_packet_template") is True,
         collect_shadow_evidence=arguments.get("collect_shadow_evidence") is True,
