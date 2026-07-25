@@ -23,6 +23,10 @@ from agent_knowledge.llm_brain_core.objects.post_deploy_mcp_capture import (
     validate_post_deploy_mcp_url,
 )
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
+    ARGO_RECONCILIATION_SCHEMA_V2,
+    ARGO_RECONCILIATION_SCHEMA_V3,
+    DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V2,
+    DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V3,
     EVIDENCE_PROVENANCE_SCHEMA,
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
     REQUIRED_AGENT_CONTEXT_SECTIONS,
@@ -36,6 +40,27 @@ from agent_knowledge.mcp_tools import BRAIN_QUERY_TOOL_NAME
 
 
 _BOUND_SOURCE_COMMIT = "c" * 40
+
+
+def _deferred_temporal_guard_argo(
+    *,
+    schema_version: str,
+    deferred_count: int = 1,
+) -> dict:
+    return {
+        "schema_version": schema_version,
+        "reconciliation_source": "sanitized_argo_application_summary",
+        "reconciled_ops_revision": "a" * 40,
+        "sync_status": "OutOfSync",
+        "health_status": "Healthy",
+        "reconciliation_mode": "deferred_non_prune_temporal_guard",
+        "operation_state": "none",
+        "deferred_resource_count": deferred_count,
+        "deferred_config_map_count": deferred_count,
+        "deferred_temporal_guard_count": deferred_count,
+        "other_out_of_sync_resource_count": 0,
+        "production_mutation_performed": False,
+    }
 
 
 def _fake_agent_context_product(*, consumer: str = "codex") -> dict:
@@ -4197,7 +4222,31 @@ def test_collect_post_deploy_mcp_capture_calculates_gitops_deployment_binding():
     assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "validated"
 
 
-def test_collect_post_deploy_mcp_capture_allowlists_deferred_temporal_guard_v2():
+@pytest.mark.parametrize(
+    ("schema_version", "binding_schema", "deferred_count"),
+    [
+        (
+            ARGO_RECONCILIATION_SCHEMA_V2,
+            DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V2,
+            1,
+        ),
+        (
+            ARGO_RECONCILIATION_SCHEMA_V3,
+            DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V3,
+            1,
+        ),
+        (
+            ARGO_RECONCILIATION_SCHEMA_V3,
+            DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V3,
+            2,
+        ),
+    ],
+)
+def test_collect_post_deploy_mcp_capture_allowlists_deferred_temporal_guard_variants(
+    schema_version,
+    binding_schema,
+    deferred_count,
+):
     state = {
         "schema_version": "gitops_desired_state_identity.v1",
         "images_include_expected_commit": True,
@@ -4209,20 +4258,10 @@ def test_collect_post_deploy_mcp_capture_allowlists_deferred_temporal_guard_v2()
         "expected_image_ref_count": 1,
         "production_mutation_performed": False,
     }
-    argo = {
-        "schema_version": "argo_reconciliation_identity.v2",
-        "reconciliation_source": "sanitized_argo_application_summary",
-        "reconciled_ops_revision": "a" * 40,
-        "sync_status": "OutOfSync",
-        "health_status": "Healthy",
-        "reconciliation_mode": "deferred_non_prune_temporal_guard",
-        "operation_state": "none",
-        "deferred_resource_count": 1,
-        "deferred_config_map_count": 1,
-        "deferred_temporal_guard_count": 1,
-        "other_out_of_sync_resource_count": 0,
-        "production_mutation_performed": False,
-    }
+    argo = _deferred_temporal_guard_argo(
+        schema_version=schema_version,
+        deferred_count=deferred_count,
+    )
     session = _FakeMcpSession()
 
     @asynccontextmanager
@@ -4248,16 +4287,54 @@ def test_collect_post_deploy_mcp_capture_allowlists_deferred_temporal_guard_v2()
     )
 
     assert capture["argo_reconciliation"] == argo
-    assert capture["deployment_evidence_binding"]["schema_version"] == (
-        "deployment_evidence_binding.v2"
-    )
+    assert capture["deployment_evidence_binding"]["schema_version"] == binding_schema
     argo_plan = capture["runtime_readiness_plan"]["argo_reconciliation_contract"]
     assert argo_plan["status"] == "validated"
-    assert argo_plan["accepted_variants"][1]["schema_version"] == (
-        "argo_reconciliation_identity.v2"
+    assert any(
+        variant["schema_version"] == schema_version
+        and variant["deferred_resource_count"] == deferred_count
+        and variant["deferred_config_map_count"] == deferred_count
+        and variant["deferred_temporal_guard_count"] == deferred_count
+        for variant in argo_plan["accepted_variants"]
     )
     serialized = json.dumps(capture, sort_keys=True)
     assert "resource_name" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("deferred_resource_count", 0),
+        ("deferred_resource_count", 3),
+        ("deferred_config_map_count", 2),
+        ("deferred_temporal_guard_count", True),
+        ("deferred_temporal_guard_count", "2"),
+        ("other_out_of_sync_resource_count", 1),
+        ("operation_state", "Running"),
+        ("production_mutation_performed", True),
+    ],
+)
+def test_collect_post_deploy_mcp_capture_rejects_nonexact_v3_deferred_counts(
+    field,
+    value,
+):
+    argo = _deferred_temporal_guard_argo(
+        schema_version=ARGO_RECONCILIATION_SCHEMA_V3,
+    )
+    argo[field] = value
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield _FakeMcpSession()
+
+    with pytest.raises(ValueError, match="unsupported field"):
+        asyncio.run(
+            collect_source_to_candidate_post_deploy_mcp_capture(
+                mcp_url="https://mcp.example.test/mcp",
+                argo_reconciliation=argo,
+                session_factory=_fake_session_factory,
+            )
+        )
 
 
 def test_runtime_readiness_plan_view_does_not_project_untrusted_argo_variant_details():
@@ -4314,6 +4391,11 @@ def test_runtime_readiness_plan_view_does_not_project_untrusted_argo_variant_det
             "deferred_resource_count",
             {"namespace": "must-not-leak-v2-namespace"},
         ),
+        (
+            "argo_reconciliation_identity.v3",
+            "deferred_resource_count",
+            {"namespace": "must-not-leak-v3-namespace"},
+        ),
     ],
 )
 def test_collect_post_deploy_mcp_capture_rejects_nested_argo_identity_fields(
@@ -4329,7 +4411,10 @@ def test_collect_post_deploy_mcp_capture_rejects_nested_argo_identity_fields(
         "health_status": "Healthy",
         "production_mutation_performed": False,
     }
-    if schema_version == "argo_reconciliation_identity.v2":
+    if schema_version in {
+        "argo_reconciliation_identity.v2",
+        "argo_reconciliation_identity.v3",
+    }:
         argo.update(
             {
                 "sync_status": "OutOfSync",
@@ -4361,24 +4446,16 @@ def test_collect_post_deploy_mcp_capture_rejects_nested_argo_identity_fields(
     "forbidden_field",
     ["resource_name", "host", "secret", "dataset_id", "document_id", "session_id"],
 )
+@pytest.mark.parametrize(
+    "schema_version",
+    [ARGO_RECONCILIATION_SCHEMA_V2, ARGO_RECONCILIATION_SCHEMA_V3],
+)
 def test_collect_post_deploy_mcp_capture_rejects_raw_argo_identity_fields(
     forbidden_field,
+    schema_version,
 ):
-    argo = {
-        "schema_version": "argo_reconciliation_identity.v2",
-        "reconciliation_source": "sanitized_argo_application_summary",
-        "reconciled_ops_revision": "a" * 40,
-        "sync_status": "OutOfSync",
-        "health_status": "Healthy",
-        "reconciliation_mode": "deferred_non_prune_temporal_guard",
-        "operation_state": "none",
-        "deferred_resource_count": 1,
-        "deferred_config_map_count": 1,
-        "deferred_temporal_guard_count": 1,
-        "other_out_of_sync_resource_count": 0,
-        "production_mutation_performed": False,
-        forbidden_field: "must-not-leak",
-    }
+    argo = _deferred_temporal_guard_argo(schema_version=schema_version)
+    argo[forbidden_field] = "must-not-leak"
 
     @asynccontextmanager
     async def _fake_session_factory(_mcp_url: str):
