@@ -177,7 +177,8 @@ def _required_state_schema_preflight(
     """
 
     try:
-        with state_db.connect() as connection:
+        preflight_db = RAGIngressStateDB(state_db.path, read_only=True)
+        with preflight_db.connect() as connection:
             rows = connection.execute(
                 "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN (?, ?)",
                 tuple(sorted(_REQUIRED_STATE_TABLES)),
@@ -193,7 +194,7 @@ def _required_state_schema_preflight(
             "missing_required_table_count": missing_count,
         }
     try:
-        with state_db.connect() as connection:
+        with preflight_db.connect() as connection:
             payload_row = connection.execute(
                 """
                 SELECT COUNT(*) AS count
@@ -812,9 +813,10 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     effective_argv = list(sys.argv[1:] if argv is None else argv)
     execute = bool(args.execute)
+    project = str(args.project or "").strip()
     try:
         _validate_bounds(
-            project=str(args.project or ""),
+            project=project,
             limit=int(args.limit),
             max_runtime_seconds=float(args.max_runtime_seconds),
         )
@@ -857,7 +859,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         state_db = RAGIngressStateDB(args.state_db, read_only=True)
-        preflight = _required_state_schema_preflight(state_db, project=str(args.project or ""))
+        preflight = _required_state_schema_preflight(state_db, project=project)
         if preflight is not None:
             print(
                 json.dumps(
@@ -887,7 +889,7 @@ def main(argv: list[str] | None = None) -> int:
         report = backfill_temporal_metadata(
             state_db=state_db,
             source_store=store,
-            project=str(args.project),
+            project=project,
             limit=int(args.limit),
             max_runtime_seconds=float(args.max_runtime_seconds),
             execute=execute,

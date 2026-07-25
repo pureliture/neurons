@@ -21,6 +21,7 @@ from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceS
 from agent_knowledge.couchdb_source.temporal_evidence_inventory import (
     DEFAULT_INDEX_DESIGN_DOCUMENT,
     DEFAULT_INDEX_NAME,
+    _per_request_timeout_seconds,
     inventory_temporal_evidence,
     main,
 )
@@ -360,6 +361,11 @@ def test_limit_is_per_family_and_global_bound_is_four_families() -> None:
     assert report["global_document_limit"] == 4
 
 
+def test_inventory_request_timeout_reserves_the_bounded_run_budget() -> None:
+    assert _per_request_timeout_seconds(100) == 10
+    assert _per_request_timeout_seconds(600) == 30
+
+
 def test_coverage_manifest_is_a_cross_check_not_direct_temporal_evidence() -> None:
     documents = _source_documents(chunk_temporal=("", ""))
     documents[0]["observed_at_start"] = "2026-07-01T01:00:00Z"
@@ -636,7 +642,7 @@ def test_http_store_sends_explicit_index_and_disables_mango_fallback_without_wri
     sequence = store.read_change_sequence()
     found = store.find_by_type_with_execution_stats(
         "conversation_chunk",
-        selector={"project": "neurons"},
+        selector={"project": "neurons", "doc_type": "coverage_manifest"},
         fields=["_id", "_rev", "observed_at_start", "observed_at_end"],
         limit=11,
         use_index=[DEFAULT_INDEX_DESIGN_DOCUMENT, DEFAULT_INDEX_NAME],
@@ -657,3 +663,4 @@ def test_http_store_sends_explicit_index_and_disables_mango_fallback_without_wri
     assert calls[2][2]["use_index"] == [DEFAULT_INDEX_DESIGN_DOCUMENT, DEFAULT_INDEX_NAME]
     assert calls[2][2]["allow_fallback"] is False
     assert calls[2][2]["execution_stats"] is True
+    assert calls[2][2]["selector"]["doc_type"] == "conversation_chunk"

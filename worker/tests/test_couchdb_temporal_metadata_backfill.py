@@ -1182,7 +1182,7 @@ def test_cli_defaults_to_dry_run_and_live_requires_exact_argv_approval(tmp_path)
         "--state-db",
         str(state_db.path),
         "--project",
-        PROJECT,
+        f" {PROJECT} ",
         "--limit",
         "10",
         "--max-runtime-seconds",

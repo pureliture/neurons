@@ -444,7 +444,7 @@ class CouchDBHttpSourceStore:
         a scan bound.  It never creates an index or follows a bookmark.
         """
 
-        query_selector = {"doc_type": doc_type, **(selector or {})}
+        query_selector = {**(selector or {}), "doc_type": doc_type}
         status, payload = self._request(
             "POST",
             f"/{self.db}/_find",
