@@ -10,6 +10,7 @@ from collections.abc import Callable
 from .couchdb_source import build_cli as couchdb_build_cli
 from .couchdb_source import migration_flow_cli as couchdb_migration_flow_cli
 from .couchdb_source import migration_cli
+from .couchdb_source import temporal_evidence_inventory
 from .ledger import Ledger
 from .llm_brain_core import cli as llm_brain_core_cli
 from .llm_brain_core import bulk_semantic_cli as llm_brain_bulk_semantic_cli
@@ -143,6 +144,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "couchdb-projection-invalidation-canary": projection_invalidation_canary.main,
     "couchdb-temporal-metadata-backfill": temporal_metadata_backfill.main,
     "couchdb-temporal-revision-rebuild": temporal_revision_rebuild.main,
+    "couchdb-temporal-evidence-inventory": temporal_evidence_inventory.main,
     "transcript-migration": migration_cli.main,
     "transcript-quality": _pending_server_command("transcript-quality"),
     "transcript-resources": _pending_server_command("transcript-resources"),
@@ -190,6 +192,11 @@ COMMAND_METADATA: dict[str, dict[str, object]] = {
         "runtime_category": "human_gated_additive_canary",
         "deletion_candidate": False,
         "live_mutation_requires_approval": True,
+    },
+    "couchdb-temporal-evidence-inventory": {
+        "runtime_category": "read_only",
+        "deletion_candidate": False,
+        "live_mutation_requires_approval": False,
     },
 }
 

@@ -46,6 +46,7 @@ from .state_cli import DEFAULT_TRANSCRIPT_TARGET_PROFILE
 BACKFILL_OPERATION = "couchdb_temporal_metadata_backfill"
 BACKFILL_SCHEMA_VERSION = "couchdb_temporal_metadata_backfill.v1"
 _TARGET_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_REQUIRED_STATE_TABLES = frozenset({"delivery_payloads", "delivery_jobs"})
 
 
 @dataclass(frozen=True)
@@ -161,6 +162,88 @@ def _validate_bounds(*, project: str, limit: int, max_runtime_seconds: float) ->
         raise ValueError("limit must be positive")
     if not math.isfinite(float(max_runtime_seconds)) or float(max_runtime_seconds) <= 0:
         raise ValueError("max_runtime_seconds must be positive")
+
+
+def _required_state_schema_preflight(
+    state_db: RAGIngressStateDB,
+    *,
+    project: str,
+) -> dict[str, Any] | None:
+    """Verify the immutable payload-evidence schema without altering the DB.
+
+    A shadow worker database intentionally has a different schema.  Its
+    materialized ingest rows cannot replace the original wire-payload evidence,
+    so this recovery operation must stop rather than initialize or migrate it.
+    """
+
+    try:
+        preflight_db = RAGIngressStateDB(state_db.path, read_only=True)
+        with preflight_db.connect() as connection:
+            rows = connection.execute(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN (?, ?)",
+                tuple(sorted(_REQUIRED_STATE_TABLES)),
+            ).fetchall()
+    except Exception:
+        return {"error": "state_db_schema_preflight_failed"}
+
+    present = {str(row["name"] or "") for row in rows}
+    missing_count = len(_REQUIRED_STATE_TABLES - present)
+    if missing_count:
+        return {
+            "error": "state_db_schema_missing_required_table",
+            "missing_required_table_count": missing_count,
+        }
+    try:
+        with preflight_db.connect() as connection:
+            payload_row = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM delivery_payloads
+                WHERE json_valid(payload_json)
+                  AND COALESCE(
+                        NULLIF(json_extract(payload_json, '$.payload.document.metadata.project'), ''),
+                        json_extract(payload_json, '$.source.project'),
+                        ''
+                      ) = ?
+                  AND COALESCE(
+                        NULLIF(json_extract(payload_json, '$.payload.document.metadata.type'), ''),
+                        json_extract(payload_json, '$.kind'),
+                        ''
+                      ) = 'conversation_chunk'
+                """,
+                (project,),
+            ).fetchone()
+    except Exception:
+        return {"error": "state_db_schema_preflight_failed"}
+    payload_count = int(payload_row["count"] or 0) if payload_row is not None else 0
+    if payload_count == 0:
+        return {
+            "error": "state_db_retained_payload_evidence_unavailable",
+            "retained_payload_project_count": 0,
+        }
+    return None
+
+
+def _blocked_state_schema_report(
+    *,
+    error: str,
+    dry_run: bool,
+    missing_required_table_count: int | None = None,
+    retained_payload_project_count: int | None = None,
+) -> dict[str, Any]:
+    report = _error_report(error, dry_run=dry_run)
+    report["state_db_preflight"] = {
+        "mode": "read_only",
+        "required_table_count": len(_REQUIRED_STATE_TABLES),
+        "schema_valid": False,
+    }
+    if missing_required_table_count is not None:
+        report["state_db_preflight"]["missing_required_table_count"] = (
+            missing_required_table_count
+        )
+    if retained_payload_project_count is not None:
+        report["state_db_preflight"]["retained_payload_project_count"] = retained_payload_project_count
+    return report
 
 
 def _payload_rows(
@@ -387,6 +470,14 @@ def backfill_temporal_metadata(
     resolved_target_fingerprints = _normalized_target_fingerprints(
         target_fingerprints
     )
+    preflight = _required_state_schema_preflight(state_db, project=project)
+    if preflight is not None:
+        return _blocked_state_schema_report(
+            error=str(preflight["error"]),
+            dry_run=not execute,
+            missing_required_table_count=preflight.get("missing_required_table_count"),
+            retained_payload_project_count=preflight.get("retained_payload_project_count"),
+        )
     started = monotonic()
     rows = _payload_rows(state_db, project=project)
     candidates: list[_Candidate] = []
@@ -704,6 +795,7 @@ def _error_report(error: str, *, dry_run: bool) -> dict[str, Any]:
         "dry_run": dry_run,
         "updated_count": 0,
         "error_count": 1,
+        "gap_count": 1,
         "mutation_performed": False,
         "raw_ids_printed": False,
         "raw_bodies_printed": False,
@@ -721,9 +813,10 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     effective_argv = list(sys.argv[1:] if argv is None else argv)
     execute = bool(args.execute)
+    project = str(args.project or "").strip()
     try:
         _validate_bounds(
-            project=str(args.project or ""),
+            project=project,
             limit=int(args.limit),
             max_runtime_seconds=float(args.max_runtime_seconds),
         )
@@ -766,6 +859,24 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         state_db = RAGIngressStateDB(args.state_db, read_only=True)
+        preflight = _required_state_schema_preflight(state_db, project=project)
+        if preflight is not None:
+            print(
+                json.dumps(
+                    _blocked_state_schema_report(
+                        error=str(preflight["error"]),
+                        dry_run=not execute,
+                        missing_required_table_count=preflight.get(
+                            "missing_required_table_count"
+                        ),
+                        retained_payload_project_count=preflight.get(
+                            "retained_payload_project_count"
+                        ),
+                    ),
+                    sort_keys=True,
+                )
+            )
+            return 2
         store = CouchDBHttpSourceStore(
             base_url=target.couchdb_url,
             db=target.couchdb_db,
@@ -778,7 +889,7 @@ def main(argv: list[str] | None = None) -> int:
         report = backfill_temporal_metadata(
             state_db=state_db,
             source_store=store,
-            project=str(args.project),
+            project=project,
             limit=int(args.limit),
             max_runtime_seconds=float(args.max_runtime_seconds),
             execute=execute,
