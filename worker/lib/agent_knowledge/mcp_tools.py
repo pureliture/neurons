@@ -541,6 +541,11 @@ def list_tools() -> list[dict]:
                             "external build association anchor다."
                         ),
                     },
+                    "evaluation_scope": {
+                        "type": "string",
+                        "enum": ["full", "deployment_evidence_binding"],
+                        "default": "full",
+                    },
                     "evidence_collection_plan": {"type": "boolean", "default": False},
                     "evidence_packet_template": {"type": "boolean", "default": False},
                     "collect_shadow_evidence": {"type": "boolean", "default": False},
