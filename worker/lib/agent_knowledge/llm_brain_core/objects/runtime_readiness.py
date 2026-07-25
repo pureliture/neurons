@@ -83,8 +83,10 @@ EVIDENCE_PROVENANCE_SCHEMA = "source_to_candidate_runtime_evidence_provenance.v1
 GITOPS_DESIRED_STATE_SCHEMA = "gitops_desired_state_identity.v1"
 ARGO_RECONCILIATION_SCHEMA = "argo_reconciliation_identity.v1"
 ARGO_RECONCILIATION_SCHEMA_V2 = "argo_reconciliation_identity.v2"
+ARGO_RECONCILIATION_SCHEMA_V3 = "argo_reconciliation_identity.v3"
 DEPLOYMENT_EVIDENCE_BINDING_SCHEMA = "deployment_evidence_binding.v1"
 DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V2 = "deployment_evidence_binding.v2"
+DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V3 = "deployment_evidence_binding.v3"
 RUNTIME_READINESS_EVALUATION_SCOPE_FULL = "full"
 RUNTIME_READINESS_EVALUATION_SCOPE_DEPLOYMENT_EVIDENCE_BINDING = (
     "deployment_evidence_binding"
@@ -148,6 +150,12 @@ _ARGO_RECONCILIATION_V2_COUNT_CONTRACT = {
     "deferred_temporal_guard_count": 1,
     "other_out_of_sync_resource_count": 0,
 }
+_ARGO_RECONCILIATION_V3_DEFERRED_COUNT_FIELDS = (
+    "deferred_resource_count",
+    "deferred_config_map_count",
+    "deferred_temporal_guard_count",
+)
+_ARGO_RECONCILIATION_V3_ALLOWED_DEFERRED_COUNTS = frozenset({1, 2})
 _ARGO_RECONCILIATION_V2_KEYS = frozenset(
     {
         *_ARGO_RECONCILIATION_V1_KEYS,
@@ -156,6 +164,7 @@ _ARGO_RECONCILIATION_V2_KEYS = frozenset(
         *_ARGO_RECONCILIATION_V2_COUNT_CONTRACT,
     }
 )
+_ARGO_RECONCILIATION_V3_KEYS = _ARGO_RECONCILIATION_V2_KEYS
 _DEPLOYED_IDENTITY_KEYS = frozenset(
     {
         "contains_expected_commit",
@@ -409,6 +418,12 @@ LIVE_EVIDENCE_COLLECTION_MODES = {
     "redacted_operator_packet",
 }
 ALLOWED_EVIDENCE_MUTATION_SCOPES = {"none", "bounded_production_authority_execution"}
+_EVIDENCE_PROVENANCE_PROTECTED_OUTPUT_FLAGS = (
+    "raw_private_evidence_returned",
+    "secret_returned",
+    "host_topology_returned",
+    "raw_external_ids_returned",
+)
 
 
 def argo_reconciliation_public_contract() -> dict[str, Any]:
@@ -439,6 +454,23 @@ def argo_reconciliation_public_contract() -> dict[str, Any]:
                 "other_out_of_sync_resource_count": 0,
                 "production_mutation_performed": False,
             },
+            *[
+                {
+                    "schema_version": ARGO_RECONCILIATION_SCHEMA_V3,
+                    "reconciliation_source": "sanitized_argo_application_summary",
+                    "reconciled_ops_revision": "collector_sets_public_ref",
+                    "sync_status": "OutOfSync",
+                    "health_status": "Healthy",
+                    "reconciliation_mode": "deferred_non_prune_temporal_guard",
+                    "operation_state": "none",
+                    "deferred_resource_count": deferred_count,
+                    "deferred_config_map_count": deferred_count,
+                    "deferred_temporal_guard_count": deferred_count,
+                    "other_out_of_sync_resource_count": 0,
+                    "production_mutation_performed": False,
+                }
+                for deferred_count in sorted(_ARGO_RECONCILIATION_V3_ALLOWED_DEFERRED_COUNTS)
+            ],
         ],
     }
 
@@ -457,6 +489,11 @@ def deployment_evidence_binding_public_contract() -> dict[str, Any]:
             {
                 "argo_reconciliation_schema": ARGO_RECONCILIATION_SCHEMA_V2,
                 "schema_version": DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V2,
+                "canonical_tuple_hash": "sha256:<64-hex>",
+            },
+            {
+                "argo_reconciliation_schema": ARGO_RECONCILIATION_SCHEMA_V3,
+                "schema_version": DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V3,
                 "canonical_tuple_hash": "sha256:<64-hex>",
             },
         ],
@@ -669,8 +706,78 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
     )
     collection = captured.get("collection")
     collection = collection if isinstance(collection, Mapping) else {}
-    provenance = captured.get("evidence_provenance")
-    provenance = provenance if isinstance(provenance, Mapping) else collection
+    supplied_provenance = captured.get("evidence_provenance")
+    requires_v3_provenance = (
+        safe_argo_reconciliation.get("schema_version")
+        == ARGO_RECONCILIATION_SCHEMA_V3
+    )
+    provenance = (
+        supplied_provenance
+        if isinstance(supplied_provenance, Mapping)
+        else ({} if requires_v3_provenance else collection)
+    )
+    if requires_v3_provenance:
+        evidence_provenance = {
+            "schema_version": public_safe_text(
+                str(provenance.get("schema_version") or ""), max_chars=80
+            ),
+            "collection_mode": public_safe_text(
+                str(provenance.get("collection_mode") or ""), max_chars=80
+            ),
+            "network_used": provenance.get("network_used") is True,
+            "mutation_scope": public_safe_text(
+                str(provenance.get("mutation_scope") or ""), max_chars=80
+            ),
+            "raw_private_evidence_returned": provenance.get(
+                "raw_private_evidence_returned"
+            ),
+            "secret_returned": provenance.get("secret_returned"),
+            "host_topology_returned": provenance.get("host_topology_returned"),
+            "raw_external_ids_returned": provenance.get("raw_external_ids_returned"),
+        }
+        supplied_mutation_alias = captured.get("mutation_performed")
+        production_mutation_performed = (
+            True
+            if (
+                _evidence_execution_reports_mutation(captured)
+                or _v3_capture_contains_execution_evidence(captured)
+            )
+            else (
+                captured.get("production_mutation_performed")
+                if supplied_mutation_alias is None or supplied_mutation_alias is False
+                else supplied_mutation_alias
+            )
+        )
+    else:
+        evidence_provenance = {
+            "schema_version": public_safe_text(
+                str(provenance.get("schema_version") or EVIDENCE_PROVENANCE_SCHEMA),
+                max_chars=80,
+            ),
+            "collection_mode": public_safe_text(
+                str(provenance.get("collection_mode") or "post_deploy_read_only_smoke"),
+                max_chars=80,
+            ),
+            "network_used": provenance.get("network_used") is True,
+            "mutation_scope": public_safe_text(
+                str(provenance.get("mutation_scope") or "none"),
+                max_chars=80,
+            ),
+            "raw_private_evidence_returned": _provenance_flag(
+                provenance, "raw_private_evidence_returned"
+            ),
+            "secret_returned": _provenance_flag(provenance, "secret_returned"),
+            "host_topology_returned": _provenance_flag(
+                provenance, "host_topology_returned"
+            ),
+            "raw_external_ids_returned": _provenance_flag(
+                provenance, "raw_external_ids_returned"
+            ),
+        }
+        production_mutation_performed = (
+            captured.get("production_mutation_performed") is True
+            or captured.get("mutation_performed") is True
+        )
     packet = {
         "schema_version": "source_to_candidate_runtime_evidence.v1",
         "tool_names": _string_list(captured.get("tool_names")),
@@ -696,27 +803,8 @@ def build_source_to_candidate_runtime_shadow_evidence_packet(
         "production_denials": _public_safe_mapping(captured.get("production_denials")),
         "tool_schemas": _public_safe_mapping(captured.get("tool_schemas")),
         "production_authority_gate": _public_safe_mapping(captured.get("production_authority_gate")),
-        "evidence_provenance": {
-            "schema_version": public_safe_text(
-                str(provenance.get("schema_version") or EVIDENCE_PROVENANCE_SCHEMA),
-                max_chars=80,
-            ),
-            "collection_mode": public_safe_text(
-                str(provenance.get("collection_mode") or "post_deploy_read_only_smoke"),
-                max_chars=80,
-            ),
-            "network_used": provenance.get("network_used") is True,
-            "mutation_scope": public_safe_text(
-                str(provenance.get("mutation_scope") or "none"),
-                max_chars=80,
-            ),
-            "raw_private_evidence_returned": _provenance_flag(provenance, "raw_private_evidence_returned"),
-            "secret_returned": _provenance_flag(provenance, "secret_returned"),
-            "host_topology_returned": _provenance_flag(provenance, "host_topology_returned"),
-            "raw_external_ids_returned": _provenance_flag(provenance, "raw_external_ids_returned"),
-        },
-        "production_mutation_performed": captured.get("production_mutation_performed") is True
-        or captured.get("mutation_performed") is True,
+        "evidence_provenance": evidence_provenance,
+        "production_mutation_performed": production_mutation_performed,
     }
     if "permission_sensitive_audit" in captured:
         packet["permission_sensitive_audit"] = _public_safe_mapping(
@@ -2979,6 +3067,14 @@ def _live_evidence_provenance_claim(evidence: Mapping[str, Any]) -> dict[str, An
         mutation_scope=mutation_scope,
         execution_reports_mutation=execution_reports_mutation,
     )
+    v3_capture_failures = _v3_deployment_evidence_provenance_failures(
+        evidence=evidence,
+        provenance=provenance,
+        collection_mode=collection_mode,
+        mutation_scope=mutation_scope,
+        execution_reports_mutation=execution_reports_mutation,
+    )
+    failures = _dedupe([*failures, *v3_capture_failures])
     redaction_check = "forbidden_fields_present" if any(
         gap
         in failures
@@ -2997,6 +3093,7 @@ def _live_evidence_provenance_claim(evidence: Mapping[str, Any]) -> dict[str, An
         else []
     )
     gaps = _dedupe([*failures, *live_mode_gaps])
+    v3_capture_required = _uses_v3_deployment_evidence_binding(evidence)
     return {
         "claim_id": "live.evidence.provenance",
         "evidence_class": "runtime_evidence_provenance",
@@ -3004,7 +3101,11 @@ def _live_evidence_provenance_claim(evidence: Mapping[str, Any]) -> dict[str, An
         "schema_version": public_safe_text(str(provenance.get("schema_version") or ""), max_chars=80),
         "collection_mode": collection_mode,
         "source": collection_mode,
-        "is_live": live_mode and network_used_for_evidence,
+        "is_live": (
+            live_mode
+            and network_used_for_evidence
+            and (not v3_capture_required or not failures)
+        ),
         "network_used_for_evidence": network_used_for_evidence,
         "mutation_scope": mutation_scope,
         "production_mutation_performed": execution_reports_mutation,
@@ -3044,6 +3145,49 @@ def _evidence_provenance_failures(
     return _dedupe(failures)
 
 
+def _uses_v3_deployment_evidence_binding(evidence: Mapping[str, Any]) -> bool:
+    argo = evidence.get("argo_reconciliation")
+    return (
+        isinstance(argo, Mapping)
+        and argo.get("schema_version") == ARGO_RECONCILIATION_SCHEMA_V3
+    )
+
+
+def _v3_deployment_evidence_provenance_failures(
+    *,
+    evidence: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+    collection_mode: str,
+    mutation_scope: str,
+    execution_reports_mutation: bool,
+) -> list[str]:
+    if not _uses_v3_deployment_evidence_binding(evidence):
+        return []
+
+    failures: list[str] = []
+    if collection_mode != "post_deploy_read_only_smoke":
+        failures.append("v3_deployment_evidence_provenance_collection_mode_invalid")
+    if provenance.get("network_used") is not True:
+        failures.append("v3_deployment_evidence_provenance_network_used_invalid")
+    if mutation_scope != "none":
+        failures.append("v3_deployment_evidence_provenance_mutation_scope_invalid")
+    if evidence.get("production_mutation_performed") is not False:
+        failures.append("v3_deployment_evidence_provenance_mutation_status_invalid")
+    if (
+        "mutation_performed" in evidence
+        and evidence.get("mutation_performed") is not False
+    ):
+        failures.append("v3_deployment_evidence_provenance_mutation_alias_invalid")
+    if execution_reports_mutation:
+        failures.append("v3_deployment_evidence_provenance_mutation_reported")
+    if _v3_capture_contains_execution_evidence(evidence):
+        failures.append("v3_deployment_evidence_provenance_execution_evidence_present")
+    for flag in _EVIDENCE_PROVENANCE_PROTECTED_OUTPUT_FLAGS:
+        if provenance.get(flag) is not False:
+            failures.append(f"v3_deployment_evidence_provenance_{flag}")
+    return _dedupe(failures)
+
+
 def _evidence_execution_reports_mutation(evidence: Mapping[str, Any]) -> bool:
     execution = evidence.get("production_authority_execution")
     execution = execution if isinstance(execution, Mapping) else {}
@@ -3056,6 +3200,18 @@ def _evidence_execution_reports_mutation(evidence: Mapping[str, Any]) -> bool:
         or evidence.get("mutation_performed") is True
         or _bounded_execution_reports_mutation(proposal, decision)
         or _replacement_current_reports_mutation(replacement)
+    )
+
+
+def _v3_capture_contains_execution_evidence(
+    evidence: Mapping[str, Any],
+) -> bool:
+    return any(
+        field in evidence
+        for field in (
+            "production_authority_execution",
+            "production_authority_replacement_current",
+        )
     )
 
 
@@ -5631,6 +5787,35 @@ def _argo_reconciliation_errors(value: Mapping[str, Any]) -> list[str]:
         for field, expected in _ARGO_RECONCILIATION_V2_COUNT_CONTRACT.items():
             if _strict_int_or_none(value.get(field)) != expected:
                 errors.append(f"argo_reconciliation_v2_{field}_invalid")
+    elif schema_version == ARGO_RECONCILIATION_SCHEMA_V3:
+        errors = _unknown_keys(value, _ARGO_RECONCILIATION_V3_KEYS)
+        if value.get("sync_status") != "OutOfSync":
+            errors.append("argo_reconciliation_v3_sync_status_invalid")
+        if (
+            value.get("reconciliation_mode")
+            != "deferred_non_prune_temporal_guard"
+        ):
+            errors.append("argo_reconciliation_v3_mode_invalid")
+        if value.get("operation_state") != "none":
+            errors.append("argo_reconciliation_v3_operation_state_invalid")
+        deferred_counts = {
+            field: _strict_int_or_none(value.get(field))
+            for field in _ARGO_RECONCILIATION_V3_DEFERRED_COUNT_FIELDS
+        }
+        invalid_deferred_counts = [
+            field
+            for field, count in deferred_counts.items()
+            if count not in _ARGO_RECONCILIATION_V3_ALLOWED_DEFERRED_COUNTS
+        ]
+        if invalid_deferred_counts:
+            errors.extend(
+                f"argo_reconciliation_v3_{field}_invalid"
+                for field in invalid_deferred_counts
+            )
+        elif len(set(deferred_counts.values())) != 1:
+            errors.append("argo_reconciliation_v3_deferred_counts_mismatch")
+        if _strict_int_or_none(value.get("other_out_of_sync_resource_count")) != 0:
+            errors.append("argo_reconciliation_v3_other_out_of_sync_resource_count_invalid")
     else:
         errors = _unknown_keys(value, _ARGO_RECONCILIATION_V1_KEYS)
         errors.append("argo_reconciliation_schema_mismatch")
@@ -5835,7 +6020,10 @@ def _deployment_evidence_binding_tuple(
             deployed_identity.get("production_mutation_performed") is True
         ),
     }
-    if argo_reconciliation.get("schema_version") == ARGO_RECONCILIATION_SCHEMA_V2:
+    if argo_reconciliation.get("schema_version") in {
+        ARGO_RECONCILIATION_SCHEMA_V2,
+        ARGO_RECONCILIATION_SCHEMA_V3,
+    }:
         canonical_tuple.update(
             {
                 "reconciliation_mode": public_safe_text(
@@ -5858,6 +6046,8 @@ def _deployment_evidence_binding_tuple(
 def _deployment_evidence_binding_schema(
     argo_reconciliation: Mapping[str, Any],
 ) -> str:
+    if argo_reconciliation.get("schema_version") == ARGO_RECONCILIATION_SCHEMA_V3:
+        return DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V3
     if argo_reconciliation.get("schema_version") == ARGO_RECONCILIATION_SCHEMA_V2:
         return DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V2
     return DEPLOYMENT_EVIDENCE_BINDING_SCHEMA
@@ -5870,6 +6060,8 @@ def _deployment_evidence_binding_claim(
     desired = _deployment_evidence_layer(evidence, "gitops_desired_state")
     argo = _deployment_evidence_layer(evidence, "argo_reconciliation")
     deployed = _deployment_evidence_layer(evidence, "deployed_identity")
+    provenance = evidence.get("evidence_provenance")
+    provenance = provenance if isinstance(provenance, Mapping) else {}
     packet_expected_commit = evidence.get("expected_commit")
     external_expected_commit = expected_commit
     effective_expected_commit = public_safe_text(
@@ -5897,6 +6089,21 @@ def _deployment_evidence_binding_claim(
     ):
         failures.append("gitops_deployment_evidence_binding_ops_revision_mismatch")
     if binding:
+        failures.extend(
+            _v3_deployment_evidence_provenance_failures(
+                evidence=evidence,
+                provenance=provenance,
+                collection_mode=public_safe_text(
+                    str(provenance.get("collection_mode") or ""), max_chars=80
+                ),
+                mutation_scope=public_safe_text(
+                    str(provenance.get("mutation_scope") or ""), max_chars=80
+                ),
+                execution_reports_mutation=_evidence_execution_reports_mutation(
+                    evidence
+                ),
+            )
+        )
         failures.extend(
             _binding_errors(binding, argo_reconciliation=argo)
         )
@@ -5930,7 +6137,8 @@ def _deployment_evidence_binding_claim(
             failures.append("gitops_deployment_evidence_binding_ops_revision_mismatch")
         expected_sync_status = (
             "OutOfSync"
-            if argo.get("schema_version") == ARGO_RECONCILIATION_SCHEMA_V2
+            if argo.get("schema_version")
+            in {ARGO_RECONCILIATION_SCHEMA_V2, ARGO_RECONCILIATION_SCHEMA_V3}
             else "Synced"
         )
         if argo.get("sync_status") != expected_sync_status:
