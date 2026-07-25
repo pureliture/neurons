@@ -2919,12 +2919,24 @@ def _argo_reconciliation_view(value: Any) -> dict[str, Any]:
         (
             variant
             for variant in argo_reconciliation_public_contract()["accepted_variants"]
-            if value.get("schema_version") == variant["schema_version"]
+            if isinstance(variant, Mapping)
+            and _argo_reconciliation_matches_variant(value, variant)
         ),
         None,
     )
-    if not isinstance(expected_variant, Mapping) or set(value) != set(expected_variant):
+    if not isinstance(expected_variant, Mapping):
         raise ValueError("runtime evidence contains an unsupported field")
+
+    projected = _public_safe_mapping(value)
+    return {key: projected.get(key) for key in expected_variant}
+
+
+def _argo_reconciliation_matches_variant(
+    value: Mapping[str, Any],
+    expected_variant: Mapping[str, Any],
+) -> bool:
+    if set(value) != set(expected_variant):
+        return False
     for field, expected in expected_variant.items():
         actual = value.get(field)
         if field == "reconciled_ops_revision":
@@ -2936,9 +2948,8 @@ def _argo_reconciliation_view(value: Any) -> dict[str, Any]:
         else:
             valid = isinstance(actual, str) and actual == expected
         if not valid:
-            raise ValueError("runtime evidence contains an unsupported field")
-    projected = _public_safe_mapping(value)
-    return {key: projected.get(key) for key in expected_variant}
+            return False
+    return True
 
 
 def _reject_forbidden_runtime_input_keys(value: Any) -> None:
