@@ -213,6 +213,9 @@ def _gitops_bound_deferred_temporal_guard_v3_evidence(
     **overrides,
 ):
     evidence = _gitops_bound_live_evidence()
+    evidence.pop("production_authority_execution")
+    evidence.pop("production_authority_replacement_current")
+    evidence["production_mutation_performed"] = False
     evidence["evidence_provenance"] = _evidence_provenance()
     evidence["argo_reconciliation"] = {
         "schema_version": ARGO_RECONCILIATION_SCHEMA_V3,
@@ -425,8 +428,165 @@ def test_runtime_readiness_accepts_and_binds_equal_deferred_temporal_guard_v3(
         DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V3
     )
     assert report["status"] == "PASS"
+    assert report["evidence_is_live"] is True
+    assert report["production_ready"] is True
     assert claims["ops.argo_reconciliation.application_status"]["status"] == "validated"
     assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "validated"
+
+
+def test_runtime_readiness_v3_rejects_redacted_operator_packet_provenance():
+    evidence = _gitops_bound_deferred_temporal_guard_v3_evidence()
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=evidence,
+    )
+    packet["evidence_provenance"]["collection_mode"] = "redacted_operator_packet"
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=packet,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        evaluation_scope="deployment_evidence_binding",
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+
+    assert report["status"] == "FAIL"
+    assert report["evidence_is_live"] is False
+    assert report["production_ready"] is False
+    assert "v3_deployment_evidence_provenance_collection_mode_invalid" in report["gaps"]
+    assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "failed"
+
+
+def test_runtime_readiness_v3_preserves_missing_capture_provenance_as_invalid():
+    evidence = _gitops_bound_deferred_temporal_guard_v3_evidence()
+    evidence.pop("evidence_provenance")
+    evidence.pop("production_mutation_performed")
+    evidence["collection"] = {"network_used": True}
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=evidence,
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=packet,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        evaluation_scope="deployment_evidence_binding",
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+
+    assert packet["evidence_provenance"]["collection_mode"] == ""
+    assert packet["evidence_provenance"]["raw_private_evidence_returned"] is None
+    assert packet["production_mutation_performed"] is None
+    assert report["status"] == "FAIL"
+    assert report["evidence_is_live"] is False
+    assert report["production_ready"] is False
+    assert "v3_deployment_evidence_provenance_collection_mode_invalid" in report["gaps"]
+    assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "failed"
+
+
+def test_runtime_readiness_v3_rejects_mutation_alias_in_capture():
+    evidence = _gitops_bound_deferred_temporal_guard_v3_evidence()
+    evidence["mutation_performed"] = True
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=evidence,
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=packet,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        evaluation_scope="deployment_evidence_binding",
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+
+    assert packet["production_mutation_performed"] is True
+    assert report["status"] == "FAIL"
+    assert report["evidence_is_live"] is False
+    assert report["production_ready"] is False
+    assert "v3_deployment_evidence_provenance_mutation_status_invalid" in report["gaps"]
+    assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "failed"
+
+
+def test_runtime_readiness_v3_rejects_nested_mutation_report_in_capture():
+    evidence = _gitops_bound_deferred_temporal_guard_v3_evidence()
+    evidence["production_authority_execution"] = {
+        "proposal": {"production_mutation_performed": True},
+    }
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=evidence,
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=packet,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        evaluation_scope="deployment_evidence_binding",
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+
+    assert packet["production_mutation_performed"] is True
+    assert report["status"] == "FAIL"
+    assert report["evidence_is_live"] is False
+    assert report["production_ready"] is False
+    assert "v3_deployment_evidence_provenance_mutation_status_invalid" in report["gaps"]
+    assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "failed"
+
+
+def test_runtime_readiness_v3_rejects_nonboolean_nested_mutation_indicator():
+    evidence = _gitops_bound_deferred_temporal_guard_v3_evidence()
+    evidence["production_authority_execution"] = {
+        "proposal": {"proposal_write_performed": 1},
+    }
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=evidence,
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=packet,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        evaluation_scope="deployment_evidence_binding",
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+
+    assert packet["production_mutation_performed"] is True
+    assert report["status"] == "FAIL"
+    assert report["evidence_is_live"] is False
+    assert report["production_ready"] is False
+    assert "v3_deployment_evidence_provenance_mutation_status_invalid" in report["gaps"]
+    assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "failed"
+
+
+def test_runtime_readiness_v3_direct_evaluator_rejects_execution_evidence():
+    evidence = _gitops_bound_deferred_temporal_guard_v3_evidence()
+    evidence["production_authority_execution"] = {
+        "proposal": {"proposal_write_performed": 1},
+    }
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        evaluation_scope="deployment_evidence_binding",
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+
+    assert report["status"] == "FAIL"
+    assert report["evidence_is_live"] is False
+    assert report["production_ready"] is False
+    assert "v3_deployment_evidence_provenance_execution_evidence_present" in report["gaps"]
+    assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "failed"
+
+
+def test_runtime_readiness_v3_direct_evaluator_rejects_nonboolean_mutation_alias():
+    evidence = _gitops_bound_deferred_temporal_guard_v3_evidence()
+    evidence["mutation_performed"] = 1
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        evaluation_scope="deployment_evidence_binding",
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+
+    assert report["status"] == "FAIL"
+    assert report["evidence_is_live"] is False
+    assert report["production_ready"] is False
+    assert "v3_deployment_evidence_provenance_mutation_alias_invalid" in report["gaps"]
+    assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "failed"
 
 
 @pytest.mark.parametrize(
