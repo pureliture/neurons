@@ -1245,6 +1245,13 @@ Corrective contract:
 - projection invalidation canary의 queue bookkeeping은 ingress PVC와 분리된 ephemeral state DB만 사용합니다. synthetic canary가 shadow DB에 recovery-like table을 만들고 legacy recovery가 이를 provenance 전체로 오인할 수 없습니다.
 - 이 authority correction이 production image와 GitOps runtime에 반영되고 inventory/receipt가 stable하게 일치하기 전에는 historical repair와 Date A/B positive semantic acceptance를 `PASS`로 선언하지 않습니다. 현재 zero-result/non-empty-gap temporal response는 fail-closed 동작이며 repair 완료 증거가 아닙니다.
 
+### Deferred temporal guard reconciliation evidence (2026-07-26)
+
+- `argo_reconciliation_identity.v1`과 v2의 기존 public shape, exact count, canonical tuple hash는 immutable입니다. v2는 deferred resource/config-map/temporal-guard count가 모두 `1`인 경우만 계속 허용하며 count `2`를 넓혀 읽지 않습니다.
+- `argo_reconciliation_identity.v3`와 짝인 `deployment_evidence_binding.v3`만 deferred resource/config-map/temporal-guard count가 모두 같고 `1` 또는 `2`인 two-guard profile을 허용합니다. `other_out_of_sync_resource_count=0`, `OutOfSync`, `Healthy`, deferred non-prune mode, operation `none`, public revision, production mutation `false`는 모두 exact contract입니다. count `0`/`3`, 서로 다른 count, bool/string, protected 또는 raw identity는 fail-closed입니다.
+- v3 binding은 기존 desired/live source·image·ops revision 결속에 reconciliation mode, operation state, 세 deferred count와 `other_out_of_sync_resource_count`를 포함한 canonical tuple hash를 사용합니다. source/unit test는 v3의 두 profile을 모두 검증하지만 source merge나 CI는 deployed acceptance evidence가 아닙니다.
+- live acceptance에는 configured/deployed read path에서 수집한 sanitized read-only `post_deploy_read_only_smoke` packet이 실제 observed v3 profile과 `deployment_evidence_binding.v3`를 함께 검증하고, `network_used=true`, production mutation `false`, protected/raw identity 미반환을 보여야 합니다. image/build, GitOps desired state, reconciliation, rollout, live capture는 서로 대체하지 않는 별도 evidence로 기록합니다.
+
 Production mutation boundary:
 
 - 이 corrective run에는 사용자가 bounded production ledger/corpus/runtime mutation을 사전승인했습니다. 이는 기존 read-only evidence run과 분리된 현재 작업의 명시적 scope override입니다.
