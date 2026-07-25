@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -52,6 +53,151 @@ def _state_db(tmp_path: Path) -> RAGIngressStateDB:
     private.mkdir(mode=0o700)
     os.chmod(private, 0o700)
     return RAGIngressStateDB(private / "state.sqlite")
+
+
+def _schema_only_state_db(tmp_path: Path, *, tables: tuple[str, ...]) -> Path:
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    os.chmod(private, 0o700)
+    path = private / "state.sqlite"
+    with sqlite3.connect(path) as connection:
+        for table in tables:
+            connection.execute(f"CREATE TABLE {table} (id TEXT)")
+    return path
+
+
+@pytest.mark.parametrize(
+    "tables",
+    (
+        (),
+        ("delivery_payloads",),
+        ("shadow_ingest_log",),
+        ("delivery_payloads", "delivery_jobs"),
+    ),
+    ids=("empty", "partial", "shadow_only", "required_tables_without_retained_rows"),
+)
+def test_cli_blocks_missing_required_state_schema_before_couchdb_or_plan_query(
+    tmp_path: Path,
+    tables: tuple[str, ...],
+) -> None:
+    state_db_path = _schema_only_state_db(tmp_path, tables=tables)
+    state_files_before = {
+        path.name: path.stat().st_mtime_ns for path in state_db_path.parent.iterdir()
+    }
+
+    with (
+        patch.dict(os.environ, {"COUCHDB_URL": "http://example.invalid"}),
+        patch(
+            "agent_knowledge.rag_ingress.temporal_metadata_backfill.CouchDBHttpSourceStore",
+            side_effect=AssertionError("must not construct CouchDB client"),
+        ) as source_store,
+        patch("sys.stdout", StringIO()) as output,
+    ):
+        assert main(
+            [
+                "--state-db",
+                str(state_db_path),
+                "--project",
+                PROJECT,
+                "--limit",
+                "10",
+                "--max-runtime-seconds",
+                "30",
+            ]
+        ) == 2
+
+    report = json.loads(output.getvalue())
+    assert report["status"] == "blocked"
+    expected_error = (
+        "state_db_schema_preflight_failed"
+        if set(tables) == {"delivery_payloads", "delivery_jobs"}
+        else "state_db_schema_missing_required_table"
+    )
+    assert report["error"] == expected_error
+    assert report["mutation_performed"] is False
+    assert report["error_count"] == 1
+    assert report["gap_count"] > 0
+    assert str(state_db_path) not in json.dumps(report, sort_keys=True)
+    source_store.assert_not_called()
+    assert {
+        path.name: path.stat().st_mtime_ns for path in state_db_path.parent.iterdir()
+    } == state_files_before
+
+
+def test_backfill_preflight_rejects_jobs_without_retained_project_payload(tmp_path: Path) -> None:
+    state_db = _state_db(tmp_path)
+    state_db.command_transaction().execute(
+        command_id="command-jobs-only",
+        command_type="transcript_ingest",
+        idempotency_key="jobs-only-key",
+        payload_hash="sha256:jobs-only",
+        result=CommandResultSpec(decision="accepted"),
+        delivery_jobs=[
+            DeliveryJobSpec(
+                job_id="job-jobs-only",
+                target_profile="index-transcript-memory",
+                document_kind="conversation_chunk",
+                idempotency_key="jobs-only-key",
+                payload_hash="sha256:jobs-only",
+            )
+        ],
+    )
+
+    report = backfill_temporal_metadata(
+        state_db=state_db,
+        source_store=_source_store(),
+        project=PROJECT,
+        limit=10,
+        max_runtime_seconds=30,
+    )
+
+    assert report["error"] == "state_db_retained_payload_evidence_unavailable"
+    assert report["state_db_preflight"]["retained_payload_project_count"] == 0
+    assert report["gap_count"] > 0
+
+
+def test_backfill_preflight_rejects_payloads_from_a_different_project_or_invalid_payload_rows(
+    tmp_path: Path,
+) -> None:
+    state_db = _state_db(tmp_path)
+    _record_payload(state_db, _payload(project="different-project"))
+    with state_db.connect() as connection:
+        connection.execute(
+            "INSERT INTO delivery_payloads (idempotency_key, payload_hash, payload_json, recorded_at) VALUES (?, ?, ?, ?)",
+            ("invalid-payload-key", "sha256:invalid", "not-json", "2026-07-09T10:00:00Z"),
+        )
+
+    report = backfill_temporal_metadata(
+        state_db=state_db,
+        source_store=_source_store(),
+        project=PROJECT,
+        limit=10,
+        max_runtime_seconds=30,
+    )
+
+    assert report["error"] == "state_db_retained_payload_evidence_unavailable"
+    assert report["state_db_preflight"]["retained_payload_project_count"] == 0
+    assert "different-project" not in json.dumps(report, sort_keys=True)
+
+
+def test_backfill_preflight_rejects_same_project_payload_of_a_different_kind(tmp_path: Path) -> None:
+    state_db = _state_db(tmp_path)
+    payload = _payload()
+    payload["kind"] = "tool_evidence_bundle"
+    payload["payload"]["document"]["metadata"]["type"] = "tool_evidence_bundle"
+    _record_payload(state_db, payload)
+
+    report = backfill_temporal_metadata(
+        state_db=state_db,
+        source_store=_source_store(),
+        project=PROJECT,
+        limit=10,
+        max_runtime_seconds=30,
+    )
+
+    assert report["error"] == "state_db_retained_payload_evidence_unavailable"
+    assert report["state_db_preflight"]["retained_payload_project_count"] == 0
+    assert report["gap_count"] > 0
 
 
 def test_resolved_backfill_target_repr_does_not_disclose_raw_target_or_password() -> None:
