@@ -4195,6 +4195,101 @@ def test_collect_post_deploy_mcp_capture_calculates_gitops_deployment_binding():
     assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "validated"
 
 
+def test_collect_post_deploy_mcp_capture_allowlists_deferred_temporal_guard_v2():
+    state = {
+        "schema_version": "gitops_desired_state_identity.v1",
+        "images_include_expected_commit": True,
+        "desired_state_source": "sanitized_ops_manifest_summary",
+        "target_revision": "main",
+        "source_commit": _BOUND_SOURCE_COMMIT,
+        "desired_image_set_hash": "sha256:" + "a" * 64,
+        "ops_revision": "a" * 40,
+        "expected_image_ref_count": 1,
+        "production_mutation_performed": False,
+    }
+    argo = {
+        "schema_version": "argo_reconciliation_identity.v2",
+        "reconciliation_source": "sanitized_argo_application_summary",
+        "reconciled_ops_revision": "a" * 40,
+        "sync_status": "OutOfSync",
+        "health_status": "Healthy",
+        "reconciliation_mode": "deferred_non_prune_temporal_guard",
+        "operation_state": "none",
+        "deferred_resource_count": 1,
+        "deferred_config_map_count": 1,
+        "deferred_temporal_guard_count": 1,
+        "other_out_of_sync_resource_count": 0,
+        "production_mutation_performed": False,
+    }
+    session = _FakeMcpSession()
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield session
+
+    capture = asyncio.run(
+        collect_source_to_candidate_post_deploy_mcp_capture(
+            mcp_url="https://mcp.example.test/mcp",
+            expected_commit=_BOUND_SOURCE_COMMIT,
+            gitops_desired_state=state,
+            argo_reconciliation=argo,
+            deployed_identity={
+                "contains_expected_commit": True,
+                "identity_source": "redacted_live_runtime_evidence",
+                "source_commit": _BOUND_SOURCE_COMMIT,
+                "live_image_set_hash": "sha256:" + "a" * 64,
+                "stale_image_ref_count": 0,
+                "production_mutation_performed": False,
+            },
+            session_factory=_fake_session_factory,
+        )
+    )
+
+    assert capture["argo_reconciliation"] == argo
+    assert capture["deployment_evidence_binding"]["schema_version"] == (
+        "deployment_evidence_binding.v2"
+    )
+    serialized = json.dumps(capture, sort_keys=True)
+    assert "resource_name" not in serialized
+
+
+@pytest.mark.parametrize(
+    "forbidden_field",
+    ["resource_name", "host", "secret", "dataset_id", "document_id", "session_id"],
+)
+def test_collect_post_deploy_mcp_capture_rejects_raw_argo_identity_fields(
+    forbidden_field,
+):
+    argo = {
+        "schema_version": "argo_reconciliation_identity.v2",
+        "reconciliation_source": "sanitized_argo_application_summary",
+        "reconciled_ops_revision": "a" * 40,
+        "sync_status": "OutOfSync",
+        "health_status": "Healthy",
+        "reconciliation_mode": "deferred_non_prune_temporal_guard",
+        "operation_state": "none",
+        "deferred_resource_count": 1,
+        "deferred_config_map_count": 1,
+        "deferred_temporal_guard_count": 1,
+        "other_out_of_sync_resource_count": 0,
+        "production_mutation_performed": False,
+        forbidden_field: "must-not-leak",
+    }
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield _FakeMcpSession()
+
+    with pytest.raises(ValueError, match="forbidden field|unsupported field"):
+        asyncio.run(
+            collect_source_to_candidate_post_deploy_mcp_capture(
+                mcp_url="https://mcp.example.test/mcp",
+                argo_reconciliation=argo,
+                session_factory=_fake_session_factory,
+            )
+        )
+
+
 def test_collect_post_deploy_mcp_capture_keeps_missing_live_identity_as_binding_gap():
     session = _FakeMcpSession()
 

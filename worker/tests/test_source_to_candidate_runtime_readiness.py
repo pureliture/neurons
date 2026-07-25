@@ -174,6 +174,33 @@ def _gitops_bound_live_evidence(**overrides):
     return evidence
 
 
+def _gitops_bound_deferred_temporal_guard_v2_evidence(**overrides):
+    evidence = _gitops_bound_live_evidence()
+    evidence["evidence_provenance"] = _evidence_provenance()
+    evidence["argo_reconciliation"] = {
+        "schema_version": "argo_reconciliation_identity.v2",
+        "reconciliation_source": "sanitized_argo_application_summary",
+        "reconciled_ops_revision": "a" * 40,
+        "sync_status": "OutOfSync",
+        "health_status": "Healthy",
+        "reconciliation_mode": "deferred_non_prune_temporal_guard",
+        "operation_state": "none",
+        "deferred_resource_count": 1,
+        "deferred_config_map_count": 1,
+        "deferred_temporal_guard_count": 1,
+        "other_out_of_sync_resource_count": 0,
+        "production_mutation_performed": False,
+    }
+    evidence.update(overrides)
+    evidence["deployment_evidence_binding"] = build_deployment_evidence_binding(
+        expected_commit=evidence["expected_commit"],
+        gitops_desired_state=evidence["gitops_desired_state"],
+        argo_reconciliation=evidence["argo_reconciliation"],
+        deployed_identity=evidence["deployed_identity"],
+    )
+    return evidence
+
+
 def test_runtime_readiness_normalizes_and_validates_gitops_deployment_evidence_binding():
     packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
         captured_evidence=_gitops_bound_live_evidence(),
@@ -289,6 +316,162 @@ def test_deployment_evidence_binding_v1_preserves_golden_tuple_hash_and_claim_id
     )
     assert claim["claim_id"] == "ops.gitops_deployment_evidence_binding"
     assert claim["status"] == "validated"
+
+
+def test_runtime_readiness_accepts_and_binds_exact_deferred_temporal_guard_v2():
+    evidence = _gitops_bound_deferred_temporal_guard_v2_evidence()
+    packet = build_source_to_candidate_runtime_post_deploy_capture_packet(
+        captured_evidence=evidence,
+    )
+    canonical_tuple = {
+        "expected_commit": _BOUND_SOURCE_COMMIT,
+        "desired_source_commit": _BOUND_SOURCE_COMMIT,
+        "deployed_source_commit": _BOUND_SOURCE_COMMIT,
+        "desired_image_set_hash": "sha256:" + "a" * 64,
+        "live_image_set_hash": "sha256:" + "a" * 64,
+        "ops_revision": "a" * 40,
+        "reconciled_ops_revision": "a" * 40,
+        "sync_status": "OutOfSync",
+        "health_status": "Healthy",
+        "reconciliation_mode": "deferred_non_prune_temporal_guard",
+        "operation_state": "none",
+        "deferred_resource_count": 1,
+        "deferred_config_map_count": 1,
+        "deferred_temporal_guard_count": 1,
+        "other_out_of_sync_resource_count": 0,
+        "expected_image_ref_count": 1,
+        "stale_image_ref_count": 0,
+        "desired_production_mutation_performed": False,
+        "argo_production_mutation_performed": False,
+        "deployed_production_mutation_performed": False,
+    }
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=packet,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        evaluation_scope="deployment_evidence_binding",
+    )
+    claims = {claim["claim_id"]: claim for claim in report["claims"]}
+
+    assert packet["argo_reconciliation"] == evidence["argo_reconciliation"]
+    assert hash_payload(canonical_tuple) == (
+        "sha256:f8baf0bde4374f4c0904f9a73ed48f3fb2fdf412818e7374c699931a358dd71b"
+    )
+    assert packet["deployment_evidence_binding"] == {
+        "schema_version": "deployment_evidence_binding.v2",
+        "canonical_tuple_hash": hash_payload(canonical_tuple),
+    }
+    assert report["status"] == "PASS"
+    assert claims["ops.argo_reconciliation.application_status"]["status"] == "validated"
+    assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "validated"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_gap"),
+    [
+        (
+            "reconciliation_mode",
+            "fully_synced",
+            "argo_reconciliation_v2_mode_invalid",
+        ),
+        (
+            "operation_state",
+            "Running",
+            "argo_reconciliation_v2_operation_state_invalid",
+        ),
+        (
+            "deferred_resource_count",
+            2,
+            "argo_reconciliation_v2_deferred_resource_count_invalid",
+        ),
+        (
+            "deferred_config_map_count",
+            0,
+            "argo_reconciliation_v2_deferred_config_map_count_invalid",
+        ),
+        (
+            "deferred_temporal_guard_count",
+            "1",
+            "argo_reconciliation_v2_deferred_temporal_guard_count_invalid",
+        ),
+        (
+            "other_out_of_sync_resource_count",
+            1,
+            "argo_reconciliation_v2_other_out_of_sync_resource_count_invalid",
+        ),
+        ("sync_status", "Synced", "argo_reconciliation_v2_sync_status_invalid"),
+        ("health_status", "Degraded", "argo_reconciliation_health_status_invalid"),
+        (
+            "production_mutation_performed",
+            True,
+            "argo_reconciliation_mutation_invalid",
+        ),
+        (
+            "reconciled_ops_revision",
+            "b" * 40,
+            "gitops_deployment_evidence_binding_ops_revision_mismatch",
+        ),
+    ],
+)
+def test_runtime_readiness_fails_closed_for_deferred_temporal_guard_v2_drift(
+    field, value, expected_gap
+):
+    evidence = _gitops_bound_deferred_temporal_guard_v2_evidence()
+    evidence["argo_reconciliation"][field] = value
+    evidence["deployment_evidence_binding"] = build_deployment_evidence_binding(
+        expected_commit=evidence["expected_commit"],
+        gitops_desired_state=evidence["gitops_desired_state"],
+        argo_reconciliation=evidence["argo_reconciliation"],
+        deployed_identity=evidence["deployed_identity"],
+    )
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        evaluation_scope="deployment_evidence_binding",
+    )
+
+    assert report["status"] == "FAIL"
+    assert expected_gap in report["gaps"]
+
+
+@pytest.mark.parametrize(
+    ("layer", "field", "value", "expected_gap"),
+    [
+        (
+            "argo_reconciliation",
+            "schema_version",
+            "argo_reconciliation_identity.v1",
+            "unexpected_field",
+        ),
+        (
+            "deployment_evidence_binding",
+            "schema_version",
+            "deployment_evidence_binding.v1",
+            "gitops_deployment_evidence_binding_schema_mismatch",
+        ),
+        (
+            "deployment_evidence_binding",
+            "canonical_tuple_hash",
+            "sha256:" + "b" * 64,
+            "gitops_deployment_evidence_binding_hash_mismatch",
+        ),
+    ],
+)
+def test_runtime_readiness_rejects_deferred_v2_version_or_hash_mismatch(
+    layer, field, value, expected_gap
+):
+    evidence = _gitops_bound_deferred_temporal_guard_v2_evidence()
+    evidence[layer][field] = value
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=evidence,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        evaluation_scope="deployment_evidence_binding",
+    )
+
+    assert report["status"] == "FAIL"
+    assert expected_gap in report["gaps"]
 
 
 def test_runtime_readiness_normalizer_does_not_mint_missing_deployment_binding():
