@@ -31,6 +31,7 @@ from .agent_context_consumer import (
 from .authority_policy import knowledge_object_class_from_id
 from .runtime_readiness import (
     ARGO_RECONCILIATION_SCHEMA,
+    ARGO_RECONCILIATION_SCHEMA_V2,
     ALLOWED_AGENT_CONTEXT_CONSUMERS,
     ALLOWED_AGENT_CONTEXT_TOOL_SAFE_TARGETS,
     EVIDENCE_PROVENANCE_SCHEMA,
@@ -151,10 +152,21 @@ _GITOPS_DESIRED_STATE_VIEW_KEYS = frozenset(
         "expected_image_ref_count", "production_mutation_performed",
     }
 )
-_ARGO_RECONCILIATION_VIEW_KEYS = frozenset(
+_ARGO_RECONCILIATION_V1_VIEW_KEYS = frozenset(
     {
         "schema_version", "reconciliation_source", "reconciled_ops_revision",
         "sync_status", "health_status", "production_mutation_performed",
+    }
+)
+_ARGO_RECONCILIATION_V2_VIEW_KEYS = frozenset(
+    {
+        *_ARGO_RECONCILIATION_V1_VIEW_KEYS,
+        "reconciliation_mode",
+        "operation_state",
+        "deferred_resource_count",
+        "deferred_config_map_count",
+        "deferred_temporal_guard_count",
+        "other_out_of_sync_resource_count",
     }
 )
 _DEPLOYED_IDENTITY_VIEW_KEYS = frozenset(
@@ -2885,10 +2897,15 @@ def _argo_reconciliation_view(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     _reject_forbidden_runtime_input_keys(value)
-    if set(value) - _ARGO_RECONCILIATION_VIEW_KEYS:
+    allowed_keys = (
+        _ARGO_RECONCILIATION_V2_VIEW_KEYS
+        if value.get("schema_version") == ARGO_RECONCILIATION_SCHEMA_V2
+        else _ARGO_RECONCILIATION_V1_VIEW_KEYS
+    )
+    if set(value) - allowed_keys:
         raise ValueError("runtime evidence contains an unsupported field")
     projected = _public_safe_mapping(value)
-    return {key: projected.get(key) for key in _ARGO_RECONCILIATION_VIEW_KEYS if key in projected}
+    return {key: projected.get(key) for key in allowed_keys if key in projected}
 
 
 def _reject_forbidden_runtime_input_keys(value: Any) -> None:
