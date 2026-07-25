@@ -36,6 +36,7 @@ def test_graph_trigger_execute_calls_graph_project_with_lock_and_outputs_redacte
                 {
                     "schema_version": "child.graph",
                     "status": "ok",
+                    "run_ref": "sha256:" + "a" * 12,
                     "projection": {"projected": 3, "duplicates": 0, "failed": 0},
                 }
             )
@@ -55,6 +56,7 @@ def test_graph_trigger_execute_calls_graph_project_with_lock_and_outputs_redacte
     assert report["status"] == "ok"
     assert report["mutation_performed"] is True
     assert report["network_used"] is True
+    assert report["step"]["report"]["run_ref"] == "sha256:" + "a" * 12
     assert len(calls) == 1
     argv = calls[0]
     assert "--runtime-dir" in argv
