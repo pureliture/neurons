@@ -330,6 +330,8 @@ class CouchDBHttpSourceStore:
         selector: dict | None = None,
         limit: int = 0,
         page_size: int = 10000,
+        use_index: str | list[str] = "",
+        allow_fallback: bool = True,
     ) -> Iterator[dict]:
         page_size = max(1, int(page_size or 10000))
         selector = {**(selector or {}), "doc_type": doc_type}
@@ -346,6 +348,9 @@ class CouchDBHttpSourceStore:
             body: dict = {"selector": selector, "limit": page_limit}
             if fields:
                 body["fields"] = fields
+            if use_index:
+                body["use_index"] = use_index
+                body["allow_fallback"] = bool(allow_fallback)
             if bookmark:
                 body["bookmark"] = bookmark
             status, payload = self._request("POST", f"/{self.db}/_find", json_body=body)
@@ -372,6 +377,8 @@ class CouchDBHttpSourceStore:
         selector: dict | None = None,
         limit: int = 0,
         page_size: int = 10000,
+        use_index: str | list[str] = "",
+        allow_fallback: bool = True,
     ) -> list[dict]:
         return list(
             self.iter_by_type(
@@ -380,8 +387,82 @@ class CouchDBHttpSourceStore:
                 selector=selector,
                 limit=limit,
                 page_size=page_size,
+                use_index=use_index,
+                allow_fallback=allow_fallback,
             )
         )
+
+    def explain_find(
+        self,
+        *,
+        selector: dict,
+        fields: list[str],
+        limit: int,
+        index_name: str,
+        index_design_document: str,
+        allow_fallback: bool,
+    ) -> dict:
+        """Return CouchDB Mango's selected plan without mutating index state."""
+
+        status, payload = self._request(
+            "POST",
+            f"/{self.db}/_explain",
+            json_body={
+                "selector": selector,
+                "fields": fields,
+                "limit": int(limit),
+                "use_index": [index_design_document, index_name],
+                "allow_fallback": bool(allow_fallback),
+            },
+        )
+        if status != 200:
+            raise CouchDBError(f"_explain failed: HTTP {status}")
+        return payload
+
+    def read_change_sequence(self) -> str:
+        """Read the current database update watermark without opening a changes feed."""
+
+        status, payload = self._request("GET", f"/{self.db}")
+        if status != 200 or "update_seq" not in payload:
+            raise CouchDBError("database update sequence read failed")
+        return str(payload["update_seq"])
+
+    def find_by_type_with_execution_stats(
+        self,
+        doc_type: str,
+        *,
+        fields: list[str],
+        selector: dict | None = None,
+        limit: int,
+        use_index: list[str] | tuple[str, str],
+        allow_fallback: bool,
+    ) -> dict:
+        """Run one bounded Mango query and return only its documents and scan totals.
+
+        This is intentionally separate from ``find_by_type`` because the
+        inventory needs CouchDB's single-query execution statistics to enforce
+        a scan bound.  It never creates an index or follows a bookmark.
+        """
+
+        query_selector = {"doc_type": doc_type, **(selector or {})}
+        status, payload = self._request(
+            "POST",
+            f"/{self.db}/_find",
+            json_body={
+                "selector": query_selector,
+                "fields": list(fields),
+                "limit": int(limit),
+                "use_index": list(use_index),
+                "allow_fallback": bool(allow_fallback),
+                "execution_stats": True,
+            },
+        )
+        if status != 200:
+            raise CouchDBError(f"_find execution-stats query failed: HTTP {status}")
+        return {
+            "documents": payload.get("docs"),
+            "execution_stats": payload.get("execution_stats"),
+        }
 
     def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]:
         selector: dict = {"session_id_hash": session_id_hash}

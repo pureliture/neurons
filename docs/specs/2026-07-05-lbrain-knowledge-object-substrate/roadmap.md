@@ -1235,6 +1235,15 @@ Corrective contract:
 - 한 materialization에 여러 event-time interval이 있으면 각 interval과 revision-local search-term hash를 결합해 보존합니다. 서로 다른 interval의 term union을 공유하지 않으며, supplied bound가 malformed이거나 일부 source event의 observed time이 누락되면 temporal lane은 fail-closed합니다. Tool-evidence bundle도 서로 다른 또는 유효하지 않은 event time을 하나의 bounded bundle로 합치지 않습니다.
 - `couchdb-projection-invalidation-canary`는 stable synthetic canary session 하나에서 distinct chunk의 source-hash 변경, session-memory/graph dirty 및 재선택, 양쪽 projected-hash catch-up, exact duplicate nonselection을 bounded public-safe receipt로 증명합니다. Dry-run plan digest, exact argv approval, 외부 hard timeout, fresh-nonce restore/retry, destructive mutation 금지가 release gate입니다.
 
+### Temporal evidence authority correction (2026-07-25)
+
+- activation CronJob이 live ingress와 같은 SQLite PVC를 mount하더라도, 해당 shadow worker의 `shadow_ingest_log` materialization 기록은 retained delivery payload provenance가 아닙니다. Mount 동일성이나 row 존재만으로 historical event/observed time authority를 주장하지 않습니다.
+- missing `delivery_payloads`/`delivery_jobs`를 빈 테이블로 생성하거나 `recorded_at`, artifact materialization time, session legacy time으로 observed time을 추정하는 복구는 금지합니다. 이 경우 기존 temporal metadata backfill은 explicit blocked report로 종료해야 합니다.
+- 새 read-only `couchdb-temporal-evidence-inventory`는 CouchDB source-native document family만 bounded scan하고, direct `observed_at_start`/`observed_at_end` pair를 temporal completeness의 유일한 positive evidence로 셉니다. Parent observed/legacy interval은 진단 aggregate로만 분리하며 mutation 또는 positive date recall을 해제하지 않습니다.
+- inventory는 명시 index precheck, complete-scan/limit/timeout, source revision drift, deterministic redacted digest를 검증합니다. 누락·malformed·reversed temporal evidence, source drift, repair-required count, incomplete scan 중 하나라도 있으면 `gap_count > 0`으로 fail-closed하고 activation은 첫 mutation 전에 멈춥니다.
+- projection invalidation canary의 queue bookkeeping은 ingress PVC와 분리된 ephemeral state DB만 사용합니다. synthetic canary가 shadow DB에 recovery-like table을 만들고 legacy recovery가 이를 provenance 전체로 오인할 수 없습니다.
+- 이 authority correction이 production image와 GitOps runtime에 반영되고 inventory/receipt가 stable하게 일치하기 전에는 historical repair와 Date A/B positive semantic acceptance를 `PASS`로 선언하지 않습니다. 현재 zero-result/non-empty-gap temporal response는 fail-closed 동작이며 repair 완료 증거가 아닙니다.
+
 Production mutation boundary:
 
 - 이 corrective run에는 사용자가 bounded production ledger/corpus/runtime mutation을 사전승인했습니다. 이는 기존 read-only evidence run과 분리된 현재 작업의 명시적 scope override입니다.
