@@ -239,6 +239,8 @@ def test_cli_reports_complete_only_for_direct_valid_source_evidence_and_redacts_
     for marker in ("private-session-id-marker", "private-revision-marker", "private body marker", "/private/locator", "private-couch-marker"):
         assert marker not in rendered
     assert {field for call in store.find_calls for field in call["fields"]}.isdisjoint({"body", "source_locator", "materialized_at"})
+    coverage_call = next(call for call in store.find_calls if call["doc_type"] == SourceDocType.COVERAGE_MANIFEST)
+    assert {"observed_at_start", "observed_at_end"}.issubset(coverage_call["fields"])
 
 
 def test_missing_invalid_and_reversed_direct_evidence_requires_repair() -> None:
@@ -377,6 +379,55 @@ def test_coverage_manifest_is_a_cross_check_not_direct_temporal_evidence() -> No
     assert report["direct_observed_at_valid_count"] == 0
     assert report["parent_observed_fallback_count"] == 2
     assert report["coverage_manifest_temporal_evidence_count"] == 0
+    assert report["gap_count"] > 0
+
+
+def test_malformed_parent_or_manifest_observed_pairs_block_even_with_direct_child_evidence() -> None:
+    cases = (
+        (
+            SourceDocType.TRANSCRIPT_SESSION,
+            "malformed_transcript_session_observed_at_count",
+        ),
+        (
+            SourceDocType.COVERAGE_MANIFEST,
+            "malformed_coverage_manifest_observed_at_count",
+        ),
+    )
+    malformed_pairs = (
+        ("missing", "2026-07-01T01:00:00Z", ""),
+        ("invalid", "not-a-time", "2026-07-01T02:00:00Z"),
+        ("reversed", "2026-07-01T02:00:00Z", "2026-07-01T01:00:00Z"),
+    )
+
+    for doc_type, counter in cases:
+        for _kind, start, end in malformed_pairs:
+            documents = _source_documents()
+            target = next(document for document in documents if document["doc_type"] == doc_type)
+            target["observed_at_start"] = start
+            target["observed_at_end"] = end
+
+            code, report = _run_cli(_FakeCouchSource(documents), _argv())
+
+            assert code == 1
+            assert report["direct_observed_at_valid_count"] == 2
+            assert report[counter] == 1
+            assert report["malformed_temporal_evidence_count"] == 1
+            assert report["temporal_complete"] is False
+            assert report["gap_count"] > 0
+
+
+def test_malformed_parent_observed_pair_is_counted_once_when_multiple_children_need_fallback() -> None:
+    documents = _source_documents(
+        chunk_temporal=("", ""),
+        parent=("2026-07-01T01:00:00Z", ""),
+    )
+
+    code, report = _run_cli(_FakeCouchSource(documents), _argv())
+
+    assert code == 1
+    assert report["malformed_transcript_session_observed_at_count"] == 1
+    assert report["malformed_temporal_evidence_count"] == 1
+    assert report["malformed_missing_pair_count"] == 1
     assert report["gap_count"] > 0
 
 
