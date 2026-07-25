@@ -813,6 +813,10 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
     assert readiness_schema["additionalProperties"] is False
     assert readiness_schema["properties"]["live_evidence"]["type"] == "object"
     assert readiness_schema["properties"]["expected_commit"]["type"] == "string"
+    assert readiness_schema["properties"]["evaluation_scope"]["enum"] == [
+        "full",
+        "deployment_evidence_binding",
+    ]
     assert readiness_schema["properties"]["evidence_collection_plan"]["type"] == "boolean"
     assert readiness_schema["properties"]["evidence_packet_template"]["type"] == "boolean"
     assert readiness_schema["properties"]["collect_shadow_evidence"]["type"] == "boolean"
@@ -990,6 +994,41 @@ def _bound_deployment_evidence(expected_commit: str) -> dict:
             deployed_identity=deployed_identity,
         ),
     }
+
+
+def test_mcp_runtime_readiness_evaluates_deployment_binding_scope(tmp_path: Path):
+    service = _service(tmp_path)
+    expected_commit = "c" * 40
+    evidence = _bound_deployment_evidence(expected_commit)
+    evidence["evidence_provenance"] = _runtime_evidence_provenance(
+        collection_mode="post_deploy_read_only_smoke",
+        mutation_scope="none",
+        network_used=True,
+    )
+    evidence["production_mutation_performed"] = False
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1200,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+                "arguments": {
+                    "live_evidence": evidence,
+                    "expected_commit": expected_commit,
+                    "evaluation_scope": "deployment_evidence_binding",
+                },
+            },
+        },
+        service,
+    )
+
+    report = response["result"]["structuredContent"]
+    assert report["status"] == "PASS"
+    assert report["production_ready"] is True
+    assert report["evaluation_scope"] == "deployment_evidence_binding"
+    assert len(report["claims"]) == 5
 
 
 def test_mcp_runtime_readiness_uses_independently_supplied_external_expected_commit(

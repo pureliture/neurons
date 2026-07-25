@@ -1600,6 +1600,7 @@ class KnowledgeSearchService:
         shadow_evidence: Mapping[str, Any] | None = None,
         expected_commit: str = "",
         expected_build_association_hash: str = "",
+        evaluation_scope: str = "full",
         evidence_collection_plan: bool = False,
         evidence_packet_template: bool = False,
         collect_shadow_evidence: bool = False,
@@ -1692,6 +1693,7 @@ class KnowledgeSearchService:
                 captured_evidence=dict(post_deploy_capture),
                 expected_commit=expected_commit,
                 expected_build_association_hash=expected_build_association_hash,
+                evaluation_scope=evaluation_scope,
             )
         if isinstance(normalize_shadow_evidence, Mapping):
             return build_source_to_candidate_runtime_shadow_evidence_packet(
@@ -1702,11 +1704,13 @@ class KnowledgeSearchService:
                 captured_evidence=dict(shadow_evidence),
                 expected_commit=expected_commit,
                 expected_build_association_hash=expected_build_association_hash,
+                evaluation_scope=evaluation_scope,
             )
         return build_source_to_candidate_runtime_readiness_report(
             live_evidence=dict(live_evidence) if isinstance(live_evidence, Mapping) else None,
             expected_commit=expected_commit,
             expected_build_association_hash=expected_build_association_hash,
+            evaluation_scope=evaluation_scope,
         )
 
     def _temporal_correctness_runtime_read_path_evidence(

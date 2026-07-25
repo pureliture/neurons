@@ -192,6 +192,47 @@ def test_runtime_readiness_normalizes_and_validates_gitops_deployment_evidence_b
     assert claims["ops.gitops_deployment_evidence_binding"]["status"] == "validated"
 
 
+def test_runtime_readiness_deployment_binding_scope_requires_only_live_deployment_evidence():
+    evidence = _gitops_bound_live_evidence()
+    deployment_evidence = {
+        key: evidence[key]
+        for key in (
+            "schema_version",
+            "expected_commit",
+            "gitops_desired_state",
+            "argo_reconciliation",
+            "deployed_identity",
+            "deployment_evidence_binding",
+        )
+    }
+    deployment_evidence["evidence_provenance"] = _evidence_provenance()
+    deployment_evidence["production_mutation_performed"] = False
+
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=deployment_evidence,
+        expected_commit=_BOUND_SOURCE_COMMIT,
+        evaluation_scope="deployment_evidence_binding",
+    )
+
+    assert report["status"] == "PASS"
+    assert report["production_ready"] is True
+    assert report["evaluation_scope"] == "deployment_evidence_binding"
+    assert {claim["claim_id"] for claim in report["claims"]} == {
+        "live.evidence.provenance",
+        "ops.gitops_desired_state.includes_expected_commit",
+        "ops.argo_reconciliation.application_status",
+        "live.deployed_identity.includes_expected_commit",
+        "ops.gitops_deployment_evidence_binding",
+    }
+
+
+def test_runtime_readiness_rejects_unknown_evaluation_scope():
+    with pytest.raises(ValueError, match="unsupported runtime readiness evaluation scope"):
+        build_source_to_candidate_runtime_readiness_report(
+            evaluation_scope="unsupported_scope"
+        )
+
+
 def test_deployment_evidence_binding_v1_preserves_golden_tuple_hash_and_claim_id():
     evidence = _gitops_bound_live_evidence()
     canonical_tuple = {
