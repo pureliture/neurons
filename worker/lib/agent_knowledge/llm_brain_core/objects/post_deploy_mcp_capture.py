@@ -43,7 +43,9 @@ from .runtime_readiness import (
     TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_SCHEMA,
     TEMPORAL_SEMANTIC_RESULT_MIN_SCORE,
     _is_commit_sha,
+    _is_public_ref,
     _mint_collector_attested_evidence,
+    argo_reconciliation_public_contract,
     build_deployment_evidence_binding,
 )
 
@@ -149,12 +151,6 @@ _GITOPS_DESIRED_STATE_VIEW_KEYS = frozenset(
         "schema_version", "images_include_expected_commit", "desired_state_source",
         "target_revision", "source_commit", "desired_image_set_hash", "ops_revision",
         "expected_image_ref_count", "production_mutation_performed",
-    }
-)
-_ARGO_RECONCILIATION_VIEW_KEYS = frozenset(
-    {
-        "schema_version", "reconciliation_source", "reconciled_ops_revision",
-        "sync_status", "health_status", "production_mutation_performed",
     }
 )
 _DEPLOYED_IDENTITY_VIEW_KEYS = frozenset(
@@ -1742,6 +1738,7 @@ def _runtime_readiness_plan_view(value: Any) -> dict[str, Any]:
     raw = _remote_mapping_or_failure(value)
     if raw.get("collector_call_failed") is True:
         return raw
+    argo_reconciliation_contract = _runtime_readiness_plan_argo_contract_view(raw)
     return {
         "schema_version": (
             "source_to_candidate_runtime_evidence_collection_plan.v1"
@@ -1756,8 +1753,39 @@ def _runtime_readiness_plan_view(value: Any) -> dict[str, Any]:
         ),
         "network_used": raw.get("network_used") is True,
         "production_mutation_performed": raw.get("production_mutation_performed") is True,
+        "argo_reconciliation_contract": argo_reconciliation_contract,
         "source_payload_hash": hash_payload(raw),
     }
+
+
+def _runtime_readiness_plan_argo_contract_view(raw: Mapping[str, Any]) -> dict[str, Any]:
+    expected_contract = argo_reconciliation_public_contract()
+    expected_step = {
+        "step_id": "collect_argo_reconciliation",
+        "evidence_field": "argo_reconciliation",
+        "required_values": [ARGO_RECONCILIATION_SCHEMA, "Synced", "Healthy"],
+        "variant_contract": expected_contract,
+        "safe_target": "sanitized_argo_application_summary",
+        "mutation_allowed": False,
+        "production_mutation_performed": False,
+    }
+    collection_steps = raw.get("collection_steps")
+    if not isinstance(collection_steps, list):
+        return {"status": "unverified"}
+    argo_step = next(
+        (
+            step
+            for step in collection_steps
+            if isinstance(step, Mapping)
+            and step.get("step_id") == "collect_argo_reconciliation"
+        ),
+        None,
+    )
+    if not isinstance(argo_step, Mapping):
+        return {"status": "unverified"}
+    if dict(argo_step) != expected_step:
+        return {"status": "unverified"}
+    return {"status": "validated", **expected_contract}
 
 
 def _route_smoke_from_call(*, route: str, raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -2884,11 +2912,33 @@ def _gitops_desired_state_view(value: Any) -> dict[str, Any]:
 def _argo_reconciliation_view(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
+    if not value:
+        return {}
     _reject_forbidden_runtime_input_keys(value)
-    if set(value) - _ARGO_RECONCILIATION_VIEW_KEYS:
+    expected_variant = next(
+        (
+            variant
+            for variant in argo_reconciliation_public_contract()["accepted_variants"]
+            if value.get("schema_version") == variant["schema_version"]
+        ),
+        None,
+    )
+    if not isinstance(expected_variant, Mapping) or set(value) != set(expected_variant):
         raise ValueError("runtime evidence contains an unsupported field")
+    for field, expected in expected_variant.items():
+        actual = value.get(field)
+        if field == "reconciled_ops_revision":
+            valid = _is_public_ref(actual)
+        elif isinstance(expected, bool):
+            valid = actual is expected
+        elif isinstance(expected, int):
+            valid = type(actual) is int and actual == expected
+        else:
+            valid = isinstance(actual, str) and actual == expected
+        if not valid:
+            raise ValueError("runtime evidence contains an unsupported field")
     projected = _public_safe_mapping(value)
-    return {key: projected.get(key) for key in _ARGO_RECONCILIATION_VIEW_KEYS if key in projected}
+    return {key: projected.get(key) for key in expected_variant}
 
 
 def _reject_forbidden_runtime_input_keys(value: Any) -> None:

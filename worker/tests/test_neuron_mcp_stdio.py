@@ -60,6 +60,8 @@ from agent_knowledge.llm_brain_core.knowledge_objects import EvidenceRef, Knowle
 from agent_knowledge.llm_brain_core.models import CONTEXT_PACK_SCHEMA_VERSION, OntologyEpisode
 from agent_knowledge.llm_brain_core.runtime import source_ref_from_catalog_event
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
+    ARGO_RECONCILIATION_SCHEMA_V2,
+    DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V2,
     build_deployment_evidence_binding,
     build_source_to_candidate_runtime_readiness_report,
 )
@@ -1131,6 +1133,21 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_p
     assert registration["run_status"] == "not_run"
     assert registration["request_ids"] == ["shadow_brain_objects_query_route_smoke"]
     assert registration["readiness_claim"] == "registration_only_not_runtime_evidence"
+    argo_step = next(
+        step
+        for step in plan["collection_steps"]
+        if step["step_id"] == "collect_argo_reconciliation"
+    )
+    assert argo_step["required_values"] == [
+        "argo_reconciliation_identity.v1",
+        "Synced",
+        "Healthy",
+    ]
+    assert argo_step["variant_contract"]["acceptance_mode"] == "exactly_one"
+    assert argo_step["variant_contract"]["accepted_variants"][1]["schema_version"] == (
+        ARGO_RECONCILIATION_SCHEMA_V2
+    )
+    assert argo_step["variant_contract"]["accepted_variants"][1]["sync_status"] == "OutOfSync"
 
 
 def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_template(tmp_path: Path):
@@ -1194,6 +1211,22 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_templ
         == "gitops_desired_state_identity.v1"
     )
     assert len(template["packet_field_templates"]["brain_objects_query_smokes"]) == 6
+    assert (
+        template["packet_field_templates"]["argo_reconciliation"]["schema_version"]
+        == "argo_reconciliation_identity.v1"
+    )
+    assert template["packet_field_templates"]["argo_reconciliation"][
+        "accepted_variants"
+    ][1]["schema_version"] == ARGO_RECONCILIATION_SCHEMA_V2
+    assert (
+        template["packet_field_templates"]["deployment_evidence_binding"][
+            "schema_version"
+        ]
+        == "deployment_evidence_binding.v1"
+    )
+    assert template["packet_field_templates"]["deployment_evidence_binding"][
+        "accepted_variants"
+    ][1]["schema_version"] == DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V2
 
 
 def test_mcp_source_to_candidate_runtime_readiness_normalizes_shadow_evidence(tmp_path: Path):

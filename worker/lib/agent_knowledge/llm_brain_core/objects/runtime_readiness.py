@@ -82,7 +82,9 @@ ALLOWED_AGENT_CONTEXT_TOOL_SAFE_TARGETS = {
 EVIDENCE_PROVENANCE_SCHEMA = "source_to_candidate_runtime_evidence_provenance.v1"
 GITOPS_DESIRED_STATE_SCHEMA = "gitops_desired_state_identity.v1"
 ARGO_RECONCILIATION_SCHEMA = "argo_reconciliation_identity.v1"
+ARGO_RECONCILIATION_SCHEMA_V2 = "argo_reconciliation_identity.v2"
 DEPLOYMENT_EVIDENCE_BINDING_SCHEMA = "deployment_evidence_binding.v1"
+DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V2 = "deployment_evidence_binding.v2"
 RUNTIME_READINESS_EVALUATION_SCOPE_FULL = "full"
 RUNTIME_READINESS_EVALUATION_SCOPE_DEPLOYMENT_EVIDENCE_BINDING = (
     "deployment_evidence_binding"
@@ -130,7 +132,7 @@ _GITOPS_DESIRED_STATE_KEYS = frozenset(
         "production_mutation_performed",
     }
 )
-_ARGO_RECONCILIATION_KEYS = frozenset(
+_ARGO_RECONCILIATION_V1_KEYS = frozenset(
     {
         "schema_version",
         "reconciliation_source",
@@ -138,6 +140,20 @@ _ARGO_RECONCILIATION_KEYS = frozenset(
         "sync_status",
         "health_status",
         "production_mutation_performed",
+    }
+)
+_ARGO_RECONCILIATION_V2_COUNT_CONTRACT = {
+    "deferred_resource_count": 1,
+    "deferred_config_map_count": 1,
+    "deferred_temporal_guard_count": 1,
+    "other_out_of_sync_resource_count": 0,
+}
+_ARGO_RECONCILIATION_V2_KEYS = frozenset(
+    {
+        *_ARGO_RECONCILIATION_V1_KEYS,
+        "reconciliation_mode",
+        "operation_state",
+        *_ARGO_RECONCILIATION_V2_COUNT_CONTRACT,
     }
 )
 _DEPLOYED_IDENTITY_KEYS = frozenset(
@@ -393,6 +409,58 @@ LIVE_EVIDENCE_COLLECTION_MODES = {
     "redacted_operator_packet",
 }
 ALLOWED_EVIDENCE_MUTATION_SCOPES = {"none", "bounded_production_authority_execution"}
+
+
+def argo_reconciliation_public_contract() -> dict[str, Any]:
+    """Return the public-safe, mutually exclusive Argo evidence variants."""
+
+    return {
+        "acceptance_mode": "exactly_one",
+        "accepted_variants": [
+            {
+                "schema_version": ARGO_RECONCILIATION_SCHEMA,
+                "reconciliation_source": "sanitized_argo_application_summary",
+                "reconciled_ops_revision": "collector_sets_public_ref",
+                "sync_status": "Synced",
+                "health_status": "Healthy",
+                "production_mutation_performed": False,
+            },
+            {
+                "schema_version": ARGO_RECONCILIATION_SCHEMA_V2,
+                "reconciliation_source": "sanitized_argo_application_summary",
+                "reconciled_ops_revision": "collector_sets_public_ref",
+                "sync_status": "OutOfSync",
+                "health_status": "Healthy",
+                "reconciliation_mode": "deferred_non_prune_temporal_guard",
+                "operation_state": "none",
+                "deferred_resource_count": 1,
+                "deferred_config_map_count": 1,
+                "deferred_temporal_guard_count": 1,
+                "other_out_of_sync_resource_count": 0,
+                "production_mutation_performed": False,
+            },
+        ],
+    }
+
+
+def deployment_evidence_binding_public_contract() -> dict[str, Any]:
+    """Return the public-safe binding schema paired with each Argo variant."""
+
+    return {
+        "acceptance_mode": "match_argo_reconciliation_variant",
+        "accepted_variants": [
+            {
+                "argo_reconciliation_schema": ARGO_RECONCILIATION_SCHEMA,
+                "schema_version": DEPLOYMENT_EVIDENCE_BINDING_SCHEMA,
+                "canonical_tuple_hash": "sha256:<64-hex>",
+            },
+            {
+                "argo_reconciliation_schema": ARGO_RECONCILIATION_SCHEMA_V2,
+                "schema_version": DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V2,
+                "canonical_tuple_hash": "sha256:<64-hex>",
+            },
+        ],
+    }
 
 
 def build_source_to_candidate_runtime_evidence_collection_plan(
@@ -680,7 +748,7 @@ def build_deployment_evidence_binding(
         deployed_identity=deployed_identity,
     )
     return {
-        "schema_version": DEPLOYMENT_EVIDENCE_BINDING_SCHEMA,
+        "schema_version": _deployment_evidence_binding_schema(argo_reconciliation),
         "canonical_tuple_hash": hash_payload(canonical_tuple),
     }
 
@@ -2462,10 +2530,12 @@ def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
             "sync_status": "Synced",
             "health_status": "Healthy",
             "production_mutation_performed": False,
+            **argo_reconciliation_public_contract(),
         },
         "deployment_evidence_binding": {
             "schema_version": DEPLOYMENT_EVIDENCE_BINDING_SCHEMA,
             "canonical_tuple_hash": "sha256:<64-hex>",
+            **deployment_evidence_binding_public_contract(),
         },
         "deployed_identity": {
             "contains_expected_commit": "collector_sets_boolean",
@@ -2700,6 +2770,7 @@ def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
             "step_id": "collect_argo_reconciliation",
             "evidence_field": "argo_reconciliation",
             "required_values": [ARGO_RECONCILIATION_SCHEMA, "Synced", "Healthy"],
+            "variant_contract": argo_reconciliation_public_contract(),
             "safe_target": "sanitized_argo_application_summary",
             "mutation_allowed": False,
             "production_mutation_performed": False,
@@ -5541,15 +5612,32 @@ def _gitops_desired_state_errors(value: Mapping[str, Any]) -> list[str]:
 def _argo_reconciliation_errors(value: Mapping[str, Any]) -> list[str]:
     if not value:
         return ["argo_reconciliation_unverified"]
-    errors = _unknown_keys(value, _ARGO_RECONCILIATION_KEYS)
-    if value.get("schema_version") != ARGO_RECONCILIATION_SCHEMA:
+    schema_version = value.get("schema_version")
+    if schema_version == ARGO_RECONCILIATION_SCHEMA:
+        errors = _unknown_keys(value, _ARGO_RECONCILIATION_V1_KEYS)
+        if value.get("sync_status") != "Synced":
+            errors.append("argo_reconciliation_sync_status_invalid")
+    elif schema_version == ARGO_RECONCILIATION_SCHEMA_V2:
+        errors = _unknown_keys(value, _ARGO_RECONCILIATION_V2_KEYS)
+        if value.get("sync_status") != "OutOfSync":
+            errors.append("argo_reconciliation_v2_sync_status_invalid")
+        if (
+            value.get("reconciliation_mode")
+            != "deferred_non_prune_temporal_guard"
+        ):
+            errors.append("argo_reconciliation_v2_mode_invalid")
+        if value.get("operation_state") != "none":
+            errors.append("argo_reconciliation_v2_operation_state_invalid")
+        for field, expected in _ARGO_RECONCILIATION_V2_COUNT_CONTRACT.items():
+            if _strict_int_or_none(value.get(field)) != expected:
+                errors.append(f"argo_reconciliation_v2_{field}_invalid")
+    else:
+        errors = _unknown_keys(value, _ARGO_RECONCILIATION_V1_KEYS)
         errors.append("argo_reconciliation_schema_mismatch")
     if value.get("reconciliation_source") != "sanitized_argo_application_summary":
         errors.append("argo_reconciliation_source_invalid")
     if not _is_public_ref(value.get("reconciled_ops_revision")):
         errors.append("argo_reconciliation_revision_invalid")
-    if value.get("sync_status") != "Synced":
-        errors.append("argo_reconciliation_sync_status_invalid")
     if value.get("health_status") != "Healthy":
         errors.append("argo_reconciliation_health_status_invalid")
     if value.get("production_mutation_performed") is not False:
@@ -5576,9 +5664,15 @@ def _deployed_identity_errors(value: Mapping[str, Any]) -> list[str]:
     return _dedupe(errors)
 
 
-def _binding_errors(value: Mapping[str, Any]) -> list[str]:
+def _binding_errors(
+    value: Mapping[str, Any],
+    *,
+    argo_reconciliation: Mapping[str, Any],
+) -> list[str]:
     errors = _unknown_keys(value, _DEPLOYMENT_EVIDENCE_BINDING_KEYS)
-    if value.get("schema_version") != DEPLOYMENT_EVIDENCE_BINDING_SCHEMA:
+    if value.get("schema_version") != _deployment_evidence_binding_schema(
+        argo_reconciliation
+    ):
         errors.append("gitops_deployment_evidence_binding_schema_mismatch")
     if not _is_sha256_digest(value.get("canonical_tuple_hash")):
         errors.append("gitops_deployment_evidence_binding_hash_invalid")
@@ -5703,7 +5797,7 @@ def _deployment_evidence_binding_tuple(
     argo_reconciliation: Mapping[str, Any],
     deployed_identity: Mapping[str, Any],
 ) -> dict[str, Any]:
-    return {
+    canonical_tuple = {
         "expected_commit": public_safe_text(str(expected_commit or ""), max_chars=80),
         "desired_source_commit": public_safe_text(
             str(gitops_desired_state.get("source_commit") or ""), max_chars=80
@@ -5741,6 +5835,32 @@ def _deployment_evidence_binding_tuple(
             deployed_identity.get("production_mutation_performed") is True
         ),
     }
+    if argo_reconciliation.get("schema_version") == ARGO_RECONCILIATION_SCHEMA_V2:
+        canonical_tuple.update(
+            {
+                "reconciliation_mode": public_safe_text(
+                    str(argo_reconciliation.get("reconciliation_mode") or ""),
+                    max_chars=80,
+                ),
+                "operation_state": public_safe_text(
+                    str(argo_reconciliation.get("operation_state") or ""),
+                    max_chars=40,
+                ),
+                **{
+                    field: _strict_int_or_none(argo_reconciliation.get(field))
+                    for field in _ARGO_RECONCILIATION_V2_COUNT_CONTRACT
+                },
+            }
+        )
+    return canonical_tuple
+
+
+def _deployment_evidence_binding_schema(
+    argo_reconciliation: Mapping[str, Any],
+) -> str:
+    if argo_reconciliation.get("schema_version") == ARGO_RECONCILIATION_SCHEMA_V2:
+        return DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V2
+    return DEPLOYMENT_EVIDENCE_BINDING_SCHEMA
 
 
 def _deployment_evidence_binding_claim(
@@ -5777,7 +5897,9 @@ def _deployment_evidence_binding_claim(
     ):
         failures.append("gitops_deployment_evidence_binding_ops_revision_mismatch")
     if binding:
-        failures.extend(_binding_errors(binding))
+        failures.extend(
+            _binding_errors(binding, argo_reconciliation=argo)
+        )
         failures.extend(_gitops_desired_state_errors(desired))
         failures.extend(_argo_reconciliation_errors(argo))
         failures.extend(_deployed_identity_errors(deployed))
@@ -5806,7 +5928,12 @@ def _deployment_evidence_binding_claim(
             failures.append("gitops_deployment_evidence_binding_image_set_hash_mismatch")
         if desired.get("ops_revision") != argo.get("reconciled_ops_revision"):
             failures.append("gitops_deployment_evidence_binding_ops_revision_mismatch")
-        if argo.get("sync_status") != "Synced":
+        expected_sync_status = (
+            "OutOfSync"
+            if argo.get("schema_version") == ARGO_RECONCILIATION_SCHEMA_V2
+            else "Synced"
+        )
+        if argo.get("sync_status") != expected_sync_status:
             failures.append("gitops_deployment_evidence_binding_sync_status_mismatch")
         if argo.get("health_status") != "Healthy":
             failures.append("gitops_deployment_evidence_binding_health_status_mismatch")
