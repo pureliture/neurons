@@ -9,6 +9,10 @@ from agent_knowledge.cli import main
 from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
 from agent_knowledge.llm_brain_core.objects import object_cli
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
+    ARGO_RECONCILIATION_SCHEMA,
+    ARGO_RECONCILIATION_SCHEMA_V2,
+    DEPLOYMENT_EVIDENCE_BINDING_SCHEMA,
+    DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V2,
     EVIDENCE_PROVENANCE_SCHEMA,
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
     REQUIRED_RUNTIME_TOOL_NAMES,
@@ -2122,6 +2126,95 @@ def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_
     assert "raw_document_id" in template["forbidden_outputs"]
 
 
+def test_runtime_readiness_public_plan_and_template_advertise_exact_argo_variants():
+    plan = build_source_to_candidate_runtime_evidence_collection_plan(
+        expected_commit="7218cb2",
+        repository="pureliture/neurons",
+        branch="main",
+        consumer="codex",
+    )
+    template = build_source_to_candidate_runtime_evidence_packet_template(
+        expected_commit="7218cb2",
+        repository="pureliture/neurons",
+        branch="main",
+        consumer="codex",
+    )
+    expected_argo_variants = [
+        {
+            "schema_version": ARGO_RECONCILIATION_SCHEMA,
+            "reconciliation_source": "sanitized_argo_application_summary",
+            "reconciled_ops_revision": "collector_sets_public_ref",
+            "sync_status": "Synced",
+            "health_status": "Healthy",
+            "production_mutation_performed": False,
+        },
+        {
+            "schema_version": ARGO_RECONCILIATION_SCHEMA_V2,
+            "reconciliation_source": "sanitized_argo_application_summary",
+            "reconciled_ops_revision": "collector_sets_public_ref",
+            "sync_status": "OutOfSync",
+            "health_status": "Healthy",
+            "reconciliation_mode": "deferred_non_prune_temporal_guard",
+            "operation_state": "none",
+            "deferred_resource_count": 1,
+            "deferred_config_map_count": 1,
+            "deferred_temporal_guard_count": 1,
+            "other_out_of_sync_resource_count": 0,
+            "production_mutation_performed": False,
+        },
+    ]
+    expected_binding_variants = [
+        {
+            "argo_reconciliation_schema": ARGO_RECONCILIATION_SCHEMA,
+            "schema_version": DEPLOYMENT_EVIDENCE_BINDING_SCHEMA,
+            "canonical_tuple_hash": "sha256:<64-hex>",
+        },
+        {
+            "argo_reconciliation_schema": ARGO_RECONCILIATION_SCHEMA_V2,
+            "schema_version": DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V2,
+            "canonical_tuple_hash": "sha256:<64-hex>",
+        },
+    ]
+    argo_step = next(
+        step
+        for step in plan["collection_steps"]
+        if step["step_id"] == "collect_argo_reconciliation"
+    )
+    argo_template = template["packet_field_templates"]["argo_reconciliation"]
+    binding_template = template["packet_field_templates"]["deployment_evidence_binding"]
+
+    assert argo_step["required_values"] == [
+        ARGO_RECONCILIATION_SCHEMA,
+        "Synced",
+        "Healthy",
+    ]
+    assert argo_step["variant_contract"] == {
+        "acceptance_mode": "exactly_one",
+        "accepted_variants": expected_argo_variants,
+    }
+    assert argo_template == {
+        "schema_version": ARGO_RECONCILIATION_SCHEMA,
+        "reconciliation_source": "sanitized_argo_application_summary",
+        "reconciled_ops_revision": "collector_sets_public_ref",
+        "sync_status": "Synced",
+        "health_status": "Healthy",
+        "production_mutation_performed": False,
+        "acceptance_mode": "exactly_one",
+        "accepted_variants": expected_argo_variants,
+    }
+    assert binding_template == {
+        "schema_version": DEPLOYMENT_EVIDENCE_BINDING_SCHEMA,
+        "canonical_tuple_hash": "sha256:<64-hex>",
+        "acceptance_mode": "match_argo_reconciliation_variant",
+        "accepted_variants": expected_binding_variants,
+    }
+    serialized = json.dumps({"plan": plan, "template": template}, sort_keys=True)
+    assert '"resource_name"' not in serialized
+    assert '"host"' not in serialized
+    assert '"dataset_id"' not in serialized
+    assert '"document_id"' not in serialized
+
+
 def test_runtime_evidence_contract_plan_template_and_shadow_routes_stay_in_sync():
     plan = build_source_to_candidate_runtime_evidence_collection_plan(
         expected_commit="7218cb2",
@@ -2304,10 +2397,24 @@ def test_runtime_readiness_plan_requests_gitops_desired_state_separately_from_de
         template["packet_field_templates"]["argo_reconciliation"]["schema_version"]
         == "argo_reconciliation_identity.v1"
     )
+    assert [
+        variant["schema_version"]
+        for variant in template["packet_field_templates"]["argo_reconciliation"][
+            "accepted_variants"
+        ]
+    ] == ["argo_reconciliation_identity.v1", "argo_reconciliation_identity.v2"]
     assert (
-        template["packet_field_templates"]["deployment_evidence_binding"]["schema_version"]
+        template["packet_field_templates"]["deployment_evidence_binding"][
+            "schema_version"
+        ]
         == "deployment_evidence_binding.v1"
     )
+    assert [
+        variant["schema_version"]
+        for variant in template["packet_field_templates"]["deployment_evidence_binding"][
+            "accepted_variants"
+        ]
+    ] == ["deployment_evidence_binding.v1", "deployment_evidence_binding.v2"]
     assert "desired_image_set_hash" in template["packet_field_templates"]["gitops_desired_state"]
     assert "live_image_set_hash" in template["packet_field_templates"]["deployed_identity"]
 

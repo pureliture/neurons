@@ -27,6 +27,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES,
     REQUIRED_AGENT_CONTEXT_SECTIONS,
     REQUIRED_RUNTIME_TOOL_NAMES,
+    build_source_to_candidate_runtime_evidence_collection_plan,
     build_source_to_candidate_runtime_post_deploy_capture_packet,
     build_source_to_candidate_runtime_post_deploy_capture_readiness_report,
 )
@@ -510,12 +511,13 @@ class _FakeMcpSession:
                 )
             return SimpleNamespace(
                 isError=False,
-                structuredContent={
-                    "schema_version": "source_to_candidate_runtime_evidence_collection_plan.v1",
-                    "collection_mode": "post_deploy_read_only_smoke",
-                    "network_used": False,
-                    "production_mutation_performed": False,
-                },
+                structuredContent=build_source_to_candidate_runtime_evidence_collection_plan(
+                    expected_commit=str(arguments.get("expected_commit") or ""),
+                    repository=str(arguments.get("repository") or ""),
+                    branch=str(arguments.get("branch") or ""),
+                    project=str(arguments.get("project") or ""),
+                    consumer=str(arguments.get("consumer") or "codex"),
+                ),
             )
         if name == "brain_context_resolve":
             return SimpleNamespace(
@@ -4249,8 +4251,110 @@ def test_collect_post_deploy_mcp_capture_allowlists_deferred_temporal_guard_v2()
     assert capture["deployment_evidence_binding"]["schema_version"] == (
         "deployment_evidence_binding.v2"
     )
+    argo_plan = capture["runtime_readiness_plan"]["argo_reconciliation_contract"]
+    assert argo_plan["status"] == "validated"
+    assert argo_plan["accepted_variants"][1]["schema_version"] == (
+        "argo_reconciliation_identity.v2"
+    )
     serialized = json.dumps(capture, sort_keys=True)
     assert "resource_name" not in serialized
+
+
+def test_runtime_readiness_plan_view_does_not_project_untrusted_argo_variant_details():
+    raw_resource_name = "must-not-leak-resource-name"
+    view = post_deploy_mcp_capture._runtime_readiness_plan_view(
+        {
+            "schema_version": "source_to_candidate_runtime_evidence_collection_plan.v1",
+            "collection_mode": "post_deploy_read_only_smoke",
+            "network_used": False,
+            "production_mutation_performed": False,
+            "collection_steps": [
+                {
+                    "step_id": "collect_argo_reconciliation",
+                    "variant_contract": {
+                        "acceptance_mode": "exactly_one",
+                        "accepted_variants": [
+                            {
+                                "schema_version": "argo_reconciliation_identity.v2",
+                                "resource_name": raw_resource_name,
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+
+    serialized = json.dumps(view, sort_keys=True)
+    assert view["argo_reconciliation_contract"] == {"status": "unverified"}
+    assert raw_resource_name not in serialized
+    assert '"resource_name"' not in serialized
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "field", "nested_identity"),
+    [
+        (
+            "argo_reconciliation_identity.v1",
+            "sync_status",
+            {"resource_name": "must-not-leak-v1-resource"},
+        ),
+        (
+            "argo_reconciliation_identity.v2",
+            "reconciliation_mode",
+            {"resource_name": "must-not-leak-v2-resource"},
+        ),
+        (
+            "argo_reconciliation_identity.v2",
+            "operation_state",
+            {"session_id": "must-not-leak-v2-session"},
+        ),
+        (
+            "argo_reconciliation_identity.v2",
+            "deferred_resource_count",
+            {"namespace": "must-not-leak-v2-namespace"},
+        ),
+    ],
+)
+def test_collect_post_deploy_mcp_capture_rejects_nested_argo_identity_fields(
+    schema_version,
+    field,
+    nested_identity,
+):
+    argo = {
+        "schema_version": schema_version,
+        "reconciliation_source": "sanitized_argo_application_summary",
+        "reconciled_ops_revision": "a" * 40,
+        "sync_status": "Synced",
+        "health_status": "Healthy",
+        "production_mutation_performed": False,
+    }
+    if schema_version == "argo_reconciliation_identity.v2":
+        argo.update(
+            {
+                "sync_status": "OutOfSync",
+                "reconciliation_mode": "deferred_non_prune_temporal_guard",
+                "operation_state": "none",
+                "deferred_resource_count": 1,
+                "deferred_config_map_count": 1,
+                "deferred_temporal_guard_count": 1,
+                "other_out_of_sync_resource_count": 0,
+            }
+        )
+    argo[field] = nested_identity
+
+    @asynccontextmanager
+    async def _fake_session_factory(_mcp_url: str):
+        yield _FakeMcpSession()
+
+    with pytest.raises(ValueError, match="unsupported field"):
+        asyncio.run(
+            collect_source_to_candidate_post_deploy_mcp_capture(
+                mcp_url="https://mcp.example.test/mcp",
+                argo_reconciliation=argo,
+                session_factory=_fake_session_factory,
+            )
+        )
 
 
 @pytest.mark.parametrize(

@@ -411,6 +411,58 @@ LIVE_EVIDENCE_COLLECTION_MODES = {
 ALLOWED_EVIDENCE_MUTATION_SCOPES = {"none", "bounded_production_authority_execution"}
 
 
+def argo_reconciliation_public_contract() -> dict[str, Any]:
+    """Return the public-safe, mutually exclusive Argo evidence variants."""
+
+    return {
+        "acceptance_mode": "exactly_one",
+        "accepted_variants": [
+            {
+                "schema_version": ARGO_RECONCILIATION_SCHEMA,
+                "reconciliation_source": "sanitized_argo_application_summary",
+                "reconciled_ops_revision": "collector_sets_public_ref",
+                "sync_status": "Synced",
+                "health_status": "Healthy",
+                "production_mutation_performed": False,
+            },
+            {
+                "schema_version": ARGO_RECONCILIATION_SCHEMA_V2,
+                "reconciliation_source": "sanitized_argo_application_summary",
+                "reconciled_ops_revision": "collector_sets_public_ref",
+                "sync_status": "OutOfSync",
+                "health_status": "Healthy",
+                "reconciliation_mode": "deferred_non_prune_temporal_guard",
+                "operation_state": "none",
+                "deferred_resource_count": 1,
+                "deferred_config_map_count": 1,
+                "deferred_temporal_guard_count": 1,
+                "other_out_of_sync_resource_count": 0,
+                "production_mutation_performed": False,
+            },
+        ],
+    }
+
+
+def deployment_evidence_binding_public_contract() -> dict[str, Any]:
+    """Return the public-safe binding schema paired with each Argo variant."""
+
+    return {
+        "acceptance_mode": "match_argo_reconciliation_variant",
+        "accepted_variants": [
+            {
+                "argo_reconciliation_schema": ARGO_RECONCILIATION_SCHEMA,
+                "schema_version": DEPLOYMENT_EVIDENCE_BINDING_SCHEMA,
+                "canonical_tuple_hash": "sha256:<64-hex>",
+            },
+            {
+                "argo_reconciliation_schema": ARGO_RECONCILIATION_SCHEMA_V2,
+                "schema_version": DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V2,
+                "canonical_tuple_hash": "sha256:<64-hex>",
+            },
+        ],
+    }
+
+
 def build_source_to_candidate_runtime_evidence_collection_plan(
     *,
     expected_commit: str = "",
@@ -2478,10 +2530,12 @@ def _runtime_evidence_packet_field_templates() -> dict[str, Any]:
             "sync_status": "Synced",
             "health_status": "Healthy",
             "production_mutation_performed": False,
+            **argo_reconciliation_public_contract(),
         },
         "deployment_evidence_binding": {
             "schema_version": DEPLOYMENT_EVIDENCE_BINDING_SCHEMA,
             "canonical_tuple_hash": "sha256:<64-hex>",
+            **deployment_evidence_binding_public_contract(),
         },
         "deployed_identity": {
             "contains_expected_commit": "collector_sets_boolean",
@@ -2716,6 +2770,7 @@ def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
             "step_id": "collect_argo_reconciliation",
             "evidence_field": "argo_reconciliation",
             "required_values": [ARGO_RECONCILIATION_SCHEMA, "Synced", "Healthy"],
+            "variant_contract": argo_reconciliation_public_contract(),
             "safe_target": "sanitized_argo_application_summary",
             "mutation_allowed": False,
             "production_mutation_performed": False,
