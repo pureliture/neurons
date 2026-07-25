@@ -61,6 +61,8 @@ _COVERAGE_FIELDS = [
     "_id",
     "_rev",
     "session_id_hash",
+    "observed_at_start",
+    "observed_at_end",
     "conversation_chunk_count",
     "tool_evidence_bundle_count",
     "conversation_coverage_hash",
@@ -326,6 +328,23 @@ def _classify_child(document: Mapping[str, object], parent: Mapping[str, object]
     return "no_evidence", direct
 
 
+def _malformed_observed_pair_details(documents: list[dict[str, object]]) -> list[str]:
+    """Return only present-but-invalid observed-time pairs.
+
+    Parent and coverage-manifest timestamps are not permitted to satisfy a
+    child evidence requirement.  If present, though, they remain part of the
+    source integrity contract and must not be silently ignored just because a
+    child has valid direct evidence.  An entirely absent pair is intentionally
+    not counted here: it is not an alternate source of temporal authority.
+    """
+
+    details = [
+        _classify_pair(document.get("observed_at_start"), document.get("observed_at_end"))
+        for document in documents
+    ]
+    return [detail for detail in details if detail not in {"absent", "valid"}]
+
+
 def _documents_by_session(documents: list[dict[str, object]]) -> tuple[dict[str, list[dict[str, object]]], int]:
     grouped: dict[str, list[dict[str, object]]] = {}
     missing_session_id_count = 0
@@ -564,7 +583,21 @@ def inventory_temporal_evidence(
         for document in children
     ]
     classifications = [classification for classification, _detail in outcomes]
-    malformed_details = [detail for classification, detail in outcomes if classification == "malformed"]
+    # Fallback resolution can encounter the same parent pair for multiple
+    # children.  Count physical source pairs independently so a single
+    # malformed document is never inflated by its child fan-out.
+    malformed_child_observed_details = _malformed_observed_pair_details(children)
+    malformed_parent_observed_details = _malformed_observed_pair_details(
+        families[SourceDocType.TRANSCRIPT_SESSION]
+    )
+    malformed_manifest_observed_details = _malformed_observed_pair_details(
+        families[SourceDocType.COVERAGE_MANIFEST]
+    )
+    malformed_all_details = [
+        *malformed_child_observed_details,
+        *malformed_parent_observed_details,
+        *malformed_manifest_observed_details,
+    ]
     no_child_evidence = 1 if not children else 0
     direct_valid = classifications.count("direct_observed")
     missing_direct = sum(
@@ -616,7 +649,13 @@ def inventory_temporal_evidence(
         parents_by_session=parent_by_session,
     )
     canonical_input_integrity = _canonical_input_integrity_counts(families=families)
-    temporal_gap_count = len(children) - direct_valid + no_child_evidence
+    temporal_gap_count = (
+        len(children)
+        - direct_valid
+        + no_child_evidence
+        + len(malformed_parent_observed_details)
+        + len(malformed_manifest_observed_details)
+    )
     coverage_gap_count = (
         manifest_only_session_count
         + orphan_child_session_count
@@ -635,7 +674,14 @@ def inventory_temporal_evidence(
     )
     changed = before_sequence != after_sequence
     gap_count = temporal_gap_count + coverage_gap_count + (1 if changed else 0)
-    temporal_complete = bool(children) and direct_valid == len(children) and coverage_gap_count == 0 and not changed
+    temporal_complete = (
+        bool(children)
+        and direct_valid == len(children)
+        and not malformed_parent_observed_details
+        and not malformed_manifest_observed_details
+        and coverage_gap_count == 0
+        and not changed
+    )
     return {
         "family_document_counts": {family: len(documents) for family, documents in sorted(families.items())},
         "per_family_limit": limit,
@@ -647,13 +693,15 @@ def inventory_temporal_evidence(
         "parent_observed_fallback_count": classifications.count("parent_observed_fallback"),
         "parent_legacy_fallback_count": classifications.count("parent_legacy_fallback"),
         "no_temporal_evidence_count": classifications.count("no_evidence") + no_child_evidence,
-        "malformed_temporal_evidence_count": classifications.count("malformed"),
+        "malformed_temporal_evidence_count": len(malformed_all_details),
+        "malformed_transcript_session_observed_at_count": len(malformed_parent_observed_details),
+        "malformed_coverage_manifest_observed_at_count": len(malformed_manifest_observed_details),
         "missing_direct_observed_at_count": missing_direct,
         "invalid_direct_observed_at_count": direct_invalid,
         "reversed_direct_observed_at_count": direct_reversed,
-        "malformed_missing_pair_count": malformed_details.count("missing"),
-        "malformed_invalid_value_count": malformed_details.count("invalid"),
-        "malformed_reversed_value_count": malformed_details.count("reversed"),
+        "malformed_missing_pair_count": malformed_all_details.count("missing"),
+        "malformed_invalid_value_count": malformed_all_details.count("invalid"),
+        "malformed_reversed_value_count": malformed_all_details.count("reversed"),
         "manifest_only_session_count": manifest_only_session_count,
         "orphan_child_session_count": orphan_child_session_count,
         "missing_manifest_session_count": missing_manifest_session_count,
