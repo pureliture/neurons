@@ -119,6 +119,23 @@ def _add_gap_chunk(store: InMemoryCouchDBSourceStore, *, chunk_id: str, text: st
     return repaired
 
 
+def _mark_projection_projected(store: InMemoryCouchDBSourceStore) -> None:
+    coverage = store.get(coverage_manifest_doc_id(SESSION_HASH))
+    assert coverage is not None
+    source_hash = str(coverage["source_hash"])
+    store.put(
+        build_projection_state_document(
+            session_id_hash=SESSION_HASH,
+            provider=PROVIDER,
+            project=PROJECT,
+            projection_status=ProjectionStatus.PROJECTED,
+            active_content_hash="sha256:" + "c" * 64,
+            source_hash=source_hash,
+            projected_source_hash=source_hash,
+        )
+    )
+
+
 def test_chunking_passes_valid_native_turn_bounds_and_drops_untrusted_bounds():
     session = TranscriptSession(
         session_id_hash=SESSION_HASH,
@@ -484,6 +501,194 @@ def test_postcheck_failure_after_successful_cas_preserves_mutation_and_invalidat
     assert report["coverage_recomputed_session_count"] == 1
     assert report["projection_pending_session_count"] == 1
     assert store.get(projection_state_doc_id(SESSION_HASH))["projection_status"] == ProjectionStatus.PENDING
+
+
+def test_transport_exception_after_temporal_write_is_reconciled_and_invalidates_projection():
+    store, candidate = _seed_store()
+    _mark_projection_projected(store)
+    original_patch = store.patch_observed_time_if_content_hash
+    plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+
+    def patch_then_lose_acknowledgement(**kwargs):
+        original_patch(**kwargs)
+        raise TimeoutError("private transport acknowledgement detail")
+
+    store.patch_observed_time_if_content_hash = patch_then_lose_acknowledgement  # type: ignore[method-assign]
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+        **_limits(),
+    )
+
+    current = store.get(candidate["_id"])
+    projection = store.get(projection_state_doc_id(SESSION_HASH))
+    assert current is not None and projection is not None
+    assert report["status"] == "completed"
+    assert report["updated_count"] == 1
+    assert report["mutation_performed"] is True
+    assert report["write_error_count"] == 0
+    assert report["coverage_recomputed_session_count"] == 1
+    assert report["projection_pending_session_count"] == 1
+    assert report["remaining_temporal_gap_count"] == 0
+    assert current["observed_at_start"] == candidate["observed_at_start"]
+    assert current["observed_at_end"] == candidate["observed_at_end"]
+    assert projection["projection_status"] == ProjectionStatus.PENDING
+    assert "private transport acknowledgement detail" not in json.dumps(report)
+
+
+def test_transport_exception_before_temporal_write_does_not_report_false_mutation():
+    store, candidate = _seed_store()
+    _mark_projection_projected(store)
+    plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+
+    def fail_before_patch(**_kwargs):
+        raise TimeoutError("private transport pre-write detail")
+
+    store.patch_observed_time_if_content_hash = fail_before_patch  # type: ignore[method-assign]
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+        **_limits(),
+    )
+
+    current = store.get(candidate["_id"])
+    projection = store.get(projection_state_doc_id(SESSION_HASH))
+    assert current is not None and projection is not None
+    assert report["status"] == "completed_with_errors"
+    assert report["updated_count"] == 0
+    assert report["mutation_performed"] is False
+    assert report["write_error_count"] == 1
+    assert report["coverage_recomputed_session_count"] == 0
+    assert report["projection_pending_session_count"] == 0
+    assert report["remaining_temporal_gap_count"] == 1
+    assert current["observed_at_start"] == ""
+    assert current["observed_at_end"] == ""
+    assert projection["projection_status"] == ProjectionStatus.PROJECTED
+    assert "private transport pre-write detail" not in json.dumps(report)
+
+
+def test_transport_exception_readback_revision_lineage_mismatch_fails_closed():
+    store, candidate = _seed_store()
+    original_get = store.get
+    readback_armed = False
+    plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+
+    def fail_and_arm_mismatched_readback(**_kwargs):
+        nonlocal readback_armed
+        readback_armed = True
+        raise TimeoutError("private transport mismatch detail")
+
+    def get_with_one_mismatched_readback(document_id):
+        nonlocal readback_armed
+        current = original_get(document_id)
+        if readback_armed and document_id == candidate["_id"] and current is not None:
+            readback_armed = False
+            mismatch = dict(current)
+            mismatch["observed_at_start"] = candidate["observed_at_start"]
+            mismatch["observed_at_end"] = candidate["observed_at_end"]
+            return mismatch
+        return current
+
+    store.patch_observed_time_if_content_hash = fail_and_arm_mismatched_readback  # type: ignore[method-assign]
+    store.get = get_with_one_mismatched_readback  # type: ignore[method-assign]
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+        **_limits(),
+    )
+
+    assert report["status"] == "completed_with_errors"
+    assert report["updated_count"] == 0
+    assert report["mutation_performed"] is False
+    assert report["write_error_count"] == 1
+    assert report["coverage_recomputed_session_count"] == 0
+    assert report["projection_pending_session_count"] == 0
+    assert original_get(candidate["_id"])["observed_at_start"] == ""
+    assert "private transport mismatch detail" not in json.dumps(report)
+
+
+def test_transport_exception_readback_failure_fails_closed():
+    store, candidate = _seed_store()
+    original_get = store.get
+    readback_armed = False
+    plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+
+    def fail_and_arm_readback_error(**_kwargs):
+        nonlocal readback_armed
+        readback_armed = True
+        raise TimeoutError("private transport write detail")
+
+    def get_with_one_readback_error(document_id):
+        nonlocal readback_armed
+        if readback_armed and document_id == candidate["_id"]:
+            readback_armed = False
+            raise RuntimeError("private readback detail")
+        return original_get(document_id)
+
+    store.patch_observed_time_if_content_hash = fail_and_arm_readback_error  # type: ignore[method-assign]
+    store.get = get_with_one_readback_error  # type: ignore[method-assign]
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+        **_limits(),
+    )
+
+    assert report["status"] == "completed_with_errors"
+    assert report["updated_count"] == 0
+    assert report["mutation_performed"] is False
+    assert report["write_error_count"] == 1
+    assert report["coverage_recomputed_session_count"] == 0
+    assert report["projection_pending_session_count"] == 0
+    assert original_get(candidate["_id"])["observed_at_start"] == ""
+    assert "private readback detail" not in json.dumps(report)
 
 
 def test_planning_timeout_is_a_nonzero_blocked_gap():

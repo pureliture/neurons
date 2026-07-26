@@ -362,6 +362,37 @@ def _plan_digest(
     )
 
 
+def _revision_generation(value: object) -> int | None:
+    generation, separator, digest = str(value or "").partition("-")
+    if separator != "-" or not digest or not generation.isdigit():
+        return None
+    parsed = int(generation)
+    return parsed if parsed > 0 else None
+
+
+def _uncertain_temporal_patch_is_applied(
+    current: Mapping[str, object],
+    *,
+    item: _PlanItem,
+) -> bool:
+    expected_generation = _revision_generation(item.expected_rev)
+    current_generation = _revision_generation(current.get("_rev"))
+    return (
+        str(current.get("_id") or "") == item.document_id
+        and str(current.get("content_hash") or "") == item.expected_content_hash
+        and str(current.get("session_id_hash") or "") == item.session_id_hash
+        and str(current.get("provider") or "") == item.provider
+        and str(current.get("project") or "") == item.project
+        and expected_generation is not None
+        and current_generation is not None
+        and current_generation > expected_generation
+        and normalize_observed_interval(
+            current.get("observed_at_start"), current.get("observed_at_end")
+        )
+        == (item.observed_at_start, item.observed_at_end)
+    )
+
+
 def repair_historical_temporal_gaps(
     *,
     source_store: CouchDBSourceStore,
@@ -587,18 +618,28 @@ def repair_historical_temporal_gaps(
                 failed_sessions.add(item.session_id_hash)
                 break
             try:
-                revision = source_store.patch_observed_time_if_content_hash(
-                    doc_id=item.document_id,
-                    expected_content_hash=item.expected_content_hash,
-                    expected_rev=item.expected_rev,
-                    observed_at_start=item.observed_at_start,
-                    observed_at_end=item.observed_at_end,
-                )
-                if revision.outcome != "duplicate":
+                try:
+                    revision = source_store.patch_observed_time_if_content_hash(
+                        doc_id=item.document_id,
+                        expected_content_hash=item.expected_content_hash,
+                        expected_rev=item.expected_rev,
+                        observed_at_start=item.observed_at_start,
+                        observed_at_end=item.observed_at_end,
+                    )
+                except SourceStoreConflict:
+                    raise
+                except Exception:
+                    current = source_store.get(item.document_id) or {}
+                    if not _uncertain_temporal_patch_is_applied(current, item=item):
+                        raise
+                    patch_mutated = True
+                else:
+                    patch_mutated = revision.outcome != "duplicate"
+                    current = source_store.get(item.document_id) or {}
+                if patch_mutated:
                     report["updated_count"] += 1
                     report["mutation_performed"] = True
                     mutated_sessions.add(item.session_id_hash)
-                current = source_store.get(item.document_id) or {}
                 if (
                     str(current.get("content_hash") or "") != item.expected_content_hash
                     or normalize_observed_interval(

@@ -87,6 +87,7 @@ from .state_db import RAGIngressStateDB
 
 
 CouchDBMirrorOutcomeHook = Callable[[MirrorWriteOutcome], None]
+_PAYLOAD_PREPARATION_ERRORS = (AttributeError, OverflowError, TypeError, ValueError)
 
 
 def _default_couchdb_mirror_outcome_logger(outcome: MirrorWriteOutcome) -> None:
@@ -102,6 +103,21 @@ def _default_couchdb_mirror_outcome_logger(outcome: MirrorWriteOutcome) -> None:
             ),
             flush=True,
         )
+
+
+def _payload_integrity_evidence(
+    job: DeliveryJobView,
+    *,
+    run: str,
+) -> DeliveryBackendEvidence:
+    return DeliveryBackendEvidence(
+        idempotency_key=job.idempotency_key,
+        payload_hash=job.payload_hash,
+        dataset_ref="",
+        document_ref="",
+        run=run,
+        status="payload_integrity_mismatch",
+    )
 
 
 class CouchDBDeliveryBackend:
@@ -136,11 +152,16 @@ class CouchDBDeliveryBackend:
 
     def submit(self, job: DeliveryJobView) -> DeliveryBackendEvidence:
         # --- Gate 1: payload availability + integrity -------------------------
-        payload, gate = resolve_delivery_payload(
-            self._state_db,
-            idempotency_key=job.idempotency_key,
-            expected_payload_hash=job.payload_hash,
-        )
+        try:
+            payload, gate = resolve_delivery_payload(
+                self._state_db,
+                idempotency_key=job.idempotency_key,
+                expected_payload_hash=job.payload_hash,
+            )
+        except _PAYLOAD_PREPARATION_ERRORS:
+            return _payload_integrity_evidence(job, run="invalid_stored_payload_shape")
+        except Exception as exc:
+            raise DeliveryOutcomeUncertain(exc.__class__.__name__) from exc
         if gate != PAYLOAD_OK:
             return DeliveryBackendEvidence(
                 idempotency_key=job.idempotency_key,
@@ -156,15 +177,43 @@ class CouchDBDeliveryBackend:
         # documents and then failed before coverage/projection currentness was
         # refreshed.  Remember that this is an existing delivery for evidence,
         # but always run the aggregate reconciliation below.
-        existing = self.find_by_natural_key(job.idempotency_key, job.payload_hash)
+        try:
+            existing = self.find_by_natural_key(job.idempotency_key, job.payload_hash)
+        except CouchDBError as exc:
+            # A read failure before persistence cannot prove that no prior
+            # write exists, so preserve the replay/reconcile boundary.
+            raise DeliveryOutcomeUncertain(exc.__class__.__name__) from exc
+        except Exception as exc:
+            raise DeliveryOutcomeUncertain(exc.__class__.__name__) from exc
 
         # --- Gate 3: apply full server-side public-ingress redaction ----------
-        payload = apply_server_redaction(payload)
+        raw_package = payload.get("payload")
+        raw_source = payload.get("source")
+        raw_document = (
+            raw_package.get("document") if isinstance(raw_package, Mapping) else None
+        )
+        raw_metadata = (
+            raw_document.get("metadata") or {}
+            if isinstance(raw_document, Mapping)
+            else None
+        )
+        if not all(
+            isinstance(value, Mapping)
+            for value in (raw_package, raw_source, raw_document, raw_metadata)
+        ):
+            return _payload_integrity_evidence(job, run="invalid_stored_payload_shape")
+        try:
+            payload = apply_server_redaction(payload)
+        except _PAYLOAD_PREPARATION_ERRORS:
+            return _payload_integrity_evidence(job, run="invalid_stored_payload_shape")
 
         # --- Gate 4: fail-closed public-ingress leak check --------------------
         pkg = payload.get("payload") or {}
         document = pkg.get("document") or {}
-        metadata = dict(document.get("metadata") or {})
+        raw_metadata = document.get("metadata") or {}
+        if not isinstance(raw_metadata, Mapping):
+            return _payload_integrity_evidence(job, run="invalid_document_metadata")
+        metadata = dict(raw_metadata)
         source = payload.get("source") or {}
         document_body = str(document.get("body") or "")
         leak_surface = json.dumps(
@@ -203,12 +252,15 @@ class CouchDBDeliveryBackend:
         observed_at_end = str(metadata.get("observed_at_end") or observed_at_start)
 
         # Positional chunk metadata -- fall back to 0/1 if dendrite didn't emit them
-        turn_start_index = int(metadata.get("turn_start_index") or 0)
-        turn_end_index = int(metadata.get("turn_end_index") or 0)
-        part_index = int(metadata.get("part_index") or 1)
-        part_count = int(metadata.get("part_count") or 1)
-        char_start = int(metadata.get("char_start") or 0)
-        char_end = int(metadata.get("char_end") or len(document_body))
+        try:
+            turn_start_index = int(metadata.get("turn_start_index") or 0)
+            turn_end_index = int(metadata.get("turn_end_index") or 0)
+            part_index = int(metadata.get("part_index") or 1)
+            part_count = int(metadata.get("part_count") or 1)
+            char_start = int(metadata.get("char_start") or 0)
+            char_end = int(metadata.get("char_end") or len(document_body))
+        except (OverflowError, TypeError, ValueError):
+            return _payload_integrity_evidence(job, run="invalid_positional_metadata")
 
         if not session_id_hash or not chunk_id:
             return DeliveryBackendEvidence(

@@ -635,6 +635,35 @@ def test_main_injects_couchdb_backend_directly_with_one_process_lease(tmp_path, 
     assert captured["environ"] is os.environ
 
 
+@pytest.mark.parametrize("backend_name", ("retired_index_brdige", ""))
+def test_main_rejects_unknown_delivery_backend_before_state_or_backend_startup(
+    tmp_path,
+    monkeypatch,
+    backend_name,
+):
+    import agent_knowledge.rag_ingress.shadow_worker as shadow_worker
+
+    state_path = tmp_path / "private" / "ingress.sqlite"
+
+    def fail_backend_build(**_kwargs):
+        raise AssertionError("unknown backend must not construct a delivery adapter")
+
+    monkeypatch.setattr(shadow_worker, "build_backend", fail_backend_build)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["rag-ingress-shadow-worker", "--mode", "consume", "--max-messages", "0"],
+    )
+    monkeypatch.setenv("INGEST_STATE_DB_PATH", str(state_path))
+    monkeypatch.setenv("SHADOW_DELIVER", "1")
+    monkeypatch.setenv("INGRESS_DELIVERY_BACKEND", backend_name)
+
+    with pytest.raises(SystemExit, match="must be one of"):
+        shadow_worker.main()
+
+    assert state_path.exists() is False
+
+
 @pytest.mark.parametrize(
     "missing_name",
     ("COUCHDB_URL", "COUCHDB_USER", "COUCHDB_PASSWORD", "COUCHDB_DB"),
