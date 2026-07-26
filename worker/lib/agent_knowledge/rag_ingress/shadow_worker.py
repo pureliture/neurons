@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS shadow_ingest_log (
 );
 """
 
+_DELIVERY_BACKEND_COUCHDB = "couchdb"
+_DELIVERY_BACKEND_RETIRED_INDEX_BRIDGE = "retired_index_bridge"
+_DELIVERY_BACKENDS = frozenset(
+    {_DELIVERY_BACKEND_COUCHDB, _DELIVERY_BACKEND_RETIRED_INDEX_BRIDGE}
+)
+
 
 @dataclass
 class ShadowResult:
@@ -575,9 +581,18 @@ def main() -> int:
         raise SystemExit("refusing: set ALLOW_LIVE_QUEUE=1 to consume the live RAG_INGRESS_QUEUE")
     deliver = os.environ.get("SHADOW_DELIVER", "0") == "1"
     broad_scan_pages = int(os.environ.get("NATURAL_KEY_BROAD_SCAN_PAGES", "0"))
-    delivery_backend = os.environ.get("INGRESS_DELIVERY_BACKEND", "retired_index_bridge").strip().lower()
+    configured_backend = os.environ.get("INGRESS_DELIVERY_BACKEND")
+    delivery_backend = (
+        _DELIVERY_BACKEND_RETIRED_INDEX_BRIDGE
+        if configured_backend is None
+        else configured_backend.strip().lower()
+    )
+    if delivery_backend not in _DELIVERY_BACKENDS:
+        raise SystemExit(
+            "INGRESS_DELIVERY_BACKEND must be one of: couchdb, retired_index_bridge"
+        )
     couchdb_config = None
-    if deliver and delivery_backend == "couchdb":
+    if deliver and delivery_backend == _DELIVERY_BACKEND_COUCHDB:
         couchdb_config = {
             "COUCHDB_URL": str(os.environ.get("COUCHDB_URL") or ""),
             "COUCHDB_USER": str(os.environ.get("COUCHDB_USER") or ""),
@@ -594,12 +609,12 @@ def main() -> int:
             )
     store = IngestStateStore(
         os.environ["INGEST_STATE_DB_PATH"],
-        canonical_state=deliver and delivery_backend == "couchdb",
+        canonical_state=deliver and delivery_backend == _DELIVERY_BACKEND_COUCHDB,
     )
     lease_owner = _new_lease_owner()
     backend = None
     if deliver:
-        if delivery_backend == "couchdb":
+        if delivery_backend == _DELIVERY_BACKEND_COUCHDB:
             from .couchdb_delivery_backend import build_couchdb_delivery_backend
 
             assert couchdb_config is not None
@@ -612,7 +627,7 @@ def main() -> int:
                 environ=os.environ,
             )
         else:
-            # Default RetiredIndexBridge sink (retired_index_bridge or any unrecognised value).
+            # RetiredIndexBridge remains the default only when the selector is unset.
             single = os.environ.get("RETIRED_INDEX_BRIDGE_DATASET_ID", "")
             # live (no single dataset): route per target profile like the Java worker.
             resolver = None if single else env_profile_dataset_resolver(os.environ.get)

@@ -38,7 +38,11 @@ from agent_knowledge.rag_ingress.couchdb_delivery_backend import (
     CouchDBDeliveryBackend,
     build_couchdb_delivery_backend,
 )
-from agent_knowledge.rag_ingress.delivery_executor import DeliveryJobView, DeliveryOutcomeUncertain
+from agent_knowledge.rag_ingress.delivery_executor import (
+    DeliveryExecutor,
+    DeliveryJobView,
+    DeliveryOutcomeUncertain,
+)
 from agent_knowledge.rag_ingress.server_runtime import (
     apply_server_redaction,
     job_id_for_payload,
@@ -634,6 +638,82 @@ def test_status_returns_unknown_for_missing_doc(tmp_path):
 # ---------------------------------------------------------------------------
 # CouchDBError 시 DeliveryOutcomeUncertain 테스트
 # ---------------------------------------------------------------------------
+
+def test_executor_replays_when_pre_persistence_natural_key_lookup_hits_couchdb_error(tmp_path):
+    """Natural-key lookup 오류도 lease를 replayable로 반환해야 한다."""
+    class FailingLookupStore:
+        db = "failing"
+
+        def get(self, _doc_id):
+            raise CouchDBError("GET failed: 503")
+
+    state_db = _state_db(tmp_path)
+    payload = _payload()
+    _seed(state_db, payload)
+    executor = DeliveryExecutor(
+        state_db=state_db,
+        backend=CouchDBDeliveryBackend(state_db=state_db, store=FailingLookupStore()),
+        lease_owner="couchdb-worker",
+    )
+    job_id = _job_view(state_db, "idem_key_1").job_id
+
+    assert executor.execute_once(job_id, max_attempts=3) == "replayable"
+    job = state_db.get_delivery_job(job_id)
+    assert job["status"] == "replayable"
+    assert job["last_error_class"] == "remote_outcome_uncertain"
+    assert job["lease_owner"] == ""
+    assert job["lease_until"] == ""
+    assert "GET failed: 503" not in json.dumps(job)
+
+
+def test_executor_quarantines_malformed_positional_metadata_without_leaving_lease_executing(tmp_path):
+    """정수가 아닌 positional metadata는 payload integrity quarantine으로 끝나야 한다."""
+    state_db = _state_db(tmp_path)
+    payload = _payload()
+    payload["payload"]["document"]["metadata"]["turn_start_index"] = "not-an-integer"
+    _seed(state_db, payload)
+    executor = DeliveryExecutor(
+        state_db=state_db,
+        backend=_backend(state_db, InMemoryCouchDBSourceStore()),
+        lease_owner="couchdb-worker",
+    )
+    job_id = _job_view(state_db, "idem_key_1").job_id
+
+    assert executor.execute_once(job_id, max_attempts=3) == "quarantined"
+    job = state_db.get_delivery_job(job_id)
+    assert job["status"] == "quarantined"
+    assert job["last_error_class"] == "delivery_payload_integrity_mismatch"
+    assert job["lease_owner"] == ""
+    assert job["lease_until"] == ""
+
+
+def test_executor_quarantines_malformed_persisted_source_without_leaving_lease_executing(tmp_path):
+    """Corrupt/legacy payload shape도 metadata prep 밖으로 탈출하지 않아야 한다."""
+    state_db = _state_db(tmp_path)
+    payload = _payload()
+    _seed(state_db, payload)
+    corrupted = json.loads(json.dumps(payload))
+    corrupted["source"] = ["not", "an", "object"]
+    with state_db.connect() as connection:
+        connection.execute(
+            "UPDATE delivery_payloads SET payload_json = ? WHERE idempotency_key = ?",
+            (json.dumps(corrupted, sort_keys=True), "idem_key_1"),
+        )
+    executor = DeliveryExecutor(
+        state_db=state_db,
+        backend=_backend(state_db, InMemoryCouchDBSourceStore()),
+        lease_owner="couchdb-worker",
+    )
+    job_id = _job_view(state_db, "idem_key_1").job_id
+
+    assert executor.execute_once(job_id, max_attempts=3) == "quarantined"
+    job = state_db.get_delivery_job(job_id)
+    assert job["status"] == "quarantined"
+    assert job["last_error_class"] == "delivery_payload_integrity_mismatch"
+    assert job["index_run_id"] == "invalid_stored_payload_shape"
+    assert job["lease_owner"] == ""
+    assert job["lease_until"] == ""
+
 
 def test_submit_raises_uncertain_on_couchdb_error(tmp_path):
     """CouchDB PUT 실패 시 DeliveryOutcomeUncertain이 발생한다."""
