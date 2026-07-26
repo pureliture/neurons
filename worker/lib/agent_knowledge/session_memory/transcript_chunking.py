@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from .transcript_model import MAX_TRANSCRIPT_CHUNK_TEXT_CHARS, TranscriptChunk, TranscriptTurn
 from .transcript_parsers import ParsedTranscript
@@ -48,6 +49,7 @@ def _build_chunk_for_turns(parsed: ParsedTranscript, turns: list[TranscriptTurn]
     text = _chunk_text(parsed, sorted(turns, key=lambda item: item.turn_index))
     chunk_seed = f"{parsed.session.session_id_hash}:{turn_start}:{turn_end}:{text}"
     chunk_id = "chunk_" + hashlib.sha256(chunk_seed.encode("utf-8")).hexdigest()[:16]
+    observed_at_start, observed_at_end = _native_turn_bounds(turns)
     return TranscriptChunk.from_text(
         chunk_id=chunk_id,
         session_id_hash=parsed.session.session_id_hash,
@@ -57,11 +59,14 @@ def _build_chunk_for_turns(parsed: ParsedTranscript, turns: list[TranscriptTurn]
         turn_end_index=turn_end,
         text=text,
         source_status=parsed.source_status,
+        observed_at_start=observed_at_start,
+        observed_at_end=observed_at_end,
     )
 
 
 def _build_chunks_for_long_turn(parsed: ParsedTranscript, turn: TranscriptTurn) -> list[TranscriptChunk]:
     chunks: list[TranscriptChunk] = []
+    observed_at_start, observed_at_end = _native_turn_bounds([turn])
     for part in _split_turn_text(parsed, turn):
         text = _chunk_part_text(parsed, turn, part)
         chunk_seed = (
@@ -84,9 +89,37 @@ def _build_chunks_for_long_turn(parsed: ParsedTranscript, turn: TranscriptTurn) 
                 part_count=part.part_count,
                 char_start=part.char_start,
                 char_end=part.char_end,
+                observed_at_start=observed_at_start,
+                observed_at_end=observed_at_end,
             )
         )
     return chunks
+
+
+def _native_turn_bounds(turns: list[TranscriptTurn]) -> tuple[str, str]:
+    """Return exact provider-native bounds only when a chunk has valid evidence.
+
+    Historical repair must never invent time from file order, session fields, or
+    local wall-clock time. Every turn in the chunk therefore needs an aware ISO
+    timestamp in non-decreasing turn order; absent, malformed, naive, or
+    reversed evidence deliberately yields an empty interval.
+    """
+    ordered = sorted(turns, key=lambda item: item.turn_index)
+    values = [str(turn.observed_at or "").strip() for turn in ordered]
+    if not values or any(not value for value in values):
+        return "", ""
+    parsed: list[datetime] = []
+    for value in values:
+        try:
+            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return "", ""
+        if timestamp.tzinfo is None:
+            return "", ""
+        parsed.append(timestamp.astimezone(timezone.utc))
+    if any(previous > current for previous, current in zip(parsed, parsed[1:])):
+        return "", ""
+    return values[0], values[-1]
 
 
 def _split_turn_text(parsed: ParsedTranscript, turn: TranscriptTurn) -> list[_TurnTextPart]:

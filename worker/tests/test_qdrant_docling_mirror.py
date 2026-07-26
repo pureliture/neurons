@@ -140,6 +140,36 @@ def test_qdrant_docling_adapter_upserts_normalized_markdown_and_reports_status()
     ).status == IndexStatus.INDEXED
 
 
+def test_qdrant_docling_adapter_redacts_every_stored_metadata_string():
+    client = _created_fake_client()
+    document = _document(
+        metadata={
+            "project": "/Users/example/Projects/private-project",
+            "source_host": "/Users/example/private-host",
+            "nested": {
+                "source_path": "/Users/example/.codex/private/session.jsonl",
+            },
+        }
+    )
+    adapter = QdrantDoclingMirrorAdapter(
+        client=client,
+        direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
+        collection_name="mirror_test",
+        normalizer=PassthroughMarkdownNormalizer(),
+        embedding_provider=HashEmbeddingProvider(size=8),
+    )
+
+    result = adapter.submit_document(document)
+
+    stored_payload = client.collections["mirror_test"][result.document_ref]["payload"]
+    serialized = json.dumps(stored_payload, sort_keys=True)
+    assert "/Users/" not in serialized
+    assert stored_payload["metadata"]["project"] == "[redacted_path]"
+    assert stored_payload["metadata"]["source_host"] == "[redacted_path]"
+    assert stored_payload["metadata"]["nested"]["source_path"] == "<redacted:private-path>"
+    assert stored_payload["project"] == "[redacted_path]"
+
+
 def test_qdrant_docling_adapter_natural_key_is_exact_and_blank_keys_fail_closed():
     client = _created_fake_client()
     document = _document()

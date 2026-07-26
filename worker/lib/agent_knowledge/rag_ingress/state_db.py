@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -90,19 +91,14 @@ class RAGIngressStateDB:
         self.path = Path(path)
         self.read_only = bool(read_only)
         if self.read_only:
-            if self.path.is_symlink() or not self.path.is_file():
-                raise ValueError("read-only state db must be an existing regular file")
             parent = self.path.parent
             if parent.is_symlink() or parent.stat().st_mode & 0o077:
                 raise ValueError("state db parent must be private")
+            self._validate_existing_database_file(read_only=True)
             return
         self._prepare_parent_directory()
+        self._prepare_database_file()
         self._initialize()
-        for candidate in self.path.parent.glob(f"{self.path.name}*"):
-            try:
-                os.chmod(candidate, 0o600)
-            except OSError:
-                pass
 
     def _prepare_parent_directory(self) -> None:
         parent = self.path.parent
@@ -111,10 +107,49 @@ class RAGIngressStateDB:
         existed = parent.exists()
         parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if not existed:
-            os.chmod(parent, 0o700)
             return
         if parent.stat().st_mode & 0o077:
             raise ValueError("state db parent must be private")
+
+    def _prepare_database_file(self) -> None:
+        """Create an absent state DB atomically; never repair existing paths.
+
+        The private directory is an access boundary, but the database path must
+        still reject a symlink or foreign/loose existing file. New state uses
+        O_EXCL + O_NOFOLLOW at 0600 before SQLite opens it.
+        """
+        if self.path.is_symlink() or self.path.exists():
+            self._validate_existing_database_file(read_only=False)
+            return
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(self.path, flags, 0o600)
+        except FileExistsError:
+            # A concurrent creator won. Treat it as an existing object and
+            # validate it rather than changing its mode or ownership.
+            self._validate_existing_database_file(read_only=False)
+            return
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("state db must be a regular file")
+            if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+                raise ValueError("state db file must be owner-private")
+        finally:
+            os.close(descriptor)
+
+    def _validate_existing_database_file(self, *, read_only: bool) -> None:
+        try:
+            metadata = self.path.lstat()
+        except FileNotFoundError as exc:
+            mode = "read-only" if read_only else "existing"
+            raise ValueError(f"{mode} state db must be an existing regular file") from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("state db must be a regular file, not a symlink or special path")
+        if metadata.st_uid != os.getuid():
+            raise ValueError("state db file owner must match the running user")
+        if metadata.st_mode & 0o077:
+            raise ValueError("state db file must be owner-private")
 
     def connect(self) -> sqlite3.Connection:
         database = self.path
@@ -488,14 +523,31 @@ class RAGIngressStateDB:
             if row is None:
                 raise KeyError(job_id)
             row_dict = _row_to_dict(row)
-            if _lease_is_live(row_dict, stamp_dt) and row_dict.get("lease_owner") not in {"", lease_owner}:
+            status = str(row_dict.get("status") or "")
+            if status in {"succeeded", "quarantined"}:
+                return False
+            if status == "pending":
+                pass
+            elif status in {IdempotencyOutcome.REPLAYABLE, "failed_retryable"}:
+                # Retry states may be reclaimed only once their explicit retry
+                # deadline is due. An absent deadline is malformed, not due.
+                next_retry_at = str(row_dict.get("next_retry_at") or "")
+                if not next_retry_at or next_retry_at > stamp:
+                    return False
+            elif status in {"claimed", "executing"}:
+                # A live lease belongs to its current owner; an expired lease can
+                # be reclaimed by any worker without a pending-state reset.
+                if _lease_is_live(row_dict, stamp_dt) and row_dict.get("lease_owner") not in {"", lease_owner}:
+                    return False
+            else:
                 return False
             attempt_count = int(row_dict.get("attempt_count") or 0)
             if attempt_count >= max_attempts:
                 connection.execute(
                     """
                     UPDATE delivery_jobs
-                    SET status = 'quarantined', last_error_class = ?, updated_at = ?
+                    SET status = 'quarantined', lease_owner = '', lease_until = '',
+                        last_error_class = ?, updated_at = ?
                     WHERE job_id = ?
                     """,
                     ("lease_attempt_limit", stamp, job_id),
@@ -516,6 +568,7 @@ class RAGIngressStateDB:
         self,
         job_id: str,
         *,
+        lease_owner: str = "",
         now: datetime | None = None,
         max_attempts: int = 3,
         next_retry_seconds: int = 60,
@@ -528,6 +581,16 @@ class RAGIngressStateDB:
             row = connection.execute("SELECT * FROM delivery_jobs WHERE job_id = ?", (job_id,)).fetchone()
             if row is None:
                 raise KeyError(job_id)
+            row_dict = _row_to_dict(row)
+            if lease_owner:
+                stale_owner = (
+                    row_dict.get("lease_owner") != lease_owner
+                    or not _lease_is_live(row_dict, stamp_dt)
+                )
+            else:
+                stale_owner = _lease_is_live(row_dict, stamp_dt)
+            if stale_owner:
+                return "stale_owner_rejected"
             attempt_count = int(row["attempt_count"] or 0) + 1
             if attempt_count >= max_attempts:
                 status = "quarantined"
@@ -540,7 +603,7 @@ class RAGIngressStateDB:
                 """
                 UPDATE delivery_jobs
                 SET status = ?, attempt_count = ?, next_retry_at = ?,
-                    last_error_class = ?, updated_at = ?
+                    lease_owner = '', lease_until = '', last_error_class = ?, updated_at = ?
                 WHERE job_id = ?
                 """,
                 (status, attempt_count, next_retry_at, last_error_class, stamp, job_id),
@@ -563,14 +626,6 @@ class RAGIngressStateDB:
                 raise KeyError(job_id)
             row_dict = _row_to_dict(row)
             if row_dict.get("lease_owner") != lease_owner or not _lease_is_live(row_dict, stamp_dt):
-                connection.execute(
-                    """
-                    UPDATE delivery_jobs
-                    SET last_error_class = ?, updated_at = ?
-                    WHERE job_id = ?
-                    """,
-                    ("stale_owner_rejected", stamp, job_id),
-                )
                 return False
             connection.execute(
                 "UPDATE delivery_jobs SET status = 'executing', updated_at = ? WHERE job_id = ?",
@@ -598,7 +653,7 @@ class RAGIngressStateDB:
                 UPDATE delivery_jobs
                 SET status = ?, index_target_id = ?, index_document_id = ?,
                     index_run_id = ?, last_error_class = ?, last_reconciled_at = ?,
-                    updated_at = ?
+                    lease_owner = '', lease_until = '', updated_at = ?
                 WHERE job_id = ?
                 """,
                 (status, dataset_ref, document_ref, run, last_error_class, stamp, stamp, job_id),
@@ -620,7 +675,7 @@ class RAGIngressStateDB:
         stamp_dt = now or _utc_now()
         stamp = _iso(stamp_dt)
         evidence_stamp = _iso(observed_at or stamp_dt)
-        if status not in {"succeeded", "failed_retryable"}:
+        if status not in {"succeeded", "failed_retryable", "quarantined"}:
             raise ValueError("unsupported delivery completion status")
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -629,21 +684,13 @@ class RAGIngressStateDB:
                 raise KeyError(job_id)
             row_dict = _row_to_dict(row)
             if row_dict.get("lease_owner") != lease_owner or not _lease_is_live(row_dict, stamp_dt):
-                connection.execute(
-                    """
-                    UPDATE delivery_jobs
-                    SET last_error_class = ?, updated_at = ?
-                    WHERE job_id = ?
-                    """,
-                    ("stale_owner_rejected", stamp, job_id),
-                )
                 return False
             connection.execute(
                 """
                 UPDATE delivery_jobs
                 SET status = ?, index_target_id = ?, index_document_id = ?,
                     index_run_id = ?, last_error_class = ?, last_reconciled_at = ?,
-                    updated_at = ?
+                    lease_owner = '', lease_until = '', updated_at = ?
                 WHERE job_id = ?
                 """,
                 (status, dataset_ref, document_ref, run, last_error_class, evidence_stamp, stamp, job_id),
@@ -674,17 +721,14 @@ class RAGIngressStateDB:
             if row is None:
                 raise KeyError(job_id)
             row_dict = _row_to_dict(row)
-            if lease_owner and (
-                row_dict.get("lease_owner") != lease_owner or not _lease_is_live(row_dict, stamp_dt)
-            ):
-                connection.execute(
-                    """
-                    UPDATE delivery_jobs
-                    SET last_error_class = ?, updated_at = ?
-                    WHERE job_id = ?
-                    """,
-                    ("stale_owner_rejected", stamp, job_id),
+            if lease_owner:
+                stale_owner = (
+                    row_dict.get("lease_owner") != lease_owner
+                    or not _lease_is_live(row_dict, stamp_dt)
                 )
+            else:
+                stale_owner = _lease_is_live(row_dict, stamp_dt)
+            if stale_owner:
                 return "stale_owner_rejected"
             attempt_count = int(row["attempt_count"] or 0) + 1
             if attempt_count >= max_attempts:
@@ -697,7 +741,8 @@ class RAGIngressStateDB:
                 UPDATE delivery_jobs
                 SET status = ?, attempt_count = ?, next_retry_at = ?,
                     index_target_id = ?, index_document_id = ?, index_run_id = ?,
-                    last_error_class = ?, last_reconciled_at = ?, updated_at = ?
+                    lease_owner = '', lease_until = '', last_error_class = ?,
+                    last_reconciled_at = ?, updated_at = ?
                 WHERE job_id = ?
                 """,
                 (
@@ -751,16 +796,27 @@ class RAGIngressStateDB:
     def get_delivery_job(self, job_id: str) -> dict | None:
         return self.get_row("delivery_jobs", "job_id", job_id)
 
-    def list_delivery_jobs(self, *, status: str, limit: int = 50) -> list[dict]:
+    def list_delivery_jobs(
+        self,
+        *,
+        status: str,
+        limit: int = 50,
+        due_at: datetime | None = None,
+    ) -> list[dict]:
+        query = """
+            SELECT * FROM delivery_jobs
+            WHERE status = ?
+        """
+        arguments: list[object] = [status]
+        if due_at is not None:
+            query += " AND (next_retry_at = '' OR next_retry_at <= ?)"
+            arguments.append(_iso(due_at))
+        query += " ORDER BY created_at ASC, rowid ASC LIMIT ?"
+        arguments.append(int(limit))
         with self.connect() as connection:
             rows = connection.execute(
-                """
-                SELECT * FROM delivery_jobs
-                WHERE status = ?
-                ORDER BY created_at ASC, rowid ASC
-                LIMIT ?
-                """,
-                (status, int(limit)),
+                query,
+                arguments,
             ).fetchall()
         return [_row_to_dict(row) for row in rows]
 

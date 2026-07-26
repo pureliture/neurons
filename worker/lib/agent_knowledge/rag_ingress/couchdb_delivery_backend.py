@@ -47,6 +47,9 @@ up the authoritative session document.  dataset_ref: ``couchdb:<db>``.
 from __future__ import annotations
 
 import datetime
+import json
+from collections.abc import Callable, Mapping
+from typing import Any
 
 from ..couchdb_source.couchdb_http_store import CouchDBError
 from ..couchdb_source.document_model import (
@@ -74,8 +77,47 @@ from .delivery_executor import (
     DeliveryJobView,
     DeliveryOutcomeUncertain,
 )
-from .server_runtime import apply_server_redaction, public_ingress_leak_violations
+from .qdrant_dual_write import MirrorWriteOutcome
+from .server_runtime import (
+    apply_server_redaction,
+    document_from_ingress_payload,
+    public_ingress_leak_violations,
+)
 from .state_db import RAGIngressStateDB
+
+
+CouchDBMirrorOutcomeHook = Callable[[MirrorWriteOutcome], None]
+_PAYLOAD_PREPARATION_ERRORS = (AttributeError, OverflowError, TypeError, ValueError)
+
+
+def _default_couchdb_mirror_outcome_logger(outcome: MirrorWriteOutcome) -> None:
+    """Emit only redaction-safe best-effort mirror state."""
+    if outcome.status != "mirrored":
+        print(
+            json.dumps(
+                {
+                    "event": "qdrant_mirror_write",
+                    "status": outcome.status,
+                    "error_class": outcome.error_class,
+                }
+            ),
+            flush=True,
+        )
+
+
+def _payload_integrity_evidence(
+    job: DeliveryJobView,
+    *,
+    run: str,
+) -> DeliveryBackendEvidence:
+    return DeliveryBackendEvidence(
+        idempotency_key=job.idempotency_key,
+        payload_hash=job.payload_hash,
+        dataset_ref="",
+        document_ref="",
+        run=run,
+        status="payload_integrity_mismatch",
+    )
 
 
 class CouchDBDeliveryBackend:
@@ -91,9 +133,18 @@ class CouchDBDeliveryBackend:
     fake in tests).
     """
 
-    def __init__(self, *, state_db: RAGIngressStateDB, store: CouchDBSourceStore) -> None:
+    def __init__(
+        self,
+        *,
+        state_db: RAGIngressStateDB,
+        store: CouchDBSourceStore,
+        mirror: Any | None = None,
+        on_mirror_outcome: CouchDBMirrorOutcomeHook | None = None,
+    ) -> None:
         self._state_db = state_db
         self._store = store
+        self._mirror = mirror
+        self._on_mirror_outcome = on_mirror_outcome
 
     # ------------------------------------------------------------------
     # DeliveryBackend Protocol
@@ -101,11 +152,16 @@ class CouchDBDeliveryBackend:
 
     def submit(self, job: DeliveryJobView) -> DeliveryBackendEvidence:
         # --- Gate 1: payload availability + integrity -------------------------
-        payload, gate = resolve_delivery_payload(
-            self._state_db,
-            idempotency_key=job.idempotency_key,
-            expected_payload_hash=job.payload_hash,
-        )
+        try:
+            payload, gate = resolve_delivery_payload(
+                self._state_db,
+                idempotency_key=job.idempotency_key,
+                expected_payload_hash=job.payload_hash,
+            )
+        except _PAYLOAD_PREPARATION_ERRORS:
+            return _payload_integrity_evidence(job, run="invalid_stored_payload_shape")
+        except Exception as exc:
+            raise DeliveryOutcomeUncertain(exc.__class__.__name__) from exc
         if gate != PAYLOAD_OK:
             return DeliveryBackendEvidence(
                 idempotency_key=job.idempotency_key,
@@ -121,16 +177,59 @@ class CouchDBDeliveryBackend:
         # documents and then failed before coverage/projection currentness was
         # refreshed.  Remember that this is an existing delivery for evidence,
         # but always run the aggregate reconciliation below.
-        existing = self.find_by_natural_key(job.idempotency_key, job.payload_hash)
+        try:
+            existing = self.find_by_natural_key(job.idempotency_key, job.payload_hash)
+        except CouchDBError as exc:
+            # A read failure before persistence cannot prove that no prior
+            # write exists, so preserve the replay/reconcile boundary.
+            raise DeliveryOutcomeUncertain(exc.__class__.__name__) from exc
+        except Exception as exc:
+            raise DeliveryOutcomeUncertain(exc.__class__.__name__) from exc
 
         # --- Gate 3: apply full server-side public-ingress redaction ----------
-        payload = apply_server_redaction(payload)
+        raw_package = payload.get("payload")
+        raw_source = payload.get("source")
+        raw_document = (
+            raw_package.get("document") if isinstance(raw_package, Mapping) else None
+        )
+        raw_metadata = (
+            raw_document.get("metadata") or {}
+            if isinstance(raw_document, Mapping)
+            else None
+        )
+        if not all(
+            isinstance(value, Mapping)
+            for value in (raw_package, raw_source, raw_document, raw_metadata)
+        ):
+            return _payload_integrity_evidence(job, run="invalid_stored_payload_shape")
+        try:
+            payload = apply_server_redaction(payload)
+        except _PAYLOAD_PREPARATION_ERRORS:
+            return _payload_integrity_evidence(job, run="invalid_stored_payload_shape")
 
         # --- Gate 4: fail-closed public-ingress leak check --------------------
-        document_body = str(
-            ((payload.get("payload") or {}).get("document") or {}).get("body") or ""
+        pkg = payload.get("payload") or {}
+        document = pkg.get("document") or {}
+        raw_metadata = document.get("metadata") or {}
+        if not isinstance(raw_metadata, Mapping):
+            return _payload_integrity_evidence(job, run="invalid_document_metadata")
+        metadata = dict(raw_metadata)
+        source = payload.get("source") or {}
+        document_body = str(document.get("body") or "")
+        leak_surface = json.dumps(
+            {
+                "body": document_body,
+                "filename": document.get("filename") or "",
+                "metadata": metadata,
+                "source": {
+                    "project": source.get("project") or "",
+                    "host": source.get("host") or "",
+                },
+            },
+            sort_keys=True,
+            default=str,
         )
-        leak_violations = public_ingress_leak_violations(document_body)
+        leak_violations = public_ingress_leak_violations(leak_surface)
         if leak_violations:
             return DeliveryBackendEvidence(
                 idempotency_key=job.idempotency_key,
@@ -142,11 +241,6 @@ class CouchDBDeliveryBackend:
             )
 
         # --- Extract metadata fields ------------------------------------------
-        pkg = payload.get("payload") or {}
-        document = pkg.get("document") or {}
-        metadata = dict(document.get("metadata") or {})
-        source = payload.get("source") or {}
-
         session_id_hash = str(metadata.get("session_id_hash") or "")
         provider = str(
             metadata.get("provider") or source.get("provider") or source.get("namespace") or "ingress"
@@ -158,12 +252,15 @@ class CouchDBDeliveryBackend:
         observed_at_end = str(metadata.get("observed_at_end") or observed_at_start)
 
         # Positional chunk metadata -- fall back to 0/1 if dendrite didn't emit them
-        turn_start_index = int(metadata.get("turn_start_index") or 0)
-        turn_end_index = int(metadata.get("turn_end_index") or 0)
-        part_index = int(metadata.get("part_index") or 1)
-        part_count = int(metadata.get("part_count") or 1)
-        char_start = int(metadata.get("char_start") or 0)
-        char_end = int(metadata.get("char_end") or len(document_body))
+        try:
+            turn_start_index = int(metadata.get("turn_start_index") or 0)
+            turn_end_index = int(metadata.get("turn_end_index") or 0)
+            part_index = int(metadata.get("part_index") or 1)
+            part_count = int(metadata.get("part_count") or 1)
+            char_start = int(metadata.get("char_start") or 0)
+            char_end = int(metadata.get("char_end") or len(document_body))
+        except (OverflowError, TypeError, ValueError):
+            return _payload_integrity_evidence(job, run="invalid_positional_metadata")
 
         if not session_id_hash or not chunk_id:
             return DeliveryBackendEvidence(
@@ -253,6 +350,14 @@ class CouchDBDeliveryBackend:
         except Exception as exc:
             raise DeliveryOutcomeUncertain(exc.__class__.__name__) from exc
 
+        # The Qdrant mirror is strictly post-authoritative and best-effort. A
+        # partial primary attempt may have stored the chunk but failed before
+        # aggregate reconciliation; its successful retry must still reach the
+        # mirror. Canonical succeeded-job duplicates never call ``submit`` from
+        # DeliveryExecutor, so they still have exactly one mirror side effect.
+        # The mirror sees the full server-redacted, leak-gated payload.
+        self._submit_mirror_after_authoritative_success(payload)
+
         return DeliveryBackendEvidence(
             idempotency_key=job.idempotency_key,
             payload_hash=job.payload_hash,
@@ -262,6 +367,26 @@ class CouchDBDeliveryBackend:
             status="succeeded",
             observed_at=datetime.datetime.now(tz=datetime.timezone.utc),
         )
+
+    def _submit_mirror_after_authoritative_success(self, redacted_payload: dict) -> None:
+        if self._mirror is None:
+            return
+        try:
+            document = document_from_ingress_payload(redacted_payload)
+            result = self._mirror.submit_document(document)
+            outcome = MirrorWriteOutcome(
+                status="mirrored",
+                document_ref=str(getattr(result, "document_ref", "") or ""),
+            )
+        except Exception as exc:  # mirror cannot affect authoritative success
+            outcome = MirrorWriteOutcome(
+                status="mirror_error", error_class=exc.__class__.__name__
+            )
+        if self._on_mirror_outcome is not None:
+            try:
+                self._on_mirror_outcome(outcome)
+            except Exception:
+                pass
 
     def find_by_natural_key(
         self, idempotency_key: str, payload_hash: str
@@ -337,6 +462,9 @@ def build_couchdb_delivery_backend(
     couchdb_user: str,
     couchdb_password: str,
     couchdb_db: str,
+    environ: Mapping[str, str] | None = None,
+    mirror_builder: Callable[[Mapping[str, str]], Any | None] | None = None,
+    on_mirror_outcome: CouchDBMirrorOutcomeHook | None = None,
 ) -> CouchDBDeliveryBackend:
     """Factory used by the env-switch wiring in state_cli to build the backend.
 
@@ -347,16 +475,50 @@ def build_couchdb_delivery_backend(
 
     from ..couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
 
+    required_config = {
+        "COUCHDB_URL": str(couchdb_url or ""),
+        "COUCHDB_USER": str(couchdb_user or ""),
+        "COUCHDB_PASSWORD": str(couchdb_password or ""),
+        "COUCHDB_DB": str(couchdb_db or ""),
+    }
+    missing = [name for name, value in required_config.items() if not value.strip()]
+    if missing:
+        raise ValueError(
+            "CouchDB delivery requires non-empty " + ", ".join(missing)
+        )
     credentials = base64.b64encode(f"{couchdb_user}:{couchdb_password}".encode()).decode()
     store = CouchDBHttpSourceStore(
         base_url=couchdb_url,
         db=couchdb_db,
         auth_header=f"Basic {credentials}",
     )
-    return CouchDBDeliveryBackend(state_db=state_db, store=store)
+    effective_environ = environ or {}
+    mirror = None
+    outcome_hook = on_mirror_outcome or _default_couchdb_mirror_outcome_logger
+    if str(effective_environ.get("MIRROR_DUAL_WRITE") or "").strip() == "1":
+        from .qdrant_dual_write import build_qdrant_mirror_from_env
+
+        try:
+            mirror = (mirror_builder or build_qdrant_mirror_from_env)(effective_environ)
+        except Exception as exc:
+            try:
+                outcome_hook(
+                    MirrorWriteOutcome(
+                        status="mirror_build_error", error_class=exc.__class__.__name__
+                    )
+                )
+            except Exception:
+                pass
+    return CouchDBDeliveryBackend(
+        state_db=state_db,
+        store=store,
+        mirror=mirror,
+        on_mirror_outcome=outcome_hook if mirror is not None else None,
+    )
 
 
 __all__ = [
     "CouchDBDeliveryBackend",
+    "CouchDBMirrorOutcomeHook",
     "build_couchdb_delivery_backend",
 ]

@@ -5,10 +5,10 @@ record. The Qdrant mirror submit is best-effort: a mirror failure is captured as
 outcome and NEVER breaks or alters the primary submit result. find/status delegate
 to the primary so the mirror cannot influence dedup or status.
 
-This is the code-only seam for Stage 2 (M6). It is NOT wired into the live
-``shadow_worker`` entrypoint here; activation (an env branch that constructs this
-backend) is added at deploy time once a Qdrant instance exists. With no Qdrant
-deployed and the flag off, the existing RetiredIndexBridge/CouchDB delivery is byte-identical.
+This wrapper remains the RetiredIndexBridge-specific Stage 2 (M6) seam. The
+CouchDB ``DeliveryBackend`` uses its own compatible post-authoritative mirror
+hook rather than being wrapped by this adapter. With no Qdrant configured and
+the flag off, either authoritative delivery path is unchanged.
 """
 
 from __future__ import annotations
@@ -73,7 +73,10 @@ class MirrorDualWriteBackend:
         result = self._primary.submit_document(document, on_step_complete=on_step_complete)
         outcome = self._mirror_submit(document)
         if self._on_mirror_outcome is not None:
-            self._on_mirror_outcome(outcome)
+            try:
+                self._on_mirror_outcome(outcome)
+            except Exception:
+                pass
         return result
 
     def _mirror_submit(self, document: RagReadyDocument) -> MirrorWriteOutcome:
@@ -199,9 +202,15 @@ def maybe_wrap_dual_write(
         mirror = builder(environ)
     except Exception as exc:
         # Mirror construction failure must NOT crash the authoritative worker.
-        _default_mirror_outcome_logger(
-            MirrorWriteOutcome(status="mirror_build_error", error_class=exc.__class__.__name__)
-        )
+        outcome_hook = on_mirror_outcome or _default_mirror_outcome_logger
+        try:
+            outcome_hook(
+                MirrorWriteOutcome(
+                    status="mirror_build_error", error_class=exc.__class__.__name__
+                )
+            )
+        except Exception:
+            pass
         return primary
     if mirror is None:
         return primary

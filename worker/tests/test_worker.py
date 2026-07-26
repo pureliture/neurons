@@ -7,6 +7,7 @@ Focus: the boundary this co-locate is responsible for —
   - submit_document persists the natural key so the RetiredIndexBridge-side probe can match.
 """
 import importlib
+import sqlite3
 
 import pytest
 
@@ -149,10 +150,18 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
 def test_first_delivery_uploads_once(tmp_path):
     store = IngestStateStore(tmp_path / "s.sqlite")
     backend = FakeBackend()
-    res = process_payload(build_synthetic_event(tag="first"), store=store, backend=backend, deliver=True)
+    payload = build_synthetic_event(tag="first")
+    res = process_payload(payload, store=store, backend=backend, deliver=True)
     assert res.status == "delivered"
     assert res.delivered is True
     assert backend.submit_calls == 1
+    with sqlite3.connect(store.path) as connection:
+        table_names = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    assert "delivery_payloads" not in table_names
+    assert "delivery_jobs" not in table_names
 
 
 def test_redelivery_dedups_via_local_log(tmp_path):

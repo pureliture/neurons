@@ -130,6 +130,14 @@ services:
       SHADOW_DURABLE: ${RAG_INGRESS_DURABLE:-shadow_python_worker}
       ALLOW_LIVE_QUEUE: ${RAG_INGRESS_ALLOW_LIVE_QUEUE:-0}
       SHADOW_DELIVER: ${RAG_INGRESS_DELIVER:-0}
+      # RetiredIndexBridge stays the development/default rollback path. CouchDB
+      # is selected only by an explicit deployment env-file; this compose source
+      # never enables it by itself.
+      INGRESS_DELIVERY_BACKEND: ${INGRESS_DELIVERY_BACKEND-retired_index_bridge}
+      COUCHDB_URL: ${COUCHDB_URL}
+      COUCHDB_USER: ${COUCHDB_USER}
+      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD}
+      COUCHDB_DB: ${COUCHDB_DB}
       # High = ack-drop effectively disabled: a failing message NAKs and is
       # retried/preserved rather than silently dropped (favours data preservation).
       MAX_DELIVER: ${RAG_INGRESS_MAX_DELIVER:-100000}

@@ -1,7 +1,10 @@
-"""Fake-only committed delivery job executor scaffolding.
+"""CouchDB-backed live delivery executor with an injected backend boundary.
 
-This module is not wired to production routes or CLIs. It exercises the M3
-outbox contract against an injected backend-shaped object.
+``shadow_worker`` uses this executor when ``SHADOW_DELIVER=1`` and
+``INGRESS_DELIVERY_BACKEND=couchdb``. The canonical job/payload/lease state is
+the worker's private SQLite state DB; CouchDB is the delivery sink. Other
+callers may still inject a backend for isolated tests, but this module is no
+longer fake-only or an inactive outbox sketch.
 """
 
 from __future__ import annotations
@@ -73,16 +76,23 @@ class DeliveryExecutor:
         row = self._state_db.get_delivery_job(job_id)
         if row is None:
             raise KeyError(job_id)
-        if row.get("status") in {"succeeded", "quarantined"}:
-            return str(row["status"])
-        if row.get("status") == "pending":
+        status = str(row.get("status") or "")
+        if status in {"succeeded", "quarantined"}:
+            return status
+        if status in {"pending", "replayable", "failed_retryable", "claimed", "executing"}:
             if not self._state_db.claim_delivery_job(
                 job_id,
                 lease_owner=self._lease_owner,
                 lease_seconds=self._lease_seconds,
                 now=now,
+                max_attempts=max_attempts,
             ):
+                current = self._state_db.get_delivery_job(job_id)
+                if current is not None and current.get("status") == "quarantined":
+                    return "quarantined"
                 return "claim_rejected"
+        elif status not in {"claimed", "executing"}:
+            return "claim_rejected"
         if not self._state_db.mark_delivery_executing(job_id, lease_owner=self._lease_owner, now=now):
             return "stale_owner_rejected"
 
@@ -90,8 +100,27 @@ class DeliveryExecutor:
         try:
             evidence = self._backend.submit(job)
         except DeliveryOutcomeUncertain:
-            return self._state_db.record_replayable_attempt(job_id, now=now, max_attempts=max_attempts)
+            return self._state_db.record_replayable_attempt(
+                job_id,
+                lease_owner=self._lease_owner,
+                now=now,
+                max_attempts=max_attempts,
+            )
 
+        if evidence.status in {"quarantined", "payload_unavailable", "payload_integrity_mismatch"}:
+            if not self._state_db.complete_delivery_with_evidence(
+                job_id,
+                lease_owner=self._lease_owner,
+                status="quarantined",
+                dataset_ref=evidence.dataset_ref,
+                document_ref=evidence.document_ref,
+                run=evidence.run,
+                last_error_class=f"delivery_{evidence.status}",
+                observed_at=evidence.observed_at,
+                now=now,
+            ):
+                return "stale_owner_rejected"
+            return "quarantined"
         if evidence.status == "succeeded":
             if not self._state_db.complete_delivery_with_evidence(
                 job_id,
@@ -116,4 +145,9 @@ class DeliveryExecutor:
                 now=now,
                 max_attempts=max_attempts,
             )
-        return self._state_db.record_replayable_attempt(job_id, now=now, max_attempts=max_attempts)
+        return self._state_db.record_replayable_attempt(
+            job_id,
+            lease_owner=self._lease_owner,
+            now=now,
+            max_attempts=max_attempts,
+        )
