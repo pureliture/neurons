@@ -29,7 +29,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from .couchdb_delivery_backend import CouchDBDeliveryBackend
 from .delivery_executor import DeliveryExecutor
@@ -43,6 +43,7 @@ from .server_runtime import (
 from .state_db import RAGIngressStateDB
 from .state_sink import StateDBIngressSink
 from ..index_client import RetiredIndexBridgeHttpClient
+from ..redaction import redact_text_v2
 
 SHADOW_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS shadow_ingest_log (
@@ -71,11 +72,28 @@ class ShadowResult:
 
 
 class IngestStateStore:
-    """Server-volume SQLite with canonical delivery state and legacy observer rows."""
+    """Legacy observer SQLite plus an explicit, lazy canonical-state mode.
 
-    def __init__(self, path: Path | str):
+    The default remains the RetiredIndexBridge observer contract: it creates only
+    the legacy SQLite parent/table.  CouchDB delivery opts in with
+    ``canonical_state=True``; its state DB is created only on first access so the
+    strict private-parent check is confined to that mode.
+    """
+
+    def __init__(self, path: Path | str, *, canonical_state: bool = False):
         self.path = Path(path)
-        self.state_db = RAGIngressStateDB(self.path)
+        self._canonical_state = canonical_state
+        self._state_db: RAGIngressStateDB | None = None
+        if not canonical_state:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def state_db(self) -> RAGIngressStateDB:
+        if not self._canonical_state:
+            raise RuntimeError("canonical state db is disabled for the legacy delivery mode")
+        if self._state_db is None:
+            self._state_db = RAGIngressStateDB(self.path)
+        return self._state_db
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30)
@@ -178,22 +196,55 @@ def _new_lease_owner() -> str:
     return f"shadow-worker:{os.getpid()}:{uuid.uuid4().hex}"
 
 
+def _wire_payload_is_conservatively_redacted(value: object) -> bool:
+    """Return whether every persisted wire string is already ``redact_text_v2`` safe.
+
+    Canonical state retains the full enqueue payload for replay, so accepting a
+    string that conservative redaction would change would retain an unsafe body
+    even if a later delivery-time redaction hid it from CouchDB.  Validate every
+    string leaf rather than only ``document.body`` because metadata and source
+    fields are persisted too.
+    """
+    if isinstance(value, str):
+        return redact_text_v2(value) == value
+    if isinstance(value, Mapping):
+        return all(
+            _wire_payload_is_conservatively_redacted(key)
+            and _wire_payload_is_conservatively_redacted(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return all(_wire_payload_is_conservatively_redacted(item) for item in value)
+    return True
+
+
 def process_payload(payload: dict, *, store: IngestStateStore,
                     backend: RetiredIndexBridgeRetiredIndexBridgeAdapter | CouchDBDeliveryBackend | None,
                     deliver: bool, lease_owner: str | None = None) -> ShadowResult:
     """Build the RagReadyDocument from a rag_ingress_enqueue.v1 payload, record
     state, and (if deliver) submit to the selected backend. No live stream is touched.
 
-    The CouchDB branch commits the canonical state row from the normalized producer
-    wire payload before any delivery-time redaction, then lets the backend enforce
-    integrity -> redaction -> leak-gate. The RetiredIndexBridge branch keeps its
-    established direct redaction -> dedup -> submit -> observer behavior."""
+    The CouchDB branch first fail-closes any wire payload that is not already
+    conservatively redacted, then commits its canonical state row and lets the
+    backend enforce full public-ingress redaction. The RetiredIndexBridge branch
+    keeps its established direct redaction -> dedup -> submit -> observer behavior."""
     payload = normalize_ingest_job_payload(payload)
     document = document_from_ingress_payload(payload)
     ik = document.idempotency_key
     if isinstance(backend, CouchDBDeliveryBackend):
-        existing_job = store.state_db.get_row("delivery_jobs", "idempotency_key", ik)
-        accepted = StateDBIngressSink(state_db=store.state_db).accept_payload(payload)
+        state_db = store.state_db
+        if not _wire_payload_is_conservatively_redacted(payload):
+            store.record(
+                idempotency_key=ik, content_hash=document.content_hash,
+                document_kind=document.document_kind, target_profile=document.target_profile,
+                status="quarantined_wire_redaction", delivered=False, now_iso=_now_iso(),
+            )
+            return ShadowResult(
+                status="quarantined_wire_redaction", idempotency_key=ik,
+                content_hash_present=bool(document.content_hash), delivered=False,
+            )
+        existing_job = state_db.get_row("delivery_jobs", "idempotency_key", ik)
+        accepted = StateDBIngressSink(state_db=state_db).accept_payload(payload)
         if not existing_job or existing_job["status"] != "succeeded":
             store.record(
                 idempotency_key=ik, content_hash=document.content_hash,
@@ -209,13 +260,23 @@ def process_payload(payload: dict, *, store: IngestStateStore,
             return ShadowResult(status="observed_no_deliver", idempotency_key=ik,
                                 content_hash_present=bool(document.content_hash), delivered=False)
         outcome = DeliveryExecutor(
-            state_db=store.state_db,
+            state_db=state_db,
             backend=backend,
             lease_owner=lease_owner or _new_lease_owner(),
         ).execute_once(str(accepted["job_id"]), max_attempts=5)
+        if outcome == "quarantined":
+            store.record(
+                idempotency_key=ik, content_hash=document.content_hash,
+                document_kind=document.document_kind, target_profile=document.target_profile,
+                status="quarantined_delivery", delivered=False, now_iso=_now_iso(),
+            )
+            return ShadowResult(
+                status="quarantined_delivery", idempotency_key=ik,
+                content_hash_present=bool(document.content_hash), delivered=False,
+            )
         if outcome != "succeeded":
             raise RuntimeError(f"canonical delivery did not succeed: {outcome}")
-        job = store.state_db.get_delivery_job(str(accepted["job_id"]))
+        job = state_db.get_delivery_job(str(accepted["job_id"]))
         if job is None:
             raise RuntimeError("canonical delivery proof is missing")
         store.record(
@@ -495,12 +556,15 @@ def main() -> int:
     allow_live = os.environ.get("ALLOW_LIVE_QUEUE", "0") == "1"
     if stream == "RAG_INGRESS_QUEUE" and not allow_live:
         raise SystemExit("refusing: set ALLOW_LIVE_QUEUE=1 to consume the live RAG_INGRESS_QUEUE")
-    store = IngestStateStore(os.environ["INGEST_STATE_DB_PATH"])
-    lease_owner = _new_lease_owner()
     deliver = os.environ.get("SHADOW_DELIVER", "0") == "1"
     broad_scan_pages = int(os.environ.get("NATURAL_KEY_BROAD_SCAN_PAGES", "0"))
-    backend = None
     delivery_backend = os.environ.get("INGRESS_DELIVERY_BACKEND", "retired_index_bridge").strip().lower()
+    store = IngestStateStore(
+        os.environ["INGEST_STATE_DB_PATH"],
+        canonical_state=deliver and delivery_backend == "couchdb",
+    )
+    lease_owner = _new_lease_owner()
+    backend = None
     if deliver:
         if delivery_backend == "couchdb":
             from .couchdb_delivery_backend import build_couchdb_delivery_backend

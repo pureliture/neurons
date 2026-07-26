@@ -21,6 +21,7 @@ class FakeDeliveryBackend:
         self.evidence_by_ref: dict[tuple[str, str], DeliveryBackendEvidence] = {}
         self.submit_calls = 0
         self.submit_mode = "success"
+        self.submit_status = "succeeded"
         self.status_mode = "success"
         self.observed_at = NOW
 
@@ -32,7 +33,7 @@ class FakeDeliveryBackend:
             dataset_ref="ds_fake",
             document_ref=f"doc_{job.job_id}",
             run="DONE",
-            status="succeeded",
+            status=self.submit_status,
             observed_at=self.observed_at,
         )
         self._store(evidence)
@@ -113,6 +114,88 @@ def test_timeout_after_success_replay_reconciles_to_single_delivery_job(tmp_path
     assert job["index_document_id"] == "doc_job_timeout"
     assert backend.submit_calls == 1
     assert [row["job_id"] for row in db.list_rows("delivery_jobs")] == ["job_timeout"]
+
+
+def test_different_owner_reclaims_uncertain_job_without_manual_pending_reset(tmp_path):
+    db = _db(tmp_path)
+    _create_job(db, job_id="job_uncertain_reclaim")
+    backend = FakeDeliveryBackend()
+    backend.submit_mode = "timeout_after_success"
+
+    first = DeliveryExecutor(state_db=db, backend=backend, lease_owner="worker_a")
+    assert first.execute_once("job_uncertain_reclaim", now=NOW, max_attempts=4) == "replayable"
+    replayable = db.get_delivery_job("job_uncertain_reclaim")
+    assert replayable["status"] == "replayable"
+    assert replayable["lease_owner"] == ""
+    assert replayable["lease_until"] == ""
+
+    backend.submit_mode = "success"
+    second = DeliveryExecutor(state_db=db, backend=backend, lease_owner="worker_b")
+    assert second.execute_once("job_uncertain_reclaim", now=NOW + timedelta(seconds=1), max_attempts=4) == "succeeded"
+
+    job = db.get_delivery_job("job_uncertain_reclaim")
+    assert job["status"] == "succeeded"
+    assert backend.submit_calls == 2
+
+
+def test_payload_integrity_failure_is_terminal_quarantine_not_replayable(tmp_path):
+    db = _db(tmp_path)
+    _create_job(db, job_id="job_payload_integrity")
+    backend = FakeDeliveryBackend()
+    backend.submit_status = "payload_integrity_mismatch"
+
+    outcome = DeliveryExecutor(
+        state_db=db, backend=backend, lease_owner="worker_integrity"
+    ).execute_once("job_payload_integrity", now=NOW, max_attempts=4)
+
+    job = db.get_delivery_job("job_payload_integrity")
+    assert outcome == "quarantined"
+    assert job["status"] == "quarantined"
+    assert job["last_error_class"] == "delivery_payload_integrity_mismatch"
+    assert job["lease_owner"] == ""
+    assert job["lease_until"] == ""
+
+
+def test_replayable_record_rejects_a_stale_live_lease_owner(tmp_path):
+    db = _db(tmp_path)
+    _create_job(db, job_id="job_replay_stale_owner")
+    assert db.claim_delivery_job(
+        "job_replay_stale_owner", lease_owner="owner_a", now=NOW, lease_seconds=60
+    )
+
+    assert db.record_replayable_attempt(
+        "job_replay_stale_owner", lease_owner="owner_b", now=NOW, max_attempts=4
+    ) == "stale_owner_rejected"
+
+    job = db.get_delivery_job("job_replay_stale_owner")
+    assert job["status"] == "claimed"
+    assert job["lease_owner"] == "owner_a"
+    assert job["last_error_class"] == "stale_owner_rejected"
+
+    assert db.record_replayable_attempt(
+        "job_replay_stale_owner", lease_owner="owner_a", now=NOW + timedelta(seconds=61), max_attempts=4
+    ) == "stale_owner_rejected"
+    assert db.get_delivery_job("job_replay_stale_owner")["status"] == "claimed"
+
+
+def test_claim_attempt_limit_returns_terminal_quarantine_to_executor(tmp_path):
+    db = _db(tmp_path)
+    _create_job(db, job_id="job_claim_attempt_limit")
+    assert db.record_replayable_attempt(
+        "job_claim_attempt_limit", now=NOW, max_attempts=4
+    ) == "replayable"
+
+    backend = FakeDeliveryBackend()
+    outcome = DeliveryExecutor(
+        state_db=db, backend=backend, lease_owner="worker_limit"
+    ).execute_once("job_claim_attempt_limit", now=NOW + timedelta(seconds=1), max_attempts=1)
+
+    job = db.get_delivery_job("job_claim_attempt_limit")
+    assert outcome == "quarantined"
+    assert job["status"] == "quarantined"
+    assert job["lease_owner"] == ""
+    assert job["lease_until"] == ""
+    assert backend.submit_calls == 0
 
 
 def test_async_parse_fail_maps_to_failed_retryable_then_quarantine(tmp_path):

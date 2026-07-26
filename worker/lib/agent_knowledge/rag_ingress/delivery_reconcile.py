@@ -49,4 +49,15 @@ class DeliveryReconciler:
                 now=now,
                 max_attempts=max_attempts,
             )
+        if evidence.status in {"quarantined", "payload_unavailable", "payload_integrity_mismatch"}:
+            self._state_db.record_delivery_evidence(
+                job_id,
+                status="quarantined",
+                dataset_ref=evidence.dataset_ref,
+                document_ref=evidence.document_ref,
+                run=evidence.run,
+                last_error_class=f"delivery_{evidence.status}",
+                observed_at=evidence.observed_at or now,
+            )
+            return "quarantined"
         return self._state_db.record_replayable_attempt(job_id, now=now, max_attempts=max_attempts)

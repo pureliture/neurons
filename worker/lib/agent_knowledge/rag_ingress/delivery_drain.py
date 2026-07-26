@@ -1,10 +1,10 @@
-"""M8.1 worker drain seam: pull ``pending`` delivery_jobs through DeliveryExecutor.
+"""M8.1 worker drain seam: pull retryable delivery_jobs through DeliveryExecutor.
 
 dry-run-first by contract:
 - ``dry_run=True`` (default) performs NO claim, NO state-DB mutation, NO backend
-  call. It selects pending jobs and runs only the read-only payload availability
-  gate (Slice A), so an operator can see whether a drain would even have payloads
-  to deliver.
+  call. It selects pending jobs plus retryable jobs whose durable backoff is due,
+  then runs only the read-only payload availability gate (Slice A), so an
+  operator can see whether a drain would even have payloads to deliver.
 - live (``dry_run=False``) requires an injected backend and is reached only from
   the operator-gated CLI path (explicit approval record). Each job goes through
   ``DeliveryExecutor.execute_once`` (claim -> submit outside the transaction ->
@@ -17,12 +17,14 @@ The report contains counts/booleans only -- never job ids, payload bodies, or pa
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 
 from .delivery_backend import PAYLOAD_OK, resolve_delivery_payload
 from .delivery_executor import DeliveryBackend, DeliveryExecutor
 from .state_db import RAGIngressStateDB
 
 _BLOCKED_OUTCOMES = {"claim_rejected", "stale_owner_rejected"}
+_EXECUTABLE_STATUSES = ("pending", "replayable", "failed_retryable")
 
 
 def drain_pending_deliveries(
@@ -34,8 +36,17 @@ def drain_pending_deliveries(
     dry_run: bool = True,
     max_attempts: int = 3,
     max_runtime_seconds: float = 300.0,
+    now: datetime | None = None,
 ) -> dict:
-    selected = state_db.list_delivery_jobs(status="pending", limit=limit)
+    selection_time = now or datetime.now(timezone.utc)
+    selected: list[dict] = []
+    for status in _EXECUTABLE_STATUSES:
+        remaining = max(int(limit) - len(selected), 0)
+        if remaining <= 0:
+            break
+        selected.extend(
+            state_db.list_delivery_jobs(status=status, limit=remaining, due_at=selection_time)
+        )
 
     payload_available = 0
     payload_missing = 0
@@ -76,7 +87,9 @@ def drain_pending_deliveries(
                 runtime_exceeded = True
                 blockers.append("max_runtime_exceeded")
                 break
-            outcome = executor.execute_once(str(row["job_id"]), max_attempts=max_attempts)
+            outcome = executor.execute_once(
+                str(row["job_id"]), now=selection_time, max_attempts=max_attempts
+            )
             executed += 1
             if outcome in _BLOCKED_OUTCOMES:
                 blocked += 1
