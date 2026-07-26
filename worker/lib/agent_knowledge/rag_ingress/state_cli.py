@@ -212,6 +212,7 @@ def _build_live_backend(args: argparse.Namespace, state_db: RAGIngressStateDB):
             couchdb_user=couchdb_user,
             couchdb_password=couchdb_password,
             couchdb_db=couchdb_db,
+            environ=os.environ,
         )
 
     if backend_name == _BACKEND_RETIRED_INDEX_BRIDGE:

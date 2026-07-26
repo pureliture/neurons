@@ -226,9 +226,24 @@ def test_couchdb_rejects_wire_payload_that_conservative_redaction_would_change(t
 
 
 def test_process_payload_exact_duplicate_submits_once_and_reuses_canonical_success_proof(tmp_path):
+    class RecordingMirror:
+        def __init__(self) -> None:
+            self.documents = []
+
+        def submit_document(self, document):
+            self.documents.append(document)
+            return SimpleNamespace(document_ref=f"mirror-{len(self.documents)}")
+
     store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
     payload = _couchdb_payload(tag="canonical-exact-duplicate")
-    backend, _ = _couchdb_backend(store)
+    mirror = RecordingMirror()
+    mirror_outcomes = []
+    backend = CouchDBDeliveryBackend(
+        state_db=store.state_db,
+        store=InMemoryCouchDBSourceStore(),
+        mirror=mirror,
+        on_mirror_outcome=mirror_outcomes.append,
+    )
     original_submit = backend.submit
     submit_calls = 0
 
@@ -244,6 +259,8 @@ def test_process_payload_exact_duplicate_submits_once_and_reuses_canonical_succe
 
     assert (first.status, second.status) == ("delivered", "deduplicated")
     assert submit_calls == 1
+    assert len(mirror.documents) == 1
+    assert [outcome.status for outcome in mirror_outcomes] == ["mirrored"]
     assert store.state_db.scalar("SELECT COUNT(*) FROM delivery_jobs") == 1
     assert store.state_db.get_delivery_payload(payload["idempotencyKey"]) == payload
     assert store.get_delivered(payload["idempotencyKey"]) is not None
@@ -412,6 +429,119 @@ def test_distinct_lease_owners_submit_exact_duplicate_once(tmp_path, monkeypatch
     assert store.state_db.get_row("delivery_jobs", "idempotency_key", payload["idempotencyKey"])["status"] == "succeeded"
 
 
+def test_run_consume_assigns_unique_handler_leases_for_concurrent_exact_duplicates(tmp_path, monkeypatch):
+    from agent_knowledge.rag_ingress.shadow_worker import run_consume
+
+    store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
+    payload = _couchdb_payload(tag="run-consume-concurrent-duplicate")
+    backend, _ = _couchdb_backend(store)
+    original_submit = backend.submit
+    first_submit_entered = threading.Event()
+    release_first_submit = threading.Event()
+    submit_calls = 0
+    assigned_owners: list[str] = []
+
+    def blocked_submit(job):
+        nonlocal submit_calls
+        submit_calls += 1
+        first_submit_entered.set()
+        assert release_first_submit.wait(timeout=5)
+        return original_submit(job)
+
+    backend.submit = blocked_submit
+
+    class FakeMessage:
+        def __init__(self, *, delivered: int):
+            self.data = __import__("json").dumps(payload).encode("utf-8")
+            self.metadata = SimpleNamespace(
+                num_delivered=delivered,
+                sequence=SimpleNamespace(stream=delivered),
+            )
+            self.ack_calls = 0
+            self.nak_calls = 0
+
+        async def ack(self):
+            self.ack_calls += 1
+
+        async def nak(self):
+            self.nak_calls += 1
+
+    first, competing, redelivery = FakeMessage(delivered=1), FakeMessage(delivered=1), FakeMessage(delivered=2)
+
+    class FakeSubscription:
+        def __init__(self):
+            self.batches = [[first, competing], [redelivery]]
+
+        async def fetch(self, _count, timeout):
+            del timeout
+            if self.batches:
+                return self.batches.pop(0)
+            raise TimeoutError("idle")
+
+    class FakeJetStream:
+        async def stream_info(self, _stream):
+            return object()
+
+        async def pull_subscribe(self, _subject, *, durable, stream):
+            del durable, stream
+            return FakeSubscription()
+
+    class FakeNatsConnection:
+        def jetstream(self):
+            return FakeJetStream()
+
+        async def drain(self):
+            return None
+
+    async def connect(_url):
+        return FakeNatsConnection()
+
+    monkeypatch.setitem(sys.modules, "nats", SimpleNamespace(connect=connect))
+
+    def owner_factory(base: str, ordinal: int) -> str:
+        owner = f"{base}:test-{ordinal}"
+        assigned_owners.append(owner)
+        return owner
+
+    async def consume() -> dict:
+        task = asyncio.create_task(
+            run_consume(
+                nats_url="nats://fake",
+                stream="RAG_INGRESS_SHADOW",
+                subject="rag.shadow.>",
+                durable="shadow-test",
+                store=store,
+                backend=backend,
+                deliver=True,
+                max_messages=2,
+                idle_timeout=0.01,
+                fetch_batch=2,
+                concurrency=2,
+                lease_owner="shadow-worker:test-run",
+                lease_owner_factory=owner_factory,
+                log=lambda _line: None,
+            )
+        )
+        assert await asyncio.to_thread(first_submit_entered.wait, 5)
+        release_first_submit.set()
+        return await task
+
+    result = asyncio.run(consume())
+
+    assert submit_calls == 1
+    assert assigned_owners == ["shadow-worker:test-run:test-1", "shadow-worker:test-run:test-2", "shadow-worker:test-run:test-3"]
+    # The two first-batch handlers race for the lease, so their result order is
+    # intentionally unspecified. Exactly one owns the primary submission and
+    # the other is NAKed; its later redelivery sees canonical success and ACKs.
+    assert sorted(result["statuses"]) == ["deduplicated", "delivered", "nak"]
+    assert first.ack_calls + competing.ack_calls == 1
+    assert first.nak_calls + competing.nak_calls == 1
+    assert (redelivery.ack_calls, redelivery.nak_calls) == (1, 0)
+    assert store.state_db.get_row(
+        "delivery_jobs", "idempotency_key", payload["idempotencyKey"]
+    )["status"] == "succeeded"
+
+
 def test_ingest_state_store_creates_new_parent_private(tmp_path):
     db_path = tmp_path / "new-private-parent" / "ingress.sqlite"
 
@@ -460,6 +590,7 @@ def test_main_injects_couchdb_backend_directly_with_one_process_lease(tmp_path, 
             store=InMemoryCouchDBSourceStore(),
         )
         captured["built"] = backend
+        captured["environ"] = kwargs["environ"]
         return backend
 
     async def run_consume(**kwargs):
@@ -487,3 +618,4 @@ def test_main_injects_couchdb_backend_directly_with_one_process_lease(tmp_path, 
     assert captured["backend"] is captured["built"]
     assert isinstance(captured["backend"], CouchDBDeliveryBackend)
     assert captured["lease_owner"] == "shadow-worker:pod-process-unique"
+    assert captured["environ"] is os.environ

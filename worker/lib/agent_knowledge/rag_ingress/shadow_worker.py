@@ -27,6 +27,7 @@ import os
 import sqlite3
 import time
 import uuid
+from itertools import count
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
@@ -361,6 +362,7 @@ async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
                       fetch_batch: int = 1, concurrency: int = 1,
                       pressure_open: Callable[[], bool] | None = None,
                       lease_owner: str | None = None,
+                      lease_owner_factory: Callable[[str, int], str] | None = None,
                       log: Callable[[str], None] = print) -> dict:
     """Async JetStream pull-consume loop.
 
@@ -399,16 +401,27 @@ async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
     results: list[str] = []
     fetch_batch = max(int(fetch_batch), 1)
     concurrency = max(int(concurrency), 1)
-    lease_owner = lease_owner or _new_lease_owner()
+    # ``lease_owner`` is a process/run identifier, never a handler lease. Two
+    # exact duplicate messages can be fetched in one concurrent batch, so each
+    # handler must claim with a distinct owner or the same owner would bypass
+    # the state DB's live-lease exclusion.
+    lease_owner_base = lease_owner or _new_lease_owner()
+    handler_sequence = count(1)
     semaphore = asyncio.Semaphore(concurrency)
 
     async def handle_msg(msg) -> str:
         async with semaphore:
+            handle_number = next(handler_sequence)
+            handler_lease_owner = (
+                lease_owner_factory(lease_owner_base, handle_number)
+                if lease_owner_factory is not None
+                else f"{lease_owner_base}:handle-{handle_number}"
+            )
             try:
                 payload = json.loads(msg.data.decode("utf-8"))
                 res = await asyncio.to_thread(
                     process_payload, payload, store=store, backend=backend,
-                    deliver=deliver, lease_owner=lease_owner,
+                    deliver=deliver, lease_owner=handler_lease_owner,
                 )
                 await msg.ack()
                 log(f"worker processed status={res.status} delivered={res.delivered}")
@@ -579,6 +592,7 @@ def main() -> int:
                 couchdb_user=os.environ["COUCHDB_USER"],
                 couchdb_password=os.environ["COUCHDB_PASSWORD"],
                 couchdb_db=os.environ["COUCHDB_DB"],
+                environ=os.environ,
             )
         else:
             # Default RetiredIndexBridge sink (retired_index_bridge or any unrecognised value).

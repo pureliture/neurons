@@ -14,6 +14,14 @@ command/lease state를 사용하고 CouchDB source store로 전달한다. 이 �
 `SHADOW_DELIVER=0`이며, `retired_index_bridge` backend는 별도 legacy 환경변수를
 쓴다. 이 문서는 source/CI 계약만 설명하며 production activation 증거는 아니다.
 
+`INGRESS_DELIVERY_BACKEND=couchdb`에서만 `MIRROR_DUAL_WRITE=1`은 Qdrant mirror를
+선택적으로 구성한다. mirror는 완전히 server-redacted 되고 leak gate를 통과한
+`RagReadyDocument`을 **권위 있는 CouchDB write와 aggregate reconciliation이 성공한 뒤에만**
+best-effort로 받는다. `QDRANT_URL`이 없거나 mirror 구성·write가 실패해도 CouchDB
+성공과 canonical delivery 상태는 바뀌지 않으며, 실패 관측값은 status와 exception class만
+남긴다. 플래그가 없거나 `1`이 아니면 primary-only 동작은 변경되지 않는다. 이 source
+경계는 production 활성화나 runtime mutation을 뜻하지 않는다.
+
 - 출처(provenance): `agent-knowledge` advisor source revision `d571800`의 벤더링 사본.
 - 외부 의존: `nats-py>=2.6` 하나(런타임). 그 외 표준 라이브러리만 사용.
 

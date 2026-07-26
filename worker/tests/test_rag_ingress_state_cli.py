@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from types import SimpleNamespace
 
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.rag_ingress.backfill_apply import apply_backfill_to_state_db
@@ -208,3 +209,32 @@ def test_state_cli_reconcile_deliveries_dry_run(tmp_path, capsys):
     }
     assert report["network_used"] is False
     assert report["mutation_performed"] is False
+
+
+def test_state_cli_couchdb_factory_receives_process_environment(tmp_path, monkeypatch):
+    import agent_knowledge.rag_ingress.couchdb_delivery_backend as couchdb_delivery_backend
+    import agent_knowledge.rag_ingress.state_cli as state_cli
+
+    state_db = RAGIngressStateDB(_state_db_path(tmp_path))
+    captured = {}
+    sentinel_backend = object()
+
+    def build_backend(**kwargs):
+        captured.update(kwargs)
+        return sentinel_backend
+
+    monkeypatch.setattr(couchdb_delivery_backend, "build_couchdb_delivery_backend", build_backend)
+    monkeypatch.setenv("INGRESS_DELIVERY_BACKEND", "couchdb")
+    monkeypatch.setenv("COUCHDB_URL", "http://couchdb.invalid")
+    monkeypatch.setenv("COUCHDB_USER", "test-user")
+    monkeypatch.setenv("COUCHDB_PASSWORD", "test-password")
+    monkeypatch.setenv("COUCHDB_DB", "test-db")
+
+    backend = state_cli._build_live_backend(
+        SimpleNamespace(couchdb_url="", couchdb_user="", couchdb_password="", couchdb_db=""),
+        state_db,
+    )
+
+    assert backend is sentinel_backend
+    assert captured["state_db"] is state_db
+    assert captured["environ"] is os.environ

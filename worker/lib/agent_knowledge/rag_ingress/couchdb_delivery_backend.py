@@ -47,6 +47,9 @@ up the authoritative session document.  dataset_ref: ``couchdb:<db>``.
 from __future__ import annotations
 
 import datetime
+import json
+from collections.abc import Callable, Mapping
+from typing import Any
 
 from ..couchdb_source.couchdb_http_store import CouchDBError
 from ..couchdb_source.document_model import (
@@ -74,8 +77,31 @@ from .delivery_executor import (
     DeliveryJobView,
     DeliveryOutcomeUncertain,
 )
-from .server_runtime import apply_server_redaction, public_ingress_leak_violations
+from .qdrant_dual_write import MirrorWriteOutcome
+from .server_runtime import (
+    apply_server_redaction,
+    document_from_ingress_payload,
+    public_ingress_leak_violations,
+)
 from .state_db import RAGIngressStateDB
+
+
+CouchDBMirrorOutcomeHook = Callable[[MirrorWriteOutcome], None]
+
+
+def _default_couchdb_mirror_outcome_logger(outcome: MirrorWriteOutcome) -> None:
+    """Emit only redaction-safe best-effort mirror state."""
+    if outcome.status != "mirrored":
+        print(
+            json.dumps(
+                {
+                    "event": "qdrant_mirror_write",
+                    "status": outcome.status,
+                    "error_class": outcome.error_class,
+                }
+            ),
+            flush=True,
+        )
 
 
 class CouchDBDeliveryBackend:
@@ -91,9 +117,18 @@ class CouchDBDeliveryBackend:
     fake in tests).
     """
 
-    def __init__(self, *, state_db: RAGIngressStateDB, store: CouchDBSourceStore) -> None:
+    def __init__(
+        self,
+        *,
+        state_db: RAGIngressStateDB,
+        store: CouchDBSourceStore,
+        mirror: Any | None = None,
+        on_mirror_outcome: CouchDBMirrorOutcomeHook | None = None,
+    ) -> None:
         self._state_db = state_db
         self._store = store
+        self._mirror = mirror
+        self._on_mirror_outcome = on_mirror_outcome
 
     # ------------------------------------------------------------------
     # DeliveryBackend Protocol
@@ -253,6 +288,14 @@ class CouchDBDeliveryBackend:
         except Exception as exc:
             raise DeliveryOutcomeUncertain(exc.__class__.__name__) from exc
 
+        # The Qdrant mirror is strictly post-authoritative and best-effort. A
+        # partial primary attempt may have stored the chunk but failed before
+        # aggregate reconciliation; its successful retry must still reach the
+        # mirror. Canonical succeeded-job duplicates never call ``submit`` from
+        # DeliveryExecutor, so they still have exactly one mirror side effect.
+        # The mirror sees the full server-redacted, leak-gated payload.
+        self._submit_mirror_after_authoritative_success(payload)
+
         return DeliveryBackendEvidence(
             idempotency_key=job.idempotency_key,
             payload_hash=job.payload_hash,
@@ -262,6 +305,23 @@ class CouchDBDeliveryBackend:
             status="succeeded",
             observed_at=datetime.datetime.now(tz=datetime.timezone.utc),
         )
+
+    def _submit_mirror_after_authoritative_success(self, redacted_payload: dict) -> None:
+        if self._mirror is None:
+            return
+        try:
+            document = document_from_ingress_payload(redacted_payload)
+            result = self._mirror.submit_document(document)
+            outcome = MirrorWriteOutcome(
+                status="mirrored",
+                document_ref=str(getattr(result, "document_ref", "") or ""),
+            )
+        except Exception as exc:  # mirror cannot affect authoritative success
+            outcome = MirrorWriteOutcome(
+                status="mirror_error", error_class=exc.__class__.__name__
+            )
+        if self._on_mirror_outcome is not None:
+            self._on_mirror_outcome(outcome)
 
     def find_by_natural_key(
         self, idempotency_key: str, payload_hash: str
@@ -337,6 +397,9 @@ def build_couchdb_delivery_backend(
     couchdb_user: str,
     couchdb_password: str,
     couchdb_db: str,
+    environ: Mapping[str, str] | None = None,
+    mirror_builder: Callable[[Mapping[str, str]], Any | None] | None = None,
+    on_mirror_outcome: CouchDBMirrorOutcomeHook | None = None,
 ) -> CouchDBDeliveryBackend:
     """Factory used by the env-switch wiring in state_cli to build the backend.
 
@@ -353,10 +416,30 @@ def build_couchdb_delivery_backend(
         db=couchdb_db,
         auth_header=f"Basic {credentials}",
     )
-    return CouchDBDeliveryBackend(state_db=state_db, store=store)
+    effective_environ = environ or {}
+    mirror = None
+    outcome_hook = on_mirror_outcome or _default_couchdb_mirror_outcome_logger
+    if str(effective_environ.get("MIRROR_DUAL_WRITE") or "").strip() == "1":
+        from .qdrant_dual_write import build_qdrant_mirror_from_env
+
+        try:
+            mirror = (mirror_builder or build_qdrant_mirror_from_env)(effective_environ)
+        except Exception as exc:
+            outcome_hook(
+                MirrorWriteOutcome(
+                    status="mirror_build_error", error_class=exc.__class__.__name__
+                )
+            )
+    return CouchDBDeliveryBackend(
+        state_db=state_db,
+        store=store,
+        mirror=mirror,
+        on_mirror_outcome=outcome_hook if mirror is not None else None,
+    )
 
 
 __all__ = [
     "CouchDBDeliveryBackend",
+    "CouchDBMirrorOutcomeHook",
     "build_couchdb_delivery_backend",
 ]
