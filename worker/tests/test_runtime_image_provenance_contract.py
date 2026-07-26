@@ -168,4 +168,4 @@ def test_ingress_worker_compose_keeps_retired_default_and_passes_couchdb_selecti
         "${INGRESS_DELIVERY_BACKEND:-retired_index_bridge}"
     )
     for name in ("COUCHDB_URL", "COUCHDB_USER", "COUCHDB_PASSWORD", "COUCHDB_DB"):
-        assert environment.get(name) == "${" + name + ":-}"
+        assert environment.get(name) == "${" + name + "}"

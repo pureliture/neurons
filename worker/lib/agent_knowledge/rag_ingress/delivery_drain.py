@@ -24,7 +24,7 @@ from .delivery_executor import DeliveryBackend, DeliveryExecutor
 from .state_db import RAGIngressStateDB
 
 _BLOCKED_OUTCOMES = {"claim_rejected", "stale_owner_rejected"}
-_EXECUTABLE_STATUSES = ("pending", "replayable", "failed_retryable")
+_EXECUTABLE_STATUSES = ("replayable", "failed_retryable", "pending")
 
 
 def drain_pending_deliveries(

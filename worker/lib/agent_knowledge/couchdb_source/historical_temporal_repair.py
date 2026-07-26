@@ -451,7 +451,29 @@ def repair_historical_temporal_gaps(
     except ValueError as exc:
         report.update({"status": "blocked", "error": str(exc), "error_count": 1, "gap_count": 1})
         return report
+    except Exception:
+        report.update(
+            {
+                "status": "blocked",
+                "error": "snapshot_read_failed",
+                "error_count": 1,
+                "gap_count": 1,
+            }
+        )
+        return report
     report.update(snapshot_counts)
+    if _deadline_exceeded(
+        started=started, max_runtime_seconds=max_runtime_seconds, monotonic=monotonic
+    ):
+        report.update(
+            {
+                "status": "aborted_timeout",
+                "timed_out": True,
+                "error_count": 1,
+                "gap_count": max(1, len(gaps)),
+            }
+        )
+        return report
     target_gap_ids = {str(document.get("_id") or "") for document in gaps}
     by_id: dict[str, dict[str, object]] = {}
     archive_conflicts: set[str] = set()
@@ -519,6 +541,15 @@ def repair_historical_temporal_gaps(
                 observed_at_end=bounds[1],
             )
         )
+    if report["timed_out"]:
+        report.update(
+            {
+                "status": "aborted_timeout",
+                "error_count": 1,
+                "gap_count": max(1, len(gaps) - len(planned)),
+            }
+        )
+        return report
     report["planned_update_count"] = len(planned)
     report["plan_digest"] = _plan_digest(
         planned,
@@ -563,6 +594,10 @@ def repair_historical_temporal_gaps(
                     observed_at_start=item.observed_at_start,
                     observed_at_end=item.observed_at_end,
                 )
+                if revision.outcome != "duplicate":
+                    report["updated_count"] += 1
+                    report["mutation_performed"] = True
+                    mutated_sessions.add(item.session_id_hash)
                 current = source_store.get(item.document_id) or {}
                 if (
                     str(current.get("content_hash") or "") != item.expected_content_hash
@@ -571,10 +606,6 @@ def repair_historical_temporal_gaps(
                     ) != (item.observed_at_start, item.observed_at_end)
                 ):
                     raise SourceStoreConflict("historical temporal repair postcheck failed")
-                if revision.outcome != "duplicate":
-                    report["updated_count"] += 1
-                    report["mutation_performed"] = True
-                    mutated_sessions.add(item.session_id_hash)
             except SourceStoreConflict:
                 report["write_conflict_count"] += 1
                 failed_sessions.add(item.session_id_hash)
@@ -719,6 +750,17 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=not execute,
         )
         report.update(collection)
+        print(json.dumps(report, sort_keys=True))
+        return 1
+    if collection["parser_error_count"]:
+        report = _error_report("historical_source_parse_error", dry_run=not execute)
+        report.update(collection)
+        report.update(
+            {
+                "error_count": int(collection["parser_error_count"]),
+                "gap_count": int(collection["parser_error_count"]),
+            }
+        )
         print(json.dumps(report, sort_keys=True))
         return 1
     store = CouchDBHttpSourceStore(

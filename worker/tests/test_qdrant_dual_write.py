@@ -17,6 +17,7 @@ from agent_knowledge.rag_ingress.retired_index_bridge import (
 from agent_knowledge.rag_ingress.qdrant_dual_write import (
     MirrorDualWriteBackend,
     MirrorWriteOutcome,
+    maybe_wrap_dual_write,
 )
 from agent_knowledge.rag_ingress.rag_ready_document import build_rag_ready_document
 
@@ -87,6 +88,48 @@ def test_mirror_failure_never_breaks_authoritative_write():
     assert result.document_ref == "p1"
     assert outcomes[-1].status == "mirror_error"
     assert outcomes[-1].error_class == "RuntimeError"
+
+
+def test_mirror_outcome_hook_failure_never_breaks_authoritative_write():
+    primary = _PrimaryOK()
+
+    def failing_observer(_outcome):
+        raise RuntimeError("optional observer failed")
+
+    backend = MirrorDualWriteBackend(
+        primary=primary,
+        mirror=_MirrorOK(),
+        on_mirror_outcome=failing_observer,
+    )
+
+    result = backend.submit_document(_doc())
+
+    assert result.document_ref == "p1"
+    assert primary.calls == 1
+
+
+def test_mirror_build_error_hook_failure_never_blocks_primary_startup():
+    primary = _PrimaryOK()
+    observed = []
+
+    def fail_build(_environ):
+        raise RuntimeError("mirror configuration failed")
+
+    def failing_observer(outcome):
+        observed.append(outcome)
+        raise RuntimeError("optional observer failed")
+
+    backend = maybe_wrap_dual_write(
+        primary,
+        environ={"MIRROR_DUAL_WRITE": "1"},
+        mirror_builder=fail_build,
+        on_mirror_outcome=failing_observer,
+    )
+
+    assert backend is primary
+    assert [(outcome.status, outcome.error_class) for outcome in observed] == [
+        ("mirror_build_error", "RuntimeError")
+    ]
 
 
 def test_primary_failure_propagates_and_mirror_not_touched():

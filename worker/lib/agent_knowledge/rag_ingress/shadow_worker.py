@@ -576,6 +576,22 @@ def main() -> int:
     deliver = os.environ.get("SHADOW_DELIVER", "0") == "1"
     broad_scan_pages = int(os.environ.get("NATURAL_KEY_BROAD_SCAN_PAGES", "0"))
     delivery_backend = os.environ.get("INGRESS_DELIVERY_BACKEND", "retired_index_bridge").strip().lower()
+    couchdb_config = None
+    if deliver and delivery_backend == "couchdb":
+        couchdb_config = {
+            "COUCHDB_URL": str(os.environ.get("COUCHDB_URL") or ""),
+            "COUCHDB_USER": str(os.environ.get("COUCHDB_USER") or ""),
+            "COUCHDB_PASSWORD": str(os.environ.get("COUCHDB_PASSWORD") or ""),
+            "COUCHDB_DB": str(os.environ.get("COUCHDB_DB") or ""),
+        }
+        missing = [
+            name for name, value in couchdb_config.items() if not value.strip()
+        ]
+        if missing:
+            raise SystemExit(
+                "INGRESS_DELIVERY_BACKEND=couchdb requires non-empty "
+                + ", ".join(missing)
+            )
     store = IngestStateStore(
         os.environ["INGEST_STATE_DB_PATH"],
         canonical_state=deliver and delivery_backend == "couchdb",
@@ -586,12 +602,13 @@ def main() -> int:
         if delivery_backend == "couchdb":
             from .couchdb_delivery_backend import build_couchdb_delivery_backend
 
+            assert couchdb_config is not None
             backend = build_couchdb_delivery_backend(
                 state_db=store.state_db,
-                couchdb_url=os.environ["COUCHDB_URL"],
-                couchdb_user=os.environ["COUCHDB_USER"],
-                couchdb_password=os.environ["COUCHDB_PASSWORD"],
-                couchdb_db=os.environ["COUCHDB_DB"],
+                couchdb_url=couchdb_config["COUCHDB_URL"],
+                couchdb_user=couchdb_config["COUCHDB_USER"],
+                couchdb_password=couchdb_config["COUCHDB_PASSWORD"],
+                couchdb_db=couchdb_config["COUCHDB_DB"],
                 environ=os.environ,
             )
         else:

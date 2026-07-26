@@ -90,7 +90,7 @@ def _build_parser() -> argparse.ArgumentParser:
     drain.add_argument("--couchdb-url", default=os.environ.get("COUCHDB_URL", ""))
     drain.add_argument("--couchdb-user", default=os.environ.get("COUCHDB_USER", ""))
     drain.add_argument("--couchdb-password", default=os.environ.get("COUCHDB_PASSWORD", ""))
-    drain.add_argument("--couchdb-db", default=os.environ.get("COUCHDB_DB", "neurons_transcript_source"))
+    drain.add_argument("--couchdb-db", default=os.environ.get("COUCHDB_DB", ""))
     drain.add_argument("--max-runtime-seconds", type=float, default=300.0)
 
     reconcile = subparsers.add_parser("reconcile-deliveries")
@@ -196,12 +196,19 @@ def _build_live_backend(args: argparse.Namespace, state_db: RAGIngressStateDB):
         couchdb_url = getattr(args, "couchdb_url", "") or os.environ.get("COUCHDB_URL", "")
         couchdb_user = getattr(args, "couchdb_user", "") or os.environ.get("COUCHDB_USER", "")
         couchdb_password = getattr(args, "couchdb_password", "") or os.environ.get("COUCHDB_PASSWORD", "")
-        couchdb_db = getattr(args, "couchdb_db", "") or os.environ.get("COUCHDB_DB", "neurons_transcript_source")
-        missing = [v for v, k in [(couchdb_url, "COUCHDB_URL"), (couchdb_user, "COUCHDB_USER"), (couchdb_password, "COUCHDB_PASSWORD")] if not v]
+        couchdb_db = getattr(args, "couchdb_db", "") or os.environ.get("COUCHDB_DB", "")
+        required = {
+            "COUCHDB_URL": str(couchdb_url or ""),
+            "COUCHDB_USER": str(couchdb_user or ""),
+            "COUCHDB_PASSWORD": str(couchdb_password or ""),
+            "COUCHDB_DB": str(couchdb_db or ""),
+        }
+        missing = [name for name, value in required.items() if not value.strip()]
         if missing:
             print(
                 f"drain-deliveries: INGRESS_DELIVERY_BACKEND=couchdb requires "
-                f"COUCHDB_URL, COUCHDB_USER, COUCHDB_PASSWORD env vars (missing: {missing})",
+                f"non-empty COUCHDB_URL, COUCHDB_USER, COUCHDB_PASSWORD, "
+                f"COUCHDB_DB values (missing: {', '.join(missing)})",
                 file=sys.stderr,
             )
             return None

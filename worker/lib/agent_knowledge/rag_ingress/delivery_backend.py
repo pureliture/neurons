@@ -126,22 +126,27 @@ class RetiredIndexBridgeDeliveryBackend:
         lookup = getattr(self._retired_index_bridge, "find_by_natural_key", None)
         if not callable(lookup):
             return None
-        handle = lookup(
-            target_profile=str(row.get("target_profile") or ""),
-            idempotency_key=idempotency_key,
-            payload_hash=payload_hash,
-        )
-        if handle is None:
-            return None
-        detail = self._retired_index_bridge.document_status_detail(handle)
-        return DeliveryBackendEvidence(
-            idempotency_key=idempotency_key,
-            payload_hash=payload_hash,
-            dataset_ref=handle.dataset_ref,
-            document_ref=handle.document_ref,
-            run=detail.backend_raw_status,
-            status=_SUBMIT_STATUS_TO_EVIDENCE.get(detail.status, "unknown"),
-        )
+        try:
+            handle = lookup(
+                target_profile=str(row.get("target_profile") or ""),
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+            )
+            if handle is None:
+                return None
+            detail = self._retired_index_bridge.document_status_detail(handle)
+            return DeliveryBackendEvidence(
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                dataset_ref=handle.dataset_ref,
+                document_ref=handle.document_ref,
+                run=detail.backend_raw_status,
+                status=_SUBMIT_STATUS_TO_EVIDENCE.get(detail.status, "unknown"),
+            )
+        except DeliveryOutcomeUncertain:
+            raise
+        except Exception as exc:
+            raise DeliveryOutcomeUncertain(exc.__class__.__name__) from exc
 
     def status(self, dataset_ref: str, document_ref: str) -> DeliveryBackendEvidence:
         detail = self._retired_index_bridge.document_status_detail(

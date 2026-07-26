@@ -5,7 +5,11 @@ so clients delivering the same knowledge collapse to one document; a redacted or
 stable host alias may travel as ``source_host`` metadata for operator attribution.
 """
 
-from agent_knowledge.rag_ingress.server_runtime import document_from_ingress_payload
+from agent_knowledge.rag_ingress.server_runtime import (
+    apply_server_redaction,
+    document_from_ingress_payload,
+    public_ingress_leak_violations,
+)
 
 
 def _payload(*, host="", content_hash="sha256:abc", idem="idem-1"):
@@ -59,3 +63,17 @@ def test_source_host_does_not_override_document_metadata():
 def test_absent_host_leaves_no_source_host_key():
     doc = document_from_ingress_payload(_payload(host=""))
     assert "source_host" not in doc.metadata
+
+
+def test_server_redaction_covers_source_project_and_host_before_metadata_injection():
+    payload = _payload(host="/Users/example/private-host")
+    payload["source"]["project"] = "/Users/example/Projects/private-project"
+
+    redacted = apply_server_redaction(payload)
+    document = document_from_ingress_payload(redacted)
+
+    assert redacted["source"]["project"] == "[redacted_path]"
+    assert redacted["source"]["host"] == "[redacted_path]"
+    assert document.metadata["project"] == "[redacted_path]"
+    assert document.metadata["source_host"] == "[redacted_path]"
+    assert public_ingress_leak_violations(str(document.metadata)) == []
