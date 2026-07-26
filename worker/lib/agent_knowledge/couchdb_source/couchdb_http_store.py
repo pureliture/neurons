@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from collections.abc import Iterator
 from urllib.parse import quote
 
@@ -72,12 +73,14 @@ class CouchDBHttpSourceStore:
         transport=None,
         auth_header: str = "",
         request_timeout_seconds: float = 30,
+        deadline_monotonic: float | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.db = db
         self.transport = transport or _urllib_transport
         self.auth_header = auth_header
         self.request_timeout_seconds = request_timeout_seconds
+        self.deadline_monotonic = deadline_monotonic
 
     # --- HTTP plumbing --------------------------------------------------------
 
@@ -89,12 +92,20 @@ class CouchDBHttpSourceStore:
             headers["Content-Type"] = "application/json"
         if self.auth_header:
             headers["Authorization"] = self.auth_header
+        timeout_seconds = self.request_timeout_seconds
+        if self.deadline_monotonic is not None:
+            remaining = self.deadline_monotonic - time.monotonic()
+            if remaining <= 0:
+                raise CouchDBError("operation deadline exceeded")
+            timeout_seconds = min(timeout_seconds, remaining)
         if self.transport is _urllib_transport:
             response = self.transport(
-                method, self.base_url + path, headers, body, timeout_seconds=self.request_timeout_seconds
+                method, self.base_url + path, headers, body, timeout_seconds=timeout_seconds
             )
         else:
             response = self.transport(method, self.base_url + path, headers, body)
+        if self.deadline_monotonic is not None and time.monotonic() >= self.deadline_monotonic:
+            raise CouchDBError("operation deadline exceeded")
         try:
             payload = json.loads(response.body.decode("utf-8") or "{}") if response.body else {}
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:

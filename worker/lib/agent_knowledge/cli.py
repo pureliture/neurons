@@ -38,6 +38,7 @@ from .rag_ingress import state_cli
 from .rag_ingress import projection_invalidation_canary
 from .rag_ingress import temporal_metadata_backfill
 from .rag_ingress import temporal_revision_rebuild
+from .couchdb_source import historical_temporal_repair
 from .session_memory import (
     autopilot_cli,
     cleanup_readiness,
@@ -143,6 +144,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "couchdb-graph-status": llm_brain_graph_projection_status_cli.main,
     "couchdb-projection-invalidation-canary": projection_invalidation_canary.main,
     "couchdb-temporal-metadata-backfill": temporal_metadata_backfill.main,
+    "couchdb-historical-temporal-repair": historical_temporal_repair.main,
     "couchdb-temporal-revision-rebuild": temporal_revision_rebuild.main,
     "couchdb-temporal-evidence-inventory": temporal_evidence_inventory.main,
     "transcript-migration": migration_cli.main,
@@ -179,6 +181,11 @@ COMMAND_METADATA: dict[str, dict[str, object]] = {
         "live_mutation_requires_approval": True,
     },
     "couchdb-temporal-metadata-backfill": {
+        "runtime_category": "human_gated_metadata_repair",
+        "deletion_candidate": False,
+        "live_mutation_requires_approval": True,
+    },
+    "couchdb-historical-temporal-repair": {
         "runtime_category": "human_gated_metadata_repair",
         "deletion_candidate": False,
         "live_mutation_requires_approval": True,

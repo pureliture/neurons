@@ -6,6 +6,14 @@ G2부터 라이브 delivery는 Java `ingress-worker`가 아니라 이 Python wor
 `workspace-index-advisor`의 `agent-knowledge` lib에만 물리적으로 존재했다.
 이 패키지는 그 **delivery 서브셋을 co-locate(벤더링)** 한 것이다. Java 코드는 바뀌지 않는다.
 
+`SHADOW_DELIVER=1`과 `INGRESS_DELIVERY_BACKEND=couchdb`를 함께 설정하면
+`shadow_worker`는 이 패키지의 `DeliveryExecutor`를 통해 private SQLite
+command/lease state를 사용하고 CouchDB source store로 전달한다. 이 경로에는
+`COUCHDB_URL`, `COUCHDB_USER`, `COUCHDB_PASSWORD`, `COUCHDB_DB`, 그리고
+0700 private parent 아래의 `INGEST_STATE_DB_PATH`가 필요하다. 기본값은 여전히
+`SHADOW_DELIVER=0`이며, `retired_index_bridge` backend는 별도 legacy 환경변수를
+쓴다. 이 문서는 source/CI 계약만 설명하며 production activation 증거는 아니다.
+
 - 출처(provenance): `agent-knowledge` advisor source revision `d571800`의 벤더링 사본.
 - 외부 의존: `nats-py>=2.6` 하나(런타임). 그 외 표준 라이브러리만 사용.
 
@@ -30,10 +38,10 @@ vendored (`lib/agent_knowledge/`):
   smaller `shadow_ingest_log` path.
 - `rag_ingress/delivery_executor.py` / `delivery_backend.py` /
   `delivery_reconcile.py` / `delivery_drain.py` / `backfill.py` /
-  `backfill_apply.py` / `state_sink.py` — approval-gated server
-  delivery/backfill primitives plus the state-DB-only ingress accept seam
-  covered by fake-backend tests. These are not wired into the live worker
-  defaults by this slice.
+  `backfill_apply.py` / `state_sink.py` — server delivery/backfill primitives
+  plus the state-DB ingress accept seam. `DeliveryExecutor` is wired by the
+  explicit CouchDB branch of `shadow_worker`; delivery/backfill CLIs remain
+  approval-gated and default-off.
 - `rag_ingress/product_surface_switch_plan.py` /
   `state_shadow_readiness.py` / `retirement_readiness.py` — read-only
   server-side readiness and legacy-retirement planning gates. These produce
