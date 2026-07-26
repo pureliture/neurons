@@ -306,6 +306,27 @@ def test_backend_find_by_natural_key_returns_status_evidence(tmp_path):
     ]
 
 
+def test_backend_natural_key_without_status_detail_fails_closed(tmp_path):
+    state_db = _state_db(tmp_path)
+    payload = _payload(key="k_missing_status_detail", body="body")
+    _seed(state_db, payload)
+
+    class AdapterWithoutStatusDetail:
+        def find_by_natural_key(self, **_kwargs):
+            return BackendDocumentHandle(dataset_ref="ds_lookup", document_ref="doc_lookup")
+
+        def submit_document(self, _document):
+            raise AssertionError("natural-key probe must fail before submit")
+
+    backend = RetiredIndexBridgeDeliveryBackend(
+        state_db=state_db,
+        retired_index_bridge=AdapterWithoutStatusDetail(),
+    )
+
+    with pytest.raises(AttributeError, match="document_status_detail"):
+        backend.submit(_job_view(state_db, "k_missing_status_detail"))
+
+
 def test_backend_find_by_natural_key_is_none_for_unknown_or_mismatched_job(tmp_path):
     state_db = _state_db(tmp_path)
     backend = RetiredIndexBridgeDeliveryBackend(
