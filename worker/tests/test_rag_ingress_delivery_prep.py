@@ -12,6 +12,7 @@ Covers:
 import hashlib
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -37,6 +38,9 @@ from agent_knowledge.rag_ingress.retired_index_bridge import (
 )
 from agent_knowledge.rag_ingress.server_runtime import job_id_for_payload
 from agent_knowledge.rag_ingress.state_db import RAGIngressStateDB
+
+
+DRAIN_NOW = datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc)
 
 
 def _payload(*, key="k1", body="hello delivery body"):
@@ -306,6 +310,38 @@ def test_backend_find_by_natural_key_returns_status_evidence(tmp_path):
     ]
 
 
+def test_backend_natural_key_without_status_detail_fails_closed(tmp_path):
+    state_db = _state_db(tmp_path)
+    payload = _payload(key="k_missing_status_detail", body="body")
+    _seed(state_db, payload)
+
+    class AdapterWithoutStatusDetail:
+        def find_by_natural_key(self, **_kwargs):
+            return BackendDocumentHandle(dataset_ref="ds_lookup", document_ref="doc_lookup")
+
+        def submit_document(self, _document):
+            raise AssertionError("natural-key probe must fail before submit")
+
+    backend = RetiredIndexBridgeDeliveryBackend(
+        state_db=state_db,
+        retired_index_bridge=AdapterWithoutStatusDetail(),
+    )
+
+    with pytest.raises(DeliveryOutcomeUncertain) as captured:
+        backend.submit(_job_view(state_db, "k_missing_status_detail"))
+
+    assert str(captured.value) == "AttributeError"
+    executor = DeliveryExecutor(state_db=state_db, backend=backend, lease_owner="malformed-adapter")
+    outcome = executor.execute_once(job_id_for_payload(payload), max_attempts=1)
+    assert outcome == "quarantined"
+    row = state_db.get_row(
+        "delivery_jobs",
+        "idempotency_key",
+        "k_missing_status_detail",
+    )
+    assert row["status"] == "quarantined"
+
+
 def test_backend_find_by_natural_key_is_none_for_unknown_or_mismatched_job(tmp_path):
     state_db = _state_db(tmp_path)
     backend = RetiredIndexBridgeDeliveryBackend(
@@ -404,15 +440,37 @@ def test_drain_live_counts_retryable_and_quarantined(tmp_path):
 
     # M8.2 policy: claim only leases; only an actual uncertain/failed outcome
     # consumes an attempt.
-    first = drain_pending_deliveries(state_db=state_db, backend=backend, dry_run=False, max_attempts=2)
+    first = drain_pending_deliveries(
+        state_db=state_db,
+        backend=backend,
+        dry_run=False,
+        max_attempts=2,
+        now=DRAIN_NOW,
+    )
     assert first["retryable_count"] == 2
     assert first["quarantined_count"] == 0
     assert state_db.get_row("delivery_jobs", "idempotency_key", "d4")["attempt_count"] == 1
 
-    # replayable rows are no longer 'pending'; flip them back to exercise the cap
-    with state_db.connect() as connection:
-        connection.execute("UPDATE delivery_jobs SET status = 'pending', lease_owner = '', lease_until = ''")
-    second = drain_pending_deliveries(state_db=state_db, backend=backend, dry_run=False, max_attempts=2)
+    # The retry must honour the durable backoff rather than retrying in a tight
+    # loop. Pending jobs remain immediately selectable because they have no
+    # next_retry_at value.
+    not_due = drain_pending_deliveries(
+        state_db=state_db,
+        backend=backend,
+        dry_run=False,
+        max_attempts=2,
+        now=DRAIN_NOW + timedelta(seconds=59),
+    )
+    assert not_due["selected_count"] == 0
+    assert not_due["executed_count"] == 0
+
+    second = drain_pending_deliveries(
+        state_db=state_db,
+        backend=backend,
+        dry_run=False,
+        max_attempts=2,
+        now=DRAIN_NOW + timedelta(seconds=60),
+    )
     assert second["quarantined_count"] == 2
     assert second["execution_status"] == "executed"
     assert state_db.get_row("delivery_jobs", "idempotency_key", "d4")["attempt_count"] == 2
@@ -429,6 +487,45 @@ def test_drain_respects_limit(tmp_path):
     _seed(state_db, _payload(key="d6", body="drain 6"), _payload(key="d7", body="drain 7"))
     report = drain_pending_deliveries(state_db=state_db, dry_run=True, limit=1)
     assert report["selected_count"] == 1
+
+
+def test_drain_due_retries_are_not_starved_by_pending_backlog(tmp_path):
+    state_db = _state_db(tmp_path)
+    replayable = _payload(key="due-replayable", body="due replayable")
+    failed_retryable = _payload(key="due-failed-retryable", body="due failed retryable")
+    pending_one = _payload(key="pending-one", body="pending one")
+    pending_two = _payload(key="pending-two", body="pending two")
+    _seed(state_db, pending_one, pending_two, replayable, failed_retryable)
+    due_seed_time = DRAIN_NOW - timedelta(seconds=60)
+    assert state_db.record_replayable_attempt(
+        job_id_for_payload(replayable),
+        now=due_seed_time,
+        max_attempts=3,
+        next_retry_seconds=60,
+    ) == "replayable"
+    assert state_db.record_failed_retryable_attempt(
+        job_id_for_payload(failed_retryable),
+        now=due_seed_time,
+        max_attempts=3,
+        next_retry_seconds=60,
+    ) == "failed_retryable"
+    with state_db.connect() as connection:
+        connection.execute(
+            "DELETE FROM delivery_payloads WHERE idempotency_key IN (?, ?)",
+            ("due-replayable", "due-failed-retryable"),
+        )
+
+    report = drain_pending_deliveries(
+        state_db=state_db,
+        dry_run=True,
+        limit=2,
+        now=DRAIN_NOW,
+    )
+
+    assert report["selected_count"] == 2
+    assert report["payload_missing_count"] == 2
+    assert report["payload_available_count"] == 0
+    assert report["blockers"] == ["delivery_payload_missing"]
 
 
 def test_drain_report_is_redacted(tmp_path):

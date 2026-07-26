@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -505,3 +506,37 @@ def test_runtime_inbox_shadow_failure_does_not_change_existing_ack_contract(tmp_
     queued_files = sorted((tmp_path / "jobs" / "pending").glob("*.json"))
     assert len(queued_files) == 1
     assert json.loads(queued_files[0].read_text(encoding="utf-8"))["idempotencyKey"]
+
+
+def test_state_db_creates_absent_file_0600_and_rejects_unsafe_existing_paths(tmp_path, monkeypatch):
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, 0o700)
+    database = parent / "rag-ingress-state.sqlite"
+
+    RAGIngressStateDB(database)
+    assert os.stat(database).st_mode & 0o777 == 0o600
+
+    target = parent / "outside.sqlite"
+    target.write_text("not a database", encoding="utf-8")
+    os.chmod(target, 0o600)
+    symlink = parent / "symlink.sqlite"
+    symlink.symlink_to(target)
+    with pytest.raises(ValueError, match="symlink"):
+        RAGIngressStateDB(symlink)
+
+    non_private = parent / "non-private.sqlite"
+    non_private.write_text("", encoding="utf-8")
+    os.chmod(non_private, 0o644)
+    with pytest.raises(ValueError, match="owner-private"):
+        RAGIngressStateDB(non_private)
+    assert os.stat(non_private).st_mode & 0o777 == 0o644
+
+    owner_mismatch = parent / "owner-mismatch.sqlite"
+    owner_mismatch.write_text("", encoding="utf-8")
+    os.chmod(owner_mismatch, 0o600)
+    import agent_knowledge.rag_ingress.state_db as state_db_module
+
+    monkeypatch.setattr(state_db_module.os, "getuid", lambda: os.stat(owner_mismatch).st_uid + 1)
+    with pytest.raises(ValueError, match="owner must match"):
+        RAGIngressStateDB(owner_mismatch)
