@@ -46,8 +46,6 @@ _SUBMIT_STATUS_TO_EVIDENCE = {
     IndexStatus.INDEXED: "succeeded",
     IndexStatus.INDEXING: "succeeded",
     IndexStatus.PENDING: "succeeded",
-    "submitted": "succeeded",
-    "UNSTART": "succeeded",
     IndexStatus.FAILED: "failed_retryable",
     IndexStatus.UNKNOWN: "unknown",
 }
@@ -82,10 +80,8 @@ class RetiredIndexBridgeDeliveryBackend:
     def __init__(self, *, state_db: RAGIngressStateDB, retired_index_bridge: RetiredIndexBridgeAdapter):
         self._state_db = state_db
         self._retired_index_bridge = retired_index_bridge
-        self.last_submission_was_deduplicated = False
 
     def submit(self, job: DeliveryJobView) -> DeliveryBackendEvidence:
-        self.last_submission_was_deduplicated = False
         payload, gate = resolve_delivery_payload(
             self._state_db,
             idempotency_key=job.idempotency_key,
@@ -101,7 +97,6 @@ class RetiredIndexBridgeDeliveryBackend:
                 status="payload_unavailable" if gate == PAYLOAD_MISSING else "payload_integrity_mismatch",
             )
         existing = self.find_by_natural_key(job.idempotency_key, job.payload_hash)
-        self.last_submission_was_deduplicated = existing is not None
         if existing is not None:
             return existing
         document = document_from_ingress_payload(payload)
@@ -138,17 +133,7 @@ class RetiredIndexBridgeDeliveryBackend:
         )
         if handle is None:
             return None
-        detail_lookup = getattr(self._retired_index_bridge, "document_status_detail", None)
-        if not callable(detail_lookup):
-            return DeliveryBackendEvidence(
-                idempotency_key=idempotency_key,
-                payload_hash=payload_hash,
-                dataset_ref=handle.dataset_ref,
-                document_ref=handle.document_ref,
-                run="natural_key_existing",
-                status="succeeded",
-            )
-        detail = detail_lookup(handle)
+        detail = self._retired_index_bridge.document_status_detail(handle)
         return DeliveryBackendEvidence(
             idempotency_key=idempotency_key,
             payload_hash=payload_hash,

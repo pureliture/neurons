@@ -9,8 +9,8 @@
 - submit은 멱등(re-submit 동일 doc이 중복 생성 없이 처리)이다.
 - 이미 PROJECTED인 세션에 re-submit하면 projection_state를 덮어쓰지 않는다.
 - session_id_hash / chunk_id 누락 시 ValueError 발생 (guard).
-- shadow_worker wiring: INGRESS_DELIVERY_BACKEND=couchdb 환경 변수 선택 시 CouchDBRetiredIndexBridgeAdapter가
-  build_backend 대신 선택된다.
+- historical RetiredIndexBridge protocol adapter behavior remains unit-tested;
+  the live CouchDB route uses CouchDBDeliveryBackend directly.
 """
 from __future__ import annotations
 
@@ -616,18 +616,16 @@ class TestErrorPropagation:
 
 
 # ---------------------------------------------------------------------------
-# shadow_worker wiring 테스트: INGRESS_DELIVERY_BACKEND=couchdb
+# historical RetiredIndexBridge protocol adapter behavior
 # ---------------------------------------------------------------------------
 
 class TestShadowWorkerWiring:
-    """INGRESS_DELIVERY_BACKEND=couchdb 환경 변수 선택 시 CouchDBRetiredIndexBridgeAdapter가 선택된다."""
+    """RetiredIndexBridge protocol adapter의 legacy 호환 동작을 검증한다."""
 
-    def test_env_couchdb_selects_couchdb_adapter(self, monkeypatch, tmp_path):
-        """shadow_worker.main() 내 env-switch 분기가 CouchDB 어댑터를 선택한다.
+    def test_legacy_couchdb_adapter_factory_remains_importable(self, monkeypatch, tmp_path):
+        """legacy adapter factory는 unit test 대상이지만 live route에는 사용되지 않는다.
 
-        main()을 직접 호출하지 않고, INGRESS_DELIVERY_BACKEND=couchdb 경로의
-        build_couchdb_retired_index_bridge() 팩토리가 CouchDBRetiredIndexBridgeAdapter를 반환하는지 검증한다.
-        실제 CouchDB HTTP 연결 없이 팩토리 로직만 확인.
+        live routing의 직접 주입은 shadow_worker 테스트에서 별도로 검증한다.
         """
         # 팩토리를 직접 호출해 어댑터 타입 확인
         from agent_knowledge.rag_ingress.couchdb_retired_index_bridge import (

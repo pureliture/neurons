@@ -23,13 +23,15 @@ Delivery is gated by ``deliver``: in shadow/parallel observation it is False
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .delivery_backend import RetiredIndexBridgeDeliveryBackend
+from .couchdb_delivery_backend import CouchDBDeliveryBackend
 from .delivery_executor import DeliveryExecutor
 from .retired_index_bridge import RetiredIndexBridgeRetiredIndexBridgeAdapter
 from .server_runtime import (
@@ -73,7 +75,6 @@ class IngestStateStore:
 
     def __init__(self, path: Path | str):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.state_db = RAGIngressStateDB(self.path)
 
     def _connect(self) -> sqlite3.Connection:
@@ -173,86 +174,132 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def process_payload(payload: dict, *, store: IngestStateStore,
-                    backend: RetiredIndexBridgeRetiredIndexBridgeAdapter | None, deliver: bool) -> ShadowResult:
-    """Build the RagReadyDocument from a rag_ingress_enqueue.v1 payload, record
-    state, and (if deliver) submit to RetiredIndexBridge. No live stream is touched.
+def _new_lease_owner() -> str:
+    return f"shadow-worker:{os.getpid()}:{uuid.uuid4().hex}"
 
-    G2 scoped: applies the server-side full public redaction to conservatively-
-    redacted payloads (no-op for already-full ones), then fail-closes — if any
-    real leak survives redaction the document is quarantined, never delivered."""
+
+def process_payload(payload: dict, *, store: IngestStateStore,
+                    backend: RetiredIndexBridgeRetiredIndexBridgeAdapter | CouchDBDeliveryBackend | None,
+                    deliver: bool, lease_owner: str | None = None) -> ShadowResult:
+    """Build the RagReadyDocument from a rag_ingress_enqueue.v1 payload, record
+    state, and (if deliver) submit to the selected backend. No live stream is touched.
+
+    The CouchDB branch commits the canonical state row from the normalized producer
+    wire payload before any delivery-time redaction, then lets the backend enforce
+    integrity -> redaction -> leak-gate. The RetiredIndexBridge branch keeps its
+    established direct redaction -> dedup -> submit -> observer behavior."""
     payload = normalize_ingest_job_payload(payload)
-    payload = apply_server_redaction(payload)
     document = document_from_ingress_payload(payload)
     ik = document.idempotency_key
-    leaks = public_ingress_leak_violations(document.body)
+    if isinstance(backend, CouchDBDeliveryBackend):
+        existing_job = store.state_db.get_row("delivery_jobs", "idempotency_key", ik)
+        accepted = StateDBIngressSink(state_db=store.state_db).accept_payload(payload)
+        if not existing_job or existing_job["status"] != "succeeded":
+            store.record(
+                idempotency_key=ik, content_hash=document.content_hash,
+                document_kind=document.document_kind, target_profile=document.target_profile,
+                status="received", now_iso=_now_iso(),
+            )
+        if not deliver:
+            store.record(
+                idempotency_key=ik, content_hash=document.content_hash,
+                document_kind=document.document_kind, target_profile=document.target_profile,
+                status="observed_no_deliver", delivered=False, now_iso=_now_iso(),
+            )
+            return ShadowResult(status="observed_no_deliver", idempotency_key=ik,
+                                content_hash_present=bool(document.content_hash), delivered=False)
+        outcome = DeliveryExecutor(
+            state_db=store.state_db,
+            backend=backend,
+            lease_owner=lease_owner or _new_lease_owner(),
+        ).execute_once(str(accepted["job_id"]), max_attempts=5)
+        if outcome != "succeeded":
+            raise RuntimeError(f"canonical delivery did not succeed: {outcome}")
+        job = store.state_db.get_delivery_job(str(accepted["job_id"]))
+        if job is None:
+            raise RuntimeError("canonical delivery proof is missing")
+        store.record(
+            idempotency_key=ik, content_hash=document.content_hash,
+            document_kind=document.document_kind, target_profile=document.target_profile,
+            status="delivered", dataset_ref=str(job["index_target_id"]),
+            document_ref=str(job["index_document_id"]), delivered=True, now_iso=_now_iso(),
+        )
+        return ShadowResult(
+            status="deduplicated" if existing_job and existing_job["status"] == "succeeded" else "delivered",
+            idempotency_key=ik,
+            content_hash_present=bool(document.content_hash),
+            delivered=True,
+            dataset_ref=str(job["index_target_id"]),
+            document_ref=str(job["index_document_id"]),
+        )
+
+    redacted_payload = apply_server_redaction(payload)
+    redacted_document = document_from_ingress_payload(redacted_payload)
+    if deliver and backend is not None:
+        existing = store.get_delivered(ik)
+        if existing is None:
+            handle = backend.find_by_natural_key(
+                target_profile=redacted_document.target_profile,
+                idempotency_key=ik,
+                payload_hash=redacted_document.content_hash,
+            )
+            if handle is not None:
+                existing = (handle.dataset_ref, handle.document_ref)
+        if existing is not None:
+            dataset_ref, document_ref = existing
+            store.record(
+                idempotency_key=ik, content_hash=redacted_document.content_hash,
+                document_kind=redacted_document.document_kind, target_profile=redacted_document.target_profile,
+                status="delivered", dataset_ref=dataset_ref,
+                document_ref=document_ref, delivered=True, now_iso=_now_iso(),
+            )
+            return ShadowResult(
+                status="deduplicated", idempotency_key=ik,
+                content_hash_present=bool(redacted_document.content_hash), delivered=True,
+                dataset_ref=dataset_ref, document_ref=document_ref,
+            )
+    store.record(
+        idempotency_key=ik, content_hash=redacted_document.content_hash,
+        document_kind=redacted_document.document_kind, target_profile=redacted_document.target_profile,
+        status="received", now_iso=_now_iso(),
+    )
+    leaks = public_ingress_leak_violations(redacted_document.body)
     if leaks:
         store.record(
-            idempotency_key=ik, content_hash=document.content_hash,
-            document_kind=document.document_kind, target_profile=document.target_profile,
-            status="received", now_iso=_now_iso(),
-        )
-        store.record(
-            idempotency_key=ik, content_hash=document.content_hash,
-            document_kind=document.document_kind, target_profile=document.target_profile,
+            idempotency_key=ik, content_hash=redacted_document.content_hash,
+            document_kind=redacted_document.document_kind, target_profile=redacted_document.target_profile,
             status="quarantined_leak", delivered=False, now_iso=_now_iso(),
         )
         return ShadowResult(status="quarantined_leak", idempotency_key=ik,
-                            content_hash_present=bool(document.content_hash), delivered=False)
-    existing_job = store.state_db.get_row("delivery_jobs", "idempotency_key", ik)
-    accepted = StateDBIngressSink(state_db=store.state_db).accept_payload(payload)
-    if not existing_job or existing_job["status"] != "succeeded":
-        store.record(
-            idempotency_key=ik, content_hash=document.content_hash,
-            document_kind=document.document_kind, target_profile=document.target_profile,
-            status="received", now_iso=_now_iso(),
-        )
+                            content_hash_present=bool(redacted_document.content_hash), delivered=False)
     if not deliver or backend is None:
         store.record(
-            idempotency_key=ik, content_hash=document.content_hash,
-            document_kind=document.document_kind, target_profile=document.target_profile,
+            idempotency_key=ik, content_hash=redacted_document.content_hash,
+            document_kind=redacted_document.document_kind, target_profile=redacted_document.target_profile,
             status="observed_no_deliver", delivered=False, now_iso=_now_iso(),
         )
         return ShadowResult(status="observed_no_deliver", idempotency_key=ik,
-                            content_hash_present=bool(document.content_hash), delivered=False)
-    delivery_backend = RetiredIndexBridgeDeliveryBackend(
-        state_db=store.state_db,
-        retired_index_bridge=backend,
-    )
-    outcome = DeliveryExecutor(
-        state_db=store.state_db,
-        backend=delivery_backend,
-        lease_owner="shadow_worker",
-    ).execute_once(str(accepted["job_id"]), max_attempts=5)
-    if outcome != "succeeded":
-        raise RuntimeError(f"canonical delivery did not succeed: {outcome}")
-    job = store.state_db.get_delivery_job(str(accepted["job_id"]))
-    if job is None:
-        raise RuntimeError("canonical delivery proof is missing")
+                            content_hash_present=bool(redacted_document.content_hash), delivered=False)
+    submit = backend.submit_document(redacted_document)
     store.record(
-        idempotency_key=ik, content_hash=document.content_hash,
-        document_kind=document.document_kind, target_profile=document.target_profile,
-        status="delivered", dataset_ref=str(job["index_target_id"]),
-        document_ref=str(job["index_document_id"]), delivered=True, now_iso=_now_iso(),
+        idempotency_key=ik, content_hash=redacted_document.content_hash,
+        document_kind=redacted_document.document_kind, target_profile=redacted_document.target_profile,
+        status="delivered", dataset_ref=submit.dataset_ref,
+        document_ref=submit.document_ref, delivered=True, now_iso=_now_iso(),
     )
-    status = (
-        "deduplicated"
-        if (existing_job and existing_job["status"] == "succeeded")
-        or delivery_backend.last_submission_was_deduplicated
-        else "delivered"
-    )
-    return ShadowResult(status=status, idempotency_key=ik,
-                        content_hash_present=bool(document.content_hash), delivered=True,
-                        dataset_ref=str(job["index_target_id"]),
-                        document_ref=str(job["index_document_id"]))
+    return ShadowResult(status="delivered", idempotency_key=ik,
+                        content_hash_present=bool(redacted_document.content_hash), delivered=True,
+                        dataset_ref=submit.dataset_ref, document_ref=submit.document_ref)
 
 
 async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
-                      store: IngestStateStore, backend: RetiredIndexBridgeRetiredIndexBridgeAdapter | None,
+                      store: IngestStateStore,
+                      backend: RetiredIndexBridgeRetiredIndexBridgeAdapter | CouchDBDeliveryBackend | None,
                       deliver: bool, max_messages: int | None, idle_timeout: float = 5.0,
                       allow_live: bool = False, max_deliver: int = 5,
                       fetch_batch: int = 1, concurrency: int = 1,
                       pressure_open: Callable[[], bool] | None = None,
+                      lease_owner: str | None = None,
                       log: Callable[[str], None] = print) -> dict:
     """Async JetStream pull-consume loop.
 
@@ -291,6 +338,7 @@ async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
     results: list[str] = []
     fetch_batch = max(int(fetch_batch), 1)
     concurrency = max(int(concurrency), 1)
+    lease_owner = lease_owner or _new_lease_owner()
     semaphore = asyncio.Semaphore(concurrency)
 
     async def handle_msg(msg) -> str:
@@ -298,7 +346,8 @@ async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
             try:
                 payload = json.loads(msg.data.decode("utf-8"))
                 res = await asyncio.to_thread(
-                    process_payload, payload, store=store, backend=backend, deliver=deliver
+                    process_payload, payload, store=store, backend=backend,
+                    deliver=deliver, lease_owner=lease_owner,
                 )
                 await msg.ack()
                 log(f"worker processed status={res.status} delivered={res.delivered}")
@@ -396,8 +445,10 @@ def build_synthetic_event(*, tag: str) -> dict:
 
 
 async def run_smoke(*, nats_url: str, stream: str, subject: str, durable: str,
-                    store: IngestStateStore, backend: RetiredIndexBridgeRetiredIndexBridgeAdapter | None,
-                    deliver: bool, tag: str, log: Callable[[str], None] = print) -> dict:
+                    store: IngestStateStore,
+                    backend: RetiredIndexBridgeRetiredIndexBridgeAdapter | CouchDBDeliveryBackend | None,
+                    deliver: bool, tag: str, lease_owner: str | None = None,
+                    log: Callable[[str], None] = print) -> dict:
     """Isolated end-to-end NATS smoke: ensure shadow stream → publish 1 synthetic
     event → consume 1 → process. Never touches RAG_INGRESS_QUEUE."""
     if stream == "RAG_INGRESS_QUEUE":
@@ -417,7 +468,8 @@ async def run_smoke(*, nats_url: str, stream: str, subject: str, durable: str,
     await nc.drain()
     consume = await run_consume(
         nats_url=nats_url, stream=stream, subject=subject, durable=durable,
-        store=store, backend=backend, deliver=deliver, max_messages=1, idle_timeout=10.0, log=log,
+        store=store, backend=backend, deliver=deliver, max_messages=1, idle_timeout=10.0,
+        lease_owner=lease_owner, log=log,
     )
     return {"tag": tag, "content_hash": event["contentHash"], **consume}
 
@@ -431,7 +483,6 @@ def main() -> int:
     are required."""
     import argparse
     import asyncio
-    import os
 
     parser = argparse.ArgumentParser(prog="rag-ingress-shadow-worker")
     parser.add_argument("--mode", choices=["consume", "smoke"], default="consume")
@@ -445,16 +496,17 @@ def main() -> int:
     if stream == "RAG_INGRESS_QUEUE" and not allow_live:
         raise SystemExit("refusing: set ALLOW_LIVE_QUEUE=1 to consume the live RAG_INGRESS_QUEUE")
     store = IngestStateStore(os.environ["INGEST_STATE_DB_PATH"])
+    lease_owner = _new_lease_owner()
     deliver = os.environ.get("SHADOW_DELIVER", "0") == "1"
     broad_scan_pages = int(os.environ.get("NATURAL_KEY_BROAD_SCAN_PAGES", "0"))
     backend = None
     delivery_backend = os.environ.get("INGRESS_DELIVERY_BACKEND", "retired_index_bridge").strip().lower()
     if deliver:
         if delivery_backend == "couchdb":
-            # CouchDB sink: construct CouchDBRetiredIndexBridgeAdapter.
-            # index_client is NOT imported for this path.
-            from .couchdb_retired_index_bridge import build_couchdb_retired_index_bridge
-            backend = build_couchdb_retired_index_bridge(
+            from .couchdb_delivery_backend import build_couchdb_delivery_backend
+
+            backend = build_couchdb_delivery_backend(
+                state_db=store.state_db,
                 couchdb_url=os.environ["COUCHDB_URL"],
                 couchdb_user=os.environ["COUCHDB_USER"],
                 couchdb_password=os.environ["COUCHDB_PASSWORD"],
@@ -472,12 +524,12 @@ def main() -> int:
                 resolve_dataset_id=resolver,
                 broad_scan_pages=broad_scan_pages,
             )
-        # M6 dual-write shadow (OFF unless MIRROR_DUAL_WRITE=1 + QDRANT_URL set).
-        # Best-effort Qdrant mirror alongside the authoritative primary; a mirror
-        # failure never breaks RetiredIndexBridge/CouchDB delivery. Default-off keeps the live
-        # worker byte-identical.
-        from .qdrant_dual_write import maybe_wrap_dual_write
-        backend = maybe_wrap_dual_write(backend, environ=os.environ)
+            # M6 dual-write shadow (OFF unless MIRROR_DUAL_WRITE=1 + QDRANT_URL set).
+            # Best-effort Qdrant mirror alongside the authoritative primary; a mirror
+            # failure never breaks RetiredIndexBridge delivery. Default-off keeps the live
+            # worker byte-identical.
+            from .qdrant_dual_write import maybe_wrap_dual_write
+            backend = maybe_wrap_dual_write(backend, environ=os.environ)
     nats_url = os.environ.get("RAG_INGRESS_NATS_URL", "nats://127.0.0.1:4222")
     subject = os.environ.get("SHADOW_SUBJECT", "rag.shadow.>")
     durable = os.environ.get("SHADOW_DURABLE", "shadow_python_worker")
@@ -490,6 +542,7 @@ def main() -> int:
         result = asyncio.run(run_smoke(
             nats_url=nats_url, stream=stream, subject=subject, durable=durable,
             store=store, backend=backend, deliver=deliver, tag=args.tag,
+            lease_owner=lease_owner,
         ))
     else:
         result = asyncio.run(run_consume(
@@ -498,7 +551,7 @@ def main() -> int:
             max_messages=args.max_messages, idle_timeout=args.idle_timeout,
             allow_live=allow_live, max_deliver=max_deliver,
             fetch_batch=fetch_batch, concurrency=concurrency,
-            pressure_open=pressure_open,
+            pressure_open=pressure_open, lease_owner=lease_owner,
         ))
     print(json.dumps(result, sort_keys=True))
     return 0

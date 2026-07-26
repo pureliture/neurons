@@ -149,10 +149,13 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
 def test_first_delivery_uploads_once(tmp_path):
     store = IngestStateStore(tmp_path / "s.sqlite")
     backend = FakeBackend()
-    res = process_payload(build_synthetic_event(tag="first"), store=store, backend=backend, deliver=True)
+    payload = build_synthetic_event(tag="first")
+    res = process_payload(payload, store=store, backend=backend, deliver=True)
     assert res.status == "delivered"
     assert res.delivered is True
     assert backend.submit_calls == 1
+    assert store.state_db.get_delivery_payload(payload["idempotencyKey"]) is None
+    assert store.state_db.get_row("delivery_jobs", "idempotency_key", payload["idempotencyKey"]) is None
 
 
 def test_redelivery_dedups_via_local_log(tmp_path):
