@@ -349,6 +349,7 @@ class BrainReadService:
                     "do_not_touch_boundaries",
                 ),
                 consumer=consumer,
+                query=query,
             )
         result = {
             "schema_version": "brain_objects_query.v1",
@@ -756,6 +757,7 @@ def _context_authority_object_pack(
     route: str,
     pack_names: tuple[str, ...],
     consumer: str,
+    query: str = "",
 ) -> dict[str, Any]:
     authority = pack.get("authority") if isinstance(pack.get("authority"), Mapping) else {}
     object_packs = authority.get("object_packs") if isinstance(authority.get("object_packs"), Mapping) else {}
@@ -774,20 +776,88 @@ def _context_authority_object_pack(
             seen_evidence=seen_evidence,
             seen_actions=seen_actions,
         )
-    if not merged["objects"]:
+    query_relevance_applied = bool(str(query or "").strip())
+    if query_relevance_applied:
+        _filter_context_authority_object_pack_by_query(merged, query=query)
+    if not merged["objects"] and not query_relevance_applied:
         merged["gaps"].append("context_authority_object_pack_empty")
+    if query_relevance_applied and not merged["objects"]:
+        merged["gaps"].append("context_authority_no_relevant_match")
+    if not query_relevance_applied:
+        confidence_basis = "context_authority_object_packs"
+    elif merged["objects"]:
+        confidence_basis = "context_authority_query_relevance"
+    else:
+        confidence_basis = "context_authority_query_no_relevant_match"
     merged["confidence"] = {
         "score": 0.75 if merged["objects"] else 0.0,
-        "basis": "context_authority_object_packs",
+        "basis": confidence_basis,
     }
     merged["audit"] = {
         "request_hash": str((pack.get("audit") or {}).get("request_hash") or ""),
         "consumer": consumer,
-        "object_pack_route_source": "context_authority_object_packs",
+        "object_pack_route_source": (
+            "context_authority_query_relevance"
+            if query_relevance_applied
+            else "context_authority_object_packs"
+        ),
         "source_pack_names": list(pack_names),
+        "query_relevance_applied": query_relevance_applied,
     }
     ensure_public_safe(merged, "ContextAuthorityObjectPack")
     return merged
+
+
+def _filter_context_authority_object_pack_by_query(
+    object_pack: dict[str, Any],
+    *,
+    query: str,
+) -> None:
+    query_terms = set(_terms(query))
+    if not query_terms:
+        return
+    minimum_overlap = max(1, (len(query_terms) + 1) // 2)
+    objects = object_pack.get("objects") if isinstance(object_pack.get("objects"), list) else []
+    matched_objects = [
+        dict(obj)
+        for obj in objects
+        if isinstance(obj, Mapping)
+        and _context_authority_object_query_overlap(obj, query_terms) >= minimum_overlap
+    ]
+    matched_ids = {str(obj.get("object_id") or "") for obj in matched_objects}
+    object_pack["objects"] = matched_objects
+
+    lanes = object_pack.get("lanes") if isinstance(object_pack.get("lanes"), Mapping) else {}
+    object_pack["lanes"] = {
+        str(lane): [
+            dict(obj)
+            for obj in lane_objects
+            if isinstance(obj, Mapping) and str(obj.get("object_id") or "") in matched_ids
+        ]
+        for lane, lane_objects in lanes.items()
+        if isinstance(lane_objects, list)
+    }
+    object_pack["recommended_actions"] = [
+        dict(action)
+        for action in object_pack.get("recommended_actions", [])
+        if isinstance(action, Mapping) and str(action.get("object_id") or "") in matched_ids
+    ]
+
+
+def _context_authority_object_query_overlap(
+    obj: Mapping[str, Any],
+    query_terms: set[str],
+) -> int:
+    searchable = " ".join(
+        str(value or "")
+        for value in (
+            obj.get("object_type"),
+            obj.get("title"),
+            obj.get("summary"),
+            obj.get("payload"),
+        )
+    )
+    return len(query_terms.intersection(_terms(searchable)))
 
 
 def _temporal_work_object_pack(
