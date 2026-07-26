@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+
+import agent_knowledge.couchdb_source.historical_temporal_repair as temporal_repair
 from agent_knowledge.cli import COMMAND_HANDLERS, COMMAND_METADATA
 from agent_knowledge.couchdb_source.document_model import (
     ProjectionStatus,
@@ -429,6 +432,103 @@ def test_partial_session_cas_conflict_still_refreshes_mutated_session_derived_st
     assert report["remaining_temporal_gap_count"] == 1
 
 
+def test_postcheck_failure_after_successful_cas_preserves_mutation_and_invalidation():
+    store, candidate = _seed_store()
+    original_patch = store.patch_observed_time_if_content_hash
+    original_get = store.get
+    postcheck_armed = False
+
+    def patch_then_arm_postcheck(**kwargs):
+        nonlocal postcheck_armed
+        revision = original_patch(**kwargs)
+        postcheck_armed = True
+        return revision
+
+    def get_with_one_stale_postcheck(document_id):
+        nonlocal postcheck_armed
+        current = original_get(document_id)
+        if postcheck_armed and document_id == candidate["_id"] and current is not None:
+            postcheck_armed = False
+            stale = dict(current)
+            stale["observed_at_start"] = ""
+            stale["observed_at_end"] = ""
+            return stale
+        return current
+
+    store.patch_observed_time_if_content_hash = patch_then_arm_postcheck  # type: ignore[method-assign]
+    store.get = get_with_one_stale_postcheck  # type: ignore[method-assign]
+    plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+        **_limits(),
+    )
+
+    assert report["status"] == "completed_with_errors"
+    assert report["updated_count"] == 1
+    assert report["mutation_performed"] is True
+    assert report["write_conflict_count"] == 1
+    assert report["partial_session_count"] == 1
+    assert report["coverage_recomputed_session_count"] == 1
+    assert report["projection_pending_session_count"] == 1
+    assert store.get(projection_state_doc_id(SESSION_HASH))["projection_status"] == ProjectionStatus.PENDING
+
+
+def test_planning_timeout_is_a_nonzero_blocked_gap():
+    store, candidate = _seed_store()
+    clock = iter((0.0, 31.0))
+
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        monotonic=lambda: next(clock),
+        started=0.0,
+        **_limits(),
+    )
+
+    assert report["status"] == "aborted_timeout"
+    assert report["timed_out"] is True
+    assert report["error_count"] > 0
+    assert report["gap_count"] > 0
+    assert report["mutation_performed"] is False
+
+
+def test_initial_snapshot_failure_returns_sanitized_fail_closed_report():
+    class SnapshotFailureStore(InMemoryCouchDBSourceStore):
+        def find_by_type(self, *_args, **_kwargs):
+            raise RuntimeError("private snapshot transport detail")
+
+    report = repair_historical_temporal_gaps(
+        source_store=SnapshotFailureStore(),
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[],
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+
+    assert report["status"] == "blocked"
+    assert report["error"] == "snapshot_read_failed"
+    assert report["error_count"] == 1
+    assert report["gap_count"] == 1
+    assert "private snapshot transport detail" not in json.dumps(report)
+
+
 def test_gemini_json_uses_private_fixture_conversion_instead_of_fixture_parser_error(tmp_path):
     source = tmp_path / PROJECT / "chats" / "native.json"
     source.parent.mkdir(parents=True)
@@ -450,6 +550,52 @@ def test_gemini_json_uses_private_fixture_conversion_instead_of_fixture_parser_e
     assert report["parser_error_count"] == 0
     assert report["parsed_source_count"] == 1
     assert len(documents) == 1
+
+
+def test_cli_parser_error_blocks_before_couchdb_access(monkeypatch, capsys, tmp_path):
+    collection = {
+        "source_file_count": 1,
+        "source_file_limit_exceeded": False,
+        "source_file_truncated": False,
+        "parsed_source_count": 0,
+        "parser_error_count": 1,
+        "excluded_temporal_candidate_count": 0,
+    }
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([], collection, False),
+    )
+
+    def fail_if_couchdb_is_constructed(**_kwargs):
+        raise AssertionError("CouchDB must not be reached after a parser error")
+
+    monkeypatch.setattr(
+        temporal_repair,
+        "CouchDBHttpSourceStore",
+        fail_if_couchdb_is_constructed,
+    )
+
+    rc = temporal_repair.main(
+        [
+            "--provider", PROVIDER,
+            "--project", PROJECT,
+            "--source-root", str(tmp_path),
+            "--source-file-limit", "1",
+            "--target-document-limit", "1",
+            "--patch-limit", "1",
+            "--max-runtime-seconds", "30",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == "historical_source_parse_error"
+    assert report["error_count"] == 1
+    assert report["gap_count"] == 1
+    assert report["parser_error_count"] == 1
 
 
 def test_source_file_limit_reports_truncation_before_any_couchdb_mutation(tmp_path, monkeypatch, capsys):

@@ -327,8 +327,19 @@ def test_backend_natural_key_without_status_detail_fails_closed(tmp_path):
         retired_index_bridge=AdapterWithoutStatusDetail(),
     )
 
-    with pytest.raises(AttributeError, match="document_status_detail"):
+    with pytest.raises(DeliveryOutcomeUncertain) as captured:
         backend.submit(_job_view(state_db, "k_missing_status_detail"))
+
+    assert str(captured.value) == "AttributeError"
+    executor = DeliveryExecutor(state_db=state_db, backend=backend, lease_owner="malformed-adapter")
+    outcome = executor.execute_once(job_id_for_payload(payload), max_attempts=1)
+    assert outcome == "quarantined"
+    row = state_db.get_row(
+        "delivery_jobs",
+        "idempotency_key",
+        "k_missing_status_detail",
+    )
+    assert row["status"] == "quarantined"
 
 
 def test_backend_find_by_natural_key_is_none_for_unknown_or_mismatched_job(tmp_path):
@@ -476,6 +487,45 @@ def test_drain_respects_limit(tmp_path):
     _seed(state_db, _payload(key="d6", body="drain 6"), _payload(key="d7", body="drain 7"))
     report = drain_pending_deliveries(state_db=state_db, dry_run=True, limit=1)
     assert report["selected_count"] == 1
+
+
+def test_drain_due_retries_are_not_starved_by_pending_backlog(tmp_path):
+    state_db = _state_db(tmp_path)
+    replayable = _payload(key="due-replayable", body="due replayable")
+    failed_retryable = _payload(key="due-failed-retryable", body="due failed retryable")
+    pending_one = _payload(key="pending-one", body="pending one")
+    pending_two = _payload(key="pending-two", body="pending two")
+    _seed(state_db, pending_one, pending_two, replayable, failed_retryable)
+    due_seed_time = DRAIN_NOW - timedelta(seconds=60)
+    assert state_db.record_replayable_attempt(
+        job_id_for_payload(replayable),
+        now=due_seed_time,
+        max_attempts=3,
+        next_retry_seconds=60,
+    ) == "replayable"
+    assert state_db.record_failed_retryable_attempt(
+        job_id_for_payload(failed_retryable),
+        now=due_seed_time,
+        max_attempts=3,
+        next_retry_seconds=60,
+    ) == "failed_retryable"
+    with state_db.connect() as connection:
+        connection.execute(
+            "DELETE FROM delivery_payloads WHERE idempotency_key IN (?, ?)",
+            ("due-replayable", "due-failed-retryable"),
+        )
+
+    report = drain_pending_deliveries(
+        state_db=state_db,
+        dry_run=True,
+        limit=2,
+        now=DRAIN_NOW,
+    )
+
+    assert report["selected_count"] == 2
+    assert report["payload_missing_count"] == 2
+    assert report["payload_available_count"] == 0
+    assert report["blockers"] == ["delivery_payload_missing"]
 
 
 def test_drain_report_is_redacted(tmp_path):

@@ -104,8 +104,6 @@ class CouchDBHttpSourceStore:
             )
         else:
             response = self.transport(method, self.base_url + path, headers, body)
-        if self.deadline_monotonic is not None and time.monotonic() >= self.deadline_monotonic:
-            raise CouchDBError("operation deadline exceeded")
         try:
             payload = json.loads(response.body.decode("utf-8") or "{}") if response.body else {}
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:

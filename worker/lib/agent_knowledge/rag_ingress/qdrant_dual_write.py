@@ -73,7 +73,10 @@ class MirrorDualWriteBackend:
         result = self._primary.submit_document(document, on_step_complete=on_step_complete)
         outcome = self._mirror_submit(document)
         if self._on_mirror_outcome is not None:
-            self._on_mirror_outcome(outcome)
+            try:
+                self._on_mirror_outcome(outcome)
+            except Exception:
+                pass
         return result
 
     def _mirror_submit(self, document: RagReadyDocument) -> MirrorWriteOutcome:
@@ -199,9 +202,15 @@ def maybe_wrap_dual_write(
         mirror = builder(environ)
     except Exception as exc:
         # Mirror construction failure must NOT crash the authoritative worker.
-        _default_mirror_outcome_logger(
-            MirrorWriteOutcome(status="mirror_build_error", error_class=exc.__class__.__name__)
-        )
+        outcome_hook = on_mirror_outcome or _default_mirror_outcome_logger
+        try:
+            outcome_hook(
+                MirrorWriteOutcome(
+                    status="mirror_build_error", error_class=exc.__class__.__name__
+                )
+            )
+        except Exception:
+            pass
         return primary
     if mirror is None:
         return primary

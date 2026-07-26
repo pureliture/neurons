@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+import agent_knowledge.couchdb_source.couchdb_http_store as couchdb_http_store
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBError, CouchDBHttpSourceStore
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore, SourceStoreConflict
@@ -475,3 +476,48 @@ def test_http_error_raises():
     store = CouchDBHttpSourceStore(base_url="http://couch.test:5984", db="x", transport=boom)
     with pytest.raises(CouchDBError):
         store.get("transcript_session:abc")
+
+
+def test_completed_transport_response_is_not_discarded_after_deadline(monkeypatch):
+    clock = {"now": 9.0}
+
+    def completed_transport(method, url, headers, body):
+        _ = method, url, headers, body
+        clock["now"] = 11.0
+        return ProxyResponse(status_code=201, body=b'{"ok":true}')
+
+    monkeypatch.setattr(couchdb_http_store.time, "monotonic", lambda: clock["now"])
+    store = CouchDBHttpSourceStore(
+        base_url="http://couch.test:5984",
+        db="x",
+        transport=completed_transport,
+        deadline_monotonic=10.0,
+    )
+
+    status, payload = store._request("PUT", "/x")
+
+    assert status == 201
+    assert payload == {"ok": True}
+
+
+def test_expired_deadline_still_blocks_before_transport(monkeypatch):
+    called = False
+
+    def transport(method, url, headers, body):
+        nonlocal called
+        _ = method, url, headers, body
+        called = True
+        return ProxyResponse(status_code=201, body=b'{"ok":true}')
+
+    monkeypatch.setattr(couchdb_http_store.time, "monotonic", lambda: 10.0)
+    store = CouchDBHttpSourceStore(
+        base_url="http://couch.test:5984",
+        db="x",
+        transport=transport,
+        deadline_monotonic=10.0,
+    )
+
+    with pytest.raises(CouchDBError, match="operation deadline exceeded"):
+        store._request("PUT", "/x")
+
+    assert called is False

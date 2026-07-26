@@ -5,6 +5,8 @@ import json
 import os
 from types import SimpleNamespace
 
+import pytest
+
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.rag_ingress.backfill_apply import apply_backfill_to_state_db
 from agent_knowledge.rag_ingress.server_runtime import job_id_for_payload
@@ -238,3 +240,38 @@ def test_state_cli_couchdb_factory_receives_process_environment(tmp_path, monkey
     assert backend is sentinel_backend
     assert captured["state_db"] is state_db
     assert captured["environ"] is os.environ
+
+
+@pytest.mark.parametrize(
+    "missing_name",
+    ("COUCHDB_URL", "COUCHDB_USER", "COUCHDB_PASSWORD", "COUCHDB_DB"),
+)
+def test_state_cli_couchdb_factory_rejects_blank_required_config(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    missing_name,
+):
+    import agent_knowledge.rag_ingress.state_cli as state_cli
+
+    state_db = RAGIngressStateDB(_state_db_path(tmp_path))
+    configured = {
+        "COUCHDB_URL": "http://couchdb.invalid",
+        "COUCHDB_USER": "test-user",
+        "COUCHDB_PASSWORD": "test-password",
+        "COUCHDB_DB": "test-db",
+    }
+    monkeypatch.setenv("INGRESS_DELIVERY_BACKEND", "couchdb")
+    for name, value in configured.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv(missing_name, "   ")
+
+    backend = state_cli._build_live_backend(
+        SimpleNamespace(couchdb_url="", couchdb_user="", couchdb_password="", couchdb_db=""),
+        state_db,
+    )
+
+    error = capsys.readouterr().err
+    assert backend is None
+    assert missing_name in error
+    assert "test-password" not in error

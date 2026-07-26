@@ -240,24 +240,34 @@ def _redact_meta_value(value, redact):
 
 
 def apply_server_redaction(payload: dict) -> dict:
-    """Apply the full public-ingress redaction to the payload's document
-    (body/filename/metadata) before delivery. Applied unconditionally and
-    idempotent: a conservatively-redacted body is completed to the legacy
-    single-stage output, an already-fully-redacted in-flight body is unchanged.
-    Returns a new payload dict; the original is not mutated. ``contentHash`` is
-    preserved as the input (wire) identity for dedup."""
+    """Apply full public-ingress redaction before authoritative delivery.
+
+    The document body/filename/metadata and the source project/host attribution
+    fields are covered.  This prevents source fields from re-entering CouchDB
+    domain objects or mirror metadata after the document-only redaction pass.
+    The operation is idempotent, returns a new payload, and preserves
+    ``contentHash`` as the input (wire) identity for dedup.
+    """
     pkg = payload.get("payload") or {}
     document = dict(pkg.get("document") or {})
-    if not document:
-        return payload
     from ..redaction import redact_public_ingress_text as _r
+
+    new_payload = dict(payload)
+    source = payload.get("source")
+    if isinstance(source, dict):
+        new_source = dict(source)
+        for field in ("project", "host"):
+            if field in new_source:
+                new_source[field] = _redact_meta_value(new_source[field], _r)
+        new_payload["source"] = new_source
+    if not document:
+        return new_payload
     document["body"] = _r(str(document.get("body") or ""))
     document["filename"] = _r(str(document.get("filename") or ""))
     metadata = document.get("metadata") or {}
     document["metadata"] = {str(k): _redact_meta_value(v, _r) for k, v in metadata.items()}
     new_pkg = dict(pkg)
     new_pkg["document"] = document
-    new_payload = dict(payload)
     new_payload["payload"] = new_pkg
     return new_payload
 

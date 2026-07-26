@@ -529,14 +529,28 @@ def test_run_consume_assigns_unique_handler_leases_for_concurrent_exact_duplicat
     result = asyncio.run(consume())
 
     assert submit_calls == 1
-    assert assigned_owners == ["shadow-worker:test-run:test-1", "shadow-worker:test-run:test-2", "shadow-worker:test-run:test-3"]
-    # The two first-batch handlers race for the lease, so their result order is
-    # intentionally unspecified. Exactly one owns the primary submission and
-    # the other is NAKed; its later redelivery sees canonical success and ACKs.
-    assert sorted(result["statuses"]) == ["deduplicated", "delivered", "nak"]
-    assert first.ack_calls + competing.ack_calls == 1
-    assert first.nak_calls + competing.nak_calls == 1
-    assert (redelivery.ack_calls, redelivery.nak_calls) == (1, 0)
+    assert assigned_owners in (
+        ["shadow-worker:test-run:test-1", "shadow-worker:test-run:test-2"],
+        [
+            "shadow-worker:test-run:test-1",
+            "shadow-worker:test-run:test-2",
+            "shadow-worker:test-run:test-3",
+        ],
+    )
+    assert len(assigned_owners) == len(set(assigned_owners))
+    # The two first-batch handlers race for the lease. The competing handler
+    # either observes the live lease and NAKs before a deduplicated redelivery,
+    # or runs just after authoritative completion and deduplicates immediately.
+    if len(assigned_owners) == 3:
+        assert sorted(result["statuses"]) == ["deduplicated", "delivered", "nak"]
+        assert first.ack_calls + competing.ack_calls == 1
+        assert first.nak_calls + competing.nak_calls == 1
+        assert (redelivery.ack_calls, redelivery.nak_calls) == (1, 0)
+    else:
+        assert sorted(result["statuses"]) == ["deduplicated", "delivered"]
+        assert first.ack_calls + competing.ack_calls == 2
+        assert first.nak_calls + competing.nak_calls == 0
+        assert (redelivery.ack_calls, redelivery.nak_calls) == (0, 0)
     assert store.state_db.get_row(
         "delivery_jobs", "idempotency_key", payload["idempotencyKey"]
     )["status"] == "succeeded"
@@ -619,3 +633,52 @@ def test_main_injects_couchdb_backend_directly_with_one_process_lease(tmp_path, 
     assert isinstance(captured["backend"], CouchDBDeliveryBackend)
     assert captured["lease_owner"] == "shadow-worker:pod-process-unique"
     assert captured["environ"] is os.environ
+
+
+@pytest.mark.parametrize(
+    "missing_name",
+    ("COUCHDB_URL", "COUCHDB_USER", "COUCHDB_PASSWORD", "COUCHDB_DB"),
+)
+def test_main_rejects_blank_couchdb_config_before_state_or_backend_startup(
+    tmp_path,
+    monkeypatch,
+    missing_name,
+):
+    import agent_knowledge.rag_ingress.couchdb_delivery_backend as couchdb_delivery_backend
+    import agent_knowledge.rag_ingress.shadow_worker as shadow_worker
+
+    private_parent = tmp_path / "private"
+    private_parent.mkdir()
+    os.chmod(private_parent, 0o700)
+    state_path = private_parent / "ingress.sqlite"
+
+    def fail_backend_build(**_kwargs):
+        raise AssertionError("backend construction must not start with blank CouchDB config")
+
+    monkeypatch.setattr(
+        couchdb_delivery_backend,
+        "build_couchdb_delivery_backend",
+        fail_backend_build,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["rag-ingress-shadow-worker", "--mode", "consume", "--max-messages", "0"],
+    )
+    monkeypatch.setenv("INGEST_STATE_DB_PATH", str(state_path))
+    monkeypatch.setenv("SHADOW_DELIVER", "1")
+    monkeypatch.setenv("INGRESS_DELIVERY_BACKEND", "couchdb")
+    configured = {
+        "COUCHDB_URL": "http://couchdb.test",
+        "COUCHDB_USER": "test-user",
+        "COUCHDB_PASSWORD": "test-password",
+        "COUCHDB_DB": "test-db",
+    }
+    for name, value in configured.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv(missing_name, "   ")
+
+    with pytest.raises(SystemExit, match=missing_name):
+        shadow_worker.main()
+
+    assert state_path.exists() is False

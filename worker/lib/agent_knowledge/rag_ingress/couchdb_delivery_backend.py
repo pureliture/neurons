@@ -162,10 +162,25 @@ class CouchDBDeliveryBackend:
         payload = apply_server_redaction(payload)
 
         # --- Gate 4: fail-closed public-ingress leak check --------------------
-        document_body = str(
-            ((payload.get("payload") or {}).get("document") or {}).get("body") or ""
+        pkg = payload.get("payload") or {}
+        document = pkg.get("document") or {}
+        metadata = dict(document.get("metadata") or {})
+        source = payload.get("source") or {}
+        document_body = str(document.get("body") or "")
+        leak_surface = json.dumps(
+            {
+                "body": document_body,
+                "filename": document.get("filename") or "",
+                "metadata": metadata,
+                "source": {
+                    "project": source.get("project") or "",
+                    "host": source.get("host") or "",
+                },
+            },
+            sort_keys=True,
+            default=str,
         )
-        leak_violations = public_ingress_leak_violations(document_body)
+        leak_violations = public_ingress_leak_violations(leak_surface)
         if leak_violations:
             return DeliveryBackendEvidence(
                 idempotency_key=job.idempotency_key,
@@ -177,11 +192,6 @@ class CouchDBDeliveryBackend:
             )
 
         # --- Extract metadata fields ------------------------------------------
-        pkg = payload.get("payload") or {}
-        document = pkg.get("document") or {}
-        metadata = dict(document.get("metadata") or {})
-        source = payload.get("source") or {}
-
         session_id_hash = str(metadata.get("session_id_hash") or "")
         provider = str(
             metadata.get("provider") or source.get("provider") or source.get("namespace") or "ingress"
@@ -321,7 +331,10 @@ class CouchDBDeliveryBackend:
                 status="mirror_error", error_class=exc.__class__.__name__
             )
         if self._on_mirror_outcome is not None:
-            self._on_mirror_outcome(outcome)
+            try:
+                self._on_mirror_outcome(outcome)
+            except Exception:
+                pass
 
     def find_by_natural_key(
         self, idempotency_key: str, payload_hash: str
@@ -410,6 +423,17 @@ def build_couchdb_delivery_backend(
 
     from ..couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
 
+    required_config = {
+        "COUCHDB_URL": str(couchdb_url or ""),
+        "COUCHDB_USER": str(couchdb_user or ""),
+        "COUCHDB_PASSWORD": str(couchdb_password or ""),
+        "COUCHDB_DB": str(couchdb_db or ""),
+    }
+    missing = [name for name, value in required_config.items() if not value.strip()]
+    if missing:
+        raise ValueError(
+            "CouchDB delivery requires non-empty " + ", ".join(missing)
+        )
     credentials = base64.b64encode(f"{couchdb_user}:{couchdb_password}".encode()).decode()
     store = CouchDBHttpSourceStore(
         base_url=couchdb_url,
@@ -425,11 +449,14 @@ def build_couchdb_delivery_backend(
         try:
             mirror = (mirror_builder or build_qdrant_mirror_from_env)(effective_environ)
         except Exception as exc:
-            outcome_hook(
-                MirrorWriteOutcome(
-                    status="mirror_build_error", error_class=exc.__class__.__name__
+            try:
+                outcome_hook(
+                    MirrorWriteOutcome(
+                        status="mirror_build_error", error_class=exc.__class__.__name__
+                    )
                 )
-            )
+            except Exception:
+                pass
     return CouchDBDeliveryBackend(
         state_db=state_db,
         store=store,
