@@ -13,6 +13,7 @@ import yaml
 
 from agent_knowledge.couchdb_source.document_model import conversation_chunk_doc_id
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
+from agent_knowledge.redaction import redact_text_v2
 from agent_knowledge.rag_ingress.couchdb_delivery_backend import CouchDBDeliveryBackend
 from agent_knowledge.rag_ingress.shadow_worker import (
     IngestStateStore,
@@ -118,7 +119,7 @@ def _couchdb_backend(store: IngestStateStore) -> tuple[CouchDBDeliveryBackend, I
     return CouchDBDeliveryBackend(state_db=store.state_db, store=couchdb_store), couchdb_store
 
 
-def test_process_payload_adds_canonical_tables_to_legacy_state_db_without_replacing_legacy_rows(tmp_path):
+def test_retired_default_state_store_keeps_legacy_sqlite_without_canonical_tables(tmp_path):
     db_path = tmp_path / "ingress.sqlite"
     store = IngestStateStore(db_path)
     store.record(
@@ -131,7 +132,7 @@ def test_process_payload_adds_canonical_tables_to_legacy_state_db_without_replac
     )
 
     result = process_payload(
-        _payload_with_observed_bounds(tag="canonical-table-coexistence"),
+        _payload_with_observed_bounds(tag="retired-legacy-table-contract"),
         store=store,
         backend=None,
         deliver=False,
@@ -150,12 +151,14 @@ def test_process_payload_adds_canonical_tables_to_legacy_state_db_without_replac
             ("legacy-observer-row",),
         ).fetchone()
 
-    assert {"shadow_ingest_log", "delivery_payloads", "delivery_jobs"} <= table_names
+    assert "shadow_ingest_log" in table_names
+    assert "delivery_payloads" not in table_names
+    assert "delivery_jobs" not in table_names
     assert legacy_row == ("observed_no_deliver", "sha256:legacy")
 
 
 def test_process_payload_records_temporal_payload_and_success_proof_before_legacy_delivered_observer(tmp_path):
-    store = IngestStateStore(tmp_path / "ingress.sqlite")
+    store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
     payload = _couchdb_payload(tag="canonical-delivery-success")
     backend, couchdb_store = _couchdb_backend(store)
     original_record = store.record
@@ -188,25 +191,42 @@ def test_process_payload_records_temporal_payload_and_success_proof_before_legac
 
 
 def test_couchdb_delivery_persists_wire_identity_before_deliver_time_redaction(tmp_path):
-    store = IngestStateStore(tmp_path / "ingress.sqlite")
-    body = "safe body Bearer testtoken-123456789"
+    store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
+    body = "safe body dataset_id reference"
     payload = _couchdb_payload(tag="canonical-redaction-order", body=body)
     backend, couchdb_store = _couchdb_backend(store)
 
     result = process_payload(payload, store=store, backend=backend, deliver=True)
 
     assert result.status == "delivered"
+    assert redact_text_v2(body) == body
     stored_payload = store.state_db.get_delivery_payload(payload["idempotencyKey"])
     assert stored_payload["contentHash"] == payload["contentHash"]
     assert stored_payload["payload"]["document"]["body"] == body
     chunk = couchdb_store.get(conversation_chunk_doc_id(SHADOW_SESSION_ID_HASH, "chunk-canonical-redaction-order"))
     assert chunk is not None
     assert chunk["body"] != body
-    assert "credential_scheme" in chunk["body"]
+    assert "dataset_ref" in chunk["body"]
+
+
+def test_couchdb_rejects_wire_payload_that_conservative_redaction_would_change(tmp_path):
+    store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
+    body = "public fixture Bearer exampletoken-123456789"
+    payload = _couchdb_payload(tag="canonical-wire-redaction-reject", body=body)
+    backend, couchdb_store = _couchdb_backend(store)
+
+    result = process_payload(payload, store=store, backend=backend, deliver=True)
+
+    assert redact_text_v2(body) != body
+    assert result.status == "quarantined_wire_redaction"
+    assert not result.delivered
+    assert store.state_db.get_delivery_payload(payload["idempotencyKey"]) is None
+    assert store.state_db.get_row("delivery_jobs", "idempotency_key", payload["idempotencyKey"]) is None
+    assert couchdb_store.get(conversation_chunk_doc_id(SHADOW_SESSION_ID_HASH, "chunk-canonical-wire-redaction-reject")) is None
 
 
 def test_process_payload_exact_duplicate_submits_once_and_reuses_canonical_success_proof(tmp_path):
-    store = IngestStateStore(tmp_path / "ingress.sqlite")
+    store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
     payload = _couchdb_payload(tag="canonical-exact-duplicate")
     backend, _ = _couchdb_backend(store)
     original_submit = backend.submit
@@ -230,7 +250,7 @@ def test_process_payload_exact_duplicate_submits_once_and_reuses_canonical_succe
 
 
 def test_process_payload_conflict_preserves_canonical_and_legacy_delivery_observers(tmp_path):
-    store = IngestStateStore(tmp_path / "ingress.sqlite")
+    store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
     original = _couchdb_payload(tag="canonical-content-conflict")
     conflict = _couchdb_payload(
         tag="canonical-content-conflict-replacement",
@@ -265,7 +285,7 @@ def test_process_payload_conflict_preserves_canonical_and_legacy_delivery_observ
 def test_run_consume_naks_uncertain_delivery_and_keeps_canonical_job_replayable(tmp_path, monkeypatch):
     from agent_knowledge.rag_ingress.shadow_worker import run_consume
 
-    store = IngestStateStore(tmp_path / "ingress.sqlite")
+    store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
     payload = _couchdb_payload(tag="canonical-uncertain-delivery")
 
     class FailingCouchDBStore(InMemoryCouchDBSourceStore):
@@ -345,7 +365,7 @@ def test_run_consume_naks_uncertain_delivery_and_keeps_canonical_job_replayable(
 
 
 def test_distinct_lease_owners_submit_exact_duplicate_once(tmp_path, monkeypatch):
-    store = IngestStateStore(tmp_path / "ingress.sqlite")
+    store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
     payload = _couchdb_payload(tag="canonical-concurrent-duplicate")
     backend, _ = _couchdb_backend(store)
     original_submit = backend.submit
@@ -395,7 +415,10 @@ def test_distinct_lease_owners_submit_exact_duplicate_once(tmp_path, monkeypatch
 def test_ingest_state_store_creates_new_parent_private(tmp_path):
     db_path = tmp_path / "new-private-parent" / "ingress.sqlite"
 
-    IngestStateStore(db_path)
+    store = IngestStateStore(db_path, canonical_state=True)
+
+    assert not db_path.parent.exists()
+    assert store.state_db is not None
 
     assert os.stat(db_path.parent).st_mode & 0o777 == 0o700
 
@@ -405,8 +428,9 @@ def test_ingest_state_store_rejects_existing_non_private_parent_without_chmod(tm
     parent.mkdir()
     os.chmod(parent, 0o755)
 
+    store = IngestStateStore(parent / "ingress.sqlite", canonical_state=True)
     with pytest.raises(ValueError, match="state db parent must be private"):
-        IngestStateStore(parent / "ingress.sqlite")
+        _ = store.state_db
 
     assert os.stat(parent).st_mode & 0o777 == 0o755
 

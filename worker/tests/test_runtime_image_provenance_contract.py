@@ -155,3 +155,17 @@ def test_ingress_worker_compose_revision_label_matches_build_source_identity() -
     assert labels.get("org.opencontainers.image.revision") == args.get(
         "NEURONS_SOURCE_COMMIT"
     )
+
+
+def test_ingress_worker_compose_keeps_retired_default_and_passes_couchdb_selection_env() -> None:
+    services = _compose_services(REPOSITORY_ROOT / "compose.yaml")
+    ingress_worker = services.get("ingress-worker-py")
+    assert isinstance(ingress_worker, dict)
+    environment = ingress_worker.get("environment")
+    assert isinstance(environment, dict)
+
+    assert environment.get("INGRESS_DELIVERY_BACKEND") == (
+        "${INGRESS_DELIVERY_BACKEND:-retired_index_bridge}"
+    )
+    for name in ("COUCHDB_URL", "COUCHDB_USER", "COUCHDB_PASSWORD", "COUCHDB_DB"):
+        assert environment.get(name) == "${" + name + ":-}"

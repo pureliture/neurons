@@ -7,6 +7,7 @@ Focus: the boundary this co-locate is responsible for —
   - submit_document persists the natural key so the RetiredIndexBridge-side probe can match.
 """
 import importlib
+import sqlite3
 
 import pytest
 
@@ -154,8 +155,13 @@ def test_first_delivery_uploads_once(tmp_path):
     assert res.status == "delivered"
     assert res.delivered is True
     assert backend.submit_calls == 1
-    assert store.state_db.get_delivery_payload(payload["idempotencyKey"]) is None
-    assert store.state_db.get_row("delivery_jobs", "idempotency_key", payload["idempotencyKey"]) is None
+    with sqlite3.connect(store.path) as connection:
+        table_names = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    assert "delivery_payloads" not in table_names
+    assert "delivery_jobs" not in table_names
 
 
 def test_redelivery_dedups_via_local_log(tmp_path):

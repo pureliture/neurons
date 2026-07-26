@@ -12,6 +12,7 @@ Covers:
 import hashlib
 import json
 import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -37,6 +38,9 @@ from agent_knowledge.rag_ingress.retired_index_bridge import (
 )
 from agent_knowledge.rag_ingress.server_runtime import job_id_for_payload
 from agent_knowledge.rag_ingress.state_db import RAGIngressStateDB
+
+
+DRAIN_NOW = datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc)
 
 
 def _payload(*, key="k1", body="hello delivery body"):
@@ -425,15 +429,37 @@ def test_drain_live_counts_retryable_and_quarantined(tmp_path):
 
     # M8.2 policy: claim only leases; only an actual uncertain/failed outcome
     # consumes an attempt.
-    first = drain_pending_deliveries(state_db=state_db, backend=backend, dry_run=False, max_attempts=2)
+    first = drain_pending_deliveries(
+        state_db=state_db,
+        backend=backend,
+        dry_run=False,
+        max_attempts=2,
+        now=DRAIN_NOW,
+    )
     assert first["retryable_count"] == 2
     assert first["quarantined_count"] == 0
     assert state_db.get_row("delivery_jobs", "idempotency_key", "d4")["attempt_count"] == 1
 
-    # replayable rows are no longer 'pending'; flip them back to exercise the cap
-    with state_db.connect() as connection:
-        connection.execute("UPDATE delivery_jobs SET status = 'pending', lease_owner = '', lease_until = ''")
-    second = drain_pending_deliveries(state_db=state_db, backend=backend, dry_run=False, max_attempts=2)
+    # The retry must honour the durable backoff rather than retrying in a tight
+    # loop. Pending jobs remain immediately selectable because they have no
+    # next_retry_at value.
+    not_due = drain_pending_deliveries(
+        state_db=state_db,
+        backend=backend,
+        dry_run=False,
+        max_attempts=2,
+        now=DRAIN_NOW + timedelta(seconds=59),
+    )
+    assert not_due["selected_count"] == 0
+    assert not_due["executed_count"] == 0
+
+    second = drain_pending_deliveries(
+        state_db=state_db,
+        backend=backend,
+        dry_run=False,
+        max_attempts=2,
+        now=DRAIN_NOW + timedelta(seconds=60),
+    )
     assert second["quarantined_count"] == 2
     assert second["execution_status"] == "executed"
     assert state_db.get_row("delivery_jobs", "idempotency_key", "d4")["attempt_count"] == 2
