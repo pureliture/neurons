@@ -435,6 +435,16 @@ def test_ingest_state_store_rejects_existing_non_private_parent_without_chmod(tm
     assert os.stat(parent).st_mode & 0o777 == 0o755
 
 
+def test_worker_image_precreates_private_canonical_state_parent_without_runtime_chmod():
+    dockerfile = (REPO_ROOT / "worker" / "Dockerfile").read_text(encoding="utf-8")
+    state_db = (REPO_ROOT / "worker" / "lib" / "agent_knowledge" / "rag_ingress" / "state_db.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "install -d -m 0700 -o appuser -g appuser /var/lib/agent-knowledge/ingest-state" in dockerfile
+    assert "os.chmod(" not in state_db
+
+
 def test_main_injects_couchdb_backend_directly_with_one_process_lease(tmp_path, monkeypatch):
     import agent_knowledge.rag_ingress.couchdb_delivery_backend as couchdb_delivery_backend
     import agent_knowledge.rag_ingress.shadow_worker as shadow_worker

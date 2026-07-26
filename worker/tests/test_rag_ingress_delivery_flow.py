@@ -131,7 +131,7 @@ def test_different_owner_reclaims_uncertain_job_without_manual_pending_reset(tmp
 
     backend.submit_mode = "success"
     second = DeliveryExecutor(state_db=db, backend=backend, lease_owner="worker_b")
-    assert second.execute_once("job_uncertain_reclaim", now=NOW + timedelta(seconds=1), max_attempts=4) == "succeeded"
+    assert second.execute_once("job_uncertain_reclaim", now=NOW + timedelta(seconds=60), max_attempts=4) == "succeeded"
 
     job = db.get_delivery_job("job_uncertain_reclaim")
     assert job["status"] == "succeeded"
@@ -156,13 +156,14 @@ def test_payload_integrity_failure_is_terminal_quarantine_not_replayable(tmp_pat
     assert job["lease_until"] == ""
 
 
-def test_replayable_record_rejects_a_stale_live_lease_owner(tmp_path):
+def test_replayable_record_rejects_a_stale_live_lease_owner_without_writing(tmp_path):
     db = _db(tmp_path)
     _create_job(db, job_id="job_replay_stale_owner")
     assert db.claim_delivery_job(
         "job_replay_stale_owner", lease_owner="owner_a", now=NOW, lease_seconds=60
     )
 
+    before = db.get_delivery_job("job_replay_stale_owner")
     assert db.record_replayable_attempt(
         "job_replay_stale_owner", lease_owner="owner_b", now=NOW, max_attempts=4
     ) == "stale_owner_rejected"
@@ -170,19 +171,19 @@ def test_replayable_record_rejects_a_stale_live_lease_owner(tmp_path):
     job = db.get_delivery_job("job_replay_stale_owner")
     assert job["status"] == "claimed"
     assert job["lease_owner"] == "owner_a"
-    assert job["last_error_class"] == "stale_owner_rejected"
+    assert job == before
 
     assert db.record_replayable_attempt(
         "job_replay_stale_owner", lease_owner="owner_a", now=NOW + timedelta(seconds=61), max_attempts=4
     ) == "stale_owner_rejected"
-    assert db.get_delivery_job("job_replay_stale_owner")["status"] == "claimed"
+    assert db.get_delivery_job("job_replay_stale_owner") == before
 
 
 def test_claim_attempt_limit_returns_terminal_quarantine_to_executor(tmp_path):
     db = _db(tmp_path)
     _create_job(db, job_id="job_claim_attempt_limit")
     assert db.record_replayable_attempt(
-        "job_claim_attempt_limit", now=NOW, max_attempts=4
+        "job_claim_attempt_limit", now=NOW, max_attempts=4, next_retry_seconds=0
     ) == "replayable"
 
     backend = FakeDeliveryBackend()
@@ -217,16 +218,16 @@ def test_async_parse_fail_maps_to_failed_retryable_then_quarantine(tmp_path):
     assert job["last_error_class"] == "async_parse_failed"
 
 
-def test_stale_owner_delivery_execution_is_rejected_and_recorded(tmp_path):
+def test_stale_owner_delivery_execution_is_rejected_without_overwriting_owner_state(tmp_path):
     db = _db(tmp_path)
     _create_job(db, job_id="job_stale")
     assert db.claim_delivery_job("job_stale", lease_owner="owner_1", now=NOW, lease_seconds=1)
 
     executor = DeliveryExecutor(state_db=db, backend=FakeDeliveryBackend(), lease_owner="owner_2")
 
-    assert executor.execute_once("job_stale", now=NOW, max_attempts=3) == "stale_owner_rejected"
-    assert db.get_delivery_job("job_stale")["lease_owner"] == "owner_1"
-    assert db.get_delivery_job("job_stale")["last_error_class"] == "stale_owner_rejected"
+    before = db.get_delivery_job("job_stale")
+    assert executor.execute_once("job_stale", now=NOW, max_attempts=3) == "claim_rejected"
+    assert db.get_delivery_job("job_stale") == before
 
 
 def test_delivery_success_completion_rejects_mismatched_owner(tmp_path):
@@ -246,7 +247,7 @@ def test_delivery_success_completion_rejects_mismatched_owner(tmp_path):
     )
     job = db.get_delivery_job("job_mismatch")
     assert job["status"] == "executing"
-    assert job["last_error_class"] == "stale_owner_rejected"
+    assert job["last_error_class"] == ""
 
 
 def test_delivery_success_completion_rejects_expired_owner(tmp_path):
@@ -266,10 +267,10 @@ def test_delivery_success_completion_rejects_expired_owner(tmp_path):
     )
     job = db.get_delivery_job("job_expired")
     assert job["status"] == "executing"
-    assert job["last_error_class"] == "stale_owner_rejected"
+    assert job["last_error_class"] == ""
 
 
-def test_executor_completion_cannot_backdate_expired_lease_with_backend_observed_at(tmp_path):
+def test_executor_reclaims_expired_lease_without_backdating_backend_observed_at(tmp_path):
     db = _db(tmp_path)
     _create_job(db, job_id="job_backdate")
     backend = FakeDeliveryBackend()
@@ -277,11 +278,11 @@ def test_executor_completion_cannot_backdate_expired_lease_with_backend_observed
     executor = DeliveryExecutor(state_db=db, backend=backend, lease_owner="owner_1")
     assert db.claim_delivery_job("job_backdate", lease_owner="owner_1", now=NOW, lease_seconds=1)
 
-    assert executor.execute_once("job_backdate", now=NOW + timedelta(seconds=2), max_attempts=3) == "stale_owner_rejected"
+    assert executor.execute_once("job_backdate", now=NOW + timedelta(seconds=2), max_attempts=3) == "succeeded"
     job = db.get_delivery_job("job_backdate")
-    assert job["status"] == "claimed"
-    assert job["index_document_id"] == ""
-    assert job["last_error_class"] == "stale_owner_rejected"
+    assert job["status"] == "succeeded"
+    assert job["index_document_id"] == "doc_job_backdate"
+    assert job["last_error_class"] == ""
 
 
 def test_terminal_delivery_job_is_not_reexecuted(tmp_path):
@@ -293,3 +294,87 @@ def test_terminal_delivery_job_is_not_reexecuted(tmp_path):
     assert executor.execute_once("job_terminal", now=NOW, max_attempts=3) == "succeeded"
     assert executor.execute_once("job_terminal", now=NOW, max_attempts=3) == "succeeded"
     assert backend.submit_calls == 1
+
+
+def test_claim_delivery_job_rechecks_status_due_time_and_expired_lease_in_transaction(tmp_path):
+    db = _db(tmp_path)
+    _create_job(db, job_id="job_pending_immediate")
+    assert db.claim_delivery_job("job_pending_immediate", lease_owner="owner_pending", now=NOW)
+
+    _create_job(db, job_id="job_replay_due", idempotency_key="delivery_replay_due")
+    assert db.record_replayable_attempt(
+        "job_replay_due", now=NOW, max_attempts=4, next_retry_seconds=60
+    ) == "replayable"
+    assert not db.claim_delivery_job(
+        "job_replay_due", lease_owner="owner_before_due", now=NOW + timedelta(seconds=59)
+    )
+    assert db.claim_delivery_job(
+        "job_replay_due", lease_owner="owner_due", now=NOW + timedelta(seconds=60)
+    )
+
+    _create_job(db, job_id="job_failed_due", idempotency_key="delivery_failed_due")
+    assert db.record_failed_retryable_attempt(
+        "job_failed_due", now=NOW, max_attempts=4, next_retry_seconds=60
+    ) == "failed_retryable"
+    assert not db.claim_delivery_job(
+        "job_failed_due", lease_owner="owner_before_due", now=NOW + timedelta(seconds=59)
+    )
+    assert db.claim_delivery_job(
+        "job_failed_due", lease_owner="owner_due", now=NOW + timedelta(seconds=60)
+    )
+
+    _create_job(db, job_id="job_expired_executing", idempotency_key="delivery_expired_executing")
+    assert db.claim_delivery_job(
+        "job_expired_executing", lease_owner="owner_old", now=NOW, lease_seconds=1
+    )
+    assert db.mark_delivery_executing("job_expired_executing", lease_owner="owner_old", now=NOW)
+    assert db.claim_delivery_job(
+        "job_expired_executing", lease_owner="owner_new", now=NOW + timedelta(seconds=2)
+    )
+    reclaimed = db.get_delivery_job("job_expired_executing")
+    assert reclaimed["status"] == "claimed"
+    assert reclaimed["lease_owner"] == "owner_new"
+
+
+def test_executor_reclaims_expired_claimed_job_before_submitting(tmp_path):
+    db = _db(tmp_path)
+    _create_job(db, job_id="job_executor_expired_claim")
+    assert db.claim_delivery_job(
+        "job_executor_expired_claim", lease_owner="owner_old", now=NOW, lease_seconds=1
+    )
+    backend = FakeDeliveryBackend()
+
+    assert DeliveryExecutor(
+        state_db=db, backend=backend, lease_owner="owner_new"
+    ).execute_once("job_executor_expired_claim", now=NOW + timedelta(seconds=2)) == "succeeded"
+    assert backend.submit_calls == 1
+
+
+def test_terminal_and_stale_completion_are_zero_write_to_preserve_newer_evidence(tmp_path):
+    db = _db(tmp_path)
+    _create_job(db, job_id="job_terminal_toctou")
+    assert db.claim_delivery_job("job_terminal_toctou", lease_owner="owner_old", now=NOW)
+    db.record_delivery_evidence(
+        "job_terminal_toctou",
+        status="succeeded",
+        dataset_ref="ds_terminal",
+        document_ref="doc_terminal",
+        run="DONE",
+        last_error_class="remote_success",
+        observed_at=NOW,
+    )
+    terminal = db.get_delivery_job("job_terminal_toctou")
+
+    assert not db.claim_delivery_job(
+        "job_terminal_toctou", lease_owner="owner_new", now=NOW + timedelta(seconds=1)
+    )
+    assert not db.complete_delivery_with_evidence(
+        "job_terminal_toctou",
+        lease_owner="owner_old",
+        status="succeeded",
+        dataset_ref="ds_stale",
+        document_ref="doc_stale",
+        run="DONE",
+        now=NOW + timedelta(seconds=1),
+    )
+    assert db.get_delivery_job("job_terminal_toctou") == terminal

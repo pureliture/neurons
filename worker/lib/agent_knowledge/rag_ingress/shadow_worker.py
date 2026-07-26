@@ -539,9 +539,13 @@ def main() -> int:
     """Env-driven shadow-consume entrypoint (Ubuntu shadow container).
 
     Required env: RAG_INGRESS_NATS_URL, SHADOW_STREAM(!=RAG_INGRESS_QUEUE),
-    SHADOW_SUBJECT, SHADOW_DURABLE, INGEST_STATE_DB_PATH. Delivery is OFF by default
-    (SHADOW_DELIVER=0); when on, RETIRED_INDEX_BRIDGE_BASE_URL/RETIRED_INDEX_BRIDGE_API_KEY/RETIRED_INDEX_BRIDGE_DATASET_ID
-    are required."""
+    SHADOW_SUBJECT, SHADOW_DURABLE, INGEST_STATE_DB_PATH. Delivery is OFF by
+    default (SHADOW_DELIVER=0). The explicit
+    INGRESS_DELIVERY_BACKEND=couchdb branch constructs a CouchDBDeliveryBackend
+    with COUCHDB_URL/COUCHDB_USER/COUCHDB_PASSWORD/COUCHDB_DB and uses the
+    private canonical SQLite state at INGEST_STATE_DB_PATH. The default
+    retired_index_bridge branch instead requires its legacy
+    RETIRED_INDEX_BRIDGE_* variables."""
     import argparse
     import asyncio
 

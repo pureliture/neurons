@@ -33,9 +33,11 @@ RUN python -m pip install --no-cache-dir . \
     # heavy doc-parser is not needed. Inert unless MIRROR_DUAL_WRITE=1 + QDRANT_URL.
     && python -m pip install --no-cache-dir "qdrant-client>=1.10" "openai>=1.0"
 
+# Image-owned canonical state parent. Docker copies this 0700 directory into an
+# empty named volume before the non-root app starts; the app never repairs
+# permissions at runtime and rejects an existing unsafe parent.
 RUN useradd --create-home --shell /usr/sbin/nologin appuser \
-    && mkdir -p /var/lib/agent-knowledge/ingest-state \
-    && chown -R appuser:appuser /var/lib/agent-knowledge
+    && install -d -m 0700 -o appuser -g appuser /var/lib/agent-knowledge/ingest-state
 
 USER appuser
 

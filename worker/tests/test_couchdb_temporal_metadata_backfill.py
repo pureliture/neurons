@@ -63,6 +63,7 @@ def _schema_only_state_db(tmp_path: Path, *, tables: tuple[str, ...]) -> Path:
     with sqlite3.connect(path) as connection:
         for table in tables:
             connection.execute(f"CREATE TABLE {table} (id TEXT)")
+    os.chmod(path, 0o600)
     return path
 
 
