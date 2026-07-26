@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,9 +34,12 @@ from agent_knowledge.couchdb_source.session_memory_materializer import (
 from agent_knowledge.couchdb_source.build_cli import _select_sessions_needing_projection
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
 from agent_knowledge.rag_ingress.backfill_apply import apply_backfill_to_state_db
-from agent_knowledge.rag_ingress.couchdb_delivery_backend import CouchDBDeliveryBackend
+from agent_knowledge.rag_ingress.couchdb_delivery_backend import (
+    CouchDBDeliveryBackend,
+    build_couchdb_delivery_backend,
+)
 from agent_knowledge.rag_ingress.delivery_executor import DeliveryJobView, DeliveryOutcomeUncertain
-from agent_knowledge.rag_ingress.server_runtime import job_id_for_payload
+from agent_knowledge.rag_ingress.server_runtime import apply_server_redaction, job_id_for_payload
 from agent_knowledge.rag_ingress.state_db import RAGIngressStateDB
 
 
@@ -635,6 +639,14 @@ def test_exact_duplicate_retry_reconciles_coverage_and_projection_after_partial_
                 raise CouchDBError("injected aggregate write failure")
             return super().put(document)
 
+    class RecordingMirror:
+        def __init__(self) -> None:
+            self.documents = []
+
+        def submit_document(self, document):
+            self.documents.append(document)
+            return SimpleNamespace(document_ref=f"mirror-{len(self.documents)}")
+
     state_db = _state_db(tmp_path)
     first = _payload()
     second = _payload(
@@ -644,9 +656,17 @@ def test_exact_duplicate_retry_reconciles_coverage_and_projection_after_partial_
     )
     _seed(state_db, first, second)
     store = FailNextCoveragePutStore()
-    backend = _backend(state_db, store)
+    mirror = RecordingMirror()
+    mirror_outcomes = []
+    backend = CouchDBDeliveryBackend(
+        state_db=state_db,
+        store=store,
+        mirror=mirror,
+        on_mirror_outcome=mirror_outcomes.append,
+    )
 
     backend.submit(_job_view(state_db, "idem_key_1"))
+    assert len(mirror.documents) == 1
     state_id = projection_state_doc_id(SESSION_ID_HASH)
     projected = dict(store.get(state_id))
     projected_source_hash = projected["source_hash"]
@@ -665,6 +685,9 @@ def test_exact_duplicate_retry_reconciles_coverage_and_projection_after_partial_
     with pytest.raises(DeliveryOutcomeUncertain):
         backend.submit(retry_job)
 
+    # Coverage refresh failed after the chunk PUT, so this was not an
+    # authoritative primary success and must not reach the mirror.
+    assert len(mirror.documents) == 1
     assert store.get(conversation_chunk_doc_id(SESSION_ID_HASH, "chunk_def456")) is not None
     stale_coverage = store.get(coverage_manifest_doc_id(SESSION_ID_HASH))
     assert stale_coverage is not None
@@ -675,6 +698,14 @@ def test_exact_duplicate_retry_reconciles_coverage_and_projection_after_partial_
 
     assert evidence.status == "succeeded"
     assert evidence.run == "couchdb_existing"
+    # An exact retry that reconciles an earlier partial primary write must still
+    # reach the mirror. The document is the fully server-redacted ingress view,
+    # while its content hash remains the canonical wire identity.
+    assert len(mirror.documents) == 2
+    expected_redacted = apply_server_redaction(second)
+    assert mirror.documents[-1].body == expected_redacted["payload"]["document"]["body"]
+    assert mirror.documents[-1].content_hash == second["contentHash"]
+    assert [outcome.status for outcome in mirror_outcomes] == ["mirrored", "mirrored"]
     coverage = store.get(coverage_manifest_doc_id(SESSION_ID_HASH))
     assert coverage is not None
     assert coverage["conversation_chunk_count"] == 2
@@ -684,6 +715,89 @@ def test_exact_duplicate_retry_reconciles_coverage_and_projection_after_partial_
     assert projection["projection_status"] == ProjectionStatus.PENDING
     assert projection["source_hash"] == coverage["source_hash"]
     assert projection["projected_source_hash"] == projected_source_hash
+
+
+def test_mirror_failure_is_sanitized_and_cannot_change_couchdb_success(tmp_path):
+    class FailingMirror:
+        def submit_document(self, _document):
+            raise RuntimeError("must not be exposed in delivery evidence")
+
+    state_db = _state_db(tmp_path)
+    payload = _payload(idempotency_key="idem_mirror_failure")
+    _seed(state_db, payload)
+    outcomes = []
+    backend = CouchDBDeliveryBackend(
+        state_db=state_db,
+        store=InMemoryCouchDBSourceStore(),
+        mirror=FailingMirror(),
+        on_mirror_outcome=outcomes.append,
+    )
+
+    evidence = backend.submit(_job_view(state_db, "idem_mirror_failure"))
+
+    assert evidence.status == "succeeded"
+    assert [(outcome.status, outcome.error_class) for outcome in outcomes] == [
+        ("mirror_error", "RuntimeError")
+    ]
+    assert not hasattr(outcomes[0], "message")
+
+
+def test_couchdb_factory_is_primary_only_by_default_and_attaches_flagged_mirror(tmp_path):
+    state_db = _state_db(tmp_path)
+    calls = []
+    sentinel_mirror = object()
+
+    def build_mirror(environ):
+        calls.append(dict(environ))
+        return sentinel_mirror
+
+    primary_only = build_couchdb_delivery_backend(
+        state_db=state_db,
+        couchdb_url="http://couchdb.invalid",
+        couchdb_user="test-user",
+        couchdb_password="test-password",
+        couchdb_db="test-db",
+        environ={"MIRROR_DUAL_WRITE": "0"},
+        mirror_builder=build_mirror,
+    )
+    mirrored = build_couchdb_delivery_backend(
+        state_db=state_db,
+        couchdb_url="http://couchdb.invalid",
+        couchdb_user="test-user",
+        couchdb_password="test-password",
+        couchdb_db="test-db",
+        environ={"MIRROR_DUAL_WRITE": "1"},
+        mirror_builder=build_mirror,
+    )
+
+    assert primary_only._mirror is None
+    assert mirrored._mirror is sentinel_mirror
+    assert calls == [{"MIRROR_DUAL_WRITE": "1"}]
+
+
+def test_couchdb_factory_sanitizes_mirror_build_failure_and_keeps_primary(tmp_path):
+    state_db = _state_db(tmp_path)
+    outcomes = []
+
+    def build_mirror(_environ):
+        raise RuntimeError("do not expose mirror configuration detail")
+
+    backend = build_couchdb_delivery_backend(
+        state_db=state_db,
+        couchdb_url="http://couchdb.invalid",
+        couchdb_user="test-user",
+        couchdb_password="test-password",
+        couchdb_db="test-db",
+        environ={"MIRROR_DUAL_WRITE": "1"},
+        mirror_builder=build_mirror,
+        on_mirror_outcome=outcomes.append,
+    )
+
+    assert backend._mirror is None
+    assert [(outcome.status, outcome.error_class) for outcome in outcomes] == [
+        ("mirror_build_error", "RuntimeError")
+    ]
+    assert not hasattr(outcomes[0], "message")
 
 
 # ---------------------------------------------------------------------------
