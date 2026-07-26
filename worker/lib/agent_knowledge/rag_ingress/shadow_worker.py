@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .delivery_backend import RetiredIndexBridgeDeliveryBackend
+from .delivery_executor import DeliveryExecutor
 from .retired_index_bridge import RetiredIndexBridgeRetiredIndexBridgeAdapter
 from .server_runtime import (
     apply_server_redaction,
@@ -36,6 +38,8 @@ from .server_runtime import (
     normalize_ingest_job_payload,
     public_ingress_leak_violations,
 )
+from .state_db import RAGIngressStateDB
+from .state_sink import StateDBIngressSink
 from ..index_client import RetiredIndexBridgeHttpClient
 
 SHADOW_LOG_DDL = """
@@ -65,15 +69,12 @@ class ShadowResult:
 
 
 class IngestStateStore:
-    """Server-volume SQLite owned by the worker (G1 = minimal lifecycle log).
-
-    Full ``delivery_jobs`` contract wiring (commands/domain_records) is a G1/G2
-    follow-on; G1 proves the worker owns + writes a server-volume store.
-    """
+    """Server-volume SQLite with canonical delivery state and legacy observer rows."""
 
     def __init__(self, path: Path | str):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.state_db = RAGIngressStateDB(self.path)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30)
@@ -184,48 +185,13 @@ def process_payload(payload: dict, *, store: IngestStateStore,
     payload = apply_server_redaction(payload)
     document = document_from_ingress_payload(payload)
     ik = document.idempotency_key
-    # Dedup a NATS at-least-once redelivery BEFORE recording "received" (a plain
-    # "received" upsert would overwrite a prior delivered row's refs/flag). The
-    # worker holds no lease, so JetStream may redeliver a message whose previous
-    # attempt already delivered the document (delivered but ack lost, or a
-    # transient failure after upload). Two layers mirror the retired Java worker
-    # (RecentDeliveryCache + findByContentHash):
-    #   1) the worker's own durable log — restart-safe, no backend round-trip;
-    #   2) a backend natural-key probe — covers a first attempt that uploaded but
-    #      crashed before recording, and a lost/fresh local volume.
-    if deliver and backend is not None:
-        existing = store.get_delivered(ik)
-        if existing is None:
-            handle = backend.find_by_natural_key(
-                target_profile=document.target_profile,
-                idempotency_key=ik,
-                payload_hash=document.content_hash,
-            )
-            if handle is not None:
-                existing = (handle.dataset_ref, handle.document_ref)
-        if existing is not None:
-            dataset_ref, document_ref = existing
-            # Persist as "delivered" (it IS delivered — the document exists in
-            # RetiredIndexBridge) so reconcile/counts treat a deduped redelivery exactly like
-            # an original delivery. The in-memory ShadowResult.status is
-            # "deduplicated" only so run_consume can log/observe that this pass
-            # skipped a re-upload; the durable vocab stays delivered on purpose.
-            store.record(
-                idempotency_key=ik, content_hash=document.content_hash,
-                document_kind=document.document_kind, target_profile=document.target_profile,
-                status="delivered", dataset_ref=dataset_ref,
-                document_ref=document_ref, delivered=True, now_iso=_now_iso(),
-            )
-            return ShadowResult(status="deduplicated", idempotency_key=ik,
-                                content_hash_present=bool(document.content_hash), delivered=True,
-                                dataset_ref=dataset_ref, document_ref=document_ref)
-    store.record(
-        idempotency_key=ik, content_hash=document.content_hash,
-        document_kind=document.document_kind, target_profile=document.target_profile,
-        status="received", now_iso=_now_iso(),
-    )
     leaks = public_ingress_leak_violations(document.body)
     if leaks:
+        store.record(
+            idempotency_key=ik, content_hash=document.content_hash,
+            document_kind=document.document_kind, target_profile=document.target_profile,
+            status="received", now_iso=_now_iso(),
+        )
         store.record(
             idempotency_key=ik, content_hash=document.content_hash,
             document_kind=document.document_kind, target_profile=document.target_profile,
@@ -233,6 +199,14 @@ def process_payload(payload: dict, *, store: IngestStateStore,
         )
         return ShadowResult(status="quarantined_leak", idempotency_key=ik,
                             content_hash_present=bool(document.content_hash), delivered=False)
+    existing_job = store.state_db.get_row("delivery_jobs", "idempotency_key", ik)
+    accepted = StateDBIngressSink(state_db=store.state_db).accept_payload(payload)
+    if not existing_job or existing_job["status"] != "succeeded":
+        store.record(
+            idempotency_key=ik, content_hash=document.content_hash,
+            document_kind=document.document_kind, target_profile=document.target_profile,
+            status="received", now_iso=_now_iso(),
+        )
     if not deliver or backend is None:
         store.record(
             idempotency_key=ik, content_hash=document.content_hash,
@@ -241,16 +215,36 @@ def process_payload(payload: dict, *, store: IngestStateStore,
         )
         return ShadowResult(status="observed_no_deliver", idempotency_key=ik,
                             content_hash_present=bool(document.content_hash), delivered=False)
-    submit = backend.submit_document(document)
+    delivery_backend = RetiredIndexBridgeDeliveryBackend(
+        state_db=store.state_db,
+        retired_index_bridge=backend,
+    )
+    outcome = DeliveryExecutor(
+        state_db=store.state_db,
+        backend=delivery_backend,
+        lease_owner="shadow_worker",
+    ).execute_once(str(accepted["job_id"]), max_attempts=5)
+    if outcome != "succeeded":
+        raise RuntimeError(f"canonical delivery did not succeed: {outcome}")
+    job = store.state_db.get_delivery_job(str(accepted["job_id"]))
+    if job is None:
+        raise RuntimeError("canonical delivery proof is missing")
     store.record(
         idempotency_key=ik, content_hash=document.content_hash,
         document_kind=document.document_kind, target_profile=document.target_profile,
-        status="delivered", dataset_ref=submit.dataset_ref,
-        document_ref=submit.document_ref, delivered=True, now_iso=_now_iso(),
+        status="delivered", dataset_ref=str(job["index_target_id"]),
+        document_ref=str(job["index_document_id"]), delivered=True, now_iso=_now_iso(),
     )
-    return ShadowResult(status="delivered", idempotency_key=ik,
+    status = (
+        "deduplicated"
+        if (existing_job and existing_job["status"] == "succeeded")
+        or delivery_backend.last_submission_was_deduplicated
+        else "delivered"
+    )
+    return ShadowResult(status=status, idempotency_key=ik,
                         content_hash_present=bool(document.content_hash), delivered=True,
-                        dataset_ref=submit.dataset_ref, document_ref=submit.document_ref)
+                        dataset_ref=str(job["index_target_id"]),
+                        document_ref=str(job["index_document_id"]))
 
 
 async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
