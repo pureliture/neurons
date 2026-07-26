@@ -1239,6 +1239,7 @@ Corrective contract:
 ### Temporal evidence authority correction (2026-07-25)
 
 - activation CronJob이 live ingress와 같은 SQLite PVC를 mount하더라도, 해당 shadow worker의 `shadow_ingest_log` materialization 기록은 retained delivery payload provenance가 아닙니다. Mount 동일성이나 row 존재만으로 historical event/observed time authority를 주장하지 않습니다.
+- 2026-07-26 source corrective checkpoint: live ingress source는 같은 SQLite의 `delivery_payloads`/`delivery_jobs`에 redacted wire payload와 delivery success proof를 기록하고, canonical success 뒤에만 `shadow_ingest_log` observer를 갱신하도록 연결했습니다. 이는 source/test evidence이며, production image·GitOps rollout·live historical backfill acceptance는 계속 pending입니다.
 - missing `delivery_payloads`/`delivery_jobs`를 빈 테이블로 생성하거나 `recorded_at`, artifact materialization time, session legacy time으로 observed time을 추정하는 복구는 금지합니다. 이 경우 기존 temporal metadata backfill은 explicit blocked report로 종료해야 합니다.
 - 새 read-only `couchdb-temporal-evidence-inventory`는 CouchDB source-native document family만 bounded scan하고, direct `observed_at_start`/`observed_at_end` pair를 temporal completeness의 유일한 positive evidence로 셉니다. Parent observed/legacy interval은 진단 aggregate로만 분리하며 mutation 또는 positive date recall을 해제하지 않습니다.
 - inventory는 명시 index precheck, complete-scan/limit/timeout, source revision drift, deterministic redacted digest를 검증합니다. 누락·malformed·reversed temporal evidence, source drift, repair-required count, incomplete scan 중 하나라도 있으면 `gap_count > 0`으로 fail-closed하고 activation은 첫 mutation 전에 멈춥니다.
