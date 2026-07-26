@@ -345,8 +345,10 @@ def test_neuron_knowledge_object_query_defaults_to_authority_archive_route(capsy
     assert "object_pack_route_not_implemented" not in report["object_pack"]["gaps"]
     assert report["object_pack"]["route_trace"]["route"] == "authority_archive_separation"
     assert report["object_pack"]["route_trace"]["route_source"] == "inferred"
-    assert "reference_only" in report["object_pack"]["route_trace"]["selected_source_lanes"]
-    assert report["object_pack"]["route_trace"]["stop_reason"] == "returned_object_pack"
+    assert report["object_pack"]["objects"] == []
+    assert "context_authority_no_relevant_match" in report["object_pack"]["gaps"]
+    assert report["object_pack"]["route_trace"]["selected_source_lanes"] == []
+    assert report["object_pack"]["route_trace"]["stop_reason"] == "gap_only_response"
 
 
 def test_neuron_knowledge_object_query_accepts_explicit_route(capsys):
