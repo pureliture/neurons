@@ -5446,9 +5446,9 @@ def test_mcp_brain_objects_query_applies_object_type_filter_and_response_mode(tm
     assert result["object_pack"]["objects"] == []
 
 
-def test_mcp_brain_objects_query_default_route_returns_agent_context_objects(tmp_path: Path):
+def test_mcp_brain_objects_query_default_route_requires_query_relevance(tmp_path: Path):
     service = _service(tmp_path)
-    response = handle_jsonrpc_message(
+    exact_response = handle_jsonrpc_message(
         {
             "jsonrpc": "2.0",
             "id": 101,
@@ -5458,7 +5458,7 @@ def test_mcp_brain_objects_query_default_route_returns_agent_context_objects(tmp
                 "arguments": {
                     "repository": FIXTURE_REPOSITORY,
                     "branch": FIXTURE_BRANCH,
-                    "query": "LBrain source-to-candidate-graph product activation roadmap P5 P6 P7 P8 P9 current gaps",
+                    "query": "한국어로 응답한다",
                     "current_files": ["docs/specs/roadmap.md"],
                     "consumer": "codex",
                     "response_mode": "compact",
@@ -5467,21 +5467,50 @@ def test_mcp_brain_objects_query_default_route_returns_agent_context_objects(tmp
         },
         service,
     )
+    nonsense_response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "query": "quasar marmalade unrelated nonsense",
+                    "current_files": ["docs/specs/roadmap.md"],
+                    "consumer": "codex",
+                    "response_mode": "compact",
+                },
+            },
+        },
+        service,
+    )
+    exact = exact_response["result"]["structuredContent"]
+    exact_pack = exact["object_pack"]
+    assert exact["route"] == "authority_archive_separation"
+    assert [obj["object_type"] for obj in exact_pack["objects"]] == ["PreferenceRule"]
+    assert [obj["title"] for obj in exact_pack["objects"]] == ["한국어로 응답한다"]
+    assert exact_pack["audit"]["object_pack_route_source"] == "context_authority_query_relevance"
+    assert exact_pack["route_trace"]["route"] == "authority_archive_separation"
+    assert exact_pack["route_trace"]["selected_source_lanes"] == ["accepted_current"]
+    assert exact_pack["route_trace"]["route_source"] == "inferred"
+    assert exact_pack["route_trace"]["stop_reason"] == "returned_object_pack"
+    assert exact_pack["response_mode"] == "compact"
 
-    result = response["result"]["structuredContent"]
-    pack = result["object_pack"]
-    assert result["route"] == "authority_archive_separation"
-    assert pack["objects"]
-    assert "object_pack_route_not_implemented" not in pack["gaps"]
-    assert pack["recommended_actions"]
-    assert {obj["object_type"] for obj in pack["objects"]} >= {"PreferenceRule", "Test", "ToolHandoffContext"}
-    assert pack["audit"]["object_pack_route_source"] == "context_authority_object_packs"
-    assert pack["route_trace"]["route"] == "authority_archive_separation"
-    assert "reference_only" in pack["route_trace"]["selected_source_lanes"]
-    assert pack["route_trace"]["route_source"] == "inferred"
-    assert pack["route_trace"]["stop_reason"] == "returned_object_pack"
-    assert isinstance(pack["route_trace"]["missing_evidence"], list)
-    assert pack["response_mode"] == "compact"
+    nonsense = nonsense_response["result"]["structuredContent"]
+    nonsense_pack = nonsense["object_pack"]
+    assert nonsense["route"] == "authority_archive_separation"
+    assert nonsense_pack["objects"] == []
+    assert all(not objects for objects in nonsense_pack["lanes"].values())
+    assert nonsense_pack["recommended_actions"] == []
+    assert nonsense_pack["confidence"] == {
+        "score": 0.0,
+        "basis": "context_authority_query_no_relevant_match",
+    }
+    assert "context_authority_no_relevant_match" in nonsense_pack["gaps"]
+    assert nonsense_pack["route_trace"]["selected_source_lanes"] == []
+    assert nonsense_pack["route_trace"]["stop_reason"] == "gap_only_response"
 
 
 def test_mcp_brain_objects_query_temporal_route_returns_current_work_objects(tmp_path: Path):
