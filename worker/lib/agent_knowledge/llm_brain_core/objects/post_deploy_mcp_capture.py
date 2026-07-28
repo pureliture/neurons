@@ -48,6 +48,14 @@ from .runtime_readiness import (
     argo_reconciliation_public_contract,
     build_deployment_evidence_binding,
 )
+from .temporal_acceptance_derive import (
+    DEFAULT_INVENTORY_LIMIT,
+    MAX_INVENTORY_LIMIT,
+    authority_fingerprint_from_work_unit,
+    derive_temporal_acceptance_baseline_from_ledger,
+    normalize_temporal_selector_value,
+    validate_temporal_acceptance_authority_baseline,
+)
 
 POST_DEPLOY_MCP_CAPTURE_SCHEMA = "source_to_candidate_runtime_post_deploy_mcp_capture.v1"
 TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_CAPTURE_SCHEMA = (
@@ -217,6 +225,8 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
     deployed_identity: Mapping[str, Any] | None = None,
     artifact_descriptor: Mapping[str, Any] | None = None,
     temporal_acceptance: Mapping[str, Any] | None = None,
+    ledger_path: str = "",
+    inventory_limit: int | None = None,
     collect_agent_context_startup: bool = False,
     agent_context_startup_runner: Any = None,
     session_factory: Any = None,
@@ -230,10 +240,16 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         else None
     )
     validated_temporal_acceptance = _validate_temporal_acceptance_config(
-        temporal_acceptance
+        temporal_acceptance,
+        inventory_limit=inventory_limit,
     )
     explicit_project = str(project or "").strip()
     safe_project = public_safe_text(explicit_project, max_chars=120) or "neurons"
+    authority_baseline, authority_derive_receipt = _derive_temporal_acceptance_authority_baseline(
+        config=validated_temporal_acceptance,
+        ledger_path=ledger_path,
+        project=safe_project,
+    )
     project_source = "explicit" if explicit_project else "collector_default"
     factory = session_factory or _default_mcp_session
     async with factory(safe_url) as session:
@@ -325,6 +341,8 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
                 consumer=consumer,
                 config=validated_temporal_acceptance,
                 runtime_packet=post_evaluator_runtime_packet,
+                authority_baseline=authority_baseline,
+                authority_derive_receipt=authority_derive_receipt,
             )
             if validated_temporal_acceptance
             else {}
@@ -404,6 +422,8 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         capture["session_project_rollup_runtime"] = session_project_rollup
     if temporal_checkpoint:
         capture["temporal_recall_corrective_checkpoint"] = temporal_checkpoint
+    if authority_derive_receipt:
+        capture["authority_derivation"] = authority_derive_receipt
     preference_artifact_memory = _live_preference_artifact_memory_from_runtime_packet(attested_runtime_packet)
     if preference_artifact_memory:
         capture["preference_artifact_memory"] = preference_artifact_memory
@@ -510,17 +530,25 @@ async def collect_temporal_recall_corrective_checkpoint(
     consumer: str = "codex",
     expected_commit: str = "",
     temporal_acceptance: Mapping[str, Any] | None = None,
+    ledger_path: str = "",
+    inventory_limit: int | None = None,
     session_factory: Any = None,
 ) -> dict[str, Any]:
     """Collect only read-only live evidence needed by the temporal checkpoint."""
 
     safe_url = validate_post_deploy_mcp_url(mcp_url)
     validated_temporal_acceptance = _validate_temporal_acceptance_config(
-        temporal_acceptance
+        temporal_acceptance,
+        inventory_limit=inventory_limit,
     )
     if not validated_temporal_acceptance:
         raise ValueError("temporal acceptance config is required")
     safe_project = public_safe_text(str(project or ""), max_chars=120) or "neurons"
+    authority_baseline, authority_derive_receipt = _derive_temporal_acceptance_authority_baseline(
+        config=validated_temporal_acceptance,
+        ledger_path=ledger_path,
+        project=safe_project,
+    )
     factory = session_factory or _default_mcp_session
     async with factory(safe_url) as session:
         await session.initialize()
@@ -546,6 +574,8 @@ async def collect_temporal_recall_corrective_checkpoint(
             consumer=consumer,
             config=validated_temporal_acceptance,
             runtime_packet=runtime_packet,
+            authority_baseline=authority_baseline,
+            authority_derive_receipt=authority_derive_receipt,
         )
         if _runtime_packet_reports_mutation(runtime_packet):
             checkpoint = {
@@ -569,6 +599,8 @@ async def collect_temporal_recall_corrective_checkpoint(
             checkpoint.get("production_mutation_performed") is True
         ),
     }
+    if authority_derive_receipt:
+        capture["authority_derivation"] = authority_derive_receipt
     ensure_public_safe(capture, "TemporalRecallCorrectiveCheckpointCapture")
     return capture
 
@@ -950,13 +982,74 @@ async def _call_tool_mapping(session: Any, name: str, arguments: Mapping[str, An
     )
 
 
-def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
+def _validated_inventory_limit(value: Any) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 2 <= value <= MAX_INVENTORY_LIMIT
+    ):
+        raise ValueError(
+            "temporal acceptance inventory_limit must be between "
+            f"2 and {MAX_INVENTORY_LIMIT}"
+        )
+    return value
+
+
+def _normalize_v3_temporal_selectors(config: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(config)
+    for name in ("date_a", "date_b", "mismatch"):
+        probe = dict(config[name])
+        probe["as_of"] = normalize_temporal_selector_value(
+            probe.get("as_of"), field=f"{name}.as_of"
+        )
+        normalized[name] = probe
+    for name in ("range_boundary", "invalid_range"):
+        probe = dict(config[name])
+        for field in ("date_from", "date_to"):
+            probe[field] = normalize_temporal_selector_value(
+                probe.get(field), field=f"{name}.{field}"
+            )
+        normalized[name] = probe
+    return normalized
+
+
+def _validate_temporal_acceptance_config(
+    value: Any,
+    *,
+    inventory_limit: int | None = None,
+) -> dict[str, Any]:
     if value is None:
+        if inventory_limit is not None:
+            raise ValueError("inventory_limit requires temporal acceptance config")
         return {}
     if not isinstance(value, Mapping):
         raise ValueError("temporal acceptance config must be an object")
     _reject_forbidden_runtime_input_keys(value)
     config = _public_safe_mapping(value)
+    schema_version = config.get("schema_version")
+    if schema_version == "temporal_acceptance.v2":
+        raise ValueError("temporal acceptance v2 is retired; use v3")
+    if schema_version not in (None, "", "temporal_acceptance.v3"):
+        raise ValueError("temporal acceptance schema is invalid")
+    acceptance_v3 = schema_version == "temporal_acceptance.v3"
+    if acceptance_v3 and "authority_baseline" in config:
+        raise ValueError(
+            "temporal acceptance v3 caller-supplied authority_baseline is not allowed"
+        )
+    if acceptance_v3:
+        config_limit = _validated_inventory_limit(
+            config.get("inventory_limit", DEFAULT_INVENTORY_LIMIT)
+        )
+        if inventory_limit is not None:
+            cli_limit = _validated_inventory_limit(inventory_limit)
+            if "inventory_limit" in config and cli_limit != config_limit:
+                raise ValueError(
+                    "inventory_limit conflicts with temporal acceptance config"
+                )
+            config_limit = cli_limit
+        config["inventory_limit"] = config_limit
+    elif inventory_limit is not None or "inventory_limit" in config:
+        raise ValueError("inventory_limit is supported only by temporal acceptance v3")
     temporal_query = str(config.get("temporal_query") or "").strip()
     if not temporal_query or public_safe_text(temporal_query, max_chars=240) != temporal_query:
         raise ValueError("temporal acceptance temporal_query must be public-safe")
@@ -970,21 +1063,20 @@ def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
             raise ValueError(f"temporal acceptance {name}.query must equal temporal_query")
         if not str(probe.get("as_of") or "").strip():
             raise ValueError(f"temporal acceptance {name}.as_of is required")
-        require_sha256(
-            str(probe.get("expected_object_fingerprint") or ""),
-            f"temporal acceptance {name}.expected_object_fingerprint",
-        )
-        require_sha256(
-            str(probe.get("expected_object_identity_fingerprint") or ""),
-            f"temporal acceptance {name}.expected_object_identity_fingerprint",
-        )
-    if (
+        if not acceptance_v3:
+            require_sha256(
+                str(probe.get("expected_object_fingerprint") or ""),
+                f"temporal acceptance {name}.expected_object_fingerprint",
+            )
+            require_sha256(
+                str(probe.get("expected_object_identity_fingerprint") or ""),
+                f"temporal acceptance {name}.expected_object_identity_fingerprint",
+            )
+    if not acceptance_v3 and (
         config["date_a"].get("expected_object_identity_fingerprint")
         == config["date_b"].get("expected_object_identity_fingerprint")
     ):
-        raise ValueError(
-            "temporal acceptance date object identities must be distinct"
-        )
+        raise ValueError("temporal acceptance date object identities must be distinct")
     boundary = config["range_boundary"]
     if boundary.get("query") not in (None, "", temporal_query):
         raise ValueError(
@@ -994,14 +1086,15 @@ def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
         boundary.get("date_to") or ""
     ).strip():
         raise ValueError("temporal acceptance range boundary is incomplete")
-    require_sha256(
-        str(boundary.get("expected_object_fingerprint") or ""),
-        "temporal acceptance range_boundary.expected_object_fingerprint",
-    )
-    require_sha256(
-        str(boundary.get("expected_object_identity_fingerprint") or ""),
-        "temporal acceptance range_boundary.expected_object_identity_fingerprint",
-    )
+    if not acceptance_v3:
+        require_sha256(
+            str(boundary.get("expected_object_fingerprint") or ""),
+            "temporal acceptance range_boundary.expected_object_fingerprint",
+        )
+        require_sha256(
+            str(boundary.get("expected_object_identity_fingerprint") or ""),
+            "temporal acceptance range_boundary.expected_object_identity_fingerprint",
+        )
     if not str(config["mismatch"].get("as_of") or "").strip():
         raise ValueError("temporal acceptance mismatch.as_of is required")
     if config["mismatch"].get("query") not in (None, "", temporal_query):
@@ -1068,7 +1161,60 @@ def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
         raise ValueError(
             "temporal acceptance runtime_expectations.max_artifact_age_seconds is invalid"
         )
+    if acceptance_v3:
+        config = _normalize_v3_temporal_selectors(config)
     return config
+
+
+def _derive_temporal_acceptance_authority_baseline(
+    *,
+    config: Mapping[str, Any],
+    ledger_path: str,
+    project: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Derive v3 authority immediately before a live MCP temporal probe."""
+
+    if config.get("schema_version") != "temporal_acceptance.v3":
+        return {}, {}
+    if not str(ledger_path or "").strip():
+        raise ValueError("temporal acceptance v3 requires a ledger path")
+    selection = {
+        "schema_version": "temporal_acceptance_selection.v3",
+        "policy": "latest_relevant_bounded_artifact_revision_v1",
+        "temporal_query": str(config["temporal_query"]),
+        "date_a": {"as_of": str(config["date_a"]["as_of"])},
+        "date_b": {"as_of": str(config["date_b"]["as_of"])},
+        "range_boundary": {
+            "date_from": str(config["range_boundary"]["date_from"]),
+            "date_to": str(config["range_boundary"]["date_to"]),
+        },
+    }
+    derived = derive_temporal_acceptance_baseline_from_ledger(
+        ledger_path=str(ledger_path),
+        project=project,
+        selection=selection,
+        limit=int(config["inventory_limit"]),
+        max_runtime_seconds=60,
+    )
+    candidate = derived.get("authority_baseline")
+    receipt = derived.get("receipt")
+    if not isinstance(candidate, Mapping) or not isinstance(receipt, Mapping):
+        raise ValueError("temporal acceptance v3 authority baseline is unavailable")
+    baseline = validate_temporal_acceptance_authority_baseline(
+        candidate,
+        temporal_query=str(config["temporal_query"]),
+    )
+    for label, fields in (
+        ("date_a", ("as_of",)),
+        ("date_b", ("as_of",)),
+        ("range_boundary", ("date_from", "date_to")),
+    ):
+        expected = baseline.get(label)
+        if not isinstance(expected, Mapping) or any(
+            expected.get(field) != config[label].get(field) for field in fields
+        ):
+            raise ValueError(f"temporal acceptance v3 {label} selector does not match authority")
+    return baseline, dict(receipt)
 
 
 async def _collect_temporal_recall_corrective_checkpoint(
@@ -1080,6 +1226,8 @@ async def _collect_temporal_recall_corrective_checkpoint(
     consumer: str,
     config: Mapping[str, Any],
     runtime_packet: Mapping[str, Any],
+    authority_baseline: Mapping[str, Any] | None = None,
+    authority_derive_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     async def query_objects(
         selector: Mapping[str, Any], *, query: str = "temporal work recall"
@@ -1095,6 +1243,10 @@ async def _collect_temporal_recall_corrective_checkpoint(
                 "current_files": [],
                 "route": "temporal_work_recall",
                 "response_mode": "full",
+                # Two is a sentinel, not a broad recall limit: one expected
+                # WorkUnit plus any stale/foreign second result is evidence the
+                # temporal response is not exact and must fail closed.
+                "limit": 2,
                 "consumer": consumer,
                 **dict(selector),
             },
@@ -1119,6 +1271,13 @@ async def _collect_temporal_recall_corrective_checkpoint(
     temporal_query = public_safe_text(
         str(config.get("temporal_query") or ""), max_chars=240
     )
+    acceptance_v3 = config.get("schema_version") == "temporal_acceptance.v3"
+    derived_authority_baseline = dict(authority_baseline or {}) if acceptance_v3 else {}
+    if acceptance_v3 and not derived_authority_baseline:
+        raise ValueError("temporal acceptance v3 authority baseline is required")
+    derived_authority_receipt = dict(authority_derive_receipt or {}) if acceptance_v3 else {}
+    if acceptance_v3 and not derived_authority_receipt:
+        raise ValueError("temporal acceptance v3 authority derive receipt is required")
     date_a_raw = await query_objects(
         date_a_selector,
         query=temporal_query,
@@ -1166,6 +1325,37 @@ async def _collect_temporal_recall_corrective_checkpoint(
             runtime_expectations=config["runtime_expectations"],
         )
     )
+    def probe_summary(
+        raw: Mapping[str, Any],
+        *,
+        selector: Mapping[str, str],
+        name: str,
+        legacy_config: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        expected = (
+            derived_authority_baseline.get(name)
+            if isinstance(derived_authority_baseline.get(name), Mapping)
+            else {}
+        )
+        return _temporal_object_probe_summary(
+            raw,
+            selector=selector,
+            expected_fingerprint=str(
+                legacy_config.get("expected_object_fingerprint") or ""
+            ),
+            expected_identity_fingerprint=str(
+                legacy_config.get("expected_object_identity_fingerprint") or ""
+            ),
+            expected_authority_fingerprint=str(
+                expected.get("expected_authority_fingerprint") or ""
+            )
+            if acceptance_v3
+            else "",
+            expected_source_revision=str(expected.get("expected_source_revision") or "")
+            if acceptance_v3
+            else "",
+        )
+
     checkpoint = {
         "schema_version": TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_SCHEMA,
         "evidence_class": "runtime_semantic_acceptance",
@@ -1183,29 +1373,17 @@ async def _collect_temporal_recall_corrective_checkpoint(
             ),
             "invalid_range_error_code": invalid_raw.get("collector_error_code"),
         },
-        "date_a": _temporal_object_probe_summary(
-            date_a_raw,
-            selector=date_a_selector,
-            expected_fingerprint=str(date_a_config.get("expected_object_fingerprint") or ""),
-            expected_identity_fingerprint=str(
-                date_a_config.get("expected_object_identity_fingerprint") or ""
-            ),
+        "date_a": probe_summary(
+            date_a_raw, selector=date_a_selector, name="date_a", legacy_config=date_a_config
         ),
-        "date_b": _temporal_object_probe_summary(
-            date_b_raw,
-            selector=date_b_selector,
-            expected_fingerprint=str(date_b_config.get("expected_object_fingerprint") or ""),
-            expected_identity_fingerprint=str(
-                date_b_config.get("expected_object_identity_fingerprint") or ""
-            ),
+        "date_b": probe_summary(
+            date_b_raw, selector=date_b_selector, name="date_b", legacy_config=date_b_config
         ),
-        "range_boundary": _temporal_object_probe_summary(
+        "range_boundary": probe_summary(
             boundary_raw,
             selector=boundary_selector,
-            expected_fingerprint=str(boundary_config.get("expected_object_fingerprint") or ""),
-            expected_identity_fingerprint=str(
-                boundary_config.get("expected_object_identity_fingerprint") or ""
-            ),
+            name="range_boundary",
+            legacy_config=boundary_config,
         ),
         "mismatch": _temporal_mismatch_probe_summary(
             mismatch_raw,
@@ -1244,6 +1422,9 @@ async def _collect_temporal_recall_corrective_checkpoint(
             )
         ),
     }
+    if acceptance_v3:
+        checkpoint["acceptance_version"] = "v3"
+        checkpoint["authority_baseline"] = derived_authority_baseline
     ensure_public_safe(checkpoint, "TemporalRecallCorrectiveCheckpoint")
     return checkpoint
 
@@ -1264,6 +1445,8 @@ def _temporal_object_probe_summary(
     selector: Mapping[str, str],
     expected_fingerprint: str,
     expected_identity_fingerprint: str,
+    expected_authority_fingerprint: str = "",
+    expected_source_revision: str = "",
 ) -> dict[str, Any]:
     safe = _remote_mapping_or_failure(value)
     object_pack = safe.get("object_pack") if isinstance(safe.get("object_pack"), Mapping) else {}
@@ -1280,19 +1463,24 @@ def _temporal_object_probe_summary(
         for item in objects
         if isinstance(item, Mapping) and str(item.get("object_type") or "") == "WorkUnit"
     ]
+    non_work_unit_count = len(objects) - len(work_units)
     observed_fingerprint = hash_payload(work_units[0]) if len(work_units) == 1 else ""
     observed_identity_fingerprint = (
         _temporal_work_unit_identity_fingerprint(work_units[0])
         if len(work_units) == 1
         else ""
     )
-    return {
+    result = {
         "selector_hash": hash_payload(dict(selector)),
         "expected_object_fingerprint": expected_fingerprint,
         "observed_object_fingerprint": observed_fingerprint,
         "expected_object_identity_fingerprint": expected_identity_fingerprint,
         "observed_object_identity_fingerprint": observed_identity_fingerprint,
         "work_unit_count": len(work_units),
+        "object_count": len(objects),
+        "second_result_present": len(objects) > 1,
+        "extra_work_unit_count": max(0, len(work_units) - 1),
+        "non_work_unit_count": non_work_unit_count,
         "gap_count": len(gaps),
         "confidence_score": (
             float(confidence_score)
@@ -1302,6 +1490,30 @@ def _temporal_object_probe_summary(
             else None
         ),
     }
+    if expected_authority_fingerprint or expected_source_revision:
+        work_unit = work_units[0] if len(work_units) == 1 else {}
+        payload = work_unit.get("payload") if isinstance(work_unit, Mapping) else {}
+        observed_source_revision = (
+            str(payload.get("source_revision") or "")
+            if isinstance(payload, Mapping)
+            else ""
+        )
+        try:
+            require_sha256(observed_source_revision, "temporal WorkUnit source_revision")
+            observed_authority_fingerprint = authority_fingerprint_from_work_unit(work_unit)
+        except (TypeError, ValueError):
+            observed_source_revision = ""
+            observed_authority_fingerprint = ""
+        result.update(
+            {
+                "expected_authority_fingerprint": expected_authority_fingerprint,
+                "observed_authority_fingerprint": observed_authority_fingerprint,
+                "expected_source_revision": expected_source_revision,
+                "observed_source_revision": observed_source_revision,
+                "bounded_observed_interval": bool(observed_authority_fingerprint),
+            }
+        )
+    return result
 
 
 def _temporal_work_unit_identity_fingerprint(work_unit: Mapping[str, Any]) -> str:

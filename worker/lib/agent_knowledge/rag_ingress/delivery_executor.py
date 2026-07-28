@@ -46,6 +46,12 @@ class DeliveryBackendEvidence:
     observed_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class DeliveryExecutionReceipt:
+    status: str
+    submit_attempted: bool = False
+
+
 class DeliveryOutcomeUncertain(RuntimeError):
     pass
 
@@ -73,12 +79,19 @@ class DeliveryExecutor:
         self._lease_seconds = max(int(lease_seconds), 60)
 
     def execute_once(self, job_id: str, *, now: datetime | None = None, max_attempts: int = 3) -> str:
+        return self.execute_once_with_receipt(
+            job_id, now=now, max_attempts=max_attempts
+        ).status
+
+    def execute_once_with_receipt(
+        self, job_id: str, *, now: datetime | None = None, max_attempts: int = 3
+    ) -> DeliveryExecutionReceipt:
         row = self._state_db.get_delivery_job(job_id)
         if row is None:
             raise KeyError(job_id)
         status = str(row.get("status") or "")
         if status in {"succeeded", "quarantined"}:
-            return status
+            return DeliveryExecutionReceipt(status)
         if status in {"pending", "replayable", "failed_retryable", "claimed", "executing"}:
             if not self._state_db.claim_delivery_job(
                 job_id,
@@ -89,22 +102,25 @@ class DeliveryExecutor:
             ):
                 current = self._state_db.get_delivery_job(job_id)
                 if current is not None and current.get("status") == "quarantined":
-                    return "quarantined"
-                return "claim_rejected"
+                    return DeliveryExecutionReceipt("quarantined")
+                return DeliveryExecutionReceipt("claim_rejected")
         elif status not in {"claimed", "executing"}:
-            return "claim_rejected"
+            return DeliveryExecutionReceipt("claim_rejected")
         if not self._state_db.mark_delivery_executing(job_id, lease_owner=self._lease_owner, now=now):
-            return "stale_owner_rejected"
+            return DeliveryExecutionReceipt("stale_owner_rejected")
 
         job = DeliveryJobView.from_row(self._state_db.get_delivery_job(job_id) or row)
         try:
             evidence = self._backend.submit(job)
         except DeliveryOutcomeUncertain:
-            return self._state_db.record_replayable_attempt(
-                job_id,
-                lease_owner=self._lease_owner,
-                now=now,
-                max_attempts=max_attempts,
+            return DeliveryExecutionReceipt(
+                self._state_db.record_replayable_attempt(
+                    job_id,
+                    lease_owner=self._lease_owner,
+                    now=now,
+                    max_attempts=max_attempts,
+                ),
+                submit_attempted=True,
             )
 
         if evidence.status in {"quarantined", "payload_unavailable", "payload_integrity_mismatch"}:
@@ -119,8 +135,8 @@ class DeliveryExecutor:
                 observed_at=evidence.observed_at,
                 now=now,
             ):
-                return "stale_owner_rejected"
-            return "quarantined"
+                return DeliveryExecutionReceipt("stale_owner_rejected", submit_attempted=True)
+            return DeliveryExecutionReceipt("quarantined", submit_attempted=True)
         if evidence.status == "succeeded":
             if not self._state_db.complete_delivery_with_evidence(
                 job_id,
@@ -132,22 +148,28 @@ class DeliveryExecutor:
                 observed_at=evidence.observed_at,
                 now=now,
             ):
-                return "stale_owner_rejected"
-            return "succeeded"
+                return DeliveryExecutionReceipt("stale_owner_rejected", submit_attempted=True)
+            return DeliveryExecutionReceipt("succeeded", submit_attempted=True)
         if evidence.status == "failed_retryable":
-            return self._state_db.record_failed_retryable_attempt(
+            return DeliveryExecutionReceipt(
+                self._state_db.record_failed_retryable_attempt(
+                    job_id,
+                    run=evidence.run,
+                    dataset_ref=evidence.dataset_ref,
+                    document_ref=evidence.document_ref,
+                    lease_owner=self._lease_owner,
+                    observed_at=evidence.observed_at,
+                    now=now,
+                    max_attempts=max_attempts,
+                ),
+                submit_attempted=True,
+            )
+        return DeliveryExecutionReceipt(
+            self._state_db.record_replayable_attempt(
                 job_id,
-                run=evidence.run,
-                dataset_ref=evidence.dataset_ref,
-                document_ref=evidence.document_ref,
                 lease_owner=self._lease_owner,
-                observed_at=evidence.observed_at,
                 now=now,
                 max_attempts=max_attempts,
-            )
-        return self._state_db.record_replayable_attempt(
-            job_id,
-            lease_owner=self._lease_owner,
-            now=now,
-            max_attempts=max_attempts,
+            ),
+            submit_attempted=True,
         )

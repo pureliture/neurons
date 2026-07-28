@@ -88,6 +88,7 @@ OBJECT_SUBPACKAGE_MODULES = frozenset({
     "post_deploy_mcp_capture",
     "reference_corpus",
     "runtime_readiness",
+    "temporal_acceptance_derive",
 })
 
 

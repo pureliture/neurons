@@ -36,6 +36,9 @@ from .reference_corpus import (
     default_corpus_policy_status,
     reference_corpus_objects_from_manifest,
 )
+from .temporal_acceptance_derive import (
+    derive_temporal_acceptance_baseline_from_ledger,
+)
 from .runtime_readiness import (
     build_source_to_candidate_runtime_collected_shadow_evidence_packet,
     build_source_to_candidate_runtime_evidence_collection_plan,
@@ -753,11 +756,23 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     parser.add_argument("--deployed-identity-file", default="")
     parser.add_argument("--artifact-descriptor-file", default="")
     parser.add_argument("--temporal-acceptance-file", default="")
+    parser.add_argument("--ledger", default="")
+    parser.add_argument("--inventory-limit", type=int)
     parser.add_argument("--repository", default="")
     parser.add_argument("--branch", default="")
     parser.add_argument("--project", default="")
     parser.add_argument("--consumer", default="codex")
     args = parser.parse_args(argv)
+    if args.inventory_limit is not None:
+        if not (
+            args.collect_post_deploy_mcp_capture
+            or args.collect_temporal_corrective_checkpoint
+        ):
+            parser.error(
+                "--inventory-limit requires a temporal MCP collection mode"
+            )
+        if not args.temporal_acceptance_file:
+            parser.error("--inventory-limit requires --temporal-acceptance-file")
     if args.collect_temporal_corrective_checkpoint:
         temporal_mode_conflicts = [
             flag
@@ -847,12 +862,15 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                     args.temporal_acceptance_file,
                     label="temporal acceptance",
                 ),
+                ledger_path=args.ledger,
+                inventory_limit=args.inventory_limit,
             )
         )
         output = dict(capture)
         output["checkpoint_readiness"] = (
             build_temporal_recall_corrective_checkpoint_readiness_report(
-                checkpoint=capture.get("temporal_recall_corrective_checkpoint")
+                checkpoint=capture.get("temporal_recall_corrective_checkpoint"),
+                authority_derivation=capture.get("authority_derivation"),
             )
         )
         _print_json(output)
@@ -910,6 +928,8 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 deployed_identity=deployed_identity,
                 artifact_descriptor=artifact_descriptor,
                 temporal_acceptance=temporal_acceptance,
+                ledger_path=args.ledger,
+                inventory_limit=args.inventory_limit,
                 collect_agent_context_startup=args.collect_agent_context_startup,
             )
         )
@@ -1004,6 +1024,43 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     )
     _print_json(report)
     return 1 if report["status"] == "FAIL" else 0
+
+
+def temporal_acceptance_derive_main(argv: list[str] | None = None) -> int:
+    """Build a ledger-backed temporal v3 baseline without activating projection."""
+
+    parser = argparse.ArgumentParser(prog="neuron-knowledge temporal-acceptance-derive")
+    parser.add_argument("--selection-file", required=True)
+    parser.add_argument("--ledger", required=True)
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--limit", type=int, required=True)
+    parser.add_argument("--max-runtime-seconds", type=float, required=True)
+    args = parser.parse_args(argv)
+    try:
+        result = derive_temporal_acceptance_baseline_from_ledger(
+            ledger_path=args.ledger,
+            project=str(args.project),
+            selection=_load_json_mapping(args.selection_file, label="temporal acceptance selection"),
+            limit=int(args.limit),
+            max_runtime_seconds=float(args.max_runtime_seconds),
+        )
+    except Exception as exc:
+        _print_json(
+            {
+                "schema_version": "temporal_acceptance_derive_receipt.v3",
+                "status": "blocked",
+                "error": type(exc).__name__,
+                "mutation_performed": False,
+                "network_used": False,
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            }
+        )
+        return 1
+    _print_json(dict(result))
+    return 0
 
 
 def okf_export_main(argv: list[str] | None = None) -> int:
