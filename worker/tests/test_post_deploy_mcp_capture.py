@@ -17,6 +17,9 @@ from agent_knowledge.llm_brain_core.golden_query_eval import (
 )
 from agent_knowledge.llm_brain_core.objects import object_cli
 from agent_knowledge.llm_brain_core.objects import post_deploy_mcp_capture
+from agent_knowledge.llm_brain_core.objects.temporal_acceptance_derive import (
+    authority_fingerprint_from_provenance,
+)
 from agent_knowledge.llm_brain_core.objects.post_deploy_mcp_capture import (
     collect_agent_context_consumer_startup_receipt,
     collect_source_to_candidate_post_deploy_mcp_capture,
@@ -480,6 +483,119 @@ def _minimal_temporal_acceptance_config() -> dict:
             "max_artifact_age_seconds": 3600,
         },
     }
+
+
+def test_temporal_v2_probe_summary_uses_work_unit_source_revision_as_authority():
+    observed_revision = "sha256:" + "a" * 64
+    expected_revision = "sha256:" + "b" * 64
+    provenance = {
+        "source_kind": "session_memory_artifact",
+        "source_object_type": "SessionMemoryArtifact",
+        "content_hash": observed_revision,
+        "source_revision": observed_revision,
+        "observed_at_start": "2026-07-09T10:00:00Z",
+        "observed_at_end": "2026-07-09T11:00:00Z",
+        "authority_lane": "reference_only",
+    }
+    work_unit = {
+        "object_type": "WorkUnit",
+        "content_hash": "sha256:" + "c" * 64,
+        "authority_lane": "reference_only",
+        "payload": {
+            "source_kind": provenance["source_kind"],
+            "source_object_type": provenance["source_object_type"],
+            "source_revision": observed_revision,
+            "observed_at_start": provenance["observed_at_start"],
+            "observed_at_end": provenance["observed_at_end"],
+        },
+    }
+
+    summary = post_deploy_mcp_capture._temporal_object_probe_summary(
+        {
+            "schema_version": "brain_objects_query.v1",
+            "route": "temporal_work_recall",
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": "temporal_work_recall",
+                "objects": [work_unit],
+                "gaps": [],
+                "confidence": {"score": 0.9},
+            },
+        },
+        selector={"as_of": "2026-07-09T10:30:00Z"},
+        expected_fingerprint="",
+        expected_identity_fingerprint="",
+        expected_authority_fingerprint=authority_fingerprint_from_provenance(provenance),
+        expected_source_revision=expected_revision,
+    )
+
+    assert summary["observed_source_revision"] == observed_revision
+    assert summary["observed_source_revision"] != summary["expected_source_revision"]
+    assert summary["observed_authority_fingerprint"] == authority_fingerprint_from_provenance(
+        provenance
+    )
+    assert summary["bounded_observed_interval"] is True
+
+
+@pytest.mark.parametrize(
+    ("second_object", "expected_extra_work_units", "expected_non_work_units"),
+    [
+        (
+            {
+                "object_type": "WorkUnit",
+                "authority_lane": "reference_only",
+                "payload": {
+                    "source_kind": "session_memory_artifact",
+                    "source_object_type": "SessionMemoryArtifact",
+                    "source_revision": "sha256:" + "a" * 64,
+                    "observed_at_start": "2026-07-09T10:00:00Z",
+                    "observed_at_end": "2026-07-09T11:00:00Z",
+                },
+            },
+            1,
+            0,
+        ),
+        ({"object_type": "RuntimeTruth", "payload": {}}, 0, 1),
+    ],
+)
+def test_temporal_probe_summary_marks_second_stale_or_foreign_result_as_non_exact(
+    second_object, expected_extra_work_units, expected_non_work_units
+):
+    expected_revision = "sha256:" + "b" * 64
+    current_work_unit = {
+        "object_type": "WorkUnit",
+        "authority_lane": "reference_only",
+        "payload": {
+            "source_kind": "session_memory_artifact",
+            "source_object_type": "SessionMemoryArtifact",
+            "source_revision": expected_revision,
+            "observed_at_start": "2026-07-15T10:00:00Z",
+            "observed_at_end": "2026-07-15T11:00:00Z",
+        },
+    }
+    summary = post_deploy_mcp_capture._temporal_object_probe_summary(
+        {
+            "schema_version": "brain_objects_query.v1",
+            "route": "temporal_work_recall",
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": "temporal_work_recall",
+                "objects": [current_work_unit, second_object],
+                "gaps": [],
+                "confidence": {"score": 0.9},
+            },
+        },
+        selector={"as_of": "2026-07-15T10:30:00Z"},
+        expected_fingerprint="",
+        expected_identity_fingerprint="",
+        expected_authority_fingerprint="sha256:" + "c" * 64,
+        expected_source_revision=expected_revision,
+    )
+
+    assert summary["object_count"] == 2
+    assert summary["second_result_present"] is True
+    assert summary["extra_work_unit_count"] == expected_extra_work_units
+    assert summary["non_work_unit_count"] == expected_non_work_units
 
 
 def test_temporal_acceptance_rejects_operator_supplied_runtime_aggregate() -> None:
@@ -3969,8 +4085,7 @@ def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, cap
     )
     temporal_acceptance_file = tmp_path / "temporal-acceptance.json"
     temporal_acceptance = {
-        "date_a": {"as_of": "2026-07-09", "expected_object_fingerprint": "sha256:" + "a" * 64},
-        "date_b": {"as_of": "2026-07-15", "expected_object_fingerprint": "sha256:" + "b" * 64},
+        "schema_version": "temporal_acceptance.v3",
     }
     temporal_acceptance_file.write_text(
         json.dumps(temporal_acceptance),
@@ -4019,6 +4134,10 @@ def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, cap
                 str(artifact_descriptor_file),
                 "--temporal-acceptance-file",
                 str(temporal_acceptance_file),
+                "--ledger",
+                "public-safe-ledger-path",
+                "--inventory-limit",
+                "7",
             ]
         )
         == 0
@@ -4034,6 +4153,8 @@ def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, cap
     assert seen["project"] == "neurons"
     assert seen["consumer"] == "codex"
     assert seen["expected_commit"] == "c2b8548"
+    assert seen["ledger_path"] == "public-safe-ledger-path"
+    assert seen["inventory_limit"] == 7
     assert seen["deployed_identity"] == {
         "contains_expected_commit": True,
         "identity_source": "redacted_artifact_identity_summary",

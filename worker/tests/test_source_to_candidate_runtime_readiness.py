@@ -6,7 +6,11 @@ import json
 import pytest
 
 from agent_knowledge.cli import main
+from agent_knowledge.llm_brain_core.artifact_store import (
+    InMemorySessionMemoryArtifactStore,
+)
 from agent_knowledge.llm_brain_core.context_builder import object_native_review_tool_hints
+from agent_knowledge.llm_brain_core.models import SessionMemoryArtifact
 from agent_knowledge.llm_brain_core.objects import object_cli
 from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     ARGO_RECONCILIATION_SCHEMA,
@@ -29,6 +33,15 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_shadow_evidence_packet,
     build_preference_artifact_memory_runtime_evidence,
     build_temporal_recall_corrective_checkpoint_readiness_report,
+)
+from agent_knowledge.llm_brain_core.objects.temporal_acceptance_derive import (
+    AUTHORITY_SOURCE,
+    SOURCE_LEDGER_BINDING_SCHEMA,
+    TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA,
+    TEMPORAL_ACCEPTANCE_DERIVE_RECEIPT_SCHEMA,
+    SELECTION_POLICY,
+    authority_fingerprint_from_provenance,
+    derive_temporal_acceptance_baseline,
 )
 from agent_knowledge.public_safe_util import hash_payload
 from agent_knowledge.permission_audit_contract import (
@@ -1334,6 +1347,276 @@ def _temporal_recall_corrective_checkpoint(**overrides):
     return checkpoint
 
 
+def _temporal_recall_corrective_checkpoint_v2() -> dict:
+    checkpoint = _temporal_recall_corrective_checkpoint()
+    revisions = {
+        "date_a": "sha256:" + "7" * 64,
+        "date_b": "sha256:" + "8" * 64,
+        "range_boundary": "sha256:" + "7" * 64,
+    }
+    intervals = {
+        "date_a": ("2026-07-09T10:00:00Z", "2026-07-09T11:00:00Z"),
+        "date_b": ("2026-07-15T10:00:00Z", "2026-07-15T11:00:00Z"),
+        "range_boundary": ("2026-07-09T10:00:00Z", "2026-07-09T11:00:00Z"),
+    }
+    selectors = {
+        "date_a": {"as_of": "2026-07-09T10:30:00Z"},
+        "date_b": {"as_of": "2026-07-15T10:30:00Z"},
+        "range_boundary": {
+            "date_from": "2026-07-09T00:00:00Z",
+            "date_to": "2026-07-09T23:59:59Z",
+        },
+    }
+    baseline_probes = {}
+    for label, revision in revisions.items():
+        start, end = intervals[label]
+        authority = authority_fingerprint_from_provenance(
+            {
+                "source_kind": "session_memory_artifact",
+                "source_object_type": "SessionMemoryArtifact",
+                "content_hash": revision,
+                "source_revision": revision,
+                "observed_at_start": start,
+                "observed_at_end": end,
+                "authority_lane": "reference_only",
+            }
+        )
+        baseline_probes[label] = {
+            **selectors[label],
+            "source_kind": "session_memory_artifact",
+            "source_object_type": "SessionMemoryArtifact",
+            "authority_lane": "reference_only",
+            "expected_authority_fingerprint": authority,
+            "expected_source_revision": revision,
+        }
+        checkpoint[label].update(
+            {
+                "expected_authority_fingerprint": authority,
+                "observed_authority_fingerprint": authority,
+                "expected_source_revision": revision,
+                "observed_source_revision": revision,
+                "bounded_observed_interval": True,
+                "object_count": 1,
+                "second_result_present": False,
+                "extra_work_unit_count": 0,
+                "non_work_unit_count": 0,
+            }
+        )
+    baseline_core = {
+        "schema_version": TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA,
+        "selection_policy": "latest_bounded_source_snapshot_v1",
+        "source_inventory_hash": "sha256:" + "9" * 64,
+        "source_inventory_current": True,
+        "source_inventory_count": 2,
+        **baseline_probes,
+    }
+    checkpoint.update(
+        {
+            "acceptance_version": "v2",
+            "authority_baseline": {
+                **baseline_core,
+                "authority_receipt_hash": hash_payload(baseline_core),
+            },
+        }
+    )
+    return checkpoint
+
+
+def _temporal_recall_corrective_checkpoint_v3() -> tuple[dict, dict]:
+    checkpoint = _temporal_recall_corrective_checkpoint()
+    revisions = {
+        "date_a": "sha256:" + "7" * 64,
+        "date_b": "sha256:" + "8" * 64,
+        "range_boundary": "sha256:" + "7" * 64,
+    }
+    intervals = {
+        "date_a": ("2026-07-09T10:00:00Z", "2026-07-09T11:00:00Z"),
+        "date_b": ("2026-07-15T10:00:00Z", "2026-07-15T11:00:00Z"),
+        "range_boundary": ("2026-07-09T10:00:00Z", "2026-07-09T11:00:00Z"),
+    }
+    selectors = {
+        "date_a": {"as_of": "2026-07-09T10:30:00Z"},
+        "date_b": {"as_of": "2026-07-15T10:30:00Z"},
+        "range_boundary": {
+            "date_from": "2026-07-09T00:00:00Z",
+            "date_to": "2026-07-09T23:59:59Z",
+        },
+    }
+    baseline_probes = {}
+    for label, revision in revisions.items():
+        start, end = intervals[label]
+        authority = authority_fingerprint_from_provenance(
+            {
+                "source_kind": "session_memory_artifact",
+                "source_object_type": "SessionMemoryArtifact",
+                "content_hash": revision,
+                "source_revision": revision,
+                "observed_at_start": start,
+                "observed_at_end": end,
+                "authority_lane": "reference_only",
+            }
+        )
+        baseline_probes[label] = {
+            **selectors[label],
+            "source_kind": "session_memory_artifact",
+            "source_object_type": "SessionMemoryArtifact",
+            "authority_lane": "reference_only",
+            "expected_authority_fingerprint": authority,
+            "expected_source_revision": revision,
+        }
+        checkpoint[label] = {
+            key: value
+            for key, value in checkpoint[label].items()
+            if key
+            not in {
+                "expected_object_fingerprint",
+                "observed_object_fingerprint",
+                "expected_object_identity_fingerprint",
+                "observed_object_identity_fingerprint",
+            }
+        }
+        checkpoint[label].update(
+            {
+                "selector_hash": hash_payload(selectors[label]),
+                "expected_authority_fingerprint": authority,
+                "observed_authority_fingerprint": authority,
+                "expected_source_revision": revision,
+                "observed_source_revision": revision,
+                "bounded_observed_interval": True,
+                "object_count": 1,
+                "second_result_present": False,
+                "extra_work_unit_count": 0,
+                "non_work_unit_count": 0,
+            }
+        )
+    baseline_core = {
+        "schema_version": TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA,
+        "selection_policy": SELECTION_POLICY,
+        "authority_source": AUTHORITY_SOURCE,
+        "temporal_query_hash": checkpoint["temporal_query_hash"],
+        "source_inventory_hash": "sha256:" + "9" * 64,
+        "source_inventory_count": 2,
+        **baseline_probes,
+    }
+    baseline = {
+        **baseline_core,
+        "authority_receipt_hash": hash_payload(baseline_core),
+    }
+    checkpoint.update(
+        {
+            "acceptance_version": "v3",
+            "authority_baseline": baseline,
+        }
+    )
+    receipt = {
+        "schema_version": TEMPORAL_ACCEPTANCE_DERIVE_RECEIPT_SCHEMA,
+        "status": "derived",
+        "authority_receipt_hash": baseline["authority_receipt_hash"],
+        "source_inventory_hash": baseline["source_inventory_hash"],
+        "source_inventory_count": baseline["source_inventory_count"],
+        "authority_source": AUTHORITY_SOURCE,
+        "temporal_query_hash": baseline["temporal_query_hash"],
+        "mutation_performed": False,
+        "network_used": False,
+        "raw_private_evidence_returned": False,
+        "secret_returned": False,
+        "host_topology_returned": False,
+        "raw_external_ids_returned": False,
+        "artifact_ledger_metadata_read_only": True,
+        "ledger_backend": "sqlite",
+        "source_ledger_binding": {
+            "schema_version": SOURCE_LEDGER_BINDING_SCHEMA,
+            "backend": "sqlite",
+            "before_fingerprint": baseline["source_inventory_hash"],
+            "after_fingerprint": baseline["source_inventory_hash"],
+            "stable": True,
+        },
+    }
+    return checkpoint, receipt
+
+
+def _temporal_recall_corrective_checkpoint_v3_from_derived_receipt() -> tuple[dict, dict]:
+    def artifact(
+        *,
+        suffix: str,
+        session_suffix: str,
+        interval: tuple[str, str],
+        revision: int,
+    ) -> SessionMemoryArtifact:
+        return SessionMemoryArtifact.from_summary(
+            session_id_hash="sha256:" + session_suffix * 64,
+            project="neurons",
+            provider="codex",
+            summary="migration",
+            source_event_ids=(f"event-{suffix}",),
+            source_revision="sha256:" + suffix * 64,
+            observed_at_start=interval[0],
+            observed_at_end=interval[1],
+            revision_observed_at_start=interval[0],
+            revision_observed_at_end=interval[1],
+            revision_observed_intervals=(interval,),
+            revision_temporal_evidence="bounded",
+            search_term_hashes=(hash_payload("migration"),),
+            materialized_at=interval[1],
+            materialization_revision=revision,
+        )
+
+    date_a = ("2026-07-09T10:00:00Z", "2026-07-09T11:00:00Z")
+    date_b = ("2026-07-15T10:00:00Z", "2026-07-15T11:00:00Z")
+    derived = derive_temporal_acceptance_baseline(
+        artifact_store=InMemorySessionMemoryArtifactStore(
+            [
+                artifact(suffix="a", session_suffix="1", interval=date_a, revision=1),
+                artifact(suffix="b", session_suffix="2", interval=date_b, revision=1),
+            ]
+        ),
+        project="neurons",
+        selection={
+            "schema_version": "temporal_acceptance_selection.v3",
+            "policy": SELECTION_POLICY,
+            "temporal_query": "migration",
+            "date_a": {"as_of": "2026-07-09T10:30:00Z"},
+            "date_b": {"as_of": "2026-07-15T10:30:00Z"},
+            "range_boundary": {
+                "date_from": "2026-07-09T00:00:00Z",
+                "date_to": "2026-07-09T23:59:59Z",
+            },
+        },
+        limit=10,
+        max_runtime_seconds=5,
+    )
+    baseline = derived["authority_baseline"]
+    receipt = {
+        **derived["receipt"],
+        "ledger_backend": "sqlite",
+        "source_ledger_binding": {
+            "schema_version": SOURCE_LEDGER_BINDING_SCHEMA,
+            "backend": "sqlite",
+            "before_fingerprint": baseline["source_inventory_hash"],
+            "after_fingerprint": baseline["source_inventory_hash"],
+            "stable": True,
+        },
+    }
+    checkpoint, _ = _temporal_recall_corrective_checkpoint_v3()
+    checkpoint["temporal_query_hash"] = baseline["temporal_query_hash"]
+    for label in ("date_a", "date_b", "range_boundary"):
+        expected = baseline[label]
+        checkpoint[label].update(
+            {
+                "expected_authority_fingerprint": expected[
+                    "expected_authority_fingerprint"
+                ],
+                "observed_authority_fingerprint": expected[
+                    "expected_authority_fingerprint"
+                ],
+                "expected_source_revision": expected["expected_source_revision"],
+                "observed_source_revision": expected["expected_source_revision"],
+            }
+        )
+    checkpoint["authority_baseline"] = baseline
+    return checkpoint, receipt
+
+
 def test_runtime_readiness_requires_temporal_corrective_checkpoint_before_semantic_validation():
     evidence = _sanitized_live_evidence()
     evidence.pop("temporal_recall_corrective_checkpoint")
@@ -1430,6 +1713,209 @@ def test_runtime_readiness_validates_complete_temporal_corrective_checkpoint():
     assert checkpoint["qdrant_semantic_result_lane_used"] is True
     assert route_smokes["status"] == "validated"
     assert "temporal_work_recall" in route_smokes["validated_routes"]
+
+
+def test_runtime_readiness_v2_rejects_date_b_when_it_returns_date_a_source_revision():
+    checkpoint = _temporal_recall_corrective_checkpoint_v2()
+    checkpoint["date_b"]["observed_source_revision"] = checkpoint["date_a"][
+        "expected_source_revision"
+    ]
+
+    report = build_temporal_recall_corrective_checkpoint_readiness_report(
+        checkpoint=checkpoint
+    )
+
+    assert report["status"] == "FAIL"
+    assert "temporal_corrective_v2_date_b_source_revision_mismatch" in report["gaps"]
+
+
+def test_runtime_readiness_v2_rejects_second_or_foreign_temporal_result():
+    checkpoint = _temporal_recall_corrective_checkpoint_v2()
+    checkpoint["date_b"].update(
+        object_count=2,
+        second_result_present=True,
+        extra_work_unit_count=1,
+        non_work_unit_count=0,
+    )
+
+    report = build_temporal_recall_corrective_checkpoint_readiness_report(
+        checkpoint=checkpoint
+    )
+
+    assert report["status"] == "FAIL"
+    assert "temporal_corrective_v2_date_b_response_not_exact" in report["gaps"]
+
+
+def test_runtime_readiness_v3_requires_ledger_authority_derivation_receipt():
+    checkpoint, _ = _temporal_recall_corrective_checkpoint_v3()
+    report = build_source_to_candidate_runtime_readiness_report(
+        live_evidence=_sanitized_live_evidence(
+            temporal_recall_corrective_checkpoint=checkpoint,
+        )
+    )
+
+    claim = next(
+        claim
+        for claim in report["claims"]
+        if claim["claim_id"] == "live.temporal_recall.corrective_checkpoint"
+    )
+    assert claim["status"] == "failed"
+    assert "temporal_corrective_v3_authority_derivation_invalid" in claim["gaps"]
+
+
+def test_neuron_knowledge_runtime_readiness_cli_accepts_v3_post_deploy_capture(
+    tmp_path,
+    capsys,
+):
+    checkpoint, receipt = _temporal_recall_corrective_checkpoint_v3_from_derived_receipt()
+    capture_file = tmp_path / "post-deploy-capture.json"
+    capture = _sanitized_live_evidence(
+        temporal_recall_corrective_checkpoint=checkpoint,
+        authority_derivation=receipt,
+    )
+    capture["evidence_provenance"] = _evidence_provenance()
+    capture.pop("agent_context_startup_runtime")
+    capture_file.write_text(
+        json.dumps(capture),
+        encoding="utf-8",
+    )
+
+    assert (
+        main(
+            [
+                "source-to-candidate-runtime-readiness",
+                "--post-deploy-capture-file",
+                str(capture_file),
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    claim = next(
+        claim
+        for claim in report["claims"]
+        if claim["claim_id"] == "live.temporal_recall.corrective_checkpoint"
+    )
+    assert claim["status"] == "validated"
+    assert claim["acceptance_version"] == "v3"
+    assert claim["authority_baseline_validated"] is True
+    assert claim["authority_derivation_validated"] is True
+
+
+def test_temporal_checkpoint_readiness_accepts_v3_derived_authority_receipt():
+    checkpoint, receipt = _temporal_recall_corrective_checkpoint_v3_from_derived_receipt()
+
+    report = build_temporal_recall_corrective_checkpoint_readiness_report(
+        checkpoint=checkpoint,
+        authority_derivation=receipt,
+    )
+
+    assert receipt["artifact_ledger_metadata_read_only"] is True
+    assert report["status"] == "PASS"
+    assert report["claim"]["authority_derivation_validated"] is True
+
+
+def test_temporal_checkpoint_readiness_accepts_postgres_authority_derivation_network_receipt():
+    checkpoint, receipt = _temporal_recall_corrective_checkpoint_v3_from_derived_receipt()
+    receipt["ledger_backend"] = "postgres"
+    receipt["network_used"] = True
+    receipt["source_ledger_binding"] = {
+        **receipt["source_ledger_binding"],
+        "backend": "postgres",
+    }
+
+    report = build_temporal_recall_corrective_checkpoint_readiness_report(
+        checkpoint=checkpoint,
+        authority_derivation=receipt,
+    )
+
+    assert report["status"] == "PASS"
+    assert report["claim"]["authority_derivation_validated"] is True
+
+
+def test_temporal_checkpoint_readiness_rejects_postgres_receipt_with_false_network_claim():
+    checkpoint, receipt = _temporal_recall_corrective_checkpoint_v3_from_derived_receipt()
+    receipt["ledger_backend"] = "postgres"
+    receipt["network_used"] = False
+    receipt["source_ledger_binding"] = {
+        **receipt["source_ledger_binding"],
+        "backend": "postgres",
+    }
+
+    report = build_temporal_recall_corrective_checkpoint_readiness_report(
+        checkpoint=checkpoint,
+        authority_derivation=receipt,
+    )
+
+    assert report["status"] == "FAIL"
+    assert "temporal_corrective_v3_authority_derivation_invalid" in report["gaps"]
+
+
+def test_neuron_knowledge_temporal_checkpoint_cli_forwards_v3_authority_derivation(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    checkpoint, receipt = _temporal_recall_corrective_checkpoint_v3_from_derived_receipt()
+    acceptance_file = tmp_path / "temporal-acceptance.json"
+    acceptance_file.write_text(
+        json.dumps({"schema_version": "temporal_acceptance.v3"}),
+        encoding="utf-8",
+    )
+
+    received: dict[str, object] = {}
+
+    async def _collect_temporal_checkpoint(**kwargs):
+        received.update(kwargs)
+        return {
+            "schema_version": "temporal_recall_corrective_checkpoint_capture.v1",
+            "temporal_recall_corrective_checkpoint": checkpoint,
+            "authority_derivation": receipt,
+            "production_mutation_performed": False,
+        }
+
+    monkeypatch.setattr(
+        object_cli,
+        "collect_temporal_recall_corrective_checkpoint",
+        _collect_temporal_checkpoint,
+    )
+
+    assert (
+        main(
+            [
+                "source-to-candidate-runtime-readiness",
+                "--collect-temporal-corrective-checkpoint",
+                "--mcp-url",
+                "https://mcp.example.test/mcp",
+                "--temporal-acceptance-file",
+                str(acceptance_file),
+                "--inventory-limit",
+                "7",
+            ]
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["checkpoint_readiness"]["status"] == "PASS"
+    assert output["checkpoint_readiness"]["claim"][
+        "authority_derivation_validated"
+    ] is True
+    assert received["inventory_limit"] == 7
+
+
+def test_neuron_knowledge_temporal_checkpoint_cli_rejects_inventory_limit_outside_collection_mode():
+    assert (
+        main(
+            [
+                "source-to-candidate-runtime-readiness",
+                "--inventory-limit",
+                "7",
+            ]
+        )
+        == 2
+    )
 
 
 @pytest.mark.parametrize(

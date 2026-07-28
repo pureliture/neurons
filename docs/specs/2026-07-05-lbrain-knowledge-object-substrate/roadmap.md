@@ -1245,6 +1245,7 @@ Corrective contract:
 - inventory는 명시 index precheck, complete-scan/limit/timeout, source revision drift, deterministic redacted digest를 검증합니다. 누락·malformed·reversed temporal evidence, source drift, repair-required count, incomplete scan 중 하나라도 있으면 `gap_count > 0`으로 fail-closed하고 activation은 첫 mutation 전에 멈춥니다.
 - projection invalidation canary의 queue bookkeeping은 ingress PVC와 분리된 ephemeral state DB만 사용합니다. synthetic canary가 shadow DB에 recovery-like table을 만들고 legacy recovery가 이를 provenance 전체로 오인할 수 없습니다.
 - 이 authority correction이 production image와 GitOps runtime에 반영되고 inventory/receipt가 stable하게 일치하기 전에는 historical repair와 Date A/B positive semantic acceptance를 `PASS`로 선언하지 않습니다. 현재 zero-result/non-empty-gap temporal response는 fail-closed 동작이며 repair 완료 증거가 아닙니다.
+- v3 acceptance baseline은 caller-supplied baseline을 금지하고, read-only `temporal-acceptance-derive`가 ledger artifact revision history를 두 번 derive하여 inventory drift를 막은 뒤에만 만듭니다. 기준 선택은 live `TemporalSelector` interval-overlap과 동일한 latest relevant bounded artifact revision이며, Date A/B의 canonical `source_revision`과 authority fingerprint은 모두 서로 달라야 합니다. live corrective checkpoint에는 derived `authority_baseline`만 두고, top-level `authority_derivation` receipt가 같은 receipt hash, inventory hash/count, query hash, `ledger_artifact_revision_history`, read-only/no-mutation/protected-output false를 결속해야 합니다. v2 acceptance config는 retired이며, legacy v1 packet은 계속 읽되 이 v3 receipt 계약 없이는 validated로 승격하지 않습니다.
 
 ### Deferred temporal guard reconciliation evidence (2026-07-26)
 
