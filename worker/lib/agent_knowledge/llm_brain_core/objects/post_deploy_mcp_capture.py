@@ -49,9 +49,9 @@ from .runtime_readiness import (
     build_deployment_evidence_binding,
 )
 from .temporal_acceptance_derive import (
-    TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA,
-    authority_baseline_receipt_is_valid,
     authority_fingerprint_from_work_unit,
+    derive_temporal_acceptance_baseline_from_ledger,
+    validate_temporal_acceptance_authority_baseline,
 )
 
 POST_DEPLOY_MCP_CAPTURE_SCHEMA = "source_to_candidate_runtime_post_deploy_mcp_capture.v1"
@@ -222,6 +222,7 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
     deployed_identity: Mapping[str, Any] | None = None,
     artifact_descriptor: Mapping[str, Any] | None = None,
     temporal_acceptance: Mapping[str, Any] | None = None,
+    ledger_path: str = "",
     collect_agent_context_startup: bool = False,
     agent_context_startup_runner: Any = None,
     session_factory: Any = None,
@@ -239,6 +240,11 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
     )
     explicit_project = str(project or "").strip()
     safe_project = public_safe_text(explicit_project, max_chars=120) or "neurons"
+    authority_baseline, authority_derive_receipt = _derive_temporal_acceptance_authority_baseline(
+        config=validated_temporal_acceptance,
+        ledger_path=ledger_path,
+        project=safe_project,
+    )
     project_source = "explicit" if explicit_project else "collector_default"
     factory = session_factory or _default_mcp_session
     async with factory(safe_url) as session:
@@ -330,6 +336,8 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
                 consumer=consumer,
                 config=validated_temporal_acceptance,
                 runtime_packet=post_evaluator_runtime_packet,
+                authority_baseline=authority_baseline,
+                authority_derive_receipt=authority_derive_receipt,
             )
             if validated_temporal_acceptance
             else {}
@@ -409,6 +417,8 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         capture["session_project_rollup_runtime"] = session_project_rollup
     if temporal_checkpoint:
         capture["temporal_recall_corrective_checkpoint"] = temporal_checkpoint
+    if authority_derive_receipt:
+        capture["authority_derivation"] = authority_derive_receipt
     preference_artifact_memory = _live_preference_artifact_memory_from_runtime_packet(attested_runtime_packet)
     if preference_artifact_memory:
         capture["preference_artifact_memory"] = preference_artifact_memory
@@ -515,6 +525,7 @@ async def collect_temporal_recall_corrective_checkpoint(
     consumer: str = "codex",
     expected_commit: str = "",
     temporal_acceptance: Mapping[str, Any] | None = None,
+    ledger_path: str = "",
     session_factory: Any = None,
 ) -> dict[str, Any]:
     """Collect only read-only live evidence needed by the temporal checkpoint."""
@@ -526,6 +537,11 @@ async def collect_temporal_recall_corrective_checkpoint(
     if not validated_temporal_acceptance:
         raise ValueError("temporal acceptance config is required")
     safe_project = public_safe_text(str(project or ""), max_chars=120) or "neurons"
+    authority_baseline, authority_derive_receipt = _derive_temporal_acceptance_authority_baseline(
+        config=validated_temporal_acceptance,
+        ledger_path=ledger_path,
+        project=safe_project,
+    )
     factory = session_factory or _default_mcp_session
     async with factory(safe_url) as session:
         await session.initialize()
@@ -551,6 +567,8 @@ async def collect_temporal_recall_corrective_checkpoint(
             consumer=consumer,
             config=validated_temporal_acceptance,
             runtime_packet=runtime_packet,
+            authority_baseline=authority_baseline,
+            authority_derive_receipt=authority_derive_receipt,
         )
         if _runtime_packet_reports_mutation(runtime_packet):
             checkpoint = {
@@ -574,6 +592,8 @@ async def collect_temporal_recall_corrective_checkpoint(
             checkpoint.get("production_mutation_performed") is True
         ),
     }
+    if authority_derive_receipt:
+        capture["authority_derivation"] = authority_derive_receipt
     ensure_public_safe(capture, "TemporalRecallCorrectiveCheckpointCapture")
     return capture
 
@@ -962,9 +982,16 @@ def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
         raise ValueError("temporal acceptance config must be an object")
     _reject_forbidden_runtime_input_keys(value)
     config = _public_safe_mapping(value)
-    acceptance_v2 = config.get("schema_version") == "temporal_acceptance.v2"
-    if config.get("schema_version") not in (None, "", "temporal_acceptance.v2"):
+    schema_version = config.get("schema_version")
+    if schema_version == "temporal_acceptance.v2":
+        raise ValueError("temporal acceptance v2 is retired; use v3")
+    if schema_version not in (None, "", "temporal_acceptance.v3"):
         raise ValueError("temporal acceptance schema is invalid")
+    acceptance_v3 = schema_version == "temporal_acceptance.v3"
+    if acceptance_v3 and "authority_baseline" in config:
+        raise ValueError(
+            "temporal acceptance v3 caller-supplied authority_baseline is not allowed"
+        )
     temporal_query = str(config.get("temporal_query") or "").strip()
     if not temporal_query or public_safe_text(temporal_query, max_chars=240) != temporal_query:
         raise ValueError("temporal acceptance temporal_query must be public-safe")
@@ -978,7 +1005,7 @@ def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
             raise ValueError(f"temporal acceptance {name}.query must equal temporal_query")
         if not str(probe.get("as_of") or "").strip():
             raise ValueError(f"temporal acceptance {name}.as_of is required")
-        if not acceptance_v2:
+        if not acceptance_v3:
             require_sha256(
                 str(probe.get("expected_object_fingerprint") or ""),
                 f"temporal acceptance {name}.expected_object_fingerprint",
@@ -987,7 +1014,7 @@ def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
                 str(probe.get("expected_object_identity_fingerprint") or ""),
                 f"temporal acceptance {name}.expected_object_identity_fingerprint",
             )
-    if not acceptance_v2 and (
+    if not acceptance_v3 and (
         config["date_a"].get("expected_object_identity_fingerprint")
         == config["date_b"].get("expected_object_identity_fingerprint")
     ):
@@ -1001,7 +1028,7 @@ def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
         boundary.get("date_to") or ""
     ).strip():
         raise ValueError("temporal acceptance range boundary is incomplete")
-    if not acceptance_v2:
+    if not acceptance_v3:
         require_sha256(
             str(boundary.get("expected_object_fingerprint") or ""),
             "temporal acceptance range_boundary.expected_object_fingerprint",
@@ -1076,47 +1103,58 @@ def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
         raise ValueError(
             "temporal acceptance runtime_expectations.max_artifact_age_seconds is invalid"
         )
-    if acceptance_v2:
-        baseline = config.get("authority_baseline")
-        if not isinstance(baseline, Mapping):
-            raise ValueError("temporal acceptance v2 authority_baseline is required")
-        if baseline.get("schema_version") != TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA:
-            raise ValueError("temporal acceptance v2 authority_baseline schema is invalid")
-        if not authority_baseline_receipt_is_valid(baseline):
-            raise ValueError("temporal acceptance v2 authority_baseline receipt is invalid")
-        for field in ("authority_receipt_hash", "source_inventory_hash"):
-            require_sha256(
-                str(baseline.get(field) or ""),
-                f"temporal acceptance v2 {field}",
-            )
-        if baseline.get("source_inventory_current") is not True:
-            raise ValueError("temporal acceptance v2 source inventory is not current")
-        for name in ("date_a", "date_b", "range_boundary"):
-            expected = baseline.get(name)
-            if not isinstance(expected, Mapping):
-                raise ValueError(f"temporal acceptance v2 {name} baseline is required")
-            require_sha256(
-                str(expected.get("expected_authority_fingerprint") or ""),
-                f"temporal acceptance v2 {name}.expected_authority_fingerprint",
-            )
-            require_sha256(
-                str(expected.get("expected_source_revision") or ""),
-                f"temporal acceptance v2 {name}.expected_source_revision",
-            )
-        if (
-            baseline["date_a"].get("expected_authority_fingerprint")
-            == baseline["date_b"].get("expected_authority_fingerprint")
-        ):
-            raise ValueError("temporal acceptance v2 Date A/B authority fingerprints must be distinct")
-        for field in ("as_of",):
-            if config["date_a"].get(field) != baseline["date_a"].get(field):
-                raise ValueError("temporal acceptance v2 date_a selector must match baseline")
-            if config["date_b"].get(field) != baseline["date_b"].get(field):
-                raise ValueError("temporal acceptance v2 date_b selector must match baseline")
-        for field in ("date_from", "date_to"):
-            if config["range_boundary"].get(field) != baseline["range_boundary"].get(field):
-                raise ValueError("temporal acceptance v2 range boundary selector must match baseline")
     return config
+
+
+def _derive_temporal_acceptance_authority_baseline(
+    *,
+    config: Mapping[str, Any],
+    ledger_path: str,
+    project: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Derive v3 authority immediately before a live MCP temporal probe."""
+
+    if config.get("schema_version") != "temporal_acceptance.v3":
+        return {}, {}
+    if not str(ledger_path or "").strip():
+        raise ValueError("temporal acceptance v3 requires a ledger path")
+    selection = {
+        "schema_version": "temporal_acceptance_selection.v3",
+        "policy": "latest_relevant_bounded_artifact_revision_v1",
+        "temporal_query": str(config["temporal_query"]),
+        "date_a": {"as_of": str(config["date_a"]["as_of"])},
+        "date_b": {"as_of": str(config["date_b"]["as_of"])},
+        "range_boundary": {
+            "date_from": str(config["range_boundary"]["date_from"]),
+            "date_to": str(config["range_boundary"]["date_to"]),
+        },
+    }
+    derived = derive_temporal_acceptance_baseline_from_ledger(
+        ledger_path=str(ledger_path),
+        project=project,
+        selection=selection,
+        limit=100,
+        max_runtime_seconds=60,
+    )
+    candidate = derived.get("authority_baseline")
+    receipt = derived.get("receipt")
+    if not isinstance(candidate, Mapping) or not isinstance(receipt, Mapping):
+        raise ValueError("temporal acceptance v3 authority baseline is unavailable")
+    baseline = validate_temporal_acceptance_authority_baseline(
+        candidate,
+        temporal_query=str(config["temporal_query"]),
+    )
+    for label, fields in (
+        ("date_a", ("as_of",)),
+        ("date_b", ("as_of",)),
+        ("range_boundary", ("date_from", "date_to")),
+    ):
+        expected = baseline.get(label)
+        if not isinstance(expected, Mapping) or any(
+            expected.get(field) != config[label].get(field) for field in fields
+        ):
+            raise ValueError(f"temporal acceptance v3 {label} selector does not match authority")
+    return baseline, dict(receipt)
 
 
 async def _collect_temporal_recall_corrective_checkpoint(
@@ -1128,6 +1166,8 @@ async def _collect_temporal_recall_corrective_checkpoint(
     consumer: str,
     config: Mapping[str, Any],
     runtime_packet: Mapping[str, Any],
+    authority_baseline: Mapping[str, Any] | None = None,
+    authority_derive_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     async def query_objects(
         selector: Mapping[str, Any], *, query: str = "temporal work recall"
@@ -1171,12 +1211,13 @@ async def _collect_temporal_recall_corrective_checkpoint(
     temporal_query = public_safe_text(
         str(config.get("temporal_query") or ""), max_chars=240
     )
-    acceptance_v2 = config.get("schema_version") == "temporal_acceptance.v2"
-    authority_baseline = (
-        config.get("authority_baseline")
-        if acceptance_v2 and isinstance(config.get("authority_baseline"), Mapping)
-        else {}
-    )
+    acceptance_v3 = config.get("schema_version") == "temporal_acceptance.v3"
+    derived_authority_baseline = dict(authority_baseline or {}) if acceptance_v3 else {}
+    if acceptance_v3 and not derived_authority_baseline:
+        raise ValueError("temporal acceptance v3 authority baseline is required")
+    derived_authority_receipt = dict(authority_derive_receipt or {}) if acceptance_v3 else {}
+    if acceptance_v3 and not derived_authority_receipt:
+        raise ValueError("temporal acceptance v3 authority derive receipt is required")
     date_a_raw = await query_objects(
         date_a_selector,
         query=temporal_query,
@@ -1232,8 +1273,8 @@ async def _collect_temporal_recall_corrective_checkpoint(
         legacy_config: Mapping[str, Any],
     ) -> dict[str, Any]:
         expected = (
-            authority_baseline.get(name)
-            if isinstance(authority_baseline.get(name), Mapping)
+            derived_authority_baseline.get(name)
+            if isinstance(derived_authority_baseline.get(name), Mapping)
             else {}
         )
         return _temporal_object_probe_summary(
@@ -1248,10 +1289,10 @@ async def _collect_temporal_recall_corrective_checkpoint(
             expected_authority_fingerprint=str(
                 expected.get("expected_authority_fingerprint") or ""
             )
-            if acceptance_v2
+            if acceptance_v3
             else "",
             expected_source_revision=str(expected.get("expected_source_revision") or "")
-            if acceptance_v2
+            if acceptance_v3
             else "",
         )
 
@@ -1321,9 +1362,9 @@ async def _collect_temporal_recall_corrective_checkpoint(
             )
         ),
     }
-    if acceptance_v2:
-        checkpoint["acceptance_version"] = "v2"
-        checkpoint["authority_baseline"] = dict(authority_baseline)
+    if acceptance_v3:
+        checkpoint["acceptance_version"] = "v3"
+        checkpoint["authority_baseline"] = derived_authority_baseline
     ensure_public_safe(checkpoint, "TemporalRecallCorrectiveCheckpoint")
     return checkpoint
 

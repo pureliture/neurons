@@ -37,8 +37,7 @@ from .reference_corpus import (
     reference_corpus_objects_from_manifest,
 )
 from .temporal_acceptance_derive import (
-    build_source_store_from_env,
-    derive_temporal_acceptance_baseline,
+    derive_temporal_acceptance_baseline_from_ledger,
 )
 from .runtime_readiness import (
     build_source_to_candidate_runtime_collected_shadow_evidence_packet,
@@ -757,6 +756,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     parser.add_argument("--deployed-identity-file", default="")
     parser.add_argument("--artifact-descriptor-file", default="")
     parser.add_argument("--temporal-acceptance-file", default="")
+    parser.add_argument("--ledger", default="")
     parser.add_argument("--repository", default="")
     parser.add_argument("--branch", default="")
     parser.add_argument("--project", default="")
@@ -851,12 +851,14 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                     args.temporal_acceptance_file,
                     label="temporal acceptance",
                 ),
+                ledger_path=args.ledger,
             )
         )
         output = dict(capture)
         output["checkpoint_readiness"] = (
             build_temporal_recall_corrective_checkpoint_readiness_report(
-                checkpoint=capture.get("temporal_recall_corrective_checkpoint")
+                checkpoint=capture.get("temporal_recall_corrective_checkpoint"),
+                authority_derivation=capture.get("authority_derivation"),
             )
         )
         _print_json(output)
@@ -914,6 +916,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 deployed_identity=deployed_identity,
                 artifact_descriptor=artifact_descriptor,
                 temporal_acceptance=temporal_acceptance,
+                ledger_path=args.ledger,
                 collect_agent_context_startup=args.collect_agent_context_startup,
             )
         )
@@ -1011,7 +1014,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
 
 
 def temporal_acceptance_derive_main(argv: list[str] | None = None) -> int:
-    """Build a source-native temporal v2 baseline without activating projection."""
+    """Build a ledger-backed temporal v3 baseline without activating projection."""
 
     parser = argparse.ArgumentParser(prog="neuron-knowledge temporal-acceptance-derive")
     parser.add_argument("--selection-file", required=True)
@@ -1021,21 +1024,17 @@ def temporal_acceptance_derive_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-runtime-seconds", type=float, required=True)
     args = parser.parse_args(argv)
     try:
-        # Opening this snapshot is a guard that the artifact-ledger authority
-        # plane is available.  The derive path deliberately does not require an
-        # existing projection/artifact, so it reads no artifact content.
-        _ledger = Ledger.open_read_only(args.ledger)
-        result = derive_temporal_acceptance_baseline(
-            source_store=build_source_store_from_env(),
+        result = derive_temporal_acceptance_baseline_from_ledger(
+            ledger_path=args.ledger,
             project=str(args.project),
             selection=_load_json_mapping(args.selection_file, label="temporal acceptance selection"),
             limit=int(args.limit),
             max_runtime_seconds=float(args.max_runtime_seconds),
         )
-    except ValueError as exc:
+    except Exception as exc:
         _print_json(
             {
-                "schema_version": "temporal_acceptance_derive_receipt.v2",
+                "schema_version": "temporal_acceptance_derive_receipt.v3",
                 "status": "blocked",
                 "error": type(exc).__name__,
                 "mutation_performed": False,
@@ -1047,12 +1046,7 @@ def temporal_acceptance_derive_main(argv: list[str] | None = None) -> int:
             }
         )
         return 1
-    _ = _ledger
-    output = dict(result)
-    receipt = output.get("receipt")
-    if isinstance(receipt, dict):
-        receipt["artifact_ledger_metadata_read_only"] = True
-    _print_json(output)
+    _print_json(dict(result))
     return 0
 
 

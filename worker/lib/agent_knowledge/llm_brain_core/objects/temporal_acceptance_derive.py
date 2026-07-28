@@ -1,47 +1,40 @@
-"""Read-only temporal acceptance v2 authority-baseline derivation.
+"""Read-only temporal acceptance authority-baseline derivation.
 
-The baseline is deliberately derived from CouchDB source snapshot metadata, not
-from an MCP response, a query service, or a projected artifact.  It uses the
-already-public-safe source snapshot digest that the materializer exposes as a
-temporal WorkUnit's ``source_revision``.  CouchDB document ids and revisions
-are only bound inside the non-reversible inventory receipt and are never
-returned or used for a per-probe live equality check.
+Positive temporal acceptance is bound to the historical artifact revisions that
+the runtime read path consumes.  A mutable CouchDB coverage manifest is useful
+for current aggregate reconciliation, but cannot prove what a same-session
+revision contained at an earlier event time.
 """
 
 from __future__ import annotations
 
-import base64
 import json
-import os
 import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
-from agent_knowledge.couchdb_source.document_model import SourceDocType, normalize_observed_interval
+from agent_knowledge.llm_brain_core.artifact_store import SessionMemoryArtifactStore
+from agent_knowledge.llm_brain_core.context import (
+    _temporal_candidate_is_relevant,
+    _temporal_relevance_terms,
+)
+from agent_knowledge.llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore
+from agent_knowledge.ledger import Ledger
 
-from .._util import hash_payload, require_sha256
+from .._util import hash_payload, public_safe_text, require_sha256
 from ..temporal import TemporalSelectorError, parse_temporal_selector
 
 
-TEMPORAL_ACCEPTANCE_SELECTION_SCHEMA = "temporal_acceptance_selection.v2"
-TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA = "temporal_acceptance_authority_baseline.v2"
-TEMPORAL_ACCEPTANCE_DERIVE_RECEIPT_SCHEMA = "temporal_acceptance_derive_receipt.v2"
-SELECTION_POLICY = "latest_bounded_source_snapshot_v1"
+TEMPORAL_ACCEPTANCE_SELECTION_SCHEMA = "temporal_acceptance_selection.v3"
+TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA = "temporal_acceptance_authority_baseline.v3"
+TEMPORAL_ACCEPTANCE_DERIVE_RECEIPT_SCHEMA = "temporal_acceptance_derive_receipt.v3"
+SELECTION_POLICY = "latest_relevant_bounded_artifact_revision_v1"
+AUTHORITY_SOURCE = "ledger_artifact_revision_history"
 SOURCE_KIND = "session_memory_artifact"
 SOURCE_OBJECT_TYPE = "SessionMemoryArtifact"
 WORK_UNIT_OBJECT_TYPE = "WorkUnit"
 AUTHORITY_LANE = "reference_only"
-_SOURCE_FIELDS = (
-    "_id",
-    "_rev",
-    "doc_type",
-    "project",
-    "source_hash",
-    "observed_at_start",
-    "observed_at_end",
-)
 
 
 def _as_utc(value: object) -> datetime | None:
@@ -65,8 +58,6 @@ def _normalized_selector_value(value: object, *, field: str) -> str:
         raise ValueError(f"{field} must be an ISO-8601 temporal selector") from exc
     if selector is None:
         raise ValueError(f"{field} must be an ISO-8601 temporal selector")
-    # Keep a calendar day as a calendar day.  Coercing it to midnight would
-    # diverge from TemporalSelector, which treats a date as the entire day.
     if len(text) == 10 and text[4] == "-" and text[7] == "-":
         return text
     parsed = _as_utc(text)
@@ -78,16 +69,27 @@ def _normalized_selector_value(value: object, *, field: str) -> str:
 def _validate_selection(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError("temporal acceptance selection must be an object")
-    allowed = {"schema_version", "policy", "date_a", "date_b", "range_boundary"}
+    allowed = {
+        "schema_version",
+        "policy",
+        "temporal_query",
+        "date_a",
+        "date_b",
+        "range_boundary",
+    }
     if set(value) - allowed:
         raise ValueError("temporal acceptance selection must not contain raw source identifiers")
     if value.get("schema_version") != TEMPORAL_ACCEPTANCE_SELECTION_SCHEMA:
         raise ValueError("temporal acceptance selection schema is invalid")
     if value.get("policy") != SELECTION_POLICY:
         raise ValueError("temporal acceptance selection policy is invalid")
+    temporal_query = str(value.get("temporal_query") or "").strip()
+    if not temporal_query or public_safe_text(temporal_query, max_chars=240) != temporal_query:
+        raise ValueError("temporal acceptance selection temporal_query must be public-safe")
     normalized: dict[str, Any] = {
         "schema_version": TEMPORAL_ACCEPTANCE_SELECTION_SCHEMA,
         "policy": SELECTION_POLICY,
+        "temporal_query": temporal_query,
     }
     for label in ("date_a", "date_b"):
         item = value.get(label)
@@ -116,58 +118,29 @@ def _validate_bounds(*, project: str, limit: int, max_runtime_seconds: float) ->
         raise ValueError("project is required")
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 2:
         raise ValueError("limit must be at least two")
-    if isinstance(max_runtime_seconds, bool) or not isinstance(max_runtime_seconds, (int, float)) or not 0 < float(max_runtime_seconds) <= 60:
+    if (
+        isinstance(max_runtime_seconds, bool)
+        or not isinstance(max_runtime_seconds, (int, float))
+        or not 0 < float(max_runtime_seconds) <= 60
+    ):
         raise ValueError("max_runtime_seconds is invalid")
 
 
 def _check_deadline(*, started: float, max_runtime_seconds: float) -> None:
     if time.monotonic() - started > max_runtime_seconds:
-        raise ValueError("source inventory runtime limit exceeded")
-
-
-def _source_snapshot(source: Mapping[str, Any]) -> dict[str, str]:
-    if not str(source.get("observed_at_start") or "").strip() or not str(
-        source.get("observed_at_end") or ""
-    ).strip():
-        raise ValueError("source snapshot is missing bounded observed interval")
-    interval = normalize_observed_interval(
-        source.get("observed_at_start"), source.get("observed_at_end")
-    )
-    if interval is None:
-        raise ValueError("source snapshot is missing bounded observed interval")
-    content_hash = str(source.get("source_hash") or "")
-    try:
-        require_sha256(content_hash, "source snapshot source_hash")
-    except ValueError as exc:
-        raise ValueError("source snapshot source hash is invalid") from exc
-    inventory_id = str(source.get("_id") or "").strip()
-    inventory_revision = str(source.get("_rev") or "").strip()
-    if not inventory_id or not inventory_revision:
-        raise ValueError("source snapshot candidate_missing_historical_revision")
-    # source_hash is built from the same direct source members and temporal
-    # metadata as runtime._source_revision_from_documents.  It is intentionally
-    # not CouchDB's mutable _rev or an artifact materialization content hash.
-    source_revision = content_hash
-    if not source_revision:
-        raise ValueError("source snapshot candidate_missing_historical_revision")
-    return {
-        "source_revision": source_revision,
-        "observed_at_start": interval[0],
-        "observed_at_end": interval[1],
-        "inventory_id": inventory_id,
-        "inventory_revision": inventory_revision,
-    }
+        raise ValueError("artifact revision inventory runtime limit exceeded")
 
 
 def authority_fingerprint_from_provenance(provenance: Mapping[str, Any]) -> str:
-    """Hash the exact v2 authority tuple, excluding object/title/summary/id fields."""
+    """Hash the exact authority tuple, excluding object/title/summary/id fields."""
 
     content_hash = str(provenance.get("content_hash") or "")
     require_sha256(content_hash, "authority provenance content_hash")
-    interval = normalize_observed_interval(
-        provenance.get("observed_at_start"), provenance.get("observed_at_end")
-    )
-    if interval is None:
+    observed_at_start = str(provenance.get("observed_at_start") or "")
+    observed_at_end = str(provenance.get("observed_at_end") or "")
+    if _as_utc(observed_at_start) is None or _as_utc(observed_at_end) is None:
+        raise ValueError("authority provenance requires bounded observed interval")
+    if _as_utc(observed_at_start) > _as_utc(observed_at_end):
         raise ValueError("authority provenance requires bounded observed interval")
     source_revision = str(provenance.get("source_revision") or "").strip()
     source_kind = str(provenance.get("source_kind") or "").strip()
@@ -181,8 +154,8 @@ def authority_fingerprint_from_provenance(provenance: Mapping[str, Any]) -> str:
             "source_object_type": source_object_type,
             "content_hash": content_hash,
             "source_revision": source_revision,
-            "observed_at_start": interval[0],
-            "observed_at_end": interval[1],
+            "observed_at_start": observed_at_start,
+            "observed_at_end": observed_at_end,
             "authority_lane": authority_lane,
         }
     )
@@ -200,8 +173,6 @@ def authority_fingerprint_from_work_unit(work_unit: Mapping[str, Any]) -> str:
         {
             "source_kind": payload.get("source_kind"),
             "source_object_type": payload.get("source_object_type"),
-            # ``source_revision`` is the canonical direct-source snapshot
-            # digest.  Never substitute mutable CouchDB _rev or artifact hash.
             "content_hash": payload.get("source_revision"),
             "source_revision": payload.get("source_revision"),
             "observed_at_start": payload.get("observed_at_start"),
@@ -211,47 +182,193 @@ def authority_fingerprint_from_work_unit(work_unit: Mapping[str, Any]) -> str:
     )
 
 
-def _inventory_rows(*, source_store: Any, project: str, limit: int) -> list[dict[str, Any]]:
-    rows = source_store.find_by_type(
-        SourceDocType.COVERAGE_MANIFEST,
-        fields=list(_SOURCE_FIELDS),
-        selector={"project": project},
+def _artifact_intervals(artifact: Any) -> tuple[tuple[str, str], ...]:
+    intervals = tuple(getattr(artifact, "revision_observed_intervals", ()) or ())
+    if intervals:
+        normalized = []
+        for start, end in intervals:
+            if _as_utc(start) is None or _as_utc(end) is None or _as_utc(start) > _as_utc(end):
+                return ()
+            normalized.append((str(start), str(end)))
+        return tuple(sorted(set(normalized)))
+    start = str(getattr(artifact, "revision_observed_at_start", "") or "")
+    end = str(getattr(artifact, "revision_observed_at_end", "") or "")
+    if not start or not end or _as_utc(start) is None or _as_utc(end) is None or _as_utc(start) > _as_utc(end):
+        return ()
+    return ((start, end),)
+
+
+def _revision_snapshot(
+    artifact: Any,
+    *,
+    selector: Mapping[str, str],
+    relevance_terms: set[str],
+) -> tuple[dict[str, Any], tuple[Any, ...], str, str] | None:
+    if str(getattr(artifact, "revision_temporal_evidence", "") or "") != "bounded":
+        return None
+    source_revision = str(getattr(artifact, "source_revision", "") or "")
+    try:
+        require_sha256(source_revision, "artifact source_revision")
+    except ValueError:
+        return None
+    try:
+        temporal_selector = parse_temporal_selector(**dict(selector))
+    except TemporalSelectorError:
+        return None
+    if temporal_selector is None:
+        return None
+    intervals = _artifact_intervals(artifact)
+    matching_intervals = [
+        interval
+        for interval in intervals
+        if temporal_selector.matches(observed_at_start=interval[0], observed_at_end=interval[1])
+    ]
+    if not matching_intervals:
+        return None
+    bindings = tuple(getattr(artifact, "revision_temporal_term_bindings", ()) or ())
+    if bindings:
+        matching_bindings = [
+            binding
+            for binding in bindings
+            if temporal_selector.matches(
+                observed_at_start=str(binding[0]), observed_at_end=str(binding[1])
+            )
+        ]
+        if not matching_bindings:
+            return None
+        relevance_hashes = tuple(
+            sorted({str(term_hash) for binding in matching_bindings for term_hash in binding[2]})
+        )
+    elif len(intervals) == 1:
+        relevance_hashes = tuple(getattr(artifact, "search_term_hashes", ()) or ())
+    else:
+        return None
+    if relevance_terms and not _temporal_candidate_is_relevant(
+        str(getattr(artifact, "summary", "") or ""), relevance_terms, relevance_hashes
+    ):
+        return None
+    selected_interval = max(matching_intervals)
+    artifact_id = str(getattr(artifact, "artifact_id", "") or "")
+    if not artifact_id:
+        return None
+    session_id_hash = str(getattr(artifact, "session_id_hash", "") or "")
+    try:
+        require_sha256(session_id_hash, "artifact session_id_hash")
+    except ValueError:
+        return None
+    materialization_revision = getattr(artifact, "materialization_revision", 0)
+    if isinstance(materialization_revision, bool) or not isinstance(materialization_revision, int):
+        return None
+    materialized_at = str(getattr(artifact, "materialized_at", "") or "")
+    created_at = str(getattr(artifact, "created_at", "") or "")
+    currentness = (
+        materialization_revision,
+        materialized_at,
+        source_revision,
+        created_at,
+        artifact_id,
+    )
+    snapshot = {
+        "source_reference_hash": hash_payload(artifact_id),
+        "source_revision": source_revision,
+        "observed_at_start": selected_interval[0],
+        "observed_at_end": selected_interval[1],
+        "materialization_revision": materialization_revision,
+        "materialization_currentness_hash": hash_payload(currentness),
+    }
+    return snapshot, currentness, session_id_hash, artifact_id
+
+
+def _selector_inventory(
+    *,
+    artifact_store: SessionMemoryArtifactStore,
+    project: str,
+    selector: Mapping[str, str],
+    temporal_query: str,
+    limit: int,
+    label: str,
+) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    try:
+        temporal_selector = parse_temporal_selector(**dict(selector))
+    except TemporalSelectorError as exc:
+        raise ValueError(f"{label} selector is invalid") from exc
+    if temporal_selector is None:
+        raise ValueError(f"{label} selector is invalid")
+    bounds = temporal_selector.to_audit_dict()
+    revisions = artifact_store.list_observed_interval_revisions(
+        project=project,
+        observed_at_start=str(bounds["start"]),
+        observed_at_end=str(bounds["end"]),
         limit=limit,
     )
-    if not isinstance(rows, list):
-        raise ValueError("source inventory is unavailable")
-    if len(rows) >= limit:
-        raise ValueError("source inventory is incomplete")
-    snapshots = [_source_snapshot(row) for row in rows if isinstance(row, Mapping)]
-    if len(snapshots) != len(rows) or not snapshots:
-        raise ValueError("source inventory candidate_missing")
-    return snapshots
-
-
-def _inventory_hash(snapshots: list[Mapping[str, str]]) -> str:
-    return hash_payload(
-        sorted(
-            [
-                dict(snapshot)
-                for snapshot in snapshots
-            ],
-            key=lambda item: (
-                item["observed_at_start"],
-                item["observed_at_end"],
-                item["source_revision"],
-            ),
+    if not isinstance(revisions, list):
+        raise ValueError("artifact revision inventory is unavailable")
+    if len(revisions) >= limit:
+        raise ValueError("artifact revision inventory is incomplete")
+    relevance_terms = _temporal_relevance_terms(temporal_query, project=project)
+    latest_relevant_by_session: dict[str, tuple[dict[str, Any], tuple[Any, ...], str]] = {}
+    for artifact in revisions:
+        candidate = _revision_snapshot(
+            artifact,
+            selector=selector,
+            relevance_terms=relevance_terms,
         )
+        if candidate is None:
+            continue
+        snapshot, currentness, session_id_hash, artifact_id = candidate
+        existing = latest_relevant_by_session.get(session_id_hash)
+        if existing is None or currentness > existing[1]:
+            latest_relevant_by_session[session_id_hash] = (snapshot, currentness, artifact_id)
+    candidates = list(latest_relevant_by_session.values())
+    if not candidates:
+        raise ValueError(f"{label} candidate_missing")
+    candidates.sort(
+        key=lambda item: (
+            item[0]["observed_at_start"],
+            item[2],
+        ),
+        reverse=True,
+    )
+    selected, _, _ = candidates[0]
+    return dict(selected), [dict(snapshot) for snapshot, _, _ in candidates]
+
+
+def _inventory_hash(inventory: Mapping[str, list[Mapping[str, Any]]]) -> str:
+    return hash_payload(
+        {
+            label: sorted(
+                [dict(snapshot) for snapshot in snapshots],
+                key=lambda item: (
+                    item["observed_at_start"],
+                    item["observed_at_end"],
+                    item["source_revision"],
+                    item["source_reference_hash"],
+                ),
+            )
+            for label, snapshots in sorted(inventory.items())
+        }
+    )
+
+
+def _inventory_count(inventory: Mapping[str, list[Mapping[str, Any]]]) -> int:
+    return len(
+        {
+            str(snapshot["source_reference_hash"])
+            for snapshots in inventory.values()
+            for snapshot in snapshots
+        }
     )
 
 
 def authority_baseline_receipt_is_valid(value: Mapping[str, Any]) -> bool:
-    """Validate the derive receipt without exposing its inventory preimage."""
+    """Validate a v3 receipt without exposing its ledger inventory preimage."""
 
     required = {
         "schema_version",
         "selection_policy",
+        "authority_source",
+        "temporal_query_hash",
         "source_inventory_hash",
-        "source_inventory_current",
         "source_inventory_count",
         "date_a",
         "date_b",
@@ -264,7 +381,8 @@ def authority_baseline_receipt_is_valid(value: Mapping[str, Any]) -> bool:
     try:
         return (
             value.get("schema_version") == TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA
-            and value.get("source_inventory_current") is True
+            and value.get("selection_policy") == SELECTION_POLICY
+            and value.get("authority_source") == AUTHORITY_SOURCE
             and isinstance(value.get("source_inventory_count"), int)
             and not isinstance(value.get("source_inventory_count"), bool)
             and value["source_inventory_count"] > 0
@@ -274,39 +392,32 @@ def authority_baseline_receipt_is_valid(value: Mapping[str, Any]) -> bool:
         return False
 
 
-def _select_latest_snapshot(
-    snapshots: list[Mapping[str, str]], *, selector: Mapping[str, str], label: str
-) -> Mapping[str, str]:
-    try:
-        temporal_selector = parse_temporal_selector(**dict(selector))
-    except TemporalSelectorError as exc:
-        raise ValueError(f"{label} selector is invalid") from exc
-    assert temporal_selector is not None
-    candidates = [
-        snapshot
-        for snapshot in snapshots
-        if temporal_selector.matches(
-            observed_at_start=snapshot["observed_at_start"],
-            observed_at_end=snapshot["observed_at_end"],
-        )
-    ]
-    if not candidates:
-        raise ValueError(f"{label} candidate_missing")
-    # Match context._temporal_work_object_pack ordering.  We cannot use its
-    # raw natural key as a tie-breaker in a public baseline, so a start-time tie
-    # is deliberately ambiguous rather than silently taking the first row.
-    latest_start = max(_as_utc(candidate["observed_at_start"]) for candidate in candidates)
-    latest = [
-        candidate
-        for candidate in candidates
-        if _as_utc(candidate["observed_at_start"]) == latest_start
-    ]
-    if len(latest) != 1:
-        raise ValueError(f"{label} candidate_ambiguous")
-    return latest[0]
+def validate_temporal_acceptance_authority_baseline(
+    value: Mapping[str, Any],
+    *,
+    temporal_query: str,
+) -> dict[str, Any]:
+    """Require a runtime-derived v3 baseline to bind the exact public query."""
+
+    if not authority_baseline_receipt_is_valid(value):
+        raise ValueError("temporal acceptance v3 authority baseline receipt is invalid")
+    if str(value.get("temporal_query_hash") or "") != hash_payload(temporal_query):
+        raise ValueError("temporal acceptance v3 temporal query hash does not match")
+    baseline = dict(value)
+    for name in ("date_a", "date_b", "range_boundary"):
+        expected = baseline.get(name)
+        if not isinstance(expected, Mapping):
+            raise ValueError(f"temporal acceptance v3 {name} baseline is required")
+        for field in ("expected_authority_fingerprint", "expected_source_revision"):
+            require_sha256(str(expected.get(field) or ""), f"temporal acceptance v3 {name}.{field}")
+    if baseline["date_a"].get("expected_authority_fingerprint") == baseline["date_b"].get(
+        "expected_authority_fingerprint"
+    ):
+        raise ValueError("temporal acceptance v3 Date A/B authority fingerprints must be distinct")
+    return baseline
 
 
-def _baseline_probe(snapshot: Mapping[str, str], *, selector: Mapping[str, str]) -> dict[str, str]:
+def _baseline_probe(snapshot: Mapping[str, Any], *, selector: Mapping[str, str]) -> dict[str, str]:
     provenance = {
         "source_kind": SOURCE_KIND,
         "source_object_type": SOURCE_OBJECT_TYPE,
@@ -322,50 +433,81 @@ def _baseline_probe(snapshot: Mapping[str, str], *, selector: Mapping[str, str])
         "source_object_type": SOURCE_OBJECT_TYPE,
         "authority_lane": AUTHORITY_LANE,
         "expected_authority_fingerprint": authority_fingerprint_from_provenance(provenance),
-        "expected_source_revision": snapshot["source_revision"],
+        "expected_source_revision": str(snapshot["source_revision"]),
     }
+
+
+def _derive_inventory(
+    *,
+    artifact_store: SessionMemoryArtifactStore,
+    project: str,
+    selection: Mapping[str, Any],
+    limit: int,
+) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    selected: dict[str, dict[str, Any]] = {}
+    inventory: dict[str, list[dict[str, Any]]] = {}
+    for label in ("date_a", "date_b", "range_boundary"):
+        snapshot, snapshots = _selector_inventory(
+            artifact_store=artifact_store,
+            project=project,
+            selector=selection[label],
+            temporal_query=str(selection["temporal_query"]),
+            limit=limit,
+            label=label,
+        )
+        selected[label] = snapshot
+        inventory[label] = snapshots
+    return selected, inventory
 
 
 def derive_temporal_acceptance_baseline(
     *,
-    source_store: Any,
+    artifact_store: SessionMemoryArtifactStore,
     project: str,
     selection: Mapping[str, Any],
     limit: int,
     max_runtime_seconds: float,
 ) -> dict[str, Any]:
-    """Derive one stable source-native baseline without querying the brain read path."""
+    """Derive one ledger-backed temporal baseline without a brain/MCP read."""
 
     _validate_bounds(project=project, limit=limit, max_runtime_seconds=max_runtime_seconds)
     normalized_selection = _validate_selection(selection)
     started = time.monotonic()
-    before = _inventory_rows(source_store=source_store, project=project, limit=limit)
+    before_selected, before_inventory = _derive_inventory(
+        artifact_store=artifact_store,
+        project=project,
+        selection=normalized_selection,
+        limit=limit,
+    )
     _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds)
-    before_hash = _inventory_hash(before)
-    date_a = _select_latest_snapshot(before, selector=normalized_selection["date_a"], label="date_a")
-    date_b = _select_latest_snapshot(before, selector=normalized_selection["date_b"], label="date_b")
-    boundary = _select_latest_snapshot(before, selector=normalized_selection["range_boundary"], label="range_boundary")
-    date_a_probe = _baseline_probe(date_a, selector=normalized_selection["date_a"])
-    date_b_probe = _baseline_probe(date_b, selector=normalized_selection["date_b"])
+    before_hash = _inventory_hash(before_inventory)
+    date_a_probe = _baseline_probe(before_selected["date_a"], selector=normalized_selection["date_a"])
+    date_b_probe = _baseline_probe(before_selected["date_b"], selector=normalized_selection["date_b"])
     if date_a_probe["expected_authority_fingerprint"] == date_b_probe["expected_authority_fingerprint"]:
         raise ValueError("date A/B authority fingerprints must be distinct")
     if date_a_probe["expected_source_revision"] == date_b_probe["expected_source_revision"]:
         raise ValueError("date A/B source revisions must be distinct")
-    after = _inventory_rows(source_store=source_store, project=project, limit=limit)
+    _, after_inventory = _derive_inventory(
+        artifact_store=artifact_store,
+        project=project,
+        selection=normalized_selection,
+        limit=limit,
+    )
     _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds)
-    after_hash = _inventory_hash(after)
-    if before_hash != after_hash:
-        raise ValueError("source inventory drifted during derivation")
+    if before_hash != _inventory_hash(after_inventory):
+        raise ValueError("artifact revision inventory drifted during derivation")
     baseline_core = {
         "schema_version": TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA,
         "selection_policy": SELECTION_POLICY,
+        "authority_source": AUTHORITY_SOURCE,
+        "temporal_query_hash": hash_payload(normalized_selection["temporal_query"]),
         "source_inventory_hash": before_hash,
-        "source_inventory_current": True,
-        "source_inventory_count": len(before),
+        "source_inventory_count": _inventory_count(before_inventory),
         "date_a": date_a_probe,
         "date_b": date_b_probe,
         "range_boundary": _baseline_probe(
-            boundary, selector=normalized_selection["range_boundary"]
+            before_selected["range_boundary"],
+            selector=normalized_selection["range_boundary"],
         ),
     }
     receipt_hash = hash_payload(baseline_core)
@@ -375,37 +517,42 @@ def derive_temporal_acceptance_baseline(
         "status": "derived",
         "authority_receipt_hash": receipt_hash,
         "source_inventory_hash": before_hash,
-        "source_inventory_current": True,
-        "source_inventory_count": len(before),
-        "selection_policy": SELECTION_POLICY,
+        "source_inventory_count": baseline_core["source_inventory_count"],
+        "authority_source": AUTHORITY_SOURCE,
+        "temporal_query_hash": baseline_core["temporal_query_hash"],
         "mutation_performed": False,
-        "network_used": True,
+        "network_used": False,
         "raw_private_evidence_returned": False,
         "secret_returned": False,
         "host_topology_returned": False,
         "raw_external_ids_returned": False,
+        "artifact_ledger_metadata_read_only": True,
     }
     return {"status": "derived", "authority_baseline": baseline, "receipt": receipt}
 
 
-def _auth_header(user: str, password: str) -> str:
-    if not user:
-        return ""
-    token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
-    return f"Basic {token}"
+def derive_temporal_acceptance_baseline_from_ledger(
+    *,
+    ledger_path: str,
+    project: str,
+    selection: Mapping[str, Any],
+    limit: int,
+    max_runtime_seconds: float,
+) -> dict[str, Any]:
+    """Open the local deployed ledger read-only and derive a v3 baseline."""
 
-
-def build_source_store_from_env() -> CouchDBHttpSourceStore:
-    url = str(os.environ.get("COUCHDB_URL") or "").strip()
-    if not url:
-        raise ValueError("COUCHDB_URL is required")
-    user = str(os.environ.get("COUCHDB_USER") or "")
-    password = str(os.environ.get("COUCHDB_PASSWORD") or "")
-    return CouchDBHttpSourceStore(
-        base_url=url,
-        db=str(os.environ.get("COUCHDB_DB") or "transcript_source"),
-        auth_header=_auth_header(user, password),
+    ledger = Ledger.open_read_only(ledger_path)
+    result = derive_temporal_acceptance_baseline(
+        artifact_store=LedgerSessionMemoryArtifactStore(ledger),
+        project=project,
+        selection=selection,
+        limit=limit,
+        max_runtime_seconds=max_runtime_seconds,
     )
+    receipt = result.get("receipt")
+    if isinstance(receipt, dict):
+        receipt["artifact_ledger_metadata_read_only"] = True
+    return result
 
 
 def public_result_json(value: Mapping[str, Any]) -> str:
