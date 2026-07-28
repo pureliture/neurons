@@ -250,9 +250,9 @@ def process_payload(payload: dict, *, store: IngestStateStore,
                 status="quarantined_wire_redaction", idempotency_key=ik,
                 content_hash_present=bool(document.content_hash), delivered=False,
             )
-        existing_job = state_db.get_row("delivery_jobs", "idempotency_key", ik)
         accepted = StateDBIngressSink(state_db=state_db).accept_payload(payload)
-        if not existing_job or existing_job["status"] != "succeeded":
+        already_present = bool(accepted.get("already_present"))
+        if not already_present:
             store.record(
                 idempotency_key=ik, content_hash=document.content_hash,
                 document_kind=document.document_kind, target_profile=document.target_profile,
@@ -266,11 +266,12 @@ def process_payload(payload: dict, *, store: IngestStateStore,
             )
             return ShadowResult(status="observed_no_deliver", idempotency_key=ik,
                                 content_hash_present=bool(document.content_hash), delivered=False)
-        outcome = DeliveryExecutor(
+        receipt = DeliveryExecutor(
             state_db=state_db,
             backend=backend,
             lease_owner=lease_owner or _new_lease_owner(),
-        ).execute_once(str(accepted["job_id"]), max_attempts=5)
+        ).execute_once_with_receipt(str(accepted["job_id"]), max_attempts=5)
+        outcome = receipt.status
         if outcome == "quarantined":
             store.record(
                 idempotency_key=ik, content_hash=document.content_hash,
@@ -286,14 +287,15 @@ def process_payload(payload: dict, *, store: IngestStateStore,
         job = state_db.get_delivery_job(str(accepted["job_id"]))
         if job is None:
             raise RuntimeError("canonical delivery proof is missing")
+        shadow_status = "delivered" if receipt.submit_attempted else "deduplicated"
         store.record(
             idempotency_key=ik, content_hash=document.content_hash,
             document_kind=document.document_kind, target_profile=document.target_profile,
-            status="delivered", dataset_ref=str(job["index_target_id"]),
+            status=shadow_status, dataset_ref=str(job["index_target_id"]),
             document_ref=str(job["index_document_id"]), delivered=True, now_iso=_now_iso(),
         )
         return ShadowResult(
-            status="deduplicated" if existing_job and existing_job["status"] == "succeeded" else "delivered",
+            status=shadow_status,
             idempotency_key=ik,
             content_hash_present=bool(document.content_hash),
             delivered=True,

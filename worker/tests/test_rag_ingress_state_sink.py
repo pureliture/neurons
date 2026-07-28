@@ -50,11 +50,18 @@ def test_state_db_sink_accepts_payload_without_http(tmp_path):
 
     assert result["status"] == "queued"
     assert result["job_id"].startswith("job_")
+    assert result["already_present"] is False
     assert state_db_counts(state_db)["commands"] == 1
     assert state_db_counts(state_db)["delivery_jobs"] == 1
     assert state_db.get_delivery_payload(_payload()["idempotencyKey"]) == _payload()
     assert sink.dual_write_fail_count == 0
     assert sink.dual_write_conflict_count == 0
+
+    duplicate = sink.accept_payload(_payload())
+
+    assert duplicate["status"] == "queued"
+    assert duplicate["job_id"] == result["job_id"]
+    assert duplicate["already_present"] is True
 
 
 def test_state_db_sink_conflict_rejects_without_overwrite(tmp_path):

@@ -48,6 +48,11 @@ from .runtime_readiness import (
     argo_reconciliation_public_contract,
     build_deployment_evidence_binding,
 )
+from .temporal_acceptance_derive import (
+    TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA,
+    authority_baseline_receipt_is_valid,
+    authority_fingerprint_from_work_unit,
+)
 
 POST_DEPLOY_MCP_CAPTURE_SCHEMA = "source_to_candidate_runtime_post_deploy_mcp_capture.v1"
 TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_CAPTURE_SCHEMA = (
@@ -957,6 +962,9 @@ def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
         raise ValueError("temporal acceptance config must be an object")
     _reject_forbidden_runtime_input_keys(value)
     config = _public_safe_mapping(value)
+    acceptance_v2 = config.get("schema_version") == "temporal_acceptance.v2"
+    if config.get("schema_version") not in (None, "", "temporal_acceptance.v2"):
+        raise ValueError("temporal acceptance schema is invalid")
     temporal_query = str(config.get("temporal_query") or "").strip()
     if not temporal_query or public_safe_text(temporal_query, max_chars=240) != temporal_query:
         raise ValueError("temporal acceptance temporal_query must be public-safe")
@@ -970,21 +978,20 @@ def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
             raise ValueError(f"temporal acceptance {name}.query must equal temporal_query")
         if not str(probe.get("as_of") or "").strip():
             raise ValueError(f"temporal acceptance {name}.as_of is required")
-        require_sha256(
-            str(probe.get("expected_object_fingerprint") or ""),
-            f"temporal acceptance {name}.expected_object_fingerprint",
-        )
-        require_sha256(
-            str(probe.get("expected_object_identity_fingerprint") or ""),
-            f"temporal acceptance {name}.expected_object_identity_fingerprint",
-        )
-    if (
+        if not acceptance_v2:
+            require_sha256(
+                str(probe.get("expected_object_fingerprint") or ""),
+                f"temporal acceptance {name}.expected_object_fingerprint",
+            )
+            require_sha256(
+                str(probe.get("expected_object_identity_fingerprint") or ""),
+                f"temporal acceptance {name}.expected_object_identity_fingerprint",
+            )
+    if not acceptance_v2 and (
         config["date_a"].get("expected_object_identity_fingerprint")
         == config["date_b"].get("expected_object_identity_fingerprint")
     ):
-        raise ValueError(
-            "temporal acceptance date object identities must be distinct"
-        )
+        raise ValueError("temporal acceptance date object identities must be distinct")
     boundary = config["range_boundary"]
     if boundary.get("query") not in (None, "", temporal_query):
         raise ValueError(
@@ -994,14 +1001,15 @@ def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
         boundary.get("date_to") or ""
     ).strip():
         raise ValueError("temporal acceptance range boundary is incomplete")
-    require_sha256(
-        str(boundary.get("expected_object_fingerprint") or ""),
-        "temporal acceptance range_boundary.expected_object_fingerprint",
-    )
-    require_sha256(
-        str(boundary.get("expected_object_identity_fingerprint") or ""),
-        "temporal acceptance range_boundary.expected_object_identity_fingerprint",
-    )
+    if not acceptance_v2:
+        require_sha256(
+            str(boundary.get("expected_object_fingerprint") or ""),
+            "temporal acceptance range_boundary.expected_object_fingerprint",
+        )
+        require_sha256(
+            str(boundary.get("expected_object_identity_fingerprint") or ""),
+            "temporal acceptance range_boundary.expected_object_identity_fingerprint",
+        )
     if not str(config["mismatch"].get("as_of") or "").strip():
         raise ValueError("temporal acceptance mismatch.as_of is required")
     if config["mismatch"].get("query") not in (None, "", temporal_query):
@@ -1068,6 +1076,46 @@ def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
         raise ValueError(
             "temporal acceptance runtime_expectations.max_artifact_age_seconds is invalid"
         )
+    if acceptance_v2:
+        baseline = config.get("authority_baseline")
+        if not isinstance(baseline, Mapping):
+            raise ValueError("temporal acceptance v2 authority_baseline is required")
+        if baseline.get("schema_version") != TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA:
+            raise ValueError("temporal acceptance v2 authority_baseline schema is invalid")
+        if not authority_baseline_receipt_is_valid(baseline):
+            raise ValueError("temporal acceptance v2 authority_baseline receipt is invalid")
+        for field in ("authority_receipt_hash", "source_inventory_hash"):
+            require_sha256(
+                str(baseline.get(field) or ""),
+                f"temporal acceptance v2 {field}",
+            )
+        if baseline.get("source_inventory_current") is not True:
+            raise ValueError("temporal acceptance v2 source inventory is not current")
+        for name in ("date_a", "date_b", "range_boundary"):
+            expected = baseline.get(name)
+            if not isinstance(expected, Mapping):
+                raise ValueError(f"temporal acceptance v2 {name} baseline is required")
+            require_sha256(
+                str(expected.get("expected_authority_fingerprint") or ""),
+                f"temporal acceptance v2 {name}.expected_authority_fingerprint",
+            )
+            require_sha256(
+                str(expected.get("expected_source_revision") or ""),
+                f"temporal acceptance v2 {name}.expected_source_revision",
+            )
+        if (
+            baseline["date_a"].get("expected_authority_fingerprint")
+            == baseline["date_b"].get("expected_authority_fingerprint")
+        ):
+            raise ValueError("temporal acceptance v2 Date A/B authority fingerprints must be distinct")
+        for field in ("as_of",):
+            if config["date_a"].get(field) != baseline["date_a"].get(field):
+                raise ValueError("temporal acceptance v2 date_a selector must match baseline")
+            if config["date_b"].get(field) != baseline["date_b"].get(field):
+                raise ValueError("temporal acceptance v2 date_b selector must match baseline")
+        for field in ("date_from", "date_to"):
+            if config["range_boundary"].get(field) != baseline["range_boundary"].get(field):
+                raise ValueError("temporal acceptance v2 range boundary selector must match baseline")
     return config
 
 
@@ -1095,6 +1143,10 @@ async def _collect_temporal_recall_corrective_checkpoint(
                 "current_files": [],
                 "route": "temporal_work_recall",
                 "response_mode": "full",
+                # Two is a sentinel, not a broad recall limit: one expected
+                # WorkUnit plus any stale/foreign second result is evidence the
+                # temporal response is not exact and must fail closed.
+                "limit": 2,
                 "consumer": consumer,
                 **dict(selector),
             },
@@ -1118,6 +1170,12 @@ async def _collect_temporal_recall_corrective_checkpoint(
     }
     temporal_query = public_safe_text(
         str(config.get("temporal_query") or ""), max_chars=240
+    )
+    acceptance_v2 = config.get("schema_version") == "temporal_acceptance.v2"
+    authority_baseline = (
+        config.get("authority_baseline")
+        if acceptance_v2 and isinstance(config.get("authority_baseline"), Mapping)
+        else {}
     )
     date_a_raw = await query_objects(
         date_a_selector,
@@ -1166,6 +1224,37 @@ async def _collect_temporal_recall_corrective_checkpoint(
             runtime_expectations=config["runtime_expectations"],
         )
     )
+    def probe_summary(
+        raw: Mapping[str, Any],
+        *,
+        selector: Mapping[str, str],
+        name: str,
+        legacy_config: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        expected = (
+            authority_baseline.get(name)
+            if isinstance(authority_baseline.get(name), Mapping)
+            else {}
+        )
+        return _temporal_object_probe_summary(
+            raw,
+            selector=selector,
+            expected_fingerprint=str(
+                legacy_config.get("expected_object_fingerprint") or ""
+            ),
+            expected_identity_fingerprint=str(
+                legacy_config.get("expected_object_identity_fingerprint") or ""
+            ),
+            expected_authority_fingerprint=str(
+                expected.get("expected_authority_fingerprint") or ""
+            )
+            if acceptance_v2
+            else "",
+            expected_source_revision=str(expected.get("expected_source_revision") or "")
+            if acceptance_v2
+            else "",
+        )
+
     checkpoint = {
         "schema_version": TEMPORAL_RECALL_CORRECTIVE_CHECKPOINT_SCHEMA,
         "evidence_class": "runtime_semantic_acceptance",
@@ -1183,29 +1272,17 @@ async def _collect_temporal_recall_corrective_checkpoint(
             ),
             "invalid_range_error_code": invalid_raw.get("collector_error_code"),
         },
-        "date_a": _temporal_object_probe_summary(
-            date_a_raw,
-            selector=date_a_selector,
-            expected_fingerprint=str(date_a_config.get("expected_object_fingerprint") or ""),
-            expected_identity_fingerprint=str(
-                date_a_config.get("expected_object_identity_fingerprint") or ""
-            ),
+        "date_a": probe_summary(
+            date_a_raw, selector=date_a_selector, name="date_a", legacy_config=date_a_config
         ),
-        "date_b": _temporal_object_probe_summary(
-            date_b_raw,
-            selector=date_b_selector,
-            expected_fingerprint=str(date_b_config.get("expected_object_fingerprint") or ""),
-            expected_identity_fingerprint=str(
-                date_b_config.get("expected_object_identity_fingerprint") or ""
-            ),
+        "date_b": probe_summary(
+            date_b_raw, selector=date_b_selector, name="date_b", legacy_config=date_b_config
         ),
-        "range_boundary": _temporal_object_probe_summary(
+        "range_boundary": probe_summary(
             boundary_raw,
             selector=boundary_selector,
-            expected_fingerprint=str(boundary_config.get("expected_object_fingerprint") or ""),
-            expected_identity_fingerprint=str(
-                boundary_config.get("expected_object_identity_fingerprint") or ""
-            ),
+            name="range_boundary",
+            legacy_config=boundary_config,
         ),
         "mismatch": _temporal_mismatch_probe_summary(
             mismatch_raw,
@@ -1244,6 +1321,9 @@ async def _collect_temporal_recall_corrective_checkpoint(
             )
         ),
     }
+    if acceptance_v2:
+        checkpoint["acceptance_version"] = "v2"
+        checkpoint["authority_baseline"] = dict(authority_baseline)
     ensure_public_safe(checkpoint, "TemporalRecallCorrectiveCheckpoint")
     return checkpoint
 
@@ -1264,6 +1344,8 @@ def _temporal_object_probe_summary(
     selector: Mapping[str, str],
     expected_fingerprint: str,
     expected_identity_fingerprint: str,
+    expected_authority_fingerprint: str = "",
+    expected_source_revision: str = "",
 ) -> dict[str, Any]:
     safe = _remote_mapping_or_failure(value)
     object_pack = safe.get("object_pack") if isinstance(safe.get("object_pack"), Mapping) else {}
@@ -1280,19 +1362,24 @@ def _temporal_object_probe_summary(
         for item in objects
         if isinstance(item, Mapping) and str(item.get("object_type") or "") == "WorkUnit"
     ]
+    non_work_unit_count = len(objects) - len(work_units)
     observed_fingerprint = hash_payload(work_units[0]) if len(work_units) == 1 else ""
     observed_identity_fingerprint = (
         _temporal_work_unit_identity_fingerprint(work_units[0])
         if len(work_units) == 1
         else ""
     )
-    return {
+    result = {
         "selector_hash": hash_payload(dict(selector)),
         "expected_object_fingerprint": expected_fingerprint,
         "observed_object_fingerprint": observed_fingerprint,
         "expected_object_identity_fingerprint": expected_identity_fingerprint,
         "observed_object_identity_fingerprint": observed_identity_fingerprint,
         "work_unit_count": len(work_units),
+        "object_count": len(objects),
+        "second_result_present": len(objects) > 1,
+        "extra_work_unit_count": max(0, len(work_units) - 1),
+        "non_work_unit_count": non_work_unit_count,
         "gap_count": len(gaps),
         "confidence_score": (
             float(confidence_score)
@@ -1302,6 +1389,30 @@ def _temporal_object_probe_summary(
             else None
         ),
     }
+    if expected_authority_fingerprint or expected_source_revision:
+        work_unit = work_units[0] if len(work_units) == 1 else {}
+        payload = work_unit.get("payload") if isinstance(work_unit, Mapping) else {}
+        observed_source_revision = (
+            str(payload.get("source_revision") or "")
+            if isinstance(payload, Mapping)
+            else ""
+        )
+        try:
+            require_sha256(observed_source_revision, "temporal WorkUnit source_revision")
+            observed_authority_fingerprint = authority_fingerprint_from_work_unit(work_unit)
+        except (TypeError, ValueError):
+            observed_source_revision = ""
+            observed_authority_fingerprint = ""
+        result.update(
+            {
+                "expected_authority_fingerprint": expected_authority_fingerprint,
+                "observed_authority_fingerprint": observed_authority_fingerprint,
+                "expected_source_revision": expected_source_revision,
+                "observed_source_revision": observed_source_revision,
+                "bounded_observed_interval": bool(observed_authority_fingerprint),
+            }
+        )
+    return result
 
 
 def _temporal_work_unit_identity_fingerprint(work_unit: Mapping[str, Any]) -> str:

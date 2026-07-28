@@ -15,12 +15,14 @@ from agent_knowledge.couchdb_source.document_model import conversation_chunk_doc
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
 from agent_knowledge.redaction import redact_text_v2
 from agent_knowledge.rag_ingress.couchdb_delivery_backend import CouchDBDeliveryBackend
+from agent_knowledge.rag_ingress.delivery_executor import DeliveryExecutor
 from agent_knowledge.rag_ingress.shadow_worker import (
     IngestStateStore,
     build_synthetic_event,
     env_profile_dataset_resolver,
     process_payload,
 )
+from agent_knowledge.rag_ingress.state_sink import StateDBIngressSink
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SHADOW_SESSION_ID_HASH = "sha256:" + hashlib.sha256(b"shadow-worker-session").hexdigest()
@@ -264,6 +266,109 @@ def test_process_payload_exact_duplicate_submits_once_and_reuses_canonical_succe
     assert store.state_db.scalar("SELECT COUNT(*) FROM delivery_jobs") == 1
     assert store.state_db.get_delivery_payload(payload["idempotencyKey"]) == payload
     assert store.get_delivered(payload["idempotencyKey"]) is not None
+
+
+def test_process_payload_delivers_when_prior_duplicate_accept_is_still_pending(tmp_path):
+    store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
+    payload = _couchdb_payload(tag="canonical-pending-duplicate-accept")
+    backend, _ = _couchdb_backend(store)
+    original_submit = backend.submit
+    submit_calls = 0
+
+    def counted_submit(job):
+        nonlocal submit_calls
+        submit_calls += 1
+        return original_submit(job)
+
+    backend.submit = counted_submit
+    prior_accept = StateDBIngressSink(state_db=store.state_db).accept_payload(payload)
+    assert prior_accept["already_present"] is False
+
+    result = process_payload(payload, store=store, backend=backend, deliver=True)
+
+    assert result.status == "delivered"
+    assert result.delivered is True
+    assert submit_calls == 1
+    assert store.counts() == {"delivered": 1}
+
+
+def test_process_payload_uses_accept_duplicate_signal_when_first_handler_completes_after_second_accept(
+    tmp_path, monkeypatch
+):
+    import agent_knowledge.rag_ingress.shadow_worker as shadow_worker
+
+    store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
+    payload = _couchdb_payload(tag="canonical-duplicate-completes-after-accept")
+    backend, _ = _couchdb_backend(store)
+    original_submit = backend.submit
+    submit_calls = 0
+
+    def counted_submit(job):
+        nonlocal submit_calls
+        submit_calls += 1
+        return original_submit(job)
+
+    backend.submit = counted_submit
+    first_accept = StateDBIngressSink(state_db=store.state_db).accept_payload(payload)
+    assert first_accept["already_present"] is False
+
+    accepted_duplicates = []
+    actual_sink = StateDBIngressSink
+
+    class RecordingSink:
+        def __init__(self, *, state_db):
+            self._sink = actual_sink(state_db=state_db)
+
+        def accept_payload(self, request_body):
+            accepted = self._sink.accept_payload(request_body)
+            accepted_duplicates.append(accepted["already_present"])
+            return accepted
+
+    monkeypatch.setattr(shadow_worker, "StateDBIngressSink", RecordingSink)
+    completion_outcomes = []
+    actual_executor = DeliveryExecutor
+
+    class CompleteFirstHandlerBeforeSecondExecute:
+        def __init__(self, *, state_db, backend, lease_owner):
+            self._state_db = state_db
+            self._backend = backend
+            self._lease_owner = lease_owner
+
+        def execute_once_with_receipt(self, job_id, *, max_attempts):
+            completion_outcomes.append(
+                actual_executor(
+                    state_db=self._state_db,
+                    backend=self._backend,
+                    lease_owner="shadow-worker:first-handler",
+                ).execute_once_with_receipt(job_id, max_attempts=max_attempts)
+            )
+            return actual_executor(
+                state_db=self._state_db,
+                backend=self._backend,
+                lease_owner=self._lease_owner,
+            ).execute_once_with_receipt(job_id, max_attempts=max_attempts)
+
+    monkeypatch.setattr(
+        shadow_worker, "DeliveryExecutor", CompleteFirstHandlerBeforeSecondExecute
+    )
+    recorded_statuses = []
+    original_record = store.record
+
+    def record_status(**kwargs):
+        recorded_statuses.append(kwargs["status"])
+        return original_record(**kwargs)
+
+    store.record = record_status
+
+    result = process_payload(payload, store=store, backend=backend, deliver=True)
+
+    assert [receipt.status for receipt in completion_outcomes] == ["succeeded"]
+    assert completion_outcomes[0].submit_attempted is True
+    assert accepted_duplicates == [True]
+    assert result.status == "deduplicated"
+    assert result.delivered is True
+    assert submit_calls == 1
+    assert recorded_statuses == ["deduplicated"]
 
 
 def test_process_payload_conflict_preserves_canonical_and_legacy_delivery_observers(tmp_path):
