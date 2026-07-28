@@ -6,24 +6,13 @@ import json
 import os
 import sys
 from collections.abc import Callable
+from importlib import import_module
 
 from .couchdb_source import build_cli as couchdb_build_cli
-from .couchdb_source import migration_flow_cli as couchdb_migration_flow_cli
+from .couchdb_source import historical_temporal_repair
 from .couchdb_source import migration_cli
 from .couchdb_source import temporal_evidence_inventory
 from .ledger import Ledger
-from .llm_brain_core import cli as llm_brain_core_cli
-from .llm_brain_core import bulk_semantic_cli as llm_brain_bulk_semantic_cli
-from .llm_brain_core import bulk_semantic_trigger_cli as llm_brain_bulk_semantic_trigger_cli
-from .llm_brain_core import couchdb_projection_cli as llm_brain_couchdb_projection_cli
-from .llm_brain_core import graph_projection_status_cli as llm_brain_graph_projection_status_cli
-from .llm_brain_core import graph_trigger_cli as llm_brain_graph_trigger_cli
-from .llm_brain_core.objects import object_cli as llm_brain_object_cli
-from .llm_brain_core import portable_cli as llm_brain_portable_cli
-from .llm_brain_core import projection_cli as llm_brain_projection_cli
-from .llm_brain_core import regression_gate_cli as llm_brain_regression_gate_cli
-from .llm_brain_core.runtime_graph import build_graph_adapter_from_env
-from .mcp_server import KnowledgeSearchService, build_index_client, run_stdio_server
 from .permission_audit import (
     DEFAULT_PERMISSION_AUDIT_STORE_URL,
     DEFAULT_TOKEN_REVIEW_URL,
@@ -35,10 +24,7 @@ from .permission_audit_marker_runtime_env import (
     build_production_permission_audit_marker_reader,
 )
 from .rag_ingress import state_cli
-from .rag_ingress import projection_invalidation_canary
 from .rag_ingress import temporal_metadata_backfill
-from .rag_ingress import temporal_revision_rebuild
-from .couchdb_source import historical_temporal_repair
 from .session_memory import (
     autopilot_cli,
     cleanup_readiness,
@@ -60,6 +46,7 @@ from .session_memory import (
 BOUNDARY = "server worker -> state DB -> brain/session-memory -> GC safety planners"
 
 CommandHandler = Callable[[list[str] | None], int]
+_OBJECT_CLI_MODULE = ".llm_brain_core.objects.object_cli"
 
 PENDING_SERVER_COMMANDS = {
     "backfill",
@@ -94,6 +81,41 @@ def _pending_server_command(command: str) -> CommandHandler:
     return _main
 
 
+def _lazy_handler(module_name: str, attribute: str = "main") -> CommandHandler:
+    """실행할 command의 module만 늦게 import해 가벼운 router import를 보장한다."""
+
+    def _main(argv: list[str] | None = None) -> int:
+        handler = getattr(import_module(module_name, package=__package__), attribute)
+        return handler(argv)
+
+    return _main
+
+
+def _lazy_object_handler(attribute: str) -> CommandHandler:
+    return _lazy_handler(_OBJECT_CLI_MODULE, attribute)
+
+
+def build_graph_adapter_from_env(*args, **kwargs):
+    """MCP command가 실제 실행될 때만 graph runtime을 import하는 test seam."""
+    from .llm_brain_core.runtime_graph import build_graph_adapter_from_env as build_adapter
+
+    return build_adapter(*args, **kwargs)
+
+
+def build_index_client():
+    """MCP command가 실제 실행될 때만 search service 의존성을 import한다."""
+    from .mcp_server import build_index_client as build_client
+
+    return build_client()
+
+
+def run_stdio_server(service) -> None:
+    """MCP stdio transport를 실행 시점에만 import한다."""
+    from .mcp_server import run_stdio_server as run_server
+
+    run_server(service)
+
+
 COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "rag-ingress-state": state_cli.main,
     "memory-regeneration": memory_regeneration_cli.main,
@@ -108,27 +130,27 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "transcript-volume-gc": transcript_volume_gc.main,
     "session-memory-quarantine-terminal-skipped": terminal_skipped_quarantine.main,
     "session-memory-repair-zombie-snapshots": zombie_snapshot_repair.main,
-    "brain-context-resolve": llm_brain_core_cli.main,
-    "object-query": llm_brain_object_cli.object_query_main,
-    "agent-context-startup": llm_brain_object_cli.agent_context_startup_main,
-    "artifact-preference-evaluate": llm_brain_object_cli.artifact_preference_evaluate_main,
-    "object-explain": llm_brain_object_cli.object_explain_main,
-    "corpus-status": llm_brain_object_cli.corpus_status_main,
-    "corpus-ingest-plan": llm_brain_object_cli.corpus_ingest_plan_main,
-    "corpus-ingest": llm_brain_object_cli.corpus_ingest_main,
-    "corpus-ingest-readiness": llm_brain_object_cli.corpus_ingest_readiness_main,
-    "object-authority-schema-ensure": llm_brain_object_cli.object_authority_schema_ensure_main,
-    "source-to-candidate-graph": llm_brain_object_cli.source_to_candidate_graph_main,
-    "candidate-review-edit": llm_brain_object_cli.candidate_review_edit_main,
-    "approval-board-decide": llm_brain_object_cli.approval_board_decide_main,
-    "golden-query-eval": llm_brain_object_cli.golden_query_eval_main,
-    "source-to-candidate-runtime-readiness": llm_brain_object_cli.source_to_candidate_runtime_readiness_main,
-    "temporal-acceptance-derive": llm_brain_object_cli.temporal_acceptance_derive_main,
-    "okf-export": llm_brain_object_cli.okf_export_main,
-    "brain-regression-gate": llm_brain_regression_gate_cli.main,
-    "brain-export": llm_brain_portable_cli.export_main,
-    "brain-import": llm_brain_portable_cli.import_main,
-    "brain-project": llm_brain_projection_cli.main,
+    "brain-context-resolve": _lazy_handler(".llm_brain_core.cli"),
+    "object-query": _lazy_object_handler("object_query_main"),
+    "agent-context-startup": _lazy_object_handler("agent_context_startup_main"),
+    "artifact-preference-evaluate": _lazy_object_handler("artifact_preference_evaluate_main"),
+    "object-explain": _lazy_object_handler("object_explain_main"),
+    "corpus-status": _lazy_object_handler("corpus_status_main"),
+    "corpus-ingest-plan": _lazy_object_handler("corpus_ingest_plan_main"),
+    "corpus-ingest": _lazy_object_handler("corpus_ingest_main"),
+    "corpus-ingest-readiness": _lazy_object_handler("corpus_ingest_readiness_main"),
+    "object-authority-schema-ensure": _lazy_object_handler("object_authority_schema_ensure_main"),
+    "source-to-candidate-graph": _lazy_object_handler("source_to_candidate_graph_main"),
+    "candidate-review-edit": _lazy_object_handler("candidate_review_edit_main"),
+    "approval-board-decide": _lazy_object_handler("approval_board_decide_main"),
+    "golden-query-eval": _lazy_object_handler("golden_query_eval_main"),
+    "source-to-candidate-runtime-readiness": _lazy_object_handler("source_to_candidate_runtime_readiness_main"),
+    "temporal-acceptance-derive": _lazy_object_handler("temporal_acceptance_derive_main"),
+    "okf-export": _lazy_object_handler("okf_export_main"),
+    "brain-regression-gate": _lazy_handler(".llm_brain_core.regression_gate_cli"),
+    "brain-export": _lazy_handler(".llm_brain_core.portable_cli", "export_main"),
+    "brain-import": _lazy_handler(".llm_brain_core.portable_cli", "import_main"),
+    "brain-project": _lazy_handler(".llm_brain_core.projection_cli"),
     "backfill": _pending_server_command("backfill"),
     "context-for-prompt": _pending_server_command("context-for-prompt"),
     "derived-memory-resources": _pending_server_command("derived-memory-resources"),
@@ -137,16 +159,16 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "memory": autopilot_cli.main,
     "session-entry-recall": _pending_server_command("session-entry-recall"),
     "couchdb-session-memory-build": couchdb_build_cli.main,
-    "couchdb-migration-flow": couchdb_migration_flow_cli.main,
-    "couchdb-graph-trigger": llm_brain_graph_trigger_cli.main,
-    "couchdb-graph-project": llm_brain_couchdb_projection_cli.main,
-    "couchdb-graph-bulk-semantic": llm_brain_bulk_semantic_cli.main,
-    "couchdb-bulk-semantic-trigger": llm_brain_bulk_semantic_trigger_cli.main,
-    "couchdb-graph-status": llm_brain_graph_projection_status_cli.main,
-    "couchdb-projection-invalidation-canary": projection_invalidation_canary.main,
+    "couchdb-migration-flow": _lazy_handler(".couchdb_source.migration_flow_cli"),
+    "couchdb-graph-trigger": _lazy_handler(".llm_brain_core.graph_trigger_cli"),
+    "couchdb-graph-project": _lazy_handler(".llm_brain_core.couchdb_projection_cli"),
+    "couchdb-graph-bulk-semantic": _lazy_handler(".llm_brain_core.bulk_semantic_cli"),
+    "couchdb-bulk-semantic-trigger": _lazy_handler(".llm_brain_core.bulk_semantic_trigger_cli"),
+    "couchdb-graph-status": _lazy_handler(".llm_brain_core.graph_projection_status_cli"),
+    "couchdb-projection-invalidation-canary": _lazy_handler(".rag_ingress.projection_invalidation_canary"),
     "couchdb-temporal-metadata-backfill": temporal_metadata_backfill.main,
     "couchdb-historical-temporal-repair": historical_temporal_repair.main,
-    "couchdb-temporal-revision-rebuild": temporal_revision_rebuild.main,
+    "couchdb-temporal-revision-rebuild": _lazy_handler(".rag_ingress.temporal_revision_rebuild"),
     "couchdb-temporal-evidence-inventory": temporal_evidence_inventory.main,
     "transcript-migration": migration_cli.main,
     "transcript-quality": _pending_server_command("transcript-quality"),
@@ -228,7 +250,7 @@ def _build_recall_service(
     *,
     permission_audit_marker_reader: IndependentProductMutationMarkerReader
     | None = None,
-) -> KnowledgeSearchService:
+) -> "KnowledgeSearchService":
     """mcp-stdio / mcp-http 공통 recall service 와이어링(단일 권위).
 
     두 transport main이 동일 service를 조립하던 복제 seam을 제거한다. 실패 시
@@ -315,6 +337,8 @@ def _build_recall_service(
                 message,
             ) from exc
         store_append = store_client.append_denied_once
+    from .mcp_server import KnowledgeSearchService
+
     return KnowledgeSearchService(
         ledger=ledger,
         retired_index_bridge=retired_index_bridge,
