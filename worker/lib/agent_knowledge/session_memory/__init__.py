@@ -20,7 +20,6 @@ _EXPORT_MODULES = {
     "FixtureTranscriptMemorySource": ".memory_regeneration",
     "LedgerTranscriptMemorySource": ".memory_regeneration",
     "ApprovedStatement": ".native_memory_writer",
-    "NativeMemoryEngine": ".native_memory_engine",
     "NativeMemoryMirrorStore": ".native_memory_mirror",
     "NativeMemoryMirrorWriter": ".native_memory_writer",
     "NativeMemoryMirrorWriteRunner": ".native_memory_write_runner",
