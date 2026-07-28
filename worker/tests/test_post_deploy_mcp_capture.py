@@ -4135,6 +4135,8 @@ def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, cap
                 str(artifact_descriptor_file),
                 "--temporal-acceptance-file",
                 str(temporal_acceptance_file),
+                "--ledger",
+                "public-safe-ledger-path",
             ]
         )
         == 0
@@ -4150,6 +4152,7 @@ def test_runtime_readiness_cli_collects_post_deploy_mcp_capture(monkeypatch, cap
     assert seen["project"] == "neurons"
     assert seen["consumer"] == "codex"
     assert seen["expected_commit"] == "c2b8548"
+    assert seen["ledger_path"] == "public-safe-ledger-path"
     assert seen["deployed_identity"] == {
         "contains_expected_commit": True,
         "identity_source": "redacted_artifact_identity_summary",
