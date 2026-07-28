@@ -36,6 +36,7 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
 )
 from agent_knowledge.llm_brain_core.objects.temporal_acceptance_derive import (
     AUTHORITY_SOURCE,
+    SOURCE_LEDGER_BINDING_SCHEMA,
     TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA,
     TEMPORAL_ACCEPTANCE_DERIVE_RECEIPT_SCHEMA,
     SELECTION_POLICY,
@@ -1522,6 +1523,14 @@ def _temporal_recall_corrective_checkpoint_v3() -> tuple[dict, dict]:
         "host_topology_returned": False,
         "raw_external_ids_returned": False,
         "artifact_ledger_metadata_read_only": True,
+        "ledger_backend": "sqlite",
+        "source_ledger_binding": {
+            "schema_version": SOURCE_LEDGER_BINDING_SCHEMA,
+            "backend": "sqlite",
+            "before_fingerprint": baseline["source_inventory_hash"],
+            "after_fingerprint": baseline["source_inventory_hash"],
+            "stable": True,
+        },
     }
     return checkpoint, receipt
 
@@ -1577,7 +1586,17 @@ def _temporal_recall_corrective_checkpoint_v3_from_derived_receipt() -> tuple[di
         max_runtime_seconds=5,
     )
     baseline = derived["authority_baseline"]
-    receipt = derived["receipt"]
+    receipt = {
+        **derived["receipt"],
+        "ledger_backend": "sqlite",
+        "source_ledger_binding": {
+            "schema_version": SOURCE_LEDGER_BINDING_SCHEMA,
+            "backend": "sqlite",
+            "before_fingerprint": baseline["source_inventory_hash"],
+            "after_fingerprint": baseline["source_inventory_hash"],
+            "stable": True,
+        },
+    }
     checkpoint, _ = _temporal_recall_corrective_checkpoint_v3()
     checkpoint["temporal_query_hash"] = baseline["temporal_query_hash"]
     for label in ("date_a", "date_b", "range_boundary"):
@@ -1797,6 +1816,42 @@ def test_temporal_checkpoint_readiness_accepts_v3_derived_authority_receipt():
     assert report["claim"]["authority_derivation_validated"] is True
 
 
+def test_temporal_checkpoint_readiness_accepts_postgres_authority_derivation_network_receipt():
+    checkpoint, receipt = _temporal_recall_corrective_checkpoint_v3_from_derived_receipt()
+    receipt["ledger_backend"] = "postgres"
+    receipt["network_used"] = True
+    receipt["source_ledger_binding"] = {
+        **receipt["source_ledger_binding"],
+        "backend": "postgres",
+    }
+
+    report = build_temporal_recall_corrective_checkpoint_readiness_report(
+        checkpoint=checkpoint,
+        authority_derivation=receipt,
+    )
+
+    assert report["status"] == "PASS"
+    assert report["claim"]["authority_derivation_validated"] is True
+
+
+def test_temporal_checkpoint_readiness_rejects_postgres_receipt_with_false_network_claim():
+    checkpoint, receipt = _temporal_recall_corrective_checkpoint_v3_from_derived_receipt()
+    receipt["ledger_backend"] = "postgres"
+    receipt["network_used"] = False
+    receipt["source_ledger_binding"] = {
+        **receipt["source_ledger_binding"],
+        "backend": "postgres",
+    }
+
+    report = build_temporal_recall_corrective_checkpoint_readiness_report(
+        checkpoint=checkpoint,
+        authority_derivation=receipt,
+    )
+
+    assert report["status"] == "FAIL"
+    assert "temporal_corrective_v3_authority_derivation_invalid" in report["gaps"]
+
+
 def test_neuron_knowledge_temporal_checkpoint_cli_forwards_v3_authority_derivation(
     monkeypatch,
     tmp_path,
@@ -1809,7 +1864,10 @@ def test_neuron_knowledge_temporal_checkpoint_cli_forwards_v3_authority_derivati
         encoding="utf-8",
     )
 
-    async def _collect_temporal_checkpoint(**_kwargs):
+    received: dict[str, object] = {}
+
+    async def _collect_temporal_checkpoint(**kwargs):
+        received.update(kwargs)
         return {
             "schema_version": "temporal_recall_corrective_checkpoint_capture.v1",
             "temporal_recall_corrective_checkpoint": checkpoint,
@@ -1832,6 +1890,8 @@ def test_neuron_knowledge_temporal_checkpoint_cli_forwards_v3_authority_derivati
                 "https://mcp.example.test/mcp",
                 "--temporal-acceptance-file",
                 str(acceptance_file),
+                "--inventory-limit",
+                "7",
             ]
         )
         == 0
@@ -1842,6 +1902,20 @@ def test_neuron_knowledge_temporal_checkpoint_cli_forwards_v3_authority_derivati
     assert output["checkpoint_readiness"]["claim"][
         "authority_derivation_validated"
     ] is True
+    assert received["inventory_limit"] == 7
+
+
+def test_neuron_knowledge_temporal_checkpoint_cli_rejects_inventory_limit_outside_collection_mode():
+    assert (
+        main(
+            [
+                "source-to-candidate-runtime-readiness",
+                "--inventory-limit",
+                "7",
+            ]
+        )
+        == 2
+    )
 
 
 @pytest.mark.parametrize(

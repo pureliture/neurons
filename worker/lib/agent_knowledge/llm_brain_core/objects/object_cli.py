@@ -757,11 +757,22 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     parser.add_argument("--artifact-descriptor-file", default="")
     parser.add_argument("--temporal-acceptance-file", default="")
     parser.add_argument("--ledger", default="")
+    parser.add_argument("--inventory-limit", type=int)
     parser.add_argument("--repository", default="")
     parser.add_argument("--branch", default="")
     parser.add_argument("--project", default="")
     parser.add_argument("--consumer", default="codex")
     args = parser.parse_args(argv)
+    if args.inventory_limit is not None:
+        if not (
+            args.collect_post_deploy_mcp_capture
+            or args.collect_temporal_corrective_checkpoint
+        ):
+            parser.error(
+                "--inventory-limit requires a temporal MCP collection mode"
+            )
+        if not args.temporal_acceptance_file:
+            parser.error("--inventory-limit requires --temporal-acceptance-file")
     if args.collect_temporal_corrective_checkpoint:
         temporal_mode_conflicts = [
             flag
@@ -852,6 +863,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                     label="temporal acceptance",
                 ),
                 ledger_path=args.ledger,
+                inventory_limit=args.inventory_limit,
             )
         )
         output = dict(capture)
@@ -917,6 +929,7 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
                 artifact_descriptor=artifact_descriptor,
                 temporal_acceptance=temporal_acceptance,
                 ledger_path=args.ledger,
+                inventory_limit=args.inventory_limit,
                 collect_agent_context_startup=args.collect_agent_context_startup,
             )
         )

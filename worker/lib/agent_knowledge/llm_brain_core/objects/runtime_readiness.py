@@ -26,6 +26,7 @@ from .artifact_preference_evaluator import (
 from .golden_query_eval import build_source_to_authority_quality_gate_report
 from .temporal_acceptance_derive import (
     AUTHORITY_SOURCE,
+    SOURCE_LEDGER_BINDING_SCHEMA,
     TEMPORAL_ACCEPTANCE_DERIVE_RECEIPT_SCHEMA,
     authority_baseline_receipt_is_valid,
 )
@@ -4081,6 +4082,8 @@ def _v3_authority_derivation_is_valid(
 ) -> bool:
     """Bind the public v3 receipt to the exact derived baseline."""
 
+    ledger_backend = receipt.get("ledger_backend")
+    network_used = receipt.get("network_used")
     return (
         receipt.get("schema_version") == TEMPORAL_ACCEPTANCE_DERIVE_RECEIPT_SCHEMA
         and receipt.get("status") == "derived"
@@ -4091,7 +4094,13 @@ def _v3_authority_derivation_is_valid(
         and receipt.get("source_inventory_count") == baseline.get("source_inventory_count")
         and receipt.get("temporal_query_hash") == baseline.get("temporal_query_hash")
         and receipt.get("mutation_performed") is False
-        and receipt.get("network_used") is False
+        and ledger_backend in {"sqlite", "postgres"}
+        and isinstance(network_used, bool)
+        and network_used is (ledger_backend == "postgres")
+        and _v3_source_ledger_binding_is_valid(
+            receipt.get("source_ledger_binding"),
+            backend=str(ledger_backend),
+        )
         and all(
             receipt.get(field) is False
             for field in (
@@ -4101,6 +4110,30 @@ def _v3_authority_derivation_is_valid(
                 "raw_external_ids_returned",
             )
         )
+    )
+
+
+def _v3_source_ledger_binding_is_valid(value: Any, *, backend: str) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    required = {
+        "schema_version",
+        "backend",
+        "before_fingerprint",
+        "after_fingerprint",
+        "stable",
+    }
+    if set(value) != required:
+        return False
+    before_fingerprint = str(value.get("before_fingerprint") or "")
+    after_fingerprint = str(value.get("after_fingerprint") or "")
+    return (
+        value.get("schema_version") == SOURCE_LEDGER_BINDING_SCHEMA
+        and value.get("backend") == backend
+        and value.get("stable") is True
+        and before_fingerprint == after_fingerprint
+        and _is_sha256_hash_ref(before_fingerprint)
+        and _is_sha256_hash_ref(after_fingerprint)
     )
 
 

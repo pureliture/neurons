@@ -8,14 +8,18 @@ revision contained at an earlier event time.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from agent_knowledge.llm_brain_core.artifact_store import SessionMemoryArtifactStore
 from agent_knowledge.llm_brain_core.context import (
+    _recall_safe_artifacts,
     _temporal_candidate_is_relevant,
     _temporal_relevance_terms,
 )
@@ -29,12 +33,15 @@ from ..temporal import TemporalSelectorError, parse_temporal_selector
 TEMPORAL_ACCEPTANCE_SELECTION_SCHEMA = "temporal_acceptance_selection.v3"
 TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA = "temporal_acceptance_authority_baseline.v3"
 TEMPORAL_ACCEPTANCE_DERIVE_RECEIPT_SCHEMA = "temporal_acceptance_derive_receipt.v3"
+SOURCE_LEDGER_BINDING_SCHEMA = "temporal_acceptance_source_ledger_binding.v1"
 SELECTION_POLICY = "latest_relevant_bounded_artifact_revision_v1"
 AUTHORITY_SOURCE = "ledger_artifact_revision_history"
 SOURCE_KIND = "session_memory_artifact"
 SOURCE_OBJECT_TYPE = "SessionMemoryArtifact"
 WORK_UNIT_OBJECT_TYPE = "WorkUnit"
 AUTHORITY_LANE = "reference_only"
+DEFAULT_INVENTORY_LIMIT = 100
+MAX_INVENTORY_LIMIT = 1000
 
 
 def _as_utc(value: object) -> datetime | None:
@@ -50,7 +57,7 @@ def _as_utc(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _normalized_selector_value(value: object, *, field: str) -> str:
+def normalize_temporal_selector_value(value: object, *, field: str) -> str:
     text = str(value or "").strip()
     try:
         selector = parse_temporal_selector(**{field.rsplit(".", 1)[-1]: text})
@@ -98,13 +105,15 @@ def _validate_selection(value: Any) -> dict[str, Any]:
                 raise ValueError("temporal acceptance selection must not contain raw source identifiers")
             raise ValueError(f"temporal acceptance selection {label} is invalid")
         normalized[label] = {
-            "as_of": _normalized_selector_value(item.get("as_of"), field=f"{label}.as_of")
+            "as_of": normalize_temporal_selector_value(item.get("as_of"), field=f"{label}.as_of")
         }
     boundary = value.get("range_boundary")
     if not isinstance(boundary, Mapping) or set(boundary) != {"date_from", "date_to"}:
         raise ValueError("temporal acceptance selection range_boundary is invalid")
-    date_from = _normalized_selector_value(boundary.get("date_from"), field="range_boundary.date_from")
-    date_to = _normalized_selector_value(boundary.get("date_to"), field="range_boundary.date_to")
+    date_from = normalize_temporal_selector_value(
+        boundary.get("date_from"), field="range_boundary.date_from"
+    )
+    date_to = normalize_temporal_selector_value(boundary.get("date_to"), field="range_boundary.date_to")
     try:
         parse_temporal_selector(date_from=date_from, date_to=date_to)
     except TemporalSelectorError as exc:
@@ -116,8 +125,12 @@ def _validate_selection(value: Any) -> dict[str, Any]:
 def _validate_bounds(*, project: str, limit: int, max_runtime_seconds: float) -> None:
     if not str(project or "").strip():
         raise ValueError("project is required")
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 2:
-        raise ValueError("limit must be at least two")
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 2 <= limit <= MAX_INVENTORY_LIMIT
+    ):
+        raise ValueError(f"limit must be between 2 and {MAX_INVENTORY_LIMIT}")
     if (
         isinstance(max_runtime_seconds, bool)
         or not isinstance(max_runtime_seconds, (int, float))
@@ -299,12 +312,13 @@ def _selector_inventory(
         project=project,
         observed_at_start=str(bounds["start"]),
         observed_at_end=str(bounds["end"]),
-        limit=limit,
+        limit=limit + 1,
     )
     if not isinstance(revisions, list):
         raise ValueError("artifact revision inventory is unavailable")
-    if len(revisions) >= limit:
+    if len(revisions) > limit:
         raise ValueError("artifact revision inventory is incomplete")
+    revisions = _recall_safe_artifacts(revisions)
     relevance_terms = _temporal_relevance_terms(temporal_query, project=project)
     latest_relevant_by_session: dict[str, tuple[dict[str, Any], tuple[Any, ...], str]] = {}
     for artifact in revisions:
@@ -467,12 +481,14 @@ def derive_temporal_acceptance_baseline(
     selection: Mapping[str, Any],
     limit: int,
     max_runtime_seconds: float,
+    _started_at: float | None = None,
 ) -> dict[str, Any]:
     """Derive one ledger-backed temporal baseline without a brain/MCP read."""
 
     _validate_bounds(project=project, limit=limit, max_runtime_seconds=max_runtime_seconds)
     normalized_selection = _validate_selection(selection)
-    started = time.monotonic()
+    started = time.monotonic() if _started_at is None else _started_at
+    _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds)
     before_selected, before_inventory = _derive_inventory(
         artifact_store=artifact_store,
         project=project,
@@ -531,6 +547,81 @@ def derive_temporal_acceptance_baseline(
     return {"status": "derived", "authority_baseline": baseline, "receipt": receipt}
 
 
+def _ledger_backend(ledger: Ledger) -> str:
+    adapter = getattr(ledger, "_db_adapter", None)
+    if getattr(adapter, "is_file_backed", True):
+        return "sqlite"
+    return "postgres"
+
+
+def _source_file_digest(
+    path: Path,
+    *,
+    started: float,
+    max_runtime_seconds: float,
+) -> str:
+    before = path.stat()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds)
+            digest.update(chunk)
+    _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds)
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ValueError("source ledger changed while its read-only binding was captured")
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _sqlite_source_ledger_fingerprint(
+    ledger_path: str,
+    *,
+    started: float,
+    max_runtime_seconds: float,
+) -> str:
+    source_path = Path(ledger_path)
+    source_files = sorted(source_path.parent.glob(f"{source_path.name}*"), key=lambda item: item.name)
+    _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds)
+    if not source_files or not source_path.is_file():
+        raise ValueError("source ledger is unavailable for read-only binding")
+    entries: list[dict[str, Any]] = []
+    for source_file in source_files:
+        if not source_file.is_file():
+            raise ValueError("source ledger binding includes an unsupported file")
+        stat = source_file.stat()
+        entries.append(
+            {
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "content_hash": _source_file_digest(
+                    source_file,
+                    started=started,
+                    max_runtime_seconds=max_runtime_seconds,
+                ),
+            }
+        )
+    return hash_payload({"backend": "sqlite", "files": entries})
+
+
+def _source_ledger_binding(
+    *,
+    backend: str,
+    before_fingerprint: str,
+    after_fingerprint: str,
+) -> dict[str, Any]:
+    require_sha256(before_fingerprint, "source ledger binding before_fingerprint")
+    require_sha256(after_fingerprint, "source ledger binding after_fingerprint")
+    if before_fingerprint != after_fingerprint:
+        raise ValueError("source ledger drifted during derivation")
+    return {
+        "schema_version": SOURCE_LEDGER_BINDING_SCHEMA,
+        "backend": backend,
+        "before_fingerprint": before_fingerprint,
+        "after_fingerprint": after_fingerprint,
+        "stable": True,
+    }
+
+
 def derive_temporal_acceptance_baseline_from_ledger(
     *,
     ledger_path: str,
@@ -541,17 +632,55 @@ def derive_temporal_acceptance_baseline_from_ledger(
 ) -> dict[str, Any]:
     """Open the local deployed ledger read-only and derive a v3 baseline."""
 
+    _validate_bounds(project=project, limit=limit, max_runtime_seconds=max_runtime_seconds)
+    started = time.monotonic()
+    source_before = (
+        _sqlite_source_ledger_fingerprint(
+            ledger_path,
+            started=started,
+            max_runtime_seconds=max_runtime_seconds,
+        )
+        if not os.environ.get("NEURON_LEDGER_PG_DSN", "").strip()
+        else ""
+    )
     ledger = Ledger.open_read_only(ledger_path)
+    _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds)
+    backend = _ledger_backend(ledger)
+    if backend == "sqlite" and not source_before:
+        raise ValueError("source ledger binding must be captured before read-only open")
     result = derive_temporal_acceptance_baseline(
         artifact_store=LedgerSessionMemoryArtifactStore(ledger),
         project=project,
         selection=selection,
         limit=limit,
         max_runtime_seconds=max_runtime_seconds,
+        _started_at=started,
     )
     receipt = result.get("receipt")
-    if isinstance(receipt, dict):
-        receipt["artifact_ledger_metadata_read_only"] = True
+    if not isinstance(receipt, dict):
+        raise ValueError("temporal acceptance derivation receipt is unavailable")
+    if backend == "sqlite":
+        source_after = _sqlite_source_ledger_fingerprint(
+            ledger_path,
+            started=started,
+            max_runtime_seconds=max_runtime_seconds,
+        )
+    else:
+        source_after = str(receipt.get("source_inventory_hash") or "")
+        source_before = source_after
+    receipt.update(
+        {
+            "artifact_ledger_metadata_read_only": True,
+            "ledger_backend": backend,
+            "network_used": backend == "postgres",
+            "source_ledger_binding": _source_ledger_binding(
+                backend=backend,
+                before_fingerprint=source_before,
+                after_fingerprint=source_after,
+            ),
+        }
+    )
+    _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds)
     return result
 
 

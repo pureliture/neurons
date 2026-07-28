@@ -49,8 +49,11 @@ from .runtime_readiness import (
     build_deployment_evidence_binding,
 )
 from .temporal_acceptance_derive import (
+    DEFAULT_INVENTORY_LIMIT,
+    MAX_INVENTORY_LIMIT,
     authority_fingerprint_from_work_unit,
     derive_temporal_acceptance_baseline_from_ledger,
+    normalize_temporal_selector_value,
     validate_temporal_acceptance_authority_baseline,
 )
 
@@ -223,6 +226,7 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
     artifact_descriptor: Mapping[str, Any] | None = None,
     temporal_acceptance: Mapping[str, Any] | None = None,
     ledger_path: str = "",
+    inventory_limit: int | None = None,
     collect_agent_context_startup: bool = False,
     agent_context_startup_runner: Any = None,
     session_factory: Any = None,
@@ -236,7 +240,8 @@ async def collect_source_to_candidate_post_deploy_mcp_capture(
         else None
     )
     validated_temporal_acceptance = _validate_temporal_acceptance_config(
-        temporal_acceptance
+        temporal_acceptance,
+        inventory_limit=inventory_limit,
     )
     explicit_project = str(project or "").strip()
     safe_project = public_safe_text(explicit_project, max_chars=120) or "neurons"
@@ -526,13 +531,15 @@ async def collect_temporal_recall_corrective_checkpoint(
     expected_commit: str = "",
     temporal_acceptance: Mapping[str, Any] | None = None,
     ledger_path: str = "",
+    inventory_limit: int | None = None,
     session_factory: Any = None,
 ) -> dict[str, Any]:
     """Collect only read-only live evidence needed by the temporal checkpoint."""
 
     safe_url = validate_post_deploy_mcp_url(mcp_url)
     validated_temporal_acceptance = _validate_temporal_acceptance_config(
-        temporal_acceptance
+        temporal_acceptance,
+        inventory_limit=inventory_limit,
     )
     if not validated_temporal_acceptance:
         raise ValueError("temporal acceptance config is required")
@@ -975,8 +982,45 @@ async def _call_tool_mapping(session: Any, name: str, arguments: Mapping[str, An
     )
 
 
-def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
+def _validated_inventory_limit(value: Any) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 2 <= value <= MAX_INVENTORY_LIMIT
+    ):
+        raise ValueError(
+            "temporal acceptance inventory_limit must be between "
+            f"2 and {MAX_INVENTORY_LIMIT}"
+        )
+    return value
+
+
+def _normalize_v3_temporal_selectors(config: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(config)
+    for name in ("date_a", "date_b", "mismatch"):
+        probe = dict(config[name])
+        probe["as_of"] = normalize_temporal_selector_value(
+            probe.get("as_of"), field=f"{name}.as_of"
+        )
+        normalized[name] = probe
+    for name in ("range_boundary", "invalid_range"):
+        probe = dict(config[name])
+        for field in ("date_from", "date_to"):
+            probe[field] = normalize_temporal_selector_value(
+                probe.get(field), field=f"{name}.{field}"
+            )
+        normalized[name] = probe
+    return normalized
+
+
+def _validate_temporal_acceptance_config(
+    value: Any,
+    *,
+    inventory_limit: int | None = None,
+) -> dict[str, Any]:
     if value is None:
+        if inventory_limit is not None:
+            raise ValueError("inventory_limit requires temporal acceptance config")
         return {}
     if not isinstance(value, Mapping):
         raise ValueError("temporal acceptance config must be an object")
@@ -992,6 +1036,20 @@ def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
         raise ValueError(
             "temporal acceptance v3 caller-supplied authority_baseline is not allowed"
         )
+    if acceptance_v3:
+        config_limit = _validated_inventory_limit(
+            config.get("inventory_limit", DEFAULT_INVENTORY_LIMIT)
+        )
+        if inventory_limit is not None:
+            cli_limit = _validated_inventory_limit(inventory_limit)
+            if "inventory_limit" in config and cli_limit != config_limit:
+                raise ValueError(
+                    "inventory_limit conflicts with temporal acceptance config"
+                )
+            config_limit = cli_limit
+        config["inventory_limit"] = config_limit
+    elif inventory_limit is not None or "inventory_limit" in config:
+        raise ValueError("inventory_limit is supported only by temporal acceptance v3")
     temporal_query = str(config.get("temporal_query") or "").strip()
     if not temporal_query or public_safe_text(temporal_query, max_chars=240) != temporal_query:
         raise ValueError("temporal acceptance temporal_query must be public-safe")
@@ -1103,6 +1161,8 @@ def _validate_temporal_acceptance_config(value: Any) -> dict[str, Any]:
         raise ValueError(
             "temporal acceptance runtime_expectations.max_artifact_age_seconds is invalid"
         )
+    if acceptance_v3:
+        config = _normalize_v3_temporal_selectors(config)
     return config
 
 
@@ -1133,7 +1193,7 @@ def _derive_temporal_acceptance_authority_baseline(
         ledger_path=str(ledger_path),
         project=project,
         selection=selection,
-        limit=100,
+        limit=int(config["inventory_limit"]),
         max_runtime_seconds=60,
     )
     candidate = derived.get("authority_baseline")

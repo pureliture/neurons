@@ -82,6 +82,11 @@ def test_derivation_fails_closed_when_revision_inventory_is_incomplete() -> None
                 end="2026-07-09T11:00:00Z",
             ),
             _artifact(
+                suffix="d",
+                start="2026-07-09T10:00:00Z",
+                end="2026-07-09T11:00:00Z",
+            ),
+            _artifact(
                 suffix="b",
                 start="2026-07-15T10:00:00Z",
                 end="2026-07-15T11:00:00Z",
