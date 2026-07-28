@@ -41,24 +41,12 @@ class CurationService:
         if candidate is None:
             raise ValueError(f"unknown memory candidate: {candidate_id}")
         card = build_memory_card(candidate, approved_by=approved_by, supersedes=old_memory_id)
-        old_card = self.ledger.update_memory_card_state(old_memory_id, "superseded", reviewed_by=approved_by, reason=reason)
-        if old_card["card_type"] == "user_preference":
-            self.ledger.upsert_profile_fact(
-                memory_id=old_memory_id,
-                project=old_card["project"],
-                fact_type=old_card["card_type"],
-                content_hash=old_card["content_hash"],
-                state="superseded",
+        return dict(
+            self.repository.supersede_candidate(
+                old_memory_id,
+                candidate,
+                card,
+                approved_by=approved_by,
+                reason=reason,
             )
-        stored = self.ledger.upsert_memory_card(card)
-        self.ledger.add_memory_card_evidence(card["memory_id"], candidate["evidence_refs"])
-        self.ledger.update_memory_candidate_state(candidate_id, "approved", reviewed_by=approved_by, reason=reason)
-        if candidate["candidate_type"] == "user_preference":
-            self.ledger.upsert_profile_fact(
-                memory_id=card["memory_id"],
-                project=card["project"],
-                fact_type=card["card_type"],
-                content_hash=card["content_hash"],
-                state=card.get("state", "active"),
-            )
-        return stored
+        )

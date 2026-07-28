@@ -632,6 +632,34 @@ class _LedgerTransaction:
                 (memory_id, ref["knowledge_id"], ref["content_hash"]),
             )
 
+    def supersede_memory_card(
+        self,
+        memory_id: str,
+        *,
+        reviewed_by: str,
+        reason: str,
+    ) -> dict:
+        """Demote one approved card and its ledger authority in this transaction."""
+        disabled_at = datetime.now(timezone.utc).isoformat()
+        self._connection.execute(
+            """
+            UPDATE memory_cards
+            SET state = 'superseded', disabled_at = ?, disabled_by = ?, disable_reason = ?
+            WHERE memory_id = ?
+            """,
+            (disabled_at, reviewed_by, reason, memory_id),
+        )
+        self._update_status(
+            memory_id,
+            "disabled",
+            disabled_at=disabled_at,
+            authorization_status="disabled",
+        )
+        card = self.get_memory_card(memory_id)
+        if card is None:
+            raise ValueError(f"unknown memory card: {memory_id}")
+        return card
+
     def update_memory_candidate_state(
         self,
         candidate_id: str,
