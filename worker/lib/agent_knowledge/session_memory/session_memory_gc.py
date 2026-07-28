@@ -48,9 +48,9 @@ class SessionMemoryGcConfig:
     # retention gate를 강제한다. 둘 다 비면 기존 dataset_id-only 동작을 유지한다.
     declared_dataset_role: str = ""
     declared_retention_policy: str = ""
-    # G-8 (recoverable delete): set to a private dir to back up the doc body +
-    # recovery meta BEFORE the irreversible hard delete. Backup failure aborts
-    # the delete (no delete without a backup).
+    # G-8 (recoverable delete): execute with selected candidates requires a
+    # private backup directory. The document body + recovery metadata are saved
+    # BEFORE the irreversible hard delete; backup failure aborts the delete.
     backup_dir: str = ""
 
     def effective_min_disabled_age_seconds(self) -> int:
@@ -94,6 +94,9 @@ class SessionMemoryGcRunner:
         ledger = Ledger(self.config.ledger_path)
         candidates = self._list_candidates(ledger)
         selected = candidates[: max(int(self.config.max_items), 1)]
+        if self.config.execute and selected and not self.config.backup_dir:
+            return self._backup_dir_required_report(candidates, selected)
+
         deleted_count = 0
         failed_count = 0
         attempted_count = 0
@@ -125,10 +128,16 @@ class SessionMemoryGcRunner:
                     continue
                 attempted_count += 1
                 try:
-                    if self.config.backup_dir:
-                        # G-8: 백업이 성공해야만 삭제로 진행(백업 실패 시 예외→delete 안 함).
-                        self._backup_before_delete(ledger, retired_index_bridge, row, document_id=document_id, knowledge_id=knowledge_id, session_id_hash=session_id_hash)
-                        backed_up_count += 1
+                    # G-8: 백업이 성공해야만 삭제로 진행(백업 실패 시 예외→delete 안 함).
+                    self._backup_before_delete(
+                        ledger,
+                        retired_index_bridge,
+                        row,
+                        document_id=document_id,
+                        knowledge_id=knowledge_id,
+                        session_id_hash=session_id_hash,
+                    )
+                    backed_up_count += 1
                     hard_delete_documents(retired_index_bridge, self.config.dataset_id, [document_id])
                     self._mark_gc_deleted(ledger, knowledge_id)
                     self._record_audit(
@@ -160,6 +169,29 @@ class SessionMemoryGcRunner:
             "failed_error_class": failed_error_class,
             "mutation_performed": bool(self.config.execute and deleted_count),
             "network_used": bool(self.config.execute),
+            "raw_ids_printed": False,
+        }
+
+    def _backup_dir_required_report(self, candidates: list[dict], selected: list[dict]) -> dict:
+        """실행 후보가 있을 때 recoverable backup 없이 delete하지 않는다."""
+        return {
+            "schema_version": SESSION_MEMORY_GC_SCHEMA_VERSION,
+            "status": "partial_failed",
+            "mode": "execute",
+            "retention_policy_enforced": bool(self.config.declared_policy_input()),
+            "min_disabled_age_floor_seconds": MIN_DISABLED_AGE_FLOOR_SECONDS,
+            "effective_min_disabled_age_seconds": self.config.effective_min_disabled_age_seconds(),
+            "eligible_count": len(candidates),
+            "selected_count": len(selected),
+            "attempted_count": 0,
+            "deleted_count": 0,
+            "revalidation_skipped_count": 0,
+            "backed_up_count": 0,
+            "backup_enabled": False,
+            "failed_count": 1,
+            "failed_error_class": "backup_dir_required",
+            "mutation_performed": False,
+            "network_used": False,
             "raw_ids_printed": False,
         }
 
@@ -419,6 +451,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.execute:
         if not token:
             print("token env is not set", file=sys.stderr)
+            return 2
+        if not args.backup_dir:
+            print("--backup-dir is required for --execute (no delete without backup)", file=sys.stderr)
             return 2
         try:
             validate_goal3_live_approval(
