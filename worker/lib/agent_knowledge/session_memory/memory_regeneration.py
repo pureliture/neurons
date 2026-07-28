@@ -576,6 +576,7 @@ class SessionMemoryRegenerationRunner:
         would_write_session_memory = []
         skipped_sessions: list[dict] = []
         mutated = False
+        sync_executor = None
 
         for group in groups:
             canonical_group, canonicalization = _canonical_session_group_for_memory(group)
@@ -634,11 +635,22 @@ class SessionMemoryRegenerationRunner:
                 would_write_session_memory.append(planned)
                 continue
 
-            from .regeneration_index_sync import (
-                SessionMemoryCoverageRecord,
-                SessionMemoryIndexSyncExecutor,
-                SessionMemoryIndexSyncRequest,
-            )
+            if sync_executor is None:
+                from .regeneration_index_sync import (
+                    SessionMemoryCoverageRecord,
+                    SessionMemoryIndexSyncExecutor,
+                    SessionMemoryIndexSyncRequest,
+                )
+
+                sync_executor = SessionMemoryIndexSyncExecutor(
+                    ledger=self.ledger,
+                    retired_index_bridge=self.retired_index_bridge,
+                    dataset_id=self.dataset_id,
+                    runtime_dir=self.runtime_dir,
+                    max_poll_attempts=self.max_poll_attempts,
+                    poll_interval_seconds=self.poll_interval_seconds,
+                    sleep_func=self.sleep_func,
+                )
 
             coverage_records = tuple(
                 SessionMemoryCoverageRecord(
@@ -650,23 +662,11 @@ class SessionMemoryRegenerationRunner:
                 )
                 for chunk in _normalize_session_chunks_for_memory(canonical_group.chunks)
             )
-            sync_result = SessionMemoryIndexSyncExecutor().execute(
+            sync_result = sync_executor.execute(
                 SessionMemoryIndexSyncRequest(
-                    ledger=self.ledger,
-                    retired_index_bridge=self.retired_index_bridge,
-                    dataset_id=self.dataset_id,
-                    runtime_dir=self.runtime_dir,
                     packed=packed,
                     planned=planned,
-                    content_hash=content_hash,
-                    provider=canonical_group.provider,
-                    project=canonical_group.project,
-                    session_id_hash=canonical_group.session_id_hash,
-                    coverage=coverage,
                     coverage_records=coverage_records,
-                    max_poll_attempts=self.max_poll_attempts,
-                    poll_interval_seconds=self.poll_interval_seconds,
-                    sleep_func=self.sleep_func,
                 )
             )
             mutated = mutated or sync_result.mutation_performed

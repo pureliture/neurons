@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import fields, replace
+
 import pytest
 
+from agent_knowledge.session_memory import regeneration_index_sync
 from agent_knowledge.session_memory.memory_regeneration import (
     FixtureTranscriptMemorySource,
     SessionMemoryRegenerationRunner,
@@ -99,13 +102,13 @@ class ParseRequestFailureBridge(FakeRetiredIndexBridge):
         raise RuntimeError("parse service unavailable")
 
 
-def _source() -> FixtureTranscriptMemorySource:
+def _source(*, session_id_hash: str = "sha256:session-sync") -> FixtureTranscriptMemorySource:
     return FixtureTranscriptMemorySource(
         [
             TranscriptMemoryChunkRecord(
                 knowledge_id="kn_source_chunk",
                 chunk_id="chunk_source",
-                session_id_hash="sha256:session-sync",
+                session_id_hash=session_id_hash,
                 provider="codex",
                 project=PROJECT,
                 turn_start_index=1,
@@ -117,6 +120,43 @@ def _source() -> FixtureTranscriptMemorySource:
                 source_status="indexed_transcript_memory",
                 redaction_version="redaction.v2",
             )
+        ]
+    )
+
+
+def _two_session_source() -> FixtureTranscriptMemorySource:
+    return FixtureTranscriptMemorySource(
+        _source().list_conversation_chunks()
+        + _source(session_id_hash="sha256:session-sync-second").list_conversation_chunks()
+    )
+
+
+def _all_skipped_source() -> FixtureTranscriptMemorySource:
+    source_chunk = _source().list_conversation_chunks()[0]
+    return FixtureTranscriptMemorySource(
+        [
+            replace(
+                source_chunk,
+                session_id_hash="sha256:invalid-window",
+                turn_start_index=0,
+                turn_end_index=0,
+            ),
+            replace(
+                source_chunk,
+                session_id_hash="sha256:gapped-window",
+                chunk_id="chunk_gap_first",
+                content_hash="sha256:gap-first",
+                turn_start_index=1,
+                turn_end_index=1,
+            ),
+            replace(
+                source_chunk,
+                session_id_hash="sha256:gapped-window",
+                chunk_id="chunk_gap_second",
+                content_hash="sha256:gap-second",
+                turn_start_index=3,
+                turn_end_index=3,
+            ),
         ]
     )
 
@@ -140,6 +180,73 @@ def _run_sync(*, ledger: FakeLedger, bridge: FakeRetiredIndexBridge, max_poll_at
 
 def _event_names(events: list[tuple[str, dict]]) -> list[str]:
     return [name for name, _details in events]
+
+
+def test_sync_without_dependencies_returns_empty_source_report():
+    report = SessionMemoryRegenerationRunner(
+        source=FixtureTranscriptMemorySource([]),
+        sync=True,
+    ).run()
+
+    assert report["mode"] == "sync"
+    assert report["memory_documents_planned"] == 0
+    assert report["skipped_sessions"] == []
+    assert report["mutation_performed"] is False
+
+
+def test_sync_without_dependencies_returns_all_skipped_groups_report():
+    report = SessionMemoryRegenerationRunner(
+        source=_all_skipped_source(),
+        sync=True,
+    ).run()
+
+    assert report["mode"] == "sync"
+    assert report["memory_documents_planned"] == 0
+    assert {item["reason"] for item in report["skipped_sessions"]} == {
+        "invalid_turn_window",
+        "coverage_incomplete_before_upload",
+    }
+    assert report["mutation_performed"] is False
+
+
+def test_sync_initializes_executor_once_and_keeps_document_request_minimal(monkeypatch):
+    construction_args: list[dict] = []
+    requests = []
+
+    class RecordingExecutor:
+        def __init__(self, **kwargs):
+            construction_args.append(kwargs)
+
+        def execute(self, request):
+            requests.append(request)
+            return regeneration_index_sync.SessionMemoryIndexSyncResult(
+                planned=dict(request.planned),
+                mutation_performed=False,
+            )
+
+    monkeypatch.setattr(regeneration_index_sync, "SessionMemoryIndexSyncExecutor", RecordingExecutor)
+    ledger = FakeLedger()
+    bridge = FakeRetiredIndexBridge([])
+    runner = SessionMemoryRegenerationRunner(
+        source=_two_session_source(),
+        ledger=ledger,
+        sync=True,
+        retired_index_bridge=bridge,
+        dataset_id=DATASET_ID,
+        max_poll_attempts=3,
+        poll_interval_seconds=0,
+    )
+
+    report = runner.run()
+
+    assert len(construction_args) == 1
+    assert construction_args[0]["ledger"] is ledger
+    assert construction_args[0]["retired_index_bridge"] is bridge
+    assert construction_args[0]["dataset_id"] == DATASET_ID
+    assert construction_args[0]["max_poll_attempts"] == 3
+    assert len(requests) == 2
+    assert [field.name for field in fields(requests[0])] == ["packed", "planned", "coverage_records"]
+    assert report["memory_documents_planned"] == 2
 
 
 def test_sync_fresh_upload_metadata_parse_and_poll_success():

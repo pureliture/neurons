@@ -205,6 +205,96 @@ def test_session_memory_gc_execute_requires_backup_for_selected_candidates(tmp_p
     assert report["network_used"] is False
 
 
+def test_session_memory_gc_reports_share_schema_across_normal_and_fail_closed_paths(tmp_path, monkeypatch):
+    # P2: 정상 완료와 두 fail-closed short-circuit은 같은 report schema를 유지한다.
+    # 특히 backup_dir 부재와 retention 정책 차단은 index 호출이나 delete로 진행하지 않는다.
+    candidate = {
+        "knowledge_id": "kn_gc_schema",
+        "index_document_id": "doc_gc_schema",
+        "session_id_hash": SESSION_ID_HASH,
+    }
+    monkeypatch.setattr(SessionMemoryGcRunner, "_list_candidates", lambda self, ledger: [candidate])
+    fake = _FakeRetiredIndexBridgeGcClient()
+
+    normal = SessionMemoryGcRunner(
+        config=SessionMemoryGcConfig(
+            ledger_path=tmp_path / "normal.sqlite",
+            dataset_id="ds_session_memory",
+            index_url="http://localhost:9380",
+        ),
+        index_client=fake,
+    ).run()
+    backup_dir_required = SessionMemoryGcRunner(
+        config=SessionMemoryGcConfig(
+            ledger_path=tmp_path / "backup-required.sqlite",
+            dataset_id="ds_session_memory",
+            index_url="http://localhost:9380",
+            execute=True,
+        ),
+        index_client=fake,
+    ).run()
+    blocked_retention_policy = SessionMemoryGcRunner(
+        config=SessionMemoryGcConfig(
+            ledger_path=tmp_path / "blocked.sqlite",
+            dataset_id="ds_session_memory",
+            index_url="http://localhost:9380",
+            declared_retention_policy="private_indefinite_until_disabled",
+            execute=True,
+        ),
+        index_client=fake,
+    ).run()
+
+    expected_fields = {
+        "schema_version",
+        "status",
+        "mode",
+        "retention_policy_enforced",
+        "min_disabled_age_floor_seconds",
+        "effective_min_disabled_age_seconds",
+        "eligible_count",
+        "selected_count",
+        "attempted_count",
+        "deleted_count",
+        "revalidation_skipped_count",
+        "backed_up_count",
+        "backup_enabled",
+        "failed_count",
+        "failed_error_class",
+        "mutation_performed",
+        "network_used",
+        "raw_ids_printed",
+    }
+    assert all(set(report) == expected_fields for report in (
+        normal,
+        backup_dir_required,
+        blocked_retention_policy,
+    ))
+
+    assert normal["status"] == "ok"
+    assert normal["mode"] == "dry_run"
+    assert normal["network_used"] is False
+    assert normal["mutation_performed"] is False
+
+    assert backup_dir_required["status"] == "partial_failed"
+    assert backup_dir_required["failed_error_class"] == "backup_dir_required"
+    assert backup_dir_required["attempted_count"] == 0
+    assert backup_dir_required["deleted_count"] == 0
+    assert backup_dir_required["backed_up_count"] == 0
+    assert backup_dir_required["network_used"] is False
+    assert backup_dir_required["mutation_performed"] is False
+
+    assert blocked_retention_policy["status"] == "blocked_retention_policy"
+    assert blocked_retention_policy["retention_policy_enforced"] is True
+    assert blocked_retention_policy["eligible_count"] == 0
+    assert blocked_retention_policy["selected_count"] == 0
+    assert blocked_retention_policy["attempted_count"] == 0
+    assert blocked_retention_policy["deleted_count"] == 0
+    assert blocked_retention_policy["backed_up_count"] == 0
+    assert blocked_retention_policy["network_used"] is False
+    assert blocked_retention_policy["mutation_performed"] is False
+    assert fake.deleted == []
+
+
 def test_session_memory_gc_requires_promoted_dirty_and_active_replacement(tmp_path, monkeypatch):
     ledger_path = tmp_path / "ledger.sqlite"
     ledger = Ledger(ledger_path)
