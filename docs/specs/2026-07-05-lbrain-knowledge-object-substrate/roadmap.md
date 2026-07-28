@@ -1245,6 +1245,7 @@ Corrective contract:
 - inventory는 명시 index precheck, complete-scan/limit/timeout, source revision drift, deterministic redacted digest를 검증합니다. 누락·malformed·reversed temporal evidence, source drift, repair-required count, incomplete scan 중 하나라도 있으면 `gap_count > 0`으로 fail-closed하고 activation은 첫 mutation 전에 멈춥니다.
 - projection invalidation canary의 queue bookkeeping은 ingress PVC와 분리된 ephemeral state DB만 사용합니다. synthetic canary가 shadow DB에 recovery-like table을 만들고 legacy recovery가 이를 provenance 전체로 오인할 수 없습니다.
 - 이 authority correction이 production image와 GitOps runtime에 반영되고 inventory/receipt가 stable하게 일치하기 전에는 historical repair와 Date A/B positive semantic acceptance를 `PASS`로 선언하지 않습니다. 현재 zero-result/non-empty-gap temporal response는 fail-closed 동작이며 repair 완료 증거가 아닙니다.
+- v2 acceptance baseline은 read-only `temporal-acceptance-derive`가 complete CouchDB inventory를 두 번 비교해 source revision drift를 막은 뒤에만 만들 수 있습니다. 기준 선택은 live `TemporalSelector` interval-overlap과 동일하고, `observed_at_start` 최신 snapshot만 허용하며 동률은 차단합니다. MCP 결과, artifact materialization hash, CouchDB `_rev`는 positive baseline이 될 수 없습니다. Per-probe는 `SessionMemoryArtifact` provenance의 canonical `source_revision`과 authority fingerprint을 비교하며 Date A/B는 두 값 모두 서로 달라야 합니다. CouchDB `_id`/`_rev`는 반환되지 않는 outer inventory receipt preimage에만 결속합니다.
 
 ### Deferred temporal guard reconciliation evidence (2026-07-26)
 

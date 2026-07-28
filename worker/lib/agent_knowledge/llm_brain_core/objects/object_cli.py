@@ -36,6 +36,10 @@ from .reference_corpus import (
     default_corpus_policy_status,
     reference_corpus_objects_from_manifest,
 )
+from .temporal_acceptance_derive import (
+    build_source_store_from_env,
+    derive_temporal_acceptance_baseline,
+)
 from .runtime_readiness import (
     build_source_to_candidate_runtime_collected_shadow_evidence_packet,
     build_source_to_candidate_runtime_evidence_collection_plan,
@@ -1004,6 +1008,52 @@ def source_to_candidate_runtime_readiness_main(argv: list[str] | None = None) ->
     )
     _print_json(report)
     return 1 if report["status"] == "FAIL" else 0
+
+
+def temporal_acceptance_derive_main(argv: list[str] | None = None) -> int:
+    """Build a source-native temporal v2 baseline without activating projection."""
+
+    parser = argparse.ArgumentParser(prog="neuron-knowledge temporal-acceptance-derive")
+    parser.add_argument("--selection-file", required=True)
+    parser.add_argument("--ledger", required=True)
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--limit", type=int, required=True)
+    parser.add_argument("--max-runtime-seconds", type=float, required=True)
+    args = parser.parse_args(argv)
+    try:
+        # Opening this snapshot is a guard that the artifact-ledger authority
+        # plane is available.  The derive path deliberately does not require an
+        # existing projection/artifact, so it reads no artifact content.
+        _ledger = Ledger.open_read_only(args.ledger)
+        result = derive_temporal_acceptance_baseline(
+            source_store=build_source_store_from_env(),
+            project=str(args.project),
+            selection=_load_json_mapping(args.selection_file, label="temporal acceptance selection"),
+            limit=int(args.limit),
+            max_runtime_seconds=float(args.max_runtime_seconds),
+        )
+    except ValueError as exc:
+        _print_json(
+            {
+                "schema_version": "temporal_acceptance_derive_receipt.v2",
+                "status": "blocked",
+                "error": type(exc).__name__,
+                "mutation_performed": False,
+                "network_used": False,
+                "raw_private_evidence_returned": False,
+                "secret_returned": False,
+                "host_topology_returned": False,
+                "raw_external_ids_returned": False,
+            }
+        )
+        return 1
+    _ = _ledger
+    output = dict(result)
+    receipt = output.get("receipt")
+    if isinstance(receipt, dict):
+        receipt["artifact_ledger_metadata_read_only"] = True
+    _print_json(output)
+    return 0
 
 
 def okf_export_main(argv: list[str] | None = None) -> int:

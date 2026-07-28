@@ -24,6 +24,7 @@ from .artifact_preference_evaluator import (
     artifact_preference_application_receipt_is_valid,
 )
 from .golden_query_eval import build_source_to_authority_quality_gate_report
+from .temporal_acceptance_derive import authority_baseline_receipt_is_valid
 from ...permission_audit_contract import build_permission_audit_operation_hash
 
 REQUIRED_REVIEW_TOOL_NAMES = (
@@ -3387,6 +3388,8 @@ def _live_temporal_recall_corrective_checkpoint_claim(
 ) -> dict[str, Any]:
     checkpoint = evidence.get("temporal_recall_corrective_checkpoint")
     checkpoint = checkpoint if isinstance(checkpoint, Mapping) else {}
+    if checkpoint.get("acceptance_version") == "v2":
+        return _live_temporal_recall_corrective_checkpoint_v2_claim(evidence)
     base = {
         "claim_id": "live.temporal_recall.corrective_checkpoint",
         "evidence_class": "runtime_semantic_acceptance",
@@ -3646,6 +3649,21 @@ def _live_temporal_recall_corrective_checkpoint_claim(
             )
         if _strict_int_or_none(probe.get("work_unit_count")) != 1:
             failures.append(f"temporal_corrective_{label}_work_unit_count_invalid")
+        if any(
+            field in probe
+            for field in (
+                "object_count",
+                "second_result_present",
+                "extra_work_unit_count",
+                "non_work_unit_count",
+            )
+        ) and (
+            _strict_int_or_none(probe.get("object_count")) != 1
+            or probe.get("second_result_present") is not False
+            or _strict_int_or_none(probe.get("extra_work_unit_count")) != 0
+            or _strict_int_or_none(probe.get("non_work_unit_count")) != 0
+        ):
+            failures.append(f"temporal_corrective_{label}_response_not_exact")
         confidence_score = probe.get("confidence_score")
         if (
             _strict_int_or_none(probe.get("gap_count")) != 0
@@ -3801,6 +3819,129 @@ def _live_temporal_recall_corrective_checkpoint_claim(
         "nonsense_result_count": _strict_int_or_none(nonsense.get("result_count")),
         "entity_coverage_count": coverage,
         "entity_backlog_count": backlog,
+        "gaps": _dedupe(failures),
+    }
+
+
+def _live_temporal_recall_corrective_checkpoint_v2_claim(
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate v2 against direct-source revisions, then retain v1 safety gates.
+
+    The legacy checkpoint checks semantic/runtime health.  Its old object and
+    identity hashes are replaced in an in-memory shadow with the v2 authority
+    fingerprint solely to reuse those shared non-authority safety checks.  The
+    explicit comparisons below remain the only positive v2 authority basis.
+    """
+
+    checkpoint = evidence.get("temporal_recall_corrective_checkpoint")
+    checkpoint = checkpoint if isinstance(checkpoint, Mapping) else {}
+    shadow = dict(checkpoint)
+    shadow.pop("acceptance_version", None)
+    shadow.pop("authority_baseline", None)
+    for label in ("date_a", "date_b", "range_boundary"):
+        probe = checkpoint.get(label)
+        if not isinstance(probe, Mapping):
+            continue
+        expected = str(probe.get("expected_authority_fingerprint") or "")
+        observed = str(probe.get("observed_authority_fingerprint") or "")
+        shadow_probe = dict(probe)
+        shadow_probe.update(
+            {
+                "expected_object_fingerprint": expected,
+                "observed_object_fingerprint": observed,
+                "expected_object_identity_fingerprint": expected,
+                "observed_object_identity_fingerprint": observed,
+            }
+        )
+        shadow[label] = shadow_probe
+    legacy = _live_temporal_recall_corrective_checkpoint_claim(
+        {**dict(evidence), "temporal_recall_corrective_checkpoint": shadow}
+    )
+
+    failures: list[str] = list(legacy.get("gaps") or [])
+    baseline = checkpoint.get("authority_baseline")
+    baseline = baseline if isinstance(baseline, Mapping) else {}
+    baseline_valid = authority_baseline_receipt_is_valid(baseline)
+    if not baseline_valid:
+        failures.append("temporal_corrective_v2_authority_receipt_invalid")
+    if baseline.get("source_inventory_current") is not True:
+        failures.append("temporal_corrective_v2_source_inventory_not_current")
+    if not _is_sha256_hash_ref(str(baseline.get("source_inventory_hash") or "")):
+        failures.append("temporal_corrective_v2_source_inventory_hash_invalid")
+
+    expected_authorities: dict[str, str] = {}
+    observed_authorities: dict[str, str] = {}
+    expected_revisions: dict[str, str] = {}
+    observed_revisions: dict[str, str] = {}
+    for label in ("date_a", "date_b", "range_boundary"):
+        probe = checkpoint.get(label)
+        probe = probe if isinstance(probe, Mapping) else {}
+        expected = baseline.get(label)
+        expected = expected if isinstance(expected, Mapping) else {}
+        expected_authority = str(probe.get("expected_authority_fingerprint") or "")
+        observed_authority = str(probe.get("observed_authority_fingerprint") or "")
+        expected_revision = str(probe.get("expected_source_revision") or "")
+        observed_revision = str(probe.get("observed_source_revision") or "")
+        expected_authorities[label] = expected_authority
+        observed_authorities[label] = observed_authority
+        expected_revisions[label] = expected_revision
+        observed_revisions[label] = observed_revision
+        if (
+            expected_authority != str(expected.get("expected_authority_fingerprint") or "")
+            or expected_revision != str(expected.get("expected_source_revision") or "")
+        ):
+            failures.append(f"temporal_corrective_v2_{label}_baseline_binding_mismatch")
+        if not _is_sha256_hash_ref(expected_authority):
+            failures.append(f"temporal_corrective_v2_{label}_expected_authority_invalid")
+        if not _is_sha256_hash_ref(observed_authority):
+            failures.append(f"temporal_corrective_v2_{label}_observed_authority_invalid")
+        if expected_authority != observed_authority:
+            failures.append(f"temporal_corrective_v2_{label}_authority_fingerprint_mismatch")
+        if not _is_sha256_hash_ref(expected_revision):
+            failures.append(f"temporal_corrective_v2_{label}_expected_source_revision_invalid")
+        if not _is_sha256_hash_ref(observed_revision):
+            failures.append(f"temporal_corrective_v2_{label}_observed_source_revision_invalid")
+        if expected_revision != observed_revision:
+            failures.append(f"temporal_corrective_v2_{label}_source_revision_mismatch")
+        if probe.get("bounded_observed_interval") is not True:
+            failures.append(f"temporal_corrective_v2_{label}_bounded_observed_interval_missing")
+        if (
+            _strict_int_or_none(probe.get("object_count")) != 1
+            or probe.get("second_result_present") is not False
+            or _strict_int_or_none(probe.get("extra_work_unit_count")) != 0
+            or _strict_int_or_none(probe.get("non_work_unit_count")) != 0
+        ):
+            failures.append(f"temporal_corrective_v2_{label}_response_not_exact")
+
+    date_authority_distinct = bool(
+        _is_sha256_hash_ref(expected_authorities["date_a"])
+        and _is_sha256_hash_ref(expected_authorities["date_b"])
+        and _is_sha256_hash_ref(observed_authorities["date_a"])
+        and _is_sha256_hash_ref(observed_authorities["date_b"])
+        and expected_authorities["date_a"] != expected_authorities["date_b"]
+        and observed_authorities["date_a"] != observed_authorities["date_b"]
+    )
+    date_source_revisions_distinct = bool(
+        _is_sha256_hash_ref(expected_revisions["date_a"])
+        and _is_sha256_hash_ref(expected_revisions["date_b"])
+        and _is_sha256_hash_ref(observed_revisions["date_a"])
+        and _is_sha256_hash_ref(observed_revisions["date_b"])
+        and expected_revisions["date_a"] != expected_revisions["date_b"]
+        and observed_revisions["date_a"] != observed_revisions["date_b"]
+    )
+    if not date_authority_distinct:
+        failures.append("temporal_corrective_v2_date_authority_fingerprints_not_distinct")
+    if not date_source_revisions_distinct:
+        failures.append("temporal_corrective_v2_date_source_revisions_not_distinct")
+
+    return {
+        **legacy,
+        "status": "failed" if failures else "validated",
+        "acceptance_version": "v2",
+        "authority_receipt_validated": baseline_valid,
+        "date_ab_authority_distinct": date_authority_distinct,
+        "date_ab_source_revisions_distinct": date_source_revisions_distinct,
         "gaps": _dedupe(failures),
     }
 

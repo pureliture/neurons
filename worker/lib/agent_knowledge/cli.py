@@ -123,6 +123,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "approval-board-decide": llm_brain_object_cli.approval_board_decide_main,
     "golden-query-eval": llm_brain_object_cli.golden_query_eval_main,
     "source-to-candidate-runtime-readiness": llm_brain_object_cli.source_to_candidate_runtime_readiness_main,
+    "temporal-acceptance-derive": llm_brain_object_cli.temporal_acceptance_derive_main,
     "okf-export": llm_brain_object_cli.okf_export_main,
     "brain-regression-gate": llm_brain_regression_gate_cli.main,
     "brain-export": llm_brain_portable_cli.export_main,
@@ -201,6 +202,11 @@ COMMAND_METADATA: dict[str, dict[str, object]] = {
         "live_mutation_requires_approval": True,
     },
     "couchdb-temporal-evidence-inventory": {
+        "runtime_category": "read_only",
+        "deletion_candidate": False,
+        "live_mutation_requires_approval": False,
+    },
+    "temporal-acceptance-derive": {
         "runtime_category": "read_only",
         "deletion_candidate": False,
         "live_mutation_requires_approval": False,

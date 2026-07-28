@@ -118,7 +118,11 @@ class StateDBIngressSink:
         self.dual_write_conflict_count += conflict_count
         if conflict_count:
             raise RuntimeError("state db accept rejected: conflict")
-        return {"job_id": job_id_for_payload(request_body), "status": "queued"}
+        return {
+            "job_id": job_id_for_payload(request_body),
+            "status": "queued",
+            "already_present": bool(result.get("already_present_count")),
+        }
 
     def _record_journal(self, request_body: dict) -> None:
         if self.journal is None:

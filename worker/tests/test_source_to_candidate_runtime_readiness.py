@@ -30,6 +30,10 @@ from agent_knowledge.llm_brain_core.objects.runtime_readiness import (
     build_preference_artifact_memory_runtime_evidence,
     build_temporal_recall_corrective_checkpoint_readiness_report,
 )
+from agent_knowledge.llm_brain_core.objects.temporal_acceptance_derive import (
+    TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA,
+    authority_fingerprint_from_provenance,
+)
 from agent_knowledge.public_safe_util import hash_payload
 from agent_knowledge.permission_audit_contract import (
     build_permission_audit_operation_hash,
@@ -1334,6 +1338,81 @@ def _temporal_recall_corrective_checkpoint(**overrides):
     return checkpoint
 
 
+def _temporal_recall_corrective_checkpoint_v2() -> dict:
+    checkpoint = _temporal_recall_corrective_checkpoint()
+    revisions = {
+        "date_a": "sha256:" + "7" * 64,
+        "date_b": "sha256:" + "8" * 64,
+        "range_boundary": "sha256:" + "7" * 64,
+    }
+    intervals = {
+        "date_a": ("2026-07-09T10:00:00Z", "2026-07-09T11:00:00Z"),
+        "date_b": ("2026-07-15T10:00:00Z", "2026-07-15T11:00:00Z"),
+        "range_boundary": ("2026-07-09T10:00:00Z", "2026-07-09T11:00:00Z"),
+    }
+    selectors = {
+        "date_a": {"as_of": "2026-07-09T10:30:00Z"},
+        "date_b": {"as_of": "2026-07-15T10:30:00Z"},
+        "range_boundary": {
+            "date_from": "2026-07-09T00:00:00Z",
+            "date_to": "2026-07-09T23:59:59Z",
+        },
+    }
+    baseline_probes = {}
+    for label, revision in revisions.items():
+        start, end = intervals[label]
+        authority = authority_fingerprint_from_provenance(
+            {
+                "source_kind": "session_memory_artifact",
+                "source_object_type": "SessionMemoryArtifact",
+                "content_hash": revision,
+                "source_revision": revision,
+                "observed_at_start": start,
+                "observed_at_end": end,
+                "authority_lane": "reference_only",
+            }
+        )
+        baseline_probes[label] = {
+            **selectors[label],
+            "source_kind": "session_memory_artifact",
+            "source_object_type": "SessionMemoryArtifact",
+            "authority_lane": "reference_only",
+            "expected_authority_fingerprint": authority,
+            "expected_source_revision": revision,
+        }
+        checkpoint[label].update(
+            {
+                "expected_authority_fingerprint": authority,
+                "observed_authority_fingerprint": authority,
+                "expected_source_revision": revision,
+                "observed_source_revision": revision,
+                "bounded_observed_interval": True,
+                "object_count": 1,
+                "second_result_present": False,
+                "extra_work_unit_count": 0,
+                "non_work_unit_count": 0,
+            }
+        )
+    baseline_core = {
+        "schema_version": TEMPORAL_ACCEPTANCE_BASELINE_SCHEMA,
+        "selection_policy": "latest_bounded_source_snapshot_v1",
+        "source_inventory_hash": "sha256:" + "9" * 64,
+        "source_inventory_current": True,
+        "source_inventory_count": 2,
+        **baseline_probes,
+    }
+    checkpoint.update(
+        {
+            "acceptance_version": "v2",
+            "authority_baseline": {
+                **baseline_core,
+                "authority_receipt_hash": hash_payload(baseline_core),
+            },
+        }
+    )
+    return checkpoint
+
+
 def test_runtime_readiness_requires_temporal_corrective_checkpoint_before_semantic_validation():
     evidence = _sanitized_live_evidence()
     evidence.pop("temporal_recall_corrective_checkpoint")
@@ -1430,6 +1509,37 @@ def test_runtime_readiness_validates_complete_temporal_corrective_checkpoint():
     assert checkpoint["qdrant_semantic_result_lane_used"] is True
     assert route_smokes["status"] == "validated"
     assert "temporal_work_recall" in route_smokes["validated_routes"]
+
+
+def test_runtime_readiness_v2_rejects_date_b_when_it_returns_date_a_source_revision():
+    checkpoint = _temporal_recall_corrective_checkpoint_v2()
+    checkpoint["date_b"]["observed_source_revision"] = checkpoint["date_a"][
+        "expected_source_revision"
+    ]
+
+    report = build_temporal_recall_corrective_checkpoint_readiness_report(
+        checkpoint=checkpoint
+    )
+
+    assert report["status"] == "FAIL"
+    assert "temporal_corrective_v2_date_b_source_revision_mismatch" in report["gaps"]
+
+
+def test_runtime_readiness_v2_rejects_second_or_foreign_temporal_result():
+    checkpoint = _temporal_recall_corrective_checkpoint_v2()
+    checkpoint["date_b"].update(
+        object_count=2,
+        second_result_present=True,
+        extra_work_unit_count=1,
+        non_work_unit_count=0,
+    )
+
+    report = build_temporal_recall_corrective_checkpoint_readiness_report(
+        checkpoint=checkpoint
+    )
+
+    assert report["status"] == "FAIL"
+    assert "temporal_corrective_v2_date_b_response_not_exact" in report["gaps"]
 
 
 @pytest.mark.parametrize(
