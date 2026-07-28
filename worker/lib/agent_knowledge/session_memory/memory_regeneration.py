@@ -634,122 +634,46 @@ class SessionMemoryRegenerationRunner:
                 would_write_session_memory.append(planned)
                 continue
 
-            if not self.ledger or not self.retired_index_bridge or not self.dataset_id:
-                raise ValueError("session-memory sync requires ledger, retired_index_bridge, and dataset_id")
-
-            knowledge_id = packed.metadata["knowledge_id"]
-            existing = self.ledger.get_by_knowledge_id(knowledge_id)
-            if existing is None:
-                existing = self.ledger.get_by_content_hash(content_hash)
-            existing_status = str((existing or {}).get("status") or "")
-            existing_document_id = str((existing or {}).get("index_document_id") or "")
-            existing_same_content = bool(existing and existing.get("content_hash") == content_hash)
-            if existing_same_content:
-                knowledge_id = str(existing.get("knowledge_id") or knowledge_id)
-                packed.metadata["knowledge_id"] = knowledge_id
-                planned["knowledge_id"] = knowledge_id
-            if existing_same_content and existing_status in ("indexed", "active"):
-                for chunk in _normalize_session_chunks_for_memory(canonical_group.chunks):
-                    self.ledger.record_session_memory_coverage(
-                        active_knowledge_id=knowledge_id,
-                        source_content_hash=chunk.content_hash,
-                        source_window_hash=_session_memory_source_window_hash(chunk),
-                        derived_content_hash=content_hash,
-                        redaction_version=chunk.redaction_version,
-                        turn_start_index=chunk.turn_start_index,
-                        turn_end_index=chunk.turn_end_index,
-                    )
-                would_write_session_memory.append(planned)
-                continue
-
-            resume_existing_document = (
-                existing_same_content
-                and bool(existing_document_id)
-                and existing_status in {"uploaded_unparsed", "metadata_applied", "parse_requested", "indexing", "index_timeout"}
+            from .regeneration_index_sync import (
+                SessionMemoryCoverageRecord,
+                SessionMemoryIndexSyncExecutor,
+                SessionMemoryIndexSyncRequest,
             )
-            if not resume_existing_document:
-                stored = self.ledger.upsert_session_memory(
-                    knowledge_id=knowledge_id,
-                    content_hash=content_hash,
-                    provider=canonical_group.provider,
-                    project=canonical_group.project,
-                    session_id_hash=canonical_group.session_id_hash,
-                    title=packed.title,
-                    summary=packed.metadata.get("summary", ""),
-                    evidence_status=SESSION_MEMORY_REGENERATION_EVIDENCE_STATUS,
-                    source_manifest_hash=planned["source_manifest_hash"],
-                    source_chunk_count=planned["source_chunk_count"],
-                    coverage_status=(
-                        "complete"
-                        if coverage["gap_count"] == 0 and coverage["duplicate_count"] == 0
-                        else "incomplete"
-                    ),
-                    coverage_gap_count=coverage["gap_count"],
-                    coverage_duplicate_count=coverage["duplicate_count"],
-                )
-                knowledge_id = str(stored.get("knowledge_id") or knowledge_id)
-                packed.metadata["knowledge_id"] = knowledge_id
-                planned["knowledge_id"] = knowledge_id
-            mutated = True
 
-            for chunk in _normalize_session_chunks_for_memory(canonical_group.chunks):
-                self.ledger.record_session_memory_coverage(
-                    active_knowledge_id=knowledge_id,
+            coverage_records = tuple(
+                SessionMemoryCoverageRecord(
                     source_content_hash=chunk.content_hash,
                     source_window_hash=_session_memory_source_window_hash(chunk),
-                    derived_content_hash=content_hash,
                     redaction_version=chunk.redaction_version,
                     turn_start_index=chunk.turn_start_index,
                     turn_end_index=chunk.turn_end_index,
                 )
-
-            if resume_existing_document:
-                document_id = existing_document_id
-                if existing_status == "uploaded_unparsed":
-                    self.retired_index_bridge.update_metadata(self.dataset_id, document_id, packed.metadata)
-                    self.retired_index_bridge.request_parse(self.dataset_id, [document_id])
-                    self.ledger.mark_parse_requested(knowledge_id)
-                elif existing_status == "metadata_applied":
-                    self.retired_index_bridge.request_parse(self.dataset_id, [document_id])
-                    self.ledger.mark_parse_requested(knowledge_id)
-            else:
-                from ..temp_upload import secure_upload_payload
-
-                with secure_upload_payload(self.runtime_dir, packed.body) as upload_path:
-                    upload = self.retired_index_bridge.upload_document(
-                        self.dataset_id,
-                        upload_path.read_text(encoding="utf-8"),
-                        filename=packed.filename,
-                    )
-                document_id = upload["document_id"]
-                self.ledger.mark_uploaded(knowledge_id, dataset_id=self.dataset_id, document_id=document_id, run=upload["run"])
-                self.retired_index_bridge.update_metadata(self.dataset_id, document_id, packed.metadata)
-                self.retired_index_bridge.request_parse(self.dataset_id, [document_id])
-                self.ledger.mark_parse_requested(knowledge_id)
-
-            last_run = "TIMEOUT"
-            last_progress = 0
-            indexed = False
-            for attempt in range(self.max_poll_attempts):
-                status = self.retired_index_bridge.get_document_status(self.dataset_id, document_id)
-                run = status["run"]
-                if run == "DONE":
-                    self.ledger.mark_indexed(knowledge_id, run=run)
-                    indexed = True
-                    break
-                if run == "FAIL":
-                    self.ledger.mark_parse_failed(knowledge_id, run=run)
-                    raise RuntimeError(f"parse failed for {knowledge_id}")
-                last_run = run or "RUNNING"
-                last_progress = status.get("progress", 0)
-                self.ledger.mark_indexing(knowledge_id, run=last_run, progress=last_progress)
-                if self.poll_interval_seconds > 0 and attempt + 1 < self.max_poll_attempts:
-                    self.sleep_func(self.poll_interval_seconds)
-            if not indexed:
-                self.ledger.mark_index_timeout(knowledge_id, run=last_run, progress=last_progress)
-                raise RuntimeError(f"index timeout for {knowledge_id}")
-
-            would_write_session_memory.append({**planned, "document_id": document_id})
+                for chunk in _normalize_session_chunks_for_memory(canonical_group.chunks)
+            )
+            sync_result = SessionMemoryIndexSyncExecutor().execute(
+                SessionMemoryIndexSyncRequest(
+                    ledger=self.ledger,
+                    retired_index_bridge=self.retired_index_bridge,
+                    dataset_id=self.dataset_id,
+                    runtime_dir=self.runtime_dir,
+                    packed=packed,
+                    planned=planned,
+                    content_hash=content_hash,
+                    provider=canonical_group.provider,
+                    project=canonical_group.project,
+                    session_id_hash=canonical_group.session_id_hash,
+                    coverage=coverage,
+                    coverage_records=coverage_records,
+                    max_poll_attempts=self.max_poll_attempts,
+                    poll_interval_seconds=self.poll_interval_seconds,
+                    sleep_func=self.sleep_func,
+                )
+            )
+            mutated = mutated or sync_result.mutation_performed
+            completed = sync_result.planned
+            if sync_result.document_id:
+                completed = {**completed, "document_id": sync_result.document_id}
+            would_write_session_memory.append(completed)
 
         return {
             "schema_version": MEMORY_REGENERATION_REPORT_SCHEMA_VERSION,
