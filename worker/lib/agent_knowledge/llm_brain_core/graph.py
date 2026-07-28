@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Literal, Protocol
 
+from .graph_scope import graph_group_id, graph_group_id_for_episode
 from .models import GraphMemoryResult, OntologyEpisode
 
 
@@ -119,7 +120,10 @@ class FakeGraphMemoryAdapter:
                 raise ValueError("episode id collision with different content_hash")
             return "duplicate"
         self._episodes[episode.episode_id] = episode
-        self._group_ids[episode.episode_id] = _group_id_for_episode(episode, self._default_group_id)
+        self._group_ids[episode.episode_id] = graph_group_id_for_episode(
+            episode,
+            self._default_group_id,
+        )
         return "inserted"
 
     def search_context(
@@ -133,7 +137,7 @@ class FakeGraphMemoryAdapter:
         bounded = max(1, min(int(limit), 100))
         wanted = set(entity_types or [])
         query_terms = [term for term in str(query or "").lower().split() if term]
-        target_group = _normalize_group_id(brain_id or self._default_group_id)
+        target_group = graph_group_id(brain_id or self._default_group_id)
         matches: list[OntologyEpisode] = []
         related_ids: set[str] = set()
         for episode in self._episodes.values():
@@ -171,7 +175,7 @@ class FakeGraphMemoryAdapter:
     ) -> tuple[OntologyEpisode, ...]:
         wanted_ids = [str(item) for item in episode_ids if str(item or "")]
         wanted_types = set(entity_types or [])
-        target_group = _normalize_group_id(brain_id or self._default_group_id)
+        target_group = graph_group_id(brain_id or self._default_group_id)
         episodes: list[OntologyEpisode] = []
         for episode_id in wanted_ids:
             episode = self._episodes.get(episode_id)
@@ -187,22 +191,10 @@ class FakeGraphMemoryAdapter:
     def _episode_group(self, episode: OntologyEpisode) -> str:
         stored = self._group_ids.get(episode.episode_id)
         if stored is None:
-            stored = _group_id_for_episode(episode, self._default_group_id)
-        return _normalize_group_id(stored)
+            stored = graph_group_id_for_episode(episode, self._default_group_id)
+        return graph_group_id(stored)
 
 
 def _related_incident_id(episode: OntologyEpisode) -> str:
     value = episode.payload.get("incident_id") or episode.payload.get("target_incident_id")
-    return str(value or "")
-
-
-def _episode_brain_id(episode: OntologyEpisode) -> str:
-    return str(episode.payload.get("brain_id") or "")
-
-
-def _group_id_for_episode(episode: OntologyEpisode, default_group_id: str) -> str:
-    return _episode_brain_id(episode) or str(default_group_id or "")
-
-
-def _normalize_group_id(value: str) -> str:
     return str(value or "")

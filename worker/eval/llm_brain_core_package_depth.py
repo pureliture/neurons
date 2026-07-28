@@ -47,6 +47,7 @@ ROOT_MODULE_AREA_MANIFEST: dict[str, frozenset[str]] = {
     }),
     "graph_projection": frozenset({
         "graph",
+        "graph_scope",
         "hybrid_graph",
         "projection",
         "runtime_graph",
