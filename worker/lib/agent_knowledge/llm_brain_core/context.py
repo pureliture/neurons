@@ -210,6 +210,7 @@ class BrainReadService:
         current_files: list[str],
         project: str | None = None,
         object_types: list[str] | None = None,
+        temporal_source_constraint: Mapping[str, str] | None = None,
         route: str = "",
         limit: int = 20,
         response_mode: str = "full",
@@ -253,6 +254,13 @@ class BrainReadService:
             if query_temporal_selector is not None
             else "inferred"
         )
+        source_constraint = _normalize_temporal_source_constraint(
+            temporal_source_constraint
+        )
+        if source_constraint and selected_route != "temporal_work_recall":
+            raise ValueError(
+                "temporal_source_constraint requires route temporal_work_recall"
+            )
         pack = self.brain_context_resolve(
             repository=repository,
             branch=branch,
@@ -334,6 +342,7 @@ class BrainReadService:
                 route=selected_route,
                 consumer=consumer,
                 limit=min(max(int(limit or 20), 1), 50),
+                source_constraint=source_constraint,
             )
         else:
             object_pack = _context_authority_object_pack(
@@ -870,6 +879,7 @@ def _temporal_work_object_pack(
     route: str,
     consumer: str,
     limit: int,
+    source_constraint: Mapping[str, str],
 ) -> dict[str, Any]:
     """Return only WorkUnits backed by matching observed/event time evidence.
 
@@ -1012,6 +1022,11 @@ def _temporal_work_object_pack(
     irrelevant_count = 0
     matched: list[dict[str, Any]] = []
     for candidate in candidates:
+        if source_constraint and not _temporal_candidate_matches_source_constraint(
+            candidate,
+            source_constraint,
+        ):
+            continue
         if (
             candidate.get("source_kind") == "session_memory_artifact"
             and candidate.get("temporal_evidence_kind") != "bounded"
@@ -1195,6 +1210,46 @@ def _temporal_work_object_pack(
     )
     ensure_public_safe(result, "TemporalWorkObjectPack")
     return result
+
+
+_TEMPORAL_SOURCE_CONSTRAINT_FIELDS = (
+    "source_kind",
+    "source_object_type",
+    "authority_lane",
+)
+
+
+def _normalize_temporal_source_constraint(
+    value: Mapping[str, str] | None,
+) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping) or set(value) != set(
+        _TEMPORAL_SOURCE_CONSTRAINT_FIELDS
+    ):
+        raise ValueError(
+            "temporal_source_constraint requires source_kind, "
+            "source_object_type, and authority_lane"
+        )
+    normalized: dict[str, str] = {}
+    for field in _TEMPORAL_SOURCE_CONSTRAINT_FIELDS:
+        raw_value = value.get(field)
+        if not isinstance(raw_value, str) or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9:_-]{0,119}", raw_value
+        ):
+            raise ValueError(f"temporal_source_constraint.{field} is invalid")
+        normalized[field] = raw_value
+    return normalized
+
+
+def _temporal_candidate_matches_source_constraint(
+    candidate: Mapping[str, Any],
+    source_constraint: Mapping[str, str],
+) -> bool:
+    return all(
+        str(candidate.get(field) or "") == source_constraint[field]
+        for field in _TEMPORAL_SOURCE_CONSTRAINT_FIELDS
+    )
 
 
 _TEMPORAL_QUERY_GENERIC_TERMS = frozenset(

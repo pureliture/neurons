@@ -371,6 +371,11 @@ def _dispatch_brain_objects_query_tool(tool_name: str, arguments: dict, service:
     object_types = arguments.get("object_types") or []
     if not isinstance(object_types, list):
         raise ValueError("object_types must be an array")
+    temporal_source_constraint = arguments.get("temporal_source_constraint")
+    if temporal_source_constraint is not None and not isinstance(
+        temporal_source_constraint, Mapping
+    ):
+        raise ValueError("temporal_source_constraint must be an object")
     project = _project_arg(arguments)
     as_of = str(arguments.get("as_of") or "")
     date_from = str(arguments.get("date_from") or "")
@@ -388,6 +393,7 @@ def _dispatch_brain_objects_query_tool(tool_name: str, arguments: dict, service:
         current_files=[str(item) for item in current_files],
         project=project or None,
         object_types=[str(item) for item in object_types],
+        temporal_source_constraint=temporal_source_constraint,
         route=str(arguments.get("route") or ""),
         limit=_bounded_limit(arguments.get("limit"), default=20, maximum=50),
         response_mode=_response_mode(arguments),
