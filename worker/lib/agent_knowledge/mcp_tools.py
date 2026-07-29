@@ -325,6 +325,17 @@ def list_tools() -> list[dict]:
                     "current_files": {"type": "array", "items": {"type": "string"}, "default": []},
                     "project": {"type": "string"},
                     "object_types": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "temporal_source_constraint": {
+                        "type": "object",
+                        "description": "Optional exact source constraint for temporal_work_recall.",
+                        "properties": {
+                            "source_kind": {"type": "string"},
+                            "source_object_type": {"type": "string"},
+                            "authority_lane": {"type": "string"},
+                        },
+                        "required": ["source_kind", "source_object_type", "authority_lane"],
+                        "additionalProperties": False,
+                    },
                     "route": {"type": "string"},
                     "as_of": {"type": "string", "description": "ISO-8601 instant or UTC calendar date for temporal recall."},
                     "date_from": {"type": "string", "description": "Inclusive ISO-8601 instant or UTC calendar-date range start."},
