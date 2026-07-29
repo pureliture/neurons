@@ -17,7 +17,6 @@ from agent_knowledge.llm_brain_core.graphiti_adapter import (
     GraphitiNeo4jConfig,
     GraphitiNeo4jGraphMemoryAdapter,
     _AsyncLoopRunner,
-    _graphiti_group_id,
     _MAX_EDGE_PROVENANCE_LOOKUPS_IN_FLIGHT,
     _is_list_annotation,
     _placeholder_api_key,
@@ -28,6 +27,9 @@ from agent_knowledge.llm_brain_core.graphiti_adapter import (
     _existing_fact_idx_values_from_messages,
     _normalize_structured_response,
     _uses_configured_llm_client,
+)
+from agent_knowledge.llm_brain_core.graph_scope import (
+    graph_group_id,
 )
 from agent_knowledge.llm_brain_core.models import OntologyEpisode
 
@@ -42,15 +44,16 @@ def test_graphiti_adapter_upserts_public_safe_json_episode():
     # Typed UpsertEpisodeResult (symmetric with FakeGraphMemoryAdapter), not a
     # raw graph uuid string that projection would always count as `projected`.
     assert result == "inserted"
-    assert graphiti.added[0]["name"] == episode.episode_id
-    assert graphiti.added[0]["source"] == "json"
-    assert graphiti.added[0]["group_id"].startswith("brain_")
-    assert "/" not in graphiti.added[0]["group_id"]
-    body = json.loads(graphiti.added[0]["episode_body"])
+    added_episode = graphiti.added[0]
+    assert added_episode["name"] == episode.episode_id
+    assert added_episode["source"] == "json"
+    assert added_episode["group_id"].startswith("brain_")
+    assert "/" not in added_episode["group_id"]
+    body = json.loads(added_episode["episode_body"])
     assert body["episode_id"] == episode.episode_id
     assert body["entity_type"] == "Task"
     assert body["payload"]["task"] == "Graphiti adapter"
-    assert "/Users/" not in graphiti.added[0]["episode_body"]
+    assert "/Users/" not in added_episode["episode_body"]
 
 
 def test_graphiti_adapter_default_path_inserts_then_reports_duplicate_on_reupsert():
@@ -329,6 +332,60 @@ def test_graphiti_adapter_search_rehydrates_domain_episode_and_graph_fact():
     assert "/" not in graphiti.search_calls[0]["group_ids"][0]
 
 
+def test_graphiti_adapter_reads_legacy_long_scope_group_without_cross_scope_collision():
+    shared_prefix = "/project/" + ("shared-scope-" * 20)
+    requested_scope = shared_prefix + "requested"
+    colliding_scope = shared_prefix + "colliding"
+    # `origin/main` truncated this shared prefix before hashing, so both
+    # durable nodes have the same legacy Graphiti group ID.
+    legacy_group_id = "brain_c5e08a7fe632d7a5"
+    requested_group_id = graph_group_id(requested_scope)
+    requested = _episode(
+        "Task",
+        "task:legacy-scope-requested",
+        {"brain_id": requested_scope, "task": "Legacy group requested scope"},
+    )
+    colliding = _episode(
+        "Task",
+        "task:legacy-scope-colliding",
+        {"brain_id": colliding_scope, "task": "Legacy group colliding scope"},
+    )
+    graphiti = _FakeGraphiti()
+    graphiti.episodes.extend(
+        [
+            SimpleNamespace(
+                content=json.dumps(requested.to_dict(), ensure_ascii=True, sort_keys=True),
+                group_id=legacy_group_id,
+            ),
+            SimpleNamespace(
+                content=json.dumps(colliding.to_dict(), ensure_ascii=True, sort_keys=True),
+                group_id=legacy_group_id,
+            ),
+        ]
+    )
+    retrieved_group_ids: list[list[str] | None] = []
+
+    async def _retrieve_episodes(*, reference_time, last_n=3, group_ids=None):
+        _ = (reference_time, last_n)
+        retrieved_group_ids.append(group_ids)
+        return [node for node in graphiti.episodes if node.group_id in (group_ids or [])]
+
+    graphiti.retrieve_episodes = _retrieve_episodes  # type: ignore[method-assign]
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id=requested_scope)
+
+    result = adapter.search_context(
+        brain_id=requested_scope,
+        query="Legacy group",
+        entity_types=["Task"],
+        limit=10,
+    )
+
+    assert requested_group_id != legacy_group_id
+    assert [episode.episode_id for episode in result.episodes] == [requested.episode_id]
+    assert graphiti.search_calls[-1]["group_ids"] == [requested_group_id, legacy_group_id]
+    assert retrieved_group_ids == [[requested_group_id, legacy_group_id]]
+
+
 def test_graphiti_adapter_fails_closed_for_unresolved_or_canary_edge_provenance():
     """Entity edges must inherit trusted source provider provenance before recall."""
     graphiti = _FakeGraphiti()
@@ -535,7 +592,7 @@ def test_graphiti_adapter_hydrates_recent_window_miss_and_rejects_scope_mismatch
         "task:hydrated-legacy-other-scope-source",
         {"provider": "codex", "task": "Legacy other graph source"},
     )
-    expected_group_id = _graphiti_group_id("/project/neurons")
+    expected_group_id = graph_group_id("/project/neurons")
     nodes = {
         normal.episode_id: SimpleNamespace(
             content=json.dumps(normal.to_dict(), ensure_ascii=True, sort_keys=True),
@@ -543,11 +600,11 @@ def test_graphiti_adapter_hydrates_recent_window_miss_and_rejects_scope_mismatch
         ),
         other_scope.episode_id: SimpleNamespace(
             content=json.dumps(other_scope.to_dict(), ensure_ascii=True, sort_keys=True),
-            group_id=_graphiti_group_id("/project/other"),
+            group_id=graph_group_id("/project/other"),
         ),
         legacy_other_scope.episode_id: SimpleNamespace(
             content=json.dumps(legacy_other_scope.to_dict(), ensure_ascii=True, sort_keys=True),
-            group_id=_graphiti_group_id("/project/other"),
+            group_id=graph_group_id("/project/other"),
         ),
     }
 
@@ -610,7 +667,7 @@ def test_graphiti_adapter_hydrates_missing_edge_sources_concurrently_within_dead
 
     graphiti = _FakeGraphiti()
     source_count = _MAX_EDGE_PROVENANCE_LOOKUPS_IN_FLIGHT + 1
-    expected_group_id = _graphiti_group_id("/project/neurons")
+    expected_group_id = graph_group_id("/project/neurons")
     sources = [
         _episode(
             "Task",
@@ -696,7 +753,7 @@ def test_graphiti_adapter_bounds_slow_provenance_hydration_to_read_deadline(monk
         "task:fast-source-during-slow-hydration",
         {"brain_id": "/project/neurons", "provider": "codex", "task": "Fast graph source"},
     )
-    expected_group_id = _graphiti_group_id("/project/neurons")
+    expected_group_id = graph_group_id("/project/neurons")
     graphiti.edges.extend(
         [
             SimpleNamespace(
@@ -1260,6 +1317,68 @@ def test_graphiti_episode_rehydration_rejects_missing_required_fields():
     malformed = SimpleNamespace(content=json.dumps({"episode_id": "episode:partial"}))
 
     assert _episode_node_to_ontology(malformed) is None
+
+
+def test_get_episodes_by_ids_rejects_decoded_authoritative_scope_mismatch(monkeypatch):
+    from graphiti_core.nodes import EpisodicNode
+
+    requested_scope = "/project/neurons"
+    mismatched_episode = _episode(
+        "Task",
+        "task:exact-lookup-cross-scope",
+        {"brain_id": "/project/other", "task": "must stay isolated"},
+    )
+
+    async def _get_by_uuid(_driver, episode_id):
+        assert episode_id == mismatched_episode.episode_id
+        return SimpleNamespace(
+            content=json.dumps(mismatched_episode.to_dict(), ensure_ascii=True, sort_keys=True),
+            group_id=graph_group_id(requested_scope),
+        )
+
+    monkeypatch.setattr(EpisodicNode, "get_by_uuid", staticmethod(_get_by_uuid))
+    adapter = GraphitiNeo4jGraphMemoryAdapter(_FakeGraphiti(), default_group_id=requested_scope)
+
+    assert adapter.get_episodes_by_ids(
+        [mismatched_episode.episode_id],
+        brain_id=requested_scope,
+    ) == ()
+
+
+def test_get_episodes_by_ids_reads_legacy_group_and_rejects_legacy_scope_collision(monkeypatch):
+    from graphiti_core.nodes import EpisodicNode
+
+    shared_prefix = "/project/" + ("shared-scope-" * 20)
+    requested_scope = shared_prefix + "requested"
+    legacy_group_id = "brain_c5e08a7fe632d7a5"
+    requested = _episode(
+        "Task",
+        "task:legacy-exact-requested",
+        {"brain_id": requested_scope, "task": "Legacy exact requested scope"},
+    )
+    colliding = _episode(
+        "Task",
+        "task:legacy-exact-colliding",
+        {"brain_id": shared_prefix + "colliding", "task": "Legacy exact colliding scope"},
+    )
+    nodes = {
+        episode.episode_id: SimpleNamespace(
+            content=json.dumps(episode.to_dict(), ensure_ascii=True, sort_keys=True),
+            group_id=legacy_group_id,
+        )
+        for episode in (requested, colliding)
+    }
+
+    async def _get_by_uuid(_driver, episode_id):
+        return nodes[episode_id]
+
+    monkeypatch.setattr(EpisodicNode, "get_by_uuid", staticmethod(_get_by_uuid))
+    adapter = GraphitiNeo4jGraphMemoryAdapter(_FakeGraphiti(), default_group_id=requested_scope)
+
+    assert adapter.get_episodes_by_ids(
+        [requested.episode_id, colliding.episode_id],
+        brain_id=requested_scope,
+    ) == (requested,)
 
 
 def test_graphiti_datetime_conversion_does_not_fabricate_missing_times():

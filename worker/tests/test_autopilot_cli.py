@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import sys
+
+import agent_knowledge.session_memory.autopilot_cli as autopilot_cli
 
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
 from agent_knowledge.session_memory.autopilot_cli import (
+    RETIRED_BRIDGE_LIVE_MINING_BLOCKED_EXIT,
     main,
     mine_live_candidates,
     run_autopilot_command,
@@ -124,3 +128,39 @@ def test_main_reads_candidates_json_and_writes_ledger(tmp_path, capsys):
     assert out["cycle"]["accepted_count"] == 2
     stored = Ledger(ledger_path).list_llm_brain_memory_cards(accepted_only=True, current_only=True)
     assert len(stored) == 2
+
+
+def test_main_without_candidates_json_blocks_before_retired_bridge_or_ledger_construction(tmp_path, capsys, monkeypatch):
+    def should_not_run(*_args, **_kwargs):
+        raise AssertionError("retired bridge live-mining path must not run")
+
+    monkeypatch.setattr(autopilot_cli, "Ledger", should_not_run)
+    monkeypatch.setattr(autopilot_cli, "mine_live_candidates", should_not_run)
+    monkeypatch.setitem(sys.modules, "agent_knowledge.mcp_server", None)
+    monkeypatch.setitem(sys.modules, "agent_knowledge.session_memory.supersede_detector", None)
+    monkeypatch.setitem(sys.modules, "agent_knowledge.session_memory.index_projection", None)
+
+    ledger_path = tmp_path / "ledger.sqlite"
+    rc = autopilot_cli.main([
+        "--ledger", str(ledger_path),
+        "--project", PROJECT,
+        "--refresh-watermark", "wm",
+        "--retired-index-bridge-url", "http://retired.invalid",
+        "--retired-index-bridge-token-env", "RETIRED_TOKEN",
+        "--policy-proxy-url", "http://policy.invalid",
+        "--derived-dataset-id", "legacy-derived-dataset",
+        "--llm-id", "legacy-model",
+        "--limit", "1",
+        "--max-candidates", "1",
+    ])
+
+    assert rc == RETIRED_BRIDGE_LIVE_MINING_BLOCKED_EXIT
+    assert not ledger_path.exists()
+    assert json.loads(capsys.readouterr().out) == {
+        "schema_version": "llm_brain_autopilot_command.v1",
+        "project": PROJECT,
+        "refresh_watermark": "wm",
+        "status": "blocked_retired_bridge_live_mining",
+        "network_used": False,
+        "mutation_performed": False,
+    }

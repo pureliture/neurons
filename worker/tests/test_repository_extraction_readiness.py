@@ -10,10 +10,10 @@ def test_m2_repository_extraction_plan_selects_memory_curation_candidate():
 
     assert plan["schema_version"] == "agent_knowledge_repository_extraction_plan.v1"
     assert plan["milestone"] == "M2"
-    assert plan["mode"] == "first_caller_migration"
+    assert plan["mode"] == "curation_approve_and_supersede_migration"
     assert first_candidate["name"] == "memory_curation"
     assert first_candidate["adapter"] == "LedgerMemoryCurationRepository"
-    assert first_candidate["activation_state"] == "active_for_curation_approve"
+    assert first_candidate["activation_state"] == "active_for_curation_approve_and_supersede"
     assert first_candidate["public_import_contract"] is False
     assert first_candidate["protocol_definition_stable"] is False
     assert first_candidate["tables"] == [
@@ -35,8 +35,10 @@ def test_m2_repository_extraction_plan_selects_memory_curation_candidate():
     assert plan["next_multi_write_candidate"] == {
         "caller": "CurationService.supersede",
         "reason": "old_card_demote_plus_new_card_approval_multi_write",
-        "status": "not_migrated_in_m2_first_caller",
-        "transaction_safe_claimed": False,
+        "status": "migrated_in_card_5",
+        "transaction_safe_claimed": True,
+        "repository": "LedgerMemoryCurationRepository",
+        "transaction_operation": "_LedgerTransaction.supersede_memory_card",
     }
     assert plan["public_compatibility_gate"]["public_api_break_allowed"] is False
     assert "tests/test_curation.py" in plan["public_compatibility_gate"]["fixtures"]

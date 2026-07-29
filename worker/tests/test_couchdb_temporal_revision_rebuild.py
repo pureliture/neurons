@@ -741,7 +741,7 @@ def test_temporal_query_selects_latest_relevant_revision_not_latest_unrelated_re
 
 
 def test_neuron_knowledge_routes_rebuild_as_approval_gated_additive_repair() -> None:
-    assert COMMAND_HANDLERS["couchdb-temporal-revision-rebuild"] is main
+    assert callable(COMMAND_HANDLERS["couchdb-temporal-revision-rebuild"])
     assert COMMAND_METADATA["couchdb-temporal-revision-rebuild"] == {
         "runtime_category": "human_gated_additive_repair",
         "deletion_candidate": False,

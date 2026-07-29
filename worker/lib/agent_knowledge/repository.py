@@ -19,7 +19,7 @@ def _required_list(record: Mapping[str, Any], field: str) -> list[Any]:
 
 
 class MemoryCurationRepository(Protocol):
-    """Use-case port for curation-owned approval writes."""
+    """Use-case port for curation-owned approval and supersede writes."""
 
     def approve_candidate(
         self,
@@ -29,12 +29,28 @@ class MemoryCurationRepository(Protocol):
         approved_by: str,
     ) -> Mapping[str, Any]: ...
 
+    def supersede_candidate(
+        self,
+        old_memory_id: str,
+        candidate: Mapping[str, Any],
+        card: Mapping[str, Any],
+        *,
+        approved_by: str,
+        reason: str,
+    ) -> Mapping[str, Any]: ...
+
 
 class LedgerMemoryCurationRepository:
-    """Ledger-backed repository for the first M2 curation caller migration."""
+    """Ledger-backed repository for active M2 curation caller migrations."""
 
     def __init__(self, ledger):
         self._ledger = ledger
+
+    def _transaction_factory(self):
+        transaction_factory = getattr(self._ledger, "_transaction", None)
+        if transaction_factory is None:
+            raise RuntimeError("LedgerMemoryCurationRepository requires Ledger._transaction")
+        return transaction_factory
 
     def approve_candidate(
         self,
@@ -43,11 +59,42 @@ class LedgerMemoryCurationRepository:
         *,
         approved_by: str,
     ) -> Mapping[str, Any]:
-        transaction_factory = getattr(self._ledger, "_transaction", None)
-        if transaction_factory is None:
-            raise RuntimeError("LedgerMemoryCurationRepository requires Ledger._transaction")
+        transaction_factory = self._transaction_factory()
         with transaction_factory() as transaction:
             return self._approve_on(transaction, candidate, card, approved_by=approved_by)
+
+    def supersede_candidate(
+        self,
+        old_memory_id: str,
+        candidate: Mapping[str, Any],
+        card: Mapping[str, Any],
+        *,
+        approved_by: str,
+        reason: str,
+    ) -> Mapping[str, Any]:
+        transaction_factory = self._transaction_factory()
+        _required_text({"old_memory_id": old_memory_id}, "old_memory_id")
+        with transaction_factory() as transaction:
+            old_card = transaction.supersede_memory_card(
+                old_memory_id,
+                reviewed_by=approved_by,
+                reason=reason,
+            )
+            if old_card["card_type"] == "user_preference":
+                transaction.upsert_profile_fact(
+                    memory_id=old_memory_id,
+                    project=old_card["project"],
+                    fact_type=old_card["card_type"],
+                    content_hash=old_card["content_hash"],
+                    state="superseded",
+                )
+            return self._approve_on(
+                transaction,
+                candidate,
+                card,
+                approved_by=approved_by,
+                reason=reason,
+            )
 
     @staticmethod
     def _approve_on(
@@ -56,6 +103,7 @@ class LedgerMemoryCurationRepository:
         card: Mapping[str, Any],
         *,
         approved_by: str,
+        reason: str = "",
     ) -> Mapping[str, Any]:
         card_payload = dict(card)
         memory_id = _required_text(card_payload, "memory_id")
@@ -78,6 +126,7 @@ class LedgerMemoryCurationRepository:
             candidate_id,
             "approved",
             reviewed_by=approved_by,
+            reason=reason,
         )
         if profile_fact is not None:
             transaction.upsert_profile_fact(
@@ -183,17 +232,17 @@ def repository_candidate_method_matrix() -> list[dict[str, Any]]:
 
 
 def build_repository_extraction_plan() -> dict[str, Any]:
-    """Build the M2 extraction plan for the first migrated curation caller."""
+    """Build the M2 extraction plan for the active curation caller migrations."""
 
     return {
         "schema_version": "agent_knowledge_repository_extraction_plan.v1",
         "milestone": "M2",
-        "mode": "first_caller_migration",
+        "mode": "curation_approve_and_supersede_migration",
         "first_candidate": {
             "name": "memory_curation",
             "port": "MemoryCurationRepository",
             "adapter": "LedgerMemoryCurationRepository",
-            "activation_state": "active_for_curation_approve",
+            "activation_state": "active_for_curation_approve_and_supersede",
             "public_import_contract": False,
             "protocol_definition_stable": False,
             "tables": [
@@ -212,8 +261,10 @@ def build_repository_extraction_plan() -> dict[str, Any]:
         "next_multi_write_candidate": {
             "caller": "CurationService.supersede",
             "reason": "old_card_demote_plus_new_card_approval_multi_write",
-            "status": "not_migrated_in_m2_first_caller",
-            "transaction_safe_claimed": False,
+            "status": "migrated_in_card_5",
+            "transaction_safe_claimed": True,
+            "repository": "LedgerMemoryCurationRepository",
+            "transaction_operation": "_LedgerTransaction.supersede_memory_card",
         },
         "caller_migration_order": [
             {
@@ -233,8 +284,8 @@ def build_repository_extraction_plan() -> dict[str, Any]:
             },
             {
                 "caller": "CurationService.supersede",
-                "reason": "follow_on_multi_write_candidate",
-                "rollback_guard": "future_transaction_candidate",
+                "reason": "transactional_multi_write_migration_completed",
+                "rollback_guard": "Ledger._transaction",
             },
         ],
         "rollback_guard": {

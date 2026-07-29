@@ -14,10 +14,7 @@ import os
 from pathlib import Path
 
 from agent_knowledge.ledger import Ledger
-from agent_knowledge.llm_brain_core.graphiti_adapter import (
-    _graphiti_group_id,
-    _group_id_for_episode,
-)
+from agent_knowledge.llm_brain_core.graph_scope import graph_group_id_for_episode
 from agent_knowledge.llm_brain_core.ledger_adapter import (
     LedgerGraphProjectionStateStore,
     _migrate_extraction_level,
@@ -73,13 +70,13 @@ def test_list_projected_ids_filters_by_project(tmp_path: Path):
     assert store.list_projected_ids() == {neurons.episode_id, other.episode_id}
 
 
-def test_mark_projected_persists_group_id_via_graphiti_helpers(tmp_path: Path):
-    # (5) group_id consistency: the store reuses the graphiti group_id helpers, it
-    # does not reimplement normalization.
+def test_mark_projected_persists_group_id_via_backend_neutral_codec(tmp_path: Path):
+    # (5) group_id consistency: the store reuses the shared codec rather than
+    # reimplementing the graph backend's normalization.
     ledger = _ledger(tmp_path)
     store = LedgerGraphProjectionStateStore(ledger)
     episode = _episode("group")
-    expected_group_id = _graphiti_group_id(_group_id_for_episode(episode, ""))
+    expected_group_id = graph_group_id_for_episode(episode, "")
 
     store.mark_projected(episode, "inserted")
 

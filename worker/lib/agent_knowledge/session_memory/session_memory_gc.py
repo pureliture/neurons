@@ -48,9 +48,9 @@ class SessionMemoryGcConfig:
     # retention gate를 강제한다. 둘 다 비면 기존 dataset_id-only 동작을 유지한다.
     declared_dataset_role: str = ""
     declared_retention_policy: str = ""
-    # G-8 (recoverable delete): set to a private dir to back up the doc body +
-    # recovery meta BEFORE the irreversible hard delete. Backup failure aborts
-    # the delete (no delete without a backup).
+    # G-8 (recoverable delete): execute with selected candidates requires a
+    # private backup directory. The document body + recovery metadata are saved
+    # BEFORE the irreversible hard delete; backup failure aborts the delete.
     backup_dir: str = ""
 
     def effective_min_disabled_age_seconds(self) -> int:
@@ -94,12 +94,16 @@ class SessionMemoryGcRunner:
         ledger = Ledger(self.config.ledger_path)
         candidates = self._list_candidates(ledger)
         selected = candidates[: max(int(self.config.max_items), 1)]
+        if self.config.execute and selected and not self.config.backup_dir:
+            return self._backup_dir_required_report(candidates, selected)
+
         deleted_count = 0
         failed_count = 0
         attempted_count = 0
         revalidation_skipped_count = 0
         backed_up_count = 0
         failed_error_class = ""
+        network_used = False
         if self.config.execute and selected:
             retired_index_bridge = self._index_client if self._index_client is not None else RetiredIndexBridgeHttpClient(
                 base_url=self.config.index_url,
@@ -125,10 +129,17 @@ class SessionMemoryGcRunner:
                     continue
                 attempted_count += 1
                 try:
-                    if self.config.backup_dir:
-                        # G-8: 백업이 성공해야만 삭제로 진행(백업 실패 시 예외→delete 안 함).
-                        self._backup_before_delete(ledger, retired_index_bridge, row, document_id=document_id, knowledge_id=knowledge_id, session_id_hash=session_id_hash)
-                        backed_up_count += 1
+                    # G-8: 백업이 성공해야만 삭제로 진행(백업 실패 시 예외→delete 안 함).
+                    network_used = True
+                    self._backup_before_delete(
+                        ledger,
+                        retired_index_bridge,
+                        row,
+                        document_id=document_id,
+                        knowledge_id=knowledge_id,
+                        session_id_hash=session_id_hash,
+                    )
+                    backed_up_count += 1
                     hard_delete_documents(retired_index_bridge, self.config.dataset_id, [document_id])
                     self._mark_gc_deleted(ledger, knowledge_id)
                     self._record_audit(
@@ -142,15 +153,65 @@ class SessionMemoryGcRunner:
                     failed_error_class = exc.__class__.__name__
                     failed_count += 1
                     break
+        return self._build_report(
+            status="ok" if failed_count == 0 else "partial_failed",
+            eligible_count=len(candidates),
+            selected_count=len(selected),
+            attempted_count=attempted_count,
+            deleted_count=deleted_count,
+            revalidation_skipped_count=revalidation_skipped_count,
+            backed_up_count=backed_up_count,
+            failed_count=failed_count,
+            failed_error_class=failed_error_class,
+            mutation_performed=bool(self.config.execute and deleted_count),
+            network_used=network_used,
+        )
+
+    def _backup_dir_required_report(self, candidates: list[dict], selected: list[dict]) -> dict:
+        """실행 후보가 있을 때 recoverable backup 없이 delete하지 않는다."""
+        return self._build_report(
+            status="partial_failed",
+            eligible_count=len(candidates),
+            selected_count=len(selected),
+            failed_count=1,
+            failed_error_class="backup_dir_required",
+        )
+
+    def _blocked_retention_policy_report(self) -> dict:
+        """G-5: 허용되지 않은(혹은 unknown) retention policy가 선언됐을 때, 어떤
+        mutation도 하기 전에 돌려주는 거부 리포트. 모든 count는 0이고 network/mutation은
+        False다."""
+        return self._build_report(
+            status="blocked_retention_policy",
+            eligible_count=0,
+            selected_count=0,
+        )
+
+    def _build_report(
+        self,
+        *,
+        status: str,
+        eligible_count: int,
+        selected_count: int,
+        attempted_count: int = 0,
+        deleted_count: int = 0,
+        revalidation_skipped_count: int = 0,
+        backed_up_count: int = 0,
+        failed_count: int = 0,
+        failed_error_class: str = "",
+        mutation_performed: bool = False,
+        network_used: bool = False,
+    ) -> dict:
+        """모든 종료 경로가 같은 공개 report schema를 사용하도록 만든다."""
         return {
             "schema_version": SESSION_MEMORY_GC_SCHEMA_VERSION,
-            "status": "ok" if failed_count == 0 else "partial_failed",
+            "status": status,
             "mode": "execute" if self.config.execute else "dry_run",
             "retention_policy_enforced": bool(self.config.declared_policy_input()),
             "min_disabled_age_floor_seconds": MIN_DISABLED_AGE_FLOOR_SECONDS,
             "effective_min_disabled_age_seconds": self.config.effective_min_disabled_age_seconds(),
-            "eligible_count": len(candidates),
-            "selected_count": len(selected),
+            "eligible_count": eligible_count,
+            "selected_count": selected_count,
             "attempted_count": attempted_count,
             "deleted_count": deleted_count,
             "revalidation_skipped_count": revalidation_skipped_count,
@@ -158,31 +219,8 @@ class SessionMemoryGcRunner:
             "backup_enabled": bool(self.config.backup_dir),
             "failed_count": failed_count,
             "failed_error_class": failed_error_class,
-            "mutation_performed": bool(self.config.execute and deleted_count),
-            "network_used": bool(self.config.execute),
-            "raw_ids_printed": False,
-        }
-
-    def _blocked_retention_policy_report(self) -> dict:
-        """G-5: 허용되지 않은(혹은 unknown) retention policy가 선언됐을 때, 어떤
-        mutation도 하기 전에 돌려주는 거부 리포트. 모든 count는 0이고 network/mutation은
-        False다."""
-        return {
-            "schema_version": SESSION_MEMORY_GC_SCHEMA_VERSION,
-            "status": "blocked_retention_policy",
-            "mode": "execute" if self.config.execute else "dry_run",
-            "retention_policy_enforced": True,
-            "min_disabled_age_floor_seconds": MIN_DISABLED_AGE_FLOOR_SECONDS,
-            "effective_min_disabled_age_seconds": self.config.effective_min_disabled_age_seconds(),
-            "eligible_count": 0,
-            "selected_count": 0,
-            "attempted_count": 0,
-            "deleted_count": 0,
-            "revalidation_skipped_count": 0,
-            "failed_count": 0,
-            "failed_error_class": "",
-            "mutation_performed": False,
-            "network_used": False,
+            "mutation_performed": mutation_performed,
+            "network_used": network_used,
             "raw_ids_printed": False,
         }
 
@@ -419,6 +457,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.execute:
         if not token:
             print("token env is not set", file=sys.stderr)
+            return 2
+        if not args.backup_dir:
+            print("--backup-dir is required for --execute (no delete without backup)", file=sys.stderr)
             return 2
         try:
             validate_goal3_live_approval(

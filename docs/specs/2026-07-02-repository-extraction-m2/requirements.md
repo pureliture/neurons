@@ -18,13 +18,19 @@ audit의 F-001은 ADR-0005와 `docs/specs/2026-06-26-architecture-modernization-
 
 `CurationService.approve`의 multi-write path를 첫 production caller migration으로 정한다.
 
-`approve`는 memory card write, evidence write, candidate approval, optional profile fact write를 한 흐름에서 수행한다. M1에서 이미 rollback safety 대상이었으므로 repository extraction의 첫 실제 적용점으로 적합하다. `reject`, `disable`, `supersede`는 public compatibility behavior를 유지하고, 이번 작업에서 대량 caller migration으로 확장하지 않는다. `supersede`는 old card demotion과 new card approval을 함께 수행하므로 다음 multi-write migration 후보로 기록하되, 이번 M2 first caller migration에서 transaction-safe로 주장하지 않는다.
+`approve`는 memory card write, evidence write, candidate approval, optional profile fact write를 한 흐름에서 수행한다. M1에서 이미 rollback safety 대상이었으므로 repository extraction의 첫 실제 적용점으로 적합하다. M2 first caller migration에서는 `reject`, `disable`, `supersede`의 public compatibility behavior를 유지하고 대량 caller migration으로 확장하지 않았다. 당시 `supersede`는 old card demotion과 new card approval을 함께 수행하는 다음 multi-write migration 후보였으며 transaction-safe 완료로 주장하지 않았다.
+
+### Q: 이후 Card 5 follow-up은 무엇을 변경했는가?
+
+`CurationService.supersede`의 기존 public API와 결과 shape를 유지한 채, old card demotion·old/new profile fact·new card·evidence·candidate approval write를 기존 private `Ledger._transaction()` 안으로 옮겼다.
+
+이 후속 범위는 M2 first caller migration의 역사적 결론을 바꾸지 않는다. 대신 `supersede`에 남아 있던 실제 partial-write 공백을 Card 5에서 좁혔다. `reject`, `disable`, public `UnitOfWork`, public `ledger.transaction()`은 여전히 범위 밖이다.
 
 ### Q: repository port는 무엇을 소유하나?
 
 `MemoryCurationRepository`가 curation-owned write flow를 소유한다.
 
-구현체는 기존 `Ledger`와 transaction-bound facade를 감싸며, SQL 또는 DB adapter shape를 새로 만들지 않는다. `MemoryCurationRepository`는 low-level Ledger proxy가 아니라 `approve_candidate` use-case port다. `ILedgerCoreDbAdapter`는 계속 connection seam으로 남고, public `UnitOfWork`나 public `ledger.transaction()`은 이번 범위 밖이다.
+구현체는 기존 `Ledger`와 transaction-bound facade를 감싸며, SQL 또는 DB adapter shape를 새로 만들지 않는다. `MemoryCurationRepository`는 low-level Ledger proxy가 아니라 `approve_candidate`와 `supersede_candidate` use-case port다. `ILedgerCoreDbAdapter`는 계속 connection seam으로 남고, public `UnitOfWork`나 public `ledger.transaction()`은 이번 범위 밖이다.
 
 ### Q: production 검증은 어디까지 할까?
 
@@ -46,8 +52,9 @@ audit의 F-001은 ADR-0005와 `docs/specs/2026-06-26-architecture-modernization-
 - `approve`가 쓰는 memory card, evidence, candidate approval, optional profile fact write는 동일 transaction 안에서 실행되어야 한다.
 - 기본 `LedgerMemoryCurationRepository`는 `Ledger._transaction()`이 없으면 fail-closed 해야 한다.
 - repository extraction은 `ILedgerCoreDbAdapter`를 query/transaction adapter로 바꾸지 않는다.
-- `reject`, `disable`, `supersede`의 existing behavior는 유지한다.
-- `supersede`는 다음 multi-write repository migration 후보로 metadata에 남기고, 이번 milestone에서 transaction-safe 완료 상태로 표시하지 않는다.
+- `reject`, `disable`의 existing behavior는 유지한다.
+- `supersede`의 public API와 결과 shape는 유지하고, old card demotion부터 new profile fact까지 같은 private transaction 안에서 실행한다.
+- `supersede` rollback은 old card/knowledge authority, old profile fact, new card/evidence/candidate/new profile fact를 함께 복구해야 한다.
 - public `UnitOfWork` API 또는 public `ledger.transaction()`은 만들지 않는다.
 - repository readiness metadata는 readiness-only에서 actual first caller migration 상태를 표현하되, public import contract 또는 stable protocol 완료로 표시하지 않는다.
 - raw transcript, raw dataset_id, raw document_id, token, credential은 출력하지 않는다.
@@ -68,7 +75,7 @@ audit의 F-001은 ADR-0005와 `docs/specs/2026-06-26-architecture-modernization-
 ## 사용자 시나리오
 
 - Maintainer가 `CurationService.approve`를 읽을 때 business flow가 repository port를 통해 보이고, Ledger SQL/mixin 세부가 service에 직접 퍼지지 않는다.
-- 다음 M2 구현자가 `reject`, `disable`, `supersede`를 어떤 순서와 guard로 옮길지 `repository.py`의 상태를 보고 판단한다.
+- 다음 구현자가 `reject`, `disable`의 미이관 상태와 `supersede`의 Card 5 transactional migration 상태를 `repository.py` metadata에서 구분해 판단한다.
 - 운영자는 production 검증 결과를 live mutation과 분리해서 신뢰한다.
 
 ## 미결정 항목

@@ -13,12 +13,11 @@ from ._util import PRIVATE_OUTPUT_RE, SECRET_ASSIGNMENT_RE, public_safe_text, sh
 from .graphiti_adapter import (
     _AsyncLoopRunner,
     _episode_type_json,
-    _graphiti_group_id,
-    _group_id_for_episode,
     _llm_reasoning_effort_env,
     _parse_datetime,
     _reject_forbidden_gemini_llm_model,
 )
+from .graph_scope import graph_group_id_for_episode
 from .models import OntologyEpisode
 
 DEFAULT_BULK_SEMANTIC_MAX_SESSIONS_PER_CALL = 5
@@ -296,7 +295,7 @@ class DeterministicGraphitiSemanticWriter:
             if session_result is None:
                 raise ValueError("bulk semantic result missing session")
             episode = item.episode
-            group_id = _graphiti_group_id(_group_id_for_episode(episode, ""))
+            group_id = graph_group_id_for_episode(episode, "")
             body = json.dumps(episode.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
             reference_time = _parse_datetime(episode.reference_time)
             episode_node = EpisodicNode(

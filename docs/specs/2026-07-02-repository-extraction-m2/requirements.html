@@ -24,14 +24,14 @@
   <section class="hero">
     <span class="badge">pre-approved source</span>
     <h1>Repository Extraction M2 Requirements</h1>
-    <p><code>CurationService.approve</code>를 첫 실제 repository extraction 대상으로 고정한다. production 검증은 read-only evidence로 제한한다.</p>
+    <p><code>CurationService.approve</code>를 첫 실제 repository extraction 대상으로 고정하고, Card 5 follow-up에서 <code>supersede</code>의 partial-write 공백을 같은 private transaction으로 좁힌다. production 검증은 read-only evidence로 제한한다.</p>
   </section>
   <h2>확정 결정</h2>
   <ul>
     <li>기존 승인 트랙 M2 Repository extraction을 구현한다.</li>
 	    <li>첫 caller migration은 <code>CurationService.approve</code>다.</li>
-	    <li><code>MemoryCurationRepository</code> port는 <code>approve_candidate</code> use-case만 소유한다.</li>
-	    <li><code>supersede</code>는 다음 multi-write 후보로 남기며 이번 milestone에서 transaction-safe 완료로 주장하지 않는다.</li>
+	    <li><code>MemoryCurationRepository</code> port는 <code>approve_candidate</code>와 <code>supersede_candidate</code> use-case를 소유한다.</li>
+	    <li>Card 5에서 <code>supersede</code>의 old card demotion부터 new profile fact까지를 같은 private transaction으로 묶었다.</li>
 	    <li>이번 port는 active use-case seam이며 stable public import contract가 아니다.</li>
 	    <li><code>ILedgerCoreDbAdapter</code>, public <code>UnitOfWork</code>, REST/gRPC Ledger Core API는 범위 밖이다.</li>
 	    <li>production 검증은 read-only evidence만 수행한다.</li>
@@ -41,6 +41,7 @@
     <li><code>CurationService.approve</code>는 repository port를 통해 write flow를 수행한다.</li>
     <li>기존 <code>CurationService(ledger)</code> construction은 유지한다.</li>
 	    <li>memory card, evidence, candidate approval, profile fact write는 같은 transaction 안에서 실행한다.</li>
+	    <li><code>supersede</code> 실패 시 old card/authority와 old/new profile facts를 포함한 모든 write가 rollback된다.</li>
 	    <li><code>Ledger._transaction()</code>이 없으면 default repository는 fail-closed 한다.</li>
 	    <li>repository metadata는 첫 실제 caller migration 상태와 public contract 미완료 상태를 함께 보여준다.</li>
 	  </ul>
