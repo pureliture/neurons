@@ -45,7 +45,7 @@ def violations_for(
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name in rule.forbidden_modules:
+                if _module_is_forbidden(rule, alias.name):
                     violations.append(
                         _format_violation(
                             path,
@@ -70,8 +70,8 @@ def violations_for(
                 package_root=package_root,
             )
             if (
-                imported_module in rule.forbidden_modules
-                or imported_target in rule.forbidden_modules
+                _module_is_forbidden(rule, imported_module)
+                or _module_is_forbidden(rule, imported_target)
                 or _origin_modules_are_forbidden(
                     rule,
                     export_name=alias.name,
@@ -254,12 +254,19 @@ def _origin_modules_are_forbidden(
     export_name: str,
     origin_modules: frozenset[str],
 ) -> bool:
-    return bool(rule.forbidden_modules.intersection(origin_modules)) or (
+    return any(_module_is_forbidden(rule, module) for module in origin_modules) or (
         _matches_forbidden_export(
             rule,
             export_name=export_name,
             origin_modules=origin_modules,
         )
+    )
+
+
+def _module_is_forbidden(rule: ImportDirectionRule, module: str) -> bool:
+    return any(
+        module == forbidden_module or module.startswith(f"{forbidden_module}.")
+        for forbidden_module in rule.forbidden_modules
     )
 
 
@@ -399,6 +406,18 @@ class _FunctionLocalBindingVisitor(ast.NodeVisitor):
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         return
+
+    def _visit_comprehension_scope(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp,
+    ) -> None:
+        for generator in node.generators:
+            self.visit(generator.iter)
+
+    visit_ListComp = _visit_comprehension_scope
+    visit_SetComp = _visit_comprehension_scope
+    visit_DictComp = _visit_comprehension_scope
+    visit_GeneratorExp = _visit_comprehension_scope
 
 
 def _function_local_bindings(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:

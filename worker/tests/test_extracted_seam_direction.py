@@ -172,6 +172,27 @@ def test_guard_reports_direct_absolute_and_relative_imports(tmp_path: Path) -> N
     ]
 
 
+def test_guard_reports_forbidden_module_submodule_imports(tmp_path: Path) -> None:
+    package_root = tmp_path / "worker" / "lib" / "agent_knowledge"
+    _write_fixture_source(
+        package_root,
+        "llm_brain_core/graph_scope.py",
+        "import graphiti_core.nodes\n"
+        "from graphiti_core.nodes import EpisodicNode\n",
+    )
+
+    assert _violations_for(
+        _RULES[2],
+        package_root=package_root,
+        repo_root=tmp_path,
+    ) == [
+        "worker/lib/agent_knowledge/llm_brain_core/graph_scope.py:1: "
+        "import graphiti_core.nodes",
+        "worker/lib/agent_knowledge/llm_brain_core/graph_scope.py:2: "
+        "from graphiti_core.nodes import EpisodicNode",
+    ]
+
+
 def test_curation_service_requires_curation_module_provenance(tmp_path: Path) -> None:
     package_root = tmp_path / "worker" / "lib" / "agent_knowledge"
     _write_fixture_source(
@@ -459,4 +480,33 @@ def test_facade_alias_resolution_respects_lambda_and_comprehension_scopes(
         "sm.SessionMemoryRegenerationRunner",
         "worker/lib/agent_knowledge/session_memory/regeneration_index_sync.py:8: "
         "sm.SessionMemoryRegenerationRunner",
+    ]
+
+
+def test_function_comprehension_target_does_not_shadow_import_alias(
+    tmp_path: Path,
+) -> None:
+    package_root = tmp_path / "worker" / "lib" / "agent_knowledge"
+    _write_fixture_source(
+        package_root,
+        "session_memory/__init__.py",
+        '_EXPORT_MODULES = {"SessionMemoryRegenerationRunner": ".memory_regeneration"}\n',
+    )
+    _write_fixture_source(
+        package_root,
+        "session_memory/regeneration_index_sync.py",
+        "import agent_knowledge.session_memory as sm\n"
+        "\n"
+        "def inherits_module_alias(values):\n"
+        "    seen = [value for sm in values]\n"
+        "    return sm.SessionMemoryRegenerationRunner\n",
+    )
+
+    assert _violations_for(
+        _RULES[0],
+        package_root=package_root,
+        repo_root=tmp_path,
+    ) == [
+        "worker/lib/agent_knowledge/session_memory/regeneration_index_sync.py:5: "
+        "sm.SessionMemoryRegenerationRunner"
     ]

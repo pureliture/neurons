@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import stat
 from dataclasses import fields, replace
+from pathlib import Path
 
 import pytest
 
@@ -166,13 +168,20 @@ def _content_hash() -> str:
     return report["would_write_session_memory"][0]["contentHash"]
 
 
-def _run_sync(*, ledger: FakeLedger, bridge: FakeRetiredIndexBridge, max_poll_attempts: int = 2) -> dict:
+def _run_sync(
+    *,
+    ledger: FakeLedger,
+    bridge: FakeRetiredIndexBridge,
+    runtime_dir: str | Path = "",
+    max_poll_attempts: int = 2,
+) -> dict:
     return SessionMemoryRegenerationRunner(
         source=_source(),
         ledger=ledger,
         sync=True,
         retired_index_bridge=bridge,
         dataset_id=DATASET_ID,
+        runtime_dir=runtime_dir,
         max_poll_attempts=max_poll_attempts,
         poll_interval_seconds=0,
     ).run()
@@ -249,11 +258,11 @@ def test_sync_initializes_executor_once_and_keeps_document_request_minimal(monke
     assert report["memory_documents_planned"] == 2
 
 
-def test_sync_fresh_upload_metadata_parse_and_poll_success():
+def test_sync_fresh_upload_metadata_parse_and_poll_success(tmp_path):
     ledger = FakeLedger()
     bridge = FakeRetiredIndexBridge([{"run": "RUNNING", "progress": 0.4}, {"run": "DONE"}])
 
-    report = _run_sync(ledger=ledger, bridge=bridge)
+    report = _run_sync(ledger=ledger, bridge=bridge, runtime_dir=tmp_path / "runtime")
 
     assert report["mode"] == "sync"
     assert report["network_used"] is True
@@ -282,7 +291,33 @@ def test_sync_fresh_upload_metadata_parse_and_poll_success():
     assert ledger.coverage[0]["derived_content_hash"] == _content_hash()
 
 
-def test_sync_reuses_indexed_same_content_and_restores_coverage_without_bridge_calls():
+def test_sync_requires_explicit_runtime_dir_before_new_upload(monkeypatch):
+    ledger = FakeLedger()
+    bridge = FakeRetiredIndexBridge([])
+    secure_upload_calls: list[tuple[object, ...]] = []
+    cwd_mode_before = stat.S_IMODE(Path.cwd().stat().st_mode)
+
+    def forbidden_secure_upload_payload(*args, **kwargs):
+        secure_upload_calls.append(args)
+        raise AssertionError("empty runtime_dir must fail before secure_upload_payload")
+
+    monkeypatch.setattr(
+        regeneration_index_sync,
+        "secure_upload_payload",
+        forbidden_secure_upload_payload,
+    )
+
+    with pytest.raises(ValueError, match="runtime_dir"):
+        _run_sync(ledger=ledger, bridge=bridge)
+
+    assert secure_upload_calls == []
+    assert ledger.events == []
+    assert ledger.coverage == []
+    assert bridge.events == []
+    assert stat.S_IMODE(Path.cwd().stat().st_mode) == cwd_mode_before
+
+
+def test_sync_reuses_indexed_same_content_and_restores_coverage_without_bridge_calls(tmp_path):
     ledger = FakeLedger(
         existing={
             "knowledge_id": "kn_indexed",
@@ -293,7 +328,7 @@ def test_sync_reuses_indexed_same_content_and_restores_coverage_without_bridge_c
     )
     bridge = FakeRetiredIndexBridge([])
 
-    report = _run_sync(ledger=ledger, bridge=bridge)
+    report = _run_sync(ledger=ledger, bridge=bridge, runtime_dir=tmp_path / "runtime")
 
     assert report["mutation_performed"] is False
     assert report["index_write_performed"] is False
@@ -311,19 +346,19 @@ def test_sync_reuses_indexed_same_content_and_restores_coverage_without_bridge_c
     assert coverage["turn_end_index"] == 2
 
 
-def test_sync_records_metadata_before_parse_failure_and_resumes_without_reapplying_metadata():
+def test_sync_records_metadata_before_parse_failure_and_resumes_without_reapplying_metadata(tmp_path):
     ledger = FakeLedger()
     failing_bridge = ParseRequestFailureBridge([])
 
     with pytest.raises(RuntimeError, match="parse service unavailable"):
-        _run_sync(ledger=ledger, bridge=failing_bridge)
+        _run_sync(ledger=ledger, bridge=failing_bridge, runtime_dir=tmp_path / "runtime")
 
     assert ledger.existing is not None
     assert ledger.existing["status"] == "metadata_applied"
     assert _event_names(ledger.events)[-1] == "mark_metadata_applied"
 
     resumed_bridge = FakeRetiredIndexBridge([{"run": "DONE"}])
-    report = _run_sync(ledger=ledger, bridge=resumed_bridge)
+    report = _run_sync(ledger=ledger, bridge=resumed_bridge, runtime_dir=tmp_path / "runtime")
 
     assert report["would_write_session_memory"][0]["document_id"] == "doc_fresh"
     assert _event_names(resumed_bridge.events) == ["request_parse", "get_document_status"]
@@ -340,6 +375,7 @@ def test_sync_records_metadata_before_parse_failure_and_resumes_without_reapplyi
     ],
 )
 def test_sync_resumes_each_existing_index_state(
+    tmp_path,
     status,
     expected_bridge_events,
     expects_metadata_applied,
@@ -355,7 +391,7 @@ def test_sync_resumes_each_existing_index_state(
     )
     bridge = FakeRetiredIndexBridge([{"run": "DONE"}])
 
-    report = _run_sync(ledger=ledger, bridge=bridge)
+    report = _run_sync(ledger=ledger, bridge=bridge, runtime_dir=tmp_path / "runtime")
 
     assert report["mutation_performed"] is True
     assert report["would_write_session_memory"][0]["document_id"] == "doc_resume"
@@ -374,11 +410,16 @@ def test_sync_resumes_each_existing_index_state(
         ([{"run": "RUNNING", "progress": 0.25}], "mark_index_timeout", "index timeout"),
     ],
 )
-def test_sync_persists_parse_failure_or_timeout_status(statuses, expected_ledger_event, error):
+def test_sync_persists_parse_failure_or_timeout_status(tmp_path, statuses, expected_ledger_event, error):
     ledger = FakeLedger()
     bridge = FakeRetiredIndexBridge(statuses)
 
     with pytest.raises(RuntimeError, match=error):
-        _run_sync(ledger=ledger, bridge=bridge, max_poll_attempts=1)
+        _run_sync(
+            ledger=ledger,
+            bridge=bridge,
+            runtime_dir=tmp_path / "runtime",
+            max_poll_attempts=1,
+        )
 
     assert expected_ledger_event in _event_names(ledger.events)

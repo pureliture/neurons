@@ -7,6 +7,7 @@ import os
 import sys
 from collections.abc import Callable
 from importlib import import_module
+from typing import TYPE_CHECKING
 
 from .couchdb_source import build_cli as couchdb_build_cli
 from .couchdb_source import historical_temporal_repair
@@ -42,6 +43,9 @@ from .session_memory import (
     transcript_volume_gc,
     zombie_snapshot_repair,
 )
+
+if TYPE_CHECKING:
+    from .mcp_server import KnowledgeSearchService
 
 BOUNDARY = "server worker -> state DB -> brain/session-memory -> GC safety planners"
 
