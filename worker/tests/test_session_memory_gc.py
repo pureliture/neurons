@@ -137,6 +137,7 @@ def test_session_memory_gc_deletes_disabled_row_only_after_replacement_active(tm
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
             index_url="http://localhost:9380",
+            backup_dir=str(tmp_path / "gc-backup"),
             execute=True,
         ),
         token="test-token",
@@ -146,6 +147,7 @@ def test_session_memory_gc_deletes_disabled_row_only_after_replacement_active(tm
             ledger_path=ledger_path,
             dataset_id="ds_session_memory",
             index_url="http://localhost:9380",
+            backup_dir=str(tmp_path / "gc-backup"),
             execute=True,
         ),
         token="test-token",
@@ -159,6 +161,165 @@ def test_session_memory_gc_deletes_disabled_row_only_after_replacement_active(tm
     assert tombstone["session_memory_gc"]["status"] == "deleted"
     assert repeated["eligible_count"] == 0
     assert repeated["deleted_count"] == 0
+
+
+def test_session_memory_gc_execute_requires_backup_for_selected_candidates(tmp_path, monkeypatch):
+    ledger_path = tmp_path / "ledger.sqlite"
+    ledger = Ledger(ledger_path)
+    old = _session_memory(ledger, knowledge_id="kn_gc_no_backup_old", document_id="doc_gc_no_backup_old")
+    active = _session_memory(ledger, knowledge_id="kn_gc_no_backup_active", document_id="doc_gc_no_backup_active")
+    ledger.mark_disabled(old["knowledge_id"])
+    _backdate_disabled_at(ledger, old["knowledge_id"], seconds_ago=2 * MIN_DISABLED_AGE_FLOOR_SECONDS)
+    ledger.promote_session_memory(active["knowledge_id"])
+    ledger.mark_session_memory_dirty(
+        session_id_hash=SESSION_ID_HASH,
+        provider="codex",
+        project=PROJECT,
+        reason="gc-no-backup",
+    )
+    ledger.mark_dirty_session_memory_promoted(
+        session_id_hash=SESSION_ID_HASH,
+        summary_knowledge_id=active["knowledge_id"],
+    )
+
+    def bomb_client(**kwargs):
+        raise AssertionError("backup_dir missing path must not create an index client")
+
+    monkeypatch.setattr(gc_module, "RetiredIndexBridgeHttpClient", bomb_client)
+
+    report = SessionMemoryGcRunner(
+        config=SessionMemoryGcConfig(
+            ledger_path=ledger_path,
+            dataset_id="ds_session_memory",
+            index_url="http://localhost:9380",
+            execute=True,
+        ),
+        token="test-token",
+    ).run()
+
+    assert report["status"] == "partial_failed"
+    assert report["failed_error_class"] == "backup_dir_required"
+    assert report["attempted_count"] == 0
+    assert report["deleted_count"] == 0
+    assert report["mutation_performed"] is False
+    assert report["network_used"] is False
+
+
+def test_session_memory_gc_execute_without_bridge_call_reports_network_unused(tmp_path, monkeypatch):
+    candidate = {
+        "knowledge_id": "kn_gc_revalidation_skip",
+        "index_document_id": "doc_gc_revalidation_skip",
+        "session_id_hash": SESSION_ID_HASH,
+    }
+    monkeypatch.setattr(SessionMemoryGcRunner, "_list_candidates", lambda self, ledger: [candidate])
+    monkeypatch.setattr(SessionMemoryGcRunner, "_still_qualifies", lambda self, ledger, **kwargs: False)
+    fake = _FakeRetiredIndexBridgeGcClient()
+
+    report = SessionMemoryGcRunner(
+        config=SessionMemoryGcConfig(
+            ledger_path=tmp_path / "ledger.sqlite",
+            dataset_id="ds_session_memory",
+            index_url="http://localhost:9380",
+            backup_dir=str(tmp_path / "gc-backup"),
+            execute=True,
+        ),
+        index_client=fake,
+    ).run()
+
+    assert report["attempted_count"] == 0
+    assert report["revalidation_skipped_count"] == 1
+    assert report["network_used"] is False
+    assert fake.deleted == []
+
+
+def test_session_memory_gc_reports_share_schema_across_normal_and_fail_closed_paths(tmp_path, monkeypatch):
+    # P2: 정상 완료와 두 fail-closed short-circuit은 같은 report schema를 유지한다.
+    # 특히 backup_dir 부재와 retention 정책 차단은 index 호출이나 delete로 진행하지 않는다.
+    candidate = {
+        "knowledge_id": "kn_gc_schema",
+        "index_document_id": "doc_gc_schema",
+        "session_id_hash": SESSION_ID_HASH,
+    }
+    monkeypatch.setattr(SessionMemoryGcRunner, "_list_candidates", lambda self, ledger: [candidate])
+    fake = _FakeRetiredIndexBridgeGcClient()
+
+    normal = SessionMemoryGcRunner(
+        config=SessionMemoryGcConfig(
+            ledger_path=tmp_path / "normal.sqlite",
+            dataset_id="ds_session_memory",
+            index_url="http://localhost:9380",
+        ),
+        index_client=fake,
+    ).run()
+    backup_dir_required = SessionMemoryGcRunner(
+        config=SessionMemoryGcConfig(
+            ledger_path=tmp_path / "backup-required.sqlite",
+            dataset_id="ds_session_memory",
+            index_url="http://localhost:9380",
+            execute=True,
+        ),
+        index_client=fake,
+    ).run()
+    blocked_retention_policy = SessionMemoryGcRunner(
+        config=SessionMemoryGcConfig(
+            ledger_path=tmp_path / "blocked.sqlite",
+            dataset_id="ds_session_memory",
+            index_url="http://localhost:9380",
+            declared_retention_policy="private_indefinite_until_disabled",
+            execute=True,
+        ),
+        index_client=fake,
+    ).run()
+
+    expected_fields = {
+        "schema_version",
+        "status",
+        "mode",
+        "retention_policy_enforced",
+        "min_disabled_age_floor_seconds",
+        "effective_min_disabled_age_seconds",
+        "eligible_count",
+        "selected_count",
+        "attempted_count",
+        "deleted_count",
+        "revalidation_skipped_count",
+        "backed_up_count",
+        "backup_enabled",
+        "failed_count",
+        "failed_error_class",
+        "mutation_performed",
+        "network_used",
+        "raw_ids_printed",
+    }
+    assert all(set(report) == expected_fields for report in (
+        normal,
+        backup_dir_required,
+        blocked_retention_policy,
+    ))
+
+    assert normal["status"] == "ok"
+    assert normal["mode"] == "dry_run"
+    assert normal["network_used"] is False
+    assert normal["mutation_performed"] is False
+
+    assert backup_dir_required["status"] == "partial_failed"
+    assert backup_dir_required["failed_error_class"] == "backup_dir_required"
+    assert backup_dir_required["attempted_count"] == 0
+    assert backup_dir_required["deleted_count"] == 0
+    assert backup_dir_required["backed_up_count"] == 0
+    assert backup_dir_required["network_used"] is False
+    assert backup_dir_required["mutation_performed"] is False
+
+    assert blocked_retention_policy["status"] == "blocked_retention_policy"
+    assert blocked_retention_policy["retention_policy_enforced"] is True
+    assert blocked_retention_policy["eligible_count"] == 0
+    assert blocked_retention_policy["selected_count"] == 0
+    assert blocked_retention_policy["attempted_count"] == 0
+    assert blocked_retention_policy["deleted_count"] == 0
+    assert blocked_retention_policy["backed_up_count"] == 0
+    assert blocked_retention_policy["network_used"] is False
+    assert blocked_retention_policy["mutation_performed"] is False
+    assert fake.deleted == []
 
 
 def test_session_memory_gc_requires_promoted_dirty_and_active_replacement(tmp_path, monkeypatch):
@@ -239,6 +400,7 @@ def test_session_memory_gc_floors_min_disabled_age_to_block_fresh_disable(tmp_pa
             index_url="http://localhost:9380",
             min_disabled_age_seconds=0,
             execute=True,
+            backup_dir=str(tmp_path / "gc-backup"),
         ),
         token="test-token",
     ).run()
@@ -280,6 +442,7 @@ def test_session_memory_gc_requires_authorized_replacement_not_just_active_flag(
             dataset_id="ds_session_memory",
             index_url="http://localhost:9380",
             execute=True,
+            backup_dir=str(tmp_path / "gc-backup"),
         ),
         token="test-token",
     ).run()
@@ -294,6 +457,7 @@ def test_session_memory_gc_requires_authorized_replacement_not_just_active_flag(
             dataset_id="ds_session_memory",
             index_url="http://localhost:9380",
             execute=True,
+            backup_dir=str(tmp_path / "gc-backup"),
         ),
         token="test-token",
     ).run()
@@ -353,6 +517,7 @@ def test_session_memory_gc_revalidates_each_row_before_delete(tmp_path, monkeypa
             dataset_id="ds_session_memory",
             index_url="http://localhost:9380",
             execute=True,
+            backup_dir=str(tmp_path / "gc-backup"),
         ),
         token="test-token",
     ).run()
@@ -454,6 +619,7 @@ def test_session_memory_gc_allows_declared_supersede_policy(tmp_path, monkeypatc
             index_url="http://localhost:9380",
             declared_dataset_role="session_memory",  # role -> supersede_or_disable
             execute=True,
+            backup_dir=str(tmp_path / "gc-backup"),
         ),
         token="test-token",
     ).run()
@@ -494,6 +660,7 @@ def test_session_memory_gc_absent_policy_keeps_prior_behavior(tmp_path, monkeypa
             dataset_id="ds_session_memory",
             index_url="http://localhost:9380",
             execute=True,
+            backup_dir=str(tmp_path / "gc-backup"),
         ),
         token="test-token",
     ).run()
@@ -536,6 +703,7 @@ def test_session_memory_gc_writes_durable_audit_record(tmp_path, monkeypatch):
             dataset_id="ds_session_memory",
             index_url="http://localhost:9380",
             execute=True,
+            backup_dir=str(tmp_path / "gc-backup"),
         ),
         token="test-token",
     ).run()
@@ -572,6 +740,32 @@ class _BombRetiredIndexBridgeGcClient:
     # 생성되기만 해도 실패 -> retention gate가 client 생성 *전에* 거부함을 증명한다.
     def __init__(self, **kwargs):
         raise AssertionError("RetiredIndexBridgeHttpClient must not be constructed when retention policy is blocked")
+
+
+def test_session_memory_gc_cli_requires_backup_for_execute(tmp_path, monkeypatch, capsys):
+    ledger_path = tmp_path / "ledger.sqlite"
+    Ledger(ledger_path)
+    monkeypatch.setenv("RETIRED_INDEX_BRIDGE_API_KEY", "test-token")
+
+    def bomb_approval(*args, **kwargs):
+        raise AssertionError("backup guard must run before approval validation")
+
+    monkeypatch.setattr(gc_module, "validate_goal3_live_approval", bomb_approval)
+
+    exit_code = gc_module.main(
+        [
+            "--ledger",
+            str(ledger_path),
+            "--dataset-id",
+            "ds_session_memory",
+            "--retired-index-bridge-url",
+            "http://localhost:9380",
+            "--execute",
+        ]
+    )
+
+    assert exit_code == 2
+    assert "--backup-dir is required for --execute" in capsys.readouterr().err
 
 
 def test_session_memory_gc_cli_blocks_disallowed_retention_policy(tmp_path, monkeypatch, capsys):

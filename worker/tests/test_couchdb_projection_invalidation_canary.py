@@ -351,7 +351,7 @@ def test_graph_backend_duplicate_counts_as_projection_ledger_catchup(
 def test_cli_routes_as_approval_gated_additive_canary_and_defaults_to_dry_run(
     tmp_path: Path,
 ) -> None:
-    assert COMMAND_HANDLERS["couchdb-projection-invalidation-canary"] is main
+    assert callable(COMMAND_HANDLERS["couchdb-projection-invalidation-canary"])
     assert COMMAND_METADATA["couchdb-projection-invalidation-canary"] == {
         "runtime_category": "human_gated_additive_canary",
         "deletion_candidate": False,

@@ -13,7 +13,7 @@ from .artifact_store import (
     _reject_external_index_fields,
     _validate_observed_interval,
 )
-from .graphiti_adapter import _graphiti_group_id, _group_id_for_episode
+from .graph_scope import graph_group_id_for_episode
 from .models import OntologyEpisode, SessionMemoryArtifact, SourceRefRecord
 from .source_ref import SourceRefResolver
 
@@ -343,9 +343,9 @@ class LedgerGraphProjectionStateStore:
         upsert_result: str,
         extraction_level: str = EXTRACTION_LEVEL_EPISODIC,
     ) -> None:
-        # group_id is derived with the graphiti helpers (not reimplemented) so the
-        # stored group key matches exactly what the graph adapter writes.
-        group_id = _graphiti_group_id(_group_id_for_episode(episode, ""))
+        # The backend-neutral codec keeps this durable projection key identical
+        # to Graphiti and in-memory graph projection scopes.
+        group_id = graph_group_id_for_episode(episode, "")
         project = str(episode.payload.get("project") or "")
         brain_id = str(episode.payload.get("brain_id") or "")
         level = str(extraction_level or EXTRACTION_LEVEL_EPISODIC)

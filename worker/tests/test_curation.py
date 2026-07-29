@@ -22,6 +22,23 @@ def _candidate(statement="Keep RetiredIndexBridge core unmodified.", candidate_t
     )
 
 
+def _assert_supersede_rolled_back(
+    ledger,
+    *,
+    old_memory_id: str,
+    candidate_id: str,
+    new_memory_id: str,
+    profile_facts,
+):
+    assert ledger.get_memory_card(old_memory_id)["state"] == "active"
+    assert ledger.get_by_knowledge_id(old_memory_id)["authorization_status"] == "active"
+    assert ledger.get_memory_candidate(candidate_id)["approval_state"] == "pending"
+    assert ledger.get_memory_card(new_memory_id) is None
+    assert ledger.get_by_knowledge_id(new_memory_id) is None
+    assert ledger.list_memory_card_evidence(new_memory_id) == []
+    assert ledger.list_profile_facts() == profile_facts
+
+
 def test_curation_approves_candidate_into_auditable_memory_card(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite")
     service = CurationService(ledger)
@@ -185,6 +202,95 @@ def test_superseding_profile_fact_marks_old_profile_fact_superseded(tmp_path):
     profile_facts = {fact["memory_id"]: fact for fact in ledger.list_profile_facts()}
     assert profile_facts[old["memory_id"]]["state"] == "superseded"
     assert profile_facts[new_card["memory_id"]]["state"] == "active"
+
+
+def test_supersede_rolls_back_old_card_profile_fact_and_candidate_when_evidence_write_fails(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    service = CurationService(ledger)
+    old = service.approve(
+        service.add_candidate(_candidate("User prefers old context policy.", "user_preference"))["candidate_id"],
+        approved_by="ddalkak",
+    )
+    new_candidate = service.add_candidate(_candidate("User prefers new context policy.", "user_preference"))
+    new_memory_id = build_memory_card(
+        new_candidate,
+        approved_by="ddalkak",
+        supersedes=old["memory_id"],
+    )["memory_id"]
+    profile_facts_before = ledger.list_profile_facts()
+
+    with ledger._connect() as connection:
+        connection.execute(
+            """
+            UPDATE memory_candidates
+            SET evidence_refs_json = ?
+            WHERE candidate_id = ?
+            """,
+            (
+                json.dumps([{"knowledge_id": None, "content_hash": "sha256:bad-evidence"}]),
+                new_candidate["candidate_id"],
+            ),
+        )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        service.supersede(
+            old["memory_id"],
+            new_candidate["candidate_id"],
+            approved_by="ddalkak",
+            reason="updated preference",
+        )
+
+    _assert_supersede_rolled_back(
+        ledger,
+        old_memory_id=old["memory_id"],
+        candidate_id=new_candidate["candidate_id"],
+        new_memory_id=new_memory_id,
+        profile_facts=profile_facts_before,
+    )
+
+
+def test_supersede_rolls_back_all_prior_writes_when_new_profile_fact_write_fails(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    service = CurationService(ledger)
+    old = service.approve(
+        service.add_candidate(_candidate("User prefers old context policy.", "user_preference"))["candidate_id"],
+        approved_by="ddalkak",
+    )
+    new_candidate = service.add_candidate(_candidate("User prefers new context policy.", "user_preference"))
+    new_memory_id = build_memory_card(
+        new_candidate,
+        approved_by="ddalkak",
+        supersedes=old["memory_id"],
+    )["memory_id"]
+    profile_facts_before = ledger.list_profile_facts()
+
+    with ledger._connect() as connection:
+        connection.execute(
+            f"""
+            CREATE TRIGGER fail_new_profile_fact
+            BEFORE INSERT ON profile_facts
+            WHEN NEW.memory_id = '{new_memory_id}'
+            BEGIN
+                SELECT RAISE(FAIL, 'new profile fact failure');
+            END;
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="new profile fact failure"):
+        service.supersede(
+            old["memory_id"],
+            new_candidate["candidate_id"],
+            approved_by="ddalkak",
+            reason="updated preference",
+        )
+
+    _assert_supersede_rolled_back(
+        ledger,
+        old_memory_id=old["memory_id"],
+        candidate_id=new_candidate["candidate_id"],
+        new_memory_id=new_memory_id,
+        profile_facts=profile_facts_before,
+    )
 
 
 def test_supersede_defaults_profile_fact_state_when_card_state_is_absent(tmp_path, monkeypatch):

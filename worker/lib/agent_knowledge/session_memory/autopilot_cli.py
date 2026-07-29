@@ -1,29 +1,30 @@
 """CLI entry for one autopilot curation cycle (the live-schedule entry point).
 
-This un-stubs the ``memory`` server command. The testable core ``run_autopilot_command``
-runs a cycle over already-mined candidates and returns a recall snapshot taken through
-the real product read-path (run_brain_query_v2). ``main`` either loads candidates from a
-JSON file or blind-mines them live from transcript-memory via RetiredIndexBridge.
+The testable core ``run_autopilot_command`` runs a cycle over already-mined candidates
+and returns a recall snapshot taken through the real product read-path
+(``run_brain_query_v2``). ``main`` requires a JSON file of pre-mined candidates; omitting
+it fails closed without constructing the retired bridge, a miner, a projector, or a
+ledger. ``mine_live_candidates`` remains an explicit legacy helper for callers that
+have separately authorized that integration.
 
-AUTOPILOT MODE — GOAL AND STANDING AUTHORIZATION
-================================================
+AUTOPILOT MODE — DEFAULT CLI BOUNDARY
+======================================
 GOAL (working goal_state, user-set 2026-06-14):
-  On the active neurons-owned project lane, live blind mine -> cycle -> recall must pass
+  On the active neurons-owned project lane, candidate curation -> cycle -> recall must pass
   the golden finish gate: SILENT-LIE == 0 AND false_current == 0, over 3 consecutive
   FINAL-slice cohorts, per-lane F1 >= 0.85.
 
-STANDING PRE-APPROVAL (user, 2026-06-14):
-  All autopilot approval gates are pre-approved and run unattended — candidate auto-accept
-  (human_approval path with approved_by='autopilot') and RetiredIndexBridge projection writes (the loop
-  self-mints the projection approval_record). No per-cycle human confirmation is required.
+LEGACY INTEGRATION STATUS:
+  The old RetiredIndexBridge live-mining and projection path is not available through
+  this CLI. Its compatibility helper remains callable only by an explicit caller that
+  owns separate authorization and runtime safeguards.
 
-BOUNDARY (unchanged by the pre-approval — these are NOT covered by it):
+BOUNDARY:
   The forbidden operations stay HARD-BLOCKED regardless of authorization: memory delete,
   live GC execute, RetiredIndexBridge dataset delete/disable, raw transcript/secret exposure, runtime
-  mutation (see FORBIDDEN_AUTO_POLICY_OPERATIONS + CLAUDE.md). Pre-approval removes the
-  "ask first" gate, not the safety mechanics: live writes still run bounded with exact argv,
-  timeout, redaction, postcheck, and rollback, and the readiness/conflict tripwire still
-  freezes + rolls back a poisoned cohort.
+  mutation (see FORBIDDEN_AUTO_POLICY_OPERATIONS + CLAUDE.md). Explicit legacy callers
+  remain responsible for bounded invocation, redaction, postcheck, rollback, and the
+  readiness/conflict tripwire.
 """
 
 from __future__ import annotations
@@ -39,9 +40,24 @@ from .brain_read_model import LegacyLedgerBrainReadModel
 from .extraction_llm import build_vertex_wrapper_completion_fn
 from .llm_brain_miner import LlmBrainEnvelopeMiner
 
-# Standing pre-approval flag for the autopilot operating mode (user-set 2026-06-14).
-# Scope = candidate accept + RetiredIndexBridge projection write only. Forbidden ops remain blocked.
+# Legacy compatibility marker. It does not enable retired bridge live-mining or
+# projection from ``main``; those operations remain outside the default CLI path.
 AUTOPILOT_PREAPPROVED = True
+
+
+RETIRED_BRIDGE_LIVE_MINING_BLOCKED_EXIT = 2
+
+
+def retired_bridge_live_mining_blocked_report(*, project: str, refresh_watermark: str) -> dict[str, Any]:
+    """Return the fail-closed result for the retired default live-mining path."""
+    return {
+        "schema_version": "llm_brain_autopilot_command.v1",
+        "project": project,
+        "refresh_watermark": refresh_watermark,
+        "status": "blocked_retired_bridge_live_mining",
+        "network_used": False,
+        "mutation_performed": False,
+    }
 
 
 def mine_live_candidates(
@@ -119,8 +135,6 @@ def run_autopilot_command(
 
 
 def main(argv: list[str] | None = None) -> int:
-    import os
-
     parser = argparse.ArgumentParser(prog="neuron-knowledge memory")
     parser.add_argument("--ledger", required=True)
     parser.add_argument("--project", required=True)
@@ -128,64 +142,45 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--candidates-json",
         default="",
-        help="path to a JSON array of pre-mined candidates; omit to mine live from RetiredIndexBridge",
+        help="required path to a JSON array of pre-mined candidates",
     )
-    # Live-mining options (used when --candidates-json is omitted). This is the Ubuntu
-    # brain-server entry a systemd timer/cron invokes.
+    # Legacy options remain parse-compatible for existing invocations. They never enable
+    # retired bridge live-mining or projection from this CLI.
     parser.add_argument("--retired-index-bridge-url", default="")
     parser.add_argument("--retired-index-bridge-token-env", default="")
     parser.add_argument("--policy-proxy-url", default="")
     parser.add_argument("--derived-dataset-id", default="", help="dataset id for supersede candidate recall")
     parser.add_argument("--llm-id", default="")
-    # Canary bounds — required even under standing pre-approval (safety mechanic, not a gate).
+    # Legacy mining bounds stay accepted for parse compatibility; ``main`` still
+    # fails closed before live mining when --candidates-json is absent.
     parser.add_argument("--limit", type=int, default=200, help="max transcript chunks to mine this cycle")
     parser.add_argument("--max-candidates", type=int, default=5, help="max candidates extracted per chunk")
     args = parser.parse_args(argv)
 
+    if not args.candidates_json:
+        print(
+            json.dumps(
+                retired_bridge_live_mining_blocked_report(
+                    project=args.project,
+                    refresh_watermark=args.refresh_watermark,
+                ),
+                sort_keys=True,
+            )
+        )
+        return RETIRED_BRIDGE_LIVE_MINING_BLOCKED_EXIT
+
+    with open(args.candidates_json, encoding="utf-8") as handle:
+        candidates = json.load(handle)
+    if not isinstance(candidates, list):
+        raise ValueError("--candidates-json must contain a JSON array of candidates")
+
     ledger = Ledger(args.ledger)
-    supersede_detector = None
-    projection_client = None
-
-    if args.candidates_json:
-        with open(args.candidates_json, encoding="utf-8") as handle:
-            candidates = json.load(handle)
-        if not isinstance(candidates, list):
-            raise ValueError("--candidates-json must contain a JSON array of candidates")
-    else:
-        from ..mcp_server import build_index_client
-        from .supersede_detector import build_index_judge_fn, build_supersede_detector
-
-        token = os.environ.get(args.retired_index_bridge_token_env, "") if args.retired_index_bridge_token_env else ""
-        retired_index_bridge = build_index_client(
-            index_url=args.retired_index_bridge_url, token=token, policy_proxy_url=args.policy_proxy_url
-        )
-        candidates = mine_live_candidates(
-            retired_index_bridge=retired_index_bridge,
-            project=args.project,
-            refresh_watermark=args.refresh_watermark,
-            limit=args.limit,
-            max_candidates=args.max_candidates,
-        )
-        if args.derived_dataset_id:
-            from .index_projection import RetiredIndexBridgeMemoryCardProjectionClient
-
-            supersede_detector = build_supersede_detector(
-                retired_index_bridge=retired_index_bridge,
-                judge_fn=build_index_judge_fn(retired_index_bridge, llm_id=args.llm_id),
-                dataset_id=args.derived_dataset_id,
-                project=args.project,
-            )
-            projection_client = RetiredIndexBridgeMemoryCardProjectionClient(
-                retired_index_bridge=retired_index_bridge, dataset_id=args.derived_dataset_id
-            )
 
     result = run_autopilot_command(
         ledger=ledger,
         candidates=candidates,
         project=args.project,
         refresh_watermark=args.refresh_watermark,
-        supersede_detector=supersede_detector,
-        projection_client=projection_client,
     )
     print(json.dumps(result, sort_keys=True))
     return 0

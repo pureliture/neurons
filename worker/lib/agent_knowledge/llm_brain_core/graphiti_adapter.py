@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import threading
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field, replace
@@ -21,6 +20,12 @@ from ._util import (
     short_hash,
 )
 from .graph import UpsertEpisodeResult
+from .graph_scope import (
+    episode_matches_graph_group,
+    graph_group_id,
+    graph_group_ids,
+    graph_group_id_for_episode,
+)
 from .models import GraphMemoryResult, OntologyEpisode
 from ..model_connectors.structured_response import (
     existing_fact_idx_values_from_messages as _existing_fact_idx_values_from_messages,
@@ -29,7 +34,6 @@ from ..model_connectors.structured_response import (
     normalize_structured_response as _normalize_structured_response,
 )
 
-_GRAPHITI_GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
 _MAX_EDGE_PROVENANCE_IDS = 500
 _MAX_EDGE_PROVENANCE_LOOKUPS_IN_FLIGHT = 8
@@ -258,7 +262,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
         return EpisodicNode(
             uuid=episode.episode_id,
             name=episode.episode_id,
-            group_id=group_id or _graphiti_group_id("llm_brain_default"),
+            group_id=group_id or graph_group_id("llm_brain_default"),
             labels=[],
             source=_episode_type_json(),
             content=body,
@@ -279,7 +283,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
         # extraction_body is derived/transient and is NOT in content_hash, so it
         # never changes episode_id (no node-dup explosion).
         body = json.dumps(episode.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-        group_id = _graphiti_group_id(_group_id_for_episode(episode, self._default_group_id))
+        group_id = graph_group_id_for_episode(episode, self._default_group_id)
 
         async def _call() -> UpsertEpisodeResult:
             if not self._extract_entities:
@@ -438,8 +442,10 @@ class GraphitiNeo4jGraphMemoryAdapter:
         limit: int = 10,
     ) -> GraphMemoryResult:
         bounded = max(1, min(int(limit), 100))
-        group_id = _graphiti_group_id(brain_id or self._default_group_id)
-        group_ids = [group_id] if group_id else None
+        scope = brain_id or self._default_group_id
+        group_id = graph_group_id(scope)
+        group_ids = list(graph_group_ids(scope)) or None
+        allowed_group_ids = set(group_ids or ())
 
         async def _call() -> tuple[list[Any], list[Any], list[Any], list[str], bool]:
             loop = asyncio.get_running_loop()
@@ -474,10 +480,10 @@ class GraphitiNeo4jGraphMemoryAdapter:
                     episode.episode_id
                     for episode_node in episodes
                     if (episode := _episode_node_to_ontology(episode_node)) is not None
-                    and _episode_matches_graph_group(
+                    and episode_matches_graph_group(
                         episode,
                         expected_group_id=group_id,
-                        default_group_id=self._default_group_id,
+                        default_scope=self._default_group_id,
                     )
                 }
                 missing_source_ids = [
@@ -556,24 +562,26 @@ class GraphitiNeo4jGraphMemoryAdapter:
             episode
             for episode_node in episodes
             if (episode := _episode_node_to_ontology(episode_node)) is not None
-            and _episode_matches_graph_group(
+            and episode_matches_graph_group(
                 episode,
                 expected_group_id=group_id,
-                default_group_id=self._default_group_id,
+                default_scope=self._default_group_id,
             )
         ]
         source_episodes_by_id = {episode.episode_id: episode for episode in canonical_episodes}
         for source_node in hydrated_source_nodes:
-            source_group_id = _graphiti_group_id(str(getattr(source_node, "group_id", "") or ""))
-            if source_group_id != group_id:
+            source_group_id = graph_group_id(str(getattr(source_node, "group_id", "") or ""))
+            if group_id and source_group_id not in allowed_group_ids:
+                continue
+            if not group_id and source_group_id:
                 continue
             episode = _episode_node_to_ontology(source_node)
             if episode is None:
                 continue
-            if not _episode_matches_graph_group(
+            if not episode_matches_graph_group(
                 episode,
                 expected_group_id=group_id,
-                default_group_id=self._default_group_id,
+                default_scope=self._default_group_id,
             ):
                 continue
             source_episodes_by_id[episode.episode_id] = episode
@@ -639,7 +647,9 @@ class GraphitiNeo4jGraphMemoryAdapter:
         wanted = [str(item) for item in episode_ids if str(item or "")]
         if not wanted:
             return ()
-        group_id = _graphiti_group_id(brain_id or self._default_group_id)
+        scope = brain_id or self._default_group_id
+        group_id = graph_group_id(scope)
+        allowed_group_ids = set(graph_group_ids(scope))
         wanted_types = set(entity_types or [])
 
         async def _call() -> list[OntologyEpisode]:
@@ -651,10 +661,16 @@ class GraphitiNeo4jGraphMemoryAdapter:
                     node = await EpisodicNode.get_by_uuid(self._graphiti.driver, episode_id)
                 except Exception:
                     continue
-                if group_id and str(getattr(node, "group_id", "") or "") != group_id:
+                if group_id and str(getattr(node, "group_id", "") or "") not in allowed_group_ids:
                     continue
                 episode = _episode_node_to_ontology(node)
                 if episode is None:
+                    continue
+                if group_id and not episode_matches_graph_group(
+                    episode,
+                    expected_group_id=group_id,
+                    default_scope=self._default_group_id,
+                ):
                     continue
                 if wanted_types and episode.entity_type not in wanted_types:
                     continue
@@ -1254,10 +1270,10 @@ def _resolved_edge_source_episodes(
     resolved = tuple(episode for episode in source_episodes if episode is not None)
     providers = {_episode_provider(episode) for episode in resolved}
     if any(
-        not _episode_matches_graph_group(
+        not episode_matches_graph_group(
             episode,
             expected_group_id=expected_group_id,
-            default_group_id=default_group_id,
+            default_scope=default_group_id,
         )
         for episode in resolved
     ):
@@ -1269,31 +1285,6 @@ def _resolved_edge_source_episodes(
 
 def _episode_provider(episode: OntologyEpisode) -> str:
     return str(episode.payload.get("provider") or "").strip().casefold()
-
-
-def _episode_matches_graph_group(
-    episode: OntologyEpisode,
-    *,
-    expected_group_id: str,
-    default_group_id: str,
-) -> bool:
-    return _graphiti_group_id(_group_id_for_episode(episode, default_group_id)) == expected_group_id
-
-
-def _group_id_for_episode(episode: OntologyEpisode, default_group_id: str) -> str:
-    payload_brain_id = episode.payload.get("brain_id")
-    if payload_brain_id:
-        return public_safe_text(str(payload_brain_id), max_chars=200)
-    return default_group_id
-
-
-def _graphiti_group_id(value: str) -> str:
-    text = public_safe_text(str(value or ""), max_chars=200)
-    if not text:
-        return ""
-    if _GRAPHITI_GROUP_ID_RE.fullmatch(text):
-        return text
-    return f"brain_{short_hash(text)}"
 
 
 def _parse_datetime(value: str) -> datetime:

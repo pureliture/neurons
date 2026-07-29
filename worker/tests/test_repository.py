@@ -97,6 +97,42 @@ def test_curation_service_approve_uses_injected_repository(tmp_path):
     assert ledger.get_memory_candidate(candidate["candidate_id"])["approval_state"] == "pending"
 
 
+def test_curation_service_supersede_uses_injected_repository(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    candidate = ledger.upsert_memory_candidate(_candidate("Use the replacement policy."))
+    calls = []
+
+    class RecordingRepository:
+        def supersede_candidate(
+            self,
+            old_memory_id,
+            candidate_arg,
+            card_arg,
+            *,
+            approved_by: str,
+            reason: str,
+        ):
+            calls.append((old_memory_id, candidate_arg["candidate_id"], card_arg["memory_id"], approved_by, reason))
+            stored = dict(card_arg)
+            stored["ledger_status"] = "recorded-by-repository"
+            return stored
+
+    service = CurationService(ledger, repository=RecordingRepository())
+
+    stored = service.supersede(
+        "mem_old",
+        candidate["candidate_id"],
+        approved_by="ddalkak",
+        reason="updated policy",
+    )
+
+    assert stored["ledger_status"] == "recorded-by-repository"
+    assert calls == [
+        ("mem_old", candidate["candidate_id"], stored["memory_id"], "ddalkak", "updated policy")
+    ]
+    assert ledger.get_memory_candidate(candidate["candidate_id"])["approval_state"] == "pending"
+
+
 def test_ledger_memory_curation_repository_requires_transaction_seam():
     repository = LedgerMemoryCurationRepository(object())
 
@@ -164,8 +200,8 @@ def test_repository_extraction_plan_reports_first_caller_migration():
     first_candidate = plan["first_candidate"]
     next_multi_write_candidate = plan["next_multi_write_candidate"]
 
-    assert plan["mode"] == "first_caller_migration"
-    assert first_candidate["activation_state"] == "active_for_curation_approve"
+    assert plan["mode"] == "curation_approve_and_supersede_migration"
+    assert first_candidate["activation_state"] == "active_for_curation_approve_and_supersede"
     assert first_candidate["public_import_contract"] is False
     assert first_candidate["protocol_definition_stable"] is False
     assert plan["first_migrated_caller"] == {
@@ -176,6 +212,8 @@ def test_repository_extraction_plan_reports_first_caller_migration():
     assert next_multi_write_candidate == {
         "caller": "CurationService.supersede",
         "reason": "old_card_demote_plus_new_card_approval_multi_write",
-        "status": "not_migrated_in_m2_first_caller",
-        "transaction_safe_claimed": False,
+        "status": "migrated_in_card_5",
+        "transaction_safe_claimed": True,
+        "repository": "LedgerMemoryCurationRepository",
+        "transaction_operation": "_LedgerTransaction.supersede_memory_card",
     }
