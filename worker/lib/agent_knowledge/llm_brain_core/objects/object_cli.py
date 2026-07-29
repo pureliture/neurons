@@ -1051,7 +1051,7 @@ def temporal_acceptance_derive_main(argv: list[str] | None = None) -> int:
                 "status": "blocked",
                 "error": type(exc).__name__,
                 "mutation_performed": False,
-                "network_used": False,
+                "network_used": bool(getattr(exc, "network_attempted", False)),
                 "raw_private_evidence_returned": False,
                 "secret_returned": False,
                 "host_topology_returned": False,
