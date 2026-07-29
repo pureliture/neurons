@@ -9,6 +9,7 @@ import pytest
 
 from agent_knowledge.llm_brain_core._util import hash_payload
 from agent_knowledge.llm_brain_core.artifact_store import InMemorySessionMemoryArtifactStore
+from agent_knowledge.llm_brain_core.context import BrainReadService
 from agent_knowledge.llm_brain_core.models import SessionMemoryArtifact
 from agent_knowledge.llm_brain_core.objects import object_cli
 from agent_knowledge.llm_brain_core.objects import post_deploy_mcp_capture
@@ -108,6 +109,343 @@ def _v3_config() -> dict:
             "max_artifact_age_seconds": 60,
         },
     }
+
+
+def _v3_artifact_source_constraint() -> dict[str, str]:
+    return {
+        "source_kind": "session_memory_artifact",
+        "source_object_type": "SessionMemoryArtifact",
+        "authority_lane": "reference_only",
+    }
+
+
+def _temporal_task_card() -> dict:
+    return {
+        "memory_id": "temporal-memory-card",
+        "card_type": "task",
+        "project": "neurons",
+        "title": "memory card migration work",
+        "summary": "memory card migration work",
+        "lifecycle_state": "accepted",
+        "approval_state": "approved",
+        "currentness": "current",
+        "observed_at_start": DATE_A[0],
+        "observed_at_end": DATE_A[1],
+        "typed_payload": {
+            "task_state": "migration",
+            "next_action": "resume migration work",
+            "status": "open",
+        },
+    }
+
+
+def _temporal_route_objects(
+    service: BrainReadService,
+    *,
+    temporal_source_constraint: dict[str, str] | None = None,
+) -> list[dict]:
+    result = service.brain_objects_query(
+        repository="pureliture/neurons",
+        branch="main",
+        project="neurons",
+        query="migration",
+        current_files=[],
+        route="temporal_work_recall",
+        as_of="2026-07-09T10:30:00Z",
+        limit=2,
+        temporal_source_constraint=temporal_source_constraint,
+    )
+    return result["object_pack"]["objects"]
+
+
+def test_generic_temporal_route_retains_memory_card_semantics_without_constraint() -> None:
+    service = BrainReadService(
+        memory_cards=[_temporal_task_card()],
+        artifact_store=InMemorySessionMemoryArtifactStore(
+            [
+                _artifact(
+                    suffix="a",
+                    session_suffix="1",
+                    interval=DATE_A,
+                    revision=1,
+                    terms=("migration",),
+                )
+            ]
+        ),
+    )
+
+    objects = _temporal_route_objects(service)
+
+    assert any(
+        item.get("payload", {}).get("source_kind") == "memory_card"
+        for item in objects
+    )
+
+
+def test_temporal_source_constraint_selects_artifact_before_limit() -> None:
+    service = BrainReadService(
+        memory_cards=[_temporal_task_card()],
+        artifact_store=InMemorySessionMemoryArtifactStore(
+            [
+                _artifact(
+                    suffix="a",
+                    session_suffix="1",
+                    interval=DATE_A,
+                    revision=1,
+                    terms=("migration",),
+                )
+            ]
+        ),
+    )
+
+    objects = _temporal_route_objects(
+        service,
+        temporal_source_constraint=_v3_artifact_source_constraint(),
+    )
+
+    assert len(objects) == 1
+    assert objects[0]["authority_lane"] == "reference_only"
+    assert objects[0]["payload"]["source_kind"] == "session_memory_artifact"
+    assert objects[0]["payload"]["source_object_type"] == "SessionMemoryArtifact"
+
+
+def _temporal_work_unit(
+    *,
+    source_kind: str,
+    source_object_type: str,
+    authority_lane: str,
+    source_revision: str,
+    interval: tuple[str, str] = DATE_A,
+) -> dict:
+    return {
+        "object_id": f"work-unit:{source_kind}:{source_revision[-8:]}",
+        "object_type": "WorkUnit",
+        "content_hash": "sha256:" + "c" * 64,
+        "authority_lane": authority_lane,
+        "payload": {
+            "source_kind": source_kind,
+            "source_object_type": source_object_type,
+            "source_revision": source_revision,
+            "observed_at_start": interval[0],
+            "observed_at_end": interval[1],
+        },
+    }
+
+
+def _v3_probe_summary(
+    objects: list[dict], *, baseline: dict
+) -> dict:
+    return post_deploy_mcp_capture._temporal_object_probe_summary(
+        {
+            "schema_version": "brain_objects_query.v1",
+            "route": "temporal_work_recall",
+            "object_pack": {
+                "schema_version": "object_pack.v1",
+                "route": "temporal_work_recall",
+                "objects": objects,
+                "gaps": [],
+                "confidence": {"score": 0.7},
+            },
+        },
+        selector={"as_of": "2026-07-09T10:30:00Z"},
+        expected_fingerprint="",
+        expected_identity_fingerprint="",
+        expected_authority_fingerprint=baseline["date_a"][
+            "expected_authority_fingerprint"
+        ],
+        expected_source_revision=baseline["date_a"]["expected_source_revision"],
+        artifact_authority_only=True,
+    )
+
+
+def test_v3_probe_rejects_mixed_raw_response_when_server_ignored_constraint() -> None:
+    baseline = _derive(
+        InMemorySessionMemoryArtifactStore(
+            [
+                _artifact(
+                    suffix="a",
+                    session_suffix="1",
+                    interval=DATE_A,
+                    revision=1,
+                    terms=("migration",),
+                ),
+                _artifact(
+                    suffix="b",
+                    session_suffix="2",
+                    interval=DATE_B,
+                    revision=1,
+                    terms=("migration",),
+                ),
+            ]
+        )
+    )
+    memory_card = _temporal_work_unit(
+        source_kind="memory_card",
+        source_object_type="MemoryCard:task",
+        authority_lane="accepted_current",
+        source_revision="sha256:" + "c" * 64,
+    )
+    artifact = _temporal_work_unit(
+        source_kind="session_memory_artifact",
+        source_object_type="SessionMemoryArtifact",
+        authority_lane="reference_only",
+        source_revision=baseline["date_a"]["expected_source_revision"],
+    )
+
+    summary = _v3_probe_summary([memory_card, artifact], baseline=baseline)
+
+    assert summary["work_unit_count"] == 2
+    assert summary["object_count"] == 2
+    assert summary["second_result_present"] is True
+    assert summary["gap_count"] > 0
+
+
+@pytest.mark.parametrize(
+    "objects",
+    [
+        [
+            _temporal_work_unit(
+                source_kind="memory_card",
+                source_object_type="MemoryCard:task",
+                authority_lane="accepted_current",
+                source_revision="sha256:" + "c" * 64,
+            )
+        ],
+        [
+            _temporal_work_unit(
+                source_kind="session_memory_artifact",
+                source_object_type="SessionMemoryArtifact",
+                authority_lane="reference_only",
+                source_revision="sha256:" + "a" * 64,
+            ),
+            _temporal_work_unit(
+                source_kind="session_memory_artifact",
+                source_object_type="SessionMemoryArtifact",
+                authority_lane="reference_only",
+                source_revision="sha256:" + "d" * 64,
+            ),
+        ],
+        [
+            _temporal_work_unit(
+                source_kind="session_memory_artifact",
+                source_object_type="SessionMemoryArtifact",
+                authority_lane="reference_only",
+                source_revision="sha256:" + "c" * 64,
+            )
+        ],
+    ],
+)
+def test_v3_probe_fails_closed_without_one_matching_artifact_candidate(
+    objects: list[dict],
+) -> None:
+    baseline = _derive(
+        InMemorySessionMemoryArtifactStore(
+            [
+                _artifact(
+                    suffix="a",
+                    session_suffix="1",
+                    interval=DATE_A,
+                    revision=1,
+                    terms=("migration",),
+                ),
+                _artifact(
+                    suffix="b",
+                    session_suffix="2",
+                    interval=DATE_B,
+                    revision=1,
+                    terms=("migration",),
+                ),
+            ]
+        )
+    )
+
+    summary = _v3_probe_summary(objects, baseline=baseline)
+
+    assert summary["gap_count"] > 0
+    assert summary["observed_authority_fingerprint"] != baseline["date_a"][
+        "expected_authority_fingerprint"
+    ]
+
+
+def test_v3_collector_sends_artifact_source_constraint(monkeypatch) -> None:
+    baseline = _derive(
+        InMemorySessionMemoryArtifactStore(
+            [
+                _artifact(
+                    suffix="a",
+                    session_suffix="1",
+                    interval=DATE_A,
+                    revision=1,
+                    terms=("migration",),
+                ),
+                _artifact(
+                    suffix="b",
+                    session_suffix="2",
+                    interval=DATE_B,
+                    revision=1,
+                    terms=("migration",),
+                ),
+            ]
+        )
+    )
+    probe_artifact = _temporal_work_unit(
+        source_kind="session_memory_artifact",
+        source_object_type="SessionMemoryArtifact",
+        authority_lane="reference_only",
+        source_revision=baseline["date_a"]["expected_source_revision"],
+    )
+    temporal_requests: list[dict] = []
+
+    async def _call_tool(_session, name: str, arguments: dict) -> dict:
+        if name == "brain_objects_query":
+            temporal_requests.append(dict(arguments))
+            if (
+                arguments.get("date_from") == "2026-07-16T00:00:00Z"
+                and arguments.get("date_to") == "2026-07-15T00:00:00Z"
+            ):
+                return {
+                    "collector_call_failed": True,
+                    "collector_error_type": "McpToolError",
+                    "collector_error_code": -32602,
+                }
+            return {
+                "schema_version": "brain_objects_query.v1",
+                "route": "temporal_work_recall",
+                "object_pack": {
+                    "schema_version": "object_pack.v1",
+                    "route": "temporal_work_recall",
+                    "objects": [probe_artifact],
+                    "gaps": [],
+                    "confidence": {"score": 0.7},
+                },
+            }
+        return {}
+
+    monkeypatch.setattr(
+        post_deploy_mcp_capture,
+        "_call_tool_untrusted_mapping",
+        _call_tool,
+    )
+
+    asyncio.run(
+        post_deploy_mcp_capture._collect_temporal_recall_corrective_checkpoint(
+            object(),
+            repository="pureliture/neurons",
+            branch="main",
+            project="neurons",
+            consumer="codex",
+            config=_v3_config(),
+            runtime_packet={},
+            authority_baseline=baseline,
+            authority_derive_receipt={"source_inventory_hash": hash_payload("stable")},
+        )
+    )
+
+    assert len(temporal_requests) == 5
+    assert all(
+        request["temporal_source_constraint"] == _v3_artifact_source_constraint()
+        for request in temporal_requests
+    )
 
 
 def test_v3_uses_ledger_revision_history_for_same_session_date_a_and_b() -> None:
@@ -503,10 +841,10 @@ def test_v3_from_ledger_blocks_sqlite_drift_during_read_only_open(
         connection.execute("SELECT 1")
     original_open_read_only = temporal_acceptance_derive.Ledger.open_read_only
 
-    def _mutating_open_read_only(path: str):
+    def _mutating_open_read_only(path: str, *, deadline_monotonic=None):
         with ledger_path.open("ab") as handle:
             handle.write(b"drift")
-        return original_open_read_only(path)
+        return original_open_read_only(path, deadline_monotonic=deadline_monotonic)
 
     monkeypatch.setattr(
         temporal_acceptance_derive,
@@ -566,7 +904,7 @@ def test_v3_from_postgres_marks_network_used_in_receipt(monkeypatch) -> None:
     monkeypatch.setattr(
         temporal_acceptance_derive.Ledger,
         "open_read_only",
-        staticmethod(lambda _path: fake_ledger),
+        staticmethod(lambda _path, **_kwargs: fake_ledger),
     )
     monkeypatch.setattr(
         temporal_acceptance_derive,
@@ -585,6 +923,113 @@ def test_v3_from_postgres_marks_network_used_in_receipt(monkeypatch) -> None:
     assert result["receipt"]["ledger_backend"] == "postgres"
     assert result["receipt"]["network_used"] is True
     assert result["receipt"]["source_ledger_binding"]["backend"] == "postgres"
+
+
+def test_v3_from_postgres_passes_remaining_deadline_to_read_only_ledger(monkeypatch) -> None:
+    fake_ledger = SimpleNamespace(
+        read_only=True,
+        _db_adapter=SimpleNamespace(is_file_backed=False),
+    )
+    observed = {}
+    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", "postgresql://test.invalid/ledger")
+
+    def _open_read_only(_path, *, deadline_monotonic=None):
+        observed["deadline_monotonic"] = deadline_monotonic
+        return fake_ledger
+
+    monkeypatch.setattr(
+        temporal_acceptance_derive.Ledger,
+        "open_read_only",
+        staticmethod(_open_read_only),
+    )
+    monkeypatch.setattr(
+        temporal_acceptance_derive,
+        "derive_temporal_acceptance_baseline",
+        lambda **_kwargs: {"receipt": _minimal_derived_receipt()},
+    )
+
+    started = temporal_acceptance_derive.time.monotonic()
+    temporal_acceptance_derive.derive_temporal_acceptance_baseline_from_ledger(
+        ledger_path="configured-postgres-ledger",
+        project="neurons",
+        selection=_selection(),
+        limit=10,
+        max_runtime_seconds=5,
+    )
+
+    assert observed["deadline_monotonic"] == pytest.approx(started + 5, abs=0.1)
+
+
+def test_v3_from_postgres_marks_inventory_failure_as_network_attempted(monkeypatch) -> None:
+    fake_ledger = SimpleNamespace(
+        read_only=True,
+        _db_adapter=SimpleNamespace(is_file_backed=False, network_attempted=True),
+    )
+    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", "postgresql://test.invalid/ledger")
+    monkeypatch.setattr(
+        temporal_acceptance_derive.Ledger,
+        "open_read_only",
+        staticmethod(lambda _path, **_kwargs: fake_ledger),
+    )
+
+    def _inventory_failure(**_kwargs):
+        raise RuntimeError("inventory unavailable")
+
+    monkeypatch.setattr(
+        temporal_acceptance_derive,
+        "derive_temporal_acceptance_baseline",
+        _inventory_failure,
+    )
+
+    with pytest.raises(RuntimeError, match="inventory unavailable") as exc_info:
+        temporal_acceptance_derive.derive_temporal_acceptance_baseline_from_ledger(
+            ledger_path="configured-postgres-ledger",
+            project="neurons",
+            selection=_selection(),
+            limit=10,
+            max_runtime_seconds=5,
+        )
+
+    assert exc_info.value.network_attempted is True
+
+
+def test_v3_derive_cli_records_attempted_postgres_network_on_inventory_failure(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    selection_file = tmp_path / "selection.json"
+    selection_file.write_text(json.dumps(_selection()), encoding="utf-8")
+
+    def _inventory_failure(**_kwargs):
+        error = RuntimeError("inventory unavailable")
+        error.network_attempted = True
+        raise error
+
+    monkeypatch.setattr(
+        object_cli,
+        "derive_temporal_acceptance_baseline_from_ledger",
+        _inventory_failure,
+    )
+
+    status = object_cli.temporal_acceptance_derive_main(
+        [
+            "--selection-file",
+            str(selection_file),
+            "--ledger",
+            "configured-postgres-ledger",
+            "--project",
+            "neurons",
+            "--limit",
+            "10",
+            "--max-runtime-seconds",
+            "5",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert status == 1
+    assert payload["network_used"] is True
 
 
 def test_v3_derive_cli_returns_public_blocked_receipt_without_a_ledger(

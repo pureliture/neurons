@@ -919,6 +919,7 @@ class Ledger(
         read_only: bool = False,
         db_adapter=None,
         initialize_schema: bool = True,
+        deadline_monotonic: float | None = None,
     ):
         self.path = Path(path)
         self.read_only = bool(read_only)
@@ -927,6 +928,7 @@ class Ledger(
         self._memory_promotion_area_impl = MemoryPromotionArea(self)
         # B: DB 엔진 접근 seam. None이면 현행 SQLite 어댑터를 lazy 생성(behavior-preserving).
         self._db_adapter = db_adapter
+        self._deadline_monotonic = deadline_monotonic
         # C cutover switch: 명시 어댑터가 없고 NEURON_LEDGER_PG_DSN 이 설정돼 있으면 PostgreSQL
         # 엔진을 기본으로 쓴다(엔진 flip = 환경변수 하나). 미설정이면 SQLite(기존 동작 그대로).
         if self._db_adapter is None:
@@ -937,6 +939,7 @@ class Ledger(
                 self._db_adapter = PostgresLedgerDbAdapter(
                     _pg_dsn,
                     read_only=self.read_only,
+                    deadline_monotonic=self._deadline_monotonic,
                 )
         # C: 파일 기반 엔진(SQLite)만 파일 권한 준비/하드닝을 한다. 서버형(Postgres)은 skip.
         file_backed = (
@@ -961,10 +964,15 @@ class Ledger(
             self.path = self._snapshot_read_only_copy(self.path)
 
     @classmethod
-    def open_read_only(cls, path: Path | str) -> "Ledger":
+    def open_read_only(
+        cls,
+        path: Path | str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> "Ledger":
         if not Path(path).exists() and not os.environ.get("NEURON_LEDGER_PG_DSN", ""):
             raise ValueError(f"ledger path does not exist: {path}")
-        return cls(path, read_only=True)
+        return cls(path, read_only=True, deadline_monotonic=deadline_monotonic)
 
     def __del__(self) -> None:
         if self._temp_dir is not None:
