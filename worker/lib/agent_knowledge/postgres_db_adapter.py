@@ -12,7 +12,9 @@ ledger.py), (4) file-backed 아님(Ledger.__init__ 분기) 뿐이다.
 
 from __future__ import annotations
 
+import math
 import re
+import time
 
 import psycopg
 
@@ -121,8 +123,29 @@ class _PgConnection:
 
     dialect = "postgres"
 
-    def __init__(self, dsn: str, *, read_only: bool = False):
-        self._conn = psycopg.connect(dsn, row_factory=_pg_row_factory)
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        read_only: bool = False,
+        deadline_monotonic: float | None = None,
+        on_network_attempt=None,
+    ):
+        self._deadline_monotonic = deadline_monotonic
+        connect_kwargs = {"row_factory": _pg_row_factory}
+        timeout_seconds = self._remaining_deadline_seconds()
+        if timeout_seconds is not None:
+            if timeout_seconds < 1:
+                raise TimeoutError("postgres ledger deadline has insufficient connect budget")
+            connect_kwargs.update(
+                {
+                    "connect_timeout": max(1, int(timeout_seconds)),
+                    "options": f"-c statement_timeout={max(1, int(timeout_seconds * 1000))}",
+                }
+            )
+        if callable(on_network_attempt):
+            on_network_attempt()
+        self._conn = psycopg.connect(dsn, **connect_kwargs)
         self.row_factory = None  # 호환용: callers가 sqlite3.Row를 set해도 무시(_PgRow 고정)
         self._read_only = bool(read_only)
         if self._read_only:
@@ -133,6 +156,26 @@ class _PgConnection:
         else:
             self._ensure_compat_functions()
 
+    def _remaining_deadline_seconds(self) -> float | None:
+        if self._deadline_monotonic is None:
+            return None
+        remaining = self._deadline_monotonic - time.monotonic()
+        if not math.isfinite(remaining) or remaining <= 0:
+            raise TimeoutError("postgres ledger deadline exceeded")
+        return remaining
+
+    def _refresh_statement_timeout(self) -> None:
+        remaining = self._remaining_deadline_seconds()
+        if remaining is None:
+            return
+        if remaining < 0.001:
+            raise TimeoutError("postgres ledger deadline has insufficient statement budget")
+        with self._conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT set_config('statement_timeout', %s, false)",
+                (f"{max(1, int(remaining * 1000))}ms",),
+            )
+
     def _ensure_compat_functions(self) -> None:
         # SQLite 호환 함수(julianday) 보장 — idempotent CREATE OR REPLACE, 연결당 1회.
         with self._conn.cursor() as cursor:
@@ -142,6 +185,7 @@ class _PgConnection:
     def execute(self, sql: str, params=None) -> _PgResult:
         if _is_noop_pragma(sql):
             return _PgResult(None)  # SQLite 연결-튜닝 PRAGMA — PG no-op
+        self._refresh_statement_timeout()
         cursor = self._conn.cursor()
         if params:
             cursor.execute(qmark_to_pyformat(sql), tuple(params))
@@ -152,6 +196,7 @@ class _PgConnection:
 
     def executescript(self, script: str) -> None:
         # 멀티스테이트먼트 DDL(파라미터 없음). psycopg는 한 execute에 다중 statement 가능.
+        self._refresh_statement_timeout()
         with self._conn.cursor() as cursor:
             cursor.execute(script)
         self._conn.commit()
@@ -184,10 +229,26 @@ class PostgresLedgerDbAdapter(ILedgerCoreDbAdapter):
 
     is_file_backed = False
 
-    def __init__(self, dsn: str, *, read_only: bool = False):
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        read_only: bool = False,
+        deadline_monotonic: float | None = None,
+    ):
         self.dsn = dsn
         self.read_only = bool(read_only)
+        self._deadline_monotonic = deadline_monotonic
+        self.network_attempted = False
+
+    def _mark_network_attempted(self) -> None:
+        self.network_attempted = True
 
     def connect(self, *, configure_journal: bool = False) -> _PgConnection:
         # configure_journal(WAL)은 SQLite 전용 — Postgres에선 무의미(no-op).
-        return _PgConnection(self.dsn, read_only=self.read_only)
+        return _PgConnection(
+            self.dsn,
+            read_only=self.read_only,
+            deadline_monotonic=self._deadline_monotonic,
+            on_network_attempt=self._mark_network_attempted,
+        )

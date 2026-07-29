@@ -49,8 +49,11 @@ from .runtime_readiness import (
     build_deployment_evidence_binding,
 )
 from .temporal_acceptance_derive import (
+    AUTHORITY_LANE,
     DEFAULT_INVENTORY_LIMIT,
     MAX_INVENTORY_LIMIT,
+    SOURCE_KIND,
+    SOURCE_OBJECT_TYPE,
     authority_fingerprint_from_work_unit,
     derive_temporal_acceptance_baseline_from_ledger,
     normalize_temporal_selector_value,
@@ -1229,27 +1232,36 @@ async def _collect_temporal_recall_corrective_checkpoint(
     authority_baseline: Mapping[str, Any] | None = None,
     authority_derive_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    acceptance_v3 = config.get("schema_version") == "temporal_acceptance.v3"
+
     async def query_objects(
         selector: Mapping[str, Any], *, query: str = "temporal work recall"
     ) -> dict[str, Any]:
+        arguments = {
+            "repository": repository,
+            "branch": branch,
+            "project": project,
+            "query": public_safe_text(query, max_chars=240),
+            "current_files": [],
+            "route": "temporal_work_recall",
+            "response_mode": "full",
+            # Two is a sentinel, not a broad recall limit: one expected
+            # WorkUnit plus any stale/foreign second result is evidence the
+            # temporal response is not exact and must fail closed.
+            "limit": 2,
+            "consumer": consumer,
+            **dict(selector),
+        }
+        if acceptance_v3:
+            arguments["temporal_source_constraint"] = {
+                "source_kind": SOURCE_KIND,
+                "source_object_type": SOURCE_OBJECT_TYPE,
+                "authority_lane": AUTHORITY_LANE,
+            }
         return await _call_tool_untrusted_mapping(
             session,
             "brain_objects_query",
-            {
-                "repository": repository,
-                "branch": branch,
-                "project": project,
-                "query": public_safe_text(query, max_chars=240),
-                "current_files": [],
-                "route": "temporal_work_recall",
-                "response_mode": "full",
-                # Two is a sentinel, not a broad recall limit: one expected
-                # WorkUnit plus any stale/foreign second result is evidence the
-                # temporal response is not exact and must fail closed.
-                "limit": 2,
-                "consumer": consumer,
-                **dict(selector),
-            },
+            arguments,
         )
 
     date_a_config = config["date_a"]
@@ -1271,7 +1283,6 @@ async def _collect_temporal_recall_corrective_checkpoint(
     temporal_query = public_safe_text(
         str(config.get("temporal_query") or ""), max_chars=240
     )
-    acceptance_v3 = config.get("schema_version") == "temporal_acceptance.v3"
     derived_authority_baseline = dict(authority_baseline or {}) if acceptance_v3 else {}
     if acceptance_v3 and not derived_authority_baseline:
         raise ValueError("temporal acceptance v3 authority baseline is required")
@@ -1354,6 +1365,7 @@ async def _collect_temporal_recall_corrective_checkpoint(
             expected_source_revision=str(expected.get("expected_source_revision") or "")
             if acceptance_v3
             else "",
+            artifact_authority_only=acceptance_v3,
         )
 
     checkpoint = {
@@ -1447,11 +1459,17 @@ def _temporal_object_probe_summary(
     expected_identity_fingerprint: str,
     expected_authority_fingerprint: str = "",
     expected_source_revision: str = "",
+    artifact_authority_only: bool = False,
 ) -> dict[str, Any]:
     safe = _remote_mapping_or_failure(value)
     object_pack = safe.get("object_pack") if isinstance(safe.get("object_pack"), Mapping) else {}
     objects = object_pack.get("objects") if isinstance(object_pack.get("objects"), list) else []
-    gaps = object_pack.get("gaps") if isinstance(object_pack.get("gaps"), list) else []
+    raw_gaps = object_pack.get("gaps")
+    gaps = (
+        [str(gap) for gap in raw_gaps if str(gap or "")]
+        if isinstance(raw_gaps, list)
+        else []
+    )
     confidence = (
         object_pack.get("confidence")
         if isinstance(object_pack.get("confidence"), Mapping)
@@ -1513,7 +1531,36 @@ def _temporal_object_probe_summary(
                 "bounded_observed_interval": bool(observed_authority_fingerprint),
             }
         )
+        if artifact_authority_only:
+            if len(work_units) != 1:
+                _append_probe_gap(gaps, "temporal_v3_artifact_candidate_not_exact")
+            elif not _is_v3_artifact_temporal_candidate(work_unit):
+                _append_probe_gap(gaps, "temporal_v3_artifact_provenance_mismatch")
+            elif (
+                observed_authority_fingerprint != expected_authority_fingerprint
+                or observed_source_revision != expected_source_revision
+            ):
+                _append_probe_gap(gaps, "temporal_v3_artifact_authority_mismatch")
+    elif artifact_authority_only:
+        _append_probe_gap(gaps, "temporal_v3_artifact_authority_missing")
+    result["gap_count"] = len(gaps)
     return result
+
+
+def _is_v3_artifact_temporal_candidate(value: Mapping[str, Any]) -> bool:
+    payload = value.get("payload")
+    return (
+        str(value.get("object_type") or "") == "WorkUnit"
+        and str(value.get("authority_lane") or "") == AUTHORITY_LANE
+        and isinstance(payload, Mapping)
+        and str(payload.get("source_kind") or "") == SOURCE_KIND
+        and str(payload.get("source_object_type") or "") == SOURCE_OBJECT_TYPE
+    )
+
+
+def _append_probe_gap(gaps: list[str], gap: str) -> None:
+    if gap not in gaps:
+        gaps.append(gap)
 
 
 def _temporal_work_unit_identity_fingerprint(work_unit: Mapping[str, Any]) -> str:

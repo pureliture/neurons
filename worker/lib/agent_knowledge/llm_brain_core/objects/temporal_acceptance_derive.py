@@ -554,6 +554,18 @@ def _ledger_backend(ledger: Ledger) -> str:
     return "postgres"
 
 
+def _ledger_network_attempted(ledger: Ledger) -> bool:
+    adapter = getattr(ledger, "_db_adapter", None)
+    return bool(getattr(adapter, "network_attempted", False))
+
+
+def _mark_network_attempted(exc: Exception) -> None:
+    try:
+        exc.network_attempted = True
+    except (AttributeError, TypeError):
+        return
+
+
 def _source_file_digest(
     path: Path,
     *,
@@ -643,45 +655,54 @@ def derive_temporal_acceptance_baseline_from_ledger(
         if not os.environ.get("NEURON_LEDGER_PG_DSN", "").strip()
         else ""
     )
-    ledger = Ledger.open_read_only(ledger_path)
-    _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds)
-    backend = _ledger_backend(ledger)
-    if backend == "sqlite" and not source_before:
-        raise ValueError("source ledger binding must be captured before read-only open")
-    result = derive_temporal_acceptance_baseline(
-        artifact_store=LedgerSessionMemoryArtifactStore(ledger),
-        project=project,
-        selection=selection,
-        limit=limit,
-        max_runtime_seconds=max_runtime_seconds,
-        _started_at=started,
-    )
-    receipt = result.get("receipt")
-    if not isinstance(receipt, dict):
-        raise ValueError("temporal acceptance derivation receipt is unavailable")
-    if backend == "sqlite":
-        source_after = _sqlite_source_ledger_fingerprint(
+    ledger: Ledger | None = None
+    try:
+        ledger = Ledger.open_read_only(
             ledger_path,
-            started=started,
-            max_runtime_seconds=max_runtime_seconds,
+            deadline_monotonic=started + float(max_runtime_seconds),
         )
-    else:
-        source_after = str(receipt.get("source_inventory_hash") or "")
-        source_before = source_after
-    receipt.update(
-        {
-            "artifact_ledger_metadata_read_only": True,
-            "ledger_backend": backend,
-            "network_used": backend == "postgres",
-            "source_ledger_binding": _source_ledger_binding(
-                backend=backend,
-                before_fingerprint=source_before,
-                after_fingerprint=source_after,
-            ),
-        }
-    )
-    _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds)
-    return result
+        _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds)
+        backend = _ledger_backend(ledger)
+        if backend == "sqlite" and not source_before:
+            raise ValueError("source ledger binding must be captured before read-only open")
+        result = derive_temporal_acceptance_baseline(
+            artifact_store=LedgerSessionMemoryArtifactStore(ledger),
+            project=project,
+            selection=selection,
+            limit=limit,
+            max_runtime_seconds=max_runtime_seconds,
+            _started_at=started,
+        )
+        receipt = result.get("receipt")
+        if not isinstance(receipt, dict):
+            raise ValueError("temporal acceptance derivation receipt is unavailable")
+        if backend == "sqlite":
+            source_after = _sqlite_source_ledger_fingerprint(
+                ledger_path,
+                started=started,
+                max_runtime_seconds=max_runtime_seconds,
+            )
+        else:
+            source_after = str(receipt.get("source_inventory_hash") or "")
+            source_before = source_after
+        receipt.update(
+            {
+                "artifact_ledger_metadata_read_only": True,
+                "ledger_backend": backend,
+                "network_used": backend == "postgres",
+                "source_ledger_binding": _source_ledger_binding(
+                    backend=backend,
+                    before_fingerprint=source_before,
+                    after_fingerprint=source_after,
+                ),
+            }
+        )
+        _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds)
+        return result
+    except Exception as exc:
+        if ledger is not None and _ledger_network_attempted(ledger):
+            _mark_network_attempted(exc)
+        raise
 
 
 def public_result_json(value: Mapping[str, Any]) -> str:
