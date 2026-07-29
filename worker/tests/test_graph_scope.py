@@ -41,6 +41,17 @@ def test_graph_scope_hashes_overlength_scope_deterministically():
     assert len(first) < len(scope)
 
 
+def test_graph_scope_distinguishes_long_authoritative_scopes_with_a_shared_prefix():
+    shared_prefix = "/project/" + ("shared-scope-" * 20)
+
+    first = graph_group_id(shared_prefix + "first")
+    second = graph_group_id(shared_prefix + "second")
+
+    assert first.startswith("brain_")
+    assert second.startswith("brain_")
+    assert first != second
+
+
 def test_episode_brain_id_takes_precedence_and_default_scope_is_only_a_fallback():
     scoped = _episode(brain_id="/project/authoritative")
     legacy = _episode(brain_id=None)

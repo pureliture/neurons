@@ -205,6 +205,33 @@ def test_session_memory_gc_execute_requires_backup_for_selected_candidates(tmp_p
     assert report["network_used"] is False
 
 
+def test_session_memory_gc_execute_without_bridge_call_reports_network_unused(tmp_path, monkeypatch):
+    candidate = {
+        "knowledge_id": "kn_gc_revalidation_skip",
+        "index_document_id": "doc_gc_revalidation_skip",
+        "session_id_hash": SESSION_ID_HASH,
+    }
+    monkeypatch.setattr(SessionMemoryGcRunner, "_list_candidates", lambda self, ledger: [candidate])
+    monkeypatch.setattr(SessionMemoryGcRunner, "_still_qualifies", lambda self, ledger, **kwargs: False)
+    fake = _FakeRetiredIndexBridgeGcClient()
+
+    report = SessionMemoryGcRunner(
+        config=SessionMemoryGcConfig(
+            ledger_path=tmp_path / "ledger.sqlite",
+            dataset_id="ds_session_memory",
+            index_url="http://localhost:9380",
+            backup_dir=str(tmp_path / "gc-backup"),
+            execute=True,
+        ),
+        index_client=fake,
+    ).run()
+
+    assert report["attempted_count"] == 0
+    assert report["revalidation_skipped_count"] == 1
+    assert report["network_used"] is False
+    assert fake.deleted == []
+
+
 def test_session_memory_gc_reports_share_schema_across_normal_and_fail_closed_paths(tmp_path, monkeypatch):
     # P2: 정상 완료와 두 fail-closed short-circuit은 같은 report schema를 유지한다.
     # 특히 backup_dir 부재와 retention 정책 차단은 index 호출이나 delete로 진행하지 않는다.

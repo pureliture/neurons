@@ -23,6 +23,7 @@ from .graph import UpsertEpisodeResult
 from .graph_scope import (
     episode_matches_graph_group,
     graph_group_id,
+    graph_group_ids,
     graph_group_id_for_episode,
 )
 from .models import GraphMemoryResult, OntologyEpisode
@@ -441,8 +442,10 @@ class GraphitiNeo4jGraphMemoryAdapter:
         limit: int = 10,
     ) -> GraphMemoryResult:
         bounded = max(1, min(int(limit), 100))
-        group_id = graph_group_id(brain_id or self._default_group_id)
-        group_ids = [group_id] if group_id else None
+        scope = brain_id or self._default_group_id
+        group_id = graph_group_id(scope)
+        group_ids = list(graph_group_ids(scope)) or None
+        allowed_group_ids = set(group_ids or ())
 
         async def _call() -> tuple[list[Any], list[Any], list[Any], list[str], bool]:
             loop = asyncio.get_running_loop()
@@ -568,7 +571,9 @@ class GraphitiNeo4jGraphMemoryAdapter:
         source_episodes_by_id = {episode.episode_id: episode for episode in canonical_episodes}
         for source_node in hydrated_source_nodes:
             source_group_id = graph_group_id(str(getattr(source_node, "group_id", "") or ""))
-            if source_group_id != group_id:
+            if group_id and source_group_id not in allowed_group_ids:
+                continue
+            if not group_id and source_group_id:
                 continue
             episode = _episode_node_to_ontology(source_node)
             if episode is None:
@@ -642,7 +647,9 @@ class GraphitiNeo4jGraphMemoryAdapter:
         wanted = [str(item) for item in episode_ids if str(item or "")]
         if not wanted:
             return ()
-        group_id = graph_group_id(brain_id or self._default_group_id)
+        scope = brain_id or self._default_group_id
+        group_id = graph_group_id(scope)
+        allowed_group_ids = set(graph_group_ids(scope))
         wanted_types = set(entity_types or [])
 
         async def _call() -> list[OntologyEpisode]:
@@ -654,10 +661,16 @@ class GraphitiNeo4jGraphMemoryAdapter:
                     node = await EpisodicNode.get_by_uuid(self._graphiti.driver, episode_id)
                 except Exception:
                     continue
-                if group_id and str(getattr(node, "group_id", "") or "") != group_id:
+                if group_id and str(getattr(node, "group_id", "") or "") not in allowed_group_ids:
                     continue
                 episode = _episode_node_to_ontology(node)
                 if episode is None:
+                    continue
+                if group_id and not episode_matches_graph_group(
+                    episode,
+                    expected_group_id=group_id,
+                    default_scope=self._default_group_id,
+                ):
                     continue
                 if wanted_types and episode.entity_type not in wanted_types:
                     continue

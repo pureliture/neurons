@@ -103,6 +103,7 @@ class SessionMemoryGcRunner:
         revalidation_skipped_count = 0
         backed_up_count = 0
         failed_error_class = ""
+        network_used = False
         if self.config.execute and selected:
             retired_index_bridge = self._index_client if self._index_client is not None else RetiredIndexBridgeHttpClient(
                 base_url=self.config.index_url,
@@ -129,6 +130,7 @@ class SessionMemoryGcRunner:
                 attempted_count += 1
                 try:
                     # G-8: 백업이 성공해야만 삭제로 진행(백업 실패 시 예외→delete 안 함).
+                    network_used = True
                     self._backup_before_delete(
                         ledger,
                         retired_index_bridge,
@@ -162,7 +164,7 @@ class SessionMemoryGcRunner:
             failed_count=failed_count,
             failed_error_class=failed_error_class,
             mutation_performed=bool(self.config.execute and deleted_count),
-            network_used=bool(self.config.execute),
+            network_used=network_used,
         )
 
     def _backup_dir_required_report(self, candidates: list[dict], selected: list[dict]) -> dict:

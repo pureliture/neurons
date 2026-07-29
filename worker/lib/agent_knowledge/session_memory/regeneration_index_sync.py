@@ -70,6 +70,7 @@ class SessionMemoryIndexSyncExecutor:
         self.sleep_func = sleep_func
 
     def execute(self, request: SessionMemoryIndexSyncRequest) -> SessionMemoryIndexSyncResult:
+        runtime_dir = self._validated_runtime_dir()
         packed = request.packed
         planned = dict(request.planned)
         content_hash = str(planned["contentHash"])
@@ -124,6 +125,7 @@ class SessionMemoryIndexSyncExecutor:
             existing_status=existing_status,
             existing_document_id=existing_document_id,
             can_resume_existing_document=can_resume_existing_document,
+            runtime_dir=runtime_dir,
         )
         self._poll_until_indexed(knowledge_id=knowledge_id, document_id=document_id)
         return SessionMemoryIndexSyncResult(
@@ -152,6 +154,7 @@ class SessionMemoryIndexSyncExecutor:
         existing_status: str,
         existing_document_id: str,
         can_resume_existing_document: bool,
+        runtime_dir: Path,
     ) -> str:
         if can_resume_existing_document:
             return self._resume_existing_document(
@@ -160,7 +163,11 @@ class SessionMemoryIndexSyncExecutor:
                 existing_status=existing_status,
                 existing_document_id=existing_document_id,
             )
-        return self._upload_new_document(request, knowledge_id=knowledge_id)
+        return self._upload_new_document(
+            request,
+            knowledge_id=knowledge_id,
+            runtime_dir=runtime_dir,
+        )
 
     def _resume_existing_document(
         self,
@@ -184,8 +191,26 @@ class SessionMemoryIndexSyncExecutor:
             self.ledger.mark_parse_requested(knowledge_id)
         return existing_document_id
 
-    def _upload_new_document(self, request: SessionMemoryIndexSyncRequest, *, knowledge_id: str) -> str:
-        with secure_upload_payload(self.runtime_dir, request.packed.body) as upload_path:
+    def _validated_runtime_dir(self) -> Path:
+        if not self.runtime_dir:
+            raise ValueError(
+                "session-memory sync requires an explicit runtime_dir before upload"
+            )
+        runtime_dir = Path(self.runtime_dir)
+        if runtime_dir == Path("."):
+            raise ValueError(
+                "session-memory sync requires an explicit runtime_dir before upload"
+            )
+        return runtime_dir
+
+    def _upload_new_document(
+        self,
+        request: SessionMemoryIndexSyncRequest,
+        *,
+        knowledge_id: str,
+        runtime_dir: Path,
+    ) -> str:
+        with secure_upload_payload(runtime_dir, request.packed.body) as upload_path:
             upload = self.retired_index_bridge.upload_document(
                 self.dataset_id,
                 upload_path.read_text(encoding="utf-8"),
