@@ -12,7 +12,8 @@ def test_pyproject_declares_mcp_client_extra_for_operator_capture() -> None:
     extras = pyproject["project"]["optional-dependencies"]
 
     assert "mcp-client" in extras
-    assert "mcp>=1.28.0" in extras["mcp-client"]
+    assert extras["mcp-client"] == ["mcp>=1.28.0,<2"]
+    assert extras["mcp-http"] == ["mcp>=1.28.0,<2"]
 
 
 def test_llm_brain_tools_image_installs_mcp_client_extra() -> None:
@@ -20,7 +21,9 @@ def test_llm_brain_tools_image_installs_mcp_client_extra() -> None:
 
     assert '".[mcp-client]"' in dockerfile
     assert "from mcp import ClientSession" in dockerfile
-    assert "streamablehttp_client" in dockerfile
+    assert "from mcp.client.streamable_http import streamable_http_client" in dockerfile
+    legacy_symbol = "streamable" + "http_client"
+    assert legacy_symbol not in dockerfile
     assert "post_deploy_mcp_capture" in dockerfile
     assert "qdrant-client>=1.10" in dockerfile
     assert "openai>=1.0" in dockerfile
