@@ -21,7 +21,7 @@ def test_llm_brain_tools_image_installs_mcp_client_extra() -> None:
 
     assert '".[mcp-client]"' in dockerfile
     assert "from mcp import ClientSession" in dockerfile
-    assert "streamable_http_client" in dockerfile
+    assert "from mcp.client.streamable_http import streamable_http_client" in dockerfile
     legacy_symbol = "streamable" + "http_client"
     assert legacy_symbol not in dockerfile
     assert "post_deploy_mcp_capture" in dockerfile
