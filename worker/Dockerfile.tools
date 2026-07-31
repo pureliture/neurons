@@ -23,14 +23,14 @@ RUN pip install --no-cache-dir ".[mcp-client]" \
 
 RUN python - <<'PY'
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 from agent_knowledge.llm_brain_core.objects.post_deploy_mcp_capture import (
     validate_post_deploy_mcp_url,
 )
 
 assert ClientSession is not None
-assert streamablehttp_client is not None
+assert streamable_http_client is not None
 assert validate_post_deploy_mcp_url("http://127.0.0.1:8765/mcp") == "http://127.0.0.1:8765/mcp"
 PY
 

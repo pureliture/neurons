@@ -21,12 +21,13 @@ dependencies = [
 [project.optional-dependencies]
 # Deployed operator/capture CLI support. This installs the MCP client library
 # without implying that the image should run the HTTP MCP server.
-mcp-client = ["mcp>=1.28.0"]
+mcp-client = ["mcp>=1.28.0,<2"]
 # Streamable HTTP MCP transport (옵션). 기본 worker 이미지는 이 extra 없이 빌드되며
 # (trim 철학 보존), mcp-http 서비스만 별도 빌드에서 설치한다. 하한은 설치-검증 게이트에서
-# 실측 확정한 1.28.0으로 핀한다(StreamableHTTPSessionManager + low-level Server
-# 데코레이터 등록 + Tool/CallToolResult camelCase 필드를 이 버전에서 검증).
-mcp-http = ["mcp>=1.28.0"]
+# 실측 확정한 1.28.0으로 핀하고, v2 전체 이관 전까지 v1 호환 범위를 유지한다
+# (StreamableHTTPSessionManager + low-level Server 데코레이터 등록 +
+# Tool/CallToolResult camelCase 필드를 이 버전에서 검증).
+mcp-http = ["mcp>=1.28.0,<2"]
 # Qdrant+Docling searchable mirror PoC. Docling은 local smoke / Ubuntu dry-run
 # 검증에서만 명시적으로 설치한다. Qdrant client는 product marker와 중앙 write
 # gateway의 fail-closed runtime contract가 사용하므로 기본 dependency다.
