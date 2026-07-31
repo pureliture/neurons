@@ -597,10 +597,10 @@ def test_healthz_over_real_http(http_base):
 
 def test_initialize_list_and_call_over_http(http_base):
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
 
     async def _roundtrip():
-        async with streamablehttp_client(f"{http_base}/mcp") as (read, write, _):
+        async with streamable_http_client(f"{http_base}/mcp") as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await session.list_tools()
@@ -672,14 +672,14 @@ def test_healthz_liveness_remains_static_while_mcp_fails_closed_on_bad_host():
 
 def test_http_call_refreshes_brain_card_cache_per_request():
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
 
     stub = _StubService(result={"results": [{"knowledge_id": "fresh"}]})
     port = _free_port()
     app = mh.build_app(stub, port=port)
 
     async def _roundtrip(base):
-        async with streamablehttp_client(f"{base}/mcp") as (read, write, _):
+        async with streamable_http_client(f"{base}/mcp") as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 await session.call_tool("knowledge.search", {"query": "first"})
@@ -693,10 +693,10 @@ def test_http_call_refreshes_brain_card_cache_per_request():
 
 def test_stateless_two_independent_sessions(http_base):
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
 
     async def _one():
-        async with streamablehttp_client(f"{http_base}/mcp") as (read, write, _):
+        async with streamable_http_client(f"{http_base}/mcp") as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 return (await session.list_tools()).tools
