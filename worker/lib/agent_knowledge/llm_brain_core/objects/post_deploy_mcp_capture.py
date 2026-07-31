@@ -208,9 +208,9 @@ def validate_post_deploy_mcp_url(mcp_url: str) -> str:
 @asynccontextmanager
 async def _default_mcp_session(mcp_url: str) -> AsyncIterator[Any]:
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
 
-    async with streamablehttp_client(mcp_url) as (read, write, _):
+    async with streamable_http_client(mcp_url) as (read, write, _):
         async with ClientSession(read, write) as session:
             yield session
 
