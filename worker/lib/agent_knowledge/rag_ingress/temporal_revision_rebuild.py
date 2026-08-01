@@ -13,6 +13,7 @@ import argparse
 import datetime
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -21,6 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
 from ..couchdb_source.document_model import (
     build_conversation_chunk_document,
     build_source_hash,
@@ -28,6 +31,7 @@ from ..couchdb_source.document_model import (
     observed_time_bounds,
     sha256_hash,
 )
+from ..db_adapter import SqliteLedgerDbAdapter
 from ..ledger import Ledger
 from ..llm_brain_core.artifact_store import SessionMemoryArtifactStore
 from ..llm_brain_core.ledger_adapter import LedgerSessionMemoryArtifactStore
@@ -56,10 +60,12 @@ _TARGET_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 @dataclass(frozen=True)
 class _ResolvedRebuildTarget:
-    """Immutable writable-ledger snapshot kept separate from public reports."""
+    """Immutable actual-ledger snapshot kept separate from public reports."""
 
     ledger_path: Path = field(repr=False)
+    backend: str
     target_fingerprints: dict[str, str]
+    postgres_dsn: str = field(default="", repr=False)
 
 
 def _normalized_target_fingerprints(
@@ -87,20 +93,95 @@ def _target_fingerprint_digest(target_fingerprints: Mapping[str, object] | None)
     return _target_fingerprint(_normalized_target_fingerprints(target_fingerprints))
 
 
+def _postgres_target_identity(dsn: str) -> tuple[dict[str, str], str]:
+    """Resolve and freeze the PostgreSQL target without exposing conninfo.
+
+    ``Ledger`` selects PostgreSQL solely from ``NEURON_LEDGER_PG_DSN``. The
+    approval target must therefore describe the selected server database, not
+    the inert ``--ledger`` fallback path. conninfo normalizes URI and keyword
+    DSNs alike; only database-address and logical-session fields become input
+    to the opaque fingerprint, so credentials and raw connection fields never
+    enter a plan or approval artifact.
+    """
+
+    try:
+        values = conninfo_to_dict(dsn)
+    except Exception as exc:
+        raise ValueError("postgres ledger target is invalid") from exc
+    service = str(values.get("service") or os.environ.get("PGSERVICE") or "").strip()
+    if service:
+        raise ValueError("postgres ledger service targets are ambiguous")
+    host = str(values.get("host") or os.environ.get("PGHOST") or "").strip()
+    hostaddr = str(
+        values.get("hostaddr") or os.environ.get("PGHOSTADDR") or ""
+    ).strip()
+    database = str(values.get("dbname") or "").strip()
+    port = str(values.get("port") or "").strip()
+    user = str(values.get("user") or "").strip()
+    options = str(values.get("options") or "").strip()
+    if not (host or hostaddr) or not database or not port or not user:
+        raise ValueError("postgres ledger target is incomplete")
+    values["host"] = host
+    values["hostaddr"] = hostaddr
+    values["port"] = port
+    values["user"] = user
+    values["options"] = options
+    values["service"] = ""
+    try:
+        frozen_dsn = make_conninfo(**values)
+    except Exception as exc:
+        raise ValueError("postgres ledger target is invalid") from exc
+    return {
+        "backend": "postgres",
+        "database": database,
+        "host": _canonical_postgres_host(host),
+        "hostaddr": hostaddr.lower(),
+        "options": options,
+        "port": port,
+        "user": user,
+    }, frozen_dsn
+
+
+def _canonical_postgres_host(host: str) -> str:
+    """Normalize DNS names without changing case-sensitive socket paths."""
+
+    return ",".join(
+        value if "/" in value else value.lower()
+        for value in str(host or "").split(",")
+    )
+
+
 def _resolve_rebuild_target(args: argparse.Namespace) -> _ResolvedRebuildTarget:
-    """Resolve the writable ledger once so argv aliases cannot drift after approval."""
+    """Resolve the actual ledger once so backend selection cannot drift.
+
+    The resolved DSN is retained only in this private value and passed as an
+    explicit adapter later. This prevents a second environment read from
+    changing the backend between approval, planning, and execution.
+    """
 
     ledger_path = Path(str(args.ledger or "")).expanduser().resolve(strict=False)
+    postgres_dsn = str(os.environ.get("NEURON_LEDGER_PG_DSN", "")).strip()
+    if postgres_dsn:
+        target_identity, postgres_dsn = _postgres_target_identity(postgres_dsn)
+        backend = "postgres"
+    else:
+        target_identity = {
+            "backend": "sqlite",
+            "path": str(ledger_path),
+        }
+        backend = "sqlite"
     fingerprints = _normalized_target_fingerprints(
         {
             "projection_ledger": _target_fingerprint(
-                {"kind": "projection_ledger", "path": str(ledger_path)}
+                {"kind": "projection_ledger", **target_identity}
             )
         }
     )
     return _ResolvedRebuildTarget(
         ledger_path=ledger_path,
+        backend=backend,
         target_fingerprints=fingerprints,
+        postgres_dsn=postgres_dsn,
     )
 
 
@@ -830,10 +911,20 @@ def _error_report(error: str, *, dry_run: bool) -> dict[str, Any]:
     }
 
 
+def _abort_timeout_report(plan: dict[str, Any]) -> dict[str, Any]:
+    plan["status"] = "aborted_timeout"
+    plan["dry_run"] = False
+    plan["aborted"] = True
+    plan["abort_count"] = 1
+    plan["timed_out"] = True
+    plan["mutation_performed"] = False
+    return plan
+
+
 def _read_only_plan(
     *,
     state_db: RAGIngressStateDB,
-    ledger_path: Path,
+    target: _ResolvedRebuildTarget,
     target_fingerprints: Mapping[str, object],
     project: str,
     limit: int,
@@ -841,7 +932,11 @@ def _read_only_plan(
     deadline: float,
     monotonic: Callable[[], float],
 ) -> dict[str, Any]:
-    ledger = Ledger.open_read_only(str(ledger_path))
+    ledger = _open_resolved_ledger(
+        target,
+        read_only=True,
+        deadline=deadline,
+    )
     return rebuild_temporal_revisions(
         state_db=state_db,
         artifact_store=LedgerSessionMemoryArtifactStore(ledger),
@@ -852,6 +947,54 @@ def _read_only_plan(
         deadline=deadline,
         monotonic=monotonic,
     )
+
+
+def _open_resolved_ledger(
+    target: _ResolvedRebuildTarget,
+    *,
+    read_only: bool,
+    deadline: float,
+) -> Ledger:
+    """Open only the backend bound into the target fingerprint.
+
+    In particular, do not let ``Ledger`` re-read ``NEURON_LEDGER_PG_DSN``
+    after approval. The read-only branch intentionally skips schema
+    initialization, so planning cannot execute artifact-store DDL.
+    """
+
+    if target.backend == "postgres":
+        from ..postgres_db_adapter import PostgresLedgerDbAdapter
+
+        return Ledger(
+            str(target.ledger_path),
+            read_only=read_only,
+            db_adapter=PostgresLedgerDbAdapter(
+                target.postgres_dsn,
+                read_only=read_only,
+                deadline_monotonic=deadline,
+            ),
+            initialize_schema=False,
+            deadline_monotonic=deadline,
+        )
+    if target.backend == "sqlite":
+        ledger = Ledger(
+            str(target.ledger_path),
+            read_only=read_only,
+            db_adapter=SqliteLedgerDbAdapter(
+                target.ledger_path,
+                read_only=read_only,
+            ),
+            initialize_schema=False,
+            deadline_monotonic=deadline,
+        )
+        if read_only:
+            # Ledger snapshots file-backed read-only ledgers during construction.
+            # Rebase the explicit adapter onto that snapshot so a later PG env
+            # change cannot replace the approved SQLite target and planning
+            # still reads a stable file view.
+            ledger._db_adapter = SqliteLedgerDbAdapter(ledger.path, read_only=True)
+        return ledger
+    raise ValueError("ledger target backend is invalid")
 
 
 def main(
@@ -918,7 +1061,7 @@ def main(
         state_db = RAGIngressStateDB(args.state_db, read_only=True)
         plan = _read_only_plan(
             state_db=state_db,
-            ledger_path=target.ledger_path,
+            target=target,
             target_fingerprints=target.target_fingerprints,
             project=str(args.project),
             limit=int(args.limit),
@@ -951,10 +1094,21 @@ def main(
         print(json.dumps(plan, sort_keys=True))
         return 1
 
+    if monotonic() >= command_deadline:
+        print(json.dumps(_abort_timeout_report(plan), sort_keys=True))
+        return 1
+
     try:
         # Writable ledger access is delayed until exact argv approval and a fresh
         # read-only plan digest have both passed.
-        ledger = Ledger(str(target.ledger_path), initialize_schema=False)
+        ledger = _open_resolved_ledger(
+            target,
+            read_only=False,
+            deadline=command_deadline,
+        )
+        if monotonic() >= command_deadline:
+            print(json.dumps(_abort_timeout_report(plan), sort_keys=True))
+            return 1
         report = rebuild_temporal_revisions(
             state_db=state_db,
             artifact_store=LedgerSessionMemoryArtifactStore(ledger),
