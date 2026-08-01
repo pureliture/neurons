@@ -118,7 +118,10 @@ def _postgres_target_identity(dsn: str) -> tuple[dict[str, str], str]:
     database = str(values.get("dbname") or "").strip()
     port = str(values.get("port") or "").strip()
     user = str(values.get("user") or "").strip()
-    options = str(values.get("options") or "").strip()
+    configured_options = values.get("options")
+    if configured_options is None:
+        configured_options = os.environ.get("PGOPTIONS")
+    options = str(configured_options or "").strip()
     if not (host or hostaddr) or not database or not port or not user:
         raise ValueError("postgres ledger target is incomplete")
     values["host"] = host

@@ -24,6 +24,7 @@ from agent_knowledge.llm_brain_core import (
 from agent_knowledge.llm_brain_core._util import hash_payload
 from agent_knowledge.llm_brain_core.context import BrainReadService
 from agent_knowledge.ledger import Ledger
+from agent_knowledge.postgres_db_adapter import _options_with_deadline
 from agent_knowledge.rag_ingress.state_db import (
     CommandResultSpec,
     DeliveryJobSpec,
@@ -1122,6 +1123,43 @@ def test_postgres_target_freezes_ambient_host_complements(
     )
     assert frozen_ledger._db_adapter.dsn == no_hostaddr.postgres_dsn
     assert conninfo_to_dict(frozen_ledger._db_adapter.dsn)["hostaddr"] == ""
+
+
+def test_postgres_target_freezes_ambient_options_and_preserves_deadline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    argv = [
+        "--state-db",
+        str(tmp_path / "state.sqlite3"),
+        "--ledger",
+        str(tmp_path / "sqlite-fallback.sqlite3"),
+        "--project",
+        PROJECT,
+    ]
+    parsed = rebuild_module._parser().parse_args(argv)
+    first_options = "-c search_path=ledger_a"
+    second_options = "-c search_path=ledger_b"
+    monkeypatch.setenv(
+        "NEURON_LEDGER_PG_DSN",
+        "host=ledger.invalid port=5432 dbname=neurons user=rebuild",
+    )
+    monkeypatch.setenv("PGOPTIONS", first_options)
+
+    target = rebuild_module._resolve_rebuild_target(parsed)
+
+    assert conninfo_to_dict(target.postgres_dsn)["options"] == first_options
+    assert _options_with_deadline(target.postgres_dsn, timeout_ms=1250) == (
+        f"{first_options} -c statement_timeout=1250"
+    )
+
+    monkeypatch.setenv("PGOPTIONS", second_options)
+    changed = rebuild_module._resolve_rebuild_target(parsed)
+    assert changed.target_fingerprints != target.target_fingerprints
+    assert conninfo_to_dict(target.postgres_dsn)["options"] == first_options
+    assert _options_with_deadline(target.postgres_dsn, timeout_ms=1250) == (
+        f"{first_options} -c statement_timeout=1250"
+    )
 
 
 def test_postgres_target_rejects_service_indirection(
