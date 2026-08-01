@@ -56,6 +56,10 @@ from ..session_memory.transcript_parsers import parse_transcript_source
 
 REPAIR_OPERATION = "couchdb_historical_temporal_repair"
 REPAIR_SCHEMA_VERSION = "couchdb_historical_temporal_repair.v1"
+# Keeps legacy callers bounded without making them add a compatibility-only
+# argument.  A five-digit ceiling keeps each directory sort reviewable; larger
+# archives must opt in with an explicit bound.
+DEFAULT_SOURCE_ENTRY_LIMIT = 10_000
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SNAPSHOT_FIELDS = [
     "_id",
@@ -164,6 +168,13 @@ def _optional_int(value: object | None) -> int | None:
     return int(value) if value is not None else None
 
 
+def _effective_source_entry_limit(value: object | None) -> int:
+    limit = DEFAULT_SOURCE_ENTRY_LIMIT if value is None else int(value)
+    if limit <= 0:
+        raise ValueError("source_entry_limit must be positive")
+    return limit
+
+
 def _validate_bounds(
     *,
     provider: str,
@@ -181,8 +192,7 @@ def _validate_bounds(
         raise ValueError("project scope is required")
     if any(int(limit) <= 0 for limit in (source_file_limit, target_document_limit, patch_limit)):
         raise ValueError("all limits must be positive")
-    if source_entry_limit is None or int(source_entry_limit) <= 0:
-        raise ValueError("source_entry_limit must be positive")
+    _effective_source_entry_limit(source_entry_limit)
     if batch_limit is not None and (
         int(batch_limit) <= 0 or int(batch_limit) > int(patch_limit)
     ):
@@ -256,7 +266,7 @@ def _source_project(provider: str, path: Path) -> str:
 def _iter_source_entries(
     root: Path,
     *,
-    source_entry_limit: int,
+    source_entry_limit: int | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     started: float | None = None,
     max_runtime_seconds: float | None = None,
@@ -270,9 +280,7 @@ def _iter_source_entries(
     root = Path(root)
     if not root.is_dir():
         return
-    entry_limit = int(source_entry_limit)
-    if entry_limit <= 0:
-        raise ValueError("source_entry_limit must be positive")
+    entry_limit = _effective_source_entry_limit(source_entry_limit)
     pending = [root]
     source_entry_count = 0
     while pending:
@@ -341,7 +349,7 @@ def _iter_provider_files(
     provider: str,
     root: Path,
     *,
-    source_entry_limit: int,
+    source_entry_limit: int | None = None,
 ) -> Iterable[Path]:
     """Yield matching provider sources in filesystem traversal order."""
     root = Path(root)
@@ -356,15 +364,14 @@ def collect_historical_candidates(
     project: str,
     source_root: Path,
     source_file_limit: int,
-    source_entry_limit: int,
+    source_entry_limit: int | None = None,
     required_source_locator_hashes: Iterable[str] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     started: float | None = None,
     max_runtime_seconds: float | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, int | bool | None], bool]:
     """Re-parse bounded historical sources without invoking migration/upsert."""
-    if source_entry_limit is None or int(source_entry_limit) <= 0:
-        raise ValueError("source_entry_limit must be positive")
+    source_entry_limit = _effective_source_entry_limit(source_entry_limit)
     if _deadline_exceeded(started=started, max_runtime_seconds=max_runtime_seconds, monotonic=monotonic):
         return [], _collection_counts(source_entry_limit=source_entry_limit), True
     required_hashes = (
@@ -752,6 +759,7 @@ def repair_historical_temporal_gaps(
     """
     provider = canonicalize_provider(provider)
     project = str(project or "").strip()
+    source_entry_limit = _effective_source_entry_limit(source_entry_limit)
     _validate_bounds(
         provider=provider,
         project=project,
@@ -954,7 +962,8 @@ def repair_historical_temporal_gaps(
     eligible = sorted(planned, key=lambda item: item.document_id)
     selected = eligible if batch_limit is None else eligible[: int(batch_limit)]
     report["eligible_update_count"] = len(eligible)
-    report["total_eligible_update_count"] = len(eligible)
+    # Compatibility alias retained for existing report consumers.
+    report["total_eligible_update_count"] = report["eligible_update_count"]
     report["selected_batch_count"] = len(selected)
     report["remaining_eligible_update_count"] = len(eligible) - len(selected)
     report["batch_pending"] = batch_limit is not None and bool(report["remaining_eligible_update_count"])
@@ -1134,8 +1143,13 @@ def _error_report(error: str, *, dry_run: bool) -> dict[str, Any]:
 
 
 def _batch_execute_succeeded_without_reported_errors(report: Mapping[str, object]) -> bool:
+    successful_batch_or_noop = bool(report.get("batch_execution_succeeded")) or (
+        report.get("status") == "completed"
+        and not report.get("selected_batch_count")
+        and not report.get("mutation_performed")
+    )
     return bool(
-        report.get("batch_execution_succeeded")
+        successful_batch_or_noop
         and not report.get("timed_out")
         and not report.get("write_conflict_count")
         and not report.get("write_error_count")
@@ -1290,6 +1304,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = [
+    "DEFAULT_SOURCE_ENTRY_LIMIT",
     "REPAIR_OPERATION",
     "REPAIR_SCHEMA_VERSION",
     "collect_historical_candidates",
