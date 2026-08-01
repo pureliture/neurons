@@ -160,7 +160,10 @@ def _resolve_rebuild_target(args: argparse.Namespace) -> _ResolvedRebuildTarget:
     """
 
     ledger_path = Path(str(args.ledger or "")).expanduser().resolve(strict=False)
-    postgres_dsn = str(os.environ.get("NEURON_LEDGER_PG_DSN", "")).strip()
+    configured_postgres_dsn = str(os.environ.get("NEURON_LEDGER_PG_DSN", ""))
+    postgres_dsn = configured_postgres_dsn.strip()
+    if configured_postgres_dsn and not postgres_dsn:
+        raise ValueError("postgres ledger target is invalid")
     if postgres_dsn:
         target_identity, postgres_dsn = _postgres_target_identity(postgres_dsn)
         backend = "postgres"
@@ -918,6 +921,7 @@ def _abort_timeout_report(plan: dict[str, Any]) -> dict[str, Any]:
     plan["abort_count"] = 1
     plan["timed_out"] = True
     plan["mutation_performed"] = False
+    plan["error_count"] = max(1, int(plan.get("error_count") or 0))
     return plan
 
 
