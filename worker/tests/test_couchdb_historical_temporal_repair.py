@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+import pytest
 
 import agent_knowledge.couchdb_source.historical_temporal_repair as temporal_repair
 from agent_knowledge.cli import COMMAND_HANDLERS, COMMAND_METADATA
@@ -9,6 +12,7 @@ from agent_knowledge.couchdb_source.document_model import (
     build_conversation_chunk_document,
     build_coverage_manifest_document,
     build_projection_state_document,
+    build_source_locator_hash,
     build_source_revision_token,
     build_transcript_session_document,
     coverage_manifest_doc_id,
@@ -20,6 +24,7 @@ from agent_knowledge.couchdb_source.historical_temporal_repair import (
     main,
     repair_historical_temporal_gaps,
 )
+from agent_knowledge.couchdb_source.migration_cli import enumerate_provider_files
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore, SourceStoreConflict
 from agent_knowledge.session_memory.transcript_chunking import build_transcript_chunks
 from agent_knowledge.session_memory.transcript_model import (
@@ -33,17 +38,42 @@ from agent_knowledge.session_memory.transcript_parsers import ParsedTranscript
 PROJECT = "neurons"
 PROVIDER = "codex"
 SESSION_HASH = "sha256:" + "b" * 64
+SOURCE_LOCATOR_HASH = "sha256:" + "d" * 64
 
 
 def _limits() -> dict[str, int]:
     return {
         "source_file_limit": 10,
+        "source_entry_limit": 100,
         "target_document_limit": 10,
         "patch_limit": 10,
     }
 
 
-def _seed_store() -> tuple[InMemoryCouchDBSourceStore, dict]:
+def _cli_args(source_root: Path, **overrides: object) -> list[str]:
+    options: dict[str, object] = {
+        "provider": PROVIDER,
+        "project": PROJECT,
+        "source_root": source_root,
+        "source_file_limit": 1,
+        "source_entry_limit": 100,
+        "target_document_limit": 1,
+        "patch_limit": 1,
+        "batch_limit": None,
+        "max_runtime_seconds": 30,
+    }
+    options.update(overrides)
+    args: list[str] = []
+    for name, value in options.items():
+        if value is not None:
+            args.extend((f"--{name.replace('_', '-')}", str(value)))
+    return args
+
+
+def _seed_store(
+    *,
+    source_locator_hash: str = SOURCE_LOCATOR_HASH,
+) -> tuple[InMemoryCouchDBSourceStore, dict]:
     store = InMemoryCouchDBSourceStore()
     session = TranscriptSession(
         session_id_hash=SESSION_HASH,
@@ -61,7 +91,10 @@ def _seed_store() -> tuple[InMemoryCouchDBSourceStore, dict]:
         turn_end_index=2,
         text="public historical repair body",
     )
-    chunk = build_conversation_chunk_document(chunk=missing)
+    chunk = build_conversation_chunk_document(
+        chunk=missing,
+        source_locator_hash=source_locator_hash,
+    )
     store.put(build_transcript_session_document(session=session))
     store.put(chunk)
     coverage = build_coverage_manifest_document(
@@ -96,7 +129,13 @@ def _seed_store() -> tuple[InMemoryCouchDBSourceStore, dict]:
     return store, repaired
 
 
-def _add_gap_chunk(store: InMemoryCouchDBSourceStore, *, chunk_id: str, text: str) -> dict:
+def _add_gap_chunk(
+    store: InMemoryCouchDBSourceStore,
+    *,
+    chunk_id: str,
+    text: str,
+    source_locator_hash: str = SOURCE_LOCATOR_HASH,
+) -> dict:
     chunk = build_conversation_chunk_document(
         chunk=TranscriptChunk.from_text(
             chunk_id=chunk_id,
@@ -106,7 +145,8 @@ def _add_gap_chunk(store: InMemoryCouchDBSourceStore, *, chunk_id: str, text: st
             turn_start_index=3,
             turn_end_index=3,
             text=text,
-        )
+        ),
+        source_locator_hash=source_locator_hash,
     )
     store.put(chunk)
     repaired = dict(chunk)
@@ -299,6 +339,8 @@ def test_candidate_duplicates_are_idempotent_but_archive_conflicts_are_excluded(
     assert conflict_report["archive_conflict_count"] == 1
     assert conflict_report["target_archive_conflict_count"] == 1
     assert conflict_report["planned_update_count"] == 0
+    assert conflict_report["selected_batch_count"] == 0
+    assert conflict_report["gap_count"] == 1
 
 
 def test_unmatched_archive_conflict_is_informational_not_a_live_gap_error():
@@ -342,8 +384,21 @@ def test_full_target_snapshot_changes_plan_digest_and_blocks_old_execute_plan():
         max_runtime_seconds=30,
         target_fingerprints={"couchdb_source": "sha256:" + "a" * 64},
         source_file_limit=10,
+        source_entry_limit=100,
         target_document_limit=10,
         patch_limit=11,
+    )
+    changed_entry_bound = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        target_fingerprints={"couchdb_source": "sha256:" + "a" * 64},
+        source_file_limit=10,
+        source_entry_limit=11,
+        target_document_limit=10,
+        patch_limit=10,
     )
     _add_gap_chunk(store, chunk_id="unmatched-new-gap", text="unmatched new temporal gap")
 
@@ -360,44 +415,138 @@ def test_full_target_snapshot_changes_plan_digest_and_blocks_old_execute_plan():
     )
 
     assert changed_bound["plan_digest"] != plan["plan_digest"]
+    assert changed_entry_bound["source_entry_limit"] == 11
+    assert changed_entry_bound["plan_digest"] != plan["plan_digest"]
     assert execute["status"] == "blocked_plan_drift"
     assert store.get(candidate["_id"])["observed_at_start"] == ""
 
 
-def test_patch_limit_blocks_before_any_mutation():
+def test_repair_selects_a_deterministic_bounded_batch_and_reports_remaining_work():
     store, candidate = _seed_store()
     second = _add_gap_chunk(store, chunk_id="patch-limit-second", text="second temporal gap")
-    report = repair_historical_temporal_gaps(
-        source_store=store,
-        provider=PROVIDER,
-        project=PROJECT,
-        historical_documents=[candidate, second],
-        source_file_limit=10,
-        target_document_limit=10,
-        patch_limit=1,
-        max_runtime_seconds=30,
-        execute=True,
-        expected_plan_digest="",
-    )
-
-    # The bad digest gate wins first, so obtain the actual digest then prove the
-    # separate patch bound rejects without invoking a source patch.
+    third = _add_gap_chunk(store, chunk_id="patch-limit-third", text="third temporal gap")
     plan = repair_historical_temporal_gaps(
         source_store=store,
         provider=PROVIDER,
         project=PROJECT,
-        historical_documents=[candidate, second],
+        historical_documents=[third, candidate, second],
         source_file_limit=10,
+        source_entry_limit=100,
         target_document_limit=10,
-        patch_limit=1,
+        patch_limit=3,
+        batch_limit=2,
+        max_runtime_seconds=30,
+    )
+    reordered_plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[second, third, candidate],
+        source_file_limit=10,
+        source_entry_limit=100,
+        target_document_limit=10,
+        patch_limit=3,
+        batch_limit=2,
         max_runtime_seconds=30,
     )
     bounded = repair_historical_temporal_gaps(
         source_store=store,
         provider=PROVIDER,
         project=PROJECT,
+        historical_documents=[candidate, second, third],
+        source_file_limit=10,
+        source_entry_limit=100,
+        target_document_limit=10,
+        patch_limit=3,
+        batch_limit=2,
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+    )
+
+    assert plan["eligible_update_count"] == 3
+    assert plan["selected_batch_count"] == 2
+    assert plan["remaining_eligible_update_count"] == 1
+    assert plan["plan_digest"] == reordered_plan["plan_digest"]
+    assert plan["snapshot_fingerprint"].startswith("sha256:")
+    assert plan["selected_batch_fingerprint"] == reordered_plan["selected_batch_fingerprint"]
+    assert plan["status"] == "dry_run_batch_ready"
+    assert bounded["status"] == "completed_batch_pending"
+    assert bounded["batch_execution_succeeded"] is True
+    assert bounded["error_count"] == 0
+    assert bounded["updated_count"] == 2
+    assert bounded["remaining_temporal_gap_count"] == 1
+
+
+def test_batch_stays_ready_while_an_unrepairable_target_gap_remains():
+    store, candidate = _seed_store()
+    unrepairable = _add_gap_chunk(
+        store,
+        chunk_id="unrepairable-target",
+        text="unrepairable target gap",
+    )
+    mismatched_candidate = dict(unrepairable)
+    mismatched_candidate["content_hash"] = "sha256:" + "e" * 64
+
+    plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate, mismatched_candidate],
+        source_file_limit=10,
+        source_entry_limit=100,
+        target_document_limit=10,
+        patch_limit=2,
+        batch_limit=1,
+        max_runtime_seconds=30,
+    )
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate, mismatched_candidate],
+        source_file_limit=10,
+        source_entry_limit=100,
+        target_document_limit=10,
+        patch_limit=2,
+        batch_limit=1,
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+    )
+
+    assert plan["status"] == "dry_run_batch_ready_with_gaps"
+    assert plan["batch_ready"] is True
+    assert plan["unrepairable_gap_count"] == 1
+    assert plan["selected_batch_count"] == 1
+    assert report["status"] == "completed_batch_complete_with_gaps"
+    assert report["batch_execution_succeeded"] is True
+    assert report["updated_count"] == 1
+    assert report["remaining_temporal_gap_count"] == 1
+    assert report["remaining_unresolved_gap_count"] == 1
+
+
+def test_patch_limit_without_batch_mode_blocks_before_any_mutation():
+    store, candidate = _seed_store()
+    second = _add_gap_chunk(store, chunk_id="patch-limit-second", text="second temporal gap")
+    plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
         historical_documents=[candidate, second],
         source_file_limit=10,
+        source_entry_limit=100,
+        target_document_limit=10,
+        patch_limit=1,
+        max_runtime_seconds=30,
+    )
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate, second],
+        source_file_limit=10,
+        source_entry_limit=100,
         target_document_limit=10,
         patch_limit=1,
         max_runtime_seconds=30,
@@ -405,11 +554,393 @@ def test_patch_limit_blocks_before_any_mutation():
         expected_plan_digest=plan["plan_digest"],
     )
 
-    assert report["status"] == "blocked_plan_drift"
-    assert bounded["status"] == "blocked_patch_limit"
-    assert bounded["mutation_performed"] is False
+    assert plan["status"] == "dry_run_patch_limit_exceeded"
+    assert report["status"] == "blocked_patch_limit"
+    assert report["mutation_performed"] is False
     assert store.get(candidate["_id"])["observed_at_start"] == ""
     assert store.get(second["_id"])["observed_at_start"] == ""
+
+
+def test_candidate_collection_parses_only_snapshot_locator_targets(tmp_path, monkeypatch):
+    selected = tmp_path / "a-selected.jsonl"
+    irrelevant_malformed = tmp_path / "z-irrelevant.jsonl"
+    selected.write_text("valid selected fixture", encoding="utf-8")
+    irrelevant_malformed.write_text("malformed source must remain unread", encoding="utf-8")
+    parsed_paths = []
+
+    def parse_selected(provider, path, *, project, source_locator_hash):
+        parsed_paths.append((Path(path), source_locator_hash))
+        return ParsedTranscript(
+            session=TranscriptSession(
+                session_id_hash=SESSION_HASH,
+                provider=provider,
+                project=project,
+                started_at="2026-07-01T10:00:00Z",
+            ),
+            turns=[
+                TranscriptTurn("turn-a", SESSION_HASH, 1, "user", "2026-07-01T10:00:01Z", "hello"),
+                TranscriptTurn("turn-b", SESSION_HASH, 2, "assistant", "2026-07-01T10:00:02Z", "world"),
+            ],
+            tool_events=[],
+            parser_warnings=[],
+            source_status="source_locator_private_spool_only",
+        )
+
+    monkeypatch.setattr(temporal_repair, "_source_project", lambda *_args: PROJECT)
+    monkeypatch.setattr(temporal_repair, "parse_transcript_source", parse_selected)
+
+    documents, report, timed_out = collect_historical_candidates(
+        provider=PROVIDER,
+        project=PROJECT,
+        source_root=tmp_path,
+        source_file_limit=2,
+        source_entry_limit=100,
+        required_source_locator_hashes={build_source_locator_hash(str(selected))},
+    )
+
+    assert timed_out is False
+    assert [path for path, _locator_hash in parsed_paths] == [selected]
+    assert report["source_file_count"] == 1
+    assert report["unmatched_source_locator_hash_count"] == 0
+    assert report["source_scan_complete"] is True
+    assert report["required_target_scan_satisfied"] is True
+    assert report["source_tree_scan_complete"] is True
+    assert report["source_scan_truncated"] is False
+    assert report["parser_error_count"] == 0
+    assert len(documents) == 1
+
+
+def test_candidate_collection_times_out_during_locator_filter_before_source_parsing(tmp_path, monkeypatch):
+    selected = tmp_path / "selected.jsonl"
+    selected.write_text("unread fixture", encoding="utf-8")
+    monkeypatch.setattr(
+        temporal_repair,
+        "parse_transcript_source",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("source parse must not run")),
+    )
+    clock = iter((0.0, 31.0))
+
+    documents, report, timed_out = collect_historical_candidates(
+        provider=PROVIDER,
+        project=PROJECT,
+        source_root=tmp_path,
+        source_file_limit=1,
+        source_entry_limit=100,
+        required_source_locator_hashes={build_source_locator_hash(str(selected))},
+        started=0.0,
+        max_runtime_seconds=30,
+        monotonic=lambda: next(clock),
+    )
+
+    assert documents == []
+    assert timed_out is True
+    assert report["parsed_source_count"] == 0
+    assert report["unmatched_source_locator_hash_count"] == 1
+
+
+def test_candidate_collection_checks_deadline_for_non_provider_entries_before_parsing(
+    tmp_path, monkeypatch
+):
+    for index in range(2):
+        (tmp_path / f"ignored-{index}.txt").write_text("not a provider source", encoding="utf-8")
+    monkeypatch.setattr(
+        temporal_repair,
+        "parse_transcript_source",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("source parse must not run")),
+    )
+    clock = iter((0.0, 0.0, 31.0))
+
+    documents, report, timed_out = collect_historical_candidates(
+        provider=PROVIDER,
+        project=PROJECT,
+        source_root=tmp_path,
+        source_file_limit=1,
+        source_entry_limit=100,
+        required_source_locator_hashes={"sha256:" + "a" * 64},
+        started=0.0,
+        max_runtime_seconds=30,
+        monotonic=lambda: next(clock),
+    )
+
+    assert documents == []
+    assert timed_out is True
+    assert report["source_entry_count"] == 1
+    assert report["discovered_source_file_count"] == 0
+    assert report["parsed_source_count"] == 0
+
+
+def test_candidate_collection_times_out_inside_flat_directory_scan_before_sorting(
+    tmp_path, monkeypatch
+):
+    scan_count = 0
+
+    class FakeEntry:
+        def __init__(self, index: int):
+            self.path = str(tmp_path / f"ignored-{index:05d}.txt")
+
+        def is_dir(self, *, follow_symlinks: bool) -> bool:
+            assert follow_symlinks is False
+            return False
+
+    class FakeScanner:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal scan_count
+            scan_count += 1
+            return FakeEntry(scan_count)
+
+    monkeypatch.setattr(temporal_repair.os, "scandir", lambda _path: FakeScanner())
+
+    documents, report, timed_out = collect_historical_candidates(
+        provider=PROVIDER,
+        project=PROJECT,
+        source_root=tmp_path,
+        source_file_limit=1,
+        source_entry_limit=100,
+        required_source_locator_hashes={"sha256:" + "a" * 64},
+        started=0.0,
+        max_runtime_seconds=30,
+        monotonic=lambda: 31.0 if scan_count >= 2 else 0.0,
+    )
+
+    assert documents == []
+    assert timed_out is True
+    assert scan_count <= 2
+    assert report["source_entry_count"] <= 2
+
+
+def test_candidate_collection_rejects_missing_source_entry_limit_before_scan(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        temporal_repair,
+        "_iter_source_entries",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("source scan must not run")),
+    )
+
+    with pytest.raises(ValueError, match="source_entry_limit must be positive"):
+        collect_historical_candidates(
+            provider=PROVIDER,
+            project=PROJECT,
+            source_root=tmp_path,
+            source_file_limit=1,
+            source_entry_limit=None,
+            required_source_locator_hashes={"sha256:" + "a" * 64},
+        )
+
+
+@pytest.mark.parametrize(
+    ("provider", "files", "links"),
+    [
+        (
+            "codex",
+            [("nested/valid.jsonl", True), ("uppercase.JSONL", False)],
+            [("linked.jsonl", "nested/valid.jsonl", False)],
+        ),
+        (
+            "gemini",
+            [
+                ("project/chats/valid.jsonl", True),
+                ("project/chats/native.json", True),
+                ("project/chats/uppercase.JSONL", False),
+                ("parent/project/chats/nested.jsonl", False),
+            ],
+            [("project/chats/linked.jsonl", "project/chats/valid.jsonl", True)],
+        ),
+        (
+            "antigravity",
+            [
+                ("project/.system_generated/nested/valid.jsonl", True),
+                ("project/.system_generated/nested/uppercase.JSONL", False),
+                ("project/ordinary/invalid.jsonl", False),
+            ],
+            [
+                (
+                    "project/.system_generated/nested/linked.jsonl",
+                    "project/.system_generated/nested/valid.jsonl",
+                    True,
+                )
+            ],
+        ),
+        (
+            "grok",
+            [("session/updates.jsonl", True), ("session/UPDATES.JSONL", False)],
+            [("linked/updates.jsonl", "session/updates.jsonl", False)],
+        ),
+    ],
+)
+def test_bounded_provider_iterator_matches_migration_predicates(tmp_path, provider, files, links):
+    accepted: set[Path] = set()
+    rejected: set[Path] = set()
+    for relative, expected in files:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+        (accepted if expected else rejected).add(path)
+    for relative, target, expected in links:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(tmp_path / target)
+        (accepted if expected else rejected).add(path)
+
+    actual = set(
+        temporal_repair._iter_provider_files(provider, tmp_path, source_entry_limit=100)
+    )
+
+    assert actual == set(enumerate_provider_files(provider, tmp_path))
+    assert accepted <= actual
+    assert rejected.isdisjoint(actual)
+
+
+def test_candidate_collection_stops_at_source_scan_limit_before_parsing(tmp_path, monkeypatch):
+    ignored = tmp_path / "a-ignored.jsonl"
+    another_ignored = tmp_path / "b-ignored.jsonl"
+    ignored.write_text("ignored source", encoding="utf-8")
+    another_ignored.write_text("another ignored source", encoding="utf-8")
+    monkeypatch.setattr(
+        temporal_repair,
+        "parse_transcript_source",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("source parse must not run")),
+    )
+
+    documents, report, timed_out = collect_historical_candidates(
+        provider=PROVIDER,
+        project=PROJECT,
+        source_root=tmp_path,
+        source_file_limit=1,
+        source_entry_limit=100,
+        required_source_locator_hashes={"sha256:" + "a" * 64},
+    )
+
+    assert documents == []
+    assert timed_out is False
+    assert report["source_file_limit_exceeded"] is True
+    assert report["source_file_count"] == 0
+    assert report["parsed_source_count"] == 0
+
+
+def test_candidate_collection_skips_scan_without_required_locator_hashes(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        temporal_repair,
+        "_iter_provider_files",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("source scan must not run")),
+    )
+
+    documents, report, timed_out = collect_historical_candidates(
+        provider=PROVIDER,
+        project=PROJECT,
+        source_root=tmp_path,
+        source_file_limit=1,
+        source_entry_limit=100,
+        required_source_locator_hashes=set(),
+    )
+
+    assert documents == []
+    assert timed_out is False
+    assert report["source_file_count"] == 0
+    assert report["required_source_locator_hash_count"] == 0
+
+
+def test_wrong_session_candidate_is_not_planned_for_snapshot_target():
+    store, candidate = _seed_store()
+    wrong_session_candidate = dict(candidate)
+    wrong_session_candidate["session_id_hash"] = "sha256:" + "f" * 64
+
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[wrong_session_candidate],
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+
+    assert report["planned_update_count"] == 0
+    assert report["session_identity_conflict_count"] == 1
+    assert report["error_count"] == 1
+
+
+def test_legacy_target_without_locator_is_a_distinct_unrepairable_gap():
+    store, candidate = _seed_store(source_locator_hash="")
+
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+
+    assert report["planned_update_count"] == 0
+    assert report["target_locator_missing_count"] == 1
+    assert report["content_conflict_count"] == 0
+    assert report["status"] == "dry_run_with_gaps"
+
+
+def test_generator_snapshot_uses_materialized_snapshot_count():
+    store, candidate = _seed_store()
+    snapshot = (document for document in [store.get(candidate["_id"])])
+
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        snapshot_documents=snapshot,
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+
+    assert report["snapshot_document_count"] == 1
+    assert report["planned_update_count"] == 1
+
+
+def test_batch_execute_timeout_clears_ready_and_fails_closed():
+    store, candidate = _seed_store()
+    plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        patch_limit=1,
+        batch_limit=1,
+        max_runtime_seconds=30,
+        source_file_limit=1,
+        source_entry_limit=100,
+        target_document_limit=1,
+    )
+    clock = iter((0.0, 0.0, 0.0, 31.0))
+
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        patch_limit=1,
+        batch_limit=1,
+        max_runtime_seconds=30,
+        source_file_limit=1,
+        source_entry_limit=100,
+        target_document_limit=1,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+        started=0.0,
+        monotonic=lambda: next(clock),
+    )
+
+    assert report["status"] == "aborted_timeout"
+    assert report["timed_out"] is True
+    assert report["batch_ready"] is False
+    assert report["batch_execution_succeeded"] is False
 
 
 def test_partial_session_cas_conflict_still_refreshes_mutated_session_derived_state():
@@ -749,6 +1280,7 @@ def test_gemini_json_uses_private_fixture_conversion_instead_of_fixture_parser_e
         project=PROJECT,
         source_root=tmp_path,
         source_file_limit=1,
+        source_entry_limit=100,
     )
 
     assert timed_out is False
@@ -757,42 +1289,29 @@ def test_gemini_json_uses_private_fixture_conversion_instead_of_fixture_parser_e
     assert len(documents) == 1
 
 
-def test_cli_parser_error_blocks_before_couchdb_access(monkeypatch, capsys, tmp_path):
-    collection = {
-        "source_file_count": 1,
-        "source_file_limit_exceeded": False,
-        "source_file_truncated": False,
-        "parsed_source_count": 0,
-        "parser_error_count": 1,
-        "excluded_temporal_candidate_count": 0,
-    }
+def test_cli_snapshots_target_before_parsing_and_passes_only_target_locator_hashes(monkeypatch, capsys, tmp_path):
+    collection = temporal_repair._collection_counts(source_file_count=1, parser_error_count=1)
+    store, candidate = _seed_store()
+    calls = []
     monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
-    monkeypatch.setattr(
-        temporal_repair,
-        "collect_historical_candidates",
-        lambda **_kwargs: ([], collection, False),
-    )
 
-    def fail_if_couchdb_is_constructed(**_kwargs):
-        raise AssertionError("CouchDB must not be reached after a parser error")
+    original_find_by_type = store.find_by_type
 
-    monkeypatch.setattr(
-        temporal_repair,
-        "CouchDBHttpSourceStore",
-        fail_if_couchdb_is_constructed,
-    )
+    def record_snapshot(*args, **kwargs):
+        calls.append("snapshot")
+        assert "source_locator_hash" in kwargs["fields"]
+        return original_find_by_type(*args, **kwargs)
 
-    rc = temporal_repair.main(
-        [
-            "--provider", PROVIDER,
-            "--project", PROJECT,
-            "--source-root", str(tmp_path),
-            "--source-file-limit", "1",
-            "--target-document-limit", "1",
-            "--patch-limit", "1",
-            "--max-runtime-seconds", "30",
-        ]
-    )
+    def record_collection(**kwargs):
+        calls.append("parse")
+        assert kwargs["required_source_locator_hashes"] == {candidate["source_locator_hash"]}
+        return [], collection, False
+
+    store.find_by_type = record_snapshot  # type: ignore[method-assign]
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(temporal_repair, "collect_historical_candidates", record_collection)
+
+    rc = temporal_repair.main(_cli_args(tmp_path))
 
     report = json.loads(capsys.readouterr().out)
     assert rc == 1
@@ -801,9 +1320,102 @@ def test_cli_parser_error_blocks_before_couchdb_access(monkeypatch, capsys, tmp_
     assert report["error_count"] == 1
     assert report["gap_count"] == 1
     assert report["parser_error_count"] == 1
+    assert calls == ["snapshot", "parse"]
+
+
+def test_cli_batch_ready_with_unrepairable_gap_returns_nonzero_without_locator_hash(monkeypatch, capsys, tmp_path):
+    store, candidate = _seed_store()
+    unrepairable = _add_gap_chunk(
+        store,
+        chunk_id="cli-unrepairable-target",
+        text="cli unrepairable target",
+    )
+    mismatched_candidate = dict(unrepairable)
+    mismatched_candidate["content_hash"] = "sha256:" + "e" * 64
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        parsed_source_count=1,
+    )
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([candidate, mismatched_candidate], collection, False),
+    )
+
+    rc = main(
+        _cli_args(
+            tmp_path,
+            source_file_limit=2,
+            target_document_limit=2,
+            patch_limit=2,
+            batch_limit=1,
+        )
+    )
+
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert rc == 1
+    assert report["status"] == "dry_run_batch_ready_with_gaps"
+    assert report["unrepairable_gap_count"] == 1
+    assert candidate["source_locator_hash"] not in output
+
+
+def test_cli_batch_execute_timeout_returns_nonzero(monkeypatch, capsys, tmp_path):
+    store, candidate = _seed_store()
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    target = temporal_repair._resolve_target({"COUCHDB_URL": "https://repair-test.invalid"})
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "validate_memory_enqueue_approval",
+        lambda *_args, **_kwargs: {"target": {"target_fingerprints": target.target_fingerprints}, "timeout_seconds": 30},
+    )
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([candidate], collection, False),
+    )
+    monkeypatch.setattr(
+        temporal_repair,
+        "repair_historical_temporal_gaps",
+        lambda **_kwargs: {
+            "status": "aborted_timeout",
+            "timed_out": True,
+            "batch_ready": False,
+            "batch_execution_succeeded": False,
+            "write_conflict_count": 0,
+            "write_error_count": 0,
+            "error_count": 1,
+        },
+    )
+
+    rc = main(
+        [
+            *_cli_args(tmp_path, batch_limit=1),
+            "--execute",
+            "--expected-plan-digest", "sha256:" + "a" * 64,
+            "--approval", "approved-for-test",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "aborted_timeout"
 
 
 def test_source_file_limit_reports_truncation_before_any_couchdb_mutation(tmp_path, monkeypatch, capsys):
+    source_hashes = {}
     for name in ("first", "second"):
         source = tmp_path / f"{name}.jsonl"
         source.write_text(
@@ -812,23 +1424,126 @@ def test_source_file_limit_reports_truncation_before_any_couchdb_mutation(tmp_pa
             '"content":"hello"}\n',
             encoding="utf-8",
         )
+        source_hashes[name] = build_source_locator_hash(str(source))
+    store, _candidate = _seed_store(source_locator_hash=source_hashes["first"])
+    _add_gap_chunk(
+        store,
+        chunk_id="source-limit-second",
+        text="second source limit target",
+        source_locator_hash=source_hashes["second"],
+    )
     monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
 
-    assert main(
-        [
-            "--provider", PROVIDER,
-            "--project", PROJECT,
-            "--source-root", str(tmp_path),
-            "--source-file-limit", "1",
-            "--target-document-limit", "1",
-            "--patch-limit", "1",
-            "--max-runtime-seconds", "30",
-        ]
-    ) == 1
+    assert main(_cli_args(tmp_path, target_document_limit=2)) == 1
 
     output = capsys.readouterr().out
     assert '"error": "source_file_limit_exceeded"' in output
     assert '"source_file_truncated": true' in output
+
+
+def test_source_entry_limit_stops_non_provider_tree_before_any_couchdb_mutation(
+    tmp_path, monkeypatch, capsys
+):
+    for index in range(2):
+        (tmp_path / f"ignored-{index}.txt").write_text("not a provider source", encoding="utf-8")
+    store, candidate = _seed_store()
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+
+    assert main(_cli_args(tmp_path, source_entry_limit=1)) == 1
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["error"] == "source_entry_limit_exceeded"
+    assert report["source_entry_limit"] == 1
+    assert report["source_entry_count"] == 2
+    assert report["source_entry_limit_exceeded"] is True
+    assert store.get(candidate["_id"])["observed_at_start"] == ""
+
+
+def test_finite_source_limits_have_stable_cli_outcome_when_creation_order_changes(
+    tmp_path, monkeypatch, capsys
+):
+    cases = (
+        ("source_entry_limit_exceeded", 1, 1, "target.jsonl", "ignored.txt"),
+        ("source_file_limit_exceeded", 1, 2, "a-target.jsonl", "z-extra.jsonl"),
+    )
+    for expected_error, source_file_limit, source_entry_limit, target_name, other_name in cases:
+        outcomes = []
+        for index, creation_order in enumerate(((target_name, other_name), (other_name, target_name))):
+            source_root = tmp_path / f"sources-{expected_error}-{index}"
+            source_root.mkdir()
+            for name in creation_order:
+                (source_root / name).write_text("fixture\n", encoding="utf-8")
+            selected = source_root / target_name
+            parsed = ParsedTranscript(
+                session=TranscriptSession(
+                    session_id_hash=SESSION_HASH,
+                    provider=PROVIDER,
+                    project=PROJECT,
+                    started_at="2026-07-01T10:00:00Z",
+                ),
+                turns=[
+                    TranscriptTurn("turn-a", SESSION_HASH, 1, "user", "2026-07-01T10:00:01Z", "hello"),
+                    TranscriptTurn("turn-b", SESSION_HASH, 2, "assistant", "2026-07-01T10:00:02Z", "world"),
+                ],
+                tool_events=[],
+                parser_warnings=[],
+                source_status="source_locator_private_spool_only",
+            )
+            target = build_conversation_chunk_document(
+                chunk=build_transcript_chunks(parsed)[0],
+                source_locator_hash=build_source_locator_hash(str(selected)),
+            )
+            target["observed_at_start"] = ""
+            target["observed_at_end"] = ""
+            store = InMemoryCouchDBSourceStore()
+            store.put(target)
+            monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+            monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+            monkeypatch.setattr(temporal_repair, "_source_project", lambda *_args: PROJECT)
+            monkeypatch.setattr(temporal_repair, "parse_transcript_source", lambda *_args, **_kwargs: parsed)
+
+            rc = main(
+                _cli_args(
+                    source_root,
+                    source_file_limit=source_file_limit,
+                    source_entry_limit=source_entry_limit,
+                    target_document_limit=1,
+                    patch_limit=1,
+                    batch_limit=1,
+                )
+            )
+            report = json.loads(capsys.readouterr().out)
+            outcomes.append((rc, report["status"], report.get("error")))
+
+        assert outcomes == [(1, "blocked", expected_error), (1, "blocked", expected_error)]
+
+
+def test_cli_rejects_nonpositive_source_entry_limit(capsys, tmp_path):
+    assert main(_cli_args(tmp_path, source_entry_limit=0)) == 2
+
+    assert json.loads(capsys.readouterr().out)["error"] == "invalid_bounds"
+
+
+def test_cli_rejects_missing_source_entry_limit_before_couchdb_or_source_scan(
+    capsys, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(
+        temporal_repair,
+        "CouchDBHttpSourceStore",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("CouchDB access must not run")),
+    )
+    monkeypatch.setattr(
+        temporal_repair,
+        "_iter_source_entries",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("source scan must not run")),
+    )
+
+    assert main(_cli_args(tmp_path, source_entry_limit=None)) == 2
+
+    assert json.loads(capsys.readouterr().out)["error"] == "invalid_bounds"
 
 
 def test_command_is_registered_as_approval_gated_metadata_repair():
@@ -849,6 +1564,7 @@ def test_cli_execute_requires_approval_before_source_or_couchdb_access(monkeypat
             "--project", PROJECT,
             "--source-root", str(tmp_path),
             "--source-file-limit", "1",
+            "--source-entry-limit", "100",
             "--target-document-limit", "1",
             "--patch-limit", "1",
             "--max-runtime-seconds", "30",
