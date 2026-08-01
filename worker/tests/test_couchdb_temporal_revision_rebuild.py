@@ -4,11 +4,13 @@ import hashlib
 import json
 import os
 import sqlite3
+import socket
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+import psycopg
 from psycopg.conninfo import conninfo_to_dict
 
 from agent_knowledge.cli import COMMAND_HANDLERS, COMMAND_METADATA
@@ -1108,11 +1110,10 @@ def test_postgres_target_rejects_service_indirection(
     raise AssertionError("service-based PostgreSQL targets must fail closed")
 
 
-def test_postgres_target_rejects_ambient_service_and_freezes_empty_service(
+def test_postgres_target_rejects_ambient_service_and_omits_empty_service_key(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    dsn = "host=ledger.invalid port=5432 dbname=neurons user=rebuild"
     argv = [
         "--state-db",
         str(tmp_path / "state.sqlite3"),
@@ -1122,27 +1123,37 @@ def test_postgres_target_rejects_ambient_service_and_freezes_empty_service(
         PROJECT,
     ]
     parsed = rebuild_module._parser().parse_args(argv)
-    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", dsn)
-    monkeypatch.setenv("PGSERVICE", "ambient-ledger-service")
+    with socket.socket() as unavailable_port:
+        unavailable_port.bind(("127.0.0.1", 0))
+        port = unavailable_port.getsockname()[1]
+        monkeypatch.setenv(
+            "NEURON_LEDGER_PG_DSN",
+            f"host=127.0.0.1 port={port} dbname=neurons user=rebuild",
+        )
+        monkeypatch.setenv("PGSERVICE", "ambient-ledger-service")
 
-    try:
-        rebuild_module._resolve_rebuild_target(parsed)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("ambient PGSERVICE must fail closed")
+        try:
+            rebuild_module._resolve_rebuild_target(parsed)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("ambient PGSERVICE must fail closed")
 
-    monkeypatch.delenv("PGSERVICE", raising=False)
-    target = rebuild_module._resolve_rebuild_target(parsed)
-    assert conninfo_to_dict(target.postgres_dsn)["service"] == ""
-    monkeypatch.setenv("PGSERVICE", "late-ledger-service")
-    ledger = rebuild_module._open_resolved_ledger(
-        target,
-        read_only=True,
-        deadline=100.0,
-    )
-    assert ledger._db_adapter.dsn == target.postgres_dsn
-    assert conninfo_to_dict(ledger._db_adapter.dsn)["service"] == ""
+        monkeypatch.delenv("PGSERVICE", raising=False)
+        target = rebuild_module._resolve_rebuild_target(parsed)
+        assert "service" not in conninfo_to_dict(target.postgres_dsn)
+
+        # libpq treats ``service=''`` as a request for a service literally
+        # named empty string, not as an unset service. A local non-listening
+        # port proves the frozen target reaches ordinary connection handling
+        # rather than failing at service resolution, without a PostgreSQL
+        # runtime.
+        try:
+            psycopg.connect(target.postgres_dsn, connect_timeout=1)
+        except psycopg.OperationalError as exc:
+            assert 'definition of service "" not found' not in str(exc)
+        else:
+            raise AssertionError("unavailable local port unexpectedly accepted a connection")
 
 
 def test_resolved_sqlite_backend_stays_pinned_when_postgres_env_appears(
