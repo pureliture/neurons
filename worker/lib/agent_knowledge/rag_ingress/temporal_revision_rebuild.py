@@ -126,7 +126,7 @@ def _postgres_target_identity(dsn: str) -> tuple[dict[str, str], str]:
     values["port"] = port
     values["user"] = user
     values["options"] = options
-    values["service"] = ""
+    values.pop("service", None)
     try:
         frozen_dsn = make_conninfo(**values)
     except Exception as exc:
