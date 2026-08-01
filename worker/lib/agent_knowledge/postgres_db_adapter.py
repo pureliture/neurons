@@ -17,6 +17,7 @@ import re
 import time
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
 
 from .db_adapter import ILedgerCoreDbAdapter
 from .pg_paramstyle import qmark_to_pyformat
@@ -75,6 +76,14 @@ _NOOP_PRAGMA = re.compile(r"^\s*PRAGMA\s+\w+\s*=", re.IGNORECASE)
 def _is_noop_pragma(sql: str) -> bool:
     """PostgreSQL에서 무시해야 하는 SQLite 연결-튜닝 PRAGMA인가."""
     return bool(_NOOP_PRAGMA.match(sql))
+
+
+def _options_with_deadline(dsn: str, *, timeout_ms: int) -> str:
+    """Preserve libpq session options while appending a command deadline."""
+
+    configured = str(conninfo_to_dict(dsn).get("options") or "").strip()
+    deadline = f"-c statement_timeout={int(timeout_ms)}"
+    return " ".join(value for value in (configured, deadline) if value)
 
 
 # SQLite ``julianday(t)`` 호환 shim. caller(GC/dirty-sync)가 age-gate 델타 비교에 쓰는
@@ -140,7 +149,10 @@ class _PgConnection:
             connect_kwargs.update(
                 {
                     "connect_timeout": max(1, int(timeout_seconds)),
-                    "options": f"-c statement_timeout={max(1, int(timeout_seconds * 1000))}",
+                    "options": _options_with_deadline(
+                        dsn,
+                        timeout_ms=max(1, int(timeout_seconds * 1000)),
+                    ),
                 }
             )
         if callable(on_network_attempt):

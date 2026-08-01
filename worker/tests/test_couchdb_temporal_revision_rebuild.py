@@ -3,13 +3,20 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
+import socket
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+import psycopg
+import pytest
+from psycopg.conninfo import conninfo_to_dict
+
 from agent_knowledge.cli import COMMAND_HANDLERS, COMMAND_METADATA
 from agent_knowledge.couchdb_source.document_model import sha256_hash
+from agent_knowledge.db_adapter import SqliteLedgerDbAdapter
 from agent_knowledge.llm_brain_core import (
     InMemorySessionMemoryArtifactStore,
     SessionMemoryArtifact,
@@ -17,6 +24,7 @@ from agent_knowledge.llm_brain_core import (
 from agent_knowledge.llm_brain_core._util import hash_payload
 from agent_knowledge.llm_brain_core.context import BrainReadService
 from agent_knowledge.ledger import Ledger
+from agent_knowledge.postgres_db_adapter import _options_with_deadline
 from agent_knowledge.rag_ingress.state_db import (
     CommandResultSpec,
     DeliveryJobSpec,
@@ -34,6 +42,19 @@ PROJECT = "neurons"
 SESSION_HASH = sha256_hash("private-session")
 DATE_A = ("2026-07-09T10:00:00Z", "2026-07-09T10:30:00Z")
 DATE_B = ("2026-07-15T10:00:00Z", "2026-07-15T10:30:00Z")
+
+
+@pytest.fixture(autouse=True)
+def _clear_ambient_postgres_defaults(monkeypatch) -> None:
+    for name in (
+        "PGSERVICE",
+        "PGHOST",
+        "PGHOSTADDR",
+        "PGPORT",
+        "PGUSER",
+        "PGDATABASE",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 class _ControlledClock:
@@ -899,6 +920,508 @@ def test_cli_rejects_resolved_ledger_target_drift_before_read_or_write(
     assert rejected["mutation_performed"] is False
 
 
+def test_postgres_target_fingerprint_binds_backend_without_secret_exposure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    postgres_dsn_fixture = (
+        "postgresql://rebuild-user:private-password@private-ledger.invalid:5432/"
+        "neurons?sslmode=require"
+    )
+    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", postgres_dsn_fixture)
+    argv = [
+        "--state-db",
+        str(tmp_path / "state.sqlite3"),
+        "--ledger",
+        str(tmp_path / "sqlite-fallback.sqlite3"),
+        "--project",
+        PROJECT,
+    ]
+
+    target = rebuild_module._resolve_rebuild_target(
+        rebuild_module._parser().parse_args(argv)
+    )
+
+    assert target.backend == "postgres"
+    public_target = json.dumps(target.target_fingerprints, sort_keys=True)
+    assert postgres_dsn_fixture not in public_target
+    assert "private-password" not in public_target
+    assert "private-ledger.invalid" not in public_target
+    assert postgres_dsn_fixture not in repr(target)
+
+
+def test_postgres_target_fingerprint_binds_logical_connection_scope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    argv = [
+        "--state-db",
+        str(tmp_path / "state.sqlite3"),
+        "--ledger",
+        str(tmp_path / "sqlite-fallback.sqlite3"),
+        "--project",
+        PROJECT,
+    ]
+    parsed = rebuild_module._parser().parse_args(argv)
+    first_dsn = (
+        "host=ledger.invalid hostaddr=192.0.2.10 port=5432 dbname=neurons "
+        "user=rebuild options='-c search_path=ledger_a'"
+    )
+    variants = (
+        "host=ledger.invalid hostaddr=192.0.2.11 port=5432 dbname=neurons "
+        "user=rebuild options='-c search_path=ledger_a'",
+        "host=ledger.invalid hostaddr=192.0.2.10 port=5432 dbname=neurons "
+        "user=reader options='-c search_path=ledger_a'",
+        "host=ledger.invalid hostaddr=192.0.2.10 port=5432 dbname=neurons "
+        "user=rebuild options='-c search_path=ledger_b'",
+    )
+    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", first_dsn)
+    expected = rebuild_module._resolve_rebuild_target(parsed).target_fingerprints
+
+    for dsn in variants:
+        monkeypatch.setenv("NEURON_LEDGER_PG_DSN", dsn)
+        assert (
+            rebuild_module._resolve_rebuild_target(parsed).target_fingerprints
+            != expected
+        )
+
+
+def test_postgres_target_requires_explicit_port_and_user(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    argv = [
+        "--state-db",
+        str(tmp_path / "state.sqlite3"),
+        "--ledger",
+        str(tmp_path / "sqlite-fallback.sqlite3"),
+        "--project",
+        PROJECT,
+    ]
+    parsed = rebuild_module._parser().parse_args(argv)
+
+    for dsn in (
+        "host=ledger.invalid dbname=neurons user=rebuild",
+        "host=ledger.invalid port=5432 dbname=neurons",
+    ):
+        monkeypatch.setenv("NEURON_LEDGER_PG_DSN", dsn)
+        try:
+            rebuild_module._resolve_rebuild_target(parsed)
+        except ValueError:
+            continue
+        raise AssertionError("implicit PostgreSQL connection defaults must fail closed")
+
+
+def test_postgres_target_rejects_whitespace_only_configured_dsn(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    argv = [
+        "--state-db",
+        str(tmp_path / "state.sqlite3"),
+        "--ledger",
+        str(tmp_path / "sqlite-fallback.sqlite3"),
+        "--project",
+        PROJECT,
+    ]
+    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", " \t ")
+
+    try:
+        rebuild_module._resolve_rebuild_target(
+            rebuild_module._parser().parse_args(argv)
+        )
+    except ValueError:
+        return
+    raise AssertionError("whitespace-only PostgreSQL config must fail closed")
+
+
+def test_postgres_target_preserves_case_sensitive_unix_socket_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    argv = [
+        "--state-db",
+        str(tmp_path / "state.sqlite3"),
+        "--ledger",
+        str(tmp_path / "sqlite-fallback.sqlite3"),
+        "--project",
+        PROJECT,
+    ]
+    parsed = rebuild_module._parser().parse_args(argv)
+    monkeypatch.setenv(
+        "NEURON_LEDGER_PG_DSN",
+        "host=/tmp/LedgerSocket port=5432 dbname=neurons user=rebuild",
+    )
+    upper_socket = rebuild_module._resolve_rebuild_target(parsed).target_fingerprints
+    monkeypatch.setenv(
+        "NEURON_LEDGER_PG_DSN",
+        "host=/tmp/ledgersocket port=5432 dbname=neurons user=rebuild",
+    )
+
+    assert rebuild_module._resolve_rebuild_target(parsed).target_fingerprints != upper_socket
+
+
+def test_postgres_target_freezes_ambient_host_complements(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    argv = [
+        "--state-db",
+        str(tmp_path / "state.sqlite3"),
+        "--ledger",
+        str(tmp_path / "sqlite-fallback.sqlite3"),
+        "--project",
+        PROJECT,
+    ]
+    parsed = rebuild_module._parser().parse_args(argv)
+    cases = (
+        (
+            "host=ledger.invalid port=5432 dbname=neurons user=rebuild",
+            "PGHOSTADDR",
+            "192.0.2.10",
+            "192.0.2.11",
+            "hostaddr",
+        ),
+        (
+            "hostaddr=192.0.2.10 port=5432 dbname=neurons user=rebuild",
+            "PGHOST",
+            "ledger-a.invalid",
+            "ledger-b.invalid",
+            "host",
+        ),
+    )
+
+    for dsn, ambient_name, first, second, frozen_field in cases:
+        monkeypatch.setenv("NEURON_LEDGER_PG_DSN", dsn)
+        monkeypatch.setenv(ambient_name, first)
+        target = rebuild_module._resolve_rebuild_target(parsed)
+        assert conninfo_to_dict(target.postgres_dsn)[frozen_field] == first
+        ledger = rebuild_module._open_resolved_ledger(
+            target,
+            read_only=True,
+            deadline=100.0,
+        )
+        assert ledger._db_adapter.dsn == target.postgres_dsn
+
+        monkeypatch.setenv(ambient_name, second)
+        changed = rebuild_module._resolve_rebuild_target(parsed)
+        assert changed.target_fingerprints != target.target_fingerprints
+        assert conninfo_to_dict(target.postgres_dsn)[frozen_field] == first
+
+    monkeypatch.setenv(
+        "NEURON_LEDGER_PG_DSN",
+        "host=ledger.invalid port=5432 dbname=neurons user=rebuild",
+    )
+    monkeypatch.delenv("PGHOSTADDR", raising=False)
+    no_hostaddr = rebuild_module._resolve_rebuild_target(parsed)
+    assert conninfo_to_dict(no_hostaddr.postgres_dsn)["hostaddr"] == ""
+    monkeypatch.setenv("PGHOSTADDR", "192.0.2.12")
+    frozen_ledger = rebuild_module._open_resolved_ledger(
+        no_hostaddr,
+        read_only=True,
+        deadline=100.0,
+    )
+    assert frozen_ledger._db_adapter.dsn == no_hostaddr.postgres_dsn
+    assert conninfo_to_dict(frozen_ledger._db_adapter.dsn)["hostaddr"] == ""
+
+
+def test_postgres_target_freezes_ambient_options_and_preserves_deadline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    argv = [
+        "--state-db",
+        str(tmp_path / "state.sqlite3"),
+        "--ledger",
+        str(tmp_path / "sqlite-fallback.sqlite3"),
+        "--project",
+        PROJECT,
+    ]
+    parsed = rebuild_module._parser().parse_args(argv)
+    first_options = "-c search_path=ledger_a"
+    second_options = "-c search_path=ledger_b"
+    monkeypatch.setenv(
+        "NEURON_LEDGER_PG_DSN",
+        "host=ledger.invalid port=5432 dbname=neurons user=rebuild",
+    )
+    monkeypatch.setenv("PGOPTIONS", first_options)
+
+    target = rebuild_module._resolve_rebuild_target(parsed)
+
+    assert conninfo_to_dict(target.postgres_dsn)["options"] == first_options
+    assert _options_with_deadline(target.postgres_dsn, timeout_ms=1250) == (
+        f"{first_options} -c statement_timeout=1250"
+    )
+
+    monkeypatch.setenv("PGOPTIONS", second_options)
+    changed = rebuild_module._resolve_rebuild_target(parsed)
+    assert changed.target_fingerprints != target.target_fingerprints
+    assert conninfo_to_dict(target.postgres_dsn)["options"] == first_options
+    assert _options_with_deadline(target.postgres_dsn, timeout_ms=1250) == (
+        f"{first_options} -c statement_timeout=1250"
+    )
+
+
+def test_postgres_target_rejects_service_indirection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "NEURON_LEDGER_PG_DSN",
+        "service=ledger-service host=ledger.invalid port=5432 dbname=neurons user=rebuild",
+    )
+    argv = [
+        "--state-db",
+        str(tmp_path / "state.sqlite3"),
+        "--ledger",
+        str(tmp_path / "sqlite-fallback.sqlite3"),
+        "--project",
+        PROJECT,
+    ]
+
+    try:
+        rebuild_module._resolve_rebuild_target(
+            rebuild_module._parser().parse_args(argv)
+        )
+    except ValueError:
+        return
+    raise AssertionError("service-based PostgreSQL targets must fail closed")
+
+
+def test_postgres_target_rejects_ambient_service_and_omits_empty_service_key(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    argv = [
+        "--state-db",
+        str(tmp_path / "state.sqlite3"),
+        "--ledger",
+        str(tmp_path / "sqlite-fallback.sqlite3"),
+        "--project",
+        PROJECT,
+    ]
+    parsed = rebuild_module._parser().parse_args(argv)
+    with socket.socket() as unavailable_port:
+        unavailable_port.bind(("127.0.0.1", 0))
+        port = unavailable_port.getsockname()[1]
+        monkeypatch.setenv(
+            "NEURON_LEDGER_PG_DSN",
+            f"host=127.0.0.1 port={port} dbname=neurons user=rebuild",
+        )
+        monkeypatch.setenv("PGSERVICE", "ambient-ledger-service")
+
+        try:
+            rebuild_module._resolve_rebuild_target(parsed)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("ambient PGSERVICE must fail closed")
+
+        monkeypatch.delenv("PGSERVICE", raising=False)
+        target = rebuild_module._resolve_rebuild_target(parsed)
+        assert "service" not in conninfo_to_dict(target.postgres_dsn)
+
+        # libpq treats ``service=''`` as a request for a service literally
+        # named empty string, not as an unset service. A local non-listening
+        # port proves the frozen target reaches ordinary connection handling
+        # rather than failing at service resolution, without a PostgreSQL
+        # runtime.
+        try:
+            psycopg.connect(target.postgres_dsn, connect_timeout=1)
+        except psycopg.OperationalError as exc:
+            assert 'definition of service "" not found' not in str(exc)
+        else:
+            raise AssertionError("unavailable local port unexpectedly accepted a connection")
+
+
+def test_resolved_sqlite_backend_stays_pinned_when_postgres_env_appears(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("NEURON_LEDGER_PG_DSN", raising=False)
+    ledger_path = tmp_path / "ledger.sqlite3"
+    Ledger(ledger_path)
+    argv = [
+        "--state-db",
+        str(tmp_path / "state.sqlite3"),
+        "--ledger",
+        str(ledger_path),
+        "--project",
+        PROJECT,
+    ]
+    target = rebuild_module._resolve_rebuild_target(
+        rebuild_module._parser().parse_args(argv)
+    )
+    monkeypatch.setenv(
+        "NEURON_LEDGER_PG_DSN",
+        "host=ledger.invalid port=5432 dbname=neurons user=rebuild",
+    )
+
+    read_only = rebuild_module._open_resolved_ledger(
+        target,
+        read_only=True,
+        deadline=100.0,
+    )
+    writable = rebuild_module._open_resolved_ledger(
+        target,
+        read_only=False,
+        deadline=100.0,
+    )
+
+    assert isinstance(read_only._db_adapter, SqliteLedgerDbAdapter)
+    assert isinstance(writable._db_adapter, SqliteLedgerDbAdapter)
+
+
+def test_resolved_sqlite_read_only_uses_snapshot_not_mutable_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("NEURON_LEDGER_PG_DSN", raising=False)
+    ledger_path = tmp_path / "ledger.sqlite3"
+    Ledger(ledger_path)
+    with sqlite3.connect(ledger_path) as connection:
+        connection.execute("CREATE TABLE snapshot_probe (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO snapshot_probe(value) VALUES ('before')")
+    target = rebuild_module._resolve_rebuild_target(
+        rebuild_module._parser().parse_args(
+            [
+                "--state-db",
+                str(tmp_path / "state.sqlite3"),
+                "--ledger",
+                str(ledger_path),
+                "--project",
+                PROJECT,
+            ]
+        )
+    )
+
+    snapshot_ledger = rebuild_module._open_resolved_ledger(
+        target,
+        read_only=True,
+        deadline=100.0,
+    )
+    with sqlite3.connect(ledger_path) as connection:
+        connection.execute("UPDATE snapshot_probe SET value = 'after'")
+    with snapshot_ledger._connect() as connection:
+        row = connection.execute("SELECT value FROM snapshot_probe").fetchone()
+
+    assert snapshot_ledger._db_adapter.path == snapshot_ledger.path
+    assert snapshot_ledger.path != ledger_path
+    assert row["value"] == "before"
+
+
+def test_cli_rejects_postgres_backend_target_drift_before_planning(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_db = _state_db(tmp_path)
+    approval_path = tmp_path / "approval.json"
+    execute_argv = [
+        "--state-db",
+        str(state_db.path),
+        "--ledger",
+        str(tmp_path / "sqlite-fallback.sqlite3"),
+        "--project",
+        PROJECT,
+        "--execute",
+        "--expected-plan-digest",
+        sha256_hash("postgres-target-drift"),
+        "--approval",
+        str(approval_path),
+    ]
+    first_dsn = "postgresql://rebuild-user:first-password@ledger-a.invalid:5432/neurons"
+    second_dsn = "postgresql://rebuild-user:second-password@ledger-b.invalid:5432/neurons"
+    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", first_dsn)
+    approved_target = rebuild_module._resolve_rebuild_target(
+        rebuild_module._parser().parse_args(execute_argv)
+    )
+    _write_approval(
+        approval_path,
+        execute_argv,
+        target_fingerprints=approved_target.target_fingerprints,
+    )
+    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", second_dsn)
+
+    with patch.object(
+        rebuild_module,
+        "_read_only_plan",
+        side_effect=AssertionError("backend drift must stop before planning"),
+    ), patch("sys.stdout", StringIO()) as output:
+        assert main(execute_argv) == 2
+
+    rejected = json.loads(output.getvalue())
+    assert rejected["error"] == "approval_rejected"
+    encoded = json.dumps(rejected, sort_keys=True)
+    assert first_dsn not in encoded
+    assert second_dsn not in encoded
+    assert "first-password" not in encoded
+    assert "second-password" not in encoded
+    assert "ledger-a.invalid" not in encoded
+    assert "ledger-b.invalid" not in encoded
+
+
+def test_sqlite_target_fingerprint_uses_canonical_path_when_postgres_is_unset(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("NEURON_LEDGER_PG_DSN", raising=False)
+    ledger = tmp_path / "ledger.sqlite3"
+    ledger_link = tmp_path / "ledger-link.sqlite3"
+    ledger_link.symlink_to(ledger)
+    argv = [
+        "--state-db",
+        str(tmp_path / "state.sqlite3"),
+        "--ledger",
+        str(ledger_link),
+        "--project",
+        PROJECT,
+    ]
+
+    target = rebuild_module._resolve_rebuild_target(
+        rebuild_module._parser().parse_args(argv)
+    )
+
+    assert target.backend == "sqlite"
+    assert target.postgres_dsn == ""
+    assert str(ledger) not in json.dumps(target.target_fingerprints, sort_keys=True)
+
+
+def test_cli_dry_run_does_not_create_artifact_schema_before_approval(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("NEURON_LEDGER_PG_DSN", raising=False)
+    state_db = _state_db(tmp_path)
+    _record_date_a_b(state_db)
+    ledger_path = tmp_path / "uninitialized-ledger.sqlite3"
+    sqlite3.connect(ledger_path).close()
+    dry_argv = [
+        "--state-db",
+        str(state_db.path),
+        "--ledger",
+        str(ledger_path),
+        "--project",
+        PROJECT,
+        "--limit",
+        "100",
+        "--max-runtime-seconds",
+        "30",
+    ]
+
+    with patch("sys.stdout", StringIO()) as output:
+        assert main(dry_argv) == 0
+
+    report = json.loads(output.getvalue())
+    with sqlite3.connect(ledger_path) as connection:
+        artifact_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("llm_brain_session_memory_artifacts",),
+        ).fetchone()
+    assert report["dry_run"] is True
+    assert report["mutation_performed"] is False
+    assert artifact_table is None
+
+
 def test_cli_execute_shares_one_absolute_deadline_across_plan_and_apply(
     tmp_path: Path,
 ) -> None:
@@ -954,6 +1477,69 @@ def test_cli_execute_shares_one_absolute_deadline_across_plan_and_apply(
         assert main(execute_argv, monotonic=clock) == 1
 
     report = json.loads(output.getvalue())
+    assert report["status"] == "aborted_timeout"
+    assert report["timed_out"] is True
+    assert report["error_count"] >= 1
+    assert report["mutation_performed"] is False
+
+
+def test_cli_expired_deadline_does_not_construct_writable_artifact_store(
+    tmp_path: Path,
+) -> None:
+    state_db = _state_db(tmp_path)
+    ledger_path = state_db.path.parent / "ledger.sqlite3"
+    Ledger(ledger_path)
+    plan_digest = sha256_hash("deadline-before-artifact-schema")
+    approval_path = state_db.path.parent / "approval.json"
+    execute_argv = [
+        "--state-db",
+        str(state_db.path),
+        "--ledger",
+        str(ledger_path),
+        "--project",
+        PROJECT,
+        "--limit",
+        "100",
+        "--max-runtime-seconds",
+        "30",
+        "--execute",
+        "--expected-plan-digest",
+        plan_digest,
+        "--approval",
+        str(approval_path),
+    ]
+    target = rebuild_module._resolve_rebuild_target(
+        rebuild_module._parser().parse_args(execute_argv)
+    )
+    _write_approval(
+        approval_path,
+        execute_argv,
+        target_fingerprints=target.target_fingerprints,
+    )
+    clock = _ControlledClock(now=100.0)
+
+    def _plan_then_expire(**_kwargs):
+        clock.now = 131.0
+        return {
+            "plan_digest": plan_digest,
+            "error_count": 0,
+            "gap_count": 0,
+            "aborted": False,
+        }
+
+    with patch.object(
+        rebuild_module,
+        "_read_only_plan",
+        side_effect=_plan_then_expire,
+    ), patch.object(
+        rebuild_module,
+        "LedgerSessionMemoryArtifactStore",
+        side_effect=AssertionError("expired command must not reach artifact schema ensure"),
+    ) as artifact_store, patch("sys.stdout", StringIO()) as output:
+        assert main(execute_argv, monotonic=clock) == 1
+
+    report = json.loads(output.getvalue())
+    artifact_store.assert_not_called()
     assert report["status"] == "aborted_timeout"
     assert report["timed_out"] is True
     assert report["mutation_performed"] is False
