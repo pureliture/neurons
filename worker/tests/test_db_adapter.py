@@ -71,6 +71,35 @@ def test_postgres_adapter_binds_remaining_deadline_to_connect_and_statement(monk
     ]
 
 
+def test_postgres_adapter_preserves_dsn_options_when_adding_deadline(monkeypatch):
+    calls = []
+
+    class _Connection:
+        read_only = False
+
+        def close(self):
+            return None
+
+    def _connect(dsn, **kwargs):
+        calls.append((dsn, kwargs))
+        return _Connection()
+
+    monkeypatch.setattr(postgres_db_adapter.time, "monotonic", lambda: 8.75)
+    monkeypatch.setattr(postgres_db_adapter.psycopg, "connect", _connect)
+
+    connection = PostgresLedgerDbAdapter(
+        "host=ledger.invalid port=5432 dbname=neurons user=rebuild "
+        "options='-c search_path=ledger_a'",
+        read_only=True,
+        deadline_monotonic=10.0,
+    ).connect()
+
+    connection.close()
+    assert calls[0][1]["options"] == (
+        "-c search_path=ledger_a -c statement_timeout=1250"
+    )
+
+
 def test_postgres_adapter_refreshes_statement_timeout_before_each_execute(monkeypatch):
     calls = []
     now = [8.5]
