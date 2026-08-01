@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import psycopg
+import pytest
 from psycopg.conninfo import conninfo_to_dict
 
 from agent_knowledge.cli import COMMAND_HANDLERS, COMMAND_METADATA
@@ -40,6 +41,19 @@ PROJECT = "neurons"
 SESSION_HASH = sha256_hash("private-session")
 DATE_A = ("2026-07-09T10:00:00Z", "2026-07-09T10:30:00Z")
 DATE_B = ("2026-07-15T10:00:00Z", "2026-07-15T10:30:00Z")
+
+
+@pytest.fixture(autouse=True)
+def _clear_ambient_postgres_defaults(monkeypatch) -> None:
+    for name in (
+        "PGSERVICE",
+        "PGHOST",
+        "PGHOSTADDR",
+        "PGPORT",
+        "PGUSER",
+        "PGDATABASE",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 class _ControlledClock:
@@ -909,8 +923,11 @@ def test_postgres_target_fingerprint_binds_backend_without_secret_exposure(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    secret = "postgresql://rebuild-user:private-password@private-ledger.invalid:5432/neurons?sslmode=require"
-    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", secret)
+    postgres_dsn_fixture = (
+        "postgresql://rebuild-user:private-password@private-ledger.invalid:5432/"
+        "neurons?sslmode=require"
+    )
+    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", postgres_dsn_fixture)
     argv = [
         "--state-db",
         str(tmp_path / "state.sqlite3"),
@@ -926,10 +943,10 @@ def test_postgres_target_fingerprint_binds_backend_without_secret_exposure(
 
     assert target.backend == "postgres"
     public_target = json.dumps(target.target_fingerprints, sort_keys=True)
-    assert secret not in public_target
+    assert postgres_dsn_fixture not in public_target
     assert "private-password" not in public_target
     assert "private-ledger.invalid" not in public_target
-    assert secret not in repr(target)
+    assert postgres_dsn_fixture not in repr(target)
 
 
 def test_postgres_target_fingerprint_binds_logical_connection_scope(
@@ -992,6 +1009,29 @@ def test_postgres_target_requires_explicit_port_and_user(
         except ValueError:
             continue
         raise AssertionError("implicit PostgreSQL connection defaults must fail closed")
+
+
+def test_postgres_target_rejects_whitespace_only_configured_dsn(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    argv = [
+        "--state-db",
+        str(tmp_path / "state.sqlite3"),
+        "--ledger",
+        str(tmp_path / "sqlite-fallback.sqlite3"),
+        "--project",
+        PROJECT,
+    ]
+    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", " \t ")
+
+    try:
+        rebuild_module._resolve_rebuild_target(
+            rebuild_module._parser().parse_args(argv)
+        )
+    except ValueError:
+        return
+    raise AssertionError("whitespace-only PostgreSQL config must fail closed")
 
 
 def test_postgres_target_preserves_case_sensitive_unix_socket_identity(
@@ -1401,6 +1441,7 @@ def test_cli_execute_shares_one_absolute_deadline_across_plan_and_apply(
     report = json.loads(output.getvalue())
     assert report["status"] == "aborted_timeout"
     assert report["timed_out"] is True
+    assert report["error_count"] >= 1
     assert report["mutation_performed"] is False
 
 
