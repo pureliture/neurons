@@ -218,6 +218,86 @@ def test_conditional_temporal_patch_preserves_body_and_content_hash():
     assert current["observed_at_start"] == "2026-07-09T10:00:00Z"
 
 
+def test_conditional_temporal_patch_recovers_legacy_locator_when_times_already_match():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    document = _chunk_doc("legacy locator recovery")
+    document["observed_at_start"] = "2026-07-09T10:00:00Z"
+    document["observed_at_end"] = "2026-07-09T10:30:00Z"
+    first = store.put(document)
+    replacement_locator_hash = dm.build_source_locator_hash("legacy-locator")
+
+    patched = store.patch_observed_time_if_content_hash(
+        doc_id=document["_id"],
+        expected_content_hash=document["content_hash"],
+        expected_rev=first.rev,
+        observed_at_start=document["observed_at_start"],
+        observed_at_end=document["observed_at_end"],
+        expected_source_locator_hash="",
+        replacement_source_locator_hash=replacement_locator_hash,
+    )
+
+    current = store.get(document["_id"])
+    assert current is not None
+    assert patched.rev != first.rev
+    assert current["observed_at_start"] == document["observed_at_start"]
+    assert current["observed_at_end"] == document["observed_at_end"]
+    assert current["source_locator_hash"] == replacement_locator_hash
+
+    duplicate = store.patch_observed_time_if_content_hash(
+        doc_id=document["_id"],
+        expected_content_hash=document["content_hash"],
+        expected_rev=patched.rev,
+        observed_at_start=document["observed_at_start"],
+        observed_at_end=document["observed_at_end"],
+        expected_source_locator_hash=replacement_locator_hash,
+        replacement_source_locator_hash=replacement_locator_hash,
+    )
+
+    assert duplicate.outcome == "duplicate"
+    assert duplicate.rev == patched.rev
+
+
+def test_conditional_temporal_patch_rejects_legacy_locator_cas_drift():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    document = _chunk_doc("legacy locator cas drift")
+    document["source_locator_hash"] = dm.build_source_locator_hash("current-locator")
+    first = store.put(document)
+
+    with pytest.raises(SourceStoreConflict, match="locator changed"):
+        store.patch_observed_time_if_content_hash(
+            doc_id=document["_id"],
+            expected_content_hash=document["content_hash"],
+            expected_rev=first.rev,
+            observed_at_start="2026-07-09T10:00:00Z",
+            observed_at_end="2026-07-09T10:30:00Z",
+            expected_source_locator_hash="",
+            replacement_source_locator_hash=dm.build_source_locator_hash("replacement-locator"),
+        )
+
+
+def test_conditional_temporal_patch_rejects_invalid_legacy_locator_replacement():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    document = _chunk_doc("invalid legacy locator replacement")
+    first = store.put(document)
+
+    with pytest.raises(ValueError, match="replacement_source_locator_hash"):
+        store.patch_observed_time_if_content_hash(
+            doc_id=document["_id"],
+            expected_content_hash=document["content_hash"],
+            expected_rev=first.rev,
+            observed_at_start="2026-07-09T10:00:00Z",
+            observed_at_end="2026-07-09T10:30:00Z",
+            expected_source_locator_hash="",
+            replacement_source_locator_hash="",
+        )
+
+
 def test_conditional_temporal_patch_does_not_retry_a_revision_conflict():
     fake = FakeCouch()
     store = _store(fake)
