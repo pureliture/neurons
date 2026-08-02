@@ -539,8 +539,8 @@ def collect_historical_candidates(
                 documents.extend(source_documents)
                 excluded_temporal_count += source_excluded_temporal_count
             except SourceRedactionLeak:
-                parsed_session_id_hash = (
-                    str(parsed.session.session_id_hash or "") if parsed is not None else ""
+                parsed_session_id_hash = str(
+                    getattr(getattr(parsed, "session", None), "session_id_hash", "") or ""
                 )
                 is_proven_non_target = (
                     target_session_identities_complete
