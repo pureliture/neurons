@@ -27,6 +27,7 @@ from typing import Any
 from .couchdb_http_store import CouchDBHttpSourceStore
 from .document_model import (
     SourceDocType,
+    SourceRedactionLeak,
     build_conversation_chunk_document,
     build_source_locator_hash,
     normalize_observed_interval,
@@ -371,6 +372,9 @@ def collect_historical_candidates(
     source_file_limit: int,
     source_entry_limit: int | None = None,
     required_source_locator_hashes: Iterable[str] | None = None,
+    target_source_locator_hashes: Iterable[str] | None = None,
+    target_session_id_hashes: Iterable[str] | None = None,
+    target_session_identities_complete: bool = False,
     monotonic: Callable[[], float] = time.monotonic,
     started: float | None = None,
     max_runtime_seconds: float | None = None,
@@ -382,6 +386,20 @@ def collect_historical_candidates(
     required_hashes = (
         {str(value) for value in required_source_locator_hashes if _SHA256_RE.fullmatch(str(value))}
         if required_source_locator_hashes is not None
+        else None
+    )
+    target_locator_hashes = (
+        {
+            str(value)
+            for value in target_source_locator_hashes
+            if _SHA256_RE.fullmatch(str(value))
+        }
+        if target_source_locator_hashes is not None
+        else None
+    )
+    target_session_hashes = (
+        {str(value) for value in target_session_id_hashes if _SHA256_RE.fullmatch(str(value))}
+        if target_session_id_hashes is not None
         else None
     )
     if required_hashes == set():
@@ -471,6 +489,7 @@ def collect_historical_candidates(
     documents: list[dict[str, object]] = []
     parsed_source_count = 0
     parser_error_count = 0
+    non_target_source_redaction_skip_count = 0
     excluded_temporal_count = 0
     timed_out = False
     with tempfile.TemporaryDirectory(prefix="neurons-historical-temporal-repair-") as temporary:
@@ -479,7 +498,12 @@ def collect_historical_candidates(
             if _deadline_exceeded(started=started, max_runtime_seconds=max_runtime_seconds, monotonic=monotonic):
                 timed_out = True
                 break
+            source_locator_hash = ""
+            parsed: Any | None = None
+            source_documents: list[dict[str, object]] = []
+            source_excluded_temporal_count = 0
             try:
+                source_locator_hash = build_source_locator_hash(str(path))
                 resolved_project = _source_project(provider, path)
                 if resolved_project != project:
                     continue
@@ -489,7 +513,6 @@ def collect_historical_candidates(
                 # so reconstructed document IDs match the historical source.
                 if provider == "gemini" and path.suffix == ".json":
                     parser_path = convert_gemini_json_to_fixture(path, runtime_dir)
-                source_locator_hash = build_source_locator_hash(str(path))
                 parsed = parse_transcript_source(
                     provider,
                     parser_path,
@@ -508,11 +531,29 @@ def collect_historical_candidates(
                     if _provider_native_interval(
                         document.get("observed_at_start"), document.get("observed_at_end")
                     ) is None:
-                        excluded_temporal_count += 1
+                        source_excluded_temporal_count += 1
                         continue
-                    documents.append(document)
+                    source_documents.append(document)
                 if timed_out:
                     break
+                documents.extend(source_documents)
+                excluded_temporal_count += source_excluded_temporal_count
+            except SourceRedactionLeak:
+                parsed_session_id_hash = str(
+                    getattr(getattr(parsed, "session", None), "session_id_hash", "") or ""
+                )
+                is_proven_non_target = (
+                    target_session_identities_complete
+                    and target_locator_hashes is not None
+                    and target_session_hashes is not None
+                    and _SHA256_RE.fullmatch(parsed_session_id_hash) is not None
+                    and source_locator_hash not in target_locator_hashes
+                    and parsed_session_id_hash not in target_session_hashes
+                )
+                if is_proven_non_target:
+                    non_target_source_redaction_skip_count += 1
+                else:
+                    parser_error_count += 1
             except Exception:
                 parser_error_count += 1
     return documents, _collection_counts(
@@ -527,6 +568,7 @@ def collect_historical_candidates(
         required_target_scan_satisfied=required_target_scan_satisfied,
         parsed_source_count=parsed_source_count,
         parser_error_count=parser_error_count,
+        non_target_source_redaction_skip_count=non_target_source_redaction_skip_count,
         excluded_temporal_candidate_count=excluded_temporal_count,
     ), timed_out
 
@@ -556,6 +598,7 @@ def _collection_counts(
         "source_scan_truncated": False,
         "parsed_source_count": 0,
         "parser_error_count": 0,
+        "non_target_source_redaction_skip_count": 0,
         "excluded_temporal_candidate_count": 0,
         "required_source_locator_hash_count": len(required),
         "matched_source_locator_hash_count": len(matched),
@@ -673,6 +716,7 @@ def _plan_digest(
     patch_limit: int,
     batch_limit: int | None,
     max_runtime_seconds: float,
+    non_target_source_redaction_skip_count: int,
 ) -> str:
     selected_items = list(items)
     snapshot = list(snapshot_documents)
@@ -691,6 +735,9 @@ def _plan_digest(
                     "max_runtime_seconds": float(max_runtime_seconds),
                 },
                 "selected_batch_fingerprint": selected_batch_fingerprint,
+                "non_target_source_redaction_skip_count": int(
+                    non_target_source_redaction_skip_count
+                ),
                 "items": sorted(item.digest for item in selected_items),
                 "snapshot_document_count": len(snapshot),
                 "snapshot_fingerprint": snapshot_fingerprint,
@@ -753,6 +800,7 @@ def repair_historical_temporal_gaps(
     monotonic: Callable[[], float] = time.monotonic,
     started: float | None = None,
     snapshot_documents: Iterable[Mapping[str, object]] | None = None,
+    non_target_source_redaction_skip_count: int = 0,
 ) -> dict[str, Any]:
     """Snapshot, plan, and conditionally patch historical temporal gaps.
 
@@ -763,6 +811,9 @@ def repair_historical_temporal_gaps(
     provider = canonicalize_provider(provider)
     project = str(project or "").strip()
     source_entry_limit = _effective_source_entry_limit(source_entry_limit)
+    non_target_source_redaction_skip_count = int(non_target_source_redaction_skip_count)
+    if non_target_source_redaction_skip_count < 0:
+        raise ValueError("non_target_source_redaction_skip_count must be non-negative")
     _validate_bounds(
         provider=provider,
         project=project,
@@ -791,6 +842,7 @@ def repair_historical_temporal_gaps(
         "batch_pending": False,
         "batch_execution_succeeded": False,
         "max_runtime_seconds": float(max_runtime_seconds),
+        "non_target_source_redaction_skip_count": non_target_source_redaction_skip_count,
         "snapshot_document_count": 0,
         "snapshot_gap_count": 0,
         "snapshot_complete_count": 0,
@@ -1024,6 +1076,7 @@ def repair_historical_temporal_gaps(
         patch_limit=patch_limit,
         batch_limit=batch_limit,
         max_runtime_seconds=max_runtime_seconds,
+        non_target_source_redaction_skip_count=non_target_source_redaction_skip_count,
     )
     if execute and expected_plan_digest != report["plan_digest"]:
         report.update({"status": "blocked_plan_drift", "expected_plan_digest_match": False, "error_count": 1, "gap_count": 1})
@@ -1288,6 +1341,15 @@ def main(argv: list[str] | None = None) -> int:
         for document in target_gaps
         if _SHA256_RE.fullmatch(str(document.get("source_locator_hash") or ""))
     }
+    target_session_id_hashes = {
+        str(document.get("session_id_hash") or "")
+        for document in target_gaps
+        if _SHA256_RE.fullmatch(str(document.get("session_id_hash") or ""))
+    }
+    target_session_identities_complete = all(
+        _SHA256_RE.fullmatch(str(document.get("session_id_hash") or "")) is not None
+        for document in target_gaps
+    )
     candidates, collection, timed_out = collect_historical_candidates(
         provider=canonicalize_provider(args.provider),
         project=str(args.project),
@@ -1301,6 +1363,9 @@ def main(argv: list[str] | None = None) -> int:
         required_source_locator_hashes=(
             None if has_legacy_locator_target else required_source_locator_hashes
         ),
+        target_source_locator_hashes=required_source_locator_hashes,
+        target_session_id_hashes=target_session_id_hashes,
+        target_session_identities_complete=target_session_identities_complete,
         started=started,
         max_runtime_seconds=float(args.max_runtime_seconds),
     )
@@ -1349,6 +1414,9 @@ def main(argv: list[str] | None = None) -> int:
         target_fingerprints=target.target_fingerprints,
         started=started,
         snapshot_documents=snapshot_documents,
+        non_target_source_redaction_skip_count=int(
+            collection["non_target_source_redaction_skip_count"]
+        ),
     )
     report.update(collection)
     print(json.dumps(report, sort_keys=True))
