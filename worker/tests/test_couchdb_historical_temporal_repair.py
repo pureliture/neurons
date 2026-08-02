@@ -639,6 +639,53 @@ def test_candidate_collection_parses_only_snapshot_locator_targets(tmp_path, mon
     assert len(documents) == 1
 
 
+def test_candidate_collection_without_locator_filter_parses_all_bounded_provider_sources(
+    tmp_path, monkeypatch
+):
+    first = tmp_path / "a-first.jsonl"
+    second = tmp_path / "z-second.jsonl"
+    first.write_text("first fixture", encoding="utf-8")
+    second.write_text("second fixture", encoding="utf-8")
+    parsed_paths = []
+
+    def parse_source(provider, path, *, project, source_locator_hash):
+        parsed_paths.append((Path(path), source_locator_hash))
+        return ParsedTranscript(
+            session=TranscriptSession(
+                session_id_hash=SESSION_HASH,
+                provider=provider,
+                project=project,
+                started_at="2026-07-01T10:00:00Z",
+            ),
+            turns=[
+                TranscriptTurn("turn-a", SESSION_HASH, 1, "user", "2026-07-01T10:00:01Z", "hello"),
+                TranscriptTurn("turn-b", SESSION_HASH, 2, "assistant", "2026-07-01T10:00:02Z", "world"),
+            ],
+            tool_events=[],
+            parser_warnings=[],
+            source_status="source_locator_private_spool_only",
+        )
+
+    monkeypatch.setattr(temporal_repair, "_source_project", lambda *_args: PROJECT)
+    monkeypatch.setattr(temporal_repair, "parse_transcript_source", parse_source)
+
+    documents, report, timed_out = collect_historical_candidates(
+        provider=PROVIDER,
+        project=PROJECT,
+        source_root=tmp_path,
+        source_file_limit=2,
+        source_entry_limit=100,
+        required_source_locator_hashes=None,
+    )
+
+    assert timed_out is False
+    assert [path for path, _locator_hash in parsed_paths] == [first, second]
+    assert report["source_file_count"] == 2
+    assert report["source_scan_complete"] is True
+    assert report["source_tree_scan_complete"] is True
+    assert len(documents) == 2
+
+
 def test_candidate_collection_times_out_during_locator_filter_before_source_parsing(tmp_path, monkeypatch):
     selected = tmp_path / "selected.jsonl"
     selected.write_text("unread fixture", encoding="utf-8")
@@ -893,8 +940,9 @@ def test_wrong_session_candidate_is_not_planned_for_snapshot_target():
     assert report["error_count"] == 1
 
 
-def test_legacy_target_without_locator_is_a_distinct_unrepairable_gap():
+def test_legacy_target_without_locator_plans_only_a_valid_replacement_locator():
     store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
 
     report = repair_historical_temporal_gaps(
         source_store=store,
@@ -905,9 +953,216 @@ def test_legacy_target_without_locator_is_a_distinct_unrepairable_gap():
         **_limits(),
     )
 
-    assert report["planned_update_count"] == 0
-    assert report["target_locator_missing_count"] == 1
+    assert report["legacy_target_count"] == 1
+    assert report["planned_update_count"] == 1
+    assert report["target_locator_missing_count"] == 0
     assert report["content_conflict_count"] == 0
+    assert report["status"] == "dry_run"
+
+
+def test_legacy_target_execute_binds_empty_expected_locator_to_replacement_locator():
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    patch_calls = []
+
+    def patch_with_locator_cas(
+        *,
+        doc_id,
+        expected_content_hash,
+        expected_rev,
+        observed_at_start,
+        observed_at_end,
+        expected_source_locator_hash,
+        replacement_source_locator_hash,
+    ):
+        patch_calls.append(
+            {
+                "expected_source_locator_hash": expected_source_locator_hash,
+                "replacement_source_locator_hash": replacement_source_locator_hash,
+            }
+        )
+        current = store.get(doc_id)
+        assert current is not None
+        if current["source_locator_hash"] != expected_source_locator_hash:
+            raise SourceStoreConflict("simulated locator CAS conflict")
+        updated = dict(current)
+        for key in ("_rev", "idempotency_key", "payload_hash"):
+            updated.pop(key, None)
+        updated["observed_at_start"] = observed_at_start
+        updated["observed_at_end"] = observed_at_end
+        updated["source_locator_hash"] = replacement_source_locator_hash
+        return store.put(updated)
+
+    store.patch_observed_time_if_content_hash = patch_with_locator_cas  # type: ignore[method-assign]
+    plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+        **_limits(),
+    )
+
+    current = store.get(candidate["_id"])
+    assert current is not None
+    assert patch_calls == [
+        {
+            "expected_source_locator_hash": "",
+            "replacement_source_locator_hash": SOURCE_LOCATOR_HASH,
+        }
+    ]
+    assert report["updated_count"] == 1
+    assert report["write_conflict_count"] == 0
+    assert current["source_locator_hash"] == SOURCE_LOCATOR_HASH
+
+
+def test_legacy_uncertain_ack_without_replacement_locator_fails_closed():
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+
+    def patch_then_lose_acknowledgement(
+        *,
+        doc_id,
+        expected_content_hash,
+        expected_rev,
+        observed_at_start,
+        observed_at_end,
+        expected_source_locator_hash,
+        replacement_source_locator_hash,
+    ):
+        del expected_content_hash, expected_rev, replacement_source_locator_hash
+        current = store.get(doc_id)
+        assert current is not None
+        assert current["source_locator_hash"] == expected_source_locator_hash == ""
+        updated = dict(current)
+        for key in ("_rev", "idempotency_key", "payload_hash"):
+            updated.pop(key, None)
+        updated["observed_at_start"] = observed_at_start
+        updated["observed_at_end"] = observed_at_end
+        store.put(updated)
+        raise TimeoutError("private transport acknowledgement detail")
+
+    store.patch_observed_time_if_content_hash = patch_then_lose_acknowledgement  # type: ignore[method-assign]
+    plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+        **_limits(),
+    )
+
+    current = store.get(candidate["_id"])
+    assert current is not None
+    assert report["updated_count"] == 0
+    assert report["mutation_performed"] is False
+    assert report["write_error_count"] == 1
+    assert current["source_locator_hash"] == ""
+    assert "private transport acknowledgement detail" not in json.dumps(report)
+
+
+def test_legacy_readback_without_replacement_locator_fails_postcheck():
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    original_patch = store.patch_observed_time_if_content_hash
+
+    def patch_without_locator_replacement(
+        *,
+        doc_id,
+        expected_content_hash,
+        expected_rev,
+        observed_at_start,
+        observed_at_end,
+        expected_source_locator_hash,
+        replacement_source_locator_hash,
+    ):
+        assert expected_source_locator_hash == ""
+        assert replacement_source_locator_hash == SOURCE_LOCATOR_HASH
+        return original_patch(
+            doc_id=doc_id,
+            expected_content_hash=expected_content_hash,
+            expected_rev=expected_rev,
+            observed_at_start=observed_at_start,
+            observed_at_end=observed_at_end,
+        )
+
+    store.patch_observed_time_if_content_hash = patch_without_locator_replacement  # type: ignore[method-assign]
+    plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+        **_limits(),
+    )
+
+    current = store.get(candidate["_id"])
+    assert current is not None
+    assert report["updated_count"] == 1
+    assert report["write_conflict_count"] == 1
+    assert report["status"] == "completed_with_errors"
+    assert current["source_locator_hash"] == ""
+
+
+@pytest.mark.parametrize(
+    ("candidates", "count_field"),
+    [
+        ("duplicate", "legacy_candidate_ambiguous_count"),
+        ("invalid_locator", "replacement_locator_invalid_count"),
+    ],
+)
+def test_legacy_target_duplicate_or_invalid_replacement_candidate_fails_closed(
+    candidates, count_field
+):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    historical_documents = [candidate]
+    if candidates == "duplicate":
+        historical_documents.append(dict(candidate))
+    else:
+        historical_documents[0]["source_locator_hash"] = "not-a-valid-locator"
+
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=historical_documents,
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+
+    assert report["planned_update_count"] == 0
+    assert report[count_field] == 1
     assert report["status"] == "dry_run_with_gaps"
 
 
@@ -1348,6 +1603,35 @@ def test_cli_snapshots_target_before_parsing_and_passes_only_target_locator_hash
     assert report["gap_count"] == 1
     assert report["parser_error_count"] == 1
     assert calls == ["snapshot", "parse"]
+
+
+def test_cli_legacy_locator_target_requests_full_bounded_source_scan(monkeypatch, capsys, tmp_path):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+
+    def record_collection(**kwargs):
+        assert kwargs["required_source_locator_hashes"] is None
+        return [candidate], collection, False
+
+    monkeypatch.setattr(temporal_repair, "collect_historical_candidates", record_collection)
+
+    rc = temporal_repair.main(_cli_args(tmp_path))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["status"] == "dry_run"
+    assert report["legacy_target_count"] == 1
+    assert report["planned_update_count"] == 1
 
 
 def test_cli_batch_ready_with_unrepairable_gap_returns_nonzero_without_locator_hash(monkeypatch, capsys, tmp_path):
