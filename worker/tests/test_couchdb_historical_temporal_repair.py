@@ -1799,6 +1799,55 @@ def test_cli_incomplete_target_session_identity_blocks_nontarget_redaction_skip(
     assert "synthetic redaction leak" not in output
 
 
+@pytest.mark.parametrize("failure_stage", ["parse", "materialize_without_session"])
+def test_cli_redaction_leak_with_missing_parsed_session_fails_closed(
+    monkeypatch, capsys, tmp_path, failure_stage
+):
+    source = tmp_path / "source.jsonl"
+    source.write_text("fixture", encoding="utf-8")
+    snapshot_chunk = _temporal_chunk(session_id_hash=SESSION_HASH, chunk_id="target")
+    snapshot = build_conversation_chunk_document(chunk=snapshot_chunk)
+    snapshot.update({"observed_at_start": "", "observed_at_end": ""})
+    store = InMemoryCouchDBSourceStore()
+    store.put(snapshot)
+    leaking_chunk = _temporal_chunk(
+        session_id_hash="sha256:" + "e" * 64, chunk_id="leaking-source"
+    )
+
+    def parse_source(*_args, **_kwargs):
+        if failure_stage == "parse":
+            raise SourceRedactionLeak("synthetic redaction leak")
+        return object()
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(temporal_repair, "_source_project", lambda *_args: PROJECT)
+    monkeypatch.setattr(temporal_repair, "parse_transcript_source", parse_source)
+    monkeypatch.setattr(
+        temporal_repair,
+        "build_transcript_chunks",
+        lambda _parsed: [leaking_chunk],
+    )
+    monkeypatch.setattr(
+        temporal_repair,
+        "build_conversation_chunk_document",
+        lambda **_kwargs: (_ for _ in ()).throw(SourceRedactionLeak("synthetic redaction leak")),
+    )
+
+    rc = main(_cli_args(tmp_path))
+
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == "historical_source_parse_error"
+    assert report["parser_error_count"] == 1
+    assert report["non_target_source_redaction_skip_count"] == 0
+    assert "plan_digest" not in report
+    assert "synthetic redaction leak" not in output
+    assert str(tmp_path) not in output
+
+
 def test_cli_mixed_legacy_scan_blocks_normal_target_locator_redaction_leak(
     monkeypatch, capsys, tmp_path
 ):
