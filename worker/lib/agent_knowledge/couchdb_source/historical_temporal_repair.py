@@ -61,6 +61,10 @@ REPAIR_SCHEMA_VERSION = "couchdb_historical_temporal_repair.v1"
 # argument.  A five-digit ceiling keeps each directory sort reviewable; larger
 # archives must opt in with an explicit bound.
 DEFAULT_SOURCE_ENTRY_LIMIT = 10_000
+# A single bounded source can contain many chunks.  Keep the exact legacy
+# lookup bounded as well, instead of allowing source materialization to fan
+# out into an unbounded number of CouchDB reads.
+MAX_LEGACY_IDENTITY_COUNT = 256
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SNAPSHOT_FIELDS = [
     "_id",
@@ -235,6 +239,97 @@ def _snapshot_gaps(
         limit=int(target_document_limit) + 1,
     )
     return _summarize_snapshot(documents, target_document_limit=target_document_limit)
+
+
+def _legacy_candidate_identities(
+    documents: Iterable[Mapping[str, object]],
+    *,
+    provider: str,
+    project: str,
+) -> set[tuple[str, str]]:
+    """Return valid source identities eligible to constrain legacy targets."""
+    return {
+        (session_id_hash, content_hash)
+        for document in documents
+        if str(document.get("provider") or "") == provider
+        and str(document.get("project") or "") == project
+        and _SHA256_RE.fullmatch(
+            session_id_hash := str(document.get("session_id_hash") or "")
+        )
+        is not None
+        and _SHA256_RE.fullmatch(
+            content_hash := str(document.get("content_hash") or "")
+        )
+        is not None
+    }
+
+
+def _snapshot_legacy_identity_gaps(
+    store: CouchDBSourceStore,
+    *,
+    provider: str,
+    project: str,
+    candidate_identities: Iterable[tuple[str, str]],
+    target_document_limit: int,
+    monotonic: Callable[[], float] = time.monotonic,
+    started: float | None = None,
+    max_runtime_seconds: float | None = None,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, int]]:
+    """Read legacy gaps only for identities derived from bounded source evidence.
+
+    Legacy records have no source locator, so a provider/project snapshot would
+    be broader than the approved source evidence.  Query each distinct identity
+    with equality selectors instead of an ``$or`` selector so the in-memory
+    store and the HTTP backend follow the same narrow contract.
+    """
+    identities = sorted(set(candidate_identities))
+    if not identities:
+        raise ValueError("legacy_candidate_identity_missing")
+    if len(identities) > MAX_LEGACY_IDENTITY_COUNT:
+        raise ValueError("legacy_candidate_identity_limit_exceeded")
+    deduplicated: dict[str, dict[str, object]] = {}
+    malformed: list[dict[str, object]] = []
+    for session_id_hash, content_hash in identities:
+        if _deadline_exceeded(
+            started=started,
+            max_runtime_seconds=max_runtime_seconds,
+            monotonic=monotonic,
+        ):
+            raise TimeoutError("snapshot_deadline_exceeded")
+        documents = store.find_by_type(
+            SourceDocType.CONVERSATION_CHUNK,
+            fields=_SNAPSHOT_FIELDS,
+            selector={
+                "project": project,
+                "provider": provider,
+                "source_locator_hash": "",
+                "session_id_hash": session_id_hash,
+                "content_hash": content_hash,
+            },
+            limit=int(target_document_limit) + 1,
+        )
+        if _deadline_exceeded(
+            started=started,
+            max_runtime_seconds=max_runtime_seconds,
+            monotonic=monotonic,
+        ):
+            raise TimeoutError("snapshot_deadline_exceeded")
+        for document in documents:
+            snapshot_document = dict(document)
+            document_id = str(snapshot_document.get("_id") or "")
+            if document_id:
+                deduplicated[document_id] = snapshot_document
+            else:
+                malformed.append(snapshot_document)
+    snapshot, gaps, counts = _summarize_snapshot(
+        [*deduplicated.values(), *malformed],
+        target_document_limit=target_document_limit,
+    )
+    if not snapshot:
+        raise ValueError("legacy_target_not_found")
+    if not gaps:
+        raise ValueError("legacy_target_gap_not_found")
+    return snapshot, gaps, counts
 
 
 def _summarize_snapshot(
@@ -808,8 +903,10 @@ def repair_historical_temporal_gaps(
     monotonic: Callable[[], float] = time.monotonic,
     started: float | None = None,
     snapshot_documents: Iterable[Mapping[str, object]] | None = None,
+    postcheck_document_ids: Iterable[str] | None = None,
     non_target_source_redaction_skip_count: int = 0,
     legacy_identity_match: bool = False,
+    legacy_identity_targeted_snapshot: bool = False,
     legacy_source_error_count: int = 0,
 ) -> dict[str, Any]:
     """Snapshot, plan, and conditionally patch historical temporal gaps.
@@ -825,14 +922,19 @@ def repair_historical_temporal_gaps(
     if non_target_source_redaction_skip_count < 0:
         raise ValueError("non_target_source_redaction_skip_count must be non-negative")
     legacy_identity_match = bool(legacy_identity_match)
+    legacy_identity_targeted_snapshot = bool(legacy_identity_targeted_snapshot)
     legacy_source_error_count = int(legacy_source_error_count)
     if legacy_source_error_count < 0:
         raise ValueError("legacy_source_error_count must be non-negative")
     if legacy_source_error_count and not legacy_identity_match:
         raise ValueError("legacy_source_errors_require_legacy_identity_match")
-    match_strategy = (
-        "legacy_identity_match" if legacy_identity_match else "exact_source_locator"
-    )
+    if legacy_identity_targeted_snapshot and not legacy_identity_match:
+        raise ValueError("legacy_targeted_snapshot_requires_legacy_identity_match")
+    match_strategy = "exact_source_locator"
+    if legacy_identity_match:
+        match_strategy = "legacy_identity_match"
+    if legacy_identity_targeted_snapshot:
+        match_strategy = "legacy_identity_targeted_snapshot"
     _validate_bounds(
         provider=provider,
         project=project,
@@ -843,6 +945,18 @@ def repair_historical_temporal_gaps(
         batch_limit=batch_limit,
         max_runtime_seconds=max_runtime_seconds,
     )
+    if legacy_identity_targeted_snapshot and (
+        int(source_file_limit) != 1
+        or int(source_entry_limit) != 1
+        or int(target_document_limit) != 1
+    ):
+        raise ValueError("legacy_targeted_snapshot_bounds_invalid")
+    if postcheck_document_ids is not None:
+        postcheck_document_ids = tuple(
+            str(document_id) for document_id in postcheck_document_ids if document_id
+        )
+    if legacy_identity_targeted_snapshot and execute and not postcheck_document_ids:
+        raise ValueError("legacy_targeted_snapshot_postcheck_document_ids_required")
     started = monotonic() if started is None else started
     target = dict(sorted((target_fingerprints or {}).items()))
     report: dict[str, Any] = {
@@ -1263,12 +1377,29 @@ def repair_historical_temporal_gaps(
             report["status"] = "aborted_timeout"
         else:
             try:
-                _, remaining, postcheck_counts = _snapshot_gaps(
-                    source_store,
-                    provider=provider,
-                    project=project,
-                    target_document_limit=target_document_limit,
-                )
+                if postcheck_document_ids is None:
+                    _, remaining, postcheck_counts = _snapshot_gaps(
+                        source_store,
+                        provider=provider,
+                        project=project,
+                        target_document_limit=target_document_limit,
+                    )
+                else:
+                    document_ids = sorted(
+                        {str(document_id) for document_id in postcheck_document_ids if document_id}
+                    )
+                    if not document_ids:
+                        raise ValueError("targeted_postcheck_document_ids_missing")
+                    postcheck_documents = []
+                    for document_id in document_ids:
+                        document = source_store.get(document_id)
+                        if document is None:
+                            raise ValueError("targeted_postcheck_document_missing")
+                        postcheck_documents.append(document)
+                    _, remaining, postcheck_counts = _summarize_snapshot(
+                        postcheck_documents,
+                        target_document_limit=target_document_limit,
+                    )
                 report["postcheck_snapshot_document_count"] = postcheck_counts["snapshot_document_count"]
                 report["postcheck_gap_count"] = postcheck_counts["snapshot_gap_count"]
                 report["remaining_temporal_gap_count"] = len(remaining)
@@ -1354,6 +1485,7 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--execute", action="store_true")
     parser.add_argument("--legacy-identity-match", action="store_true")
+    parser.add_argument("--legacy-identity-targeted-snapshot", action="store_true")
     parser.add_argument("--expected-plan-digest", default="")
     parser.add_argument("--approval", default="")
     return parser
@@ -1364,6 +1496,14 @@ def main(argv: list[str] | None = None) -> int:
     effective_argv = list(sys.argv[1:] if argv is None else argv)
     execute = bool(args.execute)
     try:
+        if args.legacy_identity_targeted_snapshot and not args.legacy_identity_match:
+            raise ValueError("legacy_targeted_snapshot_requires_legacy_identity_match")
+        if args.legacy_identity_targeted_snapshot and (
+            int(args.source_file_limit) != 1
+            or _effective_source_entry_limit(args.source_entry_limit) != 1
+            or int(args.target_document_limit) != 1
+        ):
+            raise ValueError("legacy_targeted_snapshot_bounds_invalid")
         _validate_bounds(
             provider=args.provider,
             project=args.project,
@@ -1405,56 +1545,127 @@ def main(argv: list[str] | None = None) -> int:
         request_timeout_seconds=min(30.0, max(0.001, float(args.max_runtime_seconds) - (time.monotonic() - started))),
         deadline_monotonic=started + float(args.max_runtime_seconds),
     )
-    try:
-        snapshot_documents, target_gaps, _snapshot_counts = _snapshot_gaps(
-            store,
-            provider=canonicalize_provider(args.provider),
-            project=str(args.project),
-            target_document_limit=int(args.target_document_limit),
+    provider = canonicalize_provider(args.provider)
+    project = str(args.project)
+    if args.legacy_identity_targeted_snapshot:
+        # Legacy targets have no locator to select before source parsing.  The
+        # bounded source corpus therefore establishes their only valid CouchDB
+        # identity scope; never read a provider/project-wide snapshot here.
+        candidates, collection, timed_out = collect_historical_candidates(
+            provider=provider,
+            project=project,
+            source_root=Path(args.source_root).expanduser(),
+            source_file_limit=int(args.source_file_limit),
+            source_entry_limit=_optional_int(args.source_entry_limit),
+            required_source_locator_hashes=None,
+            started=started,
+            max_runtime_seconds=float(args.max_runtime_seconds),
         )
-    except ValueError as exc:
-        print(json.dumps(_error_report(str(exc), dry_run=not execute), sort_keys=True))
-        return 1
-    except Exception:
-        print(json.dumps(_error_report("snapshot_read_failed", dry_run=not execute), sort_keys=True))
-        return 1
-    has_legacy_locator_target = any(
-        document.get("source_locator_hash") == "" for document in target_gaps
-    )
-    required_source_locator_hashes = {
-        str(document.get("source_locator_hash") or "")
-        for document in target_gaps
-        if _SHA256_RE.fullmatch(str(document.get("source_locator_hash") or ""))
-    }
-    target_session_id_hashes = {
-        str(document.get("session_id_hash") or "")
-        for document in target_gaps
-        if _SHA256_RE.fullmatch(str(document.get("session_id_hash") or ""))
-    }
-    target_session_identities_complete = all(
-        _SHA256_RE.fullmatch(str(document.get("session_id_hash") or "")) is not None
-        for document in target_gaps
-    )
-    candidates, collection, timed_out = collect_historical_candidates(
-        provider=canonicalize_provider(args.provider),
-        project=str(args.project),
-        source_root=Path(args.source_root).expanduser(),
-        source_file_limit=int(args.source_file_limit),
-        source_entry_limit=_optional_int(args.source_entry_limit),
-        # Empty-locator targets are candidates for a corpus scan only with the
-        # explicit opt-in.  Otherwise an all-legacy scope passes an empty set
-        # (no scan), while mixed scopes retain their exact locator filter.
-        required_source_locator_hashes=(
-            None
-            if args.legacy_identity_match and has_legacy_locator_target
-            else required_source_locator_hashes
-        ),
-        target_source_locator_hashes=required_source_locator_hashes,
-        target_session_id_hashes=target_session_id_hashes,
-        target_session_identities_complete=target_session_identities_complete,
-        started=started,
-        max_runtime_seconds=float(args.max_runtime_seconds),
-    )
+        if (
+            timed_out
+            or collection.get("source_entry_limit_exceeded")
+            or collection["source_file_limit_exceeded"]
+        ):
+            if timed_out:
+                error = "runtime_bound_exceeded"
+            elif collection.get("source_entry_limit_exceeded"):
+                error = "source_entry_limit_exceeded"
+            else:
+                error = "source_file_limit_exceeded"
+            report = _error_report(error, dry_run=not execute)
+            report.update(collection)
+            print(json.dumps(report, sort_keys=True))
+            return 1
+        if collection["parser_error_count"]:
+            report = _error_report("historical_source_parse_error", dry_run=not execute)
+            report.update(collection)
+            report.update(
+                {
+                    "error_count": int(collection["parser_error_count"]),
+                    "gap_count": int(collection["parser_error_count"]),
+                }
+            )
+            print(json.dumps(report, sort_keys=True))
+            return 1
+        try:
+            snapshot_documents, target_gaps, _snapshot_counts = _snapshot_legacy_identity_gaps(
+                store,
+                provider=provider,
+                project=project,
+                candidate_identities=_legacy_candidate_identities(
+                    candidates,
+                    provider=provider,
+                    project=project,
+                ),
+                target_document_limit=int(args.target_document_limit),
+                monotonic=time.monotonic,
+                started=started,
+                max_runtime_seconds=float(args.max_runtime_seconds),
+            )
+        except TimeoutError:
+            report = _error_report("runtime_bound_exceeded", dry_run=not execute)
+            report.update(collection)
+            print(json.dumps(report, sort_keys=True))
+            return 1
+        except ValueError as exc:
+            report = _error_report(str(exc), dry_run=not execute)
+            report.update(collection)
+            print(json.dumps(report, sort_keys=True))
+            return 1
+        except Exception:
+            print(json.dumps(_error_report("snapshot_read_failed", dry_run=not execute), sort_keys=True))
+            return 1
+        has_legacy_locator_target = bool(target_gaps)
+    else:
+        try:
+            snapshot_documents, target_gaps, _snapshot_counts = _snapshot_gaps(
+                store,
+                provider=provider,
+                project=project,
+                target_document_limit=int(args.target_document_limit),
+            )
+        except ValueError as exc:
+            print(json.dumps(_error_report(str(exc), dry_run=not execute), sort_keys=True))
+            return 1
+        except Exception:
+            print(json.dumps(_error_report("snapshot_read_failed", dry_run=not execute), sort_keys=True))
+            return 1
+        has_legacy_locator_target = any(
+            document.get("source_locator_hash") == "" for document in target_gaps
+        )
+        required_source_locator_hashes = {
+            str(document.get("source_locator_hash") or "")
+            for document in target_gaps
+            if _SHA256_RE.fullmatch(str(document.get("source_locator_hash") or ""))
+        }
+        target_session_id_hashes = {
+            str(document.get("session_id_hash") or "")
+            for document in target_gaps
+            if _SHA256_RE.fullmatch(str(document.get("session_id_hash") or ""))
+        }
+        target_session_identities_complete = all(
+            _SHA256_RE.fullmatch(str(document.get("session_id_hash") or "")) is not None
+            for document in target_gaps
+        )
+        candidates, collection, timed_out = collect_historical_candidates(
+            provider=provider,
+            project=project,
+            source_root=Path(args.source_root).expanduser(),
+            source_file_limit=int(args.source_file_limit),
+            source_entry_limit=_optional_int(args.source_entry_limit),
+            # Preserve the legacy-only compatibility path: it retains the
+            # original target-first snapshot and bounded full-source scan.
+            required_source_locator_hashes=(
+                None
+                if args.legacy_identity_match and has_legacy_locator_target
+                else required_source_locator_hashes
+            ),
+            target_source_locator_hashes=required_source_locator_hashes,
+            target_session_id_hashes=target_session_id_hashes,
+            target_session_identities_complete=target_session_identities_complete,
+            started=started,
+            max_runtime_seconds=float(args.max_runtime_seconds),
+        )
     if (
         timed_out
         or collection.get("source_entry_limit_exceeded")
@@ -1503,10 +1714,16 @@ def main(argv: list[str] | None = None) -> int:
         target_fingerprints=target.target_fingerprints,
         started=started,
         snapshot_documents=snapshot_documents,
+        postcheck_document_ids=(
+            [str(document.get("_id") or "") for document in snapshot_documents]
+            if args.legacy_identity_targeted_snapshot
+            else None
+        ),
         non_target_source_redaction_skip_count=int(
             collection["non_target_source_redaction_skip_count"]
         ),
         legacy_identity_match=bool(args.legacy_identity_match),
+        legacy_identity_targeted_snapshot=bool(args.legacy_identity_targeted_snapshot),
         legacy_source_error_count=(
             int(collection["parser_error_count"])
             if legacy_source_errors_are_reportable

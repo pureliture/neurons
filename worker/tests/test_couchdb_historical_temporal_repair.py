@@ -74,6 +74,18 @@ def _cli_args(source_root: Path, **overrides: object) -> list[str]:
     return args
 
 
+def _targeted_legacy_cli_args(source_root: Path, **overrides: object) -> list[str]:
+    options: dict[str, object] = {
+        "legacy_identity_match": True,
+        "legacy_identity_targeted_snapshot": True,
+        "source_file_limit": 1,
+        "source_entry_limit": 1,
+        "target_document_limit": 1,
+    }
+    options.update(overrides)
+    return _cli_args(source_root, **options)
+
+
 def _seed_store(
     *,
     source_locator_hash: str = SOURCE_LOCATOR_HASH,
@@ -1934,6 +1946,48 @@ def test_initial_snapshot_failure_returns_sanitized_fail_closed_report():
     assert "private snapshot transport detail" not in json.dumps(report)
 
 
+def test_targeted_legacy_execute_requires_exact_postcheck_document_ids():
+    store = InMemoryCouchDBSourceStore()
+    source_reads = 0
+    patches = 0
+
+    def unexpected_snapshot(*_args, **_kwargs):
+        nonlocal source_reads
+        source_reads += 1
+        raise AssertionError("targeted execute must reject before a global snapshot")
+
+    def unexpected_patch(**_kwargs):
+        nonlocal patches
+        patches += 1
+        raise AssertionError("targeted execute must reject before mutation")
+
+    store.find_by_type = unexpected_snapshot  # type: ignore[method-assign]
+    store.patch_observed_time_if_content_hash = unexpected_patch  # type: ignore[method-assign]
+
+    with pytest.raises(
+        ValueError,
+        match="legacy_targeted_snapshot_postcheck_document_ids_required",
+    ):
+        repair_historical_temporal_gaps(
+            source_store=store,
+            provider=PROVIDER,
+            project=PROJECT,
+            historical_documents=[],
+            source_file_limit=1,
+            source_entry_limit=1,
+            target_document_limit=1,
+            patch_limit=1,
+            max_runtime_seconds=30,
+            execute=True,
+            expected_plan_digest="sha256:" + "a" * 64,
+            legacy_identity_match=True,
+            legacy_identity_targeted_snapshot=True,
+        )
+
+    assert source_reads == 0
+    assert patches == 0
+
+
 def test_gemini_json_uses_private_fixture_conversion_instead_of_fixture_parser_error(tmp_path):
     source = tmp_path / PROJECT / "chats" / "native.json"
     source.parent.mkdir(parents=True)
@@ -2304,6 +2358,521 @@ def test_cli_snapshots_target_before_parsing_and_passes_only_target_locator_hash
     assert report["gap_count"] == 1
     assert report["parser_error_count"] == 1
     assert calls == ["snapshot", "parse"]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"legacy_identity_targeted_snapshot": True},
+        {
+            "legacy_identity_match": True,
+            "legacy_identity_targeted_snapshot": True,
+            "source_file_limit": 2,
+            "source_entry_limit": 1,
+            "target_document_limit": 1,
+        },
+    ],
+)
+def test_cli_rejects_invalid_legacy_targeted_snapshot_bounds(
+    monkeypatch, capsys, tmp_path, options
+):
+    constructed = False
+
+    def unexpected_store(**_kwargs):
+        nonlocal constructed
+        constructed = True
+        raise AssertionError("invalid targeted bounds must not construct CouchDB store")
+
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", unexpected_store)
+
+    rc = main(_cli_args(tmp_path, **options))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert report["status"] == "blocked"
+    assert report["error"] == "invalid_bounds"
+    assert constructed is False
+
+
+def test_cli_legacy_snapshot_uses_parsed_exact_identity_before_target_bound(
+    monkeypatch, capsys, tmp_path
+):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    _add_gap_chunk(
+        store,
+        chunk_id="legacy-unrelated-provider-project-target",
+        text="unrelated provider project target",
+    )
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+    calls: list[object] = []
+    original_find_by_type = store.find_by_type
+
+    def record_exact_snapshot(*args, **kwargs):
+        calls.append(("snapshot", kwargs["selector"]))
+        assert kwargs["selector"] == {
+            "project": PROJECT,
+            "provider": PROVIDER,
+            "source_locator_hash": "",
+            "session_id_hash": candidate["session_id_hash"],
+            "content_hash": candidate["content_hash"],
+        }
+        assert kwargs["limit"] == 2
+        return original_find_by_type(*args, **kwargs)
+
+    def bounded_source_parse(**kwargs):
+        calls.append("parse")
+        assert kwargs["required_source_locator_hashes"] is None
+        return [candidate], collection, False
+
+    store.find_by_type = record_exact_snapshot  # type: ignore[method-assign]
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(temporal_repair, "collect_historical_candidates", bounded_source_parse)
+
+    rc = main(_targeted_legacy_cli_args(tmp_path, batch_limit=1))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert calls[0] == "parse"
+    assert calls[1][0] == "snapshot"
+    assert len(calls) == 2
+    assert report["status"] == "dry_run_batch_ready"
+    assert report["batch_ready"] is True
+    assert report["planned_update_count"] == 1
+
+
+def test_cli_legacy_snapshot_blocks_more_than_target_limit_exact_matches(
+    monkeypatch, capsys, tmp_path
+):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    matching_target = store.get(candidate["_id"])
+    assert matching_target is not None
+    duplicate_target = dict(matching_target)
+    duplicate_target["_id"] = "conversation_chunk:legacy-duplicate-target"
+    duplicate_target.pop("_rev", None)
+    duplicate_target.pop("idempotency_key", None)
+    duplicate_target.pop("payload_hash", None)
+    store.put(duplicate_target)
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([candidate], collection, False),
+    )
+
+    rc = main(_targeted_legacy_cli_args(tmp_path, batch_limit=1))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == "target_document_limit_exceeded"
+
+
+def test_cli_legacy_snapshot_blocks_two_different_exact_identities(
+    monkeypatch, capsys, tmp_path
+):
+    store, first_candidate = _seed_store(source_locator_hash="")
+    first_candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    second_candidate = _add_gap_chunk(
+        store,
+        chunk_id="legacy-second-exact-identity",
+        text="second exact identity",
+        source_locator_hash="",
+    )
+    second_candidate["source_locator_hash"] = "sha256:" + "e" * 64
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([first_candidate, second_candidate], collection, False),
+    )
+
+    rc = main(_targeted_legacy_cli_args(tmp_path))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == "target_document_limit_exceeded"
+
+
+def test_cli_legacy_snapshot_requires_a_candidate_identity(monkeypatch, capsys, tmp_path):
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+    store = InMemoryCouchDBSourceStore()
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([], collection, False),
+    )
+
+    rc = main(_targeted_legacy_cli_args(tmp_path))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == "legacy_candidate_identity_missing"
+    assert "plan_digest" not in report
+
+
+def test_cli_legacy_snapshot_caps_candidate_identity_queries(monkeypatch, capsys, tmp_path):
+    candidates = [
+        {
+            "provider": PROVIDER,
+            "project": PROJECT,
+            "session_id_hash": SESSION_HASH,
+            "content_hash": f"sha256:{index:064x}",
+        }
+        for index in range(temporal_repair.MAX_LEGACY_IDENTITY_COUNT + 1)
+    ]
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+    store = InMemoryCouchDBSourceStore()
+    find_calls = 0
+
+    def record_unexpected_find(*_args, **_kwargs):
+        nonlocal find_calls
+        find_calls += 1
+        raise AssertionError("capped identity query must not reach CouchDB")
+
+    store.find_by_type = record_unexpected_find  # type: ignore[method-assign]
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: (candidates, collection, False),
+    )
+
+    rc = main(_targeted_legacy_cli_args(tmp_path))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == "legacy_candidate_identity_limit_exceeded"
+    assert "plan_digest" not in report
+    assert find_calls == 0
+
+
+def test_cli_legacy_parser_error_without_an_exact_target_fails_closed(
+    monkeypatch, capsys, tmp_path
+):
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parser_error_count=1,
+    )
+    store = InMemoryCouchDBSourceStore()
+    find_calls = 0
+
+    def record_unexpected_find(*_args, **_kwargs):
+        nonlocal find_calls
+        find_calls += 1
+        raise AssertionError("parser errors must block before CouchDB lookup")
+
+    store.find_by_type = record_unexpected_find  # type: ignore[method-assign]
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([], collection, False),
+    )
+
+    rc = main(_targeted_legacy_cli_args(tmp_path))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == "historical_source_parse_error"
+    assert report["parser_error_count"] == 1
+    assert "plan_digest" not in report
+    assert find_calls == 0
+
+
+def test_cli_legacy_targeted_snapshot_timeout_after_query_skips_planning(
+    monkeypatch, capsys, tmp_path
+):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+    find_calls = 0
+    original_find_by_type = store.find_by_type
+    clock = iter((0.0, 0.0, 0.0, 31.0))
+
+    def record_find(*args, **kwargs):
+        nonlocal find_calls
+        find_calls += 1
+        return original_find_by_type(*args, **kwargs)
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([candidate], collection, False),
+    )
+    monkeypatch.setattr(temporal_repair.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        temporal_repair,
+        "repair_historical_temporal_gaps",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("planner must not run")),
+    )
+    store.find_by_type = record_find  # type: ignore[method-assign]
+
+    rc = main(_targeted_legacy_cli_args(tmp_path, max_runtime_seconds=30))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == "runtime_bound_exceeded"
+    assert find_calls == 1
+
+
+def test_cli_legacy_snapshot_without_an_exact_target_fails_closed(monkeypatch, capsys, tmp_path):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    store = InMemoryCouchDBSourceStore()
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([candidate], collection, False),
+    )
+
+    rc = main(_targeted_legacy_cli_args(tmp_path))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == "legacy_target_not_found"
+    assert "plan_digest" not in report
+
+
+def test_cli_legacy_complete_only_exact_target_fails_closed(monkeypatch, capsys, tmp_path):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    matching_target = store.get(candidate["_id"])
+    assert matching_target is not None
+    complete_target = dict(matching_target)
+    complete_target.update(
+        {
+            "observed_at_start": "2026-07-01T10:00:01Z",
+            "observed_at_end": "2026-07-01T10:00:05Z",
+        }
+    )
+    for key in ("_rev", "idempotency_key", "payload_hash"):
+        complete_target.pop(key, None)
+    store.put(complete_target)
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([candidate], collection, False),
+    )
+
+    rc = main(_targeted_legacy_cli_args(tmp_path))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == "legacy_target_gap_not_found"
+    assert "plan_digest" not in report
+
+
+def test_cli_legacy_targeted_execute_postchecks_only_exact_snapshot_target(
+    monkeypatch, capsys, tmp_path
+):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    _add_gap_chunk(
+        store,
+        chunk_id="unrelated-nonlegacy-postcheck-target",
+        text="unrelated nonlegacy postcheck target",
+    )
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+    target = temporal_repair._resolve_target({"COUCHDB_URL": "https://repair-test.invalid"})
+    find_selectors: list[dict] = []
+    approval_argv: list[list[str]] = []
+    original_find_by_type = store.find_by_type
+
+    def record_exact_snapshot(*args, **kwargs):
+        find_selectors.append(dict(kwargs["selector"]))
+        return original_find_by_type(*args, **kwargs)
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([candidate], collection, False),
+    )
+    def approve(*_args, command_argv, **_kwargs):
+        approval_argv.append(command_argv)
+        return {
+            "target": {"target_fingerprints": target.target_fingerprints},
+            "timeout_seconds": 30,
+        }
+
+    monkeypatch.setattr(temporal_repair, "validate_memory_enqueue_approval", approve)
+    store.find_by_type = record_exact_snapshot  # type: ignore[method-assign]
+
+    plan_args = _targeted_legacy_cli_args(tmp_path, batch_limit=1)
+    assert main(plan_args) == 0
+    plan = json.loads(capsys.readouterr().out)
+
+    execute_args = _targeted_legacy_cli_args(
+        tmp_path,
+        batch_limit=1,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+        approval="approved-for-test",
+    )
+    assert main(execute_args) == 0
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["status"] == "completed_batch_complete"
+    assert report["updated_count"] == 1
+    assert report["postcheck_snapshot_document_count"] == 1
+    assert report["postcheck_gap_count"] == 0
+    assert len(find_selectors) == 2
+    assert all(selector["source_locator_hash"] == "" for selector in find_selectors)
+    assert "--legacy-identity-targeted-snapshot" in approval_argv[-1]
+
+
+def test_cli_legacy_targeted_plan_drifts_when_execute_omits_targeted_flag(
+    monkeypatch, capsys, tmp_path
+):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+    target = temporal_repair._resolve_target({"COUCHDB_URL": "https://repair-test.invalid"})
+    approval_argv: list[list[str]] = []
+
+    def approve(*_args, command_argv, **_kwargs):
+        approval_argv.append(command_argv)
+        return {
+            "target": {"target_fingerprints": target.target_fingerprints},
+            "timeout_seconds": 30,
+        }
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([candidate], collection, False),
+    )
+    monkeypatch.setattr(temporal_repair, "validate_memory_enqueue_approval", approve)
+
+    assert main(_targeted_legacy_cli_args(tmp_path, batch_limit=1)) == 0
+    plan = json.loads(capsys.readouterr().out)
+
+    rc = main(
+        _cli_args(
+            tmp_path,
+            legacy_identity_match=True,
+            batch_limit=1,
+            execute=True,
+            expected_plan_digest=plan["plan_digest"],
+            approval="approved-for-test",
+        )
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked_plan_drift"
+    assert report["mutation_performed"] is False
+    assert "--legacy-identity-targeted-snapshot" not in approval_argv[-1]
 
 
 def test_cli_legacy_locator_target_requests_full_bounded_source_scan(monkeypatch, capsys, tmp_path):
