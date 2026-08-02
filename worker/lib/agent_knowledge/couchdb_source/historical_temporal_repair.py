@@ -78,9 +78,13 @@ _UNREPAIRABLE_GAP_COUNT_FIELDS = (
     "session_identity_conflict_count",
     "source_locator_conflict_count",
     "target_locator_missing_count",
+    "legacy_identity_match_required_count",
     "legacy_candidate_missing_count",
     "legacy_candidate_ambiguous_count",
+    "legacy_target_ambiguous_count",
     "replacement_locator_invalid_count",
+    "legacy_source_error_count",
+    "legacy_source_error_blocked_count",
     "snapshot_integrity_error_count",
     "target_archive_conflict_count",
 )
@@ -717,6 +721,8 @@ def _plan_digest(
     batch_limit: int | None,
     max_runtime_seconds: float,
     non_target_source_redaction_skip_count: int,
+    match_strategy: str,
+    legacy_source_error_count: int,
 ) -> str:
     selected_items = list(items)
     snapshot = list(snapshot_documents)
@@ -735,6 +741,8 @@ def _plan_digest(
                     "max_runtime_seconds": float(max_runtime_seconds),
                 },
                 "selected_batch_fingerprint": selected_batch_fingerprint,
+                "match_strategy": match_strategy,
+                "legacy_source_error_count": int(legacy_source_error_count),
                 "non_target_source_redaction_skip_count": int(
                     non_target_source_redaction_skip_count
                 ),
@@ -801,6 +809,8 @@ def repair_historical_temporal_gaps(
     started: float | None = None,
     snapshot_documents: Iterable[Mapping[str, object]] | None = None,
     non_target_source_redaction_skip_count: int = 0,
+    legacy_identity_match: bool = False,
+    legacy_source_error_count: int = 0,
 ) -> dict[str, Any]:
     """Snapshot, plan, and conditionally patch historical temporal gaps.
 
@@ -814,6 +824,15 @@ def repair_historical_temporal_gaps(
     non_target_source_redaction_skip_count = int(non_target_source_redaction_skip_count)
     if non_target_source_redaction_skip_count < 0:
         raise ValueError("non_target_source_redaction_skip_count must be non-negative")
+    legacy_identity_match = bool(legacy_identity_match)
+    legacy_source_error_count = int(legacy_source_error_count)
+    if legacy_source_error_count < 0:
+        raise ValueError("legacy_source_error_count must be non-negative")
+    if legacy_source_error_count and not legacy_identity_match:
+        raise ValueError("legacy_source_errors_require_legacy_identity_match")
+    match_strategy = (
+        "legacy_identity_match" if legacy_identity_match else "exact_source_locator"
+    )
     _validate_bounds(
         provider=provider,
         project=project,
@@ -842,6 +861,9 @@ def repair_historical_temporal_gaps(
         "batch_pending": False,
         "batch_execution_succeeded": False,
         "max_runtime_seconds": float(max_runtime_seconds),
+        "match_strategy": match_strategy,
+        "legacy_identity_match_enabled": legacy_identity_match,
+        "legacy_source_error_count": legacy_source_error_count,
         "non_target_source_redaction_skip_count": non_target_source_redaction_skip_count,
         "snapshot_document_count": 0,
         "snapshot_gap_count": 0,
@@ -862,8 +884,11 @@ def repair_historical_temporal_gaps(
         "source_locator_conflict_count": 0,
         "target_locator_missing_count": 0,
         "legacy_target_count": 0,
+        "legacy_identity_match_required_count": 0,
+        "legacy_source_error_blocked_count": 0,
         "legacy_candidate_missing_count": 0,
         "legacy_candidate_ambiguous_count": 0,
+        "legacy_target_ambiguous_count": 0,
         "replacement_locator_invalid_count": 0,
         "snapshot_integrity_error_count": 0,
         "write_conflict_count": 0,
@@ -934,8 +959,8 @@ def repair_historical_temporal_gaps(
         return report
     target_gap_ids = {str(document.get("_id") or "") for document in gaps}
     by_id: dict[str, dict[str, object]] = {}
-    candidate_occurrence_count: dict[str, int] = {}
     archive_conflicts: set[str] = set()
+    candidate_rows: list[dict[str, object]] = []
     for document in historical_documents:
         if str(document.get("provider") or "") != provider or str(document.get("project") or "") != project:
             continue
@@ -947,11 +972,9 @@ def repair_historical_temporal_gaps(
         document_id = str(document.get("_id") or "")
         if not document_id or document_id in archive_conflicts:
             continue
-        candidate_occurrence_count[document_id] = (
-            candidate_occurrence_count.get(document_id, 0) + 1
-        )
         candidate = dict(document)
         candidate["observed_at_start"], candidate["observed_at_end"] = bounds
+        candidate_rows.append(candidate)
         existing = by_id.get(document_id)
         if existing is None:
             by_id[document_id] = candidate
@@ -963,6 +986,46 @@ def repair_historical_temporal_gaps(
             report["archive_conflict_count"] += 1
     report["historical_candidate_count"] = len(by_id)
     report["target_archive_conflict_count"] = len(archive_conflicts & target_gap_ids)
+    legacy_target_occurrence_count: dict[tuple[str, str, str, str], int] = {}
+    for snapshot in gaps:
+        if snapshot.get("source_locator_hash") != "":
+            continue
+        if (
+            str(snapshot.get("provider") or "") != provider
+            or str(snapshot.get("project") or "") != project
+        ):
+            continue
+        document_id = str(snapshot.get("_id") or "")
+        expected_rev = str(snapshot.get("_rev") or "")
+        content_hash = str(snapshot.get("content_hash") or "")
+        session_id_hash = str(snapshot.get("session_id_hash") or "")
+        if (
+            not document_id
+            or not expected_rev
+            or _SHA256_RE.fullmatch(content_hash) is None
+            or _SHA256_RE.fullmatch(session_id_hash) is None
+        ):
+            continue
+        identity = (provider, project, session_id_hash, content_hash)
+        legacy_target_occurrence_count[identity] = (
+            legacy_target_occurrence_count.get(identity, 0) + 1
+        )
+    legacy_candidates_by_identity: dict[tuple[str, str, str, str], list[dict[str, object]]] = {}
+    for candidate in candidate_rows:
+        if str(candidate.get("_id") or "") in archive_conflicts:
+            continue
+        content_hash = str(candidate.get("content_hash") or "")
+        session_id_hash = str(candidate.get("session_id_hash") or "")
+        if (
+            _SHA256_RE.fullmatch(content_hash) is None
+            or _SHA256_RE.fullmatch(session_id_hash) is None
+        ):
+            continue
+        identity = (provider, project, session_id_hash, content_hash)
+        # This deliberately counts materialized candidate records, rather than
+        # deduplicating an equal locator/interval.  A legacy target is safe to
+        # patch only when the bounded evidence set proves exactly one record.
+        legacy_candidates_by_identity.setdefault(identity, []).append(candidate)
     planned: list[_PlanItem] = []
     for snapshot in gaps:
         if _deadline_exceeded(
@@ -978,6 +1041,12 @@ def repair_historical_temporal_gaps(
         snapshot_locator = snapshot.get("source_locator_hash")
         expected_source_locator_hash = str(snapshot_locator or "")
         is_legacy_locator_target = snapshot_locator == ""
+        if (
+            str(snapshot.get("provider") or "") != provider
+            or str(snapshot.get("project") or "") != project
+        ):
+            report["snapshot_integrity_error_count"] += 1
+            continue
         if (
             not document_id
             or not expected_rev
@@ -997,16 +1066,29 @@ def repair_historical_temporal_gaps(
             continue
         if is_legacy_locator_target:
             report["legacy_target_count"] += 1
+            if not legacy_identity_match:
+                report["legacy_identity_match_required_count"] += 1
+                continue
+            if legacy_source_error_count:
+                report["legacy_source_error_blocked_count"] += 1
+                continue
         if document_id in archive_conflicts:
             continue
         if is_legacy_locator_target:
-            occurrence_count = candidate_occurrence_count.get(document_id, 0)
-            if occurrence_count == 0 or candidate is None:
+            identity = (provider, project, expected_session_id_hash, expected_hash)
+            target_occurrence_count = legacy_target_occurrence_count.get(identity, 0)
+            if target_occurrence_count != 1:
+                report["legacy_target_ambiguous_count"] += 1
+                continue
+            legacy_candidates = legacy_candidates_by_identity.get(identity, [])
+            occurrence_count = len(legacy_candidates)
+            if occurrence_count == 0:
                 report["legacy_candidate_missing_count"] += 1
                 continue
             if occurrence_count != 1:
                 report["legacy_candidate_ambiguous_count"] += 1
                 continue
+            candidate = legacy_candidates[0]
         if candidate is None or str(candidate.get("content_hash") or "") != expected_hash:
             report["content_conflict_count"] += 1
             continue
@@ -1077,6 +1159,8 @@ def repair_historical_temporal_gaps(
         batch_limit=batch_limit,
         max_runtime_seconds=max_runtime_seconds,
         non_target_source_redaction_skip_count=non_target_source_redaction_skip_count,
+        match_strategy=match_strategy,
+        legacy_source_error_count=legacy_source_error_count,
     )
     if execute and expected_plan_digest != report["plan_digest"]:
         report.update({"status": "blocked_plan_drift", "expected_plan_digest_match": False, "error_count": 1, "gap_count": 1})
@@ -1269,6 +1353,7 @@ def _parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--execute", action="store_true")
+    parser.add_argument("--legacy-identity-match", action="store_true")
     parser.add_argument("--expected-plan-digest", default="")
     parser.add_argument("--approval", default="")
     return parser
@@ -1356,12 +1441,13 @@ def main(argv: list[str] | None = None) -> int:
         source_root=Path(args.source_root).expanduser(),
         source_file_limit=int(args.source_file_limit),
         source_entry_limit=_optional_int(args.source_entry_limit),
-        # Legacy records with an explicitly empty locator cannot identify one
-        # source path.  Scan the bounded provider corpus so planning can prove
-        # that exactly one replacement locator is available.  Normal targets
-        # retain the locator-filtered traversal above.
+        # Empty-locator targets are candidates for a corpus scan only with the
+        # explicit opt-in.  Otherwise an all-legacy scope passes an empty set
+        # (no scan), while mixed scopes retain their exact locator filter.
         required_source_locator_hashes=(
-            None if has_legacy_locator_target else required_source_locator_hashes
+            None
+            if args.legacy_identity_match and has_legacy_locator_target
+            else required_source_locator_hashes
         ),
         target_source_locator_hashes=required_source_locator_hashes,
         target_session_id_hashes=target_session_id_hashes,
@@ -1387,7 +1473,10 @@ def main(argv: list[str] | None = None) -> int:
         report.update(collection)
         print(json.dumps(report, sort_keys=True))
         return 1
-    if collection["parser_error_count"]:
+    legacy_source_errors_are_reportable = bool(
+        args.legacy_identity_match and has_legacy_locator_target
+    )
+    if collection["parser_error_count"] and not legacy_source_errors_are_reportable:
         report = _error_report("historical_source_parse_error", dry_run=not execute)
         report.update(collection)
         report.update(
@@ -1416,6 +1505,12 @@ def main(argv: list[str] | None = None) -> int:
         snapshot_documents=snapshot_documents,
         non_target_source_redaction_skip_count=int(
             collection["non_target_source_redaction_skip_count"]
+        ),
+        legacy_identity_match=bool(args.legacy_identity_match),
+        legacy_source_error_count=(
+            int(collection["parser_error_count"])
+            if legacy_source_errors_are_reportable
+            else 0
         ),
     )
     report.update(collection)
