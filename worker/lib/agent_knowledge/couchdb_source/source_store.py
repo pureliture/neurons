@@ -28,6 +28,7 @@ from ..rag_ingress.idempotency import IdempotencyOutcome, classify_idempotency
 from .document_model import (
     SourceDocType,
     assert_couchdb_owned,
+    assert_hash_like,
     assert_no_secret_like_metadata,
     assert_source_text_clean,
 )
@@ -85,6 +86,8 @@ class CouchDBSourceStore(Protocol):
         expected_rev: str,
         observed_at_start: str,
         observed_at_end: str,
+        expected_source_locator_hash: str | None = None,
+        replacement_source_locator_hash: str | None = None,
     ) -> StoredRevision: ...
 
     def iter_by_type(
@@ -396,9 +399,13 @@ class InMemoryCouchDBSourceStore:
         expected_rev: str,
         observed_at_start: str,
         observed_at_end: str,
+        expected_source_locator_hash: str | None = None,
+        replacement_source_locator_hash: str | None = None,
     ) -> StoredRevision:
-        """Atomically patch temporal fields only when the content revision matches."""
+        """CAS-patch temporal metadata and an optional legacy locator hash."""
 
+        if replacement_source_locator_hash is not None:
+            assert_hash_like("replacement_source_locator_hash", replacement_source_locator_hash)
         current = self._docs.get(doc_id)
         if current is None:
             raise SourceStoreConflict("conditional temporal patch source is missing")
@@ -406,12 +413,34 @@ class InMemoryCouchDBSourceStore:
             raise SourceStoreConflict("conditional temporal patch content changed")
         if not expected_rev or str(current.get("_rev") or "") != str(expected_rev):
             raise SourceStoreConflict("conditional temporal patch revision changed")
+        current_locator_hash = str(current.get("source_locator_hash") or "")
+        if (
+            expected_source_locator_hash is not None
+            and current_locator_hash != expected_source_locator_hash
+        ):
+            raise SourceStoreConflict("conditional temporal patch locator changed")
         updated = copy.deepcopy(current)
         for key in ("_rev", "idempotency_key", "payload_hash"):
             updated.pop(key, None)
         updated["observed_at_start"] = str(observed_at_start or "")
         updated["observed_at_end"] = str(observed_at_end or "")
-        return self.put(updated)
+        if (
+            replacement_source_locator_hash is None
+            or current_locator_hash == replacement_source_locator_hash
+        ):
+            return self.put(updated)
+
+        updated["source_locator_hash"] = replacement_source_locator_hash
+        validate_for_write(updated)
+        incoming_hash = payload_hash(updated)
+        current_rev = str(current.get("_rev") or "")
+        rev_number = int(current_rev.split("-", 1)[0]) + 1
+        rev = f"{rev_number}-{incoming_hash.split(':', 1)[-1][:12]}"
+        updated["_rev"] = rev
+        updated["idempotency_key"] = doc_id
+        updated["payload_hash"] = incoming_hash
+        self._docs[doc_id] = updated
+        return StoredRevision(doc_id=doc_id, rev=rev, outcome="conflict_resolved")
 
     def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]:
         results = [
