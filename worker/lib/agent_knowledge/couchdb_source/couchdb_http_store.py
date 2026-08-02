@@ -21,6 +21,7 @@ from urllib.parse import quote
 
 from ..rag_ingress.idempotency import IdempotencyOutcome
 from ..transport_contract import ProxyResponse
+from .document_model import assert_hash_like
 from .source_store import (
     SourceStoreConflict,
     SourceStoreError,
@@ -262,16 +263,22 @@ class CouchDBHttpSourceStore:
         expected_rev: str,
         observed_at_start: str,
         observed_at_end: str,
+        expected_source_locator_hash: str | None = None,
+        replacement_source_locator_hash: str | None = None,
     ) -> StoredRevision:
         """CAS temporal metadata without retrying over a concurrent source write.
 
         The ordinary ``put`` path intentionally retries 409 conflicts for full
         deterministic upserts.  A recovery patch must be stricter: retrying the
         stale planned document could overwrite a newer live-ingress body.  This
-        method binds the patch to both the current content hash and CouchDB rev,
-        and a 409 is returned to the caller as a fail-closed conflict.
+        method binds the patch to both the current content hash and CouchDB rev.
+        An optional locator hash is bound too, and its replacement is persisted
+        in the same write. A 409 is returned to the caller as a fail-closed
+        conflict.
         """
 
+        if replacement_source_locator_hash is not None:
+            assert_hash_like("replacement_source_locator_hash", replacement_source_locator_hash)
         current = self.get(doc_id)
         if current is None:
             raise SourceStoreConflict("conditional temporal patch source is missing")
@@ -279,9 +286,19 @@ class CouchDBHttpSourceStore:
             raise SourceStoreConflict("conditional temporal patch content changed")
         if not expected_rev or str(current.get("_rev") or "") != str(expected_rev):
             raise SourceStoreConflict("conditional temporal patch revision changed")
+        current_locator_hash = str(current.get("source_locator_hash") or "")
+        if (
+            expected_source_locator_hash is not None
+            and current_locator_hash != expected_source_locator_hash
+        ):
+            raise SourceStoreConflict("conditional temporal patch locator changed")
         if (
             str(current.get("observed_at_start") or "") == str(observed_at_start or "")
             and str(current.get("observed_at_end") or "") == str(observed_at_end or "")
+            and (
+                replacement_source_locator_hash is None
+                or current_locator_hash == replacement_source_locator_hash
+            )
         ):
             return StoredRevision(
                 doc_id=doc_id,
@@ -294,6 +311,8 @@ class CouchDBHttpSourceStore:
         stored = copy.deepcopy(current)
         stored["observed_at_start"] = str(observed_at_start or "")
         stored["observed_at_end"] = str(observed_at_end or "")
+        if replacement_source_locator_hash is not None:
+            stored["source_locator_hash"] = replacement_source_locator_hash
         validate_for_write(stored)
         incoming_hash = payload_hash(stored)
         stored["idempotency_key"] = doc_id

@@ -77,6 +77,9 @@ _UNREPAIRABLE_GAP_COUNT_FIELDS = (
     "session_identity_conflict_count",
     "source_locator_conflict_count",
     "target_locator_missing_count",
+    "legacy_candidate_missing_count",
+    "legacy_candidate_ambiguous_count",
+    "replacement_locator_invalid_count",
     "snapshot_integrity_error_count",
     "target_archive_conflict_count",
 )
@@ -104,7 +107,8 @@ class _PlanItem:
     session_id_hash: str
     provider: str
     project: str
-    source_locator_hash: str
+    expected_source_locator_hash: str
+    replacement_source_locator_hash: str
     observed_at_start: str
     observed_at_end: str
 
@@ -117,7 +121,8 @@ class _PlanItem:
                     "revision_hash": sha256_hash(self.expected_rev),
                     "content_hash": self.expected_content_hash,
                     "session_id_hash": self.session_id_hash,
-                    "source_locator_hash": self.source_locator_hash,
+                    "expected_source_locator_hash": self.expected_source_locator_hash,
+                    "replacement_source_locator_hash": self.replacement_source_locator_hash,
                     "observed_at_start_hash": sha256_hash(self.observed_at_start),
                     "observed_at_end_hash": sha256_hash(self.observed_at_end),
                 },
@@ -718,10 +723,8 @@ def _uncertain_temporal_patch_is_applied(
         and str(current.get("session_id_hash") or "") == item.session_id_hash
         and str(current.get("provider") or "") == item.provider
         and str(current.get("project") or "") == item.project
-        and (
-            not item.source_locator_hash
-            or str(current.get("source_locator_hash") or "") == item.source_locator_hash
-        )
+        and str(current.get("source_locator_hash") or "")
+        == item.replacement_source_locator_hash
         and expected_generation is not None
         and current_generation is not None
         and current_generation > expected_generation
@@ -806,6 +809,10 @@ def repair_historical_temporal_gaps(
         "session_identity_conflict_count": 0,
         "source_locator_conflict_count": 0,
         "target_locator_missing_count": 0,
+        "legacy_target_count": 0,
+        "legacy_candidate_missing_count": 0,
+        "legacy_candidate_ambiguous_count": 0,
+        "replacement_locator_invalid_count": 0,
         "snapshot_integrity_error_count": 0,
         "write_conflict_count": 0,
         "write_error_count": 0,
@@ -875,6 +882,7 @@ def repair_historical_temporal_gaps(
         return report
     target_gap_ids = {str(document.get("_id") or "") for document in gaps}
     by_id: dict[str, dict[str, object]] = {}
+    candidate_occurrence_count: dict[str, int] = {}
     archive_conflicts: set[str] = set()
     for document in historical_documents:
         if str(document.get("provider") or "") != provider or str(document.get("project") or "") != project:
@@ -887,6 +895,9 @@ def repair_historical_temporal_gaps(
         document_id = str(document.get("_id") or "")
         if not document_id or document_id in archive_conflicts:
             continue
+        candidate_occurrence_count[document_id] = (
+            candidate_occurrence_count.get(document_id, 0) + 1
+        )
         candidate = dict(document)
         candidate["observed_at_start"], candidate["observed_at_end"] = bounds
         existing = by_id.get(document_id)
@@ -912,25 +923,55 @@ def repair_historical_temporal_gaps(
         expected_rev = str(snapshot.get("_rev") or "")
         expected_hash = str(snapshot.get("content_hash") or "")
         expected_session_id_hash = str(snapshot.get("session_id_hash") or "")
-        source_locator_hash = str(snapshot.get("source_locator_hash") or "")
-        if not document_id or not expected_rev or not _SHA256_RE.fullmatch(expected_hash):
+        snapshot_locator = snapshot.get("source_locator_hash")
+        expected_source_locator_hash = str(snapshot_locator or "")
+        is_legacy_locator_target = snapshot_locator == ""
+        if (
+            not document_id
+            or not expected_rev
+            or not _SHA256_RE.fullmatch(expected_hash)
+            or not _SHA256_RE.fullmatch(expected_session_id_hash)
+        ):
             report["snapshot_integrity_error_count"] += 1
             continue
-        if not source_locator_hash:
+        if not is_legacy_locator_target and not expected_source_locator_hash:
             report["target_locator_missing_count"] += 1
             continue
-        if _SHA256_RE.fullmatch(source_locator_hash) is None:
+        if (
+            not is_legacy_locator_target
+            and _SHA256_RE.fullmatch(expected_source_locator_hash) is None
+        ):
             report["snapshot_integrity_error_count"] += 1
             continue
+        if is_legacy_locator_target:
+            report["legacy_target_count"] += 1
         if document_id in archive_conflicts:
             continue
+        if is_legacy_locator_target:
+            occurrence_count = candidate_occurrence_count.get(document_id, 0)
+            if occurrence_count == 0 or candidate is None:
+                report["legacy_candidate_missing_count"] += 1
+                continue
+            if occurrence_count != 1:
+                report["legacy_candidate_ambiguous_count"] += 1
+                continue
         if candidate is None or str(candidate.get("content_hash") or "") != expected_hash:
             report["content_conflict_count"] += 1
             continue
         if str(candidate.get("session_id_hash") or "") != expected_session_id_hash:
             report["session_identity_conflict_count"] += 1
             continue
-        if str(candidate.get("source_locator_hash") or "") != source_locator_hash:
+        replacement_source_locator_hash = str(candidate.get("source_locator_hash") or "")
+        if _SHA256_RE.fullmatch(replacement_source_locator_hash) is None:
+            if is_legacy_locator_target:
+                report["replacement_locator_invalid_count"] += 1
+            else:
+                report["source_locator_conflict_count"] += 1
+            continue
+        if (
+            not is_legacy_locator_target
+            and replacement_source_locator_hash != expected_source_locator_hash
+        ):
             report["source_locator_conflict_count"] += 1
             continue
         bounds = _provider_native_interval(candidate.get("observed_at_start"), candidate.get("observed_at_end"))
@@ -945,7 +986,8 @@ def repair_historical_temporal_gaps(
                 session_id_hash=expected_session_id_hash,
                 provider=provider,
                 project=project,
-                source_locator_hash=source_locator_hash,
+                expected_source_locator_hash=expected_source_locator_hash,
+                replacement_source_locator_hash=replacement_source_locator_hash,
                 observed_at_start=bounds[0],
                 observed_at_end=bounds[1],
             )
@@ -1018,6 +1060,8 @@ def repair_historical_temporal_gaps(
                         expected_rev=item.expected_rev,
                         observed_at_start=item.observed_at_start,
                         observed_at_end=item.observed_at_end,
+                        expected_source_locator_hash=item.expected_source_locator_hash,
+                        replacement_source_locator_hash=item.replacement_source_locator_hash,
                     )
                 except SourceStoreConflict:
                     raise
@@ -1036,7 +1080,8 @@ def repair_historical_temporal_gaps(
                 if (
                     str(current.get("content_hash") or "") != item.expected_content_hash
                     or str(current.get("session_id_hash") or "") != item.session_id_hash
-                    or str(current.get("source_locator_hash") or "") != item.source_locator_hash
+                    or str(current.get("source_locator_hash") or "")
+                    != item.replacement_source_locator_hash
                     or normalize_observed_interval(
                         current.get("observed_at_start"), current.get("observed_at_end")
                     ) != (item.observed_at_start, item.observed_at_end)
@@ -1235,6 +1280,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         print(json.dumps(_error_report("snapshot_read_failed", dry_run=not execute), sort_keys=True))
         return 1
+    has_legacy_locator_target = any(
+        document.get("source_locator_hash") == "" for document in target_gaps
+    )
     required_source_locator_hashes = {
         str(document.get("source_locator_hash") or "")
         for document in target_gaps
@@ -1246,7 +1294,13 @@ def main(argv: list[str] | None = None) -> int:
         source_root=Path(args.source_root).expanduser(),
         source_file_limit=int(args.source_file_limit),
         source_entry_limit=_optional_int(args.source_entry_limit),
-        required_source_locator_hashes=required_source_locator_hashes,
+        # Legacy records with an explicitly empty locator cannot identify one
+        # source path.  Scan the bounded provider corpus so planning can prove
+        # that exactly one replacement locator is available.  Normal targets
+        # retain the locator-filtered traversal above.
+        required_source_locator_hashes=(
+            None if has_legacy_locator_target else required_source_locator_hashes
+        ),
         started=started,
         max_runtime_seconds=float(args.max_runtime_seconds),
     )
