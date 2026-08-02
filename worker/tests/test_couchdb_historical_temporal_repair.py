@@ -9,6 +9,7 @@ import agent_knowledge.couchdb_source.historical_temporal_repair as temporal_rep
 from agent_knowledge.cli import COMMAND_HANDLERS, COMMAND_METADATA
 from agent_knowledge.couchdb_source.document_model import (
     ProjectionStatus,
+    SourceRedactionLeak,
     build_conversation_chunk_document,
     build_coverage_manifest_document,
     build_projection_state_document,
@@ -173,6 +174,35 @@ def _mark_projection_projected(store: InMemoryCouchDBSourceStore) -> None:
             source_hash=source_hash,
             projected_source_hash=source_hash,
         )
+    )
+
+
+def _temporal_chunk(*, session_id_hash: str, chunk_id: str) -> TranscriptChunk:
+    return TranscriptChunk.from_text(
+        chunk_id=chunk_id,
+        session_id_hash=session_id_hash,
+        provider=PROVIDER,
+        project=PROJECT,
+        turn_start_index=1,
+        turn_end_index=1,
+        text=f"public temporal source {chunk_id}",
+        observed_at_start="2026-07-01T10:00:01Z",
+        observed_at_end="2026-07-01T10:00:02Z",
+    )
+
+
+def _parsed_temporal_source(session_id_hash: str) -> ParsedTranscript:
+    return ParsedTranscript(
+        session=TranscriptSession(
+            session_id_hash=session_id_hash,
+            provider=PROVIDER,
+            project=PROJECT,
+            started_at="2026-07-01T10:00:00Z",
+        ),
+        turns=[],
+        tool_events=[],
+        parser_warnings=[],
+        source_status="source_locator_private_spool_only",
     )
 
 
@@ -400,6 +430,28 @@ def test_full_target_snapshot_changes_plan_digest_and_blocks_old_execute_plan():
         target_document_limit=10,
         patch_limit=10,
     )
+    changed_redaction_skip_count = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        target_fingerprints={"couchdb_source": "sha256:" + "a" * 64},
+        non_target_source_redaction_skip_count=1,
+        **_limits(),
+    )
+    changed_redaction_skip_execute = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+        target_fingerprints={"couchdb_source": "sha256:" + "a" * 64},
+        non_target_source_redaction_skip_count=1,
+        **_limits(),
+    )
     _add_gap_chunk(store, chunk_id="unmatched-new-gap", text="unmatched new temporal gap")
 
     execute = repair_historical_temporal_gaps(
@@ -417,6 +469,8 @@ def test_full_target_snapshot_changes_plan_digest_and_blocks_old_execute_plan():
     assert changed_bound["plan_digest"] != plan["plan_digest"]
     assert changed_entry_bound["source_entry_limit"] == 11
     assert changed_entry_bound["plan_digest"] != plan["plan_digest"]
+    assert changed_redaction_skip_count["plan_digest"] != plan["plan_digest"]
+    assert changed_redaction_skip_execute["status"] == "blocked_plan_drift"
     assert execute["status"] == "blocked_plan_drift"
     assert store.get(candidate["_id"])["observed_at_start"] == ""
 
@@ -1569,6 +1623,264 @@ def test_gemini_json_uses_private_fixture_conversion_instead_of_fixture_parser_e
     assert report["parser_error_count"] == 0
     assert report["parsed_source_count"] == 1
     assert len(documents) == 1
+
+
+def test_cli_skips_proven_nontarget_redaction_leak_and_discards_partial_candidates(
+    monkeypatch, capsys, tmp_path
+):
+    target_source = tmp_path / "a-target.jsonl"
+    leaking_source = tmp_path / "b-unrelated.jsonl"
+    target_source.write_text("target fixture", encoding="utf-8")
+    leaking_source.write_text("unrelated fixture", encoding="utf-8")
+    target_chunk = _temporal_chunk(session_id_hash=SESSION_HASH, chunk_id="target")
+    partial_chunk = _temporal_chunk(
+        session_id_hash="sha256:" + "e" * 64, chunk_id="unrelated-partial"
+    )
+    leaking_chunk = _temporal_chunk(
+        session_id_hash="sha256:" + "e" * 64, chunk_id="unrelated-leaking"
+    )
+    snapshot = build_conversation_chunk_document(chunk=target_chunk)
+    snapshot.update({"observed_at_start": "", "observed_at_end": ""})
+    store = InMemoryCouchDBSourceStore()
+    store.put(snapshot)
+    target_locator_hash = build_source_locator_hash(str(target_source))
+    leaking_locator_hash = build_source_locator_hash(str(leaking_source))
+    original_build = temporal_repair.build_conversation_chunk_document
+
+    def parse_source(_provider, path, *, project, source_locator_hash):
+        assert project == PROJECT
+        if Path(path) == target_source:
+            assert source_locator_hash == target_locator_hash
+            return _parsed_temporal_source(SESSION_HASH)
+        assert Path(path) == leaking_source
+        assert source_locator_hash == leaking_locator_hash
+        return _parsed_temporal_source("sha256:" + "e" * 64)
+
+    def chunks_for_source(parsed):
+        if parsed.session.session_id_hash == SESSION_HASH:
+            return [target_chunk]
+        return [partial_chunk, leaking_chunk]
+
+    def raise_for_later_unrelated_chunk(*, chunk, source_locator_hash):
+        if chunk.chunk_id == leaking_chunk.chunk_id:
+            raise SourceRedactionLeak("synthetic redaction leak")
+        return original_build(chunk=chunk, source_locator_hash=source_locator_hash)
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(temporal_repair, "_source_project", lambda *_args: PROJECT)
+    monkeypatch.setattr(temporal_repair, "parse_transcript_source", parse_source)
+    monkeypatch.setattr(temporal_repair, "build_transcript_chunks", chunks_for_source)
+    monkeypatch.setattr(
+        temporal_repair, "build_conversation_chunk_document", raise_for_later_unrelated_chunk
+    )
+
+    rc = main(
+        _cli_args(
+            tmp_path,
+            source_file_limit=2,
+            target_document_limit=1,
+            patch_limit=1,
+            batch_limit=1,
+        )
+    )
+
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert rc == 0
+    assert report["status"] == "dry_run_batch_ready"
+    assert report["batch_ready"] is True
+    assert report["selected_batch_count"] == 1
+    assert report["historical_candidate_count"] == 1
+    assert report["parser_error_count"] == 0
+    assert report["non_target_source_redaction_skip_count"] == 1
+    assert "synthetic redaction leak" not in output
+    assert str(tmp_path) not in output
+
+
+@pytest.mark.parametrize("matches_target", ["locator", "session"])
+def test_cli_target_redaction_leak_blocks_without_a_plan(monkeypatch, capsys, tmp_path, matches_target):
+    source = tmp_path / "target.jsonl"
+    source.write_text("target fixture", encoding="utf-8")
+    source_locator_hash = build_source_locator_hash(str(source))
+    target_session_id_hash = SESSION_HASH
+    source_session_id_hash = (
+        "sha256:" + "e" * 64 if matches_target == "locator" else target_session_id_hash
+    )
+    snapshot_chunk = _temporal_chunk(
+        session_id_hash=target_session_id_hash, chunk_id=f"target-{matches_target}"
+    )
+    snapshot = build_conversation_chunk_document(
+        chunk=snapshot_chunk,
+        source_locator_hash=source_locator_hash if matches_target == "locator" else "",
+    )
+    snapshot.update({"observed_at_start": "", "observed_at_end": ""})
+    store = InMemoryCouchDBSourceStore()
+    store.put(snapshot)
+    leaking_chunk = _temporal_chunk(
+        session_id_hash=source_session_id_hash, chunk_id=f"leaking-{matches_target}"
+    )
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(temporal_repair, "_source_project", lambda *_args: PROJECT)
+    monkeypatch.setattr(
+        temporal_repair,
+        "parse_transcript_source",
+        lambda *_args, **_kwargs: _parsed_temporal_source(source_session_id_hash),
+    )
+    monkeypatch.setattr(temporal_repair, "build_transcript_chunks", lambda _parsed: [leaking_chunk])
+    monkeypatch.setattr(
+        temporal_repair,
+        "build_conversation_chunk_document",
+        lambda **_kwargs: (_ for _ in ()).throw(SourceRedactionLeak("synthetic redaction leak")),
+    )
+
+    rc = main(_cli_args(tmp_path))
+
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == "historical_source_parse_error"
+    assert report["parser_error_count"] == 1
+    assert report["non_target_source_redaction_skip_count"] == 0
+    assert "plan_digest" not in report
+    assert "synthetic redaction leak" not in output
+
+
+@pytest.mark.parametrize("invalid_target_session_id_hash", ["", "invalid"])
+def test_cli_incomplete_target_session_identity_blocks_nontarget_redaction_skip(
+    monkeypatch, capsys, tmp_path, invalid_target_session_id_hash
+):
+    source = tmp_path / "unrelated.jsonl"
+    source.write_text("unrelated fixture", encoding="utf-8")
+    snapshot_chunk = _temporal_chunk(session_id_hash=SESSION_HASH, chunk_id="incomplete-target")
+    snapshot = build_conversation_chunk_document(chunk=snapshot_chunk)
+    snapshot.update(
+        {
+            "session_id_hash": invalid_target_session_id_hash,
+            "observed_at_start": "",
+            "observed_at_end": "",
+        }
+    )
+    store = InMemoryCouchDBSourceStore()
+    store.put(snapshot)
+    unrelated_session_id_hash = "sha256:" + "e" * 64
+    leaking_chunk = _temporal_chunk(
+        session_id_hash=unrelated_session_id_hash, chunk_id="unrelated-source-leak"
+    )
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(temporal_repair, "_source_project", lambda *_args: PROJECT)
+    monkeypatch.setattr(
+        temporal_repair,
+        "parse_transcript_source",
+        lambda *_args, **_kwargs: _parsed_temporal_source(unrelated_session_id_hash),
+    )
+    monkeypatch.setattr(temporal_repair, "build_transcript_chunks", lambda _parsed: [leaking_chunk])
+    monkeypatch.setattr(
+        temporal_repair,
+        "build_conversation_chunk_document",
+        lambda **_kwargs: (_ for _ in ()).throw(SourceRedactionLeak("synthetic redaction leak")),
+    )
+
+    rc = main(_cli_args(tmp_path))
+
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == "historical_source_parse_error"
+    assert report["parser_error_count"] == 1
+    assert report["non_target_source_redaction_skip_count"] == 0
+    assert "plan_digest" not in report
+    assert "synthetic redaction leak" not in output
+
+
+def test_cli_mixed_legacy_scan_blocks_normal_target_locator_redaction_leak(
+    monkeypatch, capsys, tmp_path
+):
+    legacy_source = tmp_path / "a-legacy.jsonl"
+    normal_source = tmp_path / "b-normal.jsonl"
+    legacy_source.write_text("legacy fixture", encoding="utf-8")
+    normal_source.write_text("normal fixture", encoding="utf-8")
+    normal_target_session_id_hash = "sha256:" + "c" * 64
+    unrelated_session_id_hash = "sha256:" + "e" * 64
+    legacy_chunk = _temporal_chunk(session_id_hash=SESSION_HASH, chunk_id="legacy-target")
+    normal_target_chunk = _temporal_chunk(
+        session_id_hash=normal_target_session_id_hash, chunk_id="normal-target"
+    )
+    normal_source_locator_hash = build_source_locator_hash(str(normal_source))
+    legacy_snapshot = build_conversation_chunk_document(chunk=legacy_chunk)
+    normal_snapshot = build_conversation_chunk_document(
+        chunk=normal_target_chunk, source_locator_hash=normal_source_locator_hash
+    )
+    legacy_snapshot.update({"observed_at_start": "", "observed_at_end": ""})
+    normal_snapshot.update({"observed_at_start": "", "observed_at_end": ""})
+    store = InMemoryCouchDBSourceStore()
+    store.put(legacy_snapshot)
+    store.put(normal_snapshot)
+    leaking_chunk = _temporal_chunk(
+        session_id_hash=unrelated_session_id_hash, chunk_id="normal-source-leak"
+    )
+    parsed_paths = []
+    original_build = temporal_repair.build_conversation_chunk_document
+    original_collect = temporal_repair.collect_historical_candidates
+
+    def parse_source(_provider, path, *, project, source_locator_hash):
+        assert project == PROJECT
+        parsed_paths.append(Path(path))
+        if Path(path) == legacy_source:
+            return _parsed_temporal_source(SESSION_HASH)
+        assert Path(path) == normal_source
+        assert source_locator_hash == normal_source_locator_hash
+        return _parsed_temporal_source(unrelated_session_id_hash)
+
+    def chunks_for_source(parsed):
+        if parsed.session.session_id_hash == SESSION_HASH:
+            return [legacy_chunk]
+        return [leaking_chunk]
+
+    def raise_for_normal_target_locator(*, chunk, source_locator_hash):
+        if chunk.chunk_id == leaking_chunk.chunk_id:
+            raise SourceRedactionLeak("synthetic redaction leak")
+        return original_build(chunk=chunk, source_locator_hash=source_locator_hash)
+
+    def record_full_scan(**kwargs):
+        assert kwargs["required_source_locator_hashes"] is None
+        return original_collect(**kwargs)
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(temporal_repair, "_source_project", lambda *_args: PROJECT)
+    monkeypatch.setattr(temporal_repair, "parse_transcript_source", parse_source)
+    monkeypatch.setattr(temporal_repair, "build_transcript_chunks", chunks_for_source)
+    monkeypatch.setattr(
+        temporal_repair, "build_conversation_chunk_document", raise_for_normal_target_locator
+    )
+    monkeypatch.setattr(temporal_repair, "collect_historical_candidates", record_full_scan)
+
+    rc = main(
+        _cli_args(
+            tmp_path,
+            source_file_limit=2,
+            target_document_limit=2,
+            patch_limit=2,
+        )
+    )
+
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert rc == 1
+    assert parsed_paths == [legacy_source, normal_source]
+    assert report["status"] == "blocked"
+    assert report["error"] == "historical_source_parse_error"
+    assert report["parser_error_count"] == 1
+    assert report["non_target_source_redaction_skip_count"] == 0
+    assert "plan_digest" not in report
+    assert "synthetic redaction leak" not in output
 
 
 def test_cli_snapshots_target_before_parsing_and_passes_only_target_locator_hashes(monkeypatch, capsys, tmp_path):
