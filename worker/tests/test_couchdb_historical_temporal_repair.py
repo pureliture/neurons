@@ -66,7 +66,10 @@ def _cli_args(source_root: Path, **overrides: object) -> list[str]:
     options.update(overrides)
     args: list[str] = []
     for name, value in options.items():
-        if value is not None:
+        if isinstance(value, bool):
+            if value:
+                args.append(f"--{name.replace('_', '-')}")
+        elif value is not None:
             args.extend((f"--{name.replace('_', '-')}", str(value)))
     return args
 
@@ -1004,6 +1007,7 @@ def test_legacy_target_without_locator_plans_only_a_valid_replacement_locator():
         project=PROJECT,
         historical_documents=[candidate],
         max_runtime_seconds=30,
+        legacy_identity_match=True,
         **_limits(),
     )
 
@@ -1012,6 +1016,311 @@ def test_legacy_target_without_locator_plans_only_a_valid_replacement_locator():
     assert report["target_locator_missing_count"] == 0
     assert report["content_conflict_count"] == 0
     assert report["status"] == "dry_run"
+
+
+def test_legacy_target_requires_explicit_identity_match_opt_in():
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+
+    assert report["match_strategy"] == "exact_source_locator"
+    assert report["legacy_identity_match_required_count"] == 1
+    assert report["planned_update_count"] == 0
+    assert report["mutation_performed"] is False
+    assert report["status"] == "dry_run_with_gaps"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("project", "other-project"),
+        ("session_id_hash", "sha256:" + "e" * 64),
+        ("content_hash", "sha256:" + "e" * 64),
+    ],
+)
+def test_legacy_identity_mismatch_never_plans_a_replacement_locator(field, value):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    candidate[field] = value
+
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        legacy_identity_match=True,
+        **_limits(),
+    )
+
+    assert report["planned_update_count"] == 0
+    assert report["legacy_candidate_missing_count"] == 1
+    assert report["status"] == "dry_run_with_gaps"
+
+
+def test_legacy_target_project_mismatch_is_not_identity_matched():
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    target = store.get(candidate["_id"])
+    assert target is not None
+    target = dict(target)
+    target["project"] = "other-project"
+
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        snapshot_documents=[target],
+        max_runtime_seconds=30,
+        legacy_identity_match=True,
+        **_limits(),
+    )
+
+    assert report["planned_update_count"] == 0
+    assert report["snapshot_integrity_error_count"] == 1
+    assert report["status"] == "dry_run_with_gaps"
+
+
+def test_legacy_invalid_native_interval_never_plans_a_replacement_locator():
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate.update(
+        {
+            "source_locator_hash": SOURCE_LOCATOR_HASH,
+            "observed_at_start": "2026-07-01T10:00:05Z",
+            "observed_at_end": "2026-07-01T10:00:01Z",
+        }
+    )
+
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        legacy_identity_match=True,
+        **_limits(),
+    )
+
+    assert report["planned_update_count"] == 0
+    assert report["legacy_candidate_missing_count"] == 1
+    assert report["status"] == "dry_run_with_gaps"
+
+
+def test_legacy_identity_requires_one_target_and_one_candidate():
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    second_candidate = dict(candidate)
+    second_candidate["_id"] = f"{candidate['_id']}-second"
+    second_candidate["source_locator_hash"] = "sha256:" + "e" * 64
+
+    candidate_report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate, second_candidate],
+        max_runtime_seconds=30,
+        legacy_identity_match=True,
+        **_limits(),
+    )
+
+    target = store.get(candidate["_id"])
+    assert target is not None
+    second_target = dict(target)
+    second_target.update({"_id": f"{target['_id']}-second", "_rev": "1-second"})
+    target_report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        snapshot_documents=[target, second_target],
+        max_runtime_seconds=30,
+        legacy_identity_match=True,
+        **_limits(),
+    )
+
+    assert candidate_report["planned_update_count"] == 0
+    assert candidate_report["legacy_candidate_ambiguous_count"] == 1
+    assert target_report["planned_update_count"] == 0
+    assert target_report["legacy_target_ambiguous_count"] == 2
+
+
+def test_normal_locator_target_never_uses_legacy_identity_fallback():
+    store, candidate = _seed_store()
+    alternate_locator_candidate = dict(candidate)
+    alternate_locator_candidate["_id"] = f"{candidate['_id']}-alternate"
+    alternate_locator_candidate["source_locator_hash"] = "sha256:" + "e" * 64
+
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[alternate_locator_candidate],
+        max_runtime_seconds=30,
+        legacy_identity_match=True,
+        **_limits(),
+    )
+
+    assert report["match_strategy"] == "legacy_identity_match"
+    assert report["legacy_target_count"] == 0
+    assert report["planned_update_count"] == 0
+    assert report["content_conflict_count"] == 1
+
+
+def test_plan_digest_binds_match_strategy_and_legacy_source_error_aggregate():
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    exact_locator_plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        **_limits(),
+    )
+    legacy_plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        legacy_identity_match=True,
+        **_limits(),
+    )
+    legacy_error_plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        legacy_identity_match=True,
+        legacy_source_error_count=1,
+        **_limits(),
+    )
+
+    assert exact_locator_plan["plan_digest"] != legacy_plan["plan_digest"]
+    assert legacy_plan["plan_digest"] != legacy_error_plan["plan_digest"]
+    assert legacy_error_plan["planned_update_count"] == 0
+    assert legacy_error_plan["legacy_source_error_count"] == 1
+    assert legacy_error_plan["legacy_source_error_blocked_count"] == 1
+    assert legacy_error_plan["error_count"] == 2
+    assert legacy_error_plan["gap_count"] == 2
+    assert legacy_error_plan["status"] == "dry_run_with_gaps"
+
+    executed = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        legacy_identity_match=True,
+        legacy_source_error_count=1,
+        execute=True,
+        expected_plan_digest=legacy_error_plan["plan_digest"],
+        **_limits(),
+    )
+
+    assert executed["updated_count"] == 0
+    assert executed["mutation_performed"] is False
+    assert executed["status"] == "completed_with_errors"
+    assert executed["error_count"] >= 1
+    assert executed["gap_count"] >= 1
+
+
+def test_legacy_source_errors_exclude_legacy_items_but_allow_exact_locator_batch():
+    store, normal_candidate = _seed_store()
+    legacy_candidate = _add_gap_chunk(
+        store,
+        chunk_id="legacy-source-error-target",
+        text="legacy source error target",
+        source_locator_hash="",
+    )
+    legacy_candidate["source_locator_hash"] = "sha256:" + "e" * 64
+
+    plan = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[normal_candidate, legacy_candidate],
+        max_runtime_seconds=30,
+        batch_limit=1,
+        legacy_identity_match=True,
+        legacy_source_error_count=1,
+        **_limits(),
+    )
+    executed = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[normal_candidate, legacy_candidate],
+        max_runtime_seconds=30,
+        batch_limit=1,
+        legacy_identity_match=True,
+        legacy_source_error_count=1,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+        **_limits(),
+    )
+
+    exact_target = store.get(normal_candidate["_id"])
+    legacy_target = store.get(legacy_candidate["_id"])
+    assert exact_target is not None and legacy_target is not None
+    assert plan["planned_update_count"] == 1
+    assert plan["batch_ready"] is True
+    assert plan["legacy_source_error_blocked_count"] == 1
+    assert plan["error_count"] == 2
+    assert plan["gap_count"] == 2
+    assert executed["updated_count"] == 1
+    assert executed["batch_execution_succeeded"] is True
+    assert executed["status"] == "completed_batch_complete_with_gaps"
+    assert executed["error_count"] == 3
+    assert executed["gap_count"] == 3
+    assert exact_target["source_locator_hash"] == SOURCE_LOCATOR_HASH
+    assert legacy_target["source_locator_hash"] == ""
+    assert legacy_target["observed_at_start"] == ""
+
+
+def test_legacy_source_error_reports_a_blocker_for_each_legacy_target():
+    store, first_candidate = _seed_store(source_locator_hash="")
+    first_candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    second_candidate = _add_gap_chunk(
+        store,
+        chunk_id="second-legacy-source-error-target",
+        text="second legacy source error target",
+        source_locator_hash="",
+    )
+    second_candidate["source_locator_hash"] = "sha256:" + "e" * 64
+
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[first_candidate, second_candidate],
+        max_runtime_seconds=30,
+        batch_limit=1,
+        legacy_identity_match=True,
+        legacy_source_error_count=1,
+        **_limits(),
+    )
+
+    assert report["legacy_target_count"] == 2
+    assert report["legacy_source_error_count"] == 1
+    assert report["legacy_source_error_blocked_count"] == 2
+    assert report["planned_update_count"] == 0
+    assert report["selected_batch_count"] == 0
+    assert report["batch_ready"] is False
+    assert report["unrepairable_gap_count"] == 3
+    assert report["error_count"] == 3
+    assert report["gap_count"] == 3
+    assert report["status"] == "dry_run_with_gaps"
 
 
 def test_legacy_target_execute_binds_empty_expected_locator_to_replacement_locator():
@@ -1048,12 +1357,16 @@ def test_legacy_target_execute_binds_empty_expected_locator_to_replacement_locat
         return store.put(updated)
 
     store.patch_observed_time_if_content_hash = patch_with_locator_cas  # type: ignore[method-assign]
+    coverage_before = store.get(coverage_manifest_doc_id(SESSION_HASH))
+    assert coverage_before is not None
+    _mark_projection_projected(store)
     plan = repair_historical_temporal_gaps(
         source_store=store,
         provider=PROVIDER,
         project=PROJECT,
         historical_documents=[candidate],
         max_runtime_seconds=30,
+        legacy_identity_match=True,
         **_limits(),
     )
     report = repair_historical_temporal_gaps(
@@ -1064,6 +1377,7 @@ def test_legacy_target_execute_binds_empty_expected_locator_to_replacement_locat
         max_runtime_seconds=30,
         execute=True,
         expected_plan_digest=plan["plan_digest"],
+        legacy_identity_match=True,
         **_limits(),
     )
 
@@ -1078,6 +1392,13 @@ def test_legacy_target_execute_binds_empty_expected_locator_to_replacement_locat
     assert report["updated_count"] == 1
     assert report["write_conflict_count"] == 0
     assert current["source_locator_hash"] == SOURCE_LOCATOR_HASH
+    coverage_after = store.get(coverage_manifest_doc_id(SESSION_HASH))
+    projection = store.get(projection_state_doc_id(SESSION_HASH))
+    assert coverage_after is not None and projection is not None
+    assert report["coverage_recomputed_session_count"] == 1
+    assert report["projection_pending_session_count"] == 1
+    assert coverage_after["source_hash"] != coverage_before["source_hash"]
+    assert projection["projection_status"] == ProjectionStatus.PENDING
 
 
 def test_legacy_uncertain_ack_without_replacement_locator_fails_closed():
@@ -1113,6 +1434,7 @@ def test_legacy_uncertain_ack_without_replacement_locator_fails_closed():
         project=PROJECT,
         historical_documents=[candidate],
         max_runtime_seconds=30,
+        legacy_identity_match=True,
         **_limits(),
     )
     report = repair_historical_temporal_gaps(
@@ -1123,6 +1445,7 @@ def test_legacy_uncertain_ack_without_replacement_locator_fails_closed():
         max_runtime_seconds=30,
         execute=True,
         expected_plan_digest=plan["plan_digest"],
+        legacy_identity_match=True,
         **_limits(),
     )
 
@@ -1167,6 +1490,7 @@ def test_legacy_readback_without_replacement_locator_fails_postcheck():
         project=PROJECT,
         historical_documents=[candidate],
         max_runtime_seconds=30,
+        legacy_identity_match=True,
         **_limits(),
     )
     report = repair_historical_temporal_gaps(
@@ -1177,6 +1501,7 @@ def test_legacy_readback_without_replacement_locator_fails_postcheck():
         max_runtime_seconds=30,
         execute=True,
         expected_plan_digest=plan["plan_digest"],
+        legacy_identity_match=True,
         **_limits(),
     )
 
@@ -1188,35 +1513,43 @@ def test_legacy_readback_without_replacement_locator_fails_postcheck():
     assert current["source_locator_hash"] == ""
 
 
-@pytest.mark.parametrize(
-    ("candidates", "count_field"),
-    [
-        ("duplicate", "legacy_candidate_ambiguous_count"),
-        ("invalid_locator", "replacement_locator_invalid_count"),
-    ],
-)
-def test_legacy_target_duplicate_or_invalid_replacement_candidate_fails_closed(
-    candidates, count_field
+def test_legacy_target_duplicate_candidate_records_are_ambiguous_even_when_locator_and_interval_match(
 ):
     store, candidate = _seed_store(source_locator_hash="")
     candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
-    historical_documents = [candidate]
-    if candidates == "duplicate":
-        historical_documents.append(dict(candidate))
-    else:
-        historical_documents[0]["source_locator_hash"] = "not-a-valid-locator"
+    duplicate_candidate = dict(candidate)
 
     report = repair_historical_temporal_gaps(
         source_store=store,
         provider=PROVIDER,
         project=PROJECT,
-        historical_documents=historical_documents,
+        historical_documents=[candidate, duplicate_candidate],
         max_runtime_seconds=30,
+        legacy_identity_match=True,
         **_limits(),
     )
 
     assert report["planned_update_count"] == 0
-    assert report[count_field] == 1
+    assert report["legacy_candidate_ambiguous_count"] == 1
+    assert report["status"] == "dry_run_with_gaps"
+
+
+def test_legacy_target_invalid_replacement_locator_fails_closed():
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = "not-a-valid-locator"
+
+    report = repair_historical_temporal_gaps(
+        source_store=store,
+        provider=PROVIDER,
+        project=PROJECT,
+        historical_documents=[candidate],
+        max_runtime_seconds=30,
+        legacy_identity_match=True,
+        **_limits(),
+    )
+
+    assert report["planned_update_count"] == 0
+    assert report["replacement_locator_invalid_count"] == 1
     assert report["status"] == "dry_run_with_gaps"
 
 
@@ -1682,6 +2015,7 @@ def test_cli_skips_proven_nontarget_redaction_leak_and_discards_partial_candidat
             target_document_limit=1,
             patch_limit=1,
             batch_limit=1,
+            legacy_identity_match=True,
         )
     )
 
@@ -1741,11 +2075,17 @@ def test_cli_target_redaction_leak_blocks_without_a_plan(monkeypatch, capsys, tm
     output = capsys.readouterr().out
     report = json.loads(output)
     assert rc == 1
-    assert report["status"] == "blocked"
-    assert report["error"] == "historical_source_parse_error"
-    assert report["parser_error_count"] == 1
+    if matches_target == "locator":
+        assert report["status"] == "blocked"
+        assert report["error"] == "historical_source_parse_error"
+        assert report["parser_error_count"] == 1
+        assert "plan_digest" not in report
+    else:
+        assert report["status"] == "dry_run_with_gaps"
+        assert report["legacy_identity_match_required_count"] == 1
+        assert report["parser_error_count"] == 0
+        assert "plan_digest" in report
     assert report["non_target_source_redaction_skip_count"] == 0
-    assert "plan_digest" not in report
     assert "synthetic redaction leak" not in output
 
 
@@ -1791,11 +2131,11 @@ def test_cli_incomplete_target_session_identity_blocks_nontarget_redaction_skip(
     output = capsys.readouterr().out
     report = json.loads(output)
     assert rc == 1
-    assert report["status"] == "blocked"
-    assert report["error"] == "historical_source_parse_error"
-    assert report["parser_error_count"] == 1
+    assert report["status"] == "dry_run_with_gaps"
+    assert report["snapshot_integrity_error_count"] == 1
+    assert report["parser_error_count"] == 0
     assert report["non_target_source_redaction_skip_count"] == 0
-    assert "plan_digest" not in report
+    assert "plan_digest" in report
     assert "synthetic redaction leak" not in output
 
 
@@ -1839,16 +2179,16 @@ def test_cli_redaction_leak_with_missing_parsed_session_fails_closed(
     output = capsys.readouterr().out
     report = json.loads(output)
     assert rc == 1
-    assert report["status"] == "blocked"
-    assert report["error"] == "historical_source_parse_error"
-    assert report["parser_error_count"] == 1
+    assert report["status"] == "dry_run_with_gaps"
+    assert report["legacy_identity_match_required_count"] == 1
+    assert report["parser_error_count"] == 0
     assert report["non_target_source_redaction_skip_count"] == 0
-    assert "plan_digest" not in report
+    assert "plan_digest" in report
     assert "synthetic redaction leak" not in output
     assert str(tmp_path) not in output
 
 
-def test_cli_mixed_legacy_scan_blocks_normal_target_locator_redaction_leak(
+def test_cli_opt_out_mixed_scope_scans_only_normal_locator_targets(
     monkeypatch, capsys, tmp_path
 ):
     legacy_source = tmp_path / "a-legacy.jsonl"
@@ -1897,8 +2237,8 @@ def test_cli_mixed_legacy_scan_blocks_normal_target_locator_redaction_leak(
             raise SourceRedactionLeak("synthetic redaction leak")
         return original_build(chunk=chunk, source_locator_hash=source_locator_hash)
 
-    def record_full_scan(**kwargs):
-        assert kwargs["required_source_locator_hashes"] is None
+    def record_normal_locator_scan(**kwargs):
+        assert kwargs["required_source_locator_hashes"] == {normal_source_locator_hash}
         return original_collect(**kwargs)
 
     monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
@@ -1909,7 +2249,7 @@ def test_cli_mixed_legacy_scan_blocks_normal_target_locator_redaction_leak(
     monkeypatch.setattr(
         temporal_repair, "build_conversation_chunk_document", raise_for_normal_target_locator
     )
-    monkeypatch.setattr(temporal_repair, "collect_historical_candidates", record_full_scan)
+    monkeypatch.setattr(temporal_repair, "collect_historical_candidates", record_normal_locator_scan)
 
     rc = main(
         _cli_args(
@@ -1923,7 +2263,7 @@ def test_cli_mixed_legacy_scan_blocks_normal_target_locator_redaction_leak(
     output = capsys.readouterr().out
     report = json.loads(output)
     assert rc == 1
-    assert parsed_paths == [legacy_source, normal_source]
+    assert parsed_paths == [normal_source]
     assert report["status"] == "blocked"
     assert report["error"] == "historical_source_parse_error"
     assert report["parser_error_count"] == 1
@@ -1986,13 +2326,132 @@ def test_cli_legacy_locator_target_requests_full_bounded_source_scan(monkeypatch
 
     monkeypatch.setattr(temporal_repair, "collect_historical_candidates", record_collection)
 
-    rc = temporal_repair.main(_cli_args(tmp_path))
+    rc = temporal_repair.main(_cli_args(tmp_path, legacy_identity_match=True))
 
     report = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert report["status"] == "dry_run"
     assert report["legacy_target_count"] == 1
     assert report["planned_update_count"] == 1
+
+
+def test_cli_legacy_identity_match_is_bound_to_approval_argv_and_plan_digest(
+    monkeypatch, capsys, tmp_path
+):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+    target = temporal_repair._resolve_target({"COUCHDB_URL": "https://repair-test.invalid"})
+    approval_argv: list[list[str]] = []
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([candidate], collection, False),
+    )
+
+    def approve(*_args, command_argv, **_kwargs):
+        approval_argv.append(command_argv)
+        return {
+            "target": {"target_fingerprints": target.target_fingerprints},
+            "timeout_seconds": 30,
+        }
+
+    monkeypatch.setattr(temporal_repair, "validate_memory_enqueue_approval", approve)
+    plan_args = _cli_args(tmp_path, batch_limit=1, legacy_identity_match=True)
+    assert main(plan_args) == 0
+    plan = json.loads(capsys.readouterr().out)
+
+    assert main(
+        [
+            *_cli_args(tmp_path, batch_limit=1),
+            "--execute",
+            "--expected-plan-digest",
+            plan["plan_digest"],
+            "--approval",
+            "approved-for-test",
+        ]
+    ) == 1
+    drifted = json.loads(capsys.readouterr().out)
+
+    assert main(
+        [
+            *plan_args,
+            "--execute",
+            "--expected-plan-digest",
+            plan["plan_digest"],
+            "--approval",
+            "approved-for-test",
+        ]
+    ) == 0
+    executed = json.loads(capsys.readouterr().out)
+
+    assert drifted["status"] == "blocked_plan_drift"
+    assert drifted["mutation_performed"] is False
+    assert executed["updated_count"] == 1
+    assert "--legacy-identity-match" in approval_argv[-1]
+
+
+def test_cli_legacy_only_opt_out_skips_scan_and_opt_in_reports_source_error_targets(
+    monkeypatch, capsys, tmp_path
+):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    collection = temporal_repair._collection_counts(
+        discovered_source_file_count=2,
+        source_file_count=2,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+        parser_error_count=1,
+    )
+    no_scan_collection = temporal_repair._collection_counts(
+        required_hashes=set(),
+        source_scan_complete=True,
+        required_target_scan_satisfied=True,
+    )
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+
+    def record_collection(**kwargs):
+        if kwargs["required_source_locator_hashes"] == set():
+            return [], no_scan_collection, False
+        assert kwargs["required_source_locator_hashes"] is None
+        return [candidate], collection, False
+
+    monkeypatch.setattr(temporal_repair, "collect_historical_candidates", record_collection)
+
+    default_rc = temporal_repair.main(_cli_args(tmp_path, batch_limit=1))
+    default_report = json.loads(capsys.readouterr().out)
+    opt_in_rc = temporal_repair.main(
+        _cli_args(tmp_path, batch_limit=1, legacy_identity_match=True)
+    )
+    opt_in_report = json.loads(capsys.readouterr().out)
+
+    assert default_rc == 1
+    assert default_report["status"] == "dry_run_with_gaps"
+    assert default_report["legacy_identity_match_required_count"] == 1
+    assert default_report["source_file_count"] == 0
+    assert "parser_error_count" in default_report
+    assert opt_in_rc == 1
+    assert opt_in_report["status"] == "dry_run_with_gaps"
+    assert opt_in_report["planned_update_count"] == 0
+    assert opt_in_report["selected_batch_count"] == 0
+    assert opt_in_report["batch_ready"] is False
+    assert opt_in_report["legacy_source_error_count"] == 1
+    assert opt_in_report["legacy_source_error_blocked_count"] == 1
+    assert opt_in_report["error_count"] == 2
+    assert opt_in_report["gap_count"] == 2
+    assert "historical_source_parse_error" not in opt_in_report
 
 
 def test_cli_batch_ready_with_unrepairable_gap_returns_nonzero_without_locator_hash(monkeypatch, capsys, tmp_path):
