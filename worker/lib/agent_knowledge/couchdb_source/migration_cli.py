@@ -29,6 +29,10 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from .couchdb_http_store import CouchDBHttpSourceStore
+from .current_source_supersession import (
+    CURRENT_SOURCE_IMPORTED,
+    activate_admitted_codex_current_source,
+)
 from .historical_import import ImportStatus, SourceLocator, import_historical_source
 from .session_memory_materializer import update_coverage_with_tool_evidence
 from .source_store import InMemoryCouchDBSourceStore
@@ -36,6 +40,8 @@ from .tool_evidence_bundler import store_tool_evidence_bundles
 from .document_model import build_source_locator_hash
 from ..session_memory.native_memory_sync_approval import ApprovalError, validate_memory_enqueue_approval
 from ..session_memory.transcript_model import canonicalize_project
+from ..session_memory.transcript_parsers.common import LocatorAdmission
+from ..session_memory.transcript_parsers.providers.codex import admit_codex_locator_snapshot
 from ..session_memory.transcript_parsers import extract_tool_evidence
 
 MIGRATION_CLI_SCHEMA_VERSION = "transcript_migration_cli.v1"
@@ -43,6 +49,17 @@ MIGRATION_CLI_OPERATION = "transcript_migration"
 
 MIGRATION_PROVIDERS = ("codex", "claude", "gemini", "antigravity", "grok")
 _CWD_SCAN_MAX_LINES = 50
+_CORRECTIVE_LOCATOR_ADMISSION_MANIFEST_FIELDS = frozenset({"locator", "admission", "project"})
+_LOCATOR_ADMISSION_FIELDS = frozenset(
+    {
+        "expected_raw_sha256",
+        "expected_byte_count",
+        "max_bytes",
+        "max_line_bytes",
+        "max_record_count",
+        "max_pending_tool_calls",
+    }
+)
 
 
 def default_source_roots() -> dict[str, Path]:
@@ -334,6 +351,58 @@ def reconcile_coverage(store) -> dict:
     return {"status": "ok", "reconciled": reconciled}
 
 
+def load_corrective_locator_admission_manifest(
+    path: str,
+) -> tuple[dict[str, object], LocatorAdmission, str]:
+    """Load a private, exact-shape admission manifest without exposing it."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or set(payload) != _CORRECTIVE_LOCATOR_ADMISSION_MANIFEST_FIELDS:
+            raise ValueError
+        locator = payload["locator"]
+        admission_payload = payload["admission"]
+        project = payload["project"]
+        if (
+            not isinstance(locator, dict)
+            or not isinstance(admission_payload, dict)
+            or set(admission_payload) != _LOCATOR_ADMISSION_FIELDS
+            or not isinstance(project, str)
+            or not project
+        ):
+            raise ValueError
+        return dict(locator), LocatorAdmission(**admission_payload), project
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("corrective_import_manifest_invalid") from exc
+
+
+def run_corrective_current_import(
+    *,
+    store,
+    locator_manifest: dict[str, object],
+    admission: LocatorAdmission,
+    project: str,
+) -> dict:
+    """Admit and activate one immutable snapshot without a generic parser path."""
+    try:
+        snapshot = admit_codex_locator_snapshot(
+            locator_manifest,
+            admission,
+            project=project,
+        )
+        result = activate_admitted_codex_current_source(snapshot=snapshot, store=store)
+    except Exception:  # noqa: BLE001 - never expose private locator/admission detail
+        result = None
+    return {
+        "dry_run": True,
+        "found": 1,
+        "admitted_candidates": 1 if result is not None else 0,
+        "imported_current_revisions": int(result is not None and result.status == CURRENT_SOURCE_IMPORTED),
+        "errors": int(result is None or result.status != CURRENT_SOURCE_IMPORTED),
+        "mutation_performed": False,
+        "network_used": False,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="neuron-knowledge transcript-migration")
     parser.add_argument("--provider", action="append", choices=list(MIGRATION_PROVIDERS))
@@ -342,8 +411,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--approval", default="", help="Path to live-approval JSON (required for non-dry-run).")
     parser.add_argument("--source-root", action="append", help="provider=/path override; repeatable")
     parser.add_argument("--runtime-dir")
+    parser.add_argument(
+        "--locator-admission-manifest",
+        default="",
+        help="private bounded Codex locator/admission manifest; corrective dry-run only",
+    )
     parser.add_argument("--reconcile-coverage", action="store_true", help="recompute coverage manifests from stored chunks and exit")
     parser.add_argument("--tool-evidence", action="store_true", help="second pass: store tool_evidence_bundle docs and exit")
+    parser.add_argument(
+        "--corrective-current-source",
+        action="store_true",
+        help="one Codex corrective current-source import; requires --dry-run and a private admission manifest",
+    )
     args = parser.parse_args(argv if argv is not None else None)
     effective_argv = list(sys.argv[1:] if argv is None else argv)
 
@@ -352,6 +431,66 @@ def main(argv: list[str] | None = None) -> int:
         if "=" in raw:
             prov, _, p = raw.partition("=")
             roots_override[prov.strip()] = Path(p.strip()).expanduser()
+
+    if args.corrective_current_source:
+        if not args.dry_run:
+            print(json.dumps({
+                "status": "error",
+                "error_class": "corrective_import_requires_dry_run",
+                "dry_run": False,
+                "mutation_performed": False,
+                "network_used": False,
+            }, sort_keys=True))
+            return 2
+        if args.source_root:
+            print(json.dumps({
+                "status": "error",
+                "error_class": "corrective_import_rejects_source_root",
+                "dry_run": True,
+                "mutation_performed": False,
+                "network_used": False,
+            }, sort_keys=True))
+            return 2
+        if args.provider or args.limit is not None or args.tool_evidence or args.reconcile_coverage:
+            print(json.dumps({
+                "status": "error",
+                "error_class": "corrective_import_rejects_legacy_target_flags",
+                "dry_run": True,
+                "mutation_performed": False,
+                "network_used": False,
+            }, sort_keys=True))
+            return 2
+        if not args.locator_admission_manifest:
+            print(json.dumps({
+                "status": "error",
+                "error_class": "corrective_import_requires_locator_admission_manifest",
+                "dry_run": True,
+                "mutation_performed": False,
+                "network_used": False,
+            }, sort_keys=True))
+            return 2
+        try:
+            locator_manifest, admission, project = load_corrective_locator_admission_manifest(
+                args.locator_admission_manifest
+            )
+        except ValueError:
+            print(json.dumps({
+                "status": "error",
+                "error_class": "corrective_import_manifest_invalid",
+                "dry_run": True,
+                "mutation_performed": False,
+                "network_used": False,
+            }, sort_keys=True))
+            return 2
+        report = run_corrective_current_import(
+            store=InMemoryCouchDBSourceStore(),
+            locator_manifest=locator_manifest,
+            admission=admission,
+            project=project,
+        )
+        report["status"] = "ok" if report["errors"] == 0 else "error"
+        print(json.dumps(report, sort_keys=True))
+        return 0 if report["errors"] == 0 else 1
 
     if args.tool_evidence:
         approval_error = _live_approval_error(args.approval, dry_run=args.dry_run, effective_argv=effective_argv)
@@ -435,6 +574,8 @@ __all__ = [
     "convert_gemini_json_to_fixture",
     "build_store_from_env",
     "run_migration",
+    "load_corrective_locator_admission_manifest",
+    "run_corrective_current_import",
     "main",
 ]
 

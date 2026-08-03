@@ -9,6 +9,7 @@ import pytest
 import agent_knowledge.couchdb_source.couchdb_http_store as couchdb_http_store
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBError, CouchDBHttpSourceStore
+from agent_knowledge.couchdb_source.source_revision import activate_source_revision
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore, SourceStoreConflict
 from agent_knowledge.couchdb_source.session_memory_materializer import (
     upsert_transcript_session_aggregate,
@@ -136,6 +137,15 @@ def _store(fake: FakeCouch) -> CouchDBHttpSourceStore:
     return CouchDBHttpSourceStore(base_url="http://couch.test:5984", db="transcript_source", transport=fake)
 
 
+def _pin_chunk(store: CouchDBHttpSourceStore) -> tuple[dict, dict, str]:
+    session = _session_doc()
+    chunk = _chunk_doc("pinned source")
+    store.put(session)
+    chunk_revision = store.put(chunk)
+    activate_source_revision(store=store, session_id_hash=_sid())
+    return session, chunk, chunk_revision.rev
+
+
 def test_satisfies_protocol():
     assert isinstance(_store(FakeCouch()), CouchDBSourceStore)
 
@@ -183,6 +193,80 @@ def test_put_update_uses_rev_and_resolves():
     assert second.outcome == "conflict_resolved"
     assert second.rev.startswith("2-")
     assert store.get(changed["_id"])["body"] == "edited public body"
+
+
+def test_revision_member_rejects_changed_put_and_conditional_put_but_allows_exact_duplicate():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    _session, chunk, chunk_rev = _pin_chunk(store)
+    before = store.get(chunk["_id"])
+    assert before is not None
+
+    duplicate = store.put(chunk)
+    conditional_duplicate = store.put_if_revision(chunk, expected_rev=chunk_rev)
+    changed = dict(chunk)
+    changed["body"] = "changed public-safe pinned source"
+    changed["content_hash"] = dm.sha256_hash(changed["body"])
+
+    assert duplicate.outcome == "duplicate"
+    assert duplicate.rev == chunk_rev
+    assert conditional_duplicate.outcome == "duplicate"
+    assert conditional_duplicate.rev == chunk_rev
+    with pytest.raises(SourceStoreConflict, match="revision member"):
+        store.put(changed)
+    with pytest.raises(SourceStoreConflict, match="revision member"):
+        store.put_if_revision(changed, expected_rev=chunk_rev)
+    assert store.get(chunk["_id"]) == before
+
+
+def test_staged_revision_member_does_not_block_source_write_before_pointer_exists():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    _session, chunk, _chunk_rev = _pin_chunk(store)
+    assert store.delete(dm.active_source_revision_pointer_doc_id(_sid())) is True
+
+    changed = dict(chunk)
+    changed["body"] = "changed while activation is still staging"
+    changed["content_hash"] = dm.sha256_hash(changed["body"])
+
+    revision = store.put(changed)
+
+    assert revision.outcome == "conflict_resolved"
+    assert store.get(changed["_id"])["body"] == changed["body"]
+
+
+def test_revision_member_rejects_temporal_patch_but_allows_unreferenced_additive_write():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    _session, chunk, chunk_rev = _pin_chunk(store)
+
+    temporal_duplicate = store.patch_observed_time_if_content_hash(
+        doc_id=chunk["_id"],
+        expected_content_hash=chunk["content_hash"],
+        expected_rev=chunk_rev,
+        observed_at_start=str(chunk.get("observed_at_start") or ""),
+        observed_at_end=str(chunk.get("observed_at_end") or ""),
+    )
+
+    assert temporal_duplicate.outcome == "duplicate"
+    assert temporal_duplicate.rev == chunk_rev
+    with pytest.raises(SourceStoreConflict, match="revision member"):
+        store.patch_observed_time_if_content_hash(
+            doc_id=chunk["_id"],
+            expected_content_hash=chunk["content_hash"],
+            expected_rev=chunk_rev,
+            observed_at_start="2026-07-09T10:00:00Z",
+            observed_at_end="2026-07-09T10:30:00Z",
+        )
+
+    additive = _chunk_doc("additive source after pin")
+    accepted = store.put_if_absent(additive)
+    duplicate = store.put_if_absent(additive)
+    assert accepted.outcome == "accepted"
+    assert duplicate.outcome == "duplicate"
 
 
 def test_put_retries_once_on_conflict():

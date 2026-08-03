@@ -46,7 +46,7 @@ RETIRED_RETIRED_INDEX_BRIDGE_PROFILE = "transcript-memory"
 
 
 class SourceDocType:
-    """The six CouchDB-owned source/evidence document families."""
+    """CouchDB-owned source/evidence and source-revision control documents."""
 
     TRANSCRIPT_SESSION = "transcript_session"
     CONVERSATION_CHUNK = "conversation_chunk"
@@ -54,6 +54,9 @@ class SourceDocType:
     COVERAGE_MANIFEST = "coverage_manifest"
     PROJECTION_STATE = "projection_state"
     RETENTION_MANIFEST = "retention_manifest"
+    SOURCE_REVISION_MEMBER = "source_revision_member"
+    SOURCE_REVISION_MANIFEST = "source_revision_manifest"
+    ACTIVE_SOURCE_REVISION = "active_source_revision"
 
     _KNOWN = frozenset(
         {
@@ -63,6 +66,9 @@ class SourceDocType:
             COVERAGE_MANIFEST,
             PROJECTION_STATE,
             RETENTION_MANIFEST,
+            SOURCE_REVISION_MEMBER,
+            SOURCE_REVISION_MANIFEST,
+            ACTIVE_SOURCE_REVISION,
         }
     )
 
@@ -323,6 +329,35 @@ def projection_state_doc_id(session_id_hash: str) -> str:
 
 def retention_manifest_doc_id(session_id_hash: str) -> str:
     return f"{SourceDocType.RETENTION_MANIFEST}:{_hash_hex(session_id_hash)}"
+
+
+def source_revision_member_doc_id(
+    session_id_hash: str,
+    source_revision: str,
+    source_document_id: str,
+) -> str:
+    """Immutable member id scoped to one session source revision.
+
+    Existing source-document ids remain unchanged.  The extra immutable member
+    record captures which exact version of that legacy document a revision
+    selected without embedding its public-safe body in the control plane.
+    """
+
+    return (
+        f"{SourceDocType.SOURCE_REVISION_MEMBER}:{_hash_hex(session_id_hash)}:"
+        f"{_hash_hex(source_revision)}:{_hash_hex(sha256_hash(source_document_id))}"
+    )
+
+
+def source_revision_manifest_doc_id(session_id_hash: str, source_revision: str) -> str:
+    return (
+        f"{SourceDocType.SOURCE_REVISION_MANIFEST}:{_hash_hex(session_id_hash)}:"
+        f"{_hash_hex(source_revision)}"
+    )
+
+
+def active_source_revision_pointer_doc_id(session_id_hash: str) -> str:
+    return f"{SourceDocType.ACTIVE_SOURCE_REVISION}:{_hash_hex(session_id_hash)}"
 
 
 # --- boundary assertions ------------------------------------------------------
@@ -733,6 +768,7 @@ __all__ = [
     "build_source_locator_hash",
     "build_coverage_hash",
     "build_source_hash",
+    "build_source_revision_token",
     "observed_time_bounds",
     "session_doc_id",
     "conversation_chunk_doc_id",
@@ -740,6 +776,9 @@ __all__ = [
     "coverage_manifest_doc_id",
     "projection_state_doc_id",
     "retention_manifest_doc_id",
+    "source_revision_member_doc_id",
+    "source_revision_manifest_doc_id",
+    "active_source_revision_pointer_doc_id",
     "build_transcript_session_document",
     "build_conversation_chunk_document",
     "build_tool_evidence_bundle_document",

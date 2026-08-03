@@ -53,6 +53,8 @@ from typing import Any
 
 from ..couchdb_source.couchdb_http_store import CouchDBError
 from ..couchdb_source.document_model import (
+    SourceDocType,
+    active_source_revision_pointer_doc_id,
     build_conversation_chunk_document,
     build_transcript_session_document,
     conversation_chunk_doc_id,
@@ -64,7 +66,16 @@ from ..couchdb_source.session_memory_materializer import (
     upsert_transcript_session_aggregate,
     update_coverage_with_tool_evidence,
 )
-from ..couchdb_source.source_store import CouchDBSourceStore
+from ..couchdb_source.source_revision import (
+    ResolvedSourceRevision,
+    activate_source_revision,
+    resolve_active_source_revision,
+)
+from ..couchdb_source.source_store import (
+    CouchDBSourceStore,
+    SourceStoreConflict,
+    payload_hash,
+)
 from ..session_memory.transcript_model import REDACTION_VERSION, TranscriptChunk, TranscriptSession
 from .delivery_backend import (
     PAYLOAD_HASH_MISMATCH,
@@ -117,6 +128,50 @@ def _payload_integrity_evidence(
         document_ref="",
         run=run,
         status="payload_integrity_mismatch",
+    )
+
+
+def _active_source_revision_before_ingress(
+    *,
+    store: CouchDBSourceStore,
+    session_id_hash: str,
+) -> ResolvedSourceRevision | None:
+    """Resolve a pinned source set before any ingress write can alter it."""
+
+    if store.get(active_source_revision_pointer_doc_id(session_id_hash)) is None:
+        return None
+    return resolve_active_source_revision(
+        store=store,
+        session_id_hash=session_id_hash,
+    )
+
+
+def _assert_active_revision_matches_ingress(
+    *,
+    active_revision: ResolvedSourceRevision,
+    provider: str,
+    project: str,
+) -> None:
+    if len(active_revision.sessions) != 1:
+        raise SourceStoreConflict("active source revision session contract is invalid")
+    session = active_revision.sessions[0]
+    if (
+        str(session.get("provider") or "") != provider
+        or str(session.get("project") or "") != project
+    ):
+        raise SourceStoreConflict("active source revision ingress contract is invalid")
+
+
+def _active_revision_source_document_ids(
+    active_revision: ResolvedSourceRevision,
+) -> tuple[str, ...]:
+    return tuple(
+        str(document["_id"])
+        for document in (
+            *active_revision.sessions,
+            *active_revision.conversation_chunks,
+            *active_revision.tool_evidence_bundles,
+        )
     )
 
 
@@ -314,33 +369,105 @@ class CouchDBDeliveryBackend:
         dataset_ref = f"couchdb:{db_name}"
         doc_ref = session_doc_id(session_id_hash)
 
+        active_duplicate = False
         try:
-            # Persist the chunk first; a retry can then reconcile the aggregate
-            # without overwriting a newer session envelope with this one-chunk view.
             session_doc = build_transcript_session_document(session=session)
             chunk_doc = build_conversation_chunk_document(chunk=chunk, source_locator_hash="")
-            chunk_revision = self._store.put(chunk_doc)
-            upsert_transcript_session_aggregate(
+            active_revision = _active_source_revision_before_ingress(
                 store=self._store,
-                incoming=session_doc,
-            )
-
-            # --- Refresh aggregate source currentness ---------------------------
-            coverage_doc = update_coverage_with_tool_evidence(
                 session_id_hash=session_id_hash,
-                store=self._store,
             )
-            source_hash = str((coverage_doc or {}).get("source_hash") or "")
+            if active_revision is None:
+                # Legacy/unpinned behavior remains the aggregate reconciliation
+                # path: a retry can repair a partial earlier write.
+                chunk_revision = self._store.put(chunk_doc)
+                upsert_transcript_session_aggregate(
+                    store=self._store,
+                    incoming=session_doc,
+                )
+                coverage_doc = update_coverage_with_tool_evidence(
+                    session_id_hash=session_id_hash,
+                    store=self._store,
+                )
+                source_hash = str((coverage_doc or {}).get("source_hash") or "")
+                mark_projection_pending_if_source_changed(
+                    session_id_hash=session_id_hash,
+                    provider=provider,
+                    project=project,
+                    source_hash=source_hash,
+                    store=self._store,
+                    source_changed=chunk_revision.outcome != "duplicate",
+                )
+            else:
+                # A pointer makes the selected source set immutable. Resolve it
+                # before the new write, then only append a genuinely new chunk
+                # through an explicit allowlist activation.
+                _assert_active_revision_matches_ingress(
+                    active_revision=active_revision,
+                    provider=provider,
+                    project=project,
+                )
+                chunk_document_id = str(chunk_doc["_id"])
+                active_chunk_ids = {
+                    str(document["_id"])
+                    for document in active_revision.conversation_chunks
+                }
+                existing_chunk = self._store.get(chunk_document_id)
+                if existing_chunk is not None:
+                    if (
+                        str(existing_chunk.get("doc_type") or "")
+                        != SourceDocType.CONVERSATION_CHUNK
+                        or payload_hash(existing_chunk) != payload_hash(chunk_doc)
+                    ):
+                        raise SourceStoreConflict(
+                            "active source revision chunk id already has different content"
+                        )
+                    # An exact orphan can remain after an earlier activation CAS
+                    # loss. Reuse it in the next explicit revision instead of
+                    # treating it as a no-op duplicate.
+                    active_duplicate = chunk_document_id in active_chunk_ids
+                else:
+                    chunk_revision = self._store.put_if_absent(chunk_doc)
+                    active_duplicate = (
+                        chunk_revision.outcome == "duplicate"
+                        and chunk_document_id in active_chunk_ids
+                    )
 
-            # --- Upsert projection_state (mark dirty / pending) -----------------
-            mark_projection_pending_if_source_changed(
-                session_id_hash=session_id_hash,
-                provider=provider,
-                project=project,
-                source_hash=source_hash,
-                store=self._store,
-                source_changed=chunk_revision.outcome != "duplicate",
-            )
+                activated = active_revision
+                if not active_duplicate:
+                    activated = activate_source_revision(
+                        store=self._store,
+                        session_id_hash=session_id_hash,
+                        source_document_ids=(
+                            *_active_revision_source_document_ids(active_revision),
+                            chunk_document_id,
+                        ),
+                        expected_predecessor=active_revision,
+                    )
+                # A retry may find its chunk in the active revision after the
+                # pointer CAS succeeded but before coverage/projection did.
+                # Reconcile those secondary records for an exact duplicate too;
+                # their matching-hash paths are idempotent no-ops.
+                coverage_doc = update_coverage_with_tool_evidence(
+                    session_id_hash=session_id_hash,
+                    store=self._store,
+                )
+                if (
+                    coverage_doc is None
+                    or str(coverage_doc.get("source_hash") or "")
+                    != activated.source_hash
+                ):
+                    raise SourceStoreConflict(
+                        "active source revision coverage did not converge"
+                    )
+                mark_projection_pending_if_source_changed(
+                    session_id_hash=session_id_hash,
+                    provider=provider,
+                    project=project,
+                    source_hash=activated.source_hash,
+                    store=self._store,
+                    source_changed=True,
+                )
 
         except CouchDBError as exc:
             # Network/store errors mid-flight: the PUT may have reached CouchDB
@@ -363,7 +490,7 @@ class CouchDBDeliveryBackend:
             payload_hash=job.payload_hash,
             dataset_ref=dataset_ref,
             document_ref=doc_ref,
-            run="couchdb_existing" if existing is not None else "couchdb_put",
+            run="couchdb_existing" if existing is not None or active_duplicate else "couchdb_put",
             status="succeeded",
             observed_at=datetime.datetime.now(tz=datetime.timezone.utc),
         )

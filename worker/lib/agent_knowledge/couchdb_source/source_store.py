@@ -9,9 +9,12 @@ Idempotent upsert (design "CouchDB revision conflict: retry idempotent upsert
 using deterministic document id and content hash"): the caller never supplies a
 ``_rev``. The store keys on the deterministic ``_id``; a re-put of identical
 content is a no-op duplicate that returns the existing revision, and a put of
-changed content under the same ``_id`` is accepted and bumps the revision. This
-models a conflict-free upsert without leaking CouchDB revision bookkeeping to
-callers.
+changed content under the same ``_id`` is accepted and bumps the revision,
+unless the active source-revision manifest references that source id. That
+active-source exception is fail-closed so an active pointer cannot be advanced
+over a silently changed prior member. Staged members before pointer movement do
+not block the legacy aggregate writer. This models a conflict-free upsert
+without leaking CouchDB revision bookkeeping to callers.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from typing import Protocol, runtime_checkable
 from ..rag_ingress.idempotency import IdempotencyOutcome, classify_idempotency
 from .document_model import (
     SourceDocType,
+    active_source_revision_pointer_doc_id,
     assert_couchdb_owned,
     assert_hash_like,
     assert_no_secret_like_metadata,
@@ -40,6 +44,47 @@ class SourceStoreError(ValueError):
 
 class SourceStoreConflict(SourceStoreError):
     """Raised when a conditional additive patch no longer matches its source."""
+
+
+IMMUTABLE_SOURCE_REVISION_DOC_TYPES = frozenset(
+    {
+        SourceDocType.SOURCE_REVISION_MEMBER,
+        SourceDocType.SOURCE_REVISION_MANIFEST,
+    }
+)
+SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES = frozenset(
+    {
+        SourceDocType.TRANSCRIPT_SESSION,
+        SourceDocType.CONVERSATION_CHUNK,
+        SourceDocType.TOOL_EVIDENCE_BUNDLE,
+    }
+)
+
+
+def _active_manifest_references_source_document(
+    *,
+    pointer: dict | None,
+    manifest: dict | None,
+    session_id_hash: str,
+    source_document_id: str,
+) -> bool:
+    """Return whether the current pointer's manifest includes this source id."""
+
+    return (
+        pointer is not None
+        and str(pointer.get("doc_type") or "") == SourceDocType.ACTIVE_SOURCE_REVISION
+        and str(pointer.get("session_id_hash") or "") == session_id_hash
+        and manifest is not None
+        and str(manifest.get("_id") or "") == str(pointer.get("manifest_id") or "")
+        and str(manifest.get("doc_type") or "") == SourceDocType.SOURCE_REVISION_MANIFEST
+        and str(manifest.get("session_id_hash") or "") == session_id_hash
+        and isinstance(manifest.get("members"), list)
+        and any(
+            isinstance(member, dict)
+            and str(member.get("source_document_id") or "") == source_document_id
+            for member in manifest["members"]
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -60,6 +105,8 @@ def _project_fields(doc: dict, fields: list[str] | None) -> dict:
 @runtime_checkable
 class CouchDBSourceStore(Protocol):
     def put(self, document: dict) -> StoredRevision: ...
+
+    def put_if_absent(self, document: dict) -> StoredRevision: ...
 
     def get(self, doc_id: str) -> dict | None: ...
 
@@ -304,8 +351,31 @@ class InMemoryCouchDBSourceStore:
     def __init__(self) -> None:
         self._docs: dict[str, dict] = {}
 
+    def _require_source_document_unpinned(
+        self,
+        doc_id: str,
+        *,
+        doc_type: str,
+        session_id_hash: str,
+    ) -> None:
+        if doc_type not in SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES:
+            return
+        pointer = self._docs.get(active_source_revision_pointer_doc_id(session_id_hash))
+        manifest = self._docs.get(str((pointer or {}).get("manifest_id") or ""))
+        if _active_manifest_references_source_document(
+            pointer=pointer,
+            manifest=manifest,
+            session_id_hash=session_id_hash,
+            source_document_id=doc_id,
+        ):
+            raise SourceStoreConflict(
+                "source revision member makes source document immutable"
+            )
+
     def put(self, document: dict) -> StoredRevision:
         validate_for_write(document)
+        if document.get("doc_type") in IMMUTABLE_SOURCE_REVISION_DOC_TYPES:
+            return self.put_if_absent(document)
         doc_id = str(document["_id"])
         incoming_hash = payload_hash(document)
         existing = self._docs.get(doc_id)
@@ -317,6 +387,13 @@ class InMemoryCouchDBSourceStore:
         )
         if existing is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
             return StoredRevision(doc_id=doc_id, rev=str(existing["_rev"]), outcome="duplicate")
+
+        source_document = existing if existing is not None else document
+        self._require_source_document_unpinned(
+            doc_id,
+            doc_type=str(source_document.get("doc_type") or ""),
+            session_id_hash=str(source_document.get("session_id_hash") or ""),
+        )
 
         if existing is None:
             rev_number = 1
@@ -335,6 +412,35 @@ class InMemoryCouchDBSourceStore:
         self._docs[doc_id] = stored
         return StoredRevision(doc_id=doc_id, rev=rev, outcome=outcome)
 
+    def put_if_absent(self, document: dict) -> StoredRevision:
+        """Add one immutable document without replacing a different payload."""
+
+        validate_for_write(document)
+        doc_id = str(document["_id"])
+        incoming_hash = payload_hash(document)
+        existing = self._docs.get(doc_id)
+        if existing is not None:
+            decision = _classify_document_idempotency(
+                existing,
+                doc_id=doc_id,
+                incoming_hash=incoming_hash,
+            )
+            if decision.outcome == IdempotencyOutcome.DUPLICATE:
+                return StoredRevision(
+                    doc_id=doc_id,
+                    rev=str(existing.get("_rev") or ""),
+                    outcome="duplicate",
+                )
+            raise SourceStoreConflict("immutable source document already exists")
+
+        rev = f"1-{incoming_hash.split(':', 1)[-1][:12]}"
+        stored = copy.deepcopy(document)
+        stored["_rev"] = rev
+        stored["idempotency_key"] = doc_id
+        stored["payload_hash"] = incoming_hash
+        self._docs[doc_id] = stored
+        return StoredRevision(doc_id=doc_id, rev=rev, outcome="accepted")
+
     def get(self, doc_id: str) -> dict | None:
         stored = self._docs.get(doc_id)
         return copy.deepcopy(stored) if stored is not None else None
@@ -346,6 +452,8 @@ class InMemoryCouchDBSourceStore:
         expected_rev: str,
     ) -> StoredRevision:
         validate_for_write(document)
+        if document.get("doc_type") in IMMUTABLE_SOURCE_REVISION_DOC_TYPES:
+            raise SourceStoreConflict("immutable source document must be additive")
         doc_id = str(document["_id"])
         current = self._docs.get(doc_id)
         current_rev = str((current or {}).get("_rev") or "")
@@ -359,6 +467,11 @@ class InMemoryCouchDBSourceStore:
         )
         if current is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
             return StoredRevision(doc_id=doc_id, rev=current_rev, outcome="duplicate")
+        self._require_source_document_unpinned(
+            doc_id,
+            doc_type=str(current.get("doc_type") or "") if current is not None else str(document.get("doc_type") or ""),
+            session_id_hash=str(current.get("session_id_hash") or "") if current is not None else str(document.get("session_id_hash") or ""),
+        )
         rev_number = int(current_rev.split("-", 1)[0]) + 1 if current_rev else 1
         rev = f"{rev_number}-{incoming_hash.split(':', 1)[-1][:12]}"
         stored = copy.deepcopy(document)
@@ -419,6 +532,24 @@ class InMemoryCouchDBSourceStore:
             and current_locator_hash != expected_source_locator_hash
         ):
             raise SourceStoreConflict("conditional temporal patch locator changed")
+        if (
+            str(current.get("observed_at_start") or "") == str(observed_at_start or "")
+            and str(current.get("observed_at_end") or "") == str(observed_at_end or "")
+            and (
+                replacement_source_locator_hash is None
+                or current_locator_hash == replacement_source_locator_hash
+            )
+        ):
+            return StoredRevision(
+                doc_id=doc_id,
+                rev=str(current.get("_rev") or ""),
+                outcome="duplicate",
+            )
+        self._require_source_document_unpinned(
+            doc_id,
+            doc_type=str(current.get("doc_type") or ""),
+            session_id_hash=str(current.get("session_id_hash") or ""),
+        )
         updated = copy.deepcopy(current)
         for key in ("_rev", "idempotency_key", "payload_hash"):
             updated.pop(key, None)
@@ -501,6 +632,8 @@ class InMemoryCouchDBSourceStore:
 __all__ = [
     "CouchDBSourceStore",
     "InMemoryCouchDBSourceStore",
+    "IMMUTABLE_SOURCE_REVISION_DOC_TYPES",
+    "SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES",
     "SourceStoreConflict",
     "SourceStoreError",
     "StoredRevision",

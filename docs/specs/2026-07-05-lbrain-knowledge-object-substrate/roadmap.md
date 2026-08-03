@@ -1256,6 +1256,21 @@ Corrective contract:
 - v3 binding은 기존 desired/live source·image·ops revision 결속에 reconciliation mode, operation state, 세 deferred count와 `other_out_of_sync_resource_count`를 포함한 canonical tuple hash를 사용합니다. source/unit test는 v3의 두 profile을 모두 검증하지만 source merge나 CI는 deployed acceptance evidence가 아닙니다.
 - live acceptance에는 configured/deployed read path에서 수집한 sanitized read-only `post_deploy_read_only_smoke` packet이 실제 observed v3 profile과 `deployment_evidence_binding.v3`를 함께 검증하고, `network_used=true`, production mutation `false`, protected/raw identity 미반환을 보여야 합니다. image/build, GitOps desired state, reconciliation, rollout, live capture는 서로 대체하지 않는 별도 evidence로 기록합니다.
 
+### Current source admission checkpoint (2026-08-04)
+
+- current-source 선택은 immutable revision manifest와 active pointer를 함께 사용합니다. active pointer는 하나의 immutable revision만 가리키므로 legacy/current source를 혼합해 materialize하지 않습니다.
+- Codex source는 bounded streaming admission만 허용합니다. private locator manifest, expected raw SHA-256/byte count, source byte/line/record/pending-tool-call bound를 모두 검증하고 pre-stream fingerprint, turn parse, tool-evidence scan, post-stream fingerprint와 FD stability가 일치해야 candidate를 만듭니다.
+- locator·fingerprint·bound·unresolved tool evidence 중 하나라도 해소되지 않으면 fail-closed로 종료하며 sink output을 만들지 않습니다. 이 checkpoint는 Codex streaming path에만 적용하고 기존 unlisted provider parser의 범위를 넓히지 않습니다.
+
+### Next live temporal acceptance evidence (deployment 이후)
+
+Status: 아직 주장하지 않습니다. 다음 항목은 source test, image build, GitOps desired state 또는 rollout이 아니라 deployment 이후 configured/deployed read path에서 수집한 acceptance evidence로만 충족할 수 있습니다.
+
+- Date A와 Date B는 서로 다른 expected/observed whole-object fingerprint를 반환하면서 stable object identity와 selector/range 계약을 함께 보여야 합니다.
+- nonsense `brain.query`는 unrelated current/accepted card로 결과를 채우지 않아야 합니다.
+- distinct source revision 뒤 source/projection hash currentness와 stale projection postcheck가 일치해야 합니다.
+- entity extraction은 coverage, backlog, error count를 raw source 없이 public-safe aggregate로 기록해야 하며 coverage 증가 또는 backlog 감소와 abort 기준을 함께 보여야 합니다.
+
 Production mutation boundary:
 
 - 이 corrective run에는 사용자가 bounded production ledger/corpus/runtime mutation을 사전승인했습니다. 이는 기존 read-only evidence run과 분리된 현재 작업의 명시적 scope override입니다.

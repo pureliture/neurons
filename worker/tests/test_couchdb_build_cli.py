@@ -29,6 +29,7 @@ from agent_knowledge.couchdb_source.session_memory_materializer import (
     RecordingSessionMemoryProjector,
     materialize_and_project,
 )
+from agent_knowledge.couchdb_source.source_revision import activate_source_revision
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
 from agent_knowledge.llm_brain_core.runtime import (
     session_source_revision_from_couchdb_source,
@@ -547,6 +548,61 @@ class TestSelectSessionsNeedingProjection:
         selected = _select_sessions_needing_projection(store, limit=1)
 
         assert [s.get("session_id_hash") for s in selected] == [pending]
+        assert store.get_count == 0
+
+    def test_active_projected_session_reselects_stale_revision_without_get(self) -> None:
+        store = CountingGetStore()
+        sid = _build_synthetic_session(
+            store,
+            provider="claude",
+            project="neurons",
+            raw_id="active-stale",
+        )
+        source_documents = store.find_by_session(session_id_hash=sid)
+        activate_source_revision(
+            store=store,
+            session_id_hash=sid,
+            source_document_ids=tuple(
+                document["_id"]
+                for document in source_documents
+                if document["doc_type"]
+                in {
+                    dm.SourceDocType.TRANSCRIPT_SESSION,
+                    dm.SourceDocType.CONVERSATION_CHUNK,
+                }
+            ),
+        )
+        _mark_projected(store, sid, "claude", "neurons")
+        additional = TranscriptChunk.from_text(
+            chunk_id="chunk_01",
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            turn_start_index=1,
+            turn_end_index=1,
+            text="active revision follow-up",
+        )
+        additional_document = dm.build_conversation_chunk_document(chunk=additional)
+        store.put(additional_document)
+        active_documents = store.find_by_session(session_id_hash=sid)
+        activate_source_revision(
+            store=store,
+            session_id_hash=sid,
+            source_document_ids=tuple(
+                document["_id"]
+                for document in active_documents
+                if document["doc_type"]
+                in {
+                    dm.SourceDocType.TRANSCRIPT_SESSION,
+                    dm.SourceDocType.CONVERSATION_CHUNK,
+                }
+            ),
+        )
+        store.get_count = 0
+
+        selected = _select_sessions_needing_projection(store, limit=1)
+
+        assert [document["session_id_hash"] for document in selected] == [sid]
         assert store.get_count == 0
 
     def test_pushes_projected_status_and_scope_to_store_selectors(self) -> None:
