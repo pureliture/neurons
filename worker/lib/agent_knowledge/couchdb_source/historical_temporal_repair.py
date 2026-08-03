@@ -1496,8 +1496,14 @@ def main(argv: list[str] | None = None) -> int:
     effective_argv = list(sys.argv[1:] if argv is None else argv)
     execute = bool(args.execute)
     try:
+        provider = canonicalize_provider(args.provider)
         if args.legacy_identity_targeted_snapshot and not args.legacy_identity_match:
             raise ValueError("legacy_targeted_snapshot_requires_legacy_identity_match")
+        # The approved one-file staging and Jenkins runner are Codex-only.  Do
+        # not pretend the same one-entry bound can safely traverse providers
+        # whose native source formats require nested directories.
+        if args.legacy_identity_targeted_snapshot and provider != "codex":
+            raise ValueError("legacy_targeted_snapshot_provider_unsupported")
         if args.legacy_identity_targeted_snapshot and (
             int(args.source_file_limit) != 1
             or _effective_source_entry_limit(args.source_entry_limit) != 1
@@ -1514,8 +1520,13 @@ def main(argv: list[str] | None = None) -> int:
             batch_limit=args.batch_limit,
             max_runtime_seconds=args.max_runtime_seconds,
         )
-    except ValueError:
-        print(json.dumps(_error_report("invalid_bounds", dry_run=not execute), sort_keys=True))
+    except ValueError as exc:
+        error = (
+            "legacy_targeted_snapshot_provider_unsupported"
+            if str(exc) == "legacy_targeted_snapshot_provider_unsupported"
+            else "invalid_bounds"
+        )
+        print(json.dumps(_error_report(error, dry_run=not execute), sort_keys=True))
         return 2
     target = _resolve_target(os.environ)
     if not target.couchdb_url:
@@ -1545,7 +1556,6 @@ def main(argv: list[str] | None = None) -> int:
         request_timeout_seconds=min(30.0, max(0.001, float(args.max_runtime_seconds) - (time.monotonic() - started))),
         deadline_monotonic=started + float(args.max_runtime_seconds),
     )
-    provider = canonicalize_provider(args.provider)
     project = str(args.project)
     if args.legacy_identity_targeted_snapshot:
         # Legacy targets have no locator to select before source parsing.  The
@@ -1613,7 +1623,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(report, sort_keys=True))
             return 1
         except Exception:
-            print(json.dumps(_error_report("snapshot_read_failed", dry_run=not execute), sort_keys=True))
+            report = _error_report("snapshot_read_failed", dry_run=not execute)
+            report.update(collection)
+            print(json.dumps(report, sort_keys=True))
             return 1
         has_legacy_locator_target = bool(target_gaps)
     else:
