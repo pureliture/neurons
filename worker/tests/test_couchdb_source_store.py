@@ -9,6 +9,7 @@ from agent_knowledge.couchdb_source.source_store import (
     SourceStoreConflict,
     SourceStoreError,
 )
+from agent_knowledge.couchdb_source.source_revision import activate_source_revision
 from agent_knowledge.couchdb_source.session_memory_materializer import (
     upsert_transcript_session_aggregate,
 )
@@ -45,6 +46,15 @@ def _chunk(text: str) -> TranscriptChunk:
 
 def _chunk_doc(text: str) -> dict:
     return dm.build_conversation_chunk_document(chunk=_chunk(text))
+
+
+def _pin_chunk(store: InMemoryCouchDBSourceStore) -> tuple[dict, dict, str]:
+    session = _session_doc()
+    chunk = _chunk_doc("pinned source")
+    store.put(session)
+    chunk_revision = store.put(chunk)
+    activate_source_revision(store=store, session_id_hash=_sid())
+    return session, chunk, chunk_revision.rev
 
 
 def test_inmemory_store_satisfies_protocol() -> None:
@@ -100,6 +110,59 @@ def test_put_preserves_later_temporal_metadata_for_identical_chunk_body() -> Non
     assert second.rev != first.rev
     assert stored["observed_at_start"] == "2026-07-09T10:00:00Z"
     assert stored["observed_at_end"] == "2026-07-09T10:30:00Z"
+
+
+def test_revision_member_rejects_changed_put_and_conditional_put_but_allows_exact_duplicate() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _session, chunk, chunk_rev = _pin_chunk(store)
+    before = store.get(chunk["_id"])
+    assert before is not None
+
+    duplicate = store.put(chunk)
+    conditional_duplicate = store.put_if_revision(chunk, expected_rev=chunk_rev)
+    changed = dict(chunk)
+    changed["body"] = "changed public-safe pinned source"
+    changed["content_hash"] = dm.sha256_hash(changed["body"])
+
+    assert duplicate.outcome == "duplicate"
+    assert duplicate.rev == chunk_rev
+    assert conditional_duplicate.outcome == "duplicate"
+    assert conditional_duplicate.rev == chunk_rev
+    with pytest.raises(SourceStoreConflict, match="revision member"):
+        store.put(changed)
+    with pytest.raises(SourceStoreConflict, match="revision member"):
+        store.put_if_revision(changed, expected_rev=chunk_rev)
+    assert store.get(chunk["_id"]) == before
+
+
+def test_revision_member_rejects_temporal_patch_but_allows_unreferenced_additive_write() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _session, chunk, chunk_rev = _pin_chunk(store)
+
+    temporal_duplicate = store.patch_observed_time_if_content_hash(
+        doc_id=chunk["_id"],
+        expected_content_hash=chunk["content_hash"],
+        expected_rev=chunk_rev,
+        observed_at_start=str(chunk.get("observed_at_start") or ""),
+        observed_at_end=str(chunk.get("observed_at_end") or ""),
+    )
+
+    assert temporal_duplicate.outcome == "duplicate"
+    assert temporal_duplicate.rev == chunk_rev
+    with pytest.raises(SourceStoreConflict, match="revision member"):
+        store.patch_observed_time_if_content_hash(
+            doc_id=chunk["_id"],
+            expected_content_hash=chunk["content_hash"],
+            expected_rev=chunk_rev,
+            observed_at_start="2026-07-09T10:00:00Z",
+            observed_at_end="2026-07-09T10:30:00Z",
+        )
+
+    additive = _chunk_doc("additive source after pin")
+    accepted = store.put_if_absent(additive)
+    duplicate = store.put_if_absent(additive)
+    assert accepted.outcome == "accepted"
+    assert duplicate.outcome == "duplicate"
 
 
 def test_conditional_temporal_patch_recovers_legacy_locator_when_times_already_match() -> None:

@@ -7,8 +7,11 @@ running CouchDB. The default transport uses ``urllib``.
 Idempotency parity with the in-memory store: the caller never supplies ``_rev``.
 ``put`` reads the current doc, dedups on the shared ``payload_hash`` (identical
 content -> ``duplicate`` no-op), and otherwise writes with the current ``_rev``
-(retrying once on a 409 conflict). Auth is an injected header value (CouchDB has
-its own credentials; this is NOT the RetiredIndexBridge token).
+(retrying once on a 409 conflict). A source document referenced by the active
+source-revision manifest is the exception: changed writes are rejected before a
+PUT. Staged members do not block legacy source writes before pointer movement.
+Auth is an injected header value (CouchDB has its own credentials; this is NOT
+the RetiredIndexBridge token).
 """
 
 from __future__ import annotations
@@ -21,11 +24,18 @@ from urllib.parse import quote
 
 from ..rag_ingress.idempotency import IdempotencyOutcome
 from ..transport_contract import ProxyResponse
-from .document_model import assert_hash_like
+from .document_model import (
+    SourceDocType,
+    active_source_revision_pointer_doc_id,
+    assert_hash_like,
+)
 from .source_store import (
+    IMMUTABLE_SOURCE_REVISION_DOC_TYPES,
+    SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES,
     SourceStoreConflict,
     SourceStoreError,
     StoredRevision,
+    _active_manifest_references_source_document,
     _classify_document_idempotency,
     merge_transcript_session_documents,
     payload_hash,
@@ -132,8 +142,32 @@ class CouchDBHttpSourceStore:
             raise CouchDBError(f"GET {doc_id} failed: HTTP {status}")
         return payload
 
+    def _require_source_document_unpinned(
+        self,
+        doc_id: str,
+        *,
+        doc_type: str,
+        session_id_hash: str,
+    ) -> None:
+        if doc_type not in SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES:
+            return
+        pointer = self.get(active_source_revision_pointer_doc_id(session_id_hash))
+        manifest_id = str((pointer or {}).get("manifest_id") or "")
+        manifest = self.get(manifest_id) if manifest_id else None
+        if _active_manifest_references_source_document(
+            pointer=pointer,
+            manifest=manifest,
+            session_id_hash=session_id_hash,
+            source_document_id=doc_id,
+        ):
+            raise SourceStoreConflict(
+                "source revision member makes source document immutable"
+            )
+
     def put(self, document: dict) -> StoredRevision:
         validate_for_write(document)
+        if document.get("doc_type") in IMMUTABLE_SOURCE_REVISION_DOC_TYPES:
+            return self.put_if_absent(document)
         doc_id = str(document["_id"])
         incoming_hash = payload_hash(document)
         existing = self.get(doc_id)
@@ -146,9 +180,58 @@ class CouchDBHttpSourceStore:
         if existing is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
             return StoredRevision(doc_id=doc_id, rev=str(existing.get("_rev", "")), outcome="duplicate")
 
+        source_document = existing if existing is not None else document
+        self._require_source_document_unpinned(
+            doc_id,
+            doc_type=str(source_document.get("doc_type") or ""),
+            session_id_hash=str(source_document.get("session_id_hash") or ""),
+        )
         outcome = "conflict_resolved" if existing is not None else "accepted"
         rev = self._write(doc_id, document, incoming_hash, existing)
         return StoredRevision(doc_id=doc_id, rev=rev, outcome=outcome)
+
+    def put_if_absent(self, document: dict) -> StoredRevision:
+        """Create an immutable document, rejecting a different existing body."""
+
+        validate_for_write(document)
+        doc_id = str(document["_id"])
+        incoming_hash = payload_hash(document)
+        existing = self.get(doc_id)
+        if existing is not None:
+            decision = _classify_document_idempotency(
+                existing,
+                doc_id=doc_id,
+                incoming_hash=incoming_hash,
+            )
+            if decision.outcome == IdempotencyOutcome.DUPLICATE:
+                return StoredRevision(
+                    doc_id=doc_id,
+                    rev=str(existing.get("_rev") or ""),
+                    outcome="duplicate",
+                )
+            raise SourceStoreConflict("immutable source document already exists")
+
+        stored = copy.deepcopy(document)
+        stored.pop("_rev", None)
+        stored["idempotency_key"] = doc_id
+        stored["payload_hash"] = incoming_hash
+        status, response = self._request("PUT", self._doc_path(doc_id), json_body=stored)
+        if status == 409:
+            current = self.get(doc_id)
+            if current is not None and payload_hash(current) == incoming_hash:
+                return StoredRevision(
+                    doc_id=doc_id,
+                    rev=str(current.get("_rev") or ""),
+                    outcome="duplicate",
+                )
+            raise SourceStoreConflict("immutable source document already exists")
+        if status not in (201, 202) or not response.get("ok"):
+            raise CouchDBError(f"immutable source write failed: HTTP {status}")
+        return StoredRevision(
+            doc_id=doc_id,
+            rev=str(response.get("rev") or ""),
+            outcome="accepted",
+        )
 
     def put_if_revision(
         self,
@@ -159,6 +242,8 @@ class CouchDBHttpSourceStore:
         """Write exactly one known revision and never retry a stale payload."""
 
         validate_for_write(document)
+        if document.get("doc_type") in IMMUTABLE_SOURCE_REVISION_DOC_TYPES:
+            raise SourceStoreConflict("immutable source document must be additive")
         doc_id = str(document["_id"])
         current = self.get(doc_id)
         current_rev = str((current or {}).get("_rev") or "")
@@ -172,6 +257,11 @@ class CouchDBHttpSourceStore:
         )
         if current is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
             return StoredRevision(doc_id=doc_id, rev=current_rev, outcome="duplicate")
+        self._require_source_document_unpinned(
+            doc_id,
+            doc_type=str(current.get("doc_type") or "") if current is not None else str(document.get("doc_type") or ""),
+            session_id_hash=str(current.get("session_id_hash") or "") if current is not None else str(document.get("session_id_hash") or ""),
+        )
         stored = copy.deepcopy(document)
         stored.pop("_rev", None)
         stored["idempotency_key"] = doc_id
@@ -230,6 +320,12 @@ class CouchDBHttpSourceStore:
                     rev=str(current.get("_rev") or ""),
                     outcome="duplicate",
                 )
+
+            self._require_source_document_unpinned(
+                doc_id,
+                doc_type=str(current.get("doc_type") or "") if current is not None else str(merged.get("doc_type") or ""),
+                session_id_hash=str(current.get("session_id_hash") or "") if current is not None else str(merged.get("session_id_hash") or ""),
+            )
 
             stored = copy.deepcopy(merged)
             stored["idempotency_key"] = doc_id
@@ -305,6 +401,11 @@ class CouchDBHttpSourceStore:
                 rev=str(current.get("_rev") or ""),
                 outcome="duplicate",
             )
+        self._require_source_document_unpinned(
+            doc_id,
+            doc_type=str(current.get("doc_type") or ""),
+            session_id_hash=str(current.get("session_id_hash") or ""),
+        )
         current_rev = str(current.get("_rev") or "")
         if not current_rev:
             raise SourceStoreConflict("conditional temporal patch revision is missing")

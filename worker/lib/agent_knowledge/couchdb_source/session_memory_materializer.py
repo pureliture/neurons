@@ -24,17 +24,16 @@ from .document_model import (
     OwnershipViolation,
     ProjectionStatus,
     RETIRED_INDEX_BRIDGE_RECALL_PROFILE,
-    SourceDocType,
     assert_index_target_allowed,
     build_coverage_manifest_document,
     build_projection_state_document,
-    build_source_hash,
     build_source_revision_token,
     coverage_manifest_doc_id,
     observed_time_bounds,
     projection_state_doc_id,
     sha256_hash,
 )
+from .source_revision import resolve_active_source_revision
 from .source_store import CouchDBSourceStore, SourceStoreConflict, SourceStoreError
 
 
@@ -123,10 +122,6 @@ class RecordingSessionMemoryProjector:
         return ref
 
 
-def _session_docs(store: CouchDBSourceStore, session_id_hash: str, doc_type: str) -> list[dict]:
-    return store.find_by_session(session_id_hash=session_id_hash, doc_type=doc_type)
-
-
 def update_coverage_with_tool_evidence(*, session_id_hash: str, store: CouchDBSourceStore) -> dict | None:
     """Rebuild the per-session coverage manifest with current tool evidence counts.
 
@@ -138,9 +133,20 @@ def update_coverage_with_tool_evidence(*, session_id_hash: str, store: CouchDBSo
         snapshot = _coverage_snapshot(session_id_hash=session_id_hash, store=store)
         if snapshot is None:
             return None
-        doc, sessions, observed_at_start, observed_at_end = snapshot
+        (
+            doc,
+            sessions,
+            observed_at_start,
+            observed_at_end,
+            is_legacy_unpinned,
+        ) = snapshot
         store.put(doc)
-        if sessions:
+        # An active source revision pins the exact source document bytes.  Writing
+        # materialization bookkeeping back into that transcript-session document
+        # would itself change pinned membership.  Legacy sessions keep the
+        # compatibility aggregate update; pinned sessions keep currentness on the
+        # coverage/projection documents instead.
+        if sessions and is_legacy_unpinned:
             session_doc = dict(sessions[0])
             session_doc.update(
                 {
@@ -164,7 +170,13 @@ def update_coverage_with_tool_evidence(*, session_id_hash: str, store: CouchDBSo
         current = _coverage_snapshot(session_id_hash=session_id_hash, store=store)
         if current is None:
             continue
-        current_doc, current_sessions, _current_start, _current_end = current
+        (
+            current_doc,
+            current_sessions,
+            _current_start,
+            _current_end,
+            current_is_legacy_unpinned,
+        ) = current
         persisted = store.get(coverage_manifest_doc_id(session_id_hash)) or {}
         session_current = current_sessions[0] if current_sessions else {}
         expected_hash = str(current_doc.get("source_hash") or "")
@@ -174,7 +186,11 @@ def update_coverage_with_tool_evidence(*, session_id_hash: str, store: CouchDBSo
             == int(current_doc.get("conversation_chunk_count") or 0)
             and int(persisted.get("tool_evidence_bundle_count") or 0)
             == int(current_doc.get("tool_evidence_bundle_count") or 0)
-            and (not current_sessions or str(session_current.get("source_hash") or "") == expected_hash)
+            and (
+                not current_sessions
+                or not current_is_legacy_unpinned
+                or str(session_current.get("source_hash") or "") == expected_hash
+            )
         ):
             return current_doc
     raise SourceStoreError("coverage manifest did not converge after concurrent source updates")
@@ -182,10 +198,14 @@ def update_coverage_with_tool_evidence(*, session_id_hash: str, store: CouchDBSo
 
 def _coverage_snapshot(
     *, session_id_hash: str, store: CouchDBSourceStore
-) -> tuple[dict, list[dict], str, str] | None:
-    sessions = _session_docs(store, session_id_hash, SourceDocType.TRANSCRIPT_SESSION)
-    chunks = _session_docs(store, session_id_hash, SourceDocType.CONVERSATION_CHUNK)
-    bundles = _session_docs(store, session_id_hash, SourceDocType.TOOL_EVIDENCE_BUNDLE)
+) -> tuple[dict, list[dict], str, str, bool] | None:
+    resolved = resolve_active_source_revision(
+        session_id_hash=session_id_hash,
+        store=store,
+    )
+    sessions = list(resolved.sessions)
+    chunks = list(resolved.conversation_chunks)
+    bundles = list(resolved.tool_evidence_bundles)
     existing = store.get(coverage_manifest_doc_id(session_id_hash))
     if existing is None and not chunks and not bundles:
         return None
@@ -218,7 +238,21 @@ def _coverage_snapshot(
             for bundle in bundles
         ],
     )
-    return doc, sessions, observed_at_start, observed_at_end
+    # The source-revision resolver is the authority for the active member set and
+    # hash.  The coverage document must retain that exact identity rather than
+    # derive one from an independently broadened store scan.
+    doc["source_hash"] = resolved.source_hash
+    if not resolved.is_legacy_unpinned:
+        if not resolved.manifest_id:
+            raise SourceStoreError("active source revision manifest is required")
+        doc["active_source_manifest_id"] = resolved.manifest_id
+    return (
+        doc,
+        sessions,
+        observed_at_start,
+        observed_at_end,
+        resolved.is_legacy_unpinned,
+    )
 
 
 def _observed_bounds(
@@ -314,9 +348,13 @@ def _chunk_to_view(chunk: dict) -> ChunkView:
 
 
 def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStore) -> MaterializedSessionMemory:
-    sessions = _session_docs(store, session_id_hash, SourceDocType.TRANSCRIPT_SESSION)
-    chunks = _session_docs(store, session_id_hash, SourceDocType.CONVERSATION_CHUNK)
-    bundles = _session_docs(store, session_id_hash, SourceDocType.TOOL_EVIDENCE_BUNDLE)
+    resolved = resolve_active_source_revision(
+        session_id_hash=session_id_hash,
+        store=store,
+    )
+    sessions = list(resolved.sessions)
+    chunks = list(resolved.conversation_chunks)
+    bundles = list(resolved.tool_evidence_bundles)
     coverage = store.get(coverage_manifest_doc_id(session_id_hash))
 
     provider = sessions[0].get("provider", "") if sessions else (chunks[0].get("provider", "") if chunks else "")
@@ -370,23 +408,22 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
         chunks=chunks,
         bundles=bundles,
     )
-    source_hash = build_source_hash(
-        [str(chunk.get("content_hash") or "") for chunk in chunks],
-        [str(bundle.get("coverage_hash") or "") for bundle in bundles],
-        observed_at_start=observed_at_start,
-        observed_at_end=observed_at_end,
-        conversation_revision_tokens=[
-            build_source_revision_token(chunk, material_hash_field="content_hash")
-            for chunk in chunks
-        ],
-        tool_evidence_revision_tokens=[
-            build_source_revision_token(bundle, material_hash_field="content_hash")
-            for bundle in bundles
-        ],
-    )
+    source_hash = resolved.source_hash
     coverage_source_hash = str((coverage or {}).get("source_hash") or "")
     if coverage_source_hash and coverage_source_hash != source_hash:
         notes.append("coverage_source_hash_mismatch")
+        # Legacy coverage manifests predate immutable source-revision identity
+        # and can carry an older derivation of the same complete source set.
+        # Preserve their compatibility signal as a note. Once an active
+        # pointer exists, however, coverage must bind exactly to its manifest
+        # source hash and mismatches are fail-closed.
+        if not resolved.is_legacy_unpinned:
+            fully_materialized = False
+    if not resolved.is_legacy_unpinned:
+        coverage_manifest_id = str((coverage or {}).get("active_source_manifest_id") or "")
+        if coverage_manifest_id != str(resolved.manifest_id or ""):
+            fully_materialized = False
+            notes.append("coverage_active_source_manifest_mismatch")
 
     return MaterializedSessionMemory(
         session_id_hash=session_id_hash,
@@ -409,10 +446,21 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
 def _current_session_source_hash(
     *, session_id_hash: str, store: CouchDBSourceStore
 ) -> str:
-    snapshot = _coverage_snapshot(session_id_hash=session_id_hash, store=store)
-    if snapshot is None:
+    resolved = resolve_active_source_revision(
+        session_id_hash=session_id_hash,
+        store=store,
+    )
+    # Historical projection-CAS callers can run before any source document is
+    # present. Preserve their empty-currentness sentinel, while still letting a
+    # malformed active pointer raise from the resolver rather than falling back.
+    if (
+        resolved.is_legacy_unpinned
+        and not resolved.sessions
+        and not resolved.conversation_chunks
+        and not resolved.tool_evidence_bundles
+    ):
         return ""
-    return str(snapshot[0].get("source_hash") or "")
+    return resolved.source_hash
 
 
 def _projection_state_for_materialization(
@@ -517,19 +565,15 @@ def _update_session_materialization_if_source_current(
     *, materialized: MaterializedSessionMemory, store: CouchDBSourceStore
 ) -> bool:
     for _attempt in range(3):
-        if (
-            _current_session_source_hash(
-                session_id_hash=materialized.session_id_hash,
-                store=store,
-            )
-            != materialized.source_hash
-        ):
-            return False
-        sessions = _session_docs(
-            store,
-            materialized.session_id_hash,
-            SourceDocType.TRANSCRIPT_SESSION,
+        resolved = resolve_active_source_revision(
+            session_id_hash=materialized.session_id_hash,
+            store=store,
         )
+        if resolved.source_hash != materialized.source_hash:
+            return False
+        if not resolved.is_legacy_unpinned:
+            return True
+        sessions = list(resolved.sessions)
         if not sessions:
             return False
         current = sessions[0]
@@ -589,6 +633,15 @@ def project_session_memory(
         if commit_status == "source_revision_changed":
             result["state_write_skipped"] = commit_status
         return result
+
+    # Resolve before calling an external projector so a malformed/missing active
+    # pointer cannot create a projection side effect.  Deliberately leave a
+    # valid newer source hash to the existing commit-time currentness check: the
+    # projector error/reporting contract already distinguishes that race.
+    _current_session_source_hash(
+        session_id_hash=materialized.session_id_hash,
+        store=store,
+    )
 
     try:
         ref = projector.project(

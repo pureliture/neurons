@@ -11,6 +11,10 @@ from agent_knowledge.couchdb_source.document_model import (
     normalize_observed_interval,
     observed_time_bounds,
 )
+from agent_knowledge.couchdb_source.source_revision import (
+    resolve_active_source_revision,
+    resolve_active_source_revision_from_snapshot,
+)
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 
 from ._util import (
@@ -131,18 +135,13 @@ def _materialize_artifact_from_couchdb_source_once(
 ) -> tuple[SessionMemoryArtifact, tuple[Mapping[str, Any], ...]]:
     """Build a core artifact from CouchDB source docs without copying source bodies."""
 
-    sessions = source_store.find_by_session(
+    resolved = resolve_active_source_revision(
         session_id_hash=session_id_hash,
-        doc_type=SourceDocType.TRANSCRIPT_SESSION,
+        store=source_store,
     )
-    chunks = source_store.find_by_session(
-        session_id_hash=session_id_hash,
-        doc_type=SourceDocType.CONVERSATION_CHUNK,
-    )
-    evidence = source_store.find_by_session(
-        session_id_hash=session_id_hash,
-        doc_type=SourceDocType.TOOL_EVIDENCE_BUNDLE,
-    )
+    sessions = list(resolved.sessions)
+    chunks = list(resolved.conversation_chunks)
+    evidence = list(resolved.tool_evidence_bundles)
     if not sessions and not chunks:
         raise ValueError("session source docs are required")
     provider = str((sessions[0] if sessions else chunks[0]).get("provider") or "")
@@ -155,11 +154,7 @@ def _materialize_artifact_from_couchdb_source_once(
         chunks,
         evidence,
     )
-    source_revision = _source_revision_from_documents(
-        sessions=sessions,
-        chunks=chunks,
-        evidence=evidence,
-    )
+    source_revision = resolved.source_hash
     previous_artifact = (
         artifact_store.get_latest_for_session(
             project=project,
@@ -244,23 +239,15 @@ def _materialize_artifact_from_couchdb_source_once(
 def session_source_revision_from_couchdb_source(
     *, session_id_hash: str, source_store: CouchDBSourceStore
 ) -> str:
-    sessions = source_store.find_by_session(
+    # Selection paths obtain exactly one session-scoped snapshot.  The pure
+    # resolver interprets both legacy and active control documents from that
+    # snapshot, so projected active sessions avoid per-document ``get`` calls
+    # without widening from malformed active state to legacy discovery.
+    documents = source_store.find_by_session(session_id_hash=session_id_hash)
+    return resolve_active_source_revision_from_snapshot(
         session_id_hash=session_id_hash,
-        doc_type=SourceDocType.TRANSCRIPT_SESSION,
-    )
-    chunks = source_store.find_by_session(
-        session_id_hash=session_id_hash,
-        doc_type=SourceDocType.CONVERSATION_CHUNK,
-    )
-    evidence = source_store.find_by_session(
-        session_id_hash=session_id_hash,
-        doc_type=SourceDocType.TOOL_EVIDENCE_BUNDLE,
-    )
-    return _source_revision_from_documents(
-        sessions=sessions,
-        chunks=chunks,
-        evidence=evidence,
-    )
+        documents=documents,
+    ).source_hash
 
 
 def _source_revision_from_documents(
@@ -276,10 +263,11 @@ def _source_revision_from_documents(
     N+1 when a chunk arrives between reads.
     """
 
-    observed_at_start, observed_at_end = _source_observed_bounds(
-        sessions,
-        chunks,
-        evidence,
+    # Match the source-revision resolver: evidence affects revision tokens but
+    # never expands the session/conversation event window.
+    observed_at_start, observed_at_end = observed_time_bounds(
+        sessions=sessions,
+        chunks=chunks,
     )
     return build_source_hash(
         [str(doc.get("content_hash") or "") for doc in chunks],
@@ -573,11 +561,14 @@ def extraction_text_from_couchdb_chunks(
     logs the generic-only regression).
     """
 
-    chunks = source_store.find_by_session(
+    resolved = resolve_active_source_revision(
         session_id_hash=session_id_hash,
-        doc_type=SourceDocType.CONVERSATION_CHUNK,
+        store=source_store,
     )
-    return _extraction_text_from_chunks(chunks, max_chars=max_chars)
+    return _extraction_text_from_chunks(
+        resolved.conversation_chunks,
+        max_chars=max_chars,
+    )
 
 
 def _extraction_text_from_chunks(

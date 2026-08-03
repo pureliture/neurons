@@ -401,7 +401,13 @@ def _aggregate_is_current(
     snapshot = _coverage_snapshot(session_id_hash=session_id_hash, store=source_store)
     if snapshot is None:
         return False
-    expected, sessions, expected_start, expected_end = snapshot
+    (
+        expected,
+        sessions,
+        expected_start,
+        expected_end,
+        is_legacy_unpinned,
+    ) = snapshot
     persisted = source_store.get(coverage_manifest_doc_id(session_id_hash)) or {}
     projection = source_store.get(projection_state_doc_id(session_id_hash)) or {}
     session = sessions[0] if sessions else {}
@@ -416,9 +422,15 @@ def _aggregate_is_current(
         == int(expected.get("tool_evidence_bundle_count") or 0)
         and str(persisted.get("observed_at_start") or "") == expected_start
         and str(persisted.get("observed_at_end") or "") == expected_end
-        and str(session.get("source_hash") or "") == expected_hash
-        and str(session.get("observed_at_start") or "") == expected_start
-        and str(session.get("observed_at_end") or "") == expected_end
+        and (
+            not sessions
+            or not is_legacy_unpinned
+            or (
+                str(session.get("source_hash") or "") == expected_hash
+                and str(session.get("observed_at_start") or "") == expected_start
+                and str(session.get("observed_at_end") or "") == expected_end
+            )
+        )
         and str(projection.get("source_hash") or "") == expected_hash
     )
 
