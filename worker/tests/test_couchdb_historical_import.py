@@ -9,16 +9,29 @@ from agent_knowledge.couchdb_source.historical_import import (
     import_historical_source,
     import_historical_sources,
 )
-from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
+from agent_knowledge.couchdb_source.source_revision import (
+    activate_source_revision,
+    resolve_active_source_revision,
+)
+from agent_knowledge.couchdb_source.source_store import (
+    InMemoryCouchDBSourceStore,
+    SourceStoreConflict,
+)
 
 
-def _write_codex_fixture(tmp_path, *, session_id="sess-1", user_text="please run the migration"):
+def _write_codex_fixture(
+    tmp_path,
+    *,
+    session_id="sess-1",
+    user_text="please run the migration",
+    ended_at="2026-06-17T01:10:00Z",
+):
     payload = {
         "provider": "codex",
         "schema_version": "provider_transcript_fixture.v1",
         "session_id": session_id,
         "started_at": "2026-06-17T01:00:00Z",
-        "ended_at": "2026-06-17T01:10:00Z",
+        "ended_at": ended_at,
         "turns": [
             {"role": "user", "text": user_text, "timestamp": "2026-06-17T01:00:01Z"},
             {"role": "assistant", "text": "done; 12 passed", "timestamp": "2026-06-17T01:00:05Z"},
@@ -27,6 +40,62 @@ def _write_codex_fixture(tmp_path, *, session_id="sess-1", user_text="please run
     path = tmp_path / f"codex-{session_id}.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return str(path)
+
+
+class _PointerPublishBeforeHistoricalSourceWriteStore(InMemoryCouchDBSourceStore):
+    """Publish an initial pointer after import parsing but before its source write."""
+
+    def __init__(self, *, session_id_hash: str) -> None:
+        super().__init__()
+        self._session_id_hash = session_id_hash
+        self._publish_before_next_source_write = False
+
+    def arm_pointer_publish(self) -> None:
+        self._publish_before_next_source_write = True
+
+    def put(self, document: dict):
+        if (
+            self._publish_before_next_source_write
+            and str(document.get("doc_type") or "") == dm.SourceDocType.TRANSCRIPT_SESSION
+        ):
+            self._publish_before_next_source_write = False
+            activate_source_revision(store=self, session_id_hash=self._session_id_hash)
+        return super().put(document)
+
+
+class _PointerPublishAfterHistoricalSourceWriteStore(InMemoryCouchDBSourceStore):
+    """Publish an initial pointer after one raw import write reaches the store."""
+
+    def __init__(self, *, session_id_hash: str) -> None:
+        super().__init__()
+        self._session_id_hash = session_id_hash
+        self._publish_after_next_source_write = False
+        self._fail_successor_pointer_cas = False
+        self._fail_next_pointer_cas = False
+
+    def arm_pointer_publish(self, *, fail_successor_pointer_cas: bool = False) -> None:
+        self._publish_after_next_source_write = True
+        self._fail_successor_pointer_cas = fail_successor_pointer_cas
+
+    def put(self, document: dict):
+        revision = super().put(document)
+        if (
+            self._publish_after_next_source_write
+            and str(document.get("doc_type") or "") == dm.SourceDocType.TRANSCRIPT_SESSION
+        ):
+            self._publish_after_next_source_write = False
+            activate_source_revision(store=self, session_id_hash=self._session_id_hash)
+            self._fail_next_pointer_cas = self._fail_successor_pointer_cas
+        return revision
+
+    def put_if_revision(self, document: dict, *, expected_rev: str):
+        if (
+            self._fail_next_pointer_cas
+            and str(document.get("doc_type") or "") == dm.SourceDocType.ACTIVE_SOURCE_REVISION
+        ):
+            self._fail_next_pointer_cas = False
+            raise SourceStoreConflict("injected successor pointer conflict")
+        return super().put_if_revision(document, expected_rev=expected_rev)
 
 
 def test_import_writes_session_chunks_and_coverage(tmp_path):
@@ -70,6 +139,198 @@ def test_import_is_idempotent(tmp_path):
     # re-import did not churn revisions of the session doc
     session_doc = store.get(dm.session_doc_id(first.session_id_hash))
     assert session_doc["_rev"].startswith("1-")
+
+
+def test_import_fails_closed_when_an_active_source_revision_already_exists(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    original = _write_codex_fixture(tmp_path, session_id="active-import")
+    locator = SourceLocator(
+        provider="codex",
+        source_path=original,
+        capture_metadata_project="neurons",
+    )
+    first = import_historical_source(locator=locator, store=store)
+    assert first.status == ImportStatus.IMPORTED
+    activated = activate_source_revision(
+        store=store,
+        session_id_hash=first.session_id_hash,
+    )
+    before = store.all_docs()
+
+    changed = _write_codex_fixture(
+        tmp_path,
+        session_id="active-import",
+        user_text="changed historical import source",
+    )
+    result = import_historical_source(
+        locator=SourceLocator(
+            provider="codex",
+            source_path=changed,
+            capture_metadata_project="neurons",
+        ),
+        store=store,
+    )
+
+    assert result.status == ImportStatus.ACTIVE_SOURCE_REVISION_BLOCKED
+    assert store.all_docs() == before
+    assert (
+        resolve_active_source_revision(
+            store=store,
+            session_id_hash=first.session_id_hash,
+        ).source_hash
+        == activated.source_hash
+    )
+
+
+def test_import_fails_closed_without_writing_when_active_pointer_is_incomplete(tmp_path):
+    session_id_hash = dm.build_session_id_hash("codex", "incomplete-active-pointer")
+    store = InMemoryCouchDBSourceStore()
+    store.put(
+        {
+            "_id": dm.active_source_revision_pointer_doc_id(session_id_hash),
+            "doc_type": dm.SourceDocType.ACTIVE_SOURCE_REVISION,
+            "session_id_hash": session_id_hash,
+        }
+    )
+    before = store.all_docs()
+
+    result = import_historical_source(
+        locator=SourceLocator(
+            provider="codex",
+            source_path=_write_codex_fixture(
+                tmp_path,
+                session_id="incomplete-active-pointer",
+            ),
+            capture_metadata_project="neurons",
+        ),
+        store=store,
+    )
+
+    assert result.status == ImportStatus.ACTIVE_SOURCE_REVISION_BLOCKED
+    assert store.all_docs() == before
+
+
+def test_import_fails_closed_when_pointer_publishes_before_first_source_write(tmp_path):
+    session_id_hash = dm.build_session_id_hash("codex", "active-import-race")
+    store = _PointerPublishBeforeHistoricalSourceWriteStore(
+        session_id_hash=session_id_hash,
+    )
+    locator = SourceLocator(
+        provider="codex",
+        source_path=_write_codex_fixture(tmp_path, session_id="active-import-race"),
+        capture_metadata_project="neurons",
+    )
+    first = import_historical_source(locator=locator, store=store)
+    assert first.status == ImportStatus.IMPORTED
+    origin_ids = [
+        dm.session_doc_id(session_id_hash),
+        *(
+            document["_id"]
+            for document in store.find_by_session(
+                session_id_hash=session_id_hash,
+                doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            )
+        ),
+        dm.coverage_manifest_doc_id(session_id_hash),
+    ]
+    before = {document_id: store.get(document_id) for document_id in origin_ids}
+    store.arm_pointer_publish()
+
+    result = import_historical_source(
+        locator=SourceLocator(
+            provider="codex",
+            source_path=_write_codex_fixture(
+                tmp_path,
+                session_id="active-import-race",
+                user_text="raced changed historical import source",
+                ended_at="2026-06-17T01:15:00Z",
+            ),
+            capture_metadata_project="neurons",
+        ),
+        store=store,
+    )
+
+    assert result.status == ImportStatus.ACTIVE_SOURCE_REVISION_BLOCKED
+    assert {document_id: store.get(document_id) for document_id in origin_ids} == before
+    assert resolve_active_source_revision(
+        store=store,
+        session_id_hash=session_id_hash,
+    ).is_legacy_unpinned is False
+
+
+def test_import_reconciles_successor_when_pointer_publishes_after_source_write(tmp_path):
+    session_id_hash = dm.build_session_id_hash("codex", "active-import-post-write")
+    store = _PointerPublishAfterHistoricalSourceWriteStore(
+        session_id_hash=session_id_hash,
+    )
+    locator = SourceLocator(
+        provider="codex",
+        source_path=_write_codex_fixture(tmp_path, session_id="active-import-post-write"),
+        capture_metadata_project="neurons",
+    )
+    first = import_historical_source(locator=locator, store=store)
+    assert first.status == ImportStatus.IMPORTED
+    before_session = store.get(dm.session_doc_id(session_id_hash))
+    assert before_session is not None
+    store.arm_pointer_publish()
+
+    result = import_historical_source(
+        locator=SourceLocator(
+            provider="codex",
+            source_path=_write_codex_fixture(
+                tmp_path,
+                session_id="active-import-post-write",
+                ended_at="2026-06-17T01:15:00Z",
+            ),
+            capture_metadata_project="neurons",
+        ),
+        store=store,
+    )
+
+    resolved = resolve_active_source_revision(
+        store=store,
+        session_id_hash=session_id_hash,
+    )
+    coverage = store.get(dm.coverage_manifest_doc_id(session_id_hash))
+    assert result.status == ImportStatus.IMPORTED
+    assert "successor_activated" in result.notes
+    assert store.get(dm.session_doc_id(session_id_hash)) != before_session
+    assert coverage is not None
+    assert coverage["source_hash"] == resolved.source_hash
+
+
+def test_import_reports_uncertain_when_successor_cas_fails_after_source_write(tmp_path):
+    session_id_hash = dm.build_session_id_hash("codex", "active-import-cas-failure")
+    store = _PointerPublishAfterHistoricalSourceWriteStore(
+        session_id_hash=session_id_hash,
+    )
+    locator = SourceLocator(
+        provider="codex",
+        source_path=_write_codex_fixture(tmp_path, session_id="active-import-cas-failure"),
+        capture_metadata_project="neurons",
+    )
+    assert import_historical_source(locator=locator, store=store).status == ImportStatus.IMPORTED
+    store.arm_pointer_publish(fail_successor_pointer_cas=True)
+
+    result = import_historical_source(
+        locator=SourceLocator(
+            provider="codex",
+            source_path=_write_codex_fixture(
+                tmp_path,
+                session_id="active-import-cas-failure",
+                ended_at="2026-06-17T01:15:00Z",
+            ),
+            capture_metadata_project="neurons",
+        ),
+        store=store,
+    )
+
+    assert result.status == ImportStatus.ACTIVE_SOURCE_REVISION_UNCERTAIN
+    assert "no_import_acknowledgement" in result.notes
+    assert resolve_active_source_revision(
+        store=store,
+        session_id_hash=session_id_hash,
+    ).is_legacy_unpinned is False
 
 
 def _write_antigravity_fixture(tmp_path, *, session_id="ag-1"):

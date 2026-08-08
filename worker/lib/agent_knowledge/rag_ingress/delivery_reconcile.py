@@ -17,16 +17,27 @@ class DeliveryReconciler:
         row = self._state_db.get_delivery_job(job_id)
         if row is None:
             raise KeyError(job_id)
-        evidence = None
-        dataset_ref = str(row.get("index_target_id") or "")
-        document_ref = str(row.get("index_document_id") or "")
-        if dataset_ref and document_ref:
-            evidence = self._backend.status(dataset_ref, document_ref)
-        if evidence is None:
-            evidence = self._backend.find_by_natural_key(
-                str(row["idempotency_key"]),
-                str(row["payload_hash"]),
-            )
+        # A source-aware natural-key lookup can return non-success evidence
+        # when a raw orphan is outside an active source revision. That must
+        # outrank a stale generic reference. A natural-key success, however,
+        # does not replace the existing backend status refresh contract.
+        natural_evidence = self._backend.find_by_natural_key(
+            str(row["idempotency_key"]),
+            str(row["payload_hash"]),
+        )
+        evidence = natural_evidence
+        if natural_evidence is None or natural_evidence.status == "succeeded":
+            dataset_ref = str(row.get("index_target_id") or "")
+            document_ref = str(row.get("index_document_id") or "")
+            if dataset_ref and document_ref:
+                status_evidence = self._backend.status(dataset_ref, document_ref)
+                # A generic status lookup can still provide a later explicit
+                # failure, but its unknown result does not disprove a
+                # membership-verified natural-key success.
+                if status_evidence is not None and (
+                    natural_evidence is None or status_evidence.status != "unknown"
+                ):
+                    evidence = status_evidence
         if evidence is None:
             return self._state_db.record_replayable_attempt(job_id, now=now, max_attempts=max_attempts)
         if evidence.status == "succeeded":

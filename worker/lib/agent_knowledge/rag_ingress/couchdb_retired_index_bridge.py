@@ -54,6 +54,8 @@ from __future__ import annotations
 
 from ..couchdb_source.document_model import (
     ProjectionStatus,
+    SourceDocType,
+    active_source_revision_pointer_doc_id,
     build_conversation_chunk_document,
     build_coverage_manifest_document,
     build_projection_state_document,
@@ -63,11 +65,22 @@ from ..couchdb_source.document_model import (
     session_doc_id,
     sha256_hash,
 )
-from ..couchdb_source.source_store import CouchDBSourceStore
 from ..couchdb_source.session_memory_materializer import (
     mark_projection_pending_if_source_changed,
     upsert_transcript_session_aggregate,
     update_coverage_with_tool_evidence,
+)
+from ..couchdb_source.source_revision import (
+    ResolvedSourceRevision,
+    _source_document_logical_identity,
+    active_source_origin_document_ids,
+    activate_source_revision,
+    resolve_active_source_revision,
+)
+from ..couchdb_source.source_store import (
+    CouchDBSourceStore,
+    SourceStoreConflict,
+    payload_hash,
 )
 from ..session_memory.transcript_model import REDACTION_VERSION, TranscriptChunk, TranscriptSession
 from .retired_index_bridge import (
@@ -82,6 +95,106 @@ from .rag_ready_document import RagReadyDocument
 # ---------------------------------------------------------------------------
 # Shared transform helper
 # ---------------------------------------------------------------------------
+
+
+_CHUNK_IDENTITY_FIELDS = (
+    "doc_type",
+    "session_id_hash",
+    "chunk_id",
+    "provider",
+    "project",
+    "redaction_version",
+    "source_status",
+)
+
+
+def _chunk_documents_match(existing_chunk: dict, expected_chunk: dict) -> bool:
+    return (
+        all(
+            str(existing_chunk.get(field) or "")
+            == str(expected_chunk.get(field) or "")
+            for field in _CHUNK_IDENTITY_FIELDS
+        )
+        and payload_hash(existing_chunk) == payload_hash(expected_chunk)
+    )
+
+
+def _is_active_chunk_duplicate(
+    *,
+    active_revision: ResolvedSourceRevision,
+    chunk_document: dict,
+) -> bool:
+    """Match raw ingress against the active source's stable chunk identity."""
+
+    expected_identity = _source_document_logical_identity(chunk_document)
+    active_chunks = [
+        document
+        for document in active_revision.conversation_chunks
+        if _source_document_logical_identity(document) == expected_identity
+    ]
+    if len(active_chunks) > 1:
+        raise SourceStoreConflict("active source revision chunk logical identity is ambiguous")
+    if not active_chunks:
+        return False
+    if not _chunk_documents_match(active_chunks[0], chunk_document):
+        raise SourceStoreConflict("active source revision chunk logical identity conflicts")
+    return True
+
+
+def _active_source_revision_before_ingress(
+    *,
+    store: CouchDBSourceStore,
+    session_id_hash: str,
+) -> ResolvedSourceRevision | None:
+    """Resolve a pinned source set before any ingress write can alter it."""
+
+    if store.get(active_source_revision_pointer_doc_id(session_id_hash)) is None:
+        return None
+    return resolve_active_source_revision(
+        store=store,
+        session_id_hash=session_id_hash,
+    )
+
+
+def _assert_active_revision_matches_ingress(
+    *,
+    active_revision: ResolvedSourceRevision,
+    provider: str,
+    project: str,
+) -> None:
+    if len(active_revision.sessions) != 1:
+        raise SourceStoreConflict("active source revision session contract is invalid")
+    session = active_revision.sessions[0]
+    if (
+        str(session.get("provider") or "") != provider
+        or str(session.get("project") or "") != project
+    ):
+        raise SourceStoreConflict("active source revision ingress contract is invalid")
+
+
+def _active_revision_source_document_ids(
+    active_revision: ResolvedSourceRevision,
+) -> tuple[str, ...]:
+    """Use origins so a successor never mixes active copies with raw ingress."""
+
+    return active_source_origin_document_ids(active_revision)
+
+
+def _active_revision_provenance(
+    *,
+    store: CouchDBSourceStore,
+    active_revision: ResolvedSourceRevision,
+) -> dict[str, str]:
+    """Reuse immutable manifest provenance for an exact active duplicate."""
+
+    if not active_revision.manifest_id:
+        raise SourceStoreConflict("active source revision manifest is missing")
+    manifest = store.get(active_revision.manifest_id)
+    provenance = (manifest or {}).get("provenance")
+    if not isinstance(provenance, dict):
+        raise SourceStoreConflict("active source revision provenance is invalid")
+    return {str(key): str(value) for key, value in provenance.items()}
+
 
 def build_couchdb_docs_from_rag_document(document: RagReadyDocument) -> tuple[
     dict, dict, dict, dict, str, str
@@ -245,35 +358,173 @@ class CouchDBRetiredIndexBridgeAdapter:
         dataset_ref = f"couchdb:{db_name}"
         doc_ref = session_doc_id(session_id_hash)
 
-        # Persist the chunk first, then converge the cumulative session envelope.
-        chunk_revision = self._store.put(chunk_doc)
-        if on_step_complete is not None:
-            on_step_complete("chunk", document_ref=doc_ref)
-
-        upsert_transcript_session_aggregate(
+        active_revision = _active_source_revision_before_ingress(
             store=self._store,
-            incoming=session_doc,
-        )
-        if on_step_complete is not None:
-            on_step_complete("session", document_ref=doc_ref)
-
-        coverage_doc = update_coverage_with_tool_evidence(
             session_id_hash=session_id_hash,
-            store=self._store,
-        ) or coverage_doc
-        if on_step_complete is not None:
-            on_step_complete("coverage", document_ref=doc_ref)
-
-        mark_projection_pending_if_source_changed(
-            session_id_hash=session_id_hash,
-            provider=str(session_doc.get("provider") or ""),
-            project=str(session_doc.get("project") or ""),
-            source_hash=str(coverage_doc.get("source_hash") or ""),
-            store=self._store,
-            source_changed=chunk_revision.outcome != "duplicate",
         )
-        if on_step_complete is not None:
-            on_step_complete("projection", document_ref=doc_ref)
+        if active_revision is None:
+            # Preserve the ordinary legacy aggregate behavior while no active
+            # pointer exists. An initial activation can publish its pointer
+            # after this pre-read but before the raw source write; recheck
+            # below so the later writer creates the required successor.
+            chunk_revision = self._store.put_if_absent(chunk_doc)
+            if on_step_complete is not None:
+                on_step_complete("chunk", document_ref=doc_ref)
+
+            upsert_transcript_session_aggregate(
+                store=self._store,
+                incoming=session_doc,
+            )
+            if on_step_complete is not None:
+                on_step_complete("session", document_ref=doc_ref)
+
+            activated_after_legacy_write = _active_source_revision_before_ingress(
+                store=self._store,
+                session_id_hash=session_id_hash,
+            )
+            if activated_after_legacy_write is not None:
+                _assert_active_revision_matches_ingress(
+                    active_revision=activated_after_legacy_write,
+                    provider=str(session_doc.get("provider") or ""),
+                    project=str(session_doc.get("project") or ""),
+                )
+                chunk_document_id = str(chunk_doc["_id"])
+                active_duplicate = _is_active_chunk_duplicate(
+                    active_revision=activated_after_legacy_write,
+                    chunk_document=chunk_doc,
+                )
+                activated = activate_source_revision(
+                    store=self._store,
+                    session_id_hash=session_id_hash,
+                    source_document_ids=tuple(
+                        sorted(
+                            {
+                                *_active_revision_source_document_ids(
+                                    activated_after_legacy_write
+                                ),
+                                *(() if active_duplicate else (chunk_document_id,)),
+                            }
+                        )
+                    ),
+                    provenance=(
+                        _active_revision_provenance(
+                            store=self._store,
+                            active_revision=activated_after_legacy_write,
+                        )
+                        if active_duplicate
+                        else None
+                    ),
+                    expected_predecessor=activated_after_legacy_write,
+                )
+                coverage_doc = update_coverage_with_tool_evidence(
+                    session_id_hash=session_id_hash,
+                    store=self._store,
+                )
+                if (
+                    coverage_doc is None
+                    or str(coverage_doc.get("source_hash") or "")
+                    != activated.source_hash
+                ):
+                    raise SourceStoreConflict(
+                        "active source revision coverage did not converge"
+                    )
+                source_hash = activated.source_hash
+                source_changed = (
+                    activated.source_hash
+                    != activated_after_legacy_write.source_hash
+                )
+            else:
+                coverage_doc = update_coverage_with_tool_evidence(
+                    session_id_hash=session_id_hash,
+                    store=self._store,
+                ) or coverage_doc
+                source_hash = str(coverage_doc.get("source_hash") or "")
+                source_changed = chunk_revision.outcome != "duplicate"
+            if on_step_complete is not None:
+                on_step_complete("coverage", document_ref=doc_ref)
+
+            mark_projection_pending_if_source_changed(
+                session_id_hash=session_id_hash,
+                provider=str(session_doc.get("provider") or ""),
+                project=str(session_doc.get("project") or ""),
+                source_hash=source_hash,
+                store=self._store,
+                source_changed=source_changed,
+            )
+            if on_step_complete is not None:
+                on_step_complete("projection", document_ref=doc_ref)
+        else:
+            _assert_active_revision_matches_ingress(
+                active_revision=active_revision,
+                provider=str(session_doc.get("provider") or ""),
+                project=str(session_doc.get("project") or ""),
+            )
+            chunk_document_id = str(chunk_doc["_id"])
+            active_duplicate = _is_active_chunk_duplicate(
+                active_revision=active_revision,
+                chunk_document=chunk_doc,
+            )
+            existing_chunk = self._store.get(chunk_document_id)
+            if existing_chunk is not None:
+                if not _chunk_documents_match(existing_chunk, chunk_doc):
+                    raise SourceStoreConflict(
+                        "active source revision chunk id already has different content"
+                    )
+            else:
+                self._store.put_if_absent(chunk_doc)
+            if on_step_complete is not None:
+                on_step_complete("chunk", document_ref=doc_ref)
+
+            activated = activate_source_revision(
+                store=self._store,
+                session_id_hash=session_id_hash,
+                source_document_ids=tuple(
+                    sorted(
+                            {
+                                *_active_revision_source_document_ids(active_revision),
+                                *(() if active_duplicate else (chunk_document_id,)),
+                        }
+                    )
+                ),
+                provenance=(
+                    _active_revision_provenance(
+                        store=self._store,
+                        active_revision=active_revision,
+                    )
+                    if active_duplicate
+                    else None
+                ),
+                expected_predecessor=active_revision,
+            )
+            # A retry may see its chunk already active after the pointer CAS.
+            # Re-run activation with its complete mutable origin set before
+            # secondary reconciliation so a CAS-window origin drift becomes a
+            # new immutable successor instead of a stale successful duplicate.
+            coverage_doc = update_coverage_with_tool_evidence(
+                session_id_hash=session_id_hash,
+                store=self._store,
+            )
+            if (
+                coverage_doc is None
+                or str(coverage_doc.get("source_hash") or "")
+                != activated.source_hash
+            ):
+                raise SourceStoreConflict(
+                    "active source revision coverage did not converge"
+                )
+            if on_step_complete is not None:
+                on_step_complete("coverage", document_ref=doc_ref)
+
+            mark_projection_pending_if_source_changed(
+                session_id_hash=session_id_hash,
+                provider=str(session_doc.get("provider") or ""),
+                project=str(session_doc.get("project") or ""),
+                source_hash=activated.source_hash,
+                store=self._store,
+                source_changed=True,
+            )
+            if on_step_complete is not None:
+                on_step_complete("projection", document_ref=doc_ref)
 
         return BackendSubmitResult(
             dataset_ref=dataset_ref,
