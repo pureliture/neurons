@@ -375,6 +375,108 @@ def active_source_origin_document_ids(
     return tuple(origin_ids)
 
 
+def _validated_immediate_snapshot_origin_id(
+    *,
+    document: Mapping[str, object],
+    store: CouchDBSourceStore,
+    session_id_hash: str,
+) -> str:
+    """Validate and return a generic snapshot member's immediate origin.
+
+    Temporal repair supports the product path where a generic successor wraps
+    a raw source document or one established corrective ``current`` copy.
+    A generic-over-generic chain is not an active-source contract and must not
+    be recursively recovered into a new pointer.
+    """
+
+    expected_doc_type = str(document.get("doc_type") or "")
+    origin_id = str(document.get(_SOURCE_SNAPSHOT_ORIGIN_ID) or "")
+    try:
+        dm.assert_hash_like(
+            "source_snapshot_scope",
+            str(document.get(_SOURCE_SNAPSHOT_SCOPE) or ""),
+        )
+    except ValueError as exc:
+        raise SourceRevisionResolutionError(
+            "source revision snapshot origin is invalid"
+        ) from exc
+    if not origin_id:
+        raise SourceRevisionResolutionError("source revision snapshot origin is invalid")
+    stored = store.get(origin_id)
+    if (
+        stored is None
+        or str(stored.get("_id") or "") != origin_id
+        or str(stored.get("doc_type") or "") != expected_doc_type
+        or str(stored.get("session_id_hash") or "") != session_id_hash
+    ):
+        raise SourceRevisionResolutionError("source revision snapshot origin is unresolvable")
+    if _is_revision_snapshot_copy(stored):
+        raise SourceRevisionResolutionError("source revision snapshot origin is unsupported")
+    return origin_id
+
+
+def build_temporal_metadata_successor_documents(
+    *,
+    active_revision: ResolvedSourceRevision,
+    store: CouchDBSourceStore,
+    source_document_id: str,
+    observed_at_start: str,
+    observed_at_end: str,
+) -> list[dict]:
+    """Clone an active revision with one logical source member's time repaired.
+
+    Corrective ``current`` copies intentionally retain their own immutable ids
+    and can contain corrected content for a raw source id.  A temporal repair
+    must therefore select the active member by that shared logical identity,
+    not add the raw document to the successor allowlist.
+    """
+
+    if not isinstance(active_revision, ResolvedSourceRevision):
+        raise SourceRevisionResolutionError("active source revision is invalid")
+    candidate_id = str(source_document_id or "")
+    if not candidate_id:
+        raise SourceRevisionResolutionError("source revision logical identity is invalid")
+    documents = [
+        copy.deepcopy(document)
+        for document in (
+            *active_revision.sessions,
+            *active_revision.conversation_chunks,
+            *active_revision.tool_evidence_bundles,
+        )
+    ]
+    for document in documents:
+        if _is_revision_snapshot_copy(document):
+            origin_id = _validated_immediate_snapshot_origin_id(
+                document=document,
+                store=store,
+                session_id_hash=active_revision.session_id_hash,
+            )
+            document["_id"] = origin_id
+            document[_SOURCE_SNAPSHOT_ORIGIN_ID] = origin_id
+    matching_documents = [
+        document
+        for document in documents
+        if _source_document_logical_identity(document) == dm.sha256_hash(candidate_id)
+    ]
+    if (
+        len(matching_documents) != 1
+        or str(matching_documents[0].get("doc_type") or "")
+        != dm.SourceDocType.CONVERSATION_CHUNK
+    ):
+        raise SourceRevisionResolutionError(
+            "active source revision temporal member is not uniquely resolvable"
+        )
+    matching_documents[0]["observed_at_start"] = str(observed_at_start or "")
+    matching_documents[0]["observed_at_end"] = str(observed_at_end or "")
+    return build_revision_scoped_source_documents(
+        documents=documents,
+        source_snapshot_hash=_source_document_set_revision(
+            documents,
+            session_id_hash=active_revision.session_id_hash,
+        ),
+    )
+
+
 def _member_hash(
     *,
     session_id_hash: str,
@@ -1249,6 +1351,7 @@ __all__ = [
     "SourceRevisionResolutionError",
     "active_source_origin_document_ids",
     "activate_source_revision",
+    "build_temporal_metadata_successor_documents",
     "build_revision_scoped_source_documents",
     "resolve_active_source_revision",
     "resolve_active_source_revision_from_snapshot",
