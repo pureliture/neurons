@@ -24,6 +24,7 @@ from .document_model import (
     ProjectionStatus,
     RetentionTier,
     SourceDocType,
+    active_source_revision_pointer_doc_id,
     build_retention_manifest_document,
 )
 from .source_store import CouchDBSourceStore
@@ -107,11 +108,23 @@ def apply_retention(
 
     Returns the compaction plan. With ``dry_run=True`` (default) nothing is
     mutated. Body removal proceeds only when ``decision.allowed`` and the tier is
-    non-hot.
+    non-hot. An active source-revision pointer keeps its manifest members
+    resolvable, so it fail-closes compaction even when the supplied decision's
+    archive, coverage, and projection gates passed.
     """
 
     sid = decision.session_id_hash
     will_compact = decision.allowed and decision.effective_tier != RetentionTier.HOT_FULL
+    effective_tier = decision.effective_tier
+    blocking = list(decision.blocking)
+
+    # A pointer can reference immutable snapshot copies that otherwise match
+    # the session-wide compactable document query. Any pointer presence must
+    # therefore block deletion rather than risk leaving it unresolvable.
+    if will_compact and store.get(active_source_revision_pointer_doc_id(sid)) is not None:
+        will_compact = False
+        effective_tier = RetentionTier.HOT_FULL
+        blocking.append("active_source_revision_present")
 
     to_delete: list[str] = []
     if will_compact:
@@ -122,11 +135,11 @@ def apply_retention(
 
     result = {
         "session_id_hash": sid,
-        "effective_tier": decision.effective_tier,
+        "effective_tier": effective_tier,
         "dry_run": dry_run,
         "compacted": False,
         "deleted_doc_ids": to_delete,
-        "blocking": list(decision.blocking),
+        "blocking": blocking,
     }
     if dry_run:
         return result
@@ -143,8 +156,8 @@ def apply_retention(
         session_id_hash=sid,
         provider=provider,
         project=project,
-        tier=decision.effective_tier,
-        cold_archive_ref=decision.cold_archive_ref if decision.effective_tier == RetentionTier.COLD_ARCHIVE_REF else "",
+        tier=effective_tier,
+        cold_archive_ref=decision.cold_archive_ref if effective_tier == RetentionTier.COLD_ARCHIVE_REF else "",
         source_locator_hash=source_locator_hash,
     )
     store.put(manifest)

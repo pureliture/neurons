@@ -389,13 +389,19 @@ def run_corrective_current_import(
             admission,
             project=project,
         )
-        result = activate_admitted_codex_current_source(snapshot=snapshot, store=store)
+    except Exception:  # noqa: BLE001 - never expose private locator/admission detail
+        snapshot = None
+
+    result = None
+    try:
+        if snapshot is not None:
+            result = activate_admitted_codex_current_source(snapshot=snapshot, store=store)
     except Exception:  # noqa: BLE001 - never expose private locator/admission detail
         result = None
     return {
         "dry_run": True,
         "found": 1,
-        "admitted_candidates": 1 if result is not None else 0,
+        "admitted_candidates": int(snapshot is not None),
         "imported_current_revisions": int(result is not None and result.status == CURRENT_SOURCE_IMPORTED),
         "errors": int(result is None or result.status != CURRENT_SOURCE_IMPORTED),
         "mutation_performed": False,
@@ -451,7 +457,14 @@ def main(argv: list[str] | None = None) -> int:
                 "network_used": False,
             }, sort_keys=True))
             return 2
-        if args.provider or args.limit is not None or args.tool_evidence or args.reconcile_coverage:
+        if (
+            args.provider
+            or args.limit is not None
+            or args.tool_evidence
+            or args.reconcile_coverage
+            or args.approval
+            or args.runtime_dir
+        ):
             print(json.dumps({
                 "status": "error",
                 "error_class": "corrective_import_rejects_legacy_target_flags",

@@ -8,12 +8,14 @@ import json
 from dataclasses import replace
 
 from agent_knowledge.couchdb_source import document_model as dm
+from agent_knowledge.couchdb_source import migration_cli
 from agent_knowledge.couchdb_source.historical_import import (
     PROVIDER_LANES,
     SourceLocator,
     import_historical_source,
 )
 from agent_knowledge.couchdb_source.current_source_supersession import (
+    CorrectiveCurrentSourceImportResult,
     activate_admitted_codex_current_source,
 )
 from agent_knowledge.couchdb_source.migration_cli import main as migration_main
@@ -217,6 +219,32 @@ def test_corrective_import_is_idempotent_and_changed_verified_snapshot_moves_to_
     assert projection["source_hash"] == changed_resolved.source_hash
 
 
+def test_corrective_import_marks_projection_pending_only_when_source_hash_changes(monkeypatch, tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    _seed_projected_legacy_source(store, monkeypatch)
+    source_changed_calls: list[bool] = []
+
+    def record_projection_marker(*, source_changed: bool, **_kwargs) -> None:
+        source_changed_calls.append(source_changed)
+
+    monkeypatch.setattr(
+        "agent_knowledge.couchdb_source.current_source_supersession.mark_projection_pending_if_source_changed",
+        record_projection_marker,
+    )
+    first_snapshot = _admitted_snapshot(tmp_path, "first corrected source", "first verified raw snapshot")
+
+    first = activate_admitted_codex_current_source(snapshot=first_snapshot, store=store)
+    duplicate = activate_admitted_codex_current_source(snapshot=first_snapshot, store=store)
+    changed = activate_admitted_codex_current_source(
+        snapshot=_admitted_snapshot(tmp_path, "first corrected source", "second verified raw snapshot"),
+        store=store,
+    )
+
+    assert first.source_hash == duplicate.source_hash
+    assert changed.source_hash != first.source_hash
+    assert source_changed_calls == [True, False, True]
+
+
 def test_corrective_import_uses_the_admitted_snapshot_without_reopening_locator(monkeypatch, tmp_path):
     store = InMemoryCouchDBSourceStore()
     _seed_projected_legacy_source(store, monkeypatch)
@@ -277,6 +305,77 @@ def test_corrective_import_cli_requires_private_locator_admission_manifest(capsy
         "mutation_performed": False,
         "network_used": False,
         "status": "error",
+    }
+
+
+def test_corrective_import_reports_admission_when_activation_raises(monkeypatch):
+    admitted_snapshot = object()
+
+    monkeypatch.setattr(
+        migration_cli,
+        "admit_codex_locator_snapshot",
+        lambda *_args, **_kwargs: admitted_snapshot,
+    )
+
+    def activation_failure(*_args, **_kwargs):
+        raise RuntimeError("activation failed")
+
+    monkeypatch.setattr(
+        migration_cli,
+        "activate_admitted_codex_current_source",
+        activation_failure,
+    )
+
+    report = migration_cli.run_corrective_current_import(
+        store=InMemoryCouchDBSourceStore(),
+        locator_manifest={},
+        admission=object(),
+        project=PROJECT,
+    )
+
+    assert report == {
+        "dry_run": True,
+        "found": 1,
+        "admitted_candidates": 1,
+        "imported_current_revisions": 0,
+        "errors": 1,
+        "mutation_performed": False,
+        "network_used": False,
+    }
+
+
+def test_corrective_import_reports_admission_when_activation_is_source_unavailable(monkeypatch):
+    admitted_snapshot = object()
+
+    monkeypatch.setattr(
+        migration_cli,
+        "admit_codex_locator_snapshot",
+        lambda *_args, **_kwargs: admitted_snapshot,
+    )
+    monkeypatch.setattr(
+        migration_cli,
+        "activate_admitted_codex_current_source",
+        lambda *_args, **_kwargs: CorrectiveCurrentSourceImportResult(
+            provider="codex",
+            status="source_unavailable",
+        ),
+    )
+
+    report = migration_cli.run_corrective_current_import(
+        store=InMemoryCouchDBSourceStore(),
+        locator_manifest={},
+        admission=object(),
+        project=PROJECT,
+    )
+
+    assert report == {
+        "dry_run": True,
+        "found": 1,
+        "admitted_candidates": 1,
+        "imported_current_revisions": 0,
+        "errors": 1,
+        "mutation_performed": False,
+        "network_used": False,
     }
 
 
@@ -367,3 +466,20 @@ def test_corrective_import_cli_rejects_legacy_source_root(capsys):
         "network_used": False,
         "status": "error",
     }
+
+
+def test_corrective_import_cli_rejects_unsupported_approval_and_runtime_dir(capsys):
+    for flag, value in (
+        ("--approval", "/private/approval.json"),
+        ("--runtime-dir", "/private/runtime"),
+    ):
+        rc = migration_main(["--corrective-current-source", "--dry-run", flag, value])
+
+        assert rc == 2
+        assert json.loads(capsys.readouterr().out) == {
+            "dry_run": True,
+            "error_class": "corrective_import_rejects_legacy_target_flags",
+            "mutation_performed": False,
+            "network_used": False,
+            "status": "error",
+        }
