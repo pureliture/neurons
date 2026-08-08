@@ -7,6 +7,7 @@ from agent_knowledge.couchdb_source.source_revision import (
     SourceRevisionResolutionError,
     active_source_origin_document_ids,
     activate_source_revision,
+    build_revision_scoped_source_documents,
     resolve_active_source_revision,
     resolve_active_source_revision_from_snapshot,
 )
@@ -73,6 +74,14 @@ def _seed_session_source(store: InMemoryCouchDBSourceStore) -> tuple[dict, dict,
     return documents
 
 
+def _current_source_copies(*documents: dict) -> list[dict]:
+    return build_revision_scoped_source_documents(
+        documents=documents,
+        source_snapshot_hash=dm.sha256_hash("established current source copies"),
+        scope_kind="current",
+    )
+
+
 def test_active_revision_resolves_only_pinned_members_and_never_falls_back() -> None:
     store = InMemoryCouchDBSourceStore()
     session, chunk, bundle = _seed_session_source(store)
@@ -123,6 +132,52 @@ def test_active_revision_resolves_only_pinned_members_and_never_falls_back() -> 
 
     with pytest.raises(SourceRevisionResolutionError):
         resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+
+
+def test_activation_allows_current_source_copy_with_new_raw_origins() -> None:
+    store = InMemoryCouchDBSourceStore()
+    session, chunk, bundle = _seed_session_source(store)
+    current_session, _, _ = _current_source_copies(session, chunk, bundle)
+    store.put(current_session)
+
+    activated = activate_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+        source_document_ids=(current_session["_id"], chunk["_id"], bundle["_id"]),
+    )
+
+    assert active_source_origin_document_ids(activated) == (
+        current_session["_id"],
+        chunk["_id"],
+        bundle["_id"],
+    )
+
+
+def test_activation_preserves_homogeneous_current_source_copy_ids() -> None:
+    store = InMemoryCouchDBSourceStore()
+    current_documents = _current_source_copies(
+        _session_document(),
+        _conversation_chunk_document(),
+        _tool_evidence_bundle_document(),
+    )
+    for document in current_documents:
+        store.put(document)
+
+    activated = activate_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+        source_document_ids=tuple(document["_id"] for document in current_documents),
+    )
+
+    activated_ids = {
+        document["_id"]
+        for document in (
+            *activated.sessions,
+            *activated.conversation_chunks,
+            *activated.tool_evidence_bundles,
+        )
+    }
+    assert activated_ids == {document["_id"] for document in current_documents}
 
 
 def test_rejected_rogue_pointer_keeps_direct_and_snapshot_legacy_resolution_equal() -> None:
