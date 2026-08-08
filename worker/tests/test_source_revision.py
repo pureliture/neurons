@@ -13,6 +13,7 @@ from agent_knowledge.couchdb_source.source_revision import (
 from agent_knowledge.couchdb_source.source_store import (
     InMemoryCouchDBSourceStore,
     SourceStoreConflict,
+    SourceStoreError,
 )
 from agent_knowledge.session_memory.transcript_model import TranscriptChunk, TranscriptSession
 
@@ -124,6 +125,28 @@ def test_active_revision_resolves_only_pinned_members_and_never_falls_back() -> 
         resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
 
 
+def test_rejected_rogue_pointer_keeps_direct_and_snapshot_legacy_resolution_equal() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _seed_session_source(store)
+    rogue_pointer = {
+        "_id": f"{dm.SourceDocType.ACTIVE_SOURCE_REVISION}:rogue",
+        "doc_type": dm.SourceDocType.ACTIVE_SOURCE_REVISION,
+        "session_id_hash": _session_id_hash(),
+    }
+
+    with pytest.raises(SourceStoreError, match="active source revision pointer id is invalid"):
+        store.put(rogue_pointer)
+
+    direct = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    snapshot = resolve_active_source_revision_from_snapshot(
+        session_id_hash=_session_id_hash(),
+        documents=store.find_by_session(session_id_hash=_session_id_hash()),
+    )
+
+    assert direct == snapshot
+    assert direct.is_legacy_unpinned is True
+
+
 class _OriginMutationAtInitialPointerCasStore(InMemoryCouchDBSourceStore):
     """Mutate one legacy origin after snapshot staging but before pointer CAS."""
 
@@ -183,7 +206,7 @@ def test_legacy_discovery_excludes_revision_snapshot_copies() -> None:
     session, chunk, bundle = _seed_session_source(store)
     activated = activate_source_revision(store=store, session_id_hash=_session_id_hash())
     assert activated.manifest_id is not None
-    assert store.delete(dm.active_source_revision_pointer_doc_id(_session_id_hash()))
+    store._docs.pop(dm.active_source_revision_pointer_doc_id(_session_id_hash()))
 
     legacy = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
 
@@ -518,9 +541,9 @@ def test_existing_pointer_rejects_incomplete_or_changed_revision_without_fallbac
     assert manifest is not None
 
     if corruption == "missing_manifest":
-        store.delete(activated.manifest_id)
+        store._docs.pop(activated.manifest_id)
     elif corruption == "missing_member":
-        store.delete(manifest["members"][0]["member_id"])
+        store._docs.pop(manifest["members"][0]["member_id"])
     else:
         changed = dict(manifest)
         changed["manifest_hash"] = dm.sha256_hash("changed-manifest")

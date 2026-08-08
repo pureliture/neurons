@@ -11,6 +11,7 @@ from agent_knowledge.couchdb_source.source_store import (
 )
 from agent_knowledge.couchdb_source.source_revision import (
     activate_source_revision,
+    build_revision_scoped_source_documents,
     resolve_active_source_revision,
 )
 from agent_knowledge.couchdb_source.session_memory_materializer import (
@@ -121,6 +122,69 @@ def test_put_preserves_later_temporal_metadata_for_identical_chunk_body() -> Non
     assert stored["observed_at_end"] == "2026-07-09T10:30:00Z"
 
 
+@pytest.mark.parametrize("scope_kind", ("snapshot", "current"))
+def test_unpublished_revision_scoped_source_copy_rejects_changed_put_and_conditional_mutation(
+    scope_kind: str,
+) -> None:
+    store = InMemoryCouchDBSourceStore()
+    source = _chunk_doc("unpublished revision-scoped source")
+    snapshot = build_revision_scoped_source_documents(
+        documents=(source,),
+        source_snapshot_hash=dm.sha256_hash("unpublished revision source set"),
+        scope_kind=scope_kind,
+    )[0]
+
+    first = store.put(snapshot)
+    before = store.get(snapshot["_id"])
+    assert before is not None
+    assert store.get(dm.active_source_revision_pointer_doc_id(_sid())) is None
+
+    duplicate = store.put(snapshot)
+    conditional_duplicate = store.put_if_revision(snapshot, expected_rev=first.rev)
+    changed = dict(snapshot)
+    changed["body"] = "changed unpublished revision-scoped source"
+    changed["content_hash"] = dm.sha256_hash(changed["body"])
+
+    assert duplicate.outcome == "duplicate"
+    assert duplicate.rev == first.rev
+    assert conditional_duplicate.outcome == "duplicate"
+    assert conditional_duplicate.rev == first.rev
+    with pytest.raises(SourceStoreConflict, match="immutable source document"):
+        store.put(changed)
+    with pytest.raises(SourceStoreConflict, match="immutable source document"):
+        store.put_if_revision(changed, expected_rev=first.rev)
+    assert store.get(snapshot["_id"]) == before
+
+
+@pytest.mark.parametrize("scope_kind", ("snapshot", "current"))
+def test_unpublished_revision_scoped_source_copy_cannot_be_deleted(scope_kind: str) -> None:
+    store = InMemoryCouchDBSourceStore()
+    source = _chunk_doc("unpublished immutable source copy")
+    snapshot = build_revision_scoped_source_documents(
+        documents=(source,),
+        source_snapshot_hash=dm.sha256_hash("unpublished immutable source set"),
+        scope_kind=scope_kind,
+    )[0]
+    store.put(snapshot)
+
+    with pytest.raises(SourceStoreConflict, match="immutable"):
+        store.delete(snapshot["_id"])
+    assert store.get(snapshot["_id"]) is not None
+
+
+def test_store_rejects_noncanonical_active_source_revision_pointer_id() -> None:
+    store = InMemoryCouchDBSourceStore()
+
+    with pytest.raises(SourceStoreError, match="active source revision pointer id is invalid"):
+        store.put(
+            {
+                "_id": f"{dm.SourceDocType.ACTIVE_SOURCE_REVISION}:rogue",
+                "doc_type": dm.SourceDocType.ACTIVE_SOURCE_REVISION,
+                "session_id_hash": _sid(),
+            }
+        )
+
+
 def test_active_snapshot_rejects_changed_put_and_conditional_put_while_origin_stays_mutable() -> None:
     store = InMemoryCouchDBSourceStore()
     _session, origin_chunk, _origin_chunk_rev = _pin_chunk(store)
@@ -149,6 +213,120 @@ def test_active_snapshot_rejects_changed_put_and_conditional_put_while_origin_st
     changed_origin["body"] = "changed public-safe mutable origin"
     changed_origin["content_hash"] = dm.sha256_hash(changed_origin["body"])
     assert store.put(changed_origin).outcome == "conflict_resolved"
+
+
+def test_delete_rejects_active_revision_control_member_and_source_documents() -> None:
+    for protected_kind in ("pointer", "manifest", "member", "source"):
+        store = InMemoryCouchDBSourceStore()
+        _session, _origin_chunk, _origin_chunk_rev = _pin_chunk(store)
+        resolved = resolve_active_source_revision(store=store, session_id_hash=_sid())
+        assert resolved.manifest_id is not None
+        manifest = store.get(resolved.manifest_id)
+        assert manifest is not None
+        active_chunk = _active_snapshot_chunk(store)
+        protected_document_ids = {
+            "pointer": dm.active_source_revision_pointer_doc_id(_sid()),
+            "manifest": resolved.manifest_id,
+            "member": manifest["members"][0]["member_id"],
+            "source": active_chunk["_id"],
+        }
+        document_id = protected_document_ids[protected_kind]
+        before = store.get(document_id)
+        with pytest.raises(SourceStoreConflict, match="active source revision"):
+            store.delete(document_id)
+        assert store.get(document_id) == before
+
+    store = InMemoryCouchDBSourceStore()
+    _pin_chunk(store)
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_sid())
+    inactive = _chunk_doc("unreferenced source remains deletable")
+    store.put(inactive)
+    assert store.delete(inactive["_id"]) is True
+    assert store.get(inactive["_id"]) is None
+    assert resolve_active_source_revision(store=store, session_id_hash=_sid()) == resolved
+
+
+def test_delete_fails_closed_when_active_pointer_is_corrupt() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _pin_chunk(store)
+    inactive = _chunk_doc("unreferenced source with corrupt active pointer")
+    store.put(inactive)
+    pointer_id = dm.active_source_revision_pointer_doc_id(_sid())
+    store._docs[pointer_id]["manifest_id"] = "source_revision_manifest:missing"
+
+    with pytest.raises(SourceStoreConflict, match="active source revision is invalid"):
+        store.delete(inactive["_id"])
+    assert store.get(inactive["_id"]) is not None
+
+
+class _PointerPublishesBetweenDeleteChecksStore(InMemoryCouchDBSourceStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self._pointer_to_publish: dict | None = None
+        self._pointer_reads = 0
+
+    def publish_on_second_pointer_read(self, pointer: dict) -> None:
+        self._pointer_to_publish = dict(pointer)
+        self._pointer_reads = 0
+
+    def get(self, doc_id: str) -> dict | None:
+        if doc_id == dm.active_source_revision_pointer_doc_id(_sid()) and self._pointer_to_publish:
+            self._pointer_reads += 1
+            if self._pointer_reads == 2:
+                self._docs[doc_id] = dict(self._pointer_to_publish)
+        return super().get(doc_id)
+
+
+def test_delete_rechecks_pointer_before_removing_staged_source_copy() -> None:
+    store = _PointerPublishesBetweenDeleteChecksStore()
+    _pin_chunk(store)
+    active_chunk = _active_snapshot_chunk(store)
+    pointer_id = dm.active_source_revision_pointer_doc_id(_sid())
+    pointer = store.get(pointer_id)
+    assert pointer is not None
+    store._docs.pop(pointer_id)
+    store.publish_on_second_pointer_read(pointer)
+
+    with pytest.raises(SourceStoreConflict, match="active source revision"):
+        store.delete(active_chunk["_id"])
+    assert store.get(active_chunk["_id"]) is not None
+
+
+class _DeleteStagedSnapshotAtPointerCasStore(InMemoryCouchDBSourceStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.staged_snapshot_id = ""
+        self.delete_error: SourceStoreConflict | None = None
+
+    def put_if_absent(self, document: dict):
+        stored = super().put_if_absent(document)
+        if "source_snapshot_schema_version" in document:
+            self.staged_snapshot_id = str(document["_id"])
+        return stored
+
+    def put_if_revision(self, document: dict, *, expected_rev: str):
+        if (
+            document.get("doc_type") == dm.SourceDocType.ACTIVE_SOURCE_REVISION
+            and self.staged_snapshot_id
+        ):
+            try:
+                self.delete(self.staged_snapshot_id)
+            except SourceStoreConflict as exc:
+                self.delete_error = exc
+        return super().put_if_revision(document, expected_rev=expected_rev)
+
+
+def test_pointer_cas_cannot_delete_staged_snapshot_copy() -> None:
+    store = _DeleteStagedSnapshotAtPointerCasStore()
+    _seed = (_session_doc(), _chunk_doc("pointer-cas staged snapshot"))
+    for document in _seed:
+        store.put(document)
+
+    resolved = activate_source_revision(store=store, session_id_hash=_sid())
+
+    assert store.delete_error is not None
+    assert store.get(store.staged_snapshot_id) is not None
+    assert resolve_active_source_revision(store=store, session_id_hash=_sid()) == resolved
 
 
 @pytest.mark.parametrize(

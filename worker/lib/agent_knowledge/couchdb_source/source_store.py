@@ -10,11 +10,12 @@ using deterministic document id and content hash"): the caller never supplies a
 ``_rev``. The store keys on the deterministic ``_id``; a re-put of identical
 content is a no-op duplicate that returns the existing revision, and a put of
 changed content under the same ``_id`` is accepted and bumps the revision,
-unless the active source-revision manifest references that source id. That
-active-source exception is fail-closed so an active pointer cannot be advanced
-over a silently changed prior member. Staged members before pointer movement do
-not block the legacy aggregate writer. This models a conflict-free upsert
-without leaking CouchDB revision bookkeeping to callers.
+unless the document is a revision-scoped source copy or the active
+source-revision manifest references that source id. Both immutable exceptions
+are fail-closed so pointer publication cannot advance over a silently changed
+source. Staged revision records do not block the legacy aggregate writer. This
+models a conflict-free upsert without leaking CouchDB revision bookkeeping to
+callers.
 """
 
 from __future__ import annotations
@@ -59,6 +60,20 @@ SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES = frozenset(
         SourceDocType.TOOL_EVIDENCE_BUNDLE,
     }
 )
+def _is_revision_scoped_source_copy(document: dict | None) -> bool:
+    """Whether a source document is an immutable revision-scoped copy."""
+
+    return bool(document) and (
+        "source_snapshot_schema_version" in document
+        or "current_source_scope" in document
+    )
+
+
+def _is_immutable_source_document(document: dict | None) -> bool:
+    return bool(document) and (
+        document.get("doc_type") in IMMUTABLE_SOURCE_REVISION_DOC_TYPES
+        or _is_revision_scoped_source_copy(document)
+    )
 
 
 @dataclass(frozen=True)
@@ -174,6 +189,72 @@ def _require_active_source_revision_allows_write(
         raise SourceStoreConflict("source revision member makes source document immutable")
 
 
+def _require_active_source_revision_allows_delete(
+    *,
+    store: CouchDBSourceStore,
+    document: dict,
+) -> None:
+    """Reject deletion that would corrupt the currently active revision."""
+
+    doc_id = str(document.get("_id") or "")
+    doc_type = str(document.get("doc_type") or "")
+    if (
+        _is_immutable_source_document(document)
+        or doc_type == SourceDocType.ACTIVE_SOURCE_REVISION
+    ):
+        raise SourceStoreConflict(
+            "active source revision document is immutable and cannot be deleted"
+        )
+    session_id_hash = str(document.get("session_id_hash") or "")
+    if not session_id_hash:
+        return
+    pointer_id = active_source_revision_pointer_doc_id(session_id_hash)
+    pointer = store.get(pointer_id)
+    # A retention precheck is not a delete boundary: a pointer may publish
+    # after its first absence check. Re-read immediately before deciding that
+    # the document is unpinned, then resolve the observed control plane below.
+    if pointer is None:
+        pointer = store.get(pointer_id)
+    if pointer is None:
+        return
+
+    from .source_revision import (
+        SourceRevisionResolutionError,
+        resolve_active_source_revision,
+    )
+
+    try:
+        resolved = resolve_active_source_revision(
+            store=store,
+            session_id_hash=session_id_hash,
+        )
+    except SourceRevisionResolutionError as exc:
+        raise SourceStoreConflict("active source revision is invalid") from exc
+
+    if resolved.manifest_id is None:
+        raise SourceStoreConflict("active source revision is invalid")
+    manifest = store.get(resolved.manifest_id)
+    if manifest is None:
+        raise SourceStoreConflict("active source revision is invalid")
+    if store.get(pointer_id) != pointer:
+        raise SourceStoreConflict("active source revision changed during delete")
+    protected_document_ids = {
+        pointer_id,
+        resolved.manifest_id,
+        *(str(member.get("member_id") or "") for member in manifest["members"]),
+        *(
+            str(source.get("_id") or "")
+            for source in (
+                *resolved.sessions,
+                *resolved.conversation_chunks,
+                *resolved.tool_evidence_bundles,
+            )
+        ),
+    }
+    if doc_id in protected_document_ids:
+        raise SourceStoreConflict("active source revision document cannot be deleted")
+
+
 def payload_hash(document: dict) -> str:
     """The natural payload identity used for idempotency.
 
@@ -258,6 +339,14 @@ def validate_for_write(document: dict) -> None:
         raise SourceStoreError("document is missing a deterministic _id")
     doc_type = document.get("doc_type", "")
     assert_couchdb_owned(doc_type)
+    if doc_type == SourceDocType.ACTIVE_SOURCE_REVISION:
+        session_id_hash = str(document.get("session_id_hash") or "")
+        try:
+            assert_hash_like("session_id_hash", session_id_hash)
+        except ValueError as exc:
+            raise SourceStoreError("active source revision pointer id is invalid") from exc
+        if str(doc_id) != active_source_revision_pointer_doc_id(session_id_hash):
+            raise SourceStoreError("active source revision pointer id is invalid")
     assert_no_secret_like_metadata(document)
     body = document.get("body")
     if isinstance(body, str) and body:
@@ -379,7 +468,7 @@ class InMemoryCouchDBSourceStore:
 
     def put(self, document: dict) -> StoredRevision:
         validate_for_write(document)
-        if document.get("doc_type") in IMMUTABLE_SOURCE_REVISION_DOC_TYPES:
+        if _is_immutable_source_document(document):
             return self.put_if_absent(document)
         doc_id = str(document["_id"])
         incoming_hash = payload_hash(document)
@@ -392,6 +481,8 @@ class InMemoryCouchDBSourceStore:
         )
         if existing is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
             return StoredRevision(doc_id=doc_id, rev=str(existing["_rev"]), outcome="duplicate")
+        if _is_immutable_source_document(existing):
+            raise SourceStoreConflict("immutable source document already exists")
 
         source_document = existing if existing is not None else document
         self._require_source_document_unpinned(
@@ -436,6 +527,11 @@ class InMemoryCouchDBSourceStore:
                     rev=str(existing.get("_rev") or ""),
                     outcome="duplicate",
                 )
+            self._require_source_document_unpinned(
+                doc_id,
+                doc_type=str(existing.get("doc_type") or ""),
+                session_id_hash=str(existing.get("session_id_hash") or ""),
+            )
             raise SourceStoreConflict("immutable source document already exists")
 
         self._require_source_document_unpinned(
@@ -478,6 +574,14 @@ class InMemoryCouchDBSourceStore:
         )
         if current is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
             return StoredRevision(doc_id=doc_id, rev=current_rev, outcome="duplicate")
+        if _is_revision_scoped_source_copy(document) or _is_revision_scoped_source_copy(current):
+            source_document = current if current is not None else document
+            self._require_source_document_unpinned(
+                doc_id,
+                doc_type=str(source_document.get("doc_type") or ""),
+                session_id_hash=str(source_document.get("session_id_hash") or ""),
+            )
+            raise SourceStoreConflict("immutable source document must be additive")
         self._require_source_document_unpinned(
             doc_id,
             doc_type=str(current.get("doc_type") or "") if current is not None else str(document.get("doc_type") or ""),
@@ -595,7 +699,12 @@ class InMemoryCouchDBSourceStore:
         return results
 
     def delete(self, doc_id: str) -> bool:
-        return self._docs.pop(doc_id, None) is not None
+        existing = self._docs.get(doc_id)
+        if existing is None:
+            return False
+        _require_active_source_revision_allows_delete(store=self, document=existing)
+        self._docs.pop(doc_id)
+        return True
 
     def all_docs(self) -> list[dict]:
         return [copy.deepcopy(doc) for doc in self._docs.values()]

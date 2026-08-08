@@ -19,14 +19,19 @@ from agent_knowledge.couchdb_source.source_store import (
     SourceStoreConflict,
 )
 from agent_knowledge.rag_ingress.backfill_apply import apply_backfill_to_state_db
-from agent_knowledge.rag_ingress.couchdb_delivery_backend import CouchDBDeliveryBackend
+from agent_knowledge.rag_ingress.couchdb_delivery_backend import (
+    CouchDBDeliveryBackend,
+    _chunk_documents_match,
+)
 from agent_knowledge.rag_ingress.couchdb_retired_index_bridge import (
     CouchDBRetiredIndexBridgeAdapter,
 )
 from agent_knowledge.rag_ingress.delivery_executor import (
+    DeliveryExecutor,
     DeliveryJobView,
     DeliveryOutcomeUncertain,
 )
+from agent_knowledge.rag_ingress.delivery_reconcile import DeliveryReconciler
 from agent_knowledge.rag_ingress.server_runtime import document_from_ingress_payload
 from agent_knowledge.rag_ingress.state_db import RAGIngressStateDB
 from agent_knowledge.session_memory.transcript_model import TranscriptChunk
@@ -114,24 +119,41 @@ def _active_pointer(store: InMemoryCouchDBSourceStore) -> dict:
     return pointer
 
 
-def _orphan_chunk_document(*, chunk_id: str, body: str) -> dict:
+def _orphan_chunk_document(
+    *,
+    chunk_id: str,
+    body: str,
+    provider: str = PROVIDER,
+    project: str = PROJECT,
+    redaction_version: str = "redaction.v2",
+    source_status: str = "source_locator_private_spool_only",
+) -> dict:
     chunk = TranscriptChunk(
         chunk_id=chunk_id,
         session_id_hash=SESSION_ID_HASH,
-        provider=PROVIDER,
-        project=PROJECT,
+        provider=provider,
+        project=project,
         turn_start_index=0,
         turn_end_index=1,
         redacted_text=body,
         content_hash=dm.sha256_hash(body),
-        redaction_version="redaction.v2",
-        source_status="source_locator_private_spool_only",
+        redaction_version=redaction_version,
+        source_status=source_status,
         part_index=1,
         part_count=1,
         char_start=0,
         char_end=len(body),
     )
     return dm.build_conversation_chunk_document(chunk=chunk, source_locator_hash="")
+
+
+def _force_delete_for_corrupt_active_revision_test(
+    store: InMemoryCouchDBSourceStore,
+    document_id: str,
+) -> None:
+    """Bypass only the in-memory delete guard to model external corruption."""
+
+    assert store._docs.pop(document_id, None) is not None  # noqa: SLF001
 
 
 class _FailOnceCoverageStore(InMemoryCouchDBSourceStore):
@@ -180,6 +202,26 @@ class _OriginDriftAtPointerCasStore(InMemoryCouchDBSourceStore):
         return super().put_if_revision(document, expected_rev=expected_rev)
 
 
+class _FailOncePointerCasStore(InMemoryCouchDBSourceStore):
+    """Reject one successor-pointer CAS after the new chunk becomes an orphan."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._fail_next_pointer_cas = False
+
+    def fail_next_pointer_cas(self) -> None:
+        self._fail_next_pointer_cas = True
+
+    def put_if_revision(self, document: dict, *, expected_rev: str):
+        if (
+            self._fail_next_pointer_cas
+            and str(document.get("doc_type") or "") == dm.SourceDocType.ACTIVE_SOURCE_REVISION
+        ):
+            self._fail_next_pointer_cas = False
+            raise SourceStoreConflict("injected active pointer CAS failure")
+        return super().put_if_revision(document, expected_rev=expected_rev)
+
+
 class _InitialActivationInterleavingStore(InMemoryCouchDBSourceStore):
     """Run one legacy ingress after member staging but before initial pointer CAS."""
 
@@ -201,6 +243,28 @@ class _InitialActivationInterleavingStore(InMemoryCouchDBSourceStore):
             self._member_interleaving_fired = True
             self._on_first_member_staged()
         return revision
+
+
+class _ConcurrentChunkPayloadCollisionStore(InMemoryCouchDBSourceStore):
+    """Create a conflicting chunk after the delivery pre-read, before insert."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._collision_document: dict | None = None
+
+    def inject_next_chunk_collision(self, document: dict) -> None:
+        self._collision_document = document
+
+    def put_if_absent(self, document: dict):
+        collision = self._collision_document
+        if (
+            collision is not None
+            and str(document.get("doc_type") or "") == dm.SourceDocType.CONVERSATION_CHUNK
+            and str(document.get("_id") or "") == str(collision.get("_id") or "")
+        ):
+            self._collision_document = None
+            super().put_if_absent(collision)
+        return super().put_if_absent(document)
 
 
 def _assert_active_currentness_recovered(store: InMemoryCouchDBSourceStore) -> None:
@@ -239,6 +303,12 @@ def test_delivery_backend_rotates_active_pointer_for_distinct_chunk_not_duplicat
         store=store,
         session_id_hash=SESSION_ID_HASH,
     )
+    active_evidence = backend.find_by_natural_key(
+        "delivery-first",
+        _job(state_db, "delivery-first").payload_hash,
+    )
+    assert active_evidence is not None
+    assert active_evidence.status == "succeeded"
     _mark_projected(store, source_hash=first_resolved.source_hash)
     pointer_before_duplicate = _active_pointer(store)
     session_before_distinct = store.get(dm.session_doc_id(SESSION_ID_HASH))
@@ -533,7 +603,7 @@ def test_delivery_backend_rejects_invalid_active_pointer_before_new_chunk_write(
     assert resolved.manifest_id is not None
     manifest = store.get(resolved.manifest_id)
     assert manifest is not None
-    assert store.delete(manifest["members"][0]["member_id"])
+    _force_delete_for_corrupt_active_revision_test(store, manifest["members"][0]["member_id"])
     documents_before = store.all_docs()
 
     with pytest.raises(DeliveryOutcomeUncertain):
@@ -541,6 +611,244 @@ def test_delivery_backend_rejects_invalid_active_pointer_before_new_chunk_write(
 
     assert store.all_docs() == documents_before
     assert store.get(dm.conversation_chunk_doc_id(SESSION_ID_HASH, "second-chunk")) is None
+
+
+def test_delivery_reconciler_does_not_promote_stale_reference_when_active_pointer_is_invalid(
+    tmp_path,
+) -> None:
+    first = _payload(
+        idempotency_key="invalid-pointer-reconcile-first",
+        chunk_id="first-chunk",
+        body="First active source chunk.",
+    )
+    state_db = _state_db(tmp_path)
+    apply_backfill_to_state_db(state_db=state_db, payloads=[first], dry_run=False)
+    store = InMemoryCouchDBSourceStore()
+    backend = CouchDBDeliveryBackend(state_db=state_db, store=store)
+
+    backend.submit(_job(state_db, "invalid-pointer-reconcile-first"))
+    resolved = activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    assert resolved.manifest_id is not None
+    manifest = store.get(resolved.manifest_id)
+    assert manifest is not None
+    _force_delete_for_corrupt_active_revision_test(store, manifest["members"][0]["member_id"])
+
+    job = _job(state_db, "invalid-pointer-reconcile-first")
+    assert state_db.record_failed_retryable_attempt(
+        job.job_id,
+        dataset_ref="couchdb:couchdb",
+        document_ref=dm.session_doc_id(SESSION_ID_HASH),
+        run="stale-couchdb-reference",
+        max_attempts=4,
+    ) == "failed_retryable"
+
+    assert DeliveryReconciler(state_db=state_db, backend=backend).reconcile_once(
+        job.job_id,
+        max_attempts=4,
+    ) == "failed_retryable"
+    reconciled = state_db.get_delivery_job(job.job_id)
+    assert reconciled["index_target_id"] == ""
+    assert reconciled["index_document_id"] == ""
+    assert reconciled["index_run_id"] == "active_pointer_control_unresolved"
+
+
+def test_delivery_backend_quarantines_active_chunk_payload_identity_mismatch(tmp_path) -> None:
+    first = _payload(
+        idempotency_key="payload-identity-first",
+        chunk_id="shared-chunk",
+        body="Original active source chunk.",
+    )
+    conflicting = _payload(
+        idempotency_key="payload-identity-conflict",
+        chunk_id="shared-chunk",
+        body="Conflicting content for the same chunk id.",
+    )
+    state_db = _state_db(tmp_path)
+    apply_backfill_to_state_db(state_db=state_db, payloads=[first, conflicting], dry_run=False)
+    store = InMemoryCouchDBSourceStore()
+    backend = CouchDBDeliveryBackend(state_db=state_db, store=store)
+
+    backend.submit(_job(state_db, "payload-identity-first"))
+    activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    documents_before = store.all_docs()
+    evidence = backend.find_by_natural_key(
+        "payload-identity-conflict",
+        _job(state_db, "payload-identity-conflict").payload_hash,
+    )
+
+    outcome = DeliveryExecutor(
+        state_db=state_db,
+        backend=backend,
+        lease_owner="payload-identity-worker",
+    ).execute_once(_job(state_db, "payload-identity-conflict").job_id)
+
+    job = state_db.get_row(
+        "delivery_jobs", "idempotency_key", "payload-identity-conflict"
+    )
+    assert outcome == "quarantined"
+    assert evidence is not None
+    assert evidence.status == "payload_integrity_mismatch"
+    assert evidence.run == "chunk_id_payload_mismatch"
+    assert job is not None
+    assert job["status"] == "quarantined"
+    assert job["last_error_class"] == "delivery_payload_integrity_mismatch"
+    assert job["index_run_id"] == "chunk_id_payload_mismatch"
+    assert store.all_docs() == documents_before
+
+
+def test_delivery_backend_quarantines_racing_active_chunk_payload_identity_mismatch(tmp_path) -> None:
+    first = _payload(
+        idempotency_key="racing-payload-first",
+        chunk_id="first-chunk",
+        body="First active source chunk.",
+    )
+    incoming = _payload(
+        idempotency_key="racing-payload-incoming",
+        chunk_id="racing-chunk",
+        body="Expected content for the raced chunk.",
+    )
+    conflicting_chunk = _orphan_chunk_document(
+        chunk_id="racing-chunk",
+        body="Conflicting content inserted by another writer.",
+    )
+    state_db = _state_db(tmp_path)
+    apply_backfill_to_state_db(state_db=state_db, payloads=[first, incoming], dry_run=False)
+    store = _ConcurrentChunkPayloadCollisionStore()
+    backend = CouchDBDeliveryBackend(state_db=state_db, store=store)
+
+    backend.submit(_job(state_db, "racing-payload-first"))
+    active_before = activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    store.inject_next_chunk_collision(conflicting_chunk)
+
+    outcome = DeliveryExecutor(
+        state_db=state_db,
+        backend=backend,
+        lease_owner="racing-payload-worker",
+    ).execute_once(_job(state_db, "racing-payload-incoming").job_id)
+
+    job = state_db.get_row("delivery_jobs", "idempotency_key", "racing-payload-incoming")
+    assert outcome == "quarantined"
+    assert job is not None
+    assert job["status"] == "quarantined"
+    assert job["last_error_class"] == "delivery_payload_integrity_mismatch"
+    assert job["index_run_id"] == "chunk_id_payload_mismatch"
+    assert store.get(conflicting_chunk["_id"])["body"] == conflicting_chunk["body"]
+    assert resolve_active_source_revision(
+        store=store, session_id_hash=SESSION_ID_HASH
+    ).source_hash == active_before.source_hash
+
+
+def test_delivery_reconciler_does_not_succeed_for_unactivated_active_pointer_orphan(tmp_path) -> None:
+    first = _payload(
+        idempotency_key="orphan-reconcile-first",
+        chunk_id="first-chunk",
+        body="First active source chunk.",
+    )
+    second = _payload(
+        idempotency_key="orphan-reconcile-second",
+        chunk_id="second-chunk",
+        body="Chunk left orphaned after activation CAS loss.",
+    )
+    state_db = _state_db(tmp_path)
+    apply_backfill_to_state_db(state_db=state_db, payloads=[first, second], dry_run=False)
+    store = _FailOncePointerCasStore()
+    backend = CouchDBDeliveryBackend(state_db=state_db, store=store)
+
+    backend.submit(_job(state_db, "orphan-reconcile-first"))
+    activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    store.fail_next_pointer_cas()
+    second_job = _job(state_db, "orphan-reconcile-second")
+
+    assert DeliveryExecutor(
+        state_db=state_db,
+        backend=backend,
+        lease_owner="orphan-reconcile-worker",
+    ).execute_once(second_job.job_id) == "replayable"
+    assert state_db.record_failed_retryable_attempt(
+        second_job.job_id,
+        dataset_ref="couchdb:couchdb",
+        document_ref=dm.session_doc_id(SESSION_ID_HASH),
+        run="stale-couchdb-reference",
+        max_attempts=4,
+    ) == "failed_retryable"
+    assert DeliveryReconciler(state_db=state_db, backend=backend).reconcile_once(
+        second_job.job_id,
+        max_attempts=4,
+    ) == "failed_retryable"
+    reconciled = state_db.get_delivery_job(second_job.job_id)
+    assert reconciled["status"] == "failed_retryable"
+    assert reconciled["index_target_id"] == ""
+    assert reconciled["index_document_id"] == ""
+    assert reconciled["index_run_id"] == "active_pointer_member_missing"
+
+
+@pytest.mark.parametrize(
+    ("field", "foreign_value"),
+    [
+        ("session_id_hash", dm.sha256_hash("foreign-session")),
+        ("chunk_id", "foreign-chunk"),
+        ("provider", "foreign-provider"),
+        ("project", "foreign-project"),
+        ("redaction_version", "redaction.foreign"),
+        ("source_status", "foreign-source-status"),
+    ],
+)
+def test_chunk_identity_match_requires_authoritative_scope_fields(
+    field: str,
+    foreign_value: str,
+) -> None:
+    expected = _orphan_chunk_document(
+        chunk_id="identity-chunk",
+        body="Same body must not erase source scope identity.",
+    )
+    foreign = dict(expected)
+    foreign[field] = foreign_value
+
+    assert not _chunk_documents_match(foreign, expected)
+
+
+def test_delivery_executor_quarantines_foreign_scope_active_pointer_orphan(tmp_path) -> None:
+    first = _payload(
+        idempotency_key="foreign-orphan-first",
+        chunk_id="first-chunk",
+        body="First active source chunk.",
+    )
+    incoming = _payload(
+        idempotency_key="foreign-orphan-incoming",
+        chunk_id="foreign-orphan-chunk",
+        body="Same chunk body under a foreign semantic scope.",
+    )
+    state_db = _state_db(tmp_path)
+    apply_backfill_to_state_db(state_db=state_db, payloads=[first, incoming], dry_run=False)
+    store = InMemoryCouchDBSourceStore()
+    backend = CouchDBDeliveryBackend(state_db=state_db, store=store)
+
+    backend.submit(_job(state_db, "foreign-orphan-first"))
+    active_before = activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    store.put(
+        _orphan_chunk_document(
+            chunk_id="foreign-orphan-chunk",
+            body="Same chunk body under a foreign semantic scope.",
+            provider="foreign-provider",
+            project="foreign-project",
+        )
+    )
+
+    outcome = DeliveryExecutor(
+        state_db=state_db,
+        backend=backend,
+        lease_owner="foreign-orphan-worker",
+    ).execute_once(_job(state_db, "foreign-orphan-incoming").job_id)
+
+    job = state_db.get_row("delivery_jobs", "idempotency_key", "foreign-orphan-incoming")
+    assert outcome == "quarantined"
+    assert job is not None
+    assert job["status"] == "quarantined"
+    assert job["last_error_class"] == "delivery_payload_integrity_mismatch"
+    assert job["index_run_id"] == "chunk_id_payload_mismatch"
+    assert resolve_active_source_revision(
+        store=store, session_id_hash=SESSION_ID_HASH
+    ).source_hash == active_before.source_hash
 
 
 def test_delivery_backend_reuses_exact_orphan_chunk_in_next_active_revision(tmp_path) -> None:
@@ -619,7 +927,7 @@ def test_retired_index_bridge_rejects_invalid_active_pointer_before_new_chunk_wr
     assert resolved.manifest_id is not None
     manifest = store.get(resolved.manifest_id)
     assert manifest is not None
-    assert store.delete(manifest["members"][0]["member_id"])
+    _force_delete_for_corrupt_active_revision_test(store, manifest["members"][0]["member_id"])
     documents_before = store.all_docs()
 
     with pytest.raises(SourceRevisionResolutionError):

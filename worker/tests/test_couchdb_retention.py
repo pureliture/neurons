@@ -7,6 +7,10 @@ from agent_knowledge.couchdb_source.retention import (
     apply_retention,
     plan_retention,
 )
+from agent_knowledge.couchdb_source.source_revision import (
+    activate_source_revision,
+    resolve_active_source_revision,
+)
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
 from agent_knowledge.couchdb_source.tool_evidence_bundler import store_tool_evidence_bundles
 from agent_knowledge.session_memory.transcript_model import (
@@ -136,6 +140,33 @@ def test_dry_run_does_not_mutate():
     assert result["compacted"] is False
     assert len(result["deleted_doc_ids"]) == 3  # 2 chunks + 1 bundle
     assert len(store.all_docs()) == before  # nothing removed
+
+
+def test_active_source_revision_blocks_retention_and_reports_why():
+    store = InMemoryCouchDBSourceStore()
+    sid = _seed(store)
+    activate_source_revision(store=store, session_id_hash=sid)
+    decision = plan_retention(
+        RetentionInput(
+            session_id_hash=sid,
+            age_days=60,
+            projection_status=dm.ProjectionStatus.PROJECTED,
+            cold_archive_ref="archive://x",
+        ),
+        policy=POLICY,
+    )
+
+    dry_run = apply_retention(decision=decision, store=store, dry_run=True)
+    applied = apply_retention(decision=decision, store=store, dry_run=False)
+
+    assert dry_run["dry_run"] is True
+    assert dry_run["effective_tier"] == dm.RetentionTier.HOT_FULL
+    assert dry_run["deleted_doc_ids"] == []
+    assert dry_run["blocking"] == ["active_source_revision_present"]
+    assert applied["compacted"] is False
+    assert applied["deleted_doc_ids"] == []
+    assert applied["blocking"] == ["active_source_revision_present"]
+    assert resolve_active_source_revision(store=store, session_id_hash=sid).is_legacy_unpinned is False
 
 
 def test_apply_compacts_bodies_but_keeps_manifests():

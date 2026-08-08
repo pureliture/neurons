@@ -202,7 +202,7 @@ def activate_admitted_codex_current_source(
             project=parsed.session.project,
             source_hash=activated.source_hash,
             store=store,
-            source_changed=True,
+            source_changed=activated.source_hash != active_predecessor.source_hash,
         )
     except ValueError as exc:
         return CorrectiveCurrentSourceImportResult(

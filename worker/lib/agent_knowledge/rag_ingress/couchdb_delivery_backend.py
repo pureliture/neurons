@@ -68,6 +68,7 @@ from ..couchdb_source.session_memory_materializer import (
 )
 from ..couchdb_source.source_revision import (
     ResolvedSourceRevision,
+    SourceRevisionResolutionError,
     active_source_origin_document_ids,
     activate_source_revision,
     resolve_active_source_revision,
@@ -100,6 +101,15 @@ from .state_db import RAGIngressStateDB
 
 CouchDBMirrorOutcomeHook = Callable[[MirrorWriteOutcome], None]
 _PAYLOAD_PREPARATION_ERRORS = (AttributeError, OverflowError, TypeError, ValueError)
+_CHUNK_IDENTITY_FIELDS = (
+    "doc_type",
+    "session_id_hash",
+    "chunk_id",
+    "provider",
+    "project",
+    "redaction_version",
+    "source_status",
+)
 
 
 def _default_couchdb_mirror_outcome_logger(outcome: MirrorWriteOutcome) -> None:
@@ -130,6 +140,94 @@ def _payload_integrity_evidence(
         run=run,
         status="payload_integrity_mismatch",
     )
+
+
+def _active_pointer_membership_evidence(
+    job: DeliveryJobView,
+    *,
+    run: str,
+) -> DeliveryBackendEvidence:
+    """Prevent a stale generic status reference from proving an unactivated chunk."""
+
+    return DeliveryBackendEvidence(
+        idempotency_key=job.idempotency_key,
+        payload_hash=job.payload_hash,
+        dataset_ref="",
+        document_ref="",
+        run=run,
+        status="failed_retryable",
+    )
+
+
+def _chunk_documents_match(
+    existing_chunk: Mapping[str, Any],
+    expected_chunk: Mapping[str, Any],
+) -> bool:
+    return (
+        all(
+            str(existing_chunk.get(field) or "")
+            == str(expected_chunk.get(field) or "")
+            for field in _CHUNK_IDENTITY_FIELDS
+        )
+        and payload_hash(dict(existing_chunk)) == payload_hash(dict(expected_chunk))
+    )
+
+
+def _chunk_document_for_payload_identity(payload: Mapping[str, Any]) -> dict | None:
+    """Build the exact authoritative chunk identity for a stored delivery payload.
+
+    This mirrors the post-redaction chunk construction in ``submit`` without
+    touching the store, so a natural-key lookup cannot treat a same-id orphan
+    or a differently shaped chunk as an exact delivery.
+    """
+
+    try:
+        redacted_payload = apply_server_redaction(dict(payload))
+        package = redacted_payload.get("payload")
+        source = redacted_payload.get("source")
+        document = package.get("document") if isinstance(package, Mapping) else None
+        metadata = document.get("metadata") if isinstance(document, Mapping) else None
+        if not all(
+            isinstance(value, Mapping)
+            for value in (package, source, document, metadata)
+        ):
+            return None
+        metadata = dict(metadata)
+        document_body = str(document.get("body") or "")
+        session_id_hash = str(metadata.get("session_id_hash") or "")
+        chunk_id = str(metadata.get("chunk_id") or "")
+        if not session_id_hash or not chunk_id:
+            return None
+        chunk = TranscriptChunk(
+            chunk_id=chunk_id,
+            session_id_hash=session_id_hash,
+            provider=str(
+                metadata.get("provider")
+                or source.get("provider")
+                or source.get("namespace")
+                or "ingress"
+            ),
+            project=str(metadata.get("project") or source.get("project") or ""),
+            turn_start_index=int(metadata.get("turn_start_index") or 0),
+            turn_end_index=int(metadata.get("turn_end_index") or 0),
+            redacted_text=document_body,
+            content_hash=sha256_hash(document_body),
+            redaction_version=str(package.get("redactionVersion") or REDACTION_VERSION),
+            source_status="source_locator_private_spool_only",
+            part_index=int(metadata.get("part_index") or 1),
+            part_count=int(metadata.get("part_count") or 1),
+            char_start=int(metadata.get("char_start") or 0),
+            char_end=int(metadata.get("char_end") or len(document_body)),
+            observed_at_start=str(metadata.get("observed_at_start") or ""),
+            observed_at_end=str(
+                metadata.get("observed_at_end")
+                or metadata.get("observed_at_start")
+                or ""
+            ),
+        )
+        return build_conversation_chunk_document(chunk=chunk, source_locator_hash="")
+    except _PAYLOAD_PREPARATION_ERRORS:
+        return None
 
 
 def _active_source_revision_before_ingress(
@@ -252,6 +350,8 @@ class CouchDBDeliveryBackend:
             raise DeliveryOutcomeUncertain(exc.__class__.__name__) from exc
         except Exception as exc:
             raise DeliveryOutcomeUncertain(exc.__class__.__name__) from exc
+        if existing is not None and existing.status == "payload_integrity_mismatch":
+            return existing
 
         # --- Gate 3: apply full server-side public-ingress redaction ----------
         raw_package = payload.get("payload")
@@ -429,20 +529,36 @@ class CouchDBDeliveryBackend:
                 }
                 existing_chunk = self._store.get(chunk_document_id)
                 if existing_chunk is not None:
-                    if (
-                        str(existing_chunk.get("doc_type") or "")
-                        != SourceDocType.CONVERSATION_CHUNK
-                        or payload_hash(existing_chunk) != payload_hash(chunk_doc)
-                    ):
-                        raise SourceStoreConflict(
-                            "active source revision chunk id already has different content"
+                    if not _chunk_documents_match(existing_chunk, chunk_doc):
+                        # This is a known immutable source-identity conflict,
+                        # not an unobservable store outcome. Return terminal
+                        # integrity evidence so the executor quarantines the
+                        # job instead of replaying it over the existing chunk.
+                        return _payload_integrity_evidence(
+                            job,
+                            run="chunk_id_payload_mismatch",
                         )
                     # An exact orphan can remain after an earlier activation CAS
                     # loss. Reuse it in the next explicit revision instead of
                     # treating it as a no-op duplicate.
                     active_duplicate = chunk_document_id in active_chunk_ids
                 else:
-                    chunk_revision = self._store.put_if_absent(chunk_doc)
+                    try:
+                        chunk_revision = self._store.put_if_absent(chunk_doc)
+                    except SourceStoreConflict:
+                        # A concurrent writer can create this deterministic id
+                        # after our pre-read. Re-read only to classify an
+                        # observable identity collision; all other conflicts
+                        # remain uncertain and retain replay semantics.
+                        raced_chunk = self._store.get(chunk_document_id)
+                        if raced_chunk is not None and not _chunk_documents_match(
+                            raced_chunk, chunk_doc
+                        ):
+                            return _payload_integrity_evidence(
+                                job,
+                                run="chunk_id_payload_mismatch",
+                            )
+                        raise
                     active_duplicate = (
                         chunk_revision.outcome == "duplicate"
                         and chunk_document_id in active_chunk_ids
@@ -544,37 +660,93 @@ class CouchDBDeliveryBackend:
     def find_by_natural_key(
         self, idempotency_key: str, payload_hash: str
     ) -> DeliveryBackendEvidence | None:
-        """Idempotent lookup: return evidence if the session doc already exists.
+        """Return success evidence only for an exact authoritative chunk.
 
-        We cannot query CouchDB by idempotency_key without a state_db round-trip.
-        We fetch the state_db row to recover session_id_hash (via the chunk doc's
-        deterministic _id pattern from the stored metadata), and then check
-        whether the CouchDB session doc exists.
-
-        If the state_db row is missing or the chunk doc is not in CouchDB, return
-        None so the caller proceeds with a fresh submit.
+        With an active source pointer, an orphan raw chunk after a failed
+        activation CAS is not delivery evidence. The resolved pointer must
+        include the exact payload under that chunk's origin id; resolution also
+        verifies the active member and source-hash contracts.
         """
         row = self._state_db.get_row("delivery_jobs", "idempotency_key", idempotency_key)
         if row is None or str(row.get("payload_hash") or "") != payload_hash:
             return None
+        job = DeliveryJobView.from_row(row)
 
-        # Recover the payload to get session_id_hash + chunk_id.
         payload = self._state_db.get_delivery_payload(idempotency_key)
         if payload is None:
             return None
-        pkg = payload.get("payload") or {}
-        document = pkg.get("document") or {}
-        metadata = dict(document.get("metadata") or {})
-        session_id_hash = str(metadata.get("session_id_hash") or "")
-        chunk_id = str(metadata.get("chunk_id") or "")
-        if not session_id_hash or not chunk_id:
+        expected_chunk = _chunk_document_for_payload_identity(payload)
+        if expected_chunk is None:
             return None
 
-        chunk_doc_id = conversation_chunk_doc_id(session_id_hash, chunk_id)
-        existing_chunk = self._store.get(chunk_doc_id)
-        if existing_chunk is None:
+        session_id_hash = str(expected_chunk.get("session_id_hash") or "")
+        chunk_doc_id = str(expected_chunk.get("_id") or "")
+        if not session_id_hash or not chunk_doc_id:
             return None
 
+        try:
+            active_revision = _active_source_revision_before_ingress(
+                store=self._store,
+                session_id_hash=session_id_hash,
+            )
+        except (SourceRevisionResolutionError, ValueError):
+            # A malformed active control plane cannot prove this delivery.
+            # ``submit`` will still attempt an authoritative repair, while
+            # reconciliation receives no false success evidence from a stale
+            # session reference.
+            return _active_pointer_membership_evidence(
+                job,
+                run="active_pointer_control_unresolved",
+            )
+        if active_revision is not None:
+            active_chunks = [
+                document
+                for document in active_revision.conversation_chunks
+                if str(
+                    document.get("source_snapshot_origin_id")
+                    or document.get("_id")
+                    or ""
+                )
+                == chunk_doc_id
+            ]
+            if len(active_chunks) == 1:
+                active_chunk = active_chunks[0]
+                if not _chunk_documents_match(active_chunk, expected_chunk):
+                    return _payload_integrity_evidence(
+                        job,
+                        run="chunk_id_payload_mismatch",
+                    )
+            elif not active_chunks:
+                # An unactivated exact orphan can still be reconciled by a
+                # later submit. It is not success evidence: a stale session
+                # reference must not let reconciliation bypass the active
+                # source membership check. A conflicting orphan is terminal.
+                existing_chunk = self._store.get(chunk_doc_id)
+                if existing_chunk is not None and not _chunk_documents_match(
+                    existing_chunk, expected_chunk
+                ):
+                    return _payload_integrity_evidence(
+                        job,
+                        run="chunk_id_payload_mismatch",
+                    )
+                return _active_pointer_membership_evidence(
+                    job,
+                    run="active_pointer_member_missing",
+                )
+            else:
+                return _active_pointer_membership_evidence(
+                    job,
+                    run="active_pointer_member_ambiguous",
+                )
+        else:
+            existing_chunk = self._store.get(chunk_doc_id)
+            if existing_chunk is None:
+                return None
+            if not _chunk_documents_match(existing_chunk, expected_chunk):
+                return _payload_integrity_evidence(
+                    job,
+                    run="chunk_id_payload_mismatch",
+                )
         db_name = getattr(self._store, "db", "couchdb")
         return DeliveryBackendEvidence(
             idempotency_key=idempotency_key,

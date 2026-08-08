@@ -7,9 +7,10 @@ running CouchDB. The default transport uses ``urllib``.
 Idempotency parity with the in-memory store: the caller never supplies ``_rev``.
 ``put`` reads the current doc, dedups on the shared ``payload_hash`` (identical
 content -> ``duplicate`` no-op), and otherwise writes with the current ``_rev``
-(retrying once on a 409 conflict). A source document referenced by the active
-source-revision manifest is the exception: changed writes are rejected before a
-PUT. Staged members do not block legacy source writes before pointer movement.
+(retrying once on a 409 conflict). Revision-scoped source copies and documents
+referenced by the active source-revision manifest are immutable: changed writes
+are rejected before a PUT. Staged members do not block legacy source writes
+before pointer movement.
 Auth is an injected header value (CouchDB has its own credentials; this is NOT
 the RetiredIndexBridge token).
 """
@@ -34,6 +35,9 @@ from .source_store import (
     SourceStoreError,
     StoredRevision,
     _classify_document_idempotency,
+    _is_immutable_source_document,
+    _is_revision_scoped_source_copy,
+    _require_active_source_revision_allows_delete,
     _require_active_source_revision_allows_write,
     merge_transcript_session_documents,
     payload_hash,
@@ -156,7 +160,7 @@ class CouchDBHttpSourceStore:
 
     def put(self, document: dict) -> StoredRevision:
         validate_for_write(document)
-        if document.get("doc_type") in IMMUTABLE_SOURCE_REVISION_DOC_TYPES:
+        if _is_immutable_source_document(document):
             return self.put_if_absent(document)
         doc_id = str(document["_id"])
         incoming_hash = payload_hash(document)
@@ -169,6 +173,8 @@ class CouchDBHttpSourceStore:
         )
         if existing is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
             return StoredRevision(doc_id=doc_id, rev=str(existing.get("_rev", "")), outcome="duplicate")
+        if _is_immutable_source_document(existing):
+            raise SourceStoreConflict("immutable source document already exists")
 
         source_document = existing if existing is not None else document
         self._require_source_document_unpinned(
@@ -199,6 +205,11 @@ class CouchDBHttpSourceStore:
                     rev=str(existing.get("_rev") or ""),
                     outcome="duplicate",
                 )
+            self._require_source_document_unpinned(
+                doc_id,
+                doc_type=str(existing.get("doc_type") or ""),
+                session_id_hash=str(existing.get("session_id_hash") or ""),
+            )
             raise SourceStoreConflict("immutable source document already exists")
 
         self._require_source_document_unpinned(
@@ -253,6 +264,14 @@ class CouchDBHttpSourceStore:
         )
         if current is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
             return StoredRevision(doc_id=doc_id, rev=current_rev, outcome="duplicate")
+        if _is_revision_scoped_source_copy(document) or _is_revision_scoped_source_copy(current):
+            source_document = current if current is not None else document
+            self._require_source_document_unpinned(
+                doc_id,
+                doc_type=str(source_document.get("doc_type") or ""),
+                session_id_hash=str(source_document.get("session_id_hash") or ""),
+            )
+            raise SourceStoreConflict("immutable source document must be additive")
         self._require_source_document_unpinned(
             doc_id,
             doc_type=str(current.get("doc_type") or "") if current is not None else str(document.get("doc_type") or ""),
@@ -617,6 +636,7 @@ class CouchDBHttpSourceStore:
         existing = self.get(doc_id)
         if existing is None or not existing.get("_rev"):
             return False
+        _require_active_source_revision_allows_delete(store=self, document=existing)
         status, _ = self._request(
             "DELETE", f"{self._doc_path(doc_id)}?rev={quote(str(existing['_rev']), safe='')}"
         )
