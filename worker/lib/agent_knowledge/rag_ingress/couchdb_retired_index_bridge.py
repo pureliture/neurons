@@ -72,6 +72,7 @@ from ..couchdb_source.session_memory_materializer import (
 )
 from ..couchdb_source.source_revision import (
     ResolvedSourceRevision,
+    _source_document_logical_identity,
     active_source_origin_document_ids,
     activate_source_revision,
     resolve_active_source_revision,
@@ -94,6 +95,50 @@ from .rag_ready_document import RagReadyDocument
 # ---------------------------------------------------------------------------
 # Shared transform helper
 # ---------------------------------------------------------------------------
+
+
+_CHUNK_IDENTITY_FIELDS = (
+    "doc_type",
+    "session_id_hash",
+    "chunk_id",
+    "provider",
+    "project",
+    "redaction_version",
+    "source_status",
+)
+
+
+def _chunk_documents_match(existing_chunk: dict, expected_chunk: dict) -> bool:
+    return (
+        all(
+            str(existing_chunk.get(field) or "")
+            == str(expected_chunk.get(field) or "")
+            for field in _CHUNK_IDENTITY_FIELDS
+        )
+        and payload_hash(existing_chunk) == payload_hash(expected_chunk)
+    )
+
+
+def _is_active_chunk_duplicate(
+    *,
+    active_revision: ResolvedSourceRevision,
+    chunk_document: dict,
+) -> bool:
+    """Match raw ingress against the active source's stable chunk identity."""
+
+    expected_identity = _source_document_logical_identity(chunk_document)
+    active_chunks = [
+        document
+        for document in active_revision.conversation_chunks
+        if _source_document_logical_identity(document) == expected_identity
+    ]
+    if len(active_chunks) > 1:
+        raise SourceStoreConflict("active source revision chunk logical identity is ambiguous")
+    if not active_chunks:
+        return False
+    if not _chunk_documents_match(active_chunks[0], chunk_document):
+        raise SourceStoreConflict("active source revision chunk logical identity conflicts")
+    return True
 
 
 def _active_source_revision_before_ingress(
@@ -344,11 +389,10 @@ class CouchDBRetiredIndexBridgeAdapter:
                     project=str(session_doc.get("project") or ""),
                 )
                 chunk_document_id = str(chunk_doc["_id"])
-                active_chunk_ids = {
-                    str(document.get("source_snapshot_origin_id") or document["_id"])
-                    for document in activated_after_legacy_write.conversation_chunks
-                }
-                active_duplicate = chunk_document_id in active_chunk_ids
+                active_duplicate = _is_active_chunk_duplicate(
+                    active_revision=activated_after_legacy_write,
+                    chunk_document=chunk_doc,
+                )
                 activated = activate_source_revision(
                     store=self._store,
                     session_id_hash=session_id_hash,
@@ -358,7 +402,7 @@ class CouchDBRetiredIndexBridgeAdapter:
                                 *_active_revision_source_document_ids(
                                     activated_after_legacy_write
                                 ),
-                                chunk_document_id,
+                                *(() if active_duplicate else (chunk_document_id,)),
                             }
                         )
                     ),
@@ -416,33 +460,18 @@ class CouchDBRetiredIndexBridgeAdapter:
                 project=str(session_doc.get("project") or ""),
             )
             chunk_document_id = str(chunk_doc["_id"])
-            active_chunk_ids = {
-                str(
-                    document.get("source_snapshot_origin_id")
-                    or document["_id"]
-                )
-                for document in active_revision.conversation_chunks
-            }
+            active_duplicate = _is_active_chunk_duplicate(
+                active_revision=active_revision,
+                chunk_document=chunk_doc,
+            )
             existing_chunk = self._store.get(chunk_document_id)
             if existing_chunk is not None:
-                if (
-                    str(existing_chunk.get("doc_type") or "")
-                    != SourceDocType.CONVERSATION_CHUNK
-                    or payload_hash(existing_chunk) != payload_hash(chunk_doc)
-                ):
+                if not _chunk_documents_match(existing_chunk, chunk_doc):
                     raise SourceStoreConflict(
                         "active source revision chunk id already has different content"
                     )
-                # An exact orphan can remain after an earlier activation CAS
-                # loss. Reuse it in the next explicit revision instead of
-                # treating it as a no-op duplicate.
-                active_duplicate = chunk_document_id in active_chunk_ids
             else:
-                chunk_revision = self._store.put_if_absent(chunk_doc)
-                active_duplicate = (
-                    chunk_revision.outcome == "duplicate"
-                    and chunk_document_id in active_chunk_ids
-                )
+                self._store.put_if_absent(chunk_doc)
             if on_step_complete is not None:
                 on_step_complete("chunk", document_ref=doc_ref)
 
@@ -451,9 +480,9 @@ class CouchDBRetiredIndexBridgeAdapter:
                 session_id_hash=session_id_hash,
                 source_document_ids=tuple(
                     sorted(
-                        {
-                            *_active_revision_source_document_ids(active_revision),
-                            chunk_document_id,
+                            {
+                                *_active_revision_source_document_ids(active_revision),
+                                *(() if active_duplicate else (chunk_document_id,)),
                         }
                     )
                 ),

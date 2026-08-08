@@ -451,6 +451,43 @@ def test_full_tool_evidence_generation_replaces_prior_active_bundles() -> None:
     assert store.get(pointer_id) == pointer_after_replacement
 
 
+def test_stale_full_generation_predecessor_fails_before_bundle_write_and_preserves_newer_active_generation() -> None:
+    store = _WriteTracingStore()
+    _seed_active_source(store)
+    predecessor = resolve_active_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+    )
+    newer = store_tool_evidence_bundles(
+        [_record(summary="newer generation remains active")],
+        store=store,
+        full_session_generation=True,
+    )
+    active_after_newer = resolve_active_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+    )
+    store.write_count = 0
+
+    with pytest.raises(SourceStoreConflict, match="expected predecessor"):
+        store_tool_evidence_bundles(
+            [_record(summary="stale generation must not publish")],
+            store=store,
+            full_session_generation=True,
+            expected_predecessor=predecessor,
+        )
+
+    current = resolve_active_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+    )
+    assert store.write_count == 0
+    assert current.manifest_id == active_after_newer.manifest_id
+    assert {bundle["_id"] for bundle in current.tool_evidence_bundles} == {
+        revision.doc_id for revision in newer
+    }
+
+
 def test_exact_full_generation_retry_repairs_currentness_after_coverage_failure() -> None:
     store = _FailOnceCoverageStore()
     _session, _chunk, _bundle = _seed_active_source(store)
@@ -557,6 +594,31 @@ def test_first_unpinned_full_generation_returns_active_snapshot_revisions() -> N
 
     resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
 
+    assert {revision.doc_id for revision in stored} == {
+        bundle["_id"] for bundle in resolved.tool_evidence_bundles
+    }
+
+
+def test_expected_legacy_predecessor_still_activates_an_exact_full_generation() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _seed_unpinned_source(store)
+    records = [_record(summary="legacy full generation")]
+    store_tool_evidence_bundles(records, store=store)
+    predecessor = resolve_active_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+    )
+    assert predecessor.is_legacy_unpinned is True
+
+    stored = store_tool_evidence_bundles(
+        records,
+        store=store,
+        full_session_generation=True,
+        expected_predecessor=predecessor,
+    )
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    assert resolved.is_legacy_unpinned is False
     assert {revision.doc_id for revision in stored} == {
         bundle["_id"] for bundle in resolved.tool_evidence_bundles
     }
