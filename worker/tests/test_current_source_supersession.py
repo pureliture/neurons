@@ -226,6 +226,40 @@ def test_corrective_import_is_idempotent_and_changed_verified_snapshot_moves_to_
     assert projection["source_hash"] == changed_resolved.source_hash
 
 
+def test_corrective_import_reactivates_prior_snapshot_after_changed_snapshot(monkeypatch, tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    _seed_projected_legacy_source(store, monkeypatch)
+    first_snapshot = _admitted_snapshot(
+        tmp_path,
+        "restored corrective source",
+        "restored verified raw snapshot",
+    )
+
+    first = activate_admitted_codex_current_source(snapshot=first_snapshot, store=store)
+    first_resolved = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    changed = activate_admitted_codex_current_source(
+        snapshot=_admitted_snapshot(
+            tmp_path,
+            "changed corrective source",
+            "changed verified raw snapshot",
+        ),
+        store=store,
+    )
+    assert first.status == "imported_current_revision"
+    assert changed.status == "imported_current_revision"
+
+    restored = activate_admitted_codex_current_source(snapshot=first_snapshot, store=store)
+    restored_resolved = resolve_active_source_revision(
+        store=store,
+        session_id_hash=SESSION_ID_HASH,
+    )
+
+    assert restored.status == "imported_current_revision"
+    assert restored.source_document_ids == first.source_document_ids
+    assert restored_resolved.manifest_id == first_resolved.manifest_id
+    assert restored_resolved.source_hash == first_resolved.source_hash
+
+
 def test_corrective_import_marks_projection_pending_only_when_source_hash_changes(monkeypatch, tmp_path):
     store = InMemoryCouchDBSourceStore()
     _seed_projected_legacy_source(store, monkeypatch)

@@ -862,6 +862,65 @@ def _parse_manifest(
     return sorted(members, key=lambda member: str(member["member_id"]))
 
 
+def _source_set_provenance(provenance: Mapping[str, str]) -> dict[str, str]:
+    """Return manifest provenance that describes the immutable source set.
+
+    ``predecessor_manifest_hash`` attests a pointer transition, not the source
+    set. A deterministic manifest can be reactivated after a different
+    predecessor, so that transition-only value must not make an already stored
+    immutable source-set manifest ineligible for reuse.
+    """
+
+    return {
+        str(key): str(value)
+        for key, value in provenance.items()
+        if key != "predecessor_manifest_hash"
+    }
+
+
+def _reusable_manifest_hash(
+    *,
+    manifest: Mapping[str, object],
+    session_id_hash: str,
+    source_revision: str,
+    source_hash: str,
+    members: Iterable[Mapping[str, object]],
+    requested_provenance: Mapping[str, str],
+) -> str:
+    """Return an existing manifest hash only when its source-set content matches.
+
+    The stored immutable document remains authoritative and is never rewritten.
+    Only transition provenance may differ, which lets A -> B -> A reuse A's
+    deterministic manifest safely while preserving all source content fences.
+    """
+
+    existing_manifest_hash = _require_hash(manifest.get("manifest_hash"))
+    try:
+        existing_members = _parse_manifest(
+            manifest,
+            session_id_hash=session_id_hash,
+            active_revision=source_revision,
+            expected_manifest_hash=existing_manifest_hash,
+            expected_source_hash=source_hash,
+        )
+        existing_provenance = _validate_provenance(
+            manifest.get("provenance", {}),
+            resolution=True,
+        )
+    except SourceRevisionResolutionError as exc:
+        raise SourceStoreConflict("existing source revision manifest is invalid") from exc
+    expected_members = sorted(
+        (dict(member) for member in members), key=lambda member: str(member["member_id"])
+    )
+    if (
+        existing_members != expected_members
+        or _source_set_provenance(existing_provenance)
+        != _source_set_provenance(requested_provenance)
+    ):
+        raise SourceStoreConflict("existing source revision manifest does not match source set")
+    return existing_manifest_hash
+
+
 def _validate_member_and_source(
     *,
     get_document: Callable[[str], dict | None],
@@ -1223,7 +1282,23 @@ def activate_source_revision(
             "manifest_hash": manifest_hash,
         }
     )
-    store.put_if_absent(manifest)
+    existing_manifest = store.get(manifest_id)
+    if existing_manifest is None:
+        try:
+            store.put_if_absent(manifest)
+        except SourceStoreConflict:
+            existing_manifest = store.get(manifest_id)
+            if existing_manifest is None:
+                raise
+    if existing_manifest is not None:
+        manifest_hash = _reusable_manifest_hash(
+            manifest=existing_manifest,
+            session_id_hash=session_id_hash,
+            source_revision=source_revision,
+            source_hash=source_hash,
+            members=members,
+            requested_provenance=normalized_provenance,
+        )
 
     current_documents = _load_allowlisted_documents(
         store=store,
