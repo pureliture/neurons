@@ -30,7 +30,14 @@ class DeliveryReconciler:
             dataset_ref = str(row.get("index_target_id") or "")
             document_ref = str(row.get("index_document_id") or "")
             if dataset_ref and document_ref:
-                evidence = self._backend.status(dataset_ref, document_ref)
+                status_evidence = self._backend.status(dataset_ref, document_ref)
+                # A generic status lookup can still provide a later explicit
+                # failure, but its unknown result does not disprove a
+                # membership-verified natural-key success.
+                if status_evidence is not None and (
+                    natural_evidence is None or status_evidence.status != "unknown"
+                ):
+                    evidence = status_evidence
         if evidence is None:
             return self._state_db.record_replayable_attempt(job_id, now=now, max_attempts=max_attempts)
         if evidence.status == "succeeded":

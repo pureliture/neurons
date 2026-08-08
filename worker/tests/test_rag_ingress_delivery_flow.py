@@ -20,6 +20,7 @@ class FakeDeliveryBackend:
         self.evidence_by_key: dict[tuple[str, str], DeliveryBackendEvidence] = {}
         self.evidence_by_ref: dict[tuple[str, str], DeliveryBackendEvidence] = {}
         self.submit_calls = 0
+        self.status_calls = 0
         self.submit_mode = "success"
         self.submit_status = "succeeded"
         self.status_mode = "success"
@@ -45,6 +46,7 @@ class FakeDeliveryBackend:
         return self.evidence_by_key.get((idempotency_key, payload_hash))
 
     def status(self, dataset_ref, document_ref):
+        self.status_calls += 1
         if self.status_mode == "async_fail":
             return DeliveryBackendEvidence(
                 idempotency_key="delivery_key",
@@ -53,6 +55,16 @@ class FakeDeliveryBackend:
                 document_ref=document_ref,
                 run="FAIL",
                 status="failed_retryable",
+                observed_at=NOW,
+            )
+        if self.status_mode == "unknown":
+            return DeliveryBackendEvidence(
+                idempotency_key="delivery_key",
+                payload_hash="sha256:payload",
+                dataset_ref=dataset_ref,
+                document_ref=document_ref,
+                run="STALE",
+                status="unknown",
                 observed_at=NOW,
             )
         return self.evidence_by_ref[(dataset_ref, document_ref)]
@@ -216,6 +228,23 @@ def test_async_parse_fail_maps_to_failed_retryable_then_quarantine(tmp_path):
     job = db.get_delivery_job("job_async_fail")
     assert job["status"] == "quarantined"
     assert job["last_error_class"] == "async_parse_failed"
+
+
+def test_unknown_status_does_not_override_natural_key_success(tmp_path):
+    db = _db(tmp_path)
+    _create_job(db, job_id="job_stale_status")
+    backend = FakeDeliveryBackend()
+    executor = DeliveryExecutor(state_db=db, backend=backend, lease_owner="worker_1")
+    assert executor.execute_once("job_stale_status", now=NOW, max_attempts=5) == "succeeded"
+
+    backend.status_mode = "unknown"
+    reconciler = DeliveryReconciler(state_db=db, backend=backend)
+
+    assert reconciler.reconcile_once("job_stale_status", now=NOW, max_attempts=4) == "succeeded"
+    job = db.get_delivery_job("job_stale_status")
+    assert job["status"] == "succeeded"
+    assert job["index_run_id"] == "DONE"
+    assert backend.status_calls == 1
 
 
 def test_stale_owner_delivery_execution_is_rejected_without_overwriting_owner_state(tmp_path):
