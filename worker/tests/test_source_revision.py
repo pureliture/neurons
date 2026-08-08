@@ -726,10 +726,11 @@ class _PinnedMemberMutationAtPointerCasStore(InMemoryCouchDBSourceStore):
             changed = dict(current)
             changed["body"] = "raced changed public-safe source"
             changed["content_hash"] = dm.sha256_hash(changed["body"])
-            # A supported source write cannot corrupt an already-membered
-            # document. Propagating that failure also proves no pointer CAS
-            # occurs after the failed concurrent mutation.
-            super().put(changed)
+            # Model a remote persistent-store overwrite after this process's
+            # write guard. The activation's final origin-drift fence must
+            # still reject the pointer transition.
+            changed["_rev"] = "999-external-origin-overwrite"
+            self._docs[self._source_document_id] = changed
         return super().put_if_revision(document, expected_rev=expected_rev)
 
 

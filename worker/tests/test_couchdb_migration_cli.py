@@ -880,6 +880,31 @@ def test_tool_evidence_cli_returns_error_when_stability_fence_rejects(capsys):
     assert report["errors"] == 1
 
 
+def test_tool_evidence_dry_run_reports_source_context_seed_errors(capsys):
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.run_migration",
+            return_value={"errors": 2},
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.run_tool_evidence",
+            return_value={
+                "by_provider": {"codex": {"errors": 0}},
+                "bundles": 0,
+                "sessions_with_evidence": 0,
+                "errors": 0,
+            },
+        ),
+    ):
+        rc = main(["--tool-evidence", "--dry-run"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["source_context_seed_errors"] == 2
+    assert report["errors"] == 2
+    assert report["status"] == "error"
+
+
 def test_tool_evidence_dry_run_seeds_source_context_for_full_generation(tmp_path, capsys):
     root = tmp_path / "codex"
     source = _codex_session(root, "tool-evidence-dry-run", "/Users/x/Projects/neurons")

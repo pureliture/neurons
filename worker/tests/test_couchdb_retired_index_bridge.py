@@ -598,6 +598,9 @@ class TestErrorPropagation:
             def put(self, document):
                 raise CouchDBError("PUT failed: 503")
 
+            def put_if_absent(self, document):
+                raise CouchDBError("PUT failed: 503")
+
             def get(self, doc_id):
                 return None
 
