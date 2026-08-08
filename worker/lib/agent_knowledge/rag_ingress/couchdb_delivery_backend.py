@@ -491,25 +491,95 @@ class CouchDBDeliveryBackend:
             )
             if active_revision is None:
                 # Legacy/unpinned behavior remains the aggregate reconciliation
-                # path: a retry can repair a partial earlier write.
+                # path: a retry can repair a partial earlier write. An initial
+                # activation can publish its pointer after this pre-read but
+                # before our raw source write; recheck below so the later
+                # writer creates the required explicit successor.
                 chunk_revision = self._store.put(chunk_doc)
                 upsert_transcript_session_aggregate(
                     store=self._store,
                     incoming=session_doc,
                 )
-                coverage_doc = update_coverage_with_tool_evidence(
-                    session_id_hash=session_id_hash,
+                activated_after_legacy_write = _active_source_revision_before_ingress(
                     store=self._store,
-                )
-                source_hash = str((coverage_doc or {}).get("source_hash") or "")
-                mark_projection_pending_if_source_changed(
                     session_id_hash=session_id_hash,
-                    provider=provider,
-                    project=project,
-                    source_hash=source_hash,
-                    store=self._store,
-                    source_changed=chunk_revision.outcome != "duplicate",
                 )
+                if activated_after_legacy_write is not None:
+                    _assert_active_revision_matches_ingress(
+                        active_revision=activated_after_legacy_write,
+                        provider=provider,
+                        project=project,
+                    )
+                    chunk_document_id = str(chunk_doc["_id"])
+                    active_chunk_ids = {
+                        str(
+                            document.get("source_snapshot_origin_id")
+                            or document["_id"]
+                        )
+                        for document in activated_after_legacy_write.conversation_chunks
+                    }
+                    active_duplicate = chunk_document_id in active_chunk_ids
+                    activated = activate_source_revision(
+                        store=self._store,
+                        session_id_hash=session_id_hash,
+                        source_document_ids=tuple(
+                            sorted(
+                                {
+                                    *_active_revision_source_document_ids(
+                                        activated_after_legacy_write
+                                    ),
+                                    chunk_document_id,
+                                }
+                            )
+                        ),
+                        provenance=(
+                            _active_revision_provenance(
+                                store=self._store,
+                                active_revision=activated_after_legacy_write,
+                            )
+                            if active_duplicate
+                            else None
+                        ),
+                        expected_predecessor=activated_after_legacy_write,
+                    )
+                    coverage_doc = update_coverage_with_tool_evidence(
+                        session_id_hash=session_id_hash,
+                        store=self._store,
+                    )
+                    if (
+                        coverage_doc is None
+                        or str(coverage_doc.get("source_hash") or "")
+                        != activated.source_hash
+                    ):
+                        raise SourceStoreConflict(
+                            "active source revision coverage did not converge"
+                        )
+                    mark_projection_pending_if_source_changed(
+                        session_id_hash=session_id_hash,
+                        provider=provider,
+                        project=project,
+                        source_hash=activated.source_hash,
+                        store=self._store,
+                        source_changed=(
+                            activated.source_hash
+                            != activated_after_legacy_write.source_hash
+                        ),
+                    )
+                    active_duplicate = active_duplicate or chunk_revision.outcome == "duplicate"
+                else:
+                    coverage_doc = update_coverage_with_tool_evidence(
+                        session_id_hash=session_id_hash,
+                        store=self._store,
+                    )
+                    source_hash = str((coverage_doc or {}).get("source_hash") or "")
+                    mark_projection_pending_if_source_changed(
+                        session_id_hash=session_id_hash,
+                        provider=provider,
+                        project=project,
+                        source_hash=source_hash,
+                        store=self._store,
+                        source_changed=chunk_revision.outcome != "duplicate",
+                    )
             else:
                 # A pointer makes the selected source set immutable. Resolve it
                 # before the new write, then only append a genuinely new chunk

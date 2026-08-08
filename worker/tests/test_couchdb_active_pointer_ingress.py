@@ -245,6 +245,27 @@ class _InitialActivationInterleavingStore(InMemoryCouchDBSourceStore):
         return revision
 
 
+class _PointerPublishBeforeLegacyChunkWriteStore(InMemoryCouchDBSourceStore):
+    """Publish an initial pointer after ingress reads absence, before its raw write."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._before_next_chunk_write = None
+
+    def set_before_next_chunk_write(self, callback) -> None:
+        self._before_next_chunk_write = callback
+
+    def put(self, document: dict):
+        callback = self._before_next_chunk_write
+        if (
+            callback is not None
+            and str(document.get("doc_type") or "") == dm.SourceDocType.CONVERSATION_CHUNK
+        ):
+            self._before_next_chunk_write = None
+            callback()
+        return super().put(document)
+
+
 class _ConcurrentChunkPayloadCollisionStore(InMemoryCouchDBSourceStore):
     """Create a conflicting chunk after the delivery pre-read, before insert."""
 
@@ -405,6 +426,38 @@ def test_initial_activation_staging_does_not_make_legacy_ingress_uncertain(tmp_p
         for document in resolved.conversation_chunks
     )
     assert [delivery.status for delivery in interleaved_deliveries] == ["succeeded"]
+
+
+def test_legacy_ingress_repairs_initial_pointer_published_before_chunk_write(tmp_path) -> None:
+    first = _payload(
+        idempotency_key="late-pointer-first",
+        chunk_id="first-chunk",
+        body="First source before initial activation.",
+    )
+    second = _payload(
+        idempotency_key="late-pointer-second",
+        chunk_id="second-chunk",
+        body="Distinct source written after initial pointer publication.",
+    )
+    state_db = _state_db(tmp_path)
+    apply_backfill_to_state_db(state_db=state_db, payloads=[first, second], dry_run=False)
+    store = _PointerPublishBeforeLegacyChunkWriteStore()
+    backend = CouchDBDeliveryBackend(state_db=state_db, store=store)
+
+    backend.submit(_job(state_db, "late-pointer-first"))
+    store.set_before_next_chunk_write(
+        lambda: activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    )
+
+    evidence = backend.submit(_job(state_db, "late-pointer-second"))
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    assert evidence.status == "succeeded"
+    assert {document["chunk_id"] for document in resolved.conversation_chunks} == {
+        "first-chunk",
+        "second-chunk",
+    }
+    _assert_active_currentness_recovered(store)
 
 
 def test_retired_index_bridge_rotates_active_pointer_for_distinct_chunk_not_duplicate() -> None:

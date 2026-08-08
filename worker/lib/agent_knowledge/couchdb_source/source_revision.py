@@ -608,6 +608,58 @@ def _assert_expected_predecessor(
         raise SourceStoreConflict("expected predecessor does not match current pointer")
 
 
+def _assert_legacy_predecessor_unchanged(
+    *,
+    expected_predecessor: ResolvedSourceRevision,
+    store: CouchDBSourceStore,
+    session_id_hash: str,
+) -> None:
+    """Fence the exact legacy input again immediately before an initial CAS."""
+
+    current_pointer = store.get(dm.active_source_revision_pointer_doc_id(session_id_hash))
+    try:
+        parsed_current_pointer = (
+            _parse_pointer(current_pointer, session_id_hash=session_id_hash)
+            if current_pointer is not None
+            else None
+        )
+    except SourceRevisionResolutionError as exc:
+        raise SourceStoreConflict("expected predecessor does not match current pointer") from exc
+    _assert_expected_predecessor(
+        expected_predecessor,
+        current_pointer=parsed_current_pointer,
+        session_id_hash=session_id_hash,
+    )
+
+    expected_documents = (
+        *expected_predecessor.sessions,
+        *expected_predecessor.conversation_chunks,
+        *expected_predecessor.tool_evidence_bundles,
+    )
+    current_documents = _load_legacy_documents(
+        store=store,
+        session_id_hash=session_id_hash,
+    )
+    try:
+        dm.assert_hash_like("expected_predecessor_source_hash", expected_predecessor.source_hash)
+        expected_descriptor_revision = _source_document_set_revision(
+            expected_documents,
+            session_id_hash=session_id_hash,
+        )
+        current_descriptor_revision = _source_document_set_revision(
+            current_documents,
+            session_id_hash=session_id_hash,
+        )
+        current_source_hash = _resolved_source_hash(current_documents)
+    except (SourceRevisionResolutionError, SourceStoreConflict, TypeError, ValueError) as exc:
+        raise SourceStoreConflict("expected predecessor legacy source changed") from exc
+    if (
+        expected_predecessor.source_hash != current_source_hash
+        or expected_descriptor_revision != current_descriptor_revision
+    ):
+        raise SourceStoreConflict("expected predecessor legacy source changed")
+
+
 def _successor_provenance(
     *,
     store: CouchDBSourceStore,
@@ -1061,6 +1113,12 @@ def activate_source_revision(
             "source_hash": source_hash,
         }
     )
+    if expected_predecessor is not None and expected_predecessor.is_legacy_unpinned:
+        _assert_legacy_predecessor_unchanged(
+            expected_predecessor=expected_predecessor,
+            store=store,
+            session_id_hash=session_id_hash,
+        )
     if previous_pointer is not None:
         # The pointer revision alone cannot attest the immutable member/source
         # records it references. Re-resolve the previous active revision at the
