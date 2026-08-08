@@ -319,7 +319,9 @@ class CouchDBRetiredIndexBridgeAdapter:
         )
         if active_revision is None:
             # Preserve the ordinary legacy aggregate behavior while no active
-            # pointer exists.
+            # pointer exists. An initial activation can publish its pointer
+            # after this pre-read but before the raw source write; recheck
+            # below so the later writer creates the required successor.
             chunk_revision = self._store.put(chunk_doc)
             if on_step_complete is not None:
                 on_step_complete("chunk", document_ref=doc_ref)
@@ -331,10 +333,69 @@ class CouchDBRetiredIndexBridgeAdapter:
             if on_step_complete is not None:
                 on_step_complete("session", document_ref=doc_ref)
 
-            coverage_doc = update_coverage_with_tool_evidence(
-                session_id_hash=session_id_hash,
+            activated_after_legacy_write = _active_source_revision_before_ingress(
                 store=self._store,
-            ) or coverage_doc
+                session_id_hash=session_id_hash,
+            )
+            if activated_after_legacy_write is not None:
+                _assert_active_revision_matches_ingress(
+                    active_revision=activated_after_legacy_write,
+                    provider=str(session_doc.get("provider") or ""),
+                    project=str(session_doc.get("project") or ""),
+                )
+                chunk_document_id = str(chunk_doc["_id"])
+                active_chunk_ids = {
+                    str(document.get("source_snapshot_origin_id") or document["_id"])
+                    for document in activated_after_legacy_write.conversation_chunks
+                }
+                active_duplicate = chunk_document_id in active_chunk_ids
+                activated = activate_source_revision(
+                    store=self._store,
+                    session_id_hash=session_id_hash,
+                    source_document_ids=tuple(
+                        sorted(
+                            {
+                                *_active_revision_source_document_ids(
+                                    activated_after_legacy_write
+                                ),
+                                chunk_document_id,
+                            }
+                        )
+                    ),
+                    provenance=(
+                        _active_revision_provenance(
+                            store=self._store,
+                            active_revision=activated_after_legacy_write,
+                        )
+                        if active_duplicate
+                        else None
+                    ),
+                    expected_predecessor=activated_after_legacy_write,
+                )
+                coverage_doc = update_coverage_with_tool_evidence(
+                    session_id_hash=session_id_hash,
+                    store=self._store,
+                )
+                if (
+                    coverage_doc is None
+                    or str(coverage_doc.get("source_hash") or "")
+                    != activated.source_hash
+                ):
+                    raise SourceStoreConflict(
+                        "active source revision coverage did not converge"
+                    )
+                source_hash = activated.source_hash
+                source_changed = (
+                    activated.source_hash
+                    != activated_after_legacy_write.source_hash
+                )
+            else:
+                coverage_doc = update_coverage_with_tool_evidence(
+                    session_id_hash=session_id_hash,
+                    store=self._store,
+                ) or coverage_doc
+                source_hash = str(coverage_doc.get("source_hash") or "")
+                source_changed = chunk_revision.outcome != "duplicate"
             if on_step_complete is not None:
                 on_step_complete("coverage", document_ref=doc_ref)
 
@@ -342,9 +403,9 @@ class CouchDBRetiredIndexBridgeAdapter:
                 session_id_hash=session_id_hash,
                 provider=str(session_doc.get("provider") or ""),
                 project=str(session_doc.get("project") or ""),
-                source_hash=str(coverage_doc.get("source_hash") or ""),
+                source_hash=source_hash,
                 store=self._store,
-                source_changed=chunk_revision.outcome != "duplicate",
+                source_changed=source_changed,
             )
             if on_step_complete is not None:
                 on_step_complete("projection", document_ref=doc_ref)

@@ -460,6 +460,36 @@ def test_legacy_ingress_repairs_initial_pointer_published_before_chunk_write(tmp
     _assert_active_currentness_recovered(store)
 
 
+def test_legacy_retired_bridge_repairs_initial_pointer_published_before_chunk_write() -> None:
+    first = _payload(
+        idempotency_key="late-pointer-bridge-first",
+        chunk_id="first-chunk",
+        body="First bridge source before initial activation.",
+    )
+    second = _payload(
+        idempotency_key="late-pointer-bridge-second",
+        chunk_id="second-chunk",
+        body="Distinct bridge source written after initial pointer publication.",
+    )
+    store = _PointerPublishBeforeLegacyChunkWriteStore()
+    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+
+    adapter.submit_document(document_from_ingress_payload(first))
+    store.set_before_next_chunk_write(
+        lambda: activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    )
+
+    result = adapter.submit_document(document_from_ingress_payload(second))
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    assert result.status == "submitted"
+    assert {document["chunk_id"] for document in resolved.conversation_chunks} == {
+        "first-chunk",
+        "second-chunk",
+    }
+    _assert_active_currentness_recovered(store)
+
+
 def test_retired_index_bridge_rotates_active_pointer_for_distinct_chunk_not_duplicate() -> None:
     first = _payload(
         idempotency_key="bridge-first",

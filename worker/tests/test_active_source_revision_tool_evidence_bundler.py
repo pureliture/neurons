@@ -134,6 +134,29 @@ class _LegacyBundleBeforeInitialPointerCasStore(InMemoryCouchDBSourceStore):
         return super().put_if_revision(document, expected_rev=expected_rev)
 
 
+class _InterleavedUnpinnedFullGenerationStore(InMemoryCouchDBSourceStore):
+    """Overwrite one legacy part while a full replacement is still staging."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._competing_part: dict | None = None
+
+    def interleave_next_bundle_write(self, document: dict) -> None:
+        self._competing_part = dict(document)
+
+    def put(self, document: dict):
+        stored = super().put(document)
+        if (
+            self._competing_part is not None
+            and str(document.get("doc_type") or "")
+            == dm.SourceDocType.TOOL_EVIDENCE_BUNDLE
+        ):
+            competing_part = self._competing_part
+            self._competing_part = None
+            super().put(competing_part)
+        return stored
+
+
 class _FailOnceCoverageStore(InMemoryCouchDBSourceStore):
     """Inject one coverage write failure after a pointer transition."""
 
@@ -152,32 +175,6 @@ class _FailOnceCoverageStore(InMemoryCouchDBSourceStore):
             self._fail_next_coverage_write = False
             raise SourceStoreConflict("injected active coverage failure")
         return super().put(document)
-
-
-class _OriginDriftAtPointerCasStore(InMemoryCouchDBSourceStore):
-    """Mutate one mutable origin immediately before a successor pointer CAS."""
-
-    def __init__(self, origin_document_id: str) -> None:
-        super().__init__()
-        self._origin_document_id = origin_document_id
-        self._inject_at_pointer_cas = False
-
-    def inject_origin_drift_at_next_pointer_cas(self) -> None:
-        self._inject_at_pointer_cas = True
-
-    def put_if_revision(self, document: dict, *, expected_rev: str):
-        if (
-            self._inject_at_pointer_cas
-            and str(document.get("doc_type") or "") == dm.SourceDocType.ACTIVE_SOURCE_REVISION
-        ):
-            self._inject_at_pointer_cas = False
-            origin = self.get(self._origin_document_id)
-            assert origin is not None
-            changed = dict(origin)
-            changed["body"] = "origin changed during successor pointer transition"
-            changed["content_hash"] = dm.sha256_hash(changed["body"])
-            super().put(changed)
-        return super().put_if_revision(document, expected_rev=expected_rev)
 
 
 def test_unpinned_tool_evidence_keeps_legacy_id_and_regular_upsert() -> None:
@@ -320,6 +317,35 @@ def test_active_pointer_duplicate_bundle_does_not_churn_pointer() -> None:
     assert store.get(pointer_id) == pointer_before
 
 
+def test_active_pointer_normal_duplicate_does_not_reselect_mutated_raw_origin() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _session, raw_chunk, bundle = _seed_active_source(store)
+    pointer_id = dm.active_source_revision_pointer_doc_id(_session_id_hash())
+    pointer_before = store.get(pointer_id)
+    store.put(
+        dm.build_conversation_chunk_document(
+            chunk=TranscriptChunk.from_text(
+                chunk_id="pinned-conversation",
+                session_id_hash=_session_id_hash(),
+                provider="codex",
+                project=PROJECT,
+                turn_start_index=0,
+                turn_end_index=0,
+                text="mutable raw origin changed after activation",
+            )
+        )
+    )
+
+    duplicate = store_tool_evidence_bundles([_record()], store=store)[0]
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+
+    assert raw_chunk["_id"] == resolved.conversation_chunks[0]["source_snapshot_origin_id"]
+    assert duplicate.doc_id == resolved.tool_evidence_bundles[0]["_id"]
+    assert resolved.tool_evidence_bundles[0]["source_snapshot_origin_id"] == bundle["_id"]
+    assert resolved.conversation_chunks[0]["body"] == "public-safe pinned conversation"
+    assert store.get(pointer_id) == pointer_before
+
+
 def test_active_pointer_batches_new_bundles_into_one_allowlist_cas() -> None:
     store = InMemoryCouchDBSourceStore()
     _session, _chunk, previous_bundle = _seed_active_source(store)
@@ -357,6 +383,364 @@ def test_active_pointer_batches_new_bundles_into_one_allowlist_cas() -> None:
         previous_bundle["_id"],
         *(revision.doc_id for revision in added),
     }
+
+
+def test_full_tool_evidence_generation_replaces_prior_active_bundles() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _session, _chunk, _previous_bundle = _seed_active_source(store)
+    previous = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    pointer_id = dm.active_source_revision_pointer_doc_id(_session_id_hash())
+    full_generation = [
+        _record(
+            summary="corrected full-session evidence first part",
+            evidence_index=0,
+            observed_at="2026-08-04T00:00:00Z",
+        ),
+        _record(
+            summary="corrected full-session evidence second part",
+            evidence_index=1,
+            observed_at="2026-08-04T00:01:00Z",
+        ),
+    ]
+
+    stored = store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+        full_session_generation=True,
+    )
+    pointer_after_replacement = store.get(pointer_id)
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+
+    assert pointer_after_replacement is not None
+    assert {
+        document["_id"] for document in resolved.tool_evidence_bundles
+    } == {revision.doc_id for revision in stored}
+    assert {document["_id"] for document in resolved.tool_evidence_bundles}.isdisjoint(
+        {document["_id"] for document in previous.tool_evidence_bundles}
+    )
+
+    retried = store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+        full_session_generation=True,
+    )
+
+    assert {revision.outcome for revision in retried} == {"duplicate"}
+    assert store.get(pointer_id) == pointer_after_replacement
+
+
+def test_exact_full_generation_retry_repairs_currentness_after_coverage_failure() -> None:
+    store = _FailOnceCoverageStore()
+    _session, _chunk, _bundle = _seed_active_source(store)
+    previous = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    store.put(
+        dm.build_projection_state_document(
+            session_id_hash=_session_id_hash(),
+            provider="codex",
+            project=PROJECT,
+            projection_status=dm.ProjectionStatus.PROJECTED,
+            active_content_hash=dm.sha256_hash("old full-generation projection"),
+            source_hash=previous.source_hash,
+            projected_source_hash=previous.source_hash,
+        )
+    )
+    generation = [
+        _record(
+            summary="full evidence requires retry convergence",
+            observed_at="2026-08-04T00:00:00Z",
+        )
+    ]
+    pointer_id = dm.active_source_revision_pointer_doc_id(_session_id_hash())
+    store.fail_next_coverage_write()
+
+    with pytest.raises(SourceStoreConflict, match="injected active coverage failure"):
+        store_tool_evidence_bundles(
+            generation,
+            store=store,
+            full_session_generation=True,
+        )
+
+    pointer_after_failure = store.get(pointer_id)
+    assert pointer_after_failure is not None
+    retried = store_tool_evidence_bundles(
+        generation,
+        store=store,
+        full_session_generation=True,
+    )
+
+    current = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    coverage = store.get(dm.coverage_manifest_doc_id(_session_id_hash()))
+    projection = store.get(dm.projection_state_doc_id(_session_id_hash()))
+    assert {revision.outcome for revision in retried} == {"duplicate"}
+    assert store.get(pointer_id) == pointer_after_failure
+    assert current.source_hash != previous.source_hash
+    assert coverage is not None
+    assert coverage["source_hash"] == current.source_hash
+    assert projection is not None
+    assert projection["projection_status"] == dm.ProjectionStatus.PENDING
+    assert projection["source_hash"] == current.source_hash
+
+
+def test_unpinned_full_generation_excludes_removed_parts_before_initial_activation() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _seed_unpinned_source(store)
+    store_tool_evidence_bundles(
+        [
+            _record(
+                summary="first full generation first part",
+                evidence_index=0,
+                observed_at="2026-08-04T00:00:00Z",
+            ),
+            _record(
+                summary="first full generation second part",
+                evidence_index=1,
+                observed_at="2026-08-04T00:01:00Z",
+            ),
+        ],
+        store=store,
+        full_session_generation=True,
+    )
+    replacement = store_tool_evidence_bundles(
+        [
+            _record(
+                summary="replacement full generation only part",
+                evidence_index=0,
+                observed_at="2026-08-04T00:00:00Z",
+            )
+        ],
+        store=store,
+        full_session_generation=True,
+    )
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+
+    assert resolved.is_legacy_unpinned is False
+    assert {bundle["_id"] for bundle in resolved.tool_evidence_bundles} == {
+        replacement[0].doc_id
+    }
+
+
+def test_first_unpinned_full_generation_returns_active_snapshot_revisions() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _seed_unpinned_source(store)
+
+    stored = store_tool_evidence_bundles(
+        [
+            _record(summary="first active evidence part", evidence_index=0),
+            _record(summary="second active evidence part", evidence_index=1),
+        ],
+        store=store,
+        full_session_generation=True,
+    )
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+
+    assert {revision.doc_id for revision in stored} == {
+        bundle["_id"] for bundle in resolved.tool_evidence_bundles
+    }
+
+
+def test_unpinned_full_generation_never_publishes_interleaved_legacy_parts() -> None:
+    store = _InterleavedUnpinnedFullGenerationStore()
+    _seed_unpinned_source(store)
+    full_generation = [
+        _record(
+            summary="selected full generation first part",
+            evidence_index=0,
+            observed_at="2026-08-04T00:00:00Z",
+        ),
+        _record(
+            summary="selected full generation second part",
+            evidence_index=1,
+            observed_at="2026-08-04T00:01:00Z",
+        ),
+    ]
+    competing_part = build_tool_evidence_bundle_documents(
+        [
+            _record(
+                summary="competing generation first part",
+                evidence_index=0,
+                observed_at="2026-08-04T00:00:00Z",
+            )
+        ]
+    )[0]
+    store.interleave_next_bundle_write(competing_part)
+
+    store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+        full_session_generation=True,
+    )
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    bodies = {str(bundle["body"]) for bundle in resolved.tool_evidence_bundles}
+
+    assert len(bodies) == 2
+    assert all("selected full generation" in body for body in bodies)
+    assert all("competing generation" not in body for body in bodies)
+
+
+def test_unpinned_full_generation_replay_does_not_rotate_pointer() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _seed_unpinned_source(store)
+    full_generation = [
+        _record(
+            summary="replayed full generation first part",
+            evidence_index=0,
+            observed_at="2026-08-04T00:00:00Z",
+        ),
+        _record(
+            summary="replayed full generation second part",
+            evidence_index=1,
+            observed_at="2026-08-04T00:01:00Z",
+        ),
+    ]
+
+    store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+        full_session_generation=True,
+    )
+    pointer_id = dm.active_source_revision_pointer_doc_id(_session_id_hash())
+    pointer_before = store.get(pointer_id)
+    assert pointer_before is not None
+
+    retried = store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+        full_session_generation=True,
+    )
+
+    assert {revision.outcome for revision in retried} == {"duplicate"}
+    assert store.get(pointer_id) == pointer_before
+
+
+def test_active_full_generation_replay_ignores_overwritten_raw_duplicate() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _seed_unpinned_source(store)
+    full_generation = [
+        _record(
+            summary="active replay first part",
+            evidence_index=0,
+            observed_at="2026-08-04T00:00:00Z",
+        ),
+        _record(
+            summary="active replay second part",
+            evidence_index=1,
+            observed_at="2026-08-04T00:01:00Z",
+        ),
+    ]
+    store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+        full_session_generation=True,
+    )
+    pointer_id = dm.active_source_revision_pointer_doc_id(_session_id_hash())
+    pointer_before = store.get(pointer_id)
+    assert pointer_before is not None
+    competing_part = build_tool_evidence_bundle_documents(
+        [
+            _record(
+                summary="overwritten competing first part",
+                evidence_index=0,
+                observed_at="2026-08-04T00:00:00Z",
+            ),
+            _record(
+                summary="overwritten competing second part",
+                evidence_index=1,
+                observed_at="2026-08-04T00:01:00Z",
+            ),
+        ]
+    )[0]
+    store.put(competing_part)
+
+    store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+        full_session_generation=True,
+    )
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    assert store.get(pointer_id) == pointer_before
+    assert all(
+        "active replay" in str(bundle["body"])
+        for bundle in resolved.tool_evidence_bundles
+    )
+
+
+def test_active_full_generation_returns_new_snapshot_for_prior_duplicate_when_another_part_changes() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _seed_unpinned_source(store)
+    initial_generation = [
+        _record(
+            summary="preserved duplicate first part",
+            evidence_index=0,
+            observed_at="2026-08-04T00:00:00Z",
+        ),
+        _record(
+            summary="replaced previous second part",
+            evidence_index=1,
+            observed_at="2026-08-04T00:01:00Z",
+        ),
+    ]
+    store_tool_evidence_bundles(
+        initial_generation,
+        store=store,
+        full_session_generation=True,
+    )
+    competing_part = build_tool_evidence_bundle_documents(
+        [
+            _record(
+                summary="competing raw first part",
+                evidence_index=0,
+                observed_at="2026-08-04T00:00:00Z",
+            ),
+            _record(
+                summary="competing raw second part",
+                evidence_index=1,
+                observed_at="2026-08-04T00:01:00Z",
+            ),
+        ]
+    )[0]
+    store.put(competing_part)
+
+    stored = store_tool_evidence_bundles(
+        [
+            initial_generation[0],
+            _record(
+                summary="replacement second part",
+                evidence_index=1,
+                observed_at="2026-08-04T00:01:00Z",
+            ),
+        ],
+        store=store,
+        full_session_generation=True,
+    )
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    bodies = {str(bundle["body"]) for bundle in resolved.tool_evidence_bundles}
+    assert {revision.doc_id for revision in stored} == {
+        bundle["_id"] for bundle in resolved.tool_evidence_bundles
+    }
+    assert any("preserved duplicate first part" in body for body in bodies)
+    assert any("replacement second part" in body for body in bodies)
+    assert all("competing raw" not in body for body in bodies)
+
+
+def test_empty_full_generation_removes_active_tool_evidence() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _seed_active_source(store)
+
+    stored = store_tool_evidence_bundles(
+        [],
+        store=store,
+        full_session_generation=True,
+        session_id_hash=_session_id_hash(),
+    )
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+
+    assert stored == []
+    assert resolved.tool_evidence_bundles == ()
 
 
 def test_active_pointer_change_refreshes_coverage_and_marks_projection_pending() -> None:
@@ -431,45 +815,6 @@ def test_active_pointer_duplicate_bundle_retry_repairs_currentness_after_coverag
     assert projection is not None
     assert projection["projection_status"] == dm.ProjectionStatus.PENDING
     assert projection["source_hash"] == resolved.source_hash
-
-
-def test_tool_bundle_retry_after_origin_drift_activates_current_successor() -> None:
-    origin_chunk = dm.build_conversation_chunk_document(
-        chunk=TranscriptChunk.from_text(
-            chunk_id="pinned-conversation",
-            session_id_hash=_session_id_hash(),
-            provider="codex",
-            project=PROJECT,
-            turn_start_index=0,
-            turn_end_index=0,
-            text="public-safe pinned conversation",
-        )
-    )
-    store = _OriginDriftAtPointerCasStore(origin_chunk["_id"])
-    _session, seeded_chunk, _bundle = _seed_active_source(store)
-    assert seeded_chunk["_id"] == origin_chunk["_id"]
-    store.inject_origin_drift_at_next_pointer_cas()
-    records = [_record(summary="origin-drift recovery evidence", evidence_index=1)]
-
-    with pytest.raises(SourceStoreConflict, match="origin changed during activation"):
-        store_tool_evidence_bundles(records, store=store)
-
-    stale = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
-    assert stale.conversation_chunks[0]["body"] != "origin changed during successor pointer transition"
-
-    stored = store_tool_evidence_bundles(records, store=store)
-
-    recovered = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
-    coverage = store.get(dm.coverage_manifest_doc_id(_session_id_hash()))
-    projection = store.get(dm.projection_state_doc_id(_session_id_hash()))
-    assert stored[0].outcome == "duplicate"
-    assert recovered.source_hash != stale.source_hash
-    assert recovered.conversation_chunks[0]["body"] == "origin changed during successor pointer transition"
-    assert coverage is not None
-    assert coverage["source_hash"] == recovered.source_hash
-    assert projection is not None
-    assert projection["projection_status"] == dm.ProjectionStatus.PENDING
-    assert projection["source_hash"] == recovered.source_hash
 
 
 class _WriteTracingStore(InMemoryCouchDBSourceStore):
