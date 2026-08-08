@@ -544,12 +544,39 @@ def run_tool_evidence(
                         record.evidence_id_hash,
                     ),
                 )
-                source_session = store.get(session_doc_id(session_id_hash))
+                expected_predecessor = predecessor_by_session.get(session_id_hash)
+                active_sessions = (
+                    expected_predecessor.sessions
+                    if expected_predecessor is not None
+                    else ()
+                )
+                # The pre-extraction resolved source revision is the authority
+                # for a full-generation replacement. Its active session can be
+                # a corrective copy whose project differs from the canonical
+                # legacy session document. An incomplete active revision must
+                # fail closed instead of falling back to stale legacy state.
+                if (
+                    expected_predecessor is not None
+                    and not expected_predecessor.is_legacy_unpinned
+                ):
+                    if len(active_sessions) != 1:
+                        prov["errors"] += 1
+                        continue
+                    source_session = active_sessions[0]
+                else:
+                    source_session = store.get(session_doc_id(session_id_hash))
                 source_project = (
                     str(source_session.get("project") or "")
                     if source_session is not None
                     else ""
                 )
+                if (
+                    expected_predecessor is not None
+                    and not expected_predecessor.is_legacy_unpinned
+                    and not source_project
+                ):
+                    prov["errors"] += 1
+                    continue
                 if source_project:
                     # Extractors do not own project resolution. When the source
                     # context is present, bind only missing record projects to
@@ -601,7 +628,6 @@ def run_tool_evidence(
                     "full_session_generation": True,
                     "session_id_hash": session_id_hash,
                 }
-                expected_predecessor = predecessor_by_session.get(session_id_hash)
                 if expected_predecessor is not None:
                     bundle_kwargs["expected_predecessor"] = expected_predecessor
                 revs = store_tool_evidence_bundles(records, **bundle_kwargs)
