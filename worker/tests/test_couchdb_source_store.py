@@ -9,7 +9,10 @@ from agent_knowledge.couchdb_source.source_store import (
     SourceStoreConflict,
     SourceStoreError,
 )
-from agent_knowledge.couchdb_source.source_revision import activate_source_revision
+from agent_knowledge.couchdb_source.source_revision import (
+    activate_source_revision,
+    resolve_active_source_revision,
+)
 from agent_knowledge.couchdb_source.session_memory_materializer import (
     upsert_transcript_session_aggregate,
 )
@@ -55,6 +58,12 @@ def _pin_chunk(store: InMemoryCouchDBSourceStore) -> tuple[dict, dict, str]:
     chunk_revision = store.put(chunk)
     activate_source_revision(store=store, session_id_hash=_sid())
     return session, chunk, chunk_revision.rev
+
+
+def _active_snapshot_chunk(store: InMemoryCouchDBSourceStore) -> dict:
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_sid())
+    assert len(resolved.conversation_chunks) == 1
+    return resolved.conversation_chunks[0]
 
 
 def test_inmemory_store_satisfies_protocol() -> None:
@@ -112,9 +121,11 @@ def test_put_preserves_later_temporal_metadata_for_identical_chunk_body() -> Non
     assert stored["observed_at_end"] == "2026-07-09T10:30:00Z"
 
 
-def test_revision_member_rejects_changed_put_and_conditional_put_but_allows_exact_duplicate() -> None:
+def test_active_snapshot_rejects_changed_put_and_conditional_put_while_origin_stays_mutable() -> None:
     store = InMemoryCouchDBSourceStore()
-    _session, chunk, chunk_rev = _pin_chunk(store)
+    _session, origin_chunk, _origin_chunk_rev = _pin_chunk(store)
+    chunk = _active_snapshot_chunk(store)
+    chunk_rev = str(chunk["_rev"])
     before = store.get(chunk["_id"])
     assert before is not None
 
@@ -134,10 +145,50 @@ def test_revision_member_rejects_changed_put_and_conditional_put_but_allows_exac
         store.put_if_revision(changed, expected_rev=chunk_rev)
     assert store.get(chunk["_id"]) == before
 
+    changed_origin = dict(origin_chunk)
+    changed_origin["body"] = "changed public-safe mutable origin"
+    changed_origin["content_hash"] = dm.sha256_hash(changed_origin["body"])
+    assert store.put(changed_origin).outcome == "conflict_resolved"
 
-def test_revision_member_rejects_temporal_patch_but_allows_unreferenced_additive_write() -> None:
+
+@pytest.mark.parametrize(
+    "corrupt_active_control",
+    (
+        lambda pointer, _manifest: pointer.pop("manifest_id"),
+        lambda pointer, _manifest: pointer.update(
+            {"manifest_id": "source_revision_manifest:missing"}
+        ),
+        lambda _pointer, manifest: manifest.update({"members": "corrupt"}),
+    ),
+)
+def test_incomplete_active_control_rejects_new_source_append_but_not_exact_duplicate(
+    corrupt_active_control,
+) -> None:
     store = InMemoryCouchDBSourceStore()
-    _session, chunk, chunk_rev = _pin_chunk(store)
+    _session, _chunk, _chunk_rev = _pin_chunk(store)
+    existing_append = _chunk_doc("unreferenced append before control corruption")
+    first = store.put_if_absent(existing_append)
+    pointer_id = dm.active_source_revision_pointer_doc_id(_sid())
+    pointer = store._docs[pointer_id]
+    manifest = store._docs[pointer["manifest_id"]]
+    corrupt_active_control(pointer, manifest)
+    new_append = _chunk_doc("must not append through incomplete active control")
+
+    duplicate = store.put_if_absent(existing_append)
+    with pytest.raises(SourceStoreConflict, match="active source revision"):
+        store.put_if_absent(new_append)
+
+    assert first.outcome == "accepted"
+    assert duplicate.outcome == "duplicate"
+    assert duplicate.rev == first.rev
+    assert store.get(new_append["_id"]) is None
+
+
+def test_active_snapshot_rejects_temporal_patch_but_allows_unreferenced_additive_write() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _session, _origin_chunk, _origin_chunk_rev = _pin_chunk(store)
+    chunk = _active_snapshot_chunk(store)
+    chunk_rev = str(chunk["_rev"])
 
     temporal_duplicate = store.patch_observed_time_if_content_hash(
         doc_id=chunk["_id"],

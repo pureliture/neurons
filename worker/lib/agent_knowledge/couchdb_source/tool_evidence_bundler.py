@@ -20,6 +20,7 @@ from .document_model import (
 from .source_revision import (
     ResolvedSourceRevision,
     SourceRevisionResolutionError,
+    active_source_origin_document_ids,
     activate_source_revision,
     resolve_active_source_revision,
 )
@@ -110,7 +111,17 @@ def build_tool_evidence_bundle_documents(
 
 
 _BUNDLE_BOOKKEEPING_FIELDS = frozenset(
-    {"_id", "_rev", "idempotency_key", "payload_hash"}
+    {
+        "_id",
+        "_rev",
+        "idempotency_key",
+        "payload_hash",
+        "source_snapshot_schema_version",
+        "source_snapshot_scope",
+        "source_snapshot_origin_id",
+        "current_source_scope",
+        "supersedes_source_document_hash",
+    }
 )
 
 
@@ -178,8 +189,9 @@ def _active_provenance(
     *,
     resolved: ResolvedSourceRevision,
     store: CouchDBSourceStore,
+    include_predecessor: bool = True,
 ) -> dict[str, str]:
-    """Carry safe provenance forward while recording this immutable predecessor."""
+    """Carry safe provenance, optionally binding a new predecessor."""
 
     if not resolved.manifest_id:
         raise SourceRevisionResolutionError("active source revision manifest is missing")
@@ -196,10 +208,12 @@ def _active_provenance(
         raise SourceRevisionResolutionError(
             "active source revision manifest is invalid"
         ) from exc
-    return {
+    carried_provenance = {
         **{str(key): str(value) for key, value in provenance.items()},
-        "predecessor_manifest_hash": manifest_hash,
     }
+    if include_predecessor:
+        carried_provenance["predecessor_manifest_hash"] = manifest_hash
+    return carried_provenance
 
 
 def _active_bundle_revisions(
@@ -240,32 +254,30 @@ def _active_bundle_revisions(
         material_hash: store.put_if_absent(document)
         for material_hash, document in staged_by_material.items()
     }
-    activated = resolved
-    if staged_by_material:
-        source_document_ids = tuple(
-            sorted(
-                {
-                    str(member["_id"])
-                    for member in (
-                        *resolved.sessions,
-                        *resolved.conversation_chunks,
-                        *resolved.tool_evidence_bundles,
-                        *staged_by_material.values(),
-                    )
-                }
-            )
+    source_document_ids = tuple(
+        sorted(
+            {
+                *active_source_origin_document_ids(resolved),
+                *(str(document["_id"]) for document in staged_by_material.values()),
+            }
         )
-        activated = activate_source_revision(
+    )
+    activated = activate_source_revision(
+        store=store,
+        session_id_hash=resolved.session_id_hash,
+        source_document_ids=source_document_ids,
+        provenance=_active_provenance(
+            resolved=resolved,
             store=store,
-            session_id_hash=resolved.session_id_hash,
-            source_document_ids=source_document_ids,
-            provenance=_active_provenance(resolved=resolved, store=store),
-            expected_predecessor=resolved,
-        )
+            include_predecessor=bool(staged_by_material),
+        ),
+        expected_predecessor=resolved,
+    )
 
-    # If a prior attempt moved the pointer but failed before these secondary
-    # records converged, the retry finds only active duplicates. Reconcile the
-    # current revision in that case too; matching-hash updates are idempotent.
+    # A retry may find only active duplicates after a pointer CAS. Re-run the
+    # activation first: unchanged origins keep the same pointer, while an
+    # origin drifted during that CAS gets a new immutable successor before
+    # secondary records converge.
     coverage = update_coverage_with_tool_evidence(
         session_id_hash=activated.session_id_hash,
         store=store,

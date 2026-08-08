@@ -32,6 +32,9 @@ _PROVENANCE_HASH_KEYS = frozenset(
 _PROVENANCE_VERSION_KEYS = frozenset({"parser_version", "chunker_version"})
 _PROVENANCE_KEYS = _PROVENANCE_HASH_KEYS | _PROVENANCE_VERSION_KEYS
 _SAFE_PROVENANCE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}")
+_SOURCE_SNAPSHOT_SCHEMA_VERSION = "couchdb_source_revision_snapshot.v1"
+_SOURCE_SNAPSHOT_ORIGIN_ID = "source_snapshot_origin_id"
+_SOURCE_SNAPSHOT_SCOPE = "source_snapshot_scope"
 
 
 class SourceRevisionResolutionError(SourceStoreError):
@@ -140,6 +143,195 @@ def _source_document_set_revision(
         )
     except (SourceRevisionResolutionError, TypeError, ValueError) as exc:
         raise SourceStoreConflict("source revision source contract is invalid") from exc
+
+
+def _source_snapshot_scope(
+    *,
+    documents: Iterable[Mapping[str, object]],
+    source_snapshot_hash: str,
+) -> str:
+    """Bind immutable snapshot ids to one verified origin document set."""
+
+    dm.assert_hash_like("source_snapshot_hash", source_snapshot_hash)
+    return _canonical_hash(
+        {
+            "source_snapshot_hash": source_snapshot_hash,
+            "documents": [
+                {
+                    str(key): value
+                    for key, value in document.items()
+                    if key not in {"_id", "_rev", "idempotency_key", "payload_hash"}
+                }
+                for document in documents
+            ],
+        }
+    )
+
+
+def _revision_scoped_source_document_id(
+    *,
+    document: Mapping[str, object],
+    source_scope: str,
+    scope_kind: str,
+) -> str:
+    doc_type = str(document.get("doc_type") or "")
+    session_id_hash = str(document.get("session_id_hash") or "")
+    origin_id = str(document.get("_id") or "")
+    dm.assert_hash_like("session_id_hash", session_id_hash)
+    dm.assert_hash_like("source_scope", source_scope)
+    if doc_type not in _SOURCE_MEMBER_TYPES or not origin_id:
+        raise ValueError("source revision snapshot document contract is invalid")
+    return ":".join(
+        (
+            doc_type,
+            scope_kind,
+            session_id_hash.removeprefix("sha256:"),
+            source_scope.removeprefix("sha256:"),
+            dm.sha256_hash(origin_id).removeprefix("sha256:"),
+        )
+    )
+
+
+def build_revision_scoped_source_documents(
+    *,
+    documents: Iterable[Mapping[str, object]],
+    source_snapshot_hash: str,
+    scope_kind: str = "snapshot",
+) -> list[dict]:
+    """Build immutable, revision-scoped copies of one source-document set.
+
+    ``scope_kind='current'`` preserves the established corrective Codex import
+    shape. The default marks ordinary activation copies with their mutable
+    origin id so future successors can resnapshot origins rather than nesting
+    active copy ids.
+    """
+
+    if scope_kind not in {"snapshot", "current"}:
+        raise ValueError("source revision snapshot scope kind is invalid")
+    origins = [copy.deepcopy(dict(document)) for document in documents]
+    if scope_kind == "snapshot":
+        # The generic helper is reused by ingress and repair paths that may
+        # supply equivalent allowlists in different orders. Keep one source
+        # set on one deterministic copy-id scope so an exact duplicate never
+        # rotates the pointer merely because its caller ordered ids differently.
+        origins.sort(key=lambda document: str(document.get("_id") or ""))
+    source_scope = _source_snapshot_scope(
+        documents=origins,
+        source_snapshot_hash=source_snapshot_hash,
+    )
+    staged: list[dict] = []
+    for origin in origins:
+        origin_id = str(origin.get("_id") or "")
+        staged_document = dict(origin)
+        staged_document.pop("_rev", None)
+        staged_document.pop("idempotency_key", None)
+        staged_document.pop("payload_hash", None)
+        staged_document["_id"] = _revision_scoped_source_document_id(
+            document=origin,
+            source_scope=source_scope,
+            scope_kind=scope_kind,
+        )
+        if scope_kind == "current":
+            staged_document["current_source_scope"] = source_scope
+            staged_document["supersedes_source_document_hash"] = dm.sha256_hash(origin_id)
+        else:
+            staged_document.update(
+                {
+                    "source_snapshot_schema_version": _SOURCE_SNAPSHOT_SCHEMA_VERSION,
+                    _SOURCE_SNAPSHOT_SCOPE: source_scope,
+                    _SOURCE_SNAPSHOT_ORIGIN_ID: origin_id,
+                }
+            )
+        staged.append(staged_document)
+    return staged
+
+
+def _is_revision_snapshot_copy(document: Mapping[str, object]) -> bool:
+    return (
+        str(document.get("source_snapshot_schema_version") or "")
+        == _SOURCE_SNAPSHOT_SCHEMA_VERSION
+    )
+
+
+def _is_current_source_copy(document: Mapping[str, object]) -> bool:
+    source_scope = str(document.get("current_source_scope") or "")
+    superseded_id_hash = str(document.get("supersedes_source_document_hash") or "")
+    try:
+        dm.assert_hash_like("current_source_scope", source_scope)
+        dm.assert_hash_like("supersedes_source_document_hash", superseded_id_hash)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_immutable_source_copy(document: Mapping[str, object]) -> bool:
+    return _is_revision_snapshot_copy(document) or _is_current_source_copy(document)
+
+
+def _snapshot_source_documents(
+    *,
+    documents: Iterable[Mapping[str, object]],
+    session_id_hash: str,
+) -> list[dict]:
+    """Return one immutable source set without nested snapshot copies."""
+
+    source_documents = [copy.deepcopy(dict(document)) for document in documents]
+    generic_snapshots = [
+        document for document in source_documents if _is_revision_snapshot_copy(document)
+    ]
+    if generic_snapshots:
+        if len(generic_snapshots) != len(source_documents):
+            raise SourceStoreConflict("source revision snapshot input mixes active copies and origins")
+        for document in generic_snapshots:
+            origin_id = str(document.get(_SOURCE_SNAPSHOT_ORIGIN_ID) or "")
+            source_scope = str(document.get(_SOURCE_SNAPSHOT_SCOPE) or "")
+            if not origin_id:
+                raise SourceStoreConflict("source revision snapshot origin is invalid")
+            try:
+                dm.assert_hash_like("source_snapshot_scope", source_scope)
+            except ValueError as exc:
+                raise SourceStoreConflict("source revision snapshot origin is invalid") from exc
+        return source_documents
+    if source_documents and all(_is_current_source_copy(document) for document in source_documents):
+        # Corrective Codex imports already write a revision-scoped immutable
+        # source set. Retain those established ids exactly on replay.
+        return source_documents
+    return build_revision_scoped_source_documents(
+        documents=source_documents,
+        source_snapshot_hash=_source_document_set_revision(
+            source_documents,
+            session_id_hash=session_id_hash,
+        ),
+    )
+
+
+def active_source_origin_document_ids(
+    active_revision: ResolvedSourceRevision,
+) -> tuple[str, ...]:
+    """Recover current mutable origin ids for one active source revision.
+
+    Generic activation snapshots keep this mapping explicitly. Established
+    corrective ``current`` documents predate that field and intentionally use
+    their own immutable ids as the next successor's origins.
+    """
+
+    if not isinstance(active_revision, ResolvedSourceRevision):
+        raise SourceRevisionResolutionError("active source revision is invalid")
+    origin_ids: list[str] = []
+    for document in (
+        *active_revision.sessions,
+        *active_revision.conversation_chunks,
+        *active_revision.tool_evidence_bundles,
+    ):
+        origin_id = (
+            str(document.get(_SOURCE_SNAPSHOT_ORIGIN_ID) or "")
+            if _is_revision_snapshot_copy(document)
+            else str(document.get("_id") or "")
+        )
+        if not origin_id or origin_id in origin_ids:
+            raise SourceRevisionResolutionError("active source revision origins are invalid")
+        origin_ids.append(origin_id)
+    return tuple(origin_ids)
 
 
 def _member_hash(
@@ -278,7 +470,12 @@ def _load_legacy_documents(
         dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
     ):
         documents.extend(
-            store.find_by_session(session_id_hash=session_id_hash, doc_type=doc_type)
+            document
+            for document in store.find_by_session(
+                session_id_hash=session_id_hash,
+                doc_type=doc_type,
+            )
+            if not _is_immutable_source_copy(document)
         )
     documents.sort(key=lambda document: str(document.get("_id") or ""))
     return documents
@@ -552,6 +749,7 @@ def _snapshot_legacy_documents(
         for document in documents
         if str(document.get("session_id_hash") or "") == session_id_hash
         and str(document.get("doc_type") or "") in _SOURCE_MEMBER_TYPES
+        and not _is_immutable_source_copy(document)
     ]
     legacy_documents.sort(key=lambda document: str(document.get("_id") or ""))
     return legacy_documents
@@ -755,12 +953,32 @@ def activate_source_revision(
         raise SourceStoreConflict("source revision source contract is invalid")
 
     try:
+        origin_source_revision = _source_document_set_revision(
+            source_documents,
+            session_id_hash=session_id_hash,
+        )
+        snapshot_documents = _snapshot_source_documents(
+            documents=source_documents,
+            session_id_hash=session_id_hash,
+        )
+        snapshot_source_document_ids = tuple(
+            str(document.get("_id") or "") for document in snapshot_documents
+        )
+        if not all(snapshot_source_document_ids):
+            raise SourceStoreConflict("source revision snapshot document is invalid")
+        for document in snapshot_documents:
+            store.put_if_absent(document)
+        staged_source_documents = _load_allowlisted_documents(
+            store=store,
+            session_id_hash=session_id_hash,
+            source_document_ids=snapshot_source_document_ids,
+        )
         descriptors = [
             _source_member_descriptor(document, session_id_hash=session_id_hash)
-            for document in source_documents
+            for document in staged_source_documents
         ]
-        source_hash = _source_hash(source_documents)
-    except (SourceRevisionResolutionError, TypeError, ValueError) as exc:
+        source_hash = _source_hash(staged_source_documents)
+    except (SourceRevisionResolutionError, SourceStoreConflict, TypeError, ValueError) as exc:
         raise SourceStoreConflict("source revision source contract is invalid") from exc
     source_revision = _source_revision(descriptors)
     members: list[dict] = []
@@ -812,14 +1030,10 @@ def activate_source_revision(
     )
     store.put_if_absent(manifest)
 
-    current_documents = (
-        _load_allowlisted_documents(
-            store=store,
-            session_id_hash=session_id_hash,
-            source_document_ids=selected_source_document_ids,
-        )
-        if selected_source_document_ids is not None
-        else _load_legacy_documents(store=store, session_id_hash=session_id_hash)
+    current_documents = _load_allowlisted_documents(
+        store=store,
+        session_id_hash=session_id_hash,
+        source_document_ids=snapshot_source_document_ids,
     )
     try:
         current_descriptors = [
@@ -865,6 +1079,25 @@ def activate_source_revision(
     store.put_if_revision(pointer, expected_rev=expected_pointer_rev)
     activated = resolve_active_source_revision(store=store, session_id_hash=session_id_hash)
 
+    # The pointer only references immutable copies, so a mutable origin write
+    # cannot corrupt the active resolver. It can still make a just-published
+    # revision stale. Initial legacy activation below has enough authority to
+    # converge the entire discovered origin set; every other caller must see a
+    # retryable fail-closed result rather than a false success.
+    latest_input_documents = _load_allowlisted_documents(
+        store=store,
+        session_id_hash=session_id_hash,
+        source_document_ids=tuple(
+            str(document.get("_id") or "") for document in source_documents
+        ),
+    )
+    origin_drifted = _source_document_set_revision(
+        latest_input_documents,
+        session_id_hash=session_id_hash,
+    ) != origin_source_revision
+    if origin_drifted and (previous_pointer is not None or selected_source_document_ids is not None):
+        raise SourceStoreConflict("source revision origin changed during activation")
+
     # An initial unpinned activation necessarily discovers the legacy input
     # set. A writer can append a source document after the final pre-CAS reload
     # but before the pointer move. Recheck that same initial input once and,
@@ -877,18 +1110,10 @@ def activate_source_revision(
         store=store,
         session_id_hash=session_id_hash,
     )
-    activated_documents = (
-        *activated.sessions,
-        *activated.conversation_chunks,
-        *activated.tool_evidence_bundles,
-    )
-    if _source_document_set_revision(
+    if not origin_drifted and _source_document_set_revision(
         latest_legacy_documents,
         session_id_hash=session_id_hash,
-    ) == _source_document_set_revision(
-        activated_documents,
-        session_id_hash=session_id_hash,
-    ):
+    ) == origin_source_revision:
         return activated
 
     successor_source_document_ids = tuple(
@@ -909,16 +1134,11 @@ def activate_source_revision(
         store=store,
         session_id_hash=session_id_hash,
     )
-    successor_documents = (
-        *successor.sessions,
-        *successor.conversation_chunks,
-        *successor.tool_evidence_bundles,
-    )
     if _source_document_set_revision(
         final_legacy_documents,
         session_id_hash=session_id_hash,
     ) != _source_document_set_revision(
-        successor_documents,
+        latest_legacy_documents,
         session_id_hash=session_id_hash,
     ):
         raise SourceStoreConflict("initial legacy source set did not converge")
@@ -928,7 +1148,9 @@ def activate_source_revision(
 __all__ = [
     "ResolvedSourceRevision",
     "SourceRevisionResolutionError",
+    "active_source_origin_document_ids",
     "activate_source_revision",
+    "build_revision_scoped_source_documents",
     "resolve_active_source_revision",
     "resolve_active_source_revision_from_snapshot",
 ]

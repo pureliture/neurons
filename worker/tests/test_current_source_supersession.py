@@ -155,6 +155,14 @@ def test_corrective_import_adds_revision_scoped_docs_and_activates_only_allowlis
         document["_id"]
         for document in (*resolved.sessions, *resolved.conversation_chunks, *resolved.tool_evidence_bundles)
     } == set(result.source_document_ids)
+    assert not any(
+        document.get("source_snapshot_schema_version")
+        for document in (
+            *resolved.sessions,
+            *resolved.conversation_chunks,
+            *resolved.tool_evidence_bundles,
+        )
+    )
     assert len(resolved.tool_evidence_bundles) == 1
     assert resolved.tool_evidence_bundles[0]["record_content_hashes"] == [snapshot.tool_evidence[0].content_hash]
     assert {document_id: store.get(document_id) for document_id in legacy_ids} == legacy_snapshots
@@ -185,9 +193,11 @@ def test_corrective_import_is_idempotent_and_changed_verified_snapshot_moves_to_
     first_snapshot = _admitted_snapshot(tmp_path, "first corrected source", "first verified raw snapshot")
     first = activate_admitted_codex_current_source(snapshot=first_snapshot, store=store)
     first_resolved = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    pointer_before_duplicate = store.get(dm.active_source_revision_pointer_doc_id(SESSION_ID_HASH))
 
     duplicate = activate_admitted_codex_current_source(snapshot=first_snapshot, store=store)
     duplicate_resolved = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    pointer_after_duplicate = store.get(dm.active_source_revision_pointer_doc_id(SESSION_ID_HASH))
 
     changed = activate_admitted_codex_current_source(
         snapshot=_admitted_snapshot(tmp_path, "first corrected source", "second verified raw snapshot"),
@@ -198,6 +208,7 @@ def test_corrective_import_is_idempotent_and_changed_verified_snapshot_moves_to_
     assert duplicate.status == "imported_current_revision"
     assert duplicate.source_document_ids == first.source_document_ids
     assert duplicate_resolved.source_hash == first_resolved.source_hash
+    assert pointer_after_duplicate == pointer_before_duplicate
     assert changed.source_document_ids != first.source_document_ids
     assert changed_resolved.source_hash != first_resolved.source_hash
     projection = store.get(dm.projection_state_doc_id(SESSION_ID_HASH))

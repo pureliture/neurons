@@ -5,6 +5,7 @@ import pytest
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.source_revision import (
     SourceRevisionResolutionError,
+    active_source_origin_document_ids,
     activate_source_revision,
     resolve_active_source_revision,
     resolve_active_source_revision_from_snapshot,
@@ -80,9 +81,23 @@ def test_active_revision_resolves_only_pinned_members_and_never_falls_back() -> 
 
     assert activated.manifest_id is not None
     assert resolved.is_legacy_unpinned is False
-    assert [document["_id"] for document in resolved.sessions] == [session["_id"]]
-    assert [document["_id"] for document in resolved.conversation_chunks] == [chunk["_id"]]
-    assert [document["_id"] for document in resolved.tool_evidence_bundles] == [bundle["_id"]]
+    assert active_source_origin_document_ids(resolved) == (
+        session["_id"],
+        chunk["_id"],
+        bundle["_id"],
+    )
+    assert all(
+        document["_id"] != origin_id
+        for document, origin_id in zip(
+            (
+                *resolved.sessions,
+                *resolved.conversation_chunks,
+                *resolved.tool_evidence_bundles,
+            ),
+            active_source_origin_document_ids(resolved),
+            strict=True,
+        )
+    )
     manifest = store.get(activated.manifest_id)
     assert manifest is not None
     for membership in manifest["members"]:
@@ -101,12 +116,81 @@ def test_active_revision_resolves_only_pinned_members_and_never_falls_back() -> 
     # Simulate a storage-layer bypass rather than the supported store write
     # contract. Revision members make ordinary source writes fail closed; the
     # resolver must still detect a corrupted backing record.
-    changed_chunk = store._docs[chunk["_id"]]
+    changed_chunk = store._docs[resolved.conversation_chunks[0]["_id"]]
     changed_chunk["body"] = "changed public-safe summary"
     changed_chunk["content_hash"] = dm.sha256_hash(changed_chunk["body"])
 
     with pytest.raises(SourceRevisionResolutionError):
         resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+
+
+class _OriginMutationAtInitialPointerCasStore(InMemoryCouchDBSourceStore):
+    """Mutate one legacy origin after snapshot staging but before pointer CAS."""
+
+    def __init__(self, source_document_id: str) -> None:
+        super().__init__()
+        self._source_document_id = source_document_id
+        self._mutated = False
+        self.first_pointer_resolution = None
+
+    def put_if_revision(self, document: dict, *, expected_rev: str):
+        if (
+            not self._mutated
+            and str(document.get("doc_type") or "") == dm.SourceDocType.ACTIVE_SOURCE_REVISION
+        ):
+            self._mutated = True
+            origin = self.get(self._source_document_id)
+            assert origin is not None
+            changed = dict(origin)
+            changed["body"] = "origin changed during initial pointer transition"
+            changed["content_hash"] = dm.sha256_hash(changed["body"])
+            super().put(changed)
+            stored = super().put_if_revision(document, expected_rev=expected_rev)
+            self.first_pointer_resolution = resolve_active_source_revision(
+                store=self,
+                session_id_hash=_session_id_hash(),
+            )
+            return stored
+        return super().put_if_revision(document, expected_rev=expected_rev)
+
+
+def test_initial_activation_snapshots_origins_before_pointer_cas_and_converges_drift() -> None:
+    chunk = _conversation_chunk_document()
+    store = _OriginMutationAtInitialPointerCasStore(chunk["_id"])
+    for document in (_session_document(), chunk, _tool_evidence_bundle_document()):
+        store.put(document)
+
+    activated = activate_source_revision(store=store, session_id_hash=_session_id_hash())
+
+    first_pointer_resolution = store.first_pointer_resolution
+    assert first_pointer_resolution is not None
+    assert first_pointer_resolution.conversation_chunks[0]["body"] == "public-safe source summary"
+    assert first_pointer_resolution.conversation_chunks[0]["_id"] != chunk["_id"]
+    assert (
+        first_pointer_resolution.conversation_chunks[0]["source_snapshot_origin_id"]
+        == chunk["_id"]
+    )
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    assert activated.source_hash == resolved.source_hash
+    assert resolved.conversation_chunks[0]["body"] == "origin changed during initial pointer transition"
+    assert resolved.conversation_chunks[0]["_id"] != chunk["_id"]
+    assert resolved.conversation_chunks[0]["source_snapshot_origin_id"] == chunk["_id"]
+
+
+def test_legacy_discovery_excludes_revision_snapshot_copies() -> None:
+    store = InMemoryCouchDBSourceStore()
+    session, chunk, bundle = _seed_session_source(store)
+    activated = activate_source_revision(store=store, session_id_hash=_session_id_hash())
+    assert activated.manifest_id is not None
+    assert store.delete(dm.active_source_revision_pointer_doc_id(_session_id_hash()))
+
+    legacy = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+
+    assert legacy.is_legacy_unpinned is True
+    assert {document["_id"] for document in legacy.sessions} == {session["_id"]}
+    assert {document["_id"] for document in legacy.conversation_chunks} == {chunk["_id"]}
+    assert {document["_id"] for document in legacy.tool_evidence_bundles} == {bundle["_id"]}
 
 
 def test_pointer_absence_is_the_only_legacy_all_document_fallback() -> None:
@@ -216,7 +300,9 @@ def test_stale_expected_predecessor_cannot_drop_concurrent_active_members() -> N
     assert store.all_docs() == documents_before
     resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
     assert resolved.source_hash == current.source_hash
-    assert {document["_id"] for document in resolved.tool_evidence_bundles} == {
+    assert set(active_source_origin_document_ids(resolved)) == {
+        session["_id"],
+        chunk["_id"],
         bundle["_id"],
         concurrent_bundle["_id"],
     }
@@ -266,7 +352,10 @@ def test_snapshot_resolution_fails_closed_on_active_control_or_source_mutation(
         source = next(
             document
             for document in snapshot
-            if document["doc_type"] == dm.SourceDocType.CONVERSATION_CHUNK
+            if (
+                document["doc_type"] == dm.SourceDocType.CONVERSATION_CHUNK
+                and document.get("source_snapshot_schema_version")
+            )
         )
         source["body"] = "changed public-safe source"
         source["content_hash"] = dm.sha256_hash(source["body"])
@@ -312,8 +401,7 @@ def test_activation_allowlist_reads_exact_source_documents_without_legacy_discov
         source_document_ids=(session["_id"], chunk["_id"]),
     )
 
-    assert [document["_id"] for document in activated.sessions] == [session["_id"]]
-    assert [document["_id"] for document in activated.conversation_chunks] == [chunk["_id"]]
+    assert active_source_origin_document_ids(activated) == (session["_id"], chunk["_id"])
     assert activated.tool_evidence_bundles == ()
 
 
@@ -546,19 +634,21 @@ def test_activation_aborts_when_active_pointer_cas_is_stale() -> None:
         activate_source_revision(store=store, session_id_hash=_session_id_hash())
 
 
-def test_activation_aborts_when_source_members_change_before_pointer_transition() -> None:
+def test_initial_activation_converges_origin_change_before_pointer_transition() -> None:
     chunk = _conversation_chunk_document()
     store = _SourceOverlapStore(chunk["_id"])
     for document in (_session_document(), chunk, _tool_evidence_bundle_document()):
         store.put(document)
 
-    with pytest.raises(SourceStoreConflict):
-        activate_source_revision(store=store, session_id_hash=_session_id_hash())
+    activated = activate_source_revision(store=store, session_id_hash=_session_id_hash())
 
-    assert store.get(dm.active_source_revision_pointer_doc_id(_session_id_hash())) is None
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    assert resolved.source_hash == activated.source_hash
+    assert resolved.conversation_chunks[0]["body"] == "overlap changed public-safe source"
+    assert resolved.conversation_chunks[0]["_id"] != chunk["_id"]
 
 
-def test_active_member_mutation_at_pointer_cas_keeps_previous_pointer_and_source_intact() -> None:
+def test_active_origin_mutation_at_pointer_cas_is_fail_closed() -> None:
     session = _session_document()
     chunk = _conversation_chunk_document()
     bundle = _tool_evidence_bundle_document()
@@ -585,7 +675,7 @@ def test_active_member_mutation_at_pointer_cas_keeps_previous_pointer_and_source
     store.put_if_absent(additional_bundle)
     store.inject_at_pointer_cas = True
 
-    with pytest.raises(SourceStoreConflict, match="revision member"):
+    with pytest.raises(SourceStoreConflict, match="origin changed during activation"):
         activate_source_revision(
             store=store,
             session_id_hash=_session_id_hash(),
@@ -597,14 +687,20 @@ def test_active_member_mutation_at_pointer_cas_keeps_previous_pointer_and_source
             ),
         )
 
-    assert store.get(dm.active_source_revision_pointer_doc_id(_session_id_hash())) == previous_pointer
-    assert store.get(chunk["_id"]) == previous_chunk
+    assert store.get(dm.active_source_revision_pointer_doc_id(_session_id_hash())) != previous_pointer
+    assert store.get(chunk["_id"]) != previous_chunk
     resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
-    assert resolved.source_hash == previous.source_hash
-    assert [document["_id"] for document in resolved.tool_evidence_bundles] == [bundle["_id"]]
+    assert resolved.source_hash != previous.source_hash
+    assert resolved.conversation_chunks[0]["body"] == chunk["body"]
+    assert set(active_source_origin_document_ids(resolved)) == {
+        session["_id"],
+        chunk["_id"],
+        bundle["_id"],
+        additional_bundle["_id"],
+    }
 
 
-def test_pre_cas_reresolution_rejects_prior_active_source_corruption() -> None:
+def test_pre_cas_origin_mutation_leaves_active_snapshot_resolvable_but_fail_closed() -> None:
     session = _session_document()
     chunk = _conversation_chunk_document()
     bundle = _tool_evidence_bundle_document()
@@ -630,7 +726,7 @@ def test_pre_cas_reresolution_rejects_prior_active_source_corruption() -> None:
     store._pointer_reads = 0
     store.inject_at_pre_cas_resolution = True
 
-    with pytest.raises(SourceStoreConflict, match="integrity changed before pointer transition"):
+    with pytest.raises(SourceStoreConflict, match="origin changed during activation"):
         activate_source_revision(
             store=store,
             session_id_hash=_session_id_hash(),
@@ -642,6 +738,6 @@ def test_pre_cas_reresolution_rejects_prior_active_source_corruption() -> None:
             ),
         )
 
-    assert store.get(dm.active_source_revision_pointer_doc_id(_session_id_hash())) == previous_pointer
-    with pytest.raises(SourceRevisionResolutionError):
-        resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    assert store.get(dm.active_source_revision_pointer_doc_id(_session_id_hash())) != previous_pointer
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    assert resolved.conversation_chunks[0]["body"] == chunk["body"]

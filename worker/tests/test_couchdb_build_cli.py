@@ -29,7 +29,13 @@ from agent_knowledge.couchdb_source.session_memory_materializer import (
     RecordingSessionMemoryProjector,
     materialize_and_project,
 )
-from agent_knowledge.couchdb_source.source_revision import activate_source_revision
+from agent_knowledge.couchdb_source.source_revision import (
+    SourceRevisionResolutionError,
+    active_source_origin_document_ids,
+    activate_source_revision,
+    build_revision_scoped_source_documents,
+    resolve_active_source_revision,
+)
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
 from agent_knowledge.llm_brain_core.runtime import (
     session_source_revision_from_couchdb_source,
@@ -91,6 +97,50 @@ def _build_synthetic_session(
         project_authority={"project": project, "ambiguous": False, "eligible_for_retirement": True},
     )
     store.put(cov)
+    return sid
+
+
+def _build_current_only_active_session(
+    store: InMemoryCouchDBSourceStore,
+    *,
+    provider: str,
+    project: str,
+    raw_id: str,
+    body: str = "current-only source",
+) -> str:
+    """Seed an active corrective source without a canonical legacy session row."""
+
+    sid = dm.build_session_id_hash(provider, raw_id)
+    session = TranscriptSession(
+        session_id_hash=sid,
+        provider=provider,
+        project=project,
+        started_at="2026-06-17T00:00:00Z",
+    )
+    chunk = TranscriptChunk.from_text(
+        chunk_id="chunk_00",
+        session_id_hash=sid,
+        provider=provider,
+        project=project,
+        turn_start_index=0,
+        turn_end_index=0,
+        text=body,
+    )
+    current_documents = build_revision_scoped_source_documents(
+        documents=[
+            dm.build_transcript_session_document(session=session),
+            dm.build_conversation_chunk_document(chunk=chunk),
+        ],
+        source_snapshot_hash=dm.sha256_hash(f"current-only:{raw_id}"),
+        scope_kind="current",
+    )
+    for document in current_documents:
+        store.put_if_absent(document)
+    activate_source_revision(
+        store=store,
+        session_id_hash=sid,
+        source_document_ids=tuple(document["_id"] for document in current_documents),
+    )
     return sid
 
 
@@ -358,6 +408,183 @@ def _run(argv: list[str], store: InMemoryCouchDBSourceStore, *, projector=None, 
 # ---------------------------------------------------------------------------
 
 class TestSelectSessionsNeedingProjection:
+    def test_selects_current_only_active_snapshot_once_when_pending_or_stale(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_current_only_active_session(
+            store,
+            provider="codex",
+            project="neurons",
+            raw_id="current-only",
+        )
+        active = resolve_active_source_revision(store=store, session_id_hash=sid)
+
+        pending = dm.build_projection_state_document(
+            session_id_hash=sid,
+            provider="codex",
+            project="neurons",
+            projection_status=dm.ProjectionStatus.PENDING,
+            source_hash=active.source_hash,
+        )
+        store.put(pending)
+
+        selected_pending = _select_sessions_needing_projection(store, limit=0)
+
+        assert [session["session_id_hash"] for session in selected_pending] == [sid]
+        assert [session["_id"] for session in selected_pending] == [active.sessions[0]["_id"]]
+
+        stale = dict(pending)
+        stale["projection_status"] = dm.ProjectionStatus.PROJECTED
+        stale["projected_source_hash"] = dm.sha256_hash("stale current-only projection")
+        store.put(stale)
+
+        selected_stale = _select_sessions_needing_projection(store, limit=0)
+
+        assert [session["session_id_hash"] for session in selected_stale] == [sid]
+        assert [session["_id"] for session in selected_stale] == [active.sessions[0]["_id"]]
+
+        current = dict(stale)
+        current["projected_source_hash"] = active.source_hash
+        store.put(current)
+
+        assert _select_sessions_needing_projection(store, limit=0) == []
+        assert _select_sessions_needing_projection(store, limit=0, project="other") == []
+        assert _select_sessions_needing_projection(store, limit=0, provider="claude") == []
+
+        other_sid = _build_current_only_active_session(
+            store,
+            provider="codex",
+            project="neurons",
+            raw_id="current-only-limit",
+        )
+
+        selected_limited = _select_sessions_needing_projection(store, limit=1)
+
+        assert [session["session_id_hash"] for session in selected_limited] == [other_sid]
+
+    def test_current_only_selection_ignores_orphan_current_and_generic_snapshots(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_current_only_active_session(
+            store,
+            provider="codex",
+            project="neurons",
+            raw_id="active-current",
+        )
+        active = resolve_active_source_revision(store=store, session_id_hash=sid)
+        orphan_current = dict(active.sessions[0])
+        orphan_current["_id"] = f"{orphan_current['_id']}:orphan"
+        store.put_if_absent(orphan_current)
+
+        orphan_sid = dm.build_session_id_hash("codex", "generic-orphan")
+        orphan_session = TranscriptSession(
+            session_id_hash=orphan_sid,
+            provider="codex",
+            project="neurons",
+            started_at="2026-06-17T00:00:00Z",
+        )
+        orphan_chunk = TranscriptChunk.from_text(
+            chunk_id="chunk_00",
+            session_id_hash=orphan_sid,
+            provider="codex",
+            project="neurons",
+            turn_start_index=0,
+            turn_end_index=0,
+            text="generic orphan source",
+        )
+        generic_orphans = build_revision_scoped_source_documents(
+            documents=[
+                dm.build_transcript_session_document(session=orphan_session),
+                dm.build_conversation_chunk_document(chunk=orphan_chunk),
+            ],
+            source_snapshot_hash=dm.sha256_hash("generic-orphan"),
+        )
+        for document in generic_orphans:
+            store.put_if_absent(document)
+
+        selected = _select_sessions_needing_projection(store, limit=0)
+
+        assert [session["session_id_hash"] for session in selected] == [sid]
+        assert [session["_id"] for session in selected] == [active.sessions[0]["_id"]]
+
+    def test_selects_active_generic_successor_of_current_only_source(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_current_only_active_session(
+            store,
+            provider="codex",
+            project="neurons",
+            raw_id="current-successor",
+        )
+        current = resolve_active_source_revision(store=store, session_id_hash=sid)
+        successor_chunk = dm.build_conversation_chunk_document(
+            chunk=TranscriptChunk.from_text(
+                chunk_id="successor",
+                session_id_hash=sid,
+                provider="codex",
+                project="neurons",
+                turn_start_index=1,
+                turn_end_index=1,
+                text="current-only successor source",
+            )
+        )
+        store.put_if_absent(successor_chunk)
+        successor = activate_source_revision(
+            store=store,
+            session_id_hash=sid,
+            source_document_ids=(
+                *active_source_origin_document_ids(current),
+                successor_chunk["_id"],
+            ),
+            expected_predecessor=current,
+        )
+        store.put(
+            dm.build_projection_state_document(
+                session_id_hash=sid,
+                provider="codex",
+                project="neurons",
+                projection_status=dm.ProjectionStatus.PENDING,
+                source_hash=successor.source_hash,
+            )
+        )
+
+        selected = _select_sessions_needing_projection(store, limit=0)
+
+        assert [session["session_id_hash"] for session in selected] == [sid]
+        assert [session["_id"] for session in selected] == [successor.sessions[0]["_id"]]
+        assert selected[0]["source_snapshot_schema_version"]
+
+    def test_canonical_legacy_session_remains_preferred_over_current_snapshot(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(
+            store,
+            provider="codex",
+            project="neurons",
+            raw_id="canonical-priority",
+        )
+        _build_current_only_active_session(
+            store,
+            provider="codex",
+            project="neurons",
+            raw_id="canonical-priority",
+        )
+
+        selected = _select_sessions_needing_projection(store, limit=1)
+
+        assert [session["session_id_hash"] for session in selected] == [sid]
+        assert [session["_id"] for session in selected] == [dm.session_doc_id(sid)]
+
+    def test_current_only_selection_fails_closed_for_corrupt_active_pointer(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_current_only_active_session(
+            store,
+            provider="codex",
+            project="neurons",
+            raw_id="corrupt-current",
+        )
+        pointer_id = dm.active_source_revision_pointer_doc_id(sid)
+        store._docs[pointer_id]["manifest_hash"] = dm.sha256_hash("corrupt pointer")
+
+        with pytest.raises(SourceRevisionResolutionError):
+            _select_sessions_needing_projection(store, limit=0)
+
     def test_returns_sessions_without_projection_state(self) -> None:
         store = InMemoryCouchDBSourceStore()
         sid1 = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s1")
@@ -590,7 +817,7 @@ class TestSelectSessionsNeedingProjection:
             session_id_hash=sid,
             source_document_ids=tuple(
                 document["_id"]
-                for document in active_documents
+                for document in (*source_documents, additional_document)
                 if document["doc_type"]
                 in {
                     dm.SourceDocType.TRANSCRIPT_SESSION,

@@ -8,7 +8,6 @@ that exact allowlist.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 
 from . import document_model as dm
@@ -17,6 +16,7 @@ from .source_revision import (
     ResolvedSourceRevision,
     SourceRevisionResolutionError,
     activate_source_revision,
+    build_revision_scoped_source_documents,
     resolve_active_source_revision,
 )
 from .source_store import CouchDBSourceStore
@@ -47,30 +47,6 @@ def _error_class(exc: ValueError) -> str:
     return str(exc).split(":", 1)[0].strip() or "source_error"
 
 
-def _scope_hash(*, documents: list[dict], source_snapshot_hash: str) -> str:
-    """Bind staged member identities to the verified raw snapshot fingerprint."""
-    dm.assert_hash_like("source_snapshot_hash", source_snapshot_hash)
-    payload = {
-        "source_snapshot_hash": source_snapshot_hash,
-        "documents": [
-            {
-                str(key): value
-                for key, value in document.items()
-                if key not in {"_id", "_rev", "idempotency_key", "payload_hash"}
-            }
-            for document in documents
-        ],
-    }
-    return dm.sha256_hash(
-        json.dumps(
-            payload,
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    )
-
-
 def _build_current_source_documents(
     *,
     snapshot: _AdmittedCodexActivationSnapshot,
@@ -91,54 +67,16 @@ def _build_current_source_documents(
     ]
 
 
-def _revision_scoped_document_id(
-    *,
-    document: dict,
-    source_scope: str,
-) -> str:
-    doc_type = str(document.get("doc_type") or "")
-    session_id_hash = str(document.get("session_id_hash") or "")
-    legacy_id = str(document.get("_id") or "")
-    dm.assert_hash_like("session_id_hash", session_id_hash)
-    dm.assert_hash_like("source_scope", source_scope)
-    if doc_type not in {
-        dm.SourceDocType.TRANSCRIPT_SESSION,
-        dm.SourceDocType.CONVERSATION_CHUNK,
-        dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
-    } or not legacy_id:
-        raise ValueError("corrective source document contract is invalid")
-    return ":".join(
-        (
-            doc_type,
-            "current",
-            session_id_hash.removeprefix("sha256:"),
-            source_scope.removeprefix("sha256:"),
-            dm.sha256_hash(legacy_id).removeprefix("sha256:"),
-        )
-    )
-
-
 def _revision_scoped_documents(
     *,
     documents: list[dict],
     source_snapshot_hash: str,
 ) -> list[dict]:
-    source_scope = _scope_hash(
+    return build_revision_scoped_source_documents(
         documents=documents,
         source_snapshot_hash=source_snapshot_hash,
+        scope_kind="current",
     )
-    staged: list[dict] = []
-    for document in documents:
-        legacy_id = str(document.get("_id") or "")
-        staged_document = dict(document)
-        staged_document["_id"] = _revision_scoped_document_id(
-            document=document,
-            source_scope=source_scope,
-        )
-        staged_document["current_source_scope"] = source_scope
-        staged_document["supersedes_source_document_hash"] = dm.sha256_hash(legacy_id)
-        staged.append(staged_document)
-    return staged
 
 
 def _safe_provenance(
