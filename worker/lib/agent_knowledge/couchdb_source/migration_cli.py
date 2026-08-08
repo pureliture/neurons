@@ -25,6 +25,7 @@ import base64
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -37,12 +38,15 @@ from .historical_import import ImportStatus, SourceLocator, import_historical_so
 from .session_memory_materializer import update_coverage_with_tool_evidence
 from .source_store import InMemoryCouchDBSourceStore
 from .tool_evidence_bundler import store_tool_evidence_bundles
-from .document_model import build_source_locator_hash
+from .document_model import build_source_locator_hash, session_doc_id
 from ..session_memory.native_memory_sync_approval import ApprovalError, validate_memory_enqueue_approval
 from ..session_memory.transcript_model import canonicalize_project
 from ..session_memory.transcript_parsers.common import LocatorAdmission
 from ..session_memory.transcript_parsers.providers.codex import admit_codex_locator_snapshot
-from ..session_memory.transcript_parsers import extract_tool_evidence
+from ..session_memory.transcript_parsers import (
+    extract_tool_evidence,
+    parse_transcript_source,
+)
 
 MIGRATION_CLI_SCHEMA_VERSION = "transcript_migration_cli.v1"
 MIGRATION_CLI_OPERATION = "transcript_migration"
@@ -89,6 +93,39 @@ def enumerate_provider_files(provider: str, root: Path) -> list[Path]:
         # Session SoT is updates.jsonl per session directory (see Grok 17-sessions.md).
         return sorted(p for p in root.glob("**/updates.jsonl") if p.is_file() and not p.is_symlink())
     return sorted(p for p in root.glob("**/*.jsonl") if p.is_file() and not p.is_symlink())
+
+
+def _source_file_fingerprint(path: Path) -> tuple[int, int, int, int, int] | None:
+    """Return the bounded identity needed to reject a changed scan member."""
+
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def _tool_evidence_source_session_id(
+    *,
+    provider: str,
+    path: Path,
+    runtime_dir: Path,
+) -> str:
+    """Read only a source identity when a post-scan sibling appears."""
+
+    source_path = path
+    if provider == "gemini" and path.suffix == ".json":
+        source_path = convert_gemini_json_to_fixture(path, runtime_dir)
+    parsed = parse_transcript_source(
+        provider,
+        str(source_path),
+        project="",
+        source_locator_hash=build_source_locator_hash(str(source_path)),
+    )
+    session_id_hash = str(parsed.session.session_id_hash or "")
+    if not session_id_hash:
+        raise ValueError("tool evidence source session contract is invalid")
+    return session_id_hash
 
 
 def _iter_jsonl(path: Path, max_lines: int):
@@ -304,7 +341,12 @@ def run_tool_evidence(
     runtime_dir: Path | None = None,
 ) -> dict:
     """Second pass: extract tool_evidence_summary per session file and store it as
-    bounded tool_evidence_bundle docs in CouchDB. Idempotent (deterministic ids)."""
+    bounded tool_evidence_bundle docs in CouchDB. Idempotent (deterministic ids).
+
+    ``limit`` bounds complete session replacements, not individual source files:
+    a full generation cannot safely truncate an already-discovered sibling.
+    The report separates the discovered source count from selected sessions.
+    """
     roots = roots if roots is not None else default_source_roots()
     providers = providers or list(MIGRATION_PROVIDERS)
     runtime_dir = runtime_dir or (Path.home() / ".config" / "neurons" / "gemini-normalized")
@@ -312,22 +354,228 @@ def run_tool_evidence(
     for provider in providers:
         root = roots.get(provider)
         files = enumerate_provider_files(provider, Path(root)) if root else []
-        if limit is not None:
-            files = files[: max(limit, 0)]
-        prov = {"found": len(files), "bundles": 0, "sessions": 0, "errors": 0}
+        prov = {
+            "found": len(files),
+            "scanned_sources": len(files),
+            "selected_sessions": 0,
+            "bundles": 0,
+            "sessions": 0,
+            "errors": 0,
+        }
+        source_fingerprints = {
+            path: _source_file_fingerprint(path) for path in files
+        }
+        records_by_session: dict[str, list] = {}
+        source_paths_by_session: dict[str, set[Path]] = {}
+        session_id_by_source_path: dict[Path, str] = {}
+        incomplete_session_ids: set[str] = set()
+        has_unattributed_source_failure = False
         for path in files:
+            source_path = path
+            source_locator_hash = ""
             try:
-                source_path = path
                 if provider == "gemini" and path.suffix == ".json":
                     source_path = convert_gemini_json_to_fixture(path, runtime_dir)
-                slh = build_source_locator_hash(str(source_path))
-                records = extract_tool_evidence(provider, str(source_path), project="", source_locator_hash=slh)
+                source_locator_hash = build_source_locator_hash(str(source_path))
+                records = extract_tool_evidence(
+                    provider,
+                    str(source_path),
+                    project="",
+                    source_locator_hash=source_locator_hash,
+                )
                 if not records:
-                    continue
-                revs = store_tool_evidence_bundles(records, store=store)
-                prov["bundles"] += len(revs)
-                prov["sessions"] += 1
+                    parsed = parse_transcript_source(
+                        provider,
+                        str(source_path),
+                        project="",
+                        source_locator_hash=source_locator_hash,
+                    )
+                    session_id_hash = str(parsed.session.session_id_hash or "")
+                else:
+                    session_id_hashes = {
+                        str(record.session_id_hash or "") for record in records
+                    }
+                    if len(session_id_hashes) != 1:
+                        raise ValueError("tool evidence source session contract is invalid")
+                    session_id_hash = next(iter(session_id_hashes))
+                if not session_id_hash:
+                    raise ValueError("tool evidence source session contract is invalid")
+                records_by_session.setdefault(session_id_hash, []).extend(records)
+                source_paths_by_session.setdefault(session_id_hash, set()).add(path)
+                session_id_by_source_path[path] = session_id_hash
             except Exception:  # noqa: BLE001 - per-file fail-soft
+                prov["errors"] += 1
+                try:
+                    if not source_locator_hash:
+                        raise ValueError("tool evidence failed before source admission")
+                    parsed = parse_transcript_source(
+                        provider,
+                        str(source_path),
+                        project="",
+                        source_locator_hash=source_locator_hash,
+                    )
+                    session_id_hash = str(parsed.session.session_id_hash or "")
+                    if not session_id_hash:
+                        raise ValueError("tool evidence source session contract is invalid")
+                    incomplete_session_ids.add(session_id_hash)
+                    source_paths_by_session.setdefault(session_id_hash, set()).add(path)
+                    session_id_by_source_path[path] = session_id_hash
+                except Exception:  # noqa: BLE001 - source identity is unknown
+                    has_unattributed_source_failure = True
+
+        # A full generation may only replace evidence from a stable provider
+        # snapshot. If an existing source changes, disappears, or a same-session
+        # sibling arrives during extraction, defer that session to the next run.
+        unstable_session_ids: set[str] = set()
+        unattributed_stability_failure = False
+        for path, fingerprint in source_fingerprints.items():
+            if fingerprint is None or _source_file_fingerprint(path) != fingerprint:
+                session_id_hash = session_id_by_source_path.get(path, "")
+                if session_id_hash:
+                    unstable_session_ids.add(session_id_hash)
+                else:
+                    unattributed_stability_failure = True
+
+        current_files = enumerate_provider_files(provider, Path(root)) if root else []
+        initial_paths = set(files)
+        current_paths = set(current_files)
+        for path in initial_paths - current_paths:
+            session_id_hash = session_id_by_source_path.get(path, "")
+            if session_id_hash:
+                unstable_session_ids.add(session_id_hash)
+            else:
+                unattributed_stability_failure = True
+        for path in current_paths - initial_paths:
+            try:
+                unstable_session_ids.add(
+                    _tool_evidence_source_session_id(
+                        provider=provider,
+                        path=path,
+                        runtime_dir=runtime_dir,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - source identity is unknown
+                unattributed_stability_failure = True
+
+        if unstable_session_ids:
+            incomplete_session_ids.update(unstable_session_ids)
+            prov["errors"] += len(unstable_session_ids)
+        if unattributed_stability_failure:
+            has_unattributed_source_failure = True
+            prov["errors"] += 1
+
+        # Select only complete, stable generations. Applying ``limit`` before
+        # this fence can spend the whole bounded run on a session that must be
+        # skipped, despite another stable session being available.
+        session_id_hashes = (
+            []
+            if has_unattributed_source_failure
+            else sorted(
+                session_id_hash
+                for session_id_hash in records_by_session
+                if session_id_hash not in incomplete_session_ids
+            )
+        )
+        if limit is not None:
+            # Full-generation replacement has to see every sibling source for
+            # the selected session. Limit writes by complete sessions, rather
+            # than truncating the source-file list before grouping.
+            session_id_hashes = session_id_hashes[: max(limit, 0)]
+        prov["selected_sessions"] = len(session_id_hashes)
+        for session_id_hash in session_id_hashes:
+            if (
+                has_unattributed_source_failure
+                or session_id_hash in incomplete_session_ids
+            ):
+                continue
+            if any(
+                _source_file_fingerprint(path) != source_fingerprints.get(path)
+                for path in source_paths_by_session.get(session_id_hash, set())
+            ):
+                # Close the post-enumeration window without a global lock. The
+                # caller can retry this bounded provider scan after sources settle.
+                incomplete_session_ids.add(session_id_hash)
+                prov["errors"] += 1
+                continue
+            session_records = records_by_session[session_id_hash]
+            try:
+                # A provider extractor reads the whole source it was given.
+                # Group every matching source first, then publish exactly one
+                # full-session replacement so a later source cannot discard
+                # evidence discovered in an earlier one.
+                unique_records = {
+                    record.evidence_id_hash: record for record in session_records
+                }
+                records = sorted(
+                    unique_records.values(),
+                    key=lambda record: (
+                        record.evidence_index,
+                        record.observed_at,
+                        record.evidence_id_hash,
+                    ),
+                )
+                source_session = store.get(session_doc_id(session_id_hash))
+                source_project = (
+                    str(source_session.get("project") or "")
+                    if source_session is not None
+                    else ""
+                )
+                if source_project:
+                    # Extractors do not own project resolution. When the source
+                    # context is present, bind only missing record projects to
+                    # its stored authority; a non-empty mismatch remains visible
+                    # to the full-generation source-revision validation below.
+                    records = [
+                        replace(record, project=source_project)
+                        if not record.project
+                        else record
+                        for record in records
+                    ]
+                # Re-enumerate immediately before replacement. The earlier
+                # provider fence cannot see a same-session sibling that arrives
+                # after it completes, and a selected source can disappear in
+                # the final window. Either case can make this full generation
+                # incomplete.
+                final_paths = set(
+                    enumerate_provider_files(provider, Path(root)) if root else []
+                )
+                changed_session_ids: set[str] = set()
+                if final_paths != initial_paths:
+                    try:
+                        changed_session_ids = {
+                            session_id_by_source_path[path]
+                            for path in initial_paths - final_paths
+                        }
+                        changed_session_ids.update(
+                            _tool_evidence_source_session_id(
+                                provider=provider,
+                                path=path,
+                                runtime_dir=runtime_dir,
+                            )
+                            for path in final_paths - initial_paths
+                        )
+                    except Exception:  # noqa: BLE001 - unknown identity fails closed
+                        has_unattributed_source_failure = True
+                        prov["errors"] += 1
+                        continue
+                if session_id_hash in changed_session_ids or any(
+                    _source_file_fingerprint(path)
+                    != source_fingerprints.get(path)
+                    for path in source_paths_by_session.get(session_id_hash, set())
+                ):
+                    incomplete_session_ids.add(session_id_hash)
+                    prov["errors"] += 1
+                    continue
+                revs = store_tool_evidence_bundles(
+                    records,
+                    store=store,
+                    full_session_generation=True,
+                    session_id_hash=session_id_hash,
+                )
+                prov["bundles"] += len(revs)
+                if records:
+                    prov["sessions"] += 1
+            except Exception:  # noqa: BLE001 - per-session fail-soft
                 prov["errors"] += 1
         report["by_provider"][provider] = prov
         report["bundles"] += prov["bundles"]
@@ -412,7 +660,14 @@ def run_corrective_current_import(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="neuron-knowledge transcript-migration")
     parser.add_argument("--provider", action="append", choices=list(MIGRATION_PROVIDERS))
-    parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help=(
+            "maximum source files for migration; with --tool-evidence, "
+            "maximum complete sessions after stable source discovery"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--approval", default="", help="Path to live-approval JSON (required for non-dry-run).")
     parser.add_argument("--source-root", action="append", help="provider=/path override; repeatable")
@@ -513,13 +768,26 @@ def main(argv: list[str] | None = None) -> int:
         store = InMemoryCouchDBSourceStore() if args.dry_run else build_store_from_env()
         roots = default_source_roots()
         roots.update(roots_override)
+        runtime_dir = Path(args.runtime_dir) if args.runtime_dir else None
+        if args.dry_run:
+            # Full-generation evidence storage resolves the current source set,
+            # including its transcript session and chunks. Seed that context only
+            # in the disposable store, without limiting by source file: the tool
+            # evidence limit applies later to complete selected sessions.
+            run_migration(
+                store=store,
+                roots=roots,
+                providers=args.provider,
+                runtime_dir=runtime_dir,
+                dry_run=True,
+            )
         report = run_tool_evidence(
             store=store, roots=roots, providers=args.provider, limit=args.limit,
-            runtime_dir=Path(args.runtime_dir) if args.runtime_dir else None,
+            runtime_dir=runtime_dir,
         )
-        report["status"] = "ok"
+        report["status"] = "ok" if report["errors"] == 0 else "error"
         print(json.dumps(report, sort_keys=True))
-        return 0
+        return 0 if report["errors"] == 0 else 1
 
     if args.reconcile_coverage:
         approval_error = _live_approval_error(args.approval, dry_run=args.dry_run, effective_argv=effective_argv)

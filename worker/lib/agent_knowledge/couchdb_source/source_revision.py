@@ -145,6 +145,19 @@ def _source_document_set_revision(
         raise SourceStoreConflict("source revision source contract is invalid") from exc
 
 
+def source_document_set_revision(
+    *,
+    documents: Iterable[Mapping[str, object]],
+    session_id_hash: str,
+) -> str:
+    """Return the deterministic origin-set revision used by generic snapshots."""
+
+    return _source_document_set_revision(
+        documents,
+        session_id_hash=session_id_hash,
+    )
+
+
 def _source_snapshot_scope(
     *,
     documents: Iterable[Mapping[str, object]],
@@ -1211,4 +1224,5 @@ __all__ = [
     "build_revision_scoped_source_documents",
     "resolve_active_source_revision",
     "resolve_active_source_revision_from_snapshot",
+    "source_document_set_revision",
 ]

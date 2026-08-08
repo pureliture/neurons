@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import quote
+from unittest.mock import patch
 
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.migration_cli import (
@@ -15,8 +17,10 @@ from agent_knowledge.couchdb_source.migration_cli import (
     main,
     reconcile_coverage,
     run_migration,
+    run_tool_evidence,
 )
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
+from agent_knowledge.session_memory.transcript_model import ToolEvidenceSummaryRecord
 
 
 def _codex_session(root: Path, name: str, cwd: str) -> Path:
@@ -67,6 +71,48 @@ def test_gemini_json_conversion(tmp_path):
     assert fixture["provider"] == "gemini"
     assert fixture["schema_version"] == "provider_transcript_fixture.v1"
     assert len(fixture["turns"]) == 2
+
+
+def test_run_tool_evidence_accepts_gemini_json_as_empty_full_generation(tmp_path):
+    root = tmp_path / "tmp"
+    source = root / "project" / "chats" / "session.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        json.dumps(
+            {
+                "sessionId": "gemini-empty-evidence",
+                "messages": [
+                    {"type": "user", "content": "question", "timestamp": "2026-06-17T01:00:00Z"},
+                    {"type": "gemini", "content": "answer", "timestamp": "2026-06-17T01:00:01Z"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def record_store_call(stored_records, **kwargs):
+        captured.update(records=list(stored_records), **kwargs)
+        return []
+
+    with patch(
+        "agent_knowledge.couchdb_source.migration_cli.store_tool_evidence_bundles",
+        side_effect=record_store_call,
+    ):
+        report = run_tool_evidence(
+            store=InMemoryCouchDBSourceStore(),
+            roots={"gemini": root},
+            providers=["gemini"],
+            runtime_dir=tmp_path / "runtime",
+        )
+
+    assert report["errors"] == 0
+    assert report["sessions_with_evidence"] == 0
+    assert captured["records"] == []
+    assert captured["full_session_generation"] is True
+    assert captured["session_id_hash"] == dm.build_session_id_hash(
+        "gemini", "gemini-empty-evidence"
+    )
 
 
 def test_run_migration_resolves_project_from_cwd(tmp_path):
@@ -137,6 +183,757 @@ def test_run_migration_writes_source_families(tmp_path):
     assert dm.SourceDocType.TRANSCRIPT_SESSION in types
     assert dm.SourceDocType.CONVERSATION_CHUNK in types
     assert dm.SourceDocType.COVERAGE_MANIFEST in types
+
+
+def test_run_tool_evidence_marks_extractor_output_as_full_generation(tmp_path):
+    root = tmp_path / "codex"
+    _codex_session(root, "tool-evidence", "/Users/x/Projects/neurons")
+    records = [
+        ToolEvidenceSummaryRecord(
+            session_id_hash=dm.build_session_id_hash("codex", "tool-evidence"),
+            provider="codex",
+            project="neurons",
+            category="test_result",
+            outcome="pass",
+            tool_name="bash",
+            command_summary="uv run pytest -q",
+            redacted_summary="focused tests passed",
+            evidence_index=0,
+        )
+    ]
+    captured: dict[str, object] = {}
+
+    def record_store_call(
+        stored_records,
+        *,
+        store,
+        full_session_generation=False,
+        session_id_hash="",
+    ):
+        captured.update(
+            records=stored_records,
+            store=store,
+            full_session_generation=full_session_generation,
+            session_id_hash=session_id_hash,
+        )
+        return [object()]
+
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+            return_value=records,
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.store_tool_evidence_bundles",
+            side_effect=record_store_call,
+        ),
+    ):
+        report = run_tool_evidence(
+            store=InMemoryCouchDBSourceStore(),
+            roots={"codex": root},
+            providers=["codex"],
+        )
+
+    assert report["errors"] == 0
+    assert captured["records"] == records
+    assert captured["full_session_generation"] is True
+    assert captured["session_id_hash"] == records[0].session_id_hash
+
+
+def test_run_tool_evidence_groups_same_session_files_before_full_replacement(tmp_path):
+    root = tmp_path / "codex"
+    first_path = _codex_session(root, "tool-evidence-first", "/Users/x/Projects/neurons")
+    second_path = _codex_session(root, "tool-evidence-second", "/Users/x/Projects/neurons")
+    session_id_hash = dm.build_session_id_hash("codex", "shared-tool-evidence")
+    records_by_path = {
+        str(first_path): ToolEvidenceSummaryRecord(
+            session_id_hash=session_id_hash,
+            provider="codex",
+            project="neurons",
+            category="test_result",
+            outcome="pass",
+            tool_name="bash",
+            command_summary="first command",
+            redacted_summary="first result",
+            evidence_index=0,
+        ),
+        str(second_path): ToolEvidenceSummaryRecord(
+            session_id_hash=session_id_hash,
+            provider="codex",
+            project="neurons",
+            category="test_result",
+            outcome="pass",
+            tool_name="bash",
+            command_summary="second command",
+            redacted_summary="second result",
+            evidence_index=1,
+        ),
+    }
+    captured: list[list[ToolEvidenceSummaryRecord]] = []
+
+    def extract_records(_provider, source_path, **_kwargs):
+        return [records_by_path[str(source_path)]]
+
+    def record_store_call(stored_records, **_kwargs):
+        captured.append(list(stored_records))
+        return [object()]
+
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+            side_effect=extract_records,
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.store_tool_evidence_bundles",
+            side_effect=record_store_call,
+        ),
+    ):
+        report = run_tool_evidence(
+            store=InMemoryCouchDBSourceStore(),
+            roots={"codex": root},
+            providers=["codex"],
+        )
+
+    assert report["errors"] == 0
+    assert report["sessions_with_evidence"] == 1
+    assert captured == [[records_by_path[str(first_path)], records_by_path[str(second_path)]]]
+
+
+def test_run_tool_evidence_skips_session_when_late_sibling_appears_before_replace(tmp_path):
+    root = tmp_path / "codex"
+    first_path = _codex_session(root, "stable-first", "/Users/x/Projects/neurons")
+    late_path = _codex_session(root, "late-sibling", "/Users/x/Projects/neurons")
+    session_id_hash = dm.build_session_id_hash("codex", "late-tool-evidence")
+    record = ToolEvidenceSummaryRecord(
+        session_id_hash=session_id_hash,
+        provider="codex",
+        project="neurons",
+        category="test_result",
+        outcome="pass",
+        tool_name="bash",
+        command_summary="first command",
+        redacted_summary="first result",
+        evidence_index=0,
+    )
+    captured: list[list[ToolEvidenceSummaryRecord]] = []
+
+    def record_store_call(stored_records, **_kwargs):
+        captured.append(list(stored_records))
+        return [object()]
+
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.enumerate_provider_files",
+            side_effect=([first_path], [first_path, late_path]),
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+            return_value=[record],
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.parse_transcript_source",
+            return_value=SimpleNamespace(
+                session=SimpleNamespace(session_id_hash=session_id_hash)
+            ),
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.store_tool_evidence_bundles",
+            side_effect=record_store_call,
+        ),
+    ):
+        report = run_tool_evidence(
+            store=InMemoryCouchDBSourceStore(),
+            roots={"codex": root},
+            providers=["codex"],
+        )
+
+    assert report["errors"] == 1
+    assert report["sessions_with_evidence"] == 0
+    assert captured == []
+
+
+def test_run_tool_evidence_rechecks_new_same_session_sibling_before_full_replacement(tmp_path):
+    root = tmp_path / "codex"
+    first_path = _codex_session(root, "write-stable-first", "/Users/x/Projects/neurons")
+    late_path = _codex_session(root, "write-late-sibling", "/Users/x/Projects/neurons")
+    session_id_hash = dm.build_session_id_hash("codex", "write-late-tool-evidence")
+    record = ToolEvidenceSummaryRecord(
+        session_id_hash=session_id_hash,
+        provider="codex",
+        project="neurons",
+        category="test_result",
+        outcome="pass",
+        tool_name="bash",
+        command_summary="first command",
+        redacted_summary="first result",
+        evidence_index=0,
+    )
+    captured: list[list[ToolEvidenceSummaryRecord]] = []
+
+    def record_store_call(stored_records, **_kwargs):
+        captured.append(list(stored_records))
+        return [object()]
+
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.enumerate_provider_files",
+            side_effect=([first_path], [first_path], [first_path, late_path]),
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+            return_value=[record],
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli._tool_evidence_source_session_id",
+            return_value=session_id_hash,
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.store_tool_evidence_bundles",
+            side_effect=record_store_call,
+        ),
+    ):
+        report = run_tool_evidence(
+            store=InMemoryCouchDBSourceStore(),
+            roots={"codex": root},
+            providers=["codex"],
+        )
+
+    assert report["errors"] == 1
+    assert report["sessions_with_evidence"] == 0
+    assert captured == []
+
+
+def test_run_tool_evidence_skips_when_selected_source_disappears_before_full_replacement(tmp_path):
+    root = tmp_path / "codex"
+    first_path = _codex_session(root, "write-disappearing-source", "/Users/x/Projects/neurons")
+    session_id_hash = dm.build_session_id_hash("codex", "write-disappearing-source")
+    record = ToolEvidenceSummaryRecord(
+        session_id_hash=session_id_hash,
+        provider="codex",
+        project="neurons",
+        category="test_result",
+        outcome="pass",
+        tool_name="bash",
+        command_summary="first command",
+        redacted_summary="first result",
+        evidence_index=0,
+    )
+    captured: list[list[ToolEvidenceSummaryRecord]] = []
+
+    def record_store_call(stored_records, **_kwargs):
+        captured.append(list(stored_records))
+        return [object()]
+
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.enumerate_provider_files",
+            side_effect=([first_path], [first_path], []),
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli._source_file_fingerprint",
+            return_value=(1, 2, 3, 4, 5),
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+            return_value=[record],
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.store_tool_evidence_bundles",
+            side_effect=record_store_call,
+        ),
+    ):
+        report = run_tool_evidence(
+            store=InMemoryCouchDBSourceStore(),
+            roots={"codex": root},
+            providers=["codex"],
+        )
+
+    assert report["errors"] == 1
+    assert report["sessions_with_evidence"] == 0
+    assert captured == []
+
+
+def test_run_tool_evidence_rechecks_selected_source_fingerprint_before_full_replacement(tmp_path):
+    root = tmp_path / "codex"
+    first_path = _codex_session(root, "write-changing-source", "/Users/x/Projects/neurons")
+    session_id_hash = dm.build_session_id_hash("codex", "write-changing-source")
+    record = ToolEvidenceSummaryRecord(
+        session_id_hash=session_id_hash,
+        provider="codex",
+        project="neurons",
+        category="test_result",
+        outcome="pass",
+        tool_name="bash",
+        command_summary="first command",
+        redacted_summary="first result",
+        evidence_index=0,
+    )
+    captured: list[list[ToolEvidenceSummaryRecord]] = []
+    original_fingerprint = (1, 2, 3, 4, 5)
+    changed_fingerprint = (1, 2, 4, 5, 6)
+
+    def record_store_call(stored_records, **_kwargs):
+        captured.append(list(stored_records))
+        return [object()]
+
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.enumerate_provider_files",
+            side_effect=([first_path], [first_path], [first_path]),
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli._source_file_fingerprint",
+            side_effect=(
+                original_fingerprint,
+                original_fingerprint,
+                original_fingerprint,
+                changed_fingerprint,
+            ),
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+            return_value=[record],
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.store_tool_evidence_bundles",
+            side_effect=record_store_call,
+        ),
+    ):
+        report = run_tool_evidence(
+            store=InMemoryCouchDBSourceStore(),
+            roots={"codex": root},
+            providers=["codex"],
+        )
+
+    assert report["errors"] == 1
+    assert report["sessions_with_evidence"] == 0
+    assert captured == []
+
+
+def test_run_tool_evidence_fails_closed_when_prewrite_sibling_identity_is_unknown(tmp_path):
+    root = tmp_path / "codex"
+    first_path = _codex_session(root, "write-first", "/Users/x/Projects/neurons")
+    second_path = _codex_session(root, "write-second", "/Users/x/Projects/neurons")
+    late_path = _codex_session(root, "write-late-unknown", "/Users/x/Projects/neurons")
+    first_record = ToolEvidenceSummaryRecord(
+        session_id_hash=dm.build_session_id_hash("codex", "write-first"),
+        provider="codex",
+        project="neurons",
+        category="test_result",
+        outcome="pass",
+        tool_name="bash",
+        command_summary="first command",
+        redacted_summary="first result",
+        evidence_index=0,
+    )
+    second_record = ToolEvidenceSummaryRecord(
+        session_id_hash=dm.build_session_id_hash("codex", "write-second"),
+        provider="codex",
+        project="neurons",
+        category="test_result",
+        outcome="pass",
+        tool_name="bash",
+        command_summary="second command",
+        redacted_summary="second result",
+        evidence_index=0,
+    )
+    records_by_path = {
+        str(first_path): [first_record],
+        str(second_path): [second_record],
+    }
+    captured: list[list[ToolEvidenceSummaryRecord]] = []
+
+    def extract_records(_provider, source_path, **_kwargs):
+        return records_by_path[str(source_path)]
+
+    def record_store_call(stored_records, **_kwargs):
+        captured.append(list(stored_records))
+        return [object()]
+
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.enumerate_provider_files",
+            side_effect=(
+                [first_path, second_path],
+                [first_path, second_path],
+                [first_path, second_path, late_path],
+            ),
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+            side_effect=extract_records,
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli._tool_evidence_source_session_id",
+            side_effect=ValueError("source identity unavailable"),
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.store_tool_evidence_bundles",
+            side_effect=record_store_call,
+        ),
+    ):
+        report = run_tool_evidence(
+            store=InMemoryCouchDBSourceStore(),
+            roots={"codex": root},
+            providers=["codex"],
+        )
+
+    assert report["errors"] == 1
+    assert report["sessions_with_evidence"] == 0
+    assert captured == []
+
+
+def test_run_tool_evidence_skips_session_when_source_fingerprint_is_unavailable(tmp_path):
+    root = tmp_path / "codex"
+    _codex_session(root, "unreadable-fingerprint", "/Users/x/Projects/neurons")
+    record = ToolEvidenceSummaryRecord(
+        session_id_hash=dm.build_session_id_hash("codex", "unreadable-fingerprint"),
+        provider="codex",
+        project="neurons",
+        category="test_result",
+        outcome="pass",
+        tool_name="bash",
+        command_summary="first command",
+        redacted_summary="first result",
+        evidence_index=0,
+    )
+    captured: list[list[ToolEvidenceSummaryRecord]] = []
+
+    def record_store_call(stored_records, **_kwargs):
+        captured.append(list(stored_records))
+        return [object()]
+
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+            return_value=[record],
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli._source_file_fingerprint",
+            return_value=None,
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.store_tool_evidence_bundles",
+            side_effect=record_store_call,
+        ),
+    ):
+        report = run_tool_evidence(
+            store=InMemoryCouchDBSourceStore(),
+            roots={"codex": root},
+            providers=["codex"],
+        )
+
+    assert report["errors"] == 1
+    assert report["sessions_with_evidence"] == 0
+    assert captured == []
+
+
+def test_run_tool_evidence_clears_empty_session_generation(tmp_path):
+    root = tmp_path / "codex"
+    _codex_session(root, "empty-tool-evidence", "/Users/x/Projects/neurons")
+    session_id_hash = dm.build_session_id_hash("codex", "empty-tool-evidence")
+    captured: dict[str, object] = {}
+
+    def record_store_call(stored_records, **kwargs):
+        captured.update(records=list(stored_records), **kwargs)
+        return []
+
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+            return_value=[],
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.parse_transcript_source",
+            return_value=SimpleNamespace(
+                session=SimpleNamespace(session_id_hash=session_id_hash)
+            ),
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.store_tool_evidence_bundles",
+            side_effect=record_store_call,
+        ),
+    ):
+        report = run_tool_evidence(
+            store=InMemoryCouchDBSourceStore(),
+            roots={"codex": root},
+            providers=["codex"],
+        )
+
+    assert report["errors"] == 0
+    assert report["sessions_with_evidence"] == 0
+    assert captured["records"] == []
+    assert captured["session_id_hash"] == session_id_hash
+    assert captured["full_session_generation"] is True
+
+
+def test_run_tool_evidence_skips_incomplete_session_generation(tmp_path):
+    root = tmp_path / "codex"
+    first_path = _codex_session(root, "complete-first", "/Users/x/Projects/neurons")
+    second_path = _codex_session(root, "complete-second", "/Users/x/Projects/neurons")
+    session_id_hash = dm.build_session_id_hash("codex", "incomplete-tool-evidence")
+    first_record = ToolEvidenceSummaryRecord(
+        session_id_hash=session_id_hash,
+        provider="codex",
+        project="neurons",
+        category="test_result",
+        outcome="pass",
+        tool_name="bash",
+        command_summary="first command",
+        redacted_summary="first result",
+        evidence_index=0,
+    )
+    captured: list[list[ToolEvidenceSummaryRecord]] = []
+
+    def extract_records(_provider, source_path, **_kwargs):
+        if str(source_path) == str(first_path):
+            return [first_record]
+        raise ValueError("simulated sibling extraction failure")
+
+    def record_store_call(stored_records, **_kwargs):
+        captured.append(list(stored_records))
+        return [object()]
+
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+            side_effect=extract_records,
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.parse_transcript_source",
+            return_value=SimpleNamespace(
+                session=SimpleNamespace(session_id_hash=session_id_hash)
+            ),
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.store_tool_evidence_bundles",
+            side_effect=record_store_call,
+        ),
+    ):
+        report = run_tool_evidence(
+            store=InMemoryCouchDBSourceStore(),
+            roots={"codex": root},
+            providers=["codex"],
+        )
+
+    assert report["errors"] == 1
+    assert report["sessions_with_evidence"] == 0
+    assert captured == []
+
+
+def test_run_tool_evidence_limit_keeps_each_selected_session_complete(tmp_path):
+    root = tmp_path / "codex"
+    first_path = _codex_session(root, "limited-first", "/Users/x/Projects/neurons")
+    second_path = _codex_session(root, "limited-second", "/Users/x/Projects/neurons")
+    session_id_hash = dm.build_session_id_hash("codex", "limited-tool-evidence")
+    records_by_path = {
+        str(first_path): ToolEvidenceSummaryRecord(
+            session_id_hash=session_id_hash,
+            provider="codex",
+            project="neurons",
+            category="test_result",
+            outcome="pass",
+            tool_name="bash",
+            command_summary="first command",
+            redacted_summary="first result",
+            evidence_index=0,
+        ),
+        str(second_path): ToolEvidenceSummaryRecord(
+            session_id_hash=session_id_hash,
+            provider="codex",
+            project="neurons",
+            category="test_result",
+            outcome="pass",
+            tool_name="bash",
+            command_summary="second command",
+            redacted_summary="second result",
+            evidence_index=1,
+        ),
+    }
+    captured: list[list[ToolEvidenceSummaryRecord]] = []
+
+    def record_store_call(stored_records, **_kwargs):
+        captured.append(list(stored_records))
+        return [object()]
+
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+            side_effect=lambda _provider, source_path, **_kwargs: [
+                records_by_path[str(source_path)]
+            ],
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.store_tool_evidence_bundles",
+            side_effect=record_store_call,
+        ),
+    ):
+        report = run_tool_evidence(
+            store=InMemoryCouchDBSourceStore(),
+            roots={"codex": root},
+            providers=["codex"],
+            limit=1,
+        )
+
+    assert report["errors"] == 0
+    assert report["sessions_with_evidence"] == 1
+    assert report["by_provider"]["codex"]["found"] == 2
+    assert report["by_provider"]["codex"]["scanned_sources"] == 2
+    assert report["by_provider"]["codex"]["selected_sessions"] == 1
+    assert captured == [[records_by_path[str(first_path)], records_by_path[str(second_path)]]]
+
+
+def test_run_tool_evidence_limit_skips_incomplete_session_before_selecting_stable_session(tmp_path):
+    root = tmp_path / "codex"
+    first_path = _codex_session(root, "incomplete-first", "/Users/x/Projects/neurons")
+    _failed_path = _codex_session(root, "incomplete-second", "/Users/x/Projects/neurons")
+    stable_path = _codex_session(root, "stable", "/Users/x/Projects/neurons")
+    incomplete_session_id_hash = "sha256:" + ("1" * 64)
+    stable_session_id_hash = "sha256:" + ("2" * 64)
+    stable_record = ToolEvidenceSummaryRecord(
+        session_id_hash=stable_session_id_hash,
+        provider="codex",
+        project="neurons",
+        category="test_result",
+        outcome="pass",
+        tool_name="bash",
+        command_summary="stable command",
+        redacted_summary="stable result",
+        evidence_index=0,
+    )
+    captured: list[list[ToolEvidenceSummaryRecord]] = []
+
+    def extract_records(_provider, source_path, **_kwargs):
+        if str(source_path).endswith("incomplete-second.jsonl"):
+            raise ValueError("simulated sibling extraction failure")
+        if str(source_path) == str(first_path):
+            return [
+                ToolEvidenceSummaryRecord(
+                    session_id_hash=incomplete_session_id_hash,
+                    provider="codex",
+                    project="neurons",
+                    category="test_result",
+                    outcome="pass",
+                    tool_name="bash",
+                    command_summary="incomplete command",
+                    redacted_summary="incomplete result",
+                    evidence_index=0,
+                )
+            ]
+        assert str(source_path) == str(stable_path)
+        return [stable_record]
+
+    def record_store_call(stored_records, **_kwargs):
+        captured.append(list(stored_records))
+        return [object()]
+
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+            side_effect=extract_records,
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.parse_transcript_source",
+            return_value=SimpleNamespace(
+                session=SimpleNamespace(session_id_hash=incomplete_session_id_hash)
+            ),
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.store_tool_evidence_bundles",
+            side_effect=record_store_call,
+        ),
+    ):
+        report = run_tool_evidence(
+            store=InMemoryCouchDBSourceStore(),
+            roots={"codex": root},
+            providers=["codex"],
+            limit=1,
+        )
+
+    assert report["errors"] == 1
+    assert report["by_provider"]["codex"]["selected_sessions"] == 1
+    assert report["sessions_with_evidence"] == 1
+    assert captured == [[stable_record]]
+
+
+def test_tool_evidence_cli_returns_error_when_stability_fence_rejects(capsys):
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.run_migration",
+            return_value={"errors": 0},
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.run_tool_evidence",
+            return_value={
+                "by_provider": {"codex": {"errors": 1}},
+                "bundles": 0,
+                "sessions_with_evidence": 0,
+                "errors": 1,
+            },
+        ),
+    ):
+        rc = main(["--tool-evidence", "--dry-run"])
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "error"
+    assert report["errors"] == 1
+
+
+def test_tool_evidence_dry_run_seeds_source_context_for_full_generation(tmp_path, capsys):
+    root = tmp_path / "codex"
+    source = _codex_session(root, "tool-evidence-dry-run", "/Users/x/Projects/neurons")
+    source.write_text(
+        source.read_text(encoding="utf-8")
+        + "\n".join(
+            (
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-17T01:00:03Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "name": "exec_command",
+                            "call_id": "dry-run-tool",
+                            "arguments": json.dumps({"cmd": "uv run pytest -q"}),
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-17T01:00:04Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": "dry-run-tool",
+                            "output": "1 passed",
+                        },
+                    }
+                ),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rc = main(
+        [
+            "--tool-evidence",
+            "--dry-run",
+            "--provider",
+            "codex",
+            "--source-root",
+            f"codex={root}",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert report["status"] == "ok"
+    assert report["errors"] == 0
+    assert report["by_provider"]["codex"]["selected_sessions"] == 1
+    assert report["sessions_with_evidence"] == 1
+    assert report["bundles"] == 1
 
 
 def test_transcript_migration_live_run_requires_approval_before_store_setup(capsys):
