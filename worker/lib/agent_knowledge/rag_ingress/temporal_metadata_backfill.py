@@ -22,6 +22,7 @@ from typing import Any, Callable
 
 from ..couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
 from ..couchdb_source.document_model import (
+    active_source_revision_pointer_doc_id,
     conversation_chunk_doc_id,
     coverage_manifest_doc_id,
     projection_state_doc_id,
@@ -31,6 +32,14 @@ from ..couchdb_source.session_memory_materializer import (
     _coverage_snapshot,
     mark_projection_pending_if_source_changed,
     update_coverage_with_tool_evidence,
+)
+from ..couchdb_source.source_revision import (
+    ResolvedSourceRevision,
+    SourceRevisionResolutionError,
+    active_source_origin_document_ids,
+    activate_source_revision,
+    build_temporal_metadata_successor_documents,
+    resolve_active_source_revision,
 )
 from ..couchdb_source.source_store import CouchDBSourceStore, SourceStoreConflict
 from ..session_memory.native_memory_sync_approval import (
@@ -401,7 +410,13 @@ def _aggregate_is_current(
     snapshot = _coverage_snapshot(session_id_hash=session_id_hash, store=source_store)
     if snapshot is None:
         return False
-    expected, sessions, expected_start, expected_end = snapshot
+    (
+        expected,
+        sessions,
+        expected_start,
+        expected_end,
+        is_legacy_unpinned,
+    ) = snapshot
     persisted = source_store.get(coverage_manifest_doc_id(session_id_hash)) or {}
     projection = source_store.get(projection_state_doc_id(session_id_hash)) or {}
     session = sessions[0] if sessions else {}
@@ -416,9 +431,15 @@ def _aggregate_is_current(
         == int(expected.get("tool_evidence_bundle_count") or 0)
         and str(persisted.get("observed_at_start") or "") == expected_start
         and str(persisted.get("observed_at_end") or "") == expected_end
-        and str(session.get("source_hash") or "") == expected_hash
-        and str(session.get("observed_at_start") or "") == expected_start
-        and str(session.get("observed_at_end") or "") == expected_end
+        and (
+            not sessions
+            or not is_legacy_unpinned
+            or (
+                str(session.get("source_hash") or "") == expected_hash
+                and str(session.get("observed_at_start") or "") == expected_start
+                and str(session.get("observed_at_end") or "") == expected_end
+            )
+        )
         and str(projection.get("source_hash") or "") == expected_hash
     )
 
@@ -438,6 +459,42 @@ def _chunk_revision_matches(
         and str(document.get("observed_at_start") or "") == candidate.observed_at_start
         and str(document.get("observed_at_end") or "") == candidate.observed_at_end
     )
+
+
+def _active_revision_after_source_write(
+    *,
+    source_store: CouchDBSourceStore,
+    session_id_hash: str,
+) -> ResolvedSourceRevision | None:
+    """Resolve a pointer observed immediately after a temporal origin write."""
+
+    if source_store.get(active_source_revision_pointer_doc_id(session_id_hash)) is None:
+        return None
+    return resolve_active_source_revision(
+        store=source_store,
+        session_id_hash=session_id_hash,
+    )
+
+
+def _assert_active_successor_converged(
+    *,
+    source_store: CouchDBSourceStore,
+    session_id_hash: str,
+    activated: ResolvedSourceRevision,
+) -> None:
+    current = resolve_active_source_revision(
+        store=source_store,
+        session_id_hash=session_id_hash,
+    )
+    coverage = source_store.get(coverage_manifest_doc_id(session_id_hash)) or {}
+    if (
+        current.manifest_id != activated.manifest_id
+        or current.source_hash != activated.source_hash
+        or str(coverage.get("source_hash") or "") != current.source_hash
+        or str(coverage.get("active_source_manifest_id") or "")
+        != str(current.manifest_id or "")
+    ):
+        raise SourceStoreConflict("active successor did not converge")
 
 
 def backfill_temporal_metadata(
@@ -546,6 +603,9 @@ def backfill_temporal_metadata(
         "integrity_error_count": integrity_error_count,
         "write_error_count": 0,
         "write_conflict_count": 0,
+        "active_source_revision_blocked_count": 0,
+        "active_source_revision_successor_count": 0,
+        "active_source_revision_uncertain_count": 0,
         "chunk_metadata_write_count": 0,
         "partial_reconciliation_count": 0,
         "updated_count": 0,
@@ -618,6 +678,21 @@ def backfill_temporal_metadata(
             str(existing.get("observed_at_start") or "") == candidate.observed_at_start
             and str(existing.get("observed_at_end") or "") == candidate.observed_at_end
         )
+        if not temporal_metadata_matches:
+            try:
+                active_pointer = source_store.get(
+                    active_source_revision_pointer_doc_id(candidate.session_id_hash)
+                )
+            except Exception:
+                report["write_error_count"] += 1
+                continue
+            if active_pointer is not None:
+                # The patch would mutate a raw origin while the reader resolves
+                # only the immutable active snapshot. Existing pointers are
+                # blocked before any mutation; a pointer that appears after
+                # this check is handled by the post-write successor CAS.
+                report["active_source_revision_blocked_count"] += 1
+                continue
         aggregate_current = False
         if temporal_metadata_matches:
             try:
@@ -678,6 +753,8 @@ def backfill_temporal_metadata(
             operation_mutated = False
             cas_completed = False
             aggregate_started = False
+            active_predecessor: ResolvedSourceRevision | None = None
+            activated_successor: ResolvedSourceRevision | None = None
             try:
                 revision = source_store.patch_observed_time_if_content_hash(
                     doc_id=candidate.document_id,
@@ -700,6 +777,33 @@ def backfill_temporal_metadata(
                     expected_content_hash=before_content_hash,
                 ):
                     raise SourceStoreConflict("conditional temporal patch postcheck changed")
+                active_predecessor = _active_revision_after_source_write(
+                    source_store=source_store,
+                    session_id_hash=candidate.session_id_hash,
+                )
+                if active_predecessor is not None:
+                    successor_source_document_ids = active_source_origin_document_ids(
+                        active_predecessor
+                    )
+                    if candidate.document_id not in successor_source_document_ids:
+                        successor_documents = build_temporal_metadata_successor_documents(
+                            active_revision=active_predecessor,
+                            store=source_store,
+                            source_document_id=candidate.document_id,
+                            observed_at_start=candidate.observed_at_start,
+                            observed_at_end=candidate.observed_at_end,
+                        )
+                        for successor_document in successor_documents:
+                            source_store.put_if_absent(successor_document)
+                        successor_source_document_ids = tuple(
+                            str(document["_id"]) for document in successor_documents
+                        )
+                    activated_successor = activate_source_revision(
+                        store=source_store,
+                        session_id_hash=candidate.session_id_hash,
+                        source_document_ids=successor_source_document_ids,
+                        expected_predecessor=active_predecessor,
+                    )
                 aggregate_started = True
                 coverage = update_coverage_with_tool_evidence(
                     session_id_hash=candidate.session_id_hash,
@@ -707,6 +811,12 @@ def backfill_temporal_metadata(
                 )
                 if coverage is None or not str(coverage.get("source_hash") or ""):
                     raise ValueError("coverage source hash is unavailable")
+                if (
+                    activated_successor is not None
+                    and str(coverage.get("source_hash") or "")
+                    != activated_successor.source_hash
+                ):
+                    raise SourceStoreConflict("active successor coverage source hash changed")
                 post_coverage = source_store.get(candidate.document_id) or {}
                 if not _chunk_revision_matches(
                     post_coverage,
@@ -724,8 +834,16 @@ def backfill_temporal_metadata(
                     store=source_store,
                     source_changed=True,
                 )
+                if activated_successor is not None:
+                    _assert_active_successor_converged(
+                        source_store=source_store,
+                        session_id_hash=candidate.session_id_hash,
+                        activated=activated_successor,
+                    )
             except SourceStoreConflict:
                 report["write_conflict_count"] += 1
+                if active_predecessor is not None:
+                    report["active_source_revision_uncertain_count"] += 1
                 if operation_mutated or aggregate_started:
                     report["partial_reconciliation_count"] += 1
                 if aggregate_started and not operation_mutated:
@@ -734,6 +852,8 @@ def backfill_temporal_metadata(
                 continue
             except Exception:
                 report["write_error_count"] += 1
+                if active_predecessor is not None:
+                    report["active_source_revision_uncertain_count"] += 1
                 if operation_mutated or aggregate_started or not cas_completed:
                     report["partial_reconciliation_count"] += 1
                     if not operation_mutated and (aggregate_started or not cas_completed):
@@ -742,6 +862,8 @@ def backfill_temporal_metadata(
                 continue
             report["updated_count"] += 1
             report["mutation_performed"] = True
+            if activated_successor is not None:
+                report["active_source_revision_successor_count"] += 1
             dirty_sessions.add(candidate.session_id_hash)
         dirty_count = len(dirty_sessions)
         report["source_hash_changed_session_count"] = dirty_count
@@ -756,6 +878,7 @@ def backfill_temporal_metadata(
         + int(report["source_missing_count"])
         + int(report["content_conflict_count"])
         + int(report["wire_conflict_count"])
+        + int(report["active_source_revision_blocked_count"])
         + int(report["write_conflict_count"])
         + int(report["write_error_count"])
     )
