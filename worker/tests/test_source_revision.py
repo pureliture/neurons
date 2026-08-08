@@ -4,10 +4,12 @@ import pytest
 
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.source_revision import (
+    ResolvedSourceRevision,
     SourceRevisionResolutionError,
     active_source_origin_document_ids,
     activate_source_revision,
     build_revision_scoped_source_documents,
+    build_temporal_metadata_successor_documents,
     resolve_active_source_revision,
     resolve_active_source_revision_from_snapshot,
 )
@@ -178,6 +180,177 @@ def test_activation_preserves_homogeneous_current_source_copy_ids() -> None:
         )
     }
     assert activated_ids == {document["_id"] for document in current_documents}
+
+
+def test_temporal_successor_flattens_nested_current_generic_origins_for_next_append() -> None:
+    store = InMemoryCouchDBSourceStore()
+    session, raw_chunk, bundle = _seed_session_source(store)
+    corrective_chunk = dict(raw_chunk)
+    corrective_chunk["body"] = "corrective current source summary"
+    corrective_chunk["content_hash"] = dm.sha256_hash(corrective_chunk["body"])
+    current_documents = _current_source_copies(session, corrective_chunk, bundle)
+    for document in current_documents:
+        store.put_if_absent(document)
+    current = activate_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+        source_document_ids=tuple(document["_id"] for document in current_documents),
+    )
+
+    def new_chunk(*, chunk_id: str, text: str) -> dict:
+        return dm.build_conversation_chunk_document(
+            chunk=TranscriptChunk.from_text(
+                chunk_id=chunk_id,
+                session_id_hash=_session_id_hash(),
+                provider="codex",
+                project="neurons",
+                turn_start_index=2,
+                turn_end_index=2,
+                text=text,
+            )
+        )
+
+    first_raw_append = new_chunk(
+        chunk_id="first-raw-append",
+        text="first public-safe raw append",
+    )
+    store.put_if_absent(first_raw_append)
+    nested = activate_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+        source_document_ids=(
+            *active_source_origin_document_ids(current),
+            first_raw_append["_id"],
+        ),
+        expected_predecessor=current,
+    )
+    repaired_documents = build_temporal_metadata_successor_documents(
+        active_revision=nested,
+        store=store,
+        source_document_id=raw_chunk["_id"],
+        observed_at_start="2026-08-04T00:00:00Z",
+        observed_at_end="2026-08-04T00:01:00Z",
+    )
+    for document in repaired_documents:
+        store.put_if_absent(document)
+    repaired = activate_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+        source_document_ids=tuple(document["_id"] for document in repaired_documents),
+        expected_predecessor=nested,
+    )
+
+    second_raw_append = new_chunk(
+        chunk_id="second-raw-append",
+        text="second public-safe raw append",
+    )
+    store.put_if_absent(second_raw_append)
+    successor = activate_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+        source_document_ids=(
+            *active_source_origin_document_ids(repaired),
+            second_raw_append["_id"],
+        ),
+        expected_predecessor=repaired,
+    )
+
+    repaired_chunk = next(
+        document
+        for document in repaired.conversation_chunks
+        if document["chunk_id"] == raw_chunk["chunk_id"]
+    )
+    assert repaired_chunk["body"] == corrective_chunk["body"]
+    assert repaired_chunk["observed_at_start"] == "2026-08-04T00:00:00Z"
+    assert repaired_chunk["observed_at_end"] == "2026-08-04T00:01:00Z"
+    assert set(active_source_origin_document_ids(repaired)) == {
+        *active_source_origin_document_ids(current),
+        first_raw_append["_id"],
+    }
+    assert second_raw_append["_id"] in active_source_origin_document_ids(successor)
+
+
+def test_temporal_successor_rejects_multi_hop_generic_origin_without_pointer_change() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _session, raw_chunk, _bundle = _seed_session_source(store)
+    first = activate_source_revision(store=store, session_id_hash=_session_id_hash())
+    second_documents = build_revision_scoped_source_documents(
+        documents=(
+            *first.sessions,
+            *first.conversation_chunks,
+            *first.tool_evidence_bundles,
+        ),
+        source_snapshot_hash=dm.sha256_hash("second generic source snapshot"),
+    )
+    for document in second_documents:
+        store.put_if_absent(document)
+    second = activate_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+        source_document_ids=tuple(document["_id"] for document in second_documents),
+        expected_predecessor=first,
+    )
+    pointer_id = dm.active_source_revision_pointer_doc_id(_session_id_hash())
+    pointer_before = store.get(pointer_id)
+
+    with pytest.raises(SourceRevisionResolutionError, match="unsupported"):
+        build_temporal_metadata_successor_documents(
+            active_revision=second,
+            store=store,
+            source_document_id=raw_chunk["_id"],
+            observed_at_start="2026-08-04T00:00:00Z",
+            observed_at_end="2026-08-04T00:01:00Z",
+        )
+
+    assert store.get(pointer_id) == pointer_before
+
+
+@pytest.mark.parametrize("origin_kind", ("missing", "wrong_type", "wrong_session"))
+def test_temporal_successor_rejects_unresolvable_generic_immediate_origin(
+    origin_kind: str,
+) -> None:
+    store = InMemoryCouchDBSourceStore()
+    _session, raw_chunk, bundle = _seed_session_source(store)
+    active = activate_source_revision(store=store, session_id_hash=_session_id_hash())
+    if origin_kind == "missing":
+        origin_id = "missing-source-origin"
+    elif origin_kind == "wrong_type":
+        origin_id = bundle["_id"]
+    else:
+        foreign_session_id = dm.build_session_id_hash("codex", "foreign-session")
+        foreign_chunk = dm.build_conversation_chunk_document(
+            chunk=TranscriptChunk.from_text(
+                chunk_id="foreign-source-origin",
+                session_id_hash=foreign_session_id,
+                provider="codex",
+                project="neurons",
+                turn_start_index=0,
+                turn_end_index=0,
+                text="foreign public-safe source summary",
+            )
+        )
+        store.put_if_absent(foreign_chunk)
+        origin_id = foreign_chunk["_id"]
+    forged_chunk = dict(active.conversation_chunks[0])
+    forged_chunk["source_snapshot_origin_id"] = origin_id
+    forged = ResolvedSourceRevision(
+        session_id_hash=active.session_id_hash,
+        sessions=active.sessions,
+        conversation_chunks=(forged_chunk,),
+        tool_evidence_bundles=active.tool_evidence_bundles,
+        source_hash=active.source_hash,
+        manifest_id=active.manifest_id,
+        is_legacy_unpinned=active.is_legacy_unpinned,
+    )
+
+    with pytest.raises(SourceRevisionResolutionError):
+        build_temporal_metadata_successor_documents(
+            active_revision=forged,
+            source_document_id=raw_chunk["_id"],
+            observed_at_start="2026-08-04T00:00:00Z",
+            observed_at_end="2026-08-04T00:01:00Z",
+            store=store,
+        )
 
 
 def test_rejected_rogue_pointer_keeps_direct_and_snapshot_legacy_resolution_equal() -> None:

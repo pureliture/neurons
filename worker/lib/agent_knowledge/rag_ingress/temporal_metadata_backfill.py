@@ -38,6 +38,7 @@ from ..couchdb_source.source_revision import (
     SourceRevisionResolutionError,
     active_source_origin_document_ids,
     activate_source_revision,
+    build_temporal_metadata_successor_documents,
     resolve_active_source_revision,
 )
 from ..couchdb_source.source_store import CouchDBSourceStore, SourceStoreConflict
@@ -781,12 +782,26 @@ def backfill_temporal_metadata(
                     session_id_hash=candidate.session_id_hash,
                 )
                 if active_predecessor is not None:
+                    successor_source_document_ids = active_source_origin_document_ids(
+                        active_predecessor
+                    )
+                    if candidate.document_id not in successor_source_document_ids:
+                        successor_documents = build_temporal_metadata_successor_documents(
+                            active_revision=active_predecessor,
+                            store=source_store,
+                            source_document_id=candidate.document_id,
+                            observed_at_start=candidate.observed_at_start,
+                            observed_at_end=candidate.observed_at_end,
+                        )
+                        for successor_document in successor_documents:
+                            source_store.put_if_absent(successor_document)
+                        successor_source_document_ids = tuple(
+                            str(document["_id"]) for document in successor_documents
+                        )
                     activated_successor = activate_source_revision(
                         store=source_store,
                         session_id_hash=candidate.session_id_hash,
-                        source_document_ids=active_source_origin_document_ids(
-                            active_predecessor
-                        ),
+                        source_document_ids=successor_source_document_ids,
                         expected_predecessor=active_predecessor,
                     )
                 aggregate_started = True

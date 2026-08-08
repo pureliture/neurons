@@ -26,7 +26,9 @@ from agent_knowledge.couchdb_source.document_model import (
     sha256_hash,
 )
 from agent_knowledge.couchdb_source.source_revision import (
+    active_source_origin_document_ids,
     activate_source_revision,
+    build_revision_scoped_source_documents,
     resolve_active_source_revision,
 )
 from agent_knowledge.couchdb_source.source_store import (
@@ -452,6 +454,54 @@ class _PointerPublishAfterTemporalPatchStore(InMemoryCouchDBSourceStore):
         return super().put_if_revision(document, expected_rev=expected_rev)
 
 
+class _CorrectiveCurrentPointerPublishAfterTemporalPatchStore(
+    _PointerPublishAfterTemporalPatchStore
+):
+    """Publish a corrective current source after the guard, before the raw patch."""
+
+    def patch_observed_time_if_content_hash(self, **kwargs):
+        if not self._publish_after_next_patch:
+            return super().patch_observed_time_if_content_hash(**kwargs)
+        current = self.get(kwargs["doc_id"])
+        session = self.get(session_doc_id(SESSION_HASH))
+        assert current is not None and session is not None
+        self._require_source_document_unpinned(
+            kwargs["doc_id"],
+            doc_type=str(current.get("doc_type") or ""),
+            session_id_hash=str(current.get("session_id_hash") or ""),
+        )
+        self._publish_after_next_patch = False
+        corrective_chunk = dict(current)
+        corrective_chunk["body"] = "corrective current source body"
+        corrective_chunk["content_hash"] = sha256_hash(corrective_chunk["body"])
+        current_documents = build_revision_scoped_source_documents(
+            documents=(session, corrective_chunk),
+            source_snapshot_hash=sha256_hash("corrective-current-source"),
+            scope_kind="current",
+        )
+        for document in current_documents:
+            self.put_if_absent(document)
+        activate_source_revision(
+            store=self,
+            session_id_hash=SESSION_HASH,
+            source_document_ids=tuple(document["_id"] for document in current_documents),
+        )
+        self._fail_next_pointer_cas = self._fail_successor_pointer_cas
+
+        # Model the independent CouchDB PUT that committed the raw temporal
+        # patch after the corrective current pointer became active.
+        updated = dict(current)
+        updated["observed_at_start"] = kwargs["observed_at_start"]
+        updated["observed_at_end"] = kwargs["observed_at_end"]
+        updated["_rev"] = "2-raced"
+        self._docs[kwargs["doc_id"]] = updated
+        return StoredRevision(
+            doc_id=kwargs["doc_id"],
+            rev=str(updated["_rev"]),
+            outcome="conflict_resolved",
+        )
+
+
 def _add_source_session(
     store: InMemoryCouchDBSourceStore,
     *,
@@ -757,6 +807,103 @@ def test_pointer_publish_after_temporal_patch_converges_active_successor(tmp_pat
     assert coverage["source_hash"] == resolved.source_hash
     assert resolved.conversation_chunks[0]["observed_at_start"] == OBSERVED_START
     assert resolved.conversation_chunks[0]["observed_at_end"] == OBSERVED_END
+
+
+def test_generic_temporal_successor_preserves_raw_origins_for_next_active_append(tmp_path):
+    state_db = _state_db(tmp_path)
+    _record_payload(state_db, _payload())
+    seeded = _source_store()
+    store = _PointerPublishAfterTemporalPatchStore()
+    for document in seeded.all_docs():
+        store.put(document)
+    store.arm_pointer_publish()
+
+    report = backfill_temporal_metadata(
+        state_db=state_db,
+        source_store=store,
+        project=PROJECT,
+        limit=10,
+        max_runtime_seconds=30,
+        execute=True,
+    )
+
+    repaired = resolve_active_source_revision(
+        store=store,
+        session_id_hash=SESSION_HASH,
+    )
+    next_chunk = build_conversation_chunk_document(
+        chunk=TranscriptChunk.from_text(
+            chunk_id="next-chunk",
+            session_id_hash=SESSION_HASH,
+            provider="codex",
+            project=PROJECT,
+            turn_start_index=2,
+            turn_end_index=2,
+            text="next public-safe source summary",
+        )
+    )
+    store.put_if_absent(next_chunk)
+
+    successor = activate_source_revision(
+        store=store,
+        session_id_hash=SESSION_HASH,
+        source_document_ids=(
+            *active_source_origin_document_ids(repaired),
+            next_chunk["_id"],
+        ),
+        expected_predecessor=repaired,
+    )
+
+    assert report["active_source_revision_successor_count"] == 1
+    assert active_source_origin_document_ids(successor) == (
+        session_doc_id(SESSION_HASH),
+        conversation_chunk_doc_id(SESSION_HASH, CHUNK_ID),
+        next_chunk["_id"],
+    )
+
+
+def test_corrective_current_pointer_publish_after_temporal_patch_preserves_current_content_and_converges_metadata(
+    tmp_path,
+):
+    state_db = _state_db(tmp_path)
+    _record_payload(state_db, _payload())
+    seeded = _source_store()
+    store = _CorrectiveCurrentPointerPublishAfterTemporalPatchStore()
+    for document in seeded.all_docs():
+        store.put(document)
+    store.arm_pointer_publish()
+
+    report = backfill_temporal_metadata(
+        state_db=state_db,
+        source_store=store,
+        project=PROJECT,
+        limit=10,
+        max_runtime_seconds=30,
+        execute=True,
+    )
+
+    resolved = resolve_active_source_revision(
+        store=store,
+        session_id_hash=SESSION_HASH,
+    )
+    coverage = store.get(coverage_manifest_doc_id(SESSION_HASH))
+    current_chunk = resolved.conversation_chunks[0]
+    assert report["updated_count"] == 1
+    assert report["active_source_revision_successor_count"] == 1
+    assert report["active_source_revision_uncertain_count"] == 0
+    assert coverage is not None
+    assert coverage["source_hash"] == resolved.source_hash
+    assert coverage["active_source_manifest_id"] == resolved.manifest_id
+    assert len(resolved.conversation_chunks) == 1
+    assert current_chunk["body"] == "corrective current source body"
+    assert current_chunk["content_hash"] == sha256_hash("corrective current source body")
+    assert current_chunk["observed_at_start"] == OBSERVED_START
+    assert current_chunk["observed_at_end"] == OBSERVED_END
+    assert current_chunk["source_snapshot_schema_version"]
+    assert current_chunk["current_source_scope"]
+    assert current_chunk["supersedes_source_document_hash"] == sha256_hash(
+        conversation_chunk_doc_id(SESSION_HASH, CHUNK_ID)
+    )
 
 
 def test_pointer_publish_after_temporal_write_reports_uncertain_when_successor_cas_fails(tmp_path):
