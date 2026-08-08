@@ -69,6 +69,7 @@ from ..couchdb_source.session_memory_materializer import (
 from ..couchdb_source.source_revision import (
     ResolvedSourceRevision,
     SourceRevisionResolutionError,
+    _source_document_logical_identity,
     active_source_origin_document_ids,
     activate_source_revision,
     resolve_active_source_revision,
@@ -171,6 +172,28 @@ def _chunk_documents_match(
         )
         and payload_hash(dict(existing_chunk)) == payload_hash(dict(expected_chunk))
     )
+
+
+def _is_active_chunk_duplicate(
+    *,
+    active_revision: ResolvedSourceRevision,
+    chunk_document: Mapping[str, Any],
+) -> bool:
+    """Match raw ingress against the active source's stable chunk identity."""
+
+    expected_identity = _source_document_logical_identity(chunk_document)
+    active_chunks = [
+        document
+        for document in active_revision.conversation_chunks
+        if _source_document_logical_identity(document) == expected_identity
+    ]
+    if len(active_chunks) > 1:
+        raise SourceStoreConflict("active source revision chunk logical identity is ambiguous")
+    if not active_chunks:
+        return False
+    if not _chunk_documents_match(active_chunks[0], chunk_document):
+        raise SourceStoreConflict("active source revision chunk logical identity conflicts")
+    return True
 
 
 def _chunk_document_for_payload_identity(payload: Mapping[str, Any]) -> dict | None:
@@ -511,14 +534,16 @@ class CouchDBDeliveryBackend:
                         project=project,
                     )
                     chunk_document_id = str(chunk_doc["_id"])
-                    active_chunk_ids = {
-                        str(
-                            document.get("source_snapshot_origin_id")
-                            or document["_id"]
+                    try:
+                        active_duplicate = _is_active_chunk_duplicate(
+                            active_revision=activated_after_legacy_write,
+                            chunk_document=chunk_doc,
                         )
-                        for document in activated_after_legacy_write.conversation_chunks
-                    }
-                    active_duplicate = chunk_document_id in active_chunk_ids
+                    except SourceStoreConflict:
+                        return _payload_integrity_evidence(
+                            job,
+                            run="active_chunk_logical_identity_mismatch",
+                        )
                     activated = activate_source_revision(
                         store=self._store,
                         session_id_hash=session_id_hash,
@@ -528,7 +553,7 @@ class CouchDBDeliveryBackend:
                                     *_active_revision_source_document_ids(
                                         activated_after_legacy_write
                                     ),
-                                    chunk_document_id,
+                                    *(() if active_duplicate else (chunk_document_id,)),
                                 }
                             )
                         ),
@@ -590,13 +615,16 @@ class CouchDBDeliveryBackend:
                     project=project,
                 )
                 chunk_document_id = str(chunk_doc["_id"])
-                active_chunk_ids = {
-                    str(
-                        document.get("source_snapshot_origin_id")
-                        or document["_id"]
+                try:
+                    active_duplicate = _is_active_chunk_duplicate(
+                        active_revision=active_revision,
+                        chunk_document=chunk_doc,
                     )
-                    for document in active_revision.conversation_chunks
-                }
+                except SourceStoreConflict:
+                    return _payload_integrity_evidence(
+                        job,
+                        run="active_chunk_logical_identity_mismatch",
+                    )
                 existing_chunk = self._store.get(chunk_document_id)
                 if existing_chunk is not None:
                     if not _chunk_documents_match(existing_chunk, chunk_doc):
@@ -608,13 +636,9 @@ class CouchDBDeliveryBackend:
                             job,
                             run="chunk_id_payload_mismatch",
                         )
-                    # An exact orphan can remain after an earlier activation CAS
-                    # loss. Reuse it in the next explicit revision instead of
-                    # treating it as a no-op duplicate.
-                    active_duplicate = chunk_document_id in active_chunk_ids
                 else:
                     try:
-                        chunk_revision = self._store.put_if_absent(chunk_doc)
+                        self._store.put_if_absent(chunk_doc)
                     except SourceStoreConflict:
                         # A concurrent writer can create this deterministic id
                         # after our pre-read. Re-read only to classify an
@@ -629,10 +653,6 @@ class CouchDBDeliveryBackend:
                                 run="chunk_id_payload_mismatch",
                             )
                         raise
-                    active_duplicate = (
-                        chunk_revision.outcome == "duplicate"
-                        and chunk_document_id in active_chunk_ids
-                    )
 
                 activated = activate_source_revision(
                     store=self._store,
@@ -641,7 +661,7 @@ class CouchDBDeliveryBackend:
                         sorted(
                             {
                                 *_active_revision_source_document_ids(active_revision),
-                                chunk_document_id,
+                                *(() if active_duplicate else (chunk_document_id,)),
                             }
                         )
                     ),
@@ -769,24 +789,17 @@ class CouchDBDeliveryBackend:
                 run="active_pointer_control_unresolved",
             )
         if active_revision is not None:
-            active_chunks = [
-                document
-                for document in active_revision.conversation_chunks
-                if str(
-                    document.get("source_snapshot_origin_id")
-                    or document.get("_id")
-                    or ""
+            try:
+                active_duplicate = _is_active_chunk_duplicate(
+                    active_revision=active_revision,
+                    chunk_document=expected_chunk,
                 )
-                == chunk_doc_id
-            ]
-            if len(active_chunks) == 1:
-                active_chunk = active_chunks[0]
-                if not _chunk_documents_match(active_chunk, expected_chunk):
-                    return _payload_integrity_evidence(
-                        job,
-                        run="chunk_id_payload_mismatch",
-                    )
-            elif not active_chunks:
+            except SourceStoreConflict:
+                return _payload_integrity_evidence(
+                    job,
+                    run="chunk_id_payload_mismatch",
+                )
+            if not active_duplicate:
                 # An unactivated exact orphan can still be reconciled by a
                 # later submit. It is not success evidence: a stale session
                 # reference must not let reconciliation bypass the active
@@ -802,11 +815,6 @@ class CouchDBDeliveryBackend:
                 return _active_pointer_membership_evidence(
                     job,
                     run="active_pointer_member_missing",
-                )
-            else:
-                return _active_pointer_membership_evidence(
-                    job,
-                    run="active_pointer_member_ambiguous",
                 )
         else:
             existing_chunk = self._store.get(chunk_doc_id)

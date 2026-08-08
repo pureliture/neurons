@@ -281,6 +281,34 @@ def _is_immutable_source_copy(document: Mapping[str, object]) -> bool:
     return _is_revision_snapshot_copy(document) or _is_current_source_copy(document)
 
 
+def _source_document_logical_identity(document: Mapping[str, object]) -> str:
+    """Return the stable origin identity shared by raw and corrective copies.
+
+    A corrective ``current`` copy has no raw origin id.  Its
+    ``supersedes_source_document_hash`` is the hash of that id and must take
+    precedence even when a later generic snapshot wraps the corrective copy.
+    """
+
+    current_scope = document.get("current_source_scope")
+    superseded_id_hash = document.get("supersedes_source_document_hash")
+    if current_scope is not None or superseded_id_hash is not None:
+        try:
+            dm.assert_hash_like("current_source_scope", str(current_scope or ""))
+            dm.assert_hash_like(
+                "supersedes_source_document_hash", str(superseded_id_hash or "")
+            )
+        except ValueError as exc:
+            raise SourceRevisionResolutionError(
+                "source revision current copy logical identity is invalid"
+            ) from exc
+        return str(superseded_id_hash)
+
+    origin_id = str(document.get(_SOURCE_SNAPSHOT_ORIGIN_ID) or document.get("_id") or "")
+    if not origin_id:
+        raise SourceRevisionResolutionError("source revision logical identity is invalid")
+    return dm.sha256_hash(origin_id)
+
+
 def _snapshot_source_documents(
     *,
     documents: Iterable[Mapping[str, object]],

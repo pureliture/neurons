@@ -260,6 +260,39 @@ def _assert_complete_bundle_generation(documents: list[dict]) -> None:
         raise ValueError("full tool evidence generation is incomplete")
 
 
+def _resolve_expected_predecessor(
+    *,
+    expected_predecessor: ResolvedSourceRevision,
+    session_id_hash: str,
+    store: CouchDBSourceStore,
+) -> ResolvedSourceRevision:
+    """Fail before mutable legacy writes when an extraction predecessor is stale."""
+
+    if not isinstance(expected_predecessor, ResolvedSourceRevision):
+        raise SourceStoreConflict("expected predecessor is invalid")
+    if expected_predecessor.session_id_hash != session_id_hash:
+        raise SourceStoreConflict("expected predecessor session does not match")
+    try:
+        dm.assert_hash_like(
+            "expected_predecessor_source_hash",
+            expected_predecessor.source_hash,
+        )
+    except ValueError as exc:
+        raise SourceStoreConflict("expected predecessor is invalid") from exc
+
+    current = resolve_active_source_revision(
+        session_id_hash=session_id_hash,
+        store=store,
+    )
+    if (
+        current.is_legacy_unpinned != expected_predecessor.is_legacy_unpinned
+        or current.manifest_id != expected_predecessor.manifest_id
+        or current.source_hash != expected_predecessor.source_hash
+    ):
+        raise SourceStoreConflict("expected predecessor does not match current revision")
+    return current
+
+
 def _refresh_active_bundle_currentness(
     *,
     activated: ResolvedSourceRevision,
@@ -294,6 +327,7 @@ def _activate_full_bundle_generation(
     *,
     resolved: ResolvedSourceRevision,
     store: CouchDBSourceStore,
+    expected_predecessor: ResolvedSourceRevision | None = None,
 ) -> tuple[ResolvedSourceRevision, dict[str, StoredRevision]]:
     """Pin caller-selected bundles with the resolved session/chunk snapshot."""
 
@@ -326,7 +360,11 @@ def _activate_full_bundle_generation(
         source_document_ids=tuple(
             str(document["_id"]) for document in snapshot_documents
         ),
-        expected_predecessor=resolved,
+        expected_predecessor=(
+            expected_predecessor
+            if expected_predecessor is not None
+            else resolved
+        ),
     )
     return activated, revisions_by_origin
 
@@ -337,6 +375,7 @@ def _active_bundle_revisions(
     resolved: ResolvedSourceRevision,
     store: CouchDBSourceStore,
     replace_active_bundles: bool = False,
+    expected_predecessor: ResolvedSourceRevision | None = None,
 ) -> list[StoredRevision]:
     """Stage bundles, then move one active allowlist to their intended generation."""
 
@@ -368,6 +407,7 @@ def _active_bundle_revisions(
 
     if (
         replace_active_bundles
+        and not resolved.is_legacy_unpinned
         and not staged_by_material
         and len(ordered_materials) == len(active_by_material)
         and set(ordered_materials) == set(active_by_material)
@@ -375,6 +415,12 @@ def _active_bundle_revisions(
         # An exact full-generation retry is already represented by the active
         # immutable snapshots. Do not read mutable raw origins or reselect it,
         # but do retry secondary convergence after a prior post-CAS failure.
+        if expected_predecessor is not None:
+            _resolve_expected_predecessor(
+                expected_predecessor=expected_predecessor,
+                session_id_hash=resolved.session_id_hash,
+                store=store,
+            )
         _refresh_active_bundle_currentness(activated=resolved, store=store)
         return [active_duplicates[material_hash] for material_hash in ordered_materials]
 
@@ -383,6 +429,7 @@ def _active_bundle_revisions(
             documents,
             resolved=resolved,
             store=store,
+            expected_predecessor=expected_predecessor,
         )
         _refresh_active_bundle_currentness(activated=activated, store=store)
         return [
@@ -419,7 +466,11 @@ def _active_bundle_revisions(
                 set(source_document_ids) != active_source_document_ids
             ),
         ),
-        expected_predecessor=resolved,
+        expected_predecessor=(
+            expected_predecessor
+            if expected_predecessor is not None
+            else resolved
+        ),
     )
 
     # Only a generation with newly staged evidence may advance the active
@@ -440,6 +491,7 @@ def store_tool_evidence_bundles(
     max_chars: int = MAX_PACKED_TRANSCRIPT_BODY_CHARS,
     full_session_generation: bool = False,
     session_id_hash: str = "",
+    expected_predecessor: ResolvedSourceRevision | None = None,
 ) -> list[StoredRevision]:
     """Store bounded evidence records for one session.
 
@@ -468,6 +520,23 @@ def store_tool_evidence_bundles(
     dm.assert_hash_like("session_id_hash", session_id_hash)
     if full_session_generation and documents:
         _assert_complete_bundle_generation(documents)
+
+    if expected_predecessor is not None:
+        # A full extractor captured this predecessor before it read source
+        # contents. Do not overwrite legacy bundle origins if a newer active
+        # generation appeared while that extraction was in progress.
+        resolved = _resolve_expected_predecessor(
+            expected_predecessor=expected_predecessor,
+            session_id_hash=session_id_hash,
+            store=store,
+        )
+        return _active_bundle_revisions(
+            documents,
+            resolved=resolved,
+            store=store,
+            replace_active_bundles=full_session_generation,
+            expected_predecessor=expected_predecessor,
+        )
 
     pointer_id = dm.active_source_revision_pointer_doc_id(session_id_hash)
     if store.get(pointer_id) is None:

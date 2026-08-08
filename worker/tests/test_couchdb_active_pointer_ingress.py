@@ -12,6 +12,7 @@ from agent_knowledge.couchdb_source.build_cli import _select_sessions_needing_pr
 from agent_knowledge.couchdb_source.source_revision import (
     SourceRevisionResolutionError,
     activate_source_revision,
+    build_revision_scoped_source_documents,
     resolve_active_source_revision,
 )
 from agent_knowledge.couchdb_source.source_store import (
@@ -145,6 +146,44 @@ def _orphan_chunk_document(
         char_end=len(body),
     )
     return dm.build_conversation_chunk_document(chunk=chunk, source_locator_hash="")
+
+
+def _activate_corrective_current_source(
+    store: InMemoryCouchDBSourceStore,
+    *,
+    chunk_id: str,
+    body: str,
+    provider: str = PROVIDER,
+    project: str = PROJECT,
+):
+    """Activate a corrective current copy that supersedes one raw chunk id."""
+
+    session = store.get(dm.session_doc_id(SESSION_ID_HASH))
+    assert session is not None
+    corrective_chunk = _orphan_chunk_document(
+        chunk_id=chunk_id,
+        body=body,
+        provider=provider,
+        project=project,
+    )
+    current_documents = build_revision_scoped_source_documents(
+        documents=(session, corrective_chunk),
+        source_snapshot_hash=dm.sha256_hash("corrective-current-source"),
+        scope_kind="current",
+    )
+    for document in current_documents:
+        store.put_if_absent(document)
+    activated = activate_source_revision(
+        store=store,
+        session_id_hash=SESSION_ID_HASH,
+        source_document_ids=tuple(document["_id"] for document in current_documents),
+    )
+    current_chunk = next(
+        document
+        for document in current_documents
+        if document["doc_type"] == dm.SourceDocType.CONVERSATION_CHUNK
+    )
+    return activated, current_chunk
 
 
 def _force_delete_for_corrupt_active_revision_test(
@@ -1029,3 +1068,111 @@ def test_retired_index_bridge_rejects_invalid_active_pointer_before_new_chunk_wr
 
     assert store.all_docs() == documents_before
     assert store.get(dm.conversation_chunk_doc_id(SESSION_ID_HASH, "second-chunk")) is None
+
+
+def test_delivery_replay_of_corrective_current_chunk_is_idempotent(tmp_path) -> None:
+    raw = _payload(
+        idempotency_key="current-delivery",
+        chunk_id="current-chunk",
+        body="Corrective current source content.",
+    )
+    state_db = _state_db(tmp_path)
+    apply_backfill_to_state_db(state_db=state_db, payloads=[raw], dry_run=False)
+    store = InMemoryCouchDBSourceStore()
+    backend = CouchDBDeliveryBackend(state_db=state_db, store=store)
+
+    backend.submit(_job(state_db, "current-delivery"))
+    activated, current_chunk = _activate_corrective_current_source(
+        store,
+        chunk_id="current-chunk",
+        body="Corrective current source content.",
+    )
+    _mark_projected(store, source_hash=activated.source_hash)
+    pointer_before = _active_pointer(store)
+
+    evidence = backend.submit(_job(state_db, "current-delivery"))
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    assert evidence.status == "succeeded"
+    assert _active_pointer(store) == pointer_before
+    assert resolved.conversation_chunks == (store.get(current_chunk["_id"]),)
+    assert (
+        resolved.conversation_chunks[0]["supersedes_source_document_hash"]
+        == dm.sha256_hash(dm.conversation_chunk_doc_id(SESSION_ID_HASH, "current-chunk"))
+    )
+    assert _select_sessions_needing_projection(store, limit=0) == []
+
+
+def test_retired_bridge_replay_of_corrective_current_chunk_is_idempotent() -> None:
+    raw = _payload(
+        idempotency_key="current-bridge",
+        chunk_id="current-chunk",
+        body="Corrective current source content.",
+    )
+    store = InMemoryCouchDBSourceStore()
+    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+
+    adapter.submit_document(document_from_ingress_payload(raw))
+    activated, current_chunk = _activate_corrective_current_source(
+        store,
+        chunk_id="current-chunk",
+        body="Corrective current source content.",
+    )
+    _mark_projected(store, source_hash=activated.source_hash)
+    pointer_before = _active_pointer(store)
+
+    result = adapter.submit_document(document_from_ingress_payload(raw))
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    assert result.status == "submitted"
+    assert _active_pointer(store) == pointer_before
+    assert resolved.conversation_chunks == (store.get(current_chunk["_id"]),)
+    assert _select_sessions_needing_projection(store, limit=0) == []
+
+
+def test_delivery_rejects_mismatched_corrective_current_chunk(tmp_path) -> None:
+    raw = _payload(
+        idempotency_key="current-delivery-mismatch",
+        chunk_id="current-chunk",
+        body="Original replay content.",
+    )
+    state_db = _state_db(tmp_path)
+    apply_backfill_to_state_db(state_db=state_db, payloads=[raw], dry_run=False)
+    store = InMemoryCouchDBSourceStore()
+    backend = CouchDBDeliveryBackend(state_db=state_db, store=store)
+
+    backend.submit(_job(state_db, "current-delivery-mismatch"))
+    _activate_corrective_current_source(
+        store,
+        chunk_id="current-chunk",
+        body="Corrected content conflicts with replay.",
+    )
+    pointer_before = _active_pointer(store)
+
+    evidence = backend.submit(_job(state_db, "current-delivery-mismatch"))
+
+    assert evidence.status == "payload_integrity_mismatch"
+    assert _active_pointer(store) == pointer_before
+
+
+def test_retired_bridge_rejects_mismatched_corrective_current_chunk() -> None:
+    raw = _payload(
+        idempotency_key="current-bridge-mismatch",
+        chunk_id="current-chunk",
+        body="Original replay content.",
+    )
+    store = InMemoryCouchDBSourceStore()
+    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+
+    adapter.submit_document(document_from_ingress_payload(raw))
+    _activate_corrective_current_source(
+        store,
+        chunk_id="current-chunk",
+        body="Corrected content conflicts with replay.",
+    )
+    pointer_before = _active_pointer(store)
+
+    with pytest.raises(SourceStoreConflict):
+        adapter.submit_document(document_from_ingress_payload(raw))
+
+    assert _active_pointer(store) == pointer_before

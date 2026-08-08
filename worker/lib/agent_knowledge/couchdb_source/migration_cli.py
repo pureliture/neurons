@@ -37,6 +37,7 @@ from .current_source_supersession import (
 from .historical_import import ImportStatus, SourceLocator, import_historical_source
 from .session_memory_materializer import update_coverage_with_tool_evidence
 from .source_store import InMemoryCouchDBSourceStore
+from .source_revision import resolve_active_source_revision
 from .tool_evidence_bundler import store_tool_evidence_bundles
 from .document_model import build_source_locator_hash, session_doc_id
 from ..session_memory.native_memory_sync_approval import ApprovalError, validate_memory_enqueue_approval
@@ -64,6 +65,7 @@ _LOCATOR_ADMISSION_FIELDS = frozenset(
         "max_pending_tool_calls",
     }
 )
+_TOOL_EVIDENCE_LIMIT_ERROR = "tool_evidence_limit_unsupported"
 
 
 def default_source_roots() -> dict[str, Path]:
@@ -343,10 +345,17 @@ def run_tool_evidence(
     """Second pass: extract tool_evidence_summary per session file and store it as
     bounded tool_evidence_bundle docs in CouchDB. Idempotent (deterministic ids).
 
-    ``limit`` bounds complete session replacements, not individual source files:
-    a full generation cannot safely truncate an already-discovered sibling.
-    The report separates the discovered source count from selected sessions.
+    A bounded source-file scan cannot safely publish a full-session replacement,
+    so ``limit`` is rejected before source enumeration or store mutation.
     """
+    if limit is not None:
+        return {
+            "by_provider": {},
+            "bundles": 0,
+            "sessions_with_evidence": 0,
+            "errors": 1,
+            "error_class": _TOOL_EVIDENCE_LIMIT_ERROR,
+        }
     roots = roots if roots is not None else default_source_roots()
     providers = providers or list(MIGRATION_PROVIDERS)
     runtime_dir = runtime_dir or (Path.home() / ".config" / "neurons" / "gemini-normalized")
@@ -368,15 +377,36 @@ def run_tool_evidence(
         records_by_session: dict[str, list] = {}
         source_paths_by_session: dict[str, set[Path]] = {}
         session_id_by_source_path: dict[Path, str] = {}
+        predecessor_by_session: dict[str, object] = {}
         incomplete_session_ids: set[str] = set()
         has_unattributed_source_failure = False
         for path in files:
             source_path = path
             source_locator_hash = ""
+            source_session_id_hash = ""
             try:
                 if provider == "gemini" and path.suffix == ".json":
                     source_path = convert_gemini_json_to_fixture(path, runtime_dir)
                 source_locator_hash = build_source_locator_hash(str(source_path))
+                parsed = parse_transcript_source(
+                    provider,
+                    str(source_path),
+                    project="",
+                    source_locator_hash=source_locator_hash,
+                )
+                source_session_id_hash = str(parsed.session.session_id_hash or "")
+                if not source_session_id_hash:
+                    raise ValueError("tool evidence source session contract is invalid")
+                if source_session_id_hash not in predecessor_by_session:
+                    # Capture the active predecessor before extracting the first
+                    # source for this session. A later full replacement must not
+                    # silently use a generation published during extraction.
+                    predecessor_by_session[source_session_id_hash] = (
+                        resolve_active_source_revision(
+                            session_id_hash=source_session_id_hash,
+                            store=store,
+                        )
+                    )
                 records = extract_tool_evidence(
                     provider,
                     str(source_path),
@@ -384,13 +414,7 @@ def run_tool_evidence(
                     source_locator_hash=source_locator_hash,
                 )
                 if not records:
-                    parsed = parse_transcript_source(
-                        provider,
-                        str(source_path),
-                        project="",
-                        source_locator_hash=source_locator_hash,
-                    )
-                    session_id_hash = str(parsed.session.session_id_hash or "")
+                    session_id_hash = source_session_id_hash
                 else:
                     session_id_hashes = {
                         str(record.session_id_hash or "") for record in records
@@ -398,6 +422,10 @@ def run_tool_evidence(
                     if len(session_id_hashes) != 1:
                         raise ValueError("tool evidence source session contract is invalid")
                     session_id_hash = next(iter(session_id_hashes))
+                    if session_id_hash != source_session_id_hash:
+                        raise ValueError(
+                            "tool evidence source session identity changed during extraction"
+                        )
                 if not session_id_hash:
                     raise ValueError("tool evidence source session contract is invalid")
                 records_by_session.setdefault(session_id_hash, []).extend(records)
@@ -406,15 +434,17 @@ def run_tool_evidence(
             except Exception:  # noqa: BLE001 - per-file fail-soft
                 prov["errors"] += 1
                 try:
-                    if not source_locator_hash:
-                        raise ValueError("tool evidence failed before source admission")
-                    parsed = parse_transcript_source(
-                        provider,
-                        str(source_path),
-                        project="",
-                        source_locator_hash=source_locator_hash,
-                    )
-                    session_id_hash = str(parsed.session.session_id_hash or "")
+                    session_id_hash = source_session_id_hash
+                    if not session_id_hash:
+                        if not source_locator_hash:
+                            raise ValueError("tool evidence failed before source admission")
+                        parsed = parse_transcript_source(
+                            provider,
+                            str(source_path),
+                            project="",
+                            source_locator_hash=source_locator_hash,
+                        )
+                        session_id_hash = str(parsed.session.session_id_hash or "")
                     if not session_id_hash:
                         raise ValueError("tool evidence source session contract is invalid")
                     incomplete_session_ids.add(session_id_hash)
@@ -566,12 +596,15 @@ def run_tool_evidence(
                     incomplete_session_ids.add(session_id_hash)
                     prov["errors"] += 1
                     continue
-                revs = store_tool_evidence_bundles(
-                    records,
-                    store=store,
-                    full_session_generation=True,
-                    session_id_hash=session_id_hash,
-                )
+                bundle_kwargs = {
+                    "store": store,
+                    "full_session_generation": True,
+                    "session_id_hash": session_id_hash,
+                }
+                expected_predecessor = predecessor_by_session.get(session_id_hash)
+                if expected_predecessor is not None:
+                    bundle_kwargs["expected_predecessor"] = expected_predecessor
+                revs = store_tool_evidence_bundles(records, **bundle_kwargs)
                 prov["bundles"] += len(revs)
                 if records:
                     prov["sessions"] += 1
@@ -664,8 +697,7 @@ def main(argv: list[str] | None = None) -> int:
         "--limit",
         type=int,
         help=(
-            "maximum source files for migration; with --tool-evidence, "
-            "maximum complete sessions after stable source discovery"
+            "maximum source files for migration; unavailable with --tool-evidence"
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
@@ -686,6 +718,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv if argv is not None else None)
     effective_argv = list(sys.argv[1:] if argv is None else argv)
+
+    if args.tool_evidence and args.limit is not None:
+        print(json.dumps({
+            "schema_version": MIGRATION_CLI_SCHEMA_VERSION,
+            "status": "error",
+            "error_class": _TOOL_EVIDENCE_LIMIT_ERROR,
+            "dry_run": bool(args.dry_run),
+            "mutation_performed": False,
+            "network_used": False,
+        }, sort_keys=True))
+        return 2
 
     roots_override: dict[str, Path] = {}
     for raw in args.source_root or []:
