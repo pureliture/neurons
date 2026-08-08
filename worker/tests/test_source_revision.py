@@ -789,6 +789,117 @@ def test_activation_binds_safe_provenance_into_immutable_manifest() -> None:
         resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
 
 
+def test_activation_reactivates_existing_source_set_without_rewriting_manifest() -> None:
+    store = InMemoryCouchDBSourceStore()
+    session, chunk, bundle = _seed_session_source(store)
+    first = activate_source_revision(store=store, session_id_hash=_session_id_hash())
+    assert first.manifest_id is not None
+    first_manifest = store.get(first.manifest_id)
+    assert first_manifest is not None
+
+    added_bundle = dm.build_tool_evidence_bundle_document(
+        session_id_hash=_session_id_hash(),
+        provider="codex",
+        project="neurons",
+        part_index=2,
+        part_count=2,
+        evidence_index_start=1,
+        evidence_index_end=1,
+        record_content_hashes=[dm.sha256_hash("reactivation evidence")],
+        body="reactivation public-safe evidence",
+    )
+    store.put_if_absent(added_bundle)
+    second = activate_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+        source_document_ids=(
+            session["_id"],
+            chunk["_id"],
+            bundle["_id"],
+            added_bundle["_id"],
+        ),
+        provenance={
+            "predecessor_manifest_hash": str(first_manifest["manifest_hash"]),
+        },
+        expected_predecessor=first,
+    )
+    assert second.manifest_id is not None
+    second_manifest = store.get(second.manifest_id)
+    assert second_manifest is not None
+
+    reactivated = activate_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+        source_document_ids=(session["_id"], chunk["_id"], bundle["_id"]),
+        provenance={
+            "predecessor_manifest_hash": str(second_manifest["manifest_hash"]),
+        },
+        expected_predecessor=second,
+    )
+
+    assert reactivated.manifest_id == first.manifest_id
+    assert reactivated.source_hash == first.source_hash
+    assert store.get(first.manifest_id) == first_manifest
+    assert resolve_active_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+    ) == reactivated
+
+
+def test_reactivation_rejects_changed_source_set_provenance_without_pointer_transition() -> None:
+    store = InMemoryCouchDBSourceStore()
+    session, chunk, bundle = _seed_session_source(store)
+    first = activate_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+        provenance={"parser_version": "parser.v1"},
+    )
+    assert first.manifest_id is not None
+    first_manifest = store.get(first.manifest_id)
+    assert first_manifest is not None
+
+    added_bundle = dm.build_tool_evidence_bundle_document(
+        session_id_hash=_session_id_hash(),
+        provider="codex",
+        project="neurons",
+        part_index=2,
+        part_count=2,
+        evidence_index_start=1,
+        evidence_index_end=1,
+        record_content_hashes=[dm.sha256_hash("provenance conflict evidence")],
+        body="provenance conflict public-safe evidence",
+    )
+    store.put_if_absent(added_bundle)
+    second = activate_source_revision(
+        store=store,
+        session_id_hash=_session_id_hash(),
+        source_document_ids=(
+            session["_id"],
+            chunk["_id"],
+            bundle["_id"],
+            added_bundle["_id"],
+        ),
+        expected_predecessor=first,
+    )
+    pointer_before = store.get(
+        dm.active_source_revision_pointer_doc_id(_session_id_hash())
+    )
+
+    with pytest.raises(SourceStoreConflict, match="does not match source set"):
+        activate_source_revision(
+            store=store,
+            session_id_hash=_session_id_hash(),
+            source_document_ids=(session["_id"], chunk["_id"], bundle["_id"]),
+            provenance={"parser_version": "parser.v2"},
+            expected_predecessor=second,
+        )
+
+    assert (
+        store.get(dm.active_source_revision_pointer_doc_id(_session_id_hash()))
+        == pointer_before
+    )
+
+
 @pytest.mark.parametrize(
     "provenance",
     (
