@@ -19,6 +19,9 @@ from agent_knowledge.couchdb_source.source_store import (
     InMemoryCouchDBSourceStore,
     SourceStoreConflict,
 )
+from agent_knowledge.couchdb_source.tool_evidence_bundler import (
+    store_tool_evidence_bundles,
+)
 from agent_knowledge.rag_ingress.backfill_apply import apply_backfill_to_state_db
 from agent_knowledge.rag_ingress.couchdb_delivery_backend import (
     CouchDBDeliveryBackend,
@@ -35,7 +38,10 @@ from agent_knowledge.rag_ingress.delivery_executor import (
 from agent_knowledge.rag_ingress.delivery_reconcile import DeliveryReconciler
 from agent_knowledge.rag_ingress.server_runtime import document_from_ingress_payload
 from agent_knowledge.rag_ingress.state_db import RAGIngressStateDB
-from agent_knowledge.session_memory.transcript_model import TranscriptChunk
+from agent_knowledge.session_memory.transcript_model import (
+    ToolEvidenceSummaryRecord,
+    TranscriptChunk,
+)
 
 
 SESSION_ID_HASH = dm.sha256_hash("codex:active-pointer-ingress")
@@ -91,6 +97,37 @@ def _state_db(tmp_path) -> RAGIngressStateDB:
     private.mkdir()
     os.chmod(private, 0o700)
     return RAGIngressStateDB(private / "state.sqlite")
+
+
+def _tool_evidence_record(
+    *,
+    summary: str = "full generation identity regression coverage",
+    evidence_index: int = 0,
+    observed_at: str = "2026-08-08T00:00:00Z",
+) -> ToolEvidenceSummaryRecord:
+    return ToolEvidenceSummaryRecord(
+        session_id_hash=SESSION_ID_HASH,
+        provider=PROVIDER,
+        project=PROJECT,
+        category="test_result",
+        outcome="pass",
+        tool_name="bash",
+        command_summary="uv run pytest -q",
+        redacted_summary=summary,
+        observed_at=observed_at,
+        evidence_index=evidence_index,
+    )
+
+
+def _full_generation_records() -> list[ToolEvidenceSummaryRecord]:
+    return [
+        _tool_evidence_record(),
+        _tool_evidence_record(
+            summary="additional full generation identity regression coverage",
+            evidence_index=1,
+            observed_at="2026-08-08T00:01:00Z",
+        ),
+    ]
 
 
 def _job(state_db: RAGIngressStateDB, idempotency_key: str) -> DeliveryJobView:
@@ -155,6 +192,7 @@ def _activate_corrective_current_source(
     body: str,
     provider: str = PROVIDER,
     project: str = PROJECT,
+    extra_documents: tuple[dict, ...] = (),
 ):
     """Activate a corrective current copy that supersedes one raw chunk id."""
 
@@ -167,7 +205,7 @@ def _activate_corrective_current_source(
         project=project,
     )
     current_documents = build_revision_scoped_source_documents(
-        documents=(session, corrective_chunk),
+        documents=(session, corrective_chunk, *extra_documents),
         source_snapshot_hash=dm.sha256_hash("corrective-current-source"),
         scope_kind="current",
     )
@@ -1103,6 +1141,100 @@ def test_delivery_replay_of_corrective_current_chunk_is_idempotent(tmp_path) -> 
     assert _select_sessions_needing_projection(store, limit=0) == []
 
 
+def test_full_tool_evidence_generation_preserves_corrective_current_identity_for_delivery_replay(
+    tmp_path,
+) -> None:
+    raw = _payload(
+        idempotency_key="current-delivery-full-generation",
+        chunk_id="current-chunk",
+        body="Corrective current source content.",
+    )
+    state_db = _state_db(tmp_path)
+    apply_backfill_to_state_db(state_db=state_db, payloads=[raw], dry_run=False)
+    store = InMemoryCouchDBSourceStore()
+    backend = CouchDBDeliveryBackend(state_db=state_db, store=store)
+
+    backend.submit(_job(state_db, "current-delivery-full-generation"))
+    full_generation = _full_generation_records()
+    raw_bundle_revisions = store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+    )
+    raw_bundle = store.get(raw_bundle_revisions[0].doc_id)
+    assert raw_bundle is not None
+    _activate_corrective_current_source(
+        store,
+        chunk_id="current-chunk",
+        body="Corrective current source content.",
+        extra_documents=(raw_bundle,),
+    )
+    store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+        full_session_generation=True,
+    )
+    pointer_before = _active_pointer(store)
+
+    evidence = backend.submit(_job(state_db, "current-delivery-full-generation"))
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    assert evidence.status == "succeeded"
+    assert _active_pointer(store) == pointer_before
+    assert len(resolved.conversation_chunks) == 1
+    assert (
+        resolved.conversation_chunks[0]["supersedes_source_document_hash"]
+        == dm.sha256_hash(dm.conversation_chunk_doc_id(SESSION_ID_HASH, "current-chunk"))
+    )
+
+
+def test_full_tool_evidence_generation_rejects_conflicting_corrective_current_delivery_replay(
+    tmp_path,
+) -> None:
+    raw = _payload(
+        idempotency_key="current-delivery-full-generation-mismatch",
+        chunk_id="current-chunk",
+        body="Original replay content.",
+    )
+    state_db = _state_db(tmp_path)
+    apply_backfill_to_state_db(state_db=state_db, payloads=[raw], dry_run=False)
+    store = InMemoryCouchDBSourceStore()
+    backend = CouchDBDeliveryBackend(state_db=state_db, store=store)
+
+    backend.submit(_job(state_db, "current-delivery-full-generation-mismatch"))
+    full_generation = _full_generation_records()
+    raw_bundle_revisions = store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+    )
+    raw_bundle = store.get(raw_bundle_revisions[0].doc_id)
+    assert raw_bundle is not None
+    _activate_corrective_current_source(
+        store,
+        chunk_id="current-chunk",
+        body="Corrected content conflicts with replay.",
+        extra_documents=(raw_bundle,),
+    )
+    store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+        full_session_generation=True,
+    )
+    pointer_before = _active_pointer(store)
+
+    evidence = backend.submit(
+        _job(state_db, "current-delivery-full-generation-mismatch")
+    )
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    assert evidence.status == "payload_integrity_mismatch"
+    assert _active_pointer(store) == pointer_before
+    assert len(resolved.conversation_chunks) == 1
+    assert (
+        resolved.conversation_chunks[0]["supersedes_source_document_hash"]
+        == dm.sha256_hash(dm.conversation_chunk_doc_id(SESSION_ID_HASH, "current-chunk"))
+    )
+
+
 def test_retired_bridge_replay_of_corrective_current_chunk_is_idempotent() -> None:
     raw = _payload(
         idempotency_key="current-bridge",
@@ -1128,6 +1260,90 @@ def test_retired_bridge_replay_of_corrective_current_chunk_is_idempotent() -> No
     assert _active_pointer(store) == pointer_before
     assert resolved.conversation_chunks == (store.get(current_chunk["_id"]),)
     assert _select_sessions_needing_projection(store, limit=0) == []
+
+
+def test_full_tool_evidence_generation_preserves_corrective_current_identity_for_bridge_replay() -> None:
+    raw = _payload(
+        idempotency_key="current-bridge-full-generation",
+        chunk_id="current-chunk",
+        body="Corrective current source content.",
+    )
+    store = InMemoryCouchDBSourceStore()
+    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+
+    adapter.submit_document(document_from_ingress_payload(raw))
+    full_generation = _full_generation_records()
+    raw_bundle_revisions = store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+    )
+    raw_bundle = store.get(raw_bundle_revisions[0].doc_id)
+    assert raw_bundle is not None
+    _activate_corrective_current_source(
+        store,
+        chunk_id="current-chunk",
+        body="Corrective current source content.",
+        extra_documents=(raw_bundle,),
+    )
+    store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+        full_session_generation=True,
+    )
+    pointer_before = _active_pointer(store)
+
+    result = adapter.submit_document(document_from_ingress_payload(raw))
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    assert result.status == "submitted"
+    assert _active_pointer(store) == pointer_before
+    assert len(resolved.conversation_chunks) == 1
+    assert (
+        resolved.conversation_chunks[0]["supersedes_source_document_hash"]
+        == dm.sha256_hash(dm.conversation_chunk_doc_id(SESSION_ID_HASH, "current-chunk"))
+    )
+
+
+def test_full_tool_evidence_generation_rejects_conflicting_corrective_current_bridge_replay() -> None:
+    raw = _payload(
+        idempotency_key="current-bridge-full-generation-mismatch",
+        chunk_id="current-chunk",
+        body="Original replay content.",
+    )
+    store = InMemoryCouchDBSourceStore()
+    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+
+    adapter.submit_document(document_from_ingress_payload(raw))
+    full_generation = _full_generation_records()
+    raw_bundle_revisions = store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+    )
+    raw_bundle = store.get(raw_bundle_revisions[0].doc_id)
+    assert raw_bundle is not None
+    _activate_corrective_current_source(
+        store,
+        chunk_id="current-chunk",
+        body="Corrected content conflicts with replay.",
+        extra_documents=(raw_bundle,),
+    )
+    store_tool_evidence_bundles(
+        full_generation,
+        store=store,
+        full_session_generation=True,
+    )
+    pointer_before = _active_pointer(store)
+
+    with pytest.raises(SourceStoreConflict):
+        adapter.submit_document(document_from_ingress_payload(raw))
+
+    resolved = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    assert _active_pointer(store) == pointer_before
+    assert len(resolved.conversation_chunks) == 1
+    assert (
+        resolved.conversation_chunks[0]["supersedes_source_document_hash"]
+        == dm.sha256_hash(dm.conversation_chunk_doc_id(SESSION_ID_HASH, "current-chunk"))
+    )
 
 
 def test_delivery_rejects_mismatched_corrective_current_chunk(tmp_path) -> None:

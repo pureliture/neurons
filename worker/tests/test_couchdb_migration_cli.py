@@ -20,14 +20,19 @@ from agent_knowledge.couchdb_source.migration_cli import (
     run_tool_evidence,
 )
 from agent_knowledge.couchdb_source.source_revision import (
+    ResolvedSourceRevision,
     activate_source_revision,
+    build_revision_scoped_source_documents,
     resolve_active_source_revision,
 )
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
 from agent_knowledge.couchdb_source.tool_evidence_bundler import (
     store_tool_evidence_bundles,
 )
-from agent_knowledge.session_memory.transcript_model import ToolEvidenceSummaryRecord
+from agent_knowledge.session_memory.transcript_model import (
+    ToolEvidenceSummaryRecord,
+    TranscriptSession,
+)
 
 
 def _codex_session(root: Path, name: str, cwd: str) -> Path:
@@ -40,6 +45,34 @@ def _codex_session(root: Path, name: str, cwd: str) -> Path:
     ]
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return p
+
+
+def _activate_current_session(
+    store: InMemoryCouchDBSourceStore,
+    *,
+    session_id_hash: str,
+    project: str,
+) -> None:
+    current_session = dm.build_transcript_session_document(
+        session=TranscriptSession(
+            session_id_hash=session_id_hash,
+            provider="codex",
+            project=project,
+            started_at="2026-06-17T01:00:00Z",
+        )
+    )
+    current_documents = build_revision_scoped_source_documents(
+        documents=(current_session,),
+        source_snapshot_hash=dm.sha256_hash(f"current-session:{project}"),
+        scope_kind="current",
+    )
+    for document in current_documents:
+        store.put_if_absent(document)
+    activate_source_revision(
+        store=store,
+        session_id_hash=session_id_hash,
+        source_document_ids=tuple(document["_id"] for document in current_documents),
+    )
 
 
 def test_enumerate_codex(tmp_path):
@@ -248,6 +281,193 @@ def test_run_tool_evidence_marks_extractor_output_as_full_generation(tmp_path):
     assert captured["full_session_generation"] is True
     assert captured["session_id_hash"] == records[0].session_id_hash
     assert captured["expected_predecessor"] is not None
+
+
+def test_run_tool_evidence_uses_current_only_revision_project_for_blank_records(tmp_path):
+    root = tmp_path / "codex"
+    session_name = "current-only-tool-evidence"
+    _codex_session(root, session_name, "/Users/x/Projects/extractor-project")
+    session_id_hash = dm.build_session_id_hash("codex", session_name)
+    store = InMemoryCouchDBSourceStore()
+    _activate_current_session(
+        store,
+        session_id_hash=session_id_hash,
+        project="current-project",
+    )
+    blank_project_record = ToolEvidenceSummaryRecord(
+        session_id_hash=session_id_hash,
+        provider="codex",
+        project="",
+        category="test_result",
+        outcome="pass",
+        tool_name="bash",
+        command_summary="current-only command",
+        redacted_summary="current-only result",
+        evidence_index=0,
+    )
+
+    with patch(
+        "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+        return_value=[blank_project_record],
+    ):
+        report = run_tool_evidence(
+            store=store,
+            roots={"codex": root},
+            providers=["codex"],
+        )
+
+    current = resolve_active_source_revision(
+        store=store,
+        session_id_hash=session_id_hash,
+    )
+    assert report["errors"] == 0
+    assert current.sessions[0]["project"] == "current-project"
+    assert [bundle["project"] for bundle in current.tool_evidence_bundles] == [
+        "current-project"
+    ]
+
+
+def test_run_tool_evidence_prefers_active_project_over_stale_canonical_session(tmp_path):
+    root = tmp_path / "codex"
+    session_name = "stale-canonical-tool-evidence"
+    _codex_session(root, session_name, "/Users/x/Projects/legacy-project")
+    session_id_hash = dm.build_session_id_hash("codex", session_name)
+    store = InMemoryCouchDBSourceStore()
+    run_migration(store=store, roots={"codex": root}, providers=["codex"])
+    _activate_current_session(
+        store,
+        session_id_hash=session_id_hash,
+        project="current-project",
+    )
+    blank_project_record = ToolEvidenceSummaryRecord(
+        session_id_hash=session_id_hash,
+        provider="codex",
+        project="",
+        category="test_result",
+        outcome="pass",
+        tool_name="bash",
+        command_summary="active authority command",
+        redacted_summary="active authority result",
+        evidence_index=0,
+    )
+
+    with patch(
+        "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+        return_value=[blank_project_record],
+    ):
+        report = run_tool_evidence(
+            store=store,
+            roots={"codex": root},
+            providers=["codex"],
+        )
+
+    current = resolve_active_source_revision(
+        store=store,
+        session_id_hash=session_id_hash,
+    )
+    canonical_session = store.get(dm.session_doc_id(session_id_hash))
+    assert canonical_session is not None
+    assert canonical_session["project"] == "legacy-project"
+    assert report["errors"] == 0
+    assert current.sessions[0]["project"] == "current-project"
+    assert [bundle["project"] for bundle in current.tool_evidence_bundles] == [
+        "current-project"
+    ]
+
+
+def test_run_tool_evidence_rejects_nonempty_project_conflict_with_active_revision(tmp_path):
+    root = tmp_path / "codex"
+    session_name = "conflicting-tool-evidence"
+    _codex_session(root, session_name, "/Users/x/Projects/extractor-project")
+    session_id_hash = dm.build_session_id_hash("codex", session_name)
+    store = InMemoryCouchDBSourceStore()
+    _activate_current_session(
+        store,
+        session_id_hash=session_id_hash,
+        project="current-project",
+    )
+    conflicting_project_record = ToolEvidenceSummaryRecord(
+        session_id_hash=session_id_hash,
+        provider="codex",
+        project="conflicting-project",
+        category="test_result",
+        outcome="pass",
+        tool_name="bash",
+        command_summary="conflicting authority command",
+        redacted_summary="conflicting authority result",
+        evidence_index=0,
+    )
+    before = resolve_active_source_revision(
+        store=store,
+        session_id_hash=session_id_hash,
+    )
+
+    with patch(
+        "agent_knowledge.couchdb_source.migration_cli.extract_tool_evidence",
+        return_value=[conflicting_project_record],
+    ):
+        report = run_tool_evidence(
+            store=store,
+            roots={"codex": root},
+            providers=["codex"],
+        )
+
+    current = resolve_active_source_revision(
+        store=store,
+        session_id_hash=session_id_hash,
+    )
+    assert report["errors"] == 1
+    assert current.manifest_id == before.manifest_id
+    assert current.source_hash == before.source_hash
+    assert current.tool_evidence_bundles == ()
+
+
+def test_run_tool_evidence_fails_closed_for_blank_active_project_authority(tmp_path):
+    root = tmp_path / "codex"
+    session_name = "invalid-active-project-tool-evidence"
+    _codex_session(root, session_name, "/Users/x/Projects/legacy-project")
+    session_id_hash = dm.build_session_id_hash("codex", session_name)
+    store = InMemoryCouchDBSourceStore()
+    run_migration(store=store, roots={"codex": root}, providers=["codex"])
+    blank_project_record = ToolEvidenceSummaryRecord(
+        session_id_hash=session_id_hash,
+        provider="codex",
+        project="",
+        category="test_result",
+        outcome="pass",
+        tool_name="bash",
+        command_summary="invalid active authority command",
+        redacted_summary="invalid active authority result",
+        evidence_index=0,
+    )
+    invalid_predecessor = ResolvedSourceRevision(
+        session_id_hash=session_id_hash,
+        sessions=({"project": ""},),
+        conversation_chunks=(),
+        tool_evidence_bundles=(),
+        source_hash=dm.sha256_hash("invalid-active-project"),
+        manifest_id="active-manifest",
+        is_legacy_unpinned=False,
+    )
+
+    with (
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.resolve_active_source_revision",
+            return_value=invalid_predecessor,
+        ),
+        patch(
+            "agent_knowledge.couchdb_source.migration_cli.store_tool_evidence_bundles",
+            side_effect=AssertionError("invalid active authority must not publish"),
+        ),
+    ):
+        report = run_tool_evidence(
+            store=store,
+            roots={"codex": root},
+            providers=["codex"],
+        )
+
+    assert report["errors"] == 1
+    assert store.get(dm.session_doc_id(session_id_hash))["project"] == "legacy-project"
 
 
 def test_run_tool_evidence_groups_same_session_files_before_full_replacement(tmp_path):

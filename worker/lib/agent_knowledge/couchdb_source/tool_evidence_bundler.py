@@ -126,6 +126,14 @@ _BUNDLE_BOOKKEEPING_FIELDS = frozenset(
     }
 )
 
+# Full-generation snapshots must retain corrective-current logical identity.
+# Those fields are ignored when comparing bundle material, but are source
+# identity markers rather than mutable store bookkeeping.
+_FULL_GENERATION_SOURCE_BOOKKEEPING_FIELDS = _BUNDLE_BOOKKEEPING_FIELDS - {
+    "current_source_scope",
+    "supersedes_source_document_hash",
+}
+
 
 def _bundle_material_hash(document: dict) -> str:
     """Return the public-safe bundle identity without store bookkeeping."""
@@ -235,7 +243,7 @@ def _full_generation_source_document(document: dict) -> dict:
     source_document = {
         str(key): value
         for key, value in document.items()
-        if key not in _BUNDLE_BOOKKEEPING_FIELDS
+        if key not in _FULL_GENERATION_SOURCE_BOOKKEEPING_FIELDS
     }
     source_document["_id"] = _bundle_origin_document_id(document)
     return source_document
