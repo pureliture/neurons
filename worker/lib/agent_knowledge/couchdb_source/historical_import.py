@@ -197,7 +197,22 @@ def import_historical_source(
     # coverage write.  A pointer may still be published in the separate HTTP
     # request gap below; that path is reconciled with an expected-predecessor
     # successor before the import is acknowledged.
-    if _active_revision_after_write(store=store, session_id_hash=session_id_hash) is not None:
+    try:
+        active_revision = _active_revision_after_write(
+            store=store,
+            session_id_hash=session_id_hash,
+        )
+    except SourceRevisionResolutionError:
+        # A present but incomplete control record must block the compatibility
+        # writer before any mutable source or coverage write.  Do not let an
+        # unresolvable pointer escape as an import exception or broaden back
+        # to the legacy path.
+        return _active_revision_blocked_result(
+            provider=provider,
+            session_id_hash=session_id_hash,
+            resolution=resolution,
+        )
+    if active_revision is not None:
         return _active_revision_blocked_result(
             provider=provider,
             session_id_hash=session_id_hash,

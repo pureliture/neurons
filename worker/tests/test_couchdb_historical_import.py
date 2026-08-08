@@ -182,6 +182,34 @@ def test_import_fails_closed_when_an_active_source_revision_already_exists(tmp_p
     )
 
 
+def test_import_fails_closed_without_writing_when_active_pointer_is_incomplete(tmp_path):
+    session_id_hash = dm.build_session_id_hash("codex", "incomplete-active-pointer")
+    store = InMemoryCouchDBSourceStore()
+    store.put(
+        {
+            "_id": dm.active_source_revision_pointer_doc_id(session_id_hash),
+            "doc_type": dm.SourceDocType.ACTIVE_SOURCE_REVISION,
+            "session_id_hash": session_id_hash,
+        }
+    )
+    before = store.all_docs()
+
+    result = import_historical_source(
+        locator=SourceLocator(
+            provider="codex",
+            source_path=_write_codex_fixture(
+                tmp_path,
+                session_id="incomplete-active-pointer",
+            ),
+            capture_metadata_project="neurons",
+        ),
+        store=store,
+    )
+
+    assert result.status == ImportStatus.ACTIVE_SOURCE_REVISION_BLOCKED
+    assert store.all_docs() == before
+
+
 def test_import_fails_closed_when_pointer_publishes_before_first_source_write(tmp_path):
     session_id_hash = dm.build_session_id_hash("codex", "active-import-race")
     store = _PointerPublishBeforeHistoricalSourceWriteStore(
