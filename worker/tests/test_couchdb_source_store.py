@@ -185,7 +185,7 @@ def test_store_rejects_noncanonical_active_source_revision_pointer_id() -> None:
         )
 
 
-def test_active_snapshot_rejects_changed_put_and_conditional_put_while_origin_stays_mutable() -> None:
+def test_active_snapshot_rejects_changed_put_and_conditional_put_for_its_origin() -> None:
     store = InMemoryCouchDBSourceStore()
     _session, origin_chunk, _origin_chunk_rev = _pin_chunk(store)
     chunk = _active_snapshot_chunk(store)
@@ -212,7 +212,8 @@ def test_active_snapshot_rejects_changed_put_and_conditional_put_while_origin_st
     changed_origin = dict(origin_chunk)
     changed_origin["body"] = "changed public-safe mutable origin"
     changed_origin["content_hash"] = dm.sha256_hash(changed_origin["body"])
-    assert store.put(changed_origin).outcome == "conflict_resolved"
+    with pytest.raises(SourceStoreConflict, match="explicit successor"):
+        store.put(changed_origin)
 
 
 def test_delete_rejects_active_revision_control_member_and_source_documents() -> None:

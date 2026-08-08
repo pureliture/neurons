@@ -7,8 +7,11 @@ import hashlib
 import json
 from dataclasses import replace
 
+import pytest
+
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source import migration_cli
+from agent_knowledge.couchdb_source import current_source_supersession
 from agent_knowledge.couchdb_source.historical_import import (
     PROVIDER_LANES,
     SourceLocator,
@@ -150,6 +153,7 @@ def test_corrective_import_adds_revision_scoped_docs_and_activates_only_allowlis
     result = activate_admitted_codex_current_source(snapshot=snapshot, store=store)
     resolved = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
     projection = store.get(dm.projection_state_doc_id(SESSION_ID_HASH))
+    coverage = store.get(dm.coverage_manifest_doc_id(SESSION_ID_HASH))
 
     assert result.status == "imported_current_revision"
     assert set(result.source_document_ids).isdisjoint(legacy_ids)
@@ -172,6 +176,9 @@ def test_corrective_import_adds_revision_scoped_docs_and_activates_only_allowlis
     assert projection is not None
     assert projection["projection_status"] == dm.ProjectionStatus.PENDING
     assert projection["source_hash"] == resolved.source_hash
+    assert coverage is not None
+    assert coverage["source_hash"] == resolved.source_hash
+    assert coverage["active_source_manifest_id"] == resolved.manifest_id
     manifest = store.get(resolved.manifest_id or "")
     source_scopes = {
         document["current_source_scope"]
@@ -243,6 +250,55 @@ def test_corrective_import_marks_projection_pending_only_when_source_hash_change
     assert first.source_hash == duplicate.source_hash
     assert changed.source_hash != first.source_hash
     assert source_changed_calls == [True, False, True]
+
+
+@pytest.mark.parametrize(
+    "coverage_result",
+    (
+        None,
+        {"source_hash": dm.sha256_hash("mismatched corrective coverage")},
+    ),
+    ids=("missing", "mismatched"),
+)
+def test_corrective_import_does_not_acknowledge_or_mark_projection_without_coverage_convergence(
+    monkeypatch,
+    tmp_path,
+    coverage_result,
+):
+    store = InMemoryCouchDBSourceStore()
+    _seed_projected_legacy_source(store, monkeypatch)
+    projection_calls: list[dict] = []
+    monkeypatch.setattr(
+        current_source_supersession,
+        "update_coverage_with_tool_evidence",
+        lambda **_kwargs: coverage_result,
+    )
+    monkeypatch.setattr(
+        current_source_supersession,
+        "mark_projection_pending_if_source_changed",
+        lambda **kwargs: projection_calls.append(kwargs),
+    )
+
+    result = activate_admitted_codex_current_source(
+        snapshot=_admitted_snapshot(
+            tmp_path,
+            "corrected source without converged coverage",
+            "verified coverage-gap snapshot",
+        ),
+        store=store,
+    )
+
+    assert result.status == "source_unavailable"
+    assert result.source_hash == ""
+    assert result.notes == (
+        "active_source_revision_coverage_unavailable",
+        "no_current_source_import_acknowledgement",
+    )
+    assert projection_calls == []
+    assert resolve_active_source_revision(
+        store=store,
+        session_id_hash=SESSION_ID_HASH,
+    ).is_legacy_unpinned is False
 
 
 def test_corrective_import_uses_the_admitted_snapshot_without_reopening_locator(monkeypatch, tmp_path):

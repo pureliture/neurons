@@ -11,7 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import document_model as dm
-from .session_memory_materializer import mark_projection_pending_if_source_changed
+from .session_memory_materializer import (
+    mark_projection_pending_if_source_changed,
+    update_coverage_with_tool_evidence,
+)
 from .source_revision import (
     ResolvedSourceRevision,
     SourceRevisionResolutionError,
@@ -19,7 +22,7 @@ from .source_revision import (
     build_revision_scoped_source_documents,
     resolve_active_source_revision,
 )
-from .source_store import CouchDBSourceStore
+from .source_store import CouchDBSourceStore, SourceStoreConflict, SourceStoreError
 from .tool_evidence_bundler import build_tool_evidence_bundle_documents
 from ..session_memory.transcript_chunking import build_transcript_chunks
 from ..session_memory.transcript_model import ToolEvidenceSummaryRecord
@@ -196,6 +199,41 @@ def activate_admitted_codex_current_source(
             ),
             expected_predecessor=active_predecessor,
         )
+    except ValueError as exc:
+        return CorrectiveCurrentSourceImportResult(
+            provider="codex",
+            status="source_unavailable",
+            session_id_hash=session_id_hash,
+            notes=(_error_class(exc), "no_active_pointer_transition"),
+        )
+
+    try:
+        coverage = update_coverage_with_tool_evidence(
+            session_id_hash=session_id_hash,
+            store=store,
+        )
+        current = resolve_active_source_revision(
+            store=store,
+            session_id_hash=session_id_hash,
+        )
+        persisted_coverage = store.get(dm.coverage_manifest_doc_id(session_id_hash)) or {}
+        if (
+            coverage is None
+            or current.manifest_id != activated.manifest_id
+            or current.source_hash != activated.source_hash
+            or str(persisted_coverage.get("source_hash") or "") != current.source_hash
+            or str(persisted_coverage.get("active_source_manifest_id") or "")
+            != str(current.manifest_id or "")
+        ):
+            return CorrectiveCurrentSourceImportResult(
+                provider="codex",
+                status="source_unavailable",
+                session_id_hash=session_id_hash,
+                notes=(
+                    "active_source_revision_coverage_unavailable",
+                    "no_current_source_import_acknowledgement",
+                ),
+            )
         mark_projection_pending_if_source_changed(
             session_id_hash=session_id_hash,
             provider=parsed.session.provider,
@@ -203,6 +241,37 @@ def activate_admitted_codex_current_source(
             source_hash=activated.source_hash,
             store=store,
             source_changed=activated.source_hash != active_predecessor.source_hash,
+        )
+        current = resolve_active_source_revision(
+            store=store,
+            session_id_hash=session_id_hash,
+        )
+        persisted_coverage = store.get(dm.coverage_manifest_doc_id(session_id_hash)) or {}
+        if (
+            current.manifest_id != activated.manifest_id
+            or current.source_hash != activated.source_hash
+            or str(persisted_coverage.get("source_hash") or "") != current.source_hash
+            or str(persisted_coverage.get("active_source_manifest_id") or "")
+            != str(current.manifest_id or "")
+        ):
+            return CorrectiveCurrentSourceImportResult(
+                provider="codex",
+                status="source_unavailable",
+                session_id_hash=session_id_hash,
+                notes=(
+                    "active_source_revision_coverage_unavailable",
+                    "no_current_source_import_acknowledgement",
+                ),
+            )
+    except (SourceStoreConflict, SourceStoreError, SourceRevisionResolutionError):
+        return CorrectiveCurrentSourceImportResult(
+            provider="codex",
+            status="source_unavailable",
+            session_id_hash=session_id_hash,
+            notes=(
+                "active_source_revision_coverage_unavailable",
+                "no_current_source_import_acknowledgement",
+            ),
         )
     except ValueError as exc:
         return CorrectiveCurrentSourceImportResult(

@@ -150,12 +150,14 @@ class CouchDBHttpSourceStore:
         *,
         doc_type: str,
         session_id_hash: str,
+        allow_active_append: bool = False,
     ) -> None:
         _require_active_source_revision_allows_write(
             store=self,
             doc_id=doc_id,
             doc_type=doc_type,
             session_id_hash=session_id_hash,
+            allow_active_append=allow_active_append,
         )
 
     def put(self, document: dict) -> StoredRevision:
@@ -209,6 +211,7 @@ class CouchDBHttpSourceStore:
                 doc_id,
                 doc_type=str(existing.get("doc_type") or ""),
                 session_id_hash=str(existing.get("session_id_hash") or ""),
+                allow_active_append=True,
             )
             raise SourceStoreConflict("immutable source document already exists")
 
@@ -216,6 +219,7 @@ class CouchDBHttpSourceStore:
             doc_id,
             doc_type=str(document.get("doc_type") or ""),
             session_id_hash=str(document.get("session_id_hash") or ""),
+            allow_active_append=True,
         )
 
         stored = copy.deepcopy(document)

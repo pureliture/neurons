@@ -322,7 +322,7 @@ class CouchDBRetiredIndexBridgeAdapter:
             # pointer exists. An initial activation can publish its pointer
             # after this pre-read but before the raw source write; recheck
             # below so the later writer creates the required successor.
-            chunk_revision = self._store.put(chunk_doc)
+            chunk_revision = self._store.put_if_absent(chunk_doc)
             if on_step_complete is not None:
                 on_step_complete("chunk", document_ref=doc_ref)
 

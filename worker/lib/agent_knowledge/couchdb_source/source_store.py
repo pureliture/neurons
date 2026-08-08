@@ -157,8 +157,9 @@ def _require_active_source_revision_allows_write(
     doc_id: str,
     doc_type: str,
     session_id_hash: str,
+    allow_active_append: bool = False,
 ) -> None:
-    """Reject writes to active members or an incomplete active control plane."""
+    """Reject ordinary source writes while an active revision controls the session."""
 
     if doc_type not in SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES:
         return
@@ -170,6 +171,7 @@ def _require_active_source_revision_allows_write(
     # write path back to legacy unpinned behavior.
     from .source_revision import (
         SourceRevisionResolutionError,
+        active_source_origin_document_ids,
         resolve_active_source_revision,
     )
 
@@ -187,6 +189,12 @@ def _require_active_source_revision_allows_write(
     )
     if any(str(document.get("_id") or "") == doc_id for document in source_documents):
         raise SourceStoreConflict("source revision member makes source document immutable")
+    if doc_id in active_source_origin_document_ids(resolved) and not allow_active_append:
+        # Snapshot members have distinct immutable ids, while ordinary writers
+        # address their mutable origin ids.  Reject that raw-origin overwrite:
+        # it needs an explicit expected-predecessor successor. Unreferenced
+        # additions remain compatible with the live-ingress append contract.
+        raise SourceStoreConflict("active source revision requires an explicit successor")
 
 
 def _require_active_source_revision_allows_delete(
@@ -458,12 +466,14 @@ class InMemoryCouchDBSourceStore:
         *,
         doc_type: str,
         session_id_hash: str,
+        allow_active_append: bool = False,
     ) -> None:
         _require_active_source_revision_allows_write(
             store=self,
             doc_id=doc_id,
             doc_type=doc_type,
             session_id_hash=session_id_hash,
+            allow_active_append=allow_active_append,
         )
 
     def put(self, document: dict) -> StoredRevision:
@@ -531,6 +541,7 @@ class InMemoryCouchDBSourceStore:
                 doc_id,
                 doc_type=str(existing.get("doc_type") or ""),
                 session_id_hash=str(existing.get("session_id_hash") or ""),
+                allow_active_append=True,
             )
             raise SourceStoreConflict("immutable source document already exists")
 
@@ -538,6 +549,7 @@ class InMemoryCouchDBSourceStore:
             doc_id,
             doc_type=str(document.get("doc_type") or ""),
             session_id_hash=str(document.get("session_id_hash") or ""),
+            allow_active_append=True,
         )
 
         rev = f"1-{incoming_hash.split(':', 1)[-1][:12]}"

@@ -198,7 +198,11 @@ class _OriginDriftAtPointerCasStore(InMemoryCouchDBSourceStore):
             changed = dict(origin)
             changed["body"] = "origin changed during successor pointer transition"
             changed["content_hash"] = dm.sha256_hash(changed["body"])
-            super().put(changed)
+            # Model an external CouchDB writer after the store's preflight
+            # guard but before the pointer CAS; the local guard cannot make
+            # those separate remote documents atomic.
+            changed["_rev"] = "999-origin-drift"
+            self._docs[self._origin_document_id] = changed
         return super().put_if_revision(document, expected_rev=expected_rev)
 
 
@@ -255,7 +259,7 @@ class _PointerPublishBeforeLegacyChunkWriteStore(InMemoryCouchDBSourceStore):
     def set_before_next_chunk_write(self, callback) -> None:
         self._before_next_chunk_write = callback
 
-    def put(self, document: dict):
+    def _publish_before_chunk_write(self, document: dict) -> None:
         callback = self._before_next_chunk_write
         if (
             callback is not None
@@ -263,7 +267,14 @@ class _PointerPublishBeforeLegacyChunkWriteStore(InMemoryCouchDBSourceStore):
         ):
             self._before_next_chunk_write = None
             callback()
+
+    def put(self, document: dict):
+        self._publish_before_chunk_write(document)
         return super().put(document)
+
+    def put_if_absent(self, document: dict):
+        self._publish_before_chunk_write(document)
+        return super().put_if_absent(document)
 
 
 class _ConcurrentChunkPayloadCollisionStore(InMemoryCouchDBSourceStore):

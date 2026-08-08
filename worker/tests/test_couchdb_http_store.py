@@ -62,6 +62,7 @@ class FakeCouch:
         self.put_conflict_always = False
         self._conflicted = False
         self.on_put_conflict = None
+        self.on_before_document_put = None
 
     def __call__(self, method: str, url: str, headers: dict, body: bytes) -> ProxyResponse:
         path = urlparse(url).path
@@ -87,6 +88,10 @@ class FakeCouch:
                 return self._json(200, doc) if doc else self._json(404, {"error": "not_found"})
             if method == "PUT":
                 incoming = json.loads(body.decode())
+                if self.on_before_document_put is not None:
+                    callback = self.on_before_document_put
+                    self.on_before_document_put = None
+                    callback(doc_id)
                 if self.put_conflict_always or (self.put_conflict_once and not self._conflicted):
                     self._conflicted = True
                     if self.on_put_conflict is not None:
@@ -278,7 +283,7 @@ def test_store_rejects_noncanonical_active_source_revision_pointer_id():
         )
 
 
-def test_active_snapshot_rejects_changed_put_and_conditional_put_while_origin_stays_mutable():
+def test_active_snapshot_rejects_changed_put_and_conditional_put_for_its_origin():
     fake = FakeCouch()
     store = _store(fake)
     store.ensure_database()
@@ -307,7 +312,8 @@ def test_active_snapshot_rejects_changed_put_and_conditional_put_while_origin_st
     changed_origin = dict(origin_chunk)
     changed_origin["body"] = "changed public-safe mutable origin"
     changed_origin["content_hash"] = dm.sha256_hash(changed_origin["body"])
-    assert store.put(changed_origin).outcome == "conflict_resolved"
+    with pytest.raises(SourceStoreConflict, match="explicit successor"):
+        store.put(changed_origin)
 
 
 def test_delete_rejects_active_revision_control_member_and_source_documents():
@@ -497,6 +503,38 @@ def test_active_snapshot_rejects_temporal_patch_but_allows_unreferenced_additive
     duplicate = store.put_if_absent(additive)
     assert accepted.outcome == "accepted"
     assert duplicate.outcome == "duplicate"
+
+
+def test_http_pointer_can_publish_after_temporal_guard_before_raw_put():
+    """CouchDB's separate pointer GET and source PUT are not one transaction."""
+
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    session = _session_doc()
+    chunk = _chunk_doc("http pointer race source")
+    store.put(session)
+    original = store.put(chunk)
+
+    def publish_pointer_before_put(document_id: str) -> None:
+        assert document_id.endswith(chunk["_id"].split(":", 1)[1].replace(":", "%3A"))
+        activate_source_revision(store=store, session_id_hash=_sid())
+
+    fake.on_before_document_put = publish_pointer_before_put
+    patched = store.patch_observed_time_if_content_hash(
+        doc_id=chunk["_id"],
+        expected_content_hash=chunk["content_hash"],
+        expected_rev=original.rev,
+        observed_at_start="2026-07-09T10:00:00Z",
+        observed_at_end="2026-07-09T10:30:00Z",
+    )
+
+    raw_origin = store.get(chunk["_id"])
+    active = resolve_active_source_revision(store=store, session_id_hash=_sid())
+    assert patched.outcome == "conflict_resolved"
+    assert raw_origin is not None
+    assert raw_origin["observed_at_start"] == "2026-07-09T10:00:00Z"
+    assert active.conversation_chunks[0]["observed_at_start"] == ""
 
 
 def test_put_retries_once_on_conflict():

@@ -87,6 +87,27 @@ def _seed_active_source(store: InMemoryCouchDBSourceStore) -> tuple[dict, dict, 
     return session, chunk, initial_bundle
 
 
+def _overwrite_raw_origin_outside_store_contract(
+    store: InMemoryCouchDBSourceStore,
+    replacement: dict,
+) -> None:
+    """Model a direct persistent-store overwrite without relaxing the guard."""
+
+    document_id = str(replacement["_id"])
+    current = store.get(document_id)
+    assert current is not None
+    overwritten = dict(current)
+    overwritten.update(
+        {
+            key: value
+            for key, value in replacement.items()
+            if key not in {"_rev", "idempotency_key", "payload_hash"}
+        }
+    )
+    overwritten["_rev"] = "999-external-origin-overwrite"
+    store._docs[document_id] = overwritten
+
+
 class _PointerActivationDuringLegacyBundleStore(InMemoryCouchDBSourceStore):
     """Make a competing pointer activation visible immediately after one legacy put."""
 
@@ -322,7 +343,8 @@ def test_active_pointer_normal_duplicate_does_not_reselect_mutated_raw_origin() 
     _session, raw_chunk, bundle = _seed_active_source(store)
     pointer_id = dm.active_source_revision_pointer_doc_id(_session_id_hash())
     pointer_before = store.get(pointer_id)
-    store.put(
+    _overwrite_raw_origin_outside_store_contract(
+        store,
         dm.build_conversation_chunk_document(
             chunk=TranscriptChunk.from_text(
                 chunk_id="pinned-conversation",
@@ -652,7 +674,7 @@ def test_active_full_generation_replay_ignores_overwritten_raw_duplicate() -> No
             ),
         ]
     )[0]
-    store.put(competing_part)
+    _overwrite_raw_origin_outside_store_contract(store, competing_part)
 
     store_tool_evidence_bundles(
         full_generation,
@@ -702,7 +724,7 @@ def test_active_full_generation_returns_new_snapshot_for_prior_duplicate_when_an
             ),
         ]
     )[0]
-    store.put(competing_part)
+    _overwrite_raw_origin_outside_store_contract(store, competing_part)
 
     stored = store_tool_evidence_bundles(
         [

@@ -29,14 +29,27 @@ from typing import Callable, Mapping
 
 from .document_model import (
     SourceRedactionLeak,
+    active_source_revision_pointer_doc_id,
     build_conversation_chunk_document,
     build_coverage_manifest_document,
     build_source_revision_token,
     build_source_locator_hash,
     build_transcript_session_document,
+    coverage_manifest_doc_id,
 )
 from .project_authority import ProjectAuthorityInput, resolve_project
-from .source_store import CouchDBSourceStore
+from .session_memory_materializer import (
+    mark_projection_pending_if_source_changed,
+    update_coverage_with_tool_evidence,
+)
+from .source_revision import (
+    ResolvedSourceRevision,
+    SourceRevisionResolutionError,
+    active_source_origin_document_ids,
+    activate_source_revision,
+    resolve_active_source_revision,
+)
+from .source_store import CouchDBSourceStore, SourceStoreConflict
 from ..session_memory.transcript_chunking import build_transcript_chunks
 from ..session_memory.transcript_model import canonicalize_provider
 from ..session_memory.transcript_parsers import ParsedTranscript, parse_transcript_source
@@ -71,6 +84,8 @@ class ImportStatus:
     LEAK_BLOCKED = "leak_blocked"
     UNKNOWN_PROVIDER = "unknown_provider"
     SCOPE_VIOLATION = "scope_violation"
+    ACTIVE_SOURCE_REVISION_BLOCKED = "active_source_revision_blocked"
+    ACTIVE_SOURCE_REVISION_UNCERTAIN = "active_source_revision_uncertain"
 
 
 @dataclass(frozen=True)
@@ -174,42 +189,277 @@ def import_historical_source(
         )
 
     session_doc = build_transcript_session_document(session=parsed.session)
-    store.put(session_doc)
-    for doc in chunk_docs:
-        store.put(doc)
+    source_documents = [session_doc, *chunk_docs]
+    session_id_hash = parsed.session.session_id_hash
 
-    # Coverage is over the *stored* bodies (post public-ingress redaction), so
-    # take the recomputed hash from each built document, not the v2 chunk hash.
-    conversation_content_hashes = [doc["content_hash"] for doc in chunk_docs]
-    coverage_doc = build_coverage_manifest_document(
-        session_id_hash=parsed.session.session_id_hash,
-        provider=parsed.session.provider,
-        project=resolution.project,
+    # An existing pointer means this compatibility writer lacks a predecessor
+    # it may safely replace.  Do this check before any mutable origin or
+    # coverage write.  A pointer may still be published in the separate HTTP
+    # request gap below; that path is reconciled with an expected-predecessor
+    # successor before the import is acknowledged.
+    if _active_revision_after_write(store=store, session_id_hash=session_id_hash) is not None:
+        return _active_revision_blocked_result(
+            provider=provider,
+            session_id_hash=session_id_hash,
+            resolution=resolution,
+        )
+
+    active_predecessor: ResolvedSourceRevision | None = None
+    source_write_started = False
+    try:
+        for document in source_documents:
+            # Once the post-write recheck observes a pointer, do not overwrite
+            # any additional origins.  Additive writes keep the live-ingress
+            # recovery contract: the explicit successor below is mandatory
+            # before success is reported.
+            if active_predecessor is None:
+                stored = store.put(document)
+            else:
+                stored = store.put_if_absent(document)
+            source_write_started = source_write_started or stored.outcome != "duplicate"
+            active_predecessor = active_predecessor or _active_revision_after_write(
+                store=store,
+                session_id_hash=session_id_hash,
+            )
+
+        if active_predecessor is not None:
+            _reconcile_successor_after_source_write(
+                store=store,
+                session_id_hash=session_id_hash,
+                predecessor=active_predecessor,
+                source_documents=source_documents,
+                provider=parsed.session.provider,
+                project=resolution.project,
+            )
+            return _imported_result(
+                provider=provider,
+                session_id_hash=session_id_hash,
+                resolution=resolution,
+                conversation_chunk_count=len(chunks),
+                successor_activated=True,
+            )
+
+        # Coverage is over the *stored* bodies (post public-ingress redaction), so
+        # take the recomputed hash from each built document, not the v2 chunk hash.
+        conversation_content_hashes = [doc["content_hash"] for doc in chunk_docs]
+        coverage_doc = build_coverage_manifest_document(
+            session_id_hash=session_id_hash,
+            provider=parsed.session.provider,
+            project=resolution.project,
+            conversation_chunk_count=len(chunks),
+            tool_evidence_bundle_count=0,  # M3 fills tool evidence coverage
+            conversation_content_hashes=conversation_content_hashes,
+            tool_evidence_coverage_hashes=[],
+            conversation_revision_tokens=[
+                build_source_revision_token(doc, material_hash_field="content_hash")
+                for doc in chunk_docs
+            ],
+            source_locator_hash=source_locator_hash,
+            ledger_comparison=ledger_comparison,
+            project_authority=resolution.to_authority_block(),
+        )
+        store.put(coverage_doc)
+
+        # A pointer can be published after the last origin recheck and before
+        # this coverage PUT.  Rebuild coverage from the active successor, not
+        # from the now-stale raw origin set, before acknowledging the import.
+        active_predecessor = _active_revision_after_write(
+            store=store,
+            session_id_hash=session_id_hash,
+        )
+        if active_predecessor is not None:
+            _reconcile_successor_after_source_write(
+                store=store,
+                session_id_hash=session_id_hash,
+                predecessor=active_predecessor,
+                source_documents=source_documents,
+                provider=parsed.session.provider,
+                project=resolution.project,
+            )
+            return _imported_result(
+                provider=provider,
+                session_id_hash=session_id_hash,
+                resolution=resolution,
+                conversation_chunk_count=len(chunks),
+                successor_activated=True,
+            )
+    except (SourceStoreConflict, SourceRevisionResolutionError):
+        active_predecessor = _active_revision_after_write_or_none(
+            store=store,
+            session_id_hash=session_id_hash,
+        )
+        if active_predecessor is not None and not source_write_started:
+            return _active_revision_blocked_result(
+                provider=provider,
+                session_id_hash=session_id_hash,
+                resolution=resolution,
+            )
+        if active_predecessor is not None:
+            # A raw origin may have reached CouchDB before the pointer became
+            # visible.  Attempt to converge it, but never call that partial or
+            # conflicted import successful even when reconciliation itself
+            # happens to finish.
+            try:
+                _reconcile_successor_after_source_write(
+                    store=store,
+                    session_id_hash=session_id_hash,
+                    predecessor=active_predecessor,
+                    source_documents=source_documents,
+                    provider=parsed.session.provider,
+                    project=resolution.project,
+                )
+            except (SourceStoreConflict, SourceRevisionResolutionError):
+                pass
+        return _active_revision_uncertain_result(
+            provider=provider,
+            session_id_hash=session_id_hash,
+            resolution=resolution,
+        )
+
+    return _imported_result(
+        provider=provider,
+        session_id_hash=session_id_hash,
+        resolution=resolution,
         conversation_chunk_count=len(chunks),
-        tool_evidence_bundle_count=0,  # M3 fills tool evidence coverage
-        conversation_content_hashes=conversation_content_hashes,
-        tool_evidence_coverage_hashes=[],
-        conversation_revision_tokens=[
-            build_source_revision_token(doc, material_hash_field="content_hash")
-            for doc in chunk_docs
-        ],
-        source_locator_hash=source_locator_hash,
-        ledger_comparison=ledger_comparison,
-        project_authority=resolution.to_authority_block(),
     )
-    store.put(coverage_doc)
 
+
+def _active_revision_after_write(
+    *,
+    store: CouchDBSourceStore,
+    session_id_hash: str,
+) -> ResolvedSourceRevision | None:
+    """Return the active predecessor observed immediately after a writer PUT."""
+
+    if store.get(active_source_revision_pointer_doc_id(session_id_hash)) is None:
+        return None
+    return resolve_active_source_revision(store=store, session_id_hash=session_id_hash)
+
+
+def _active_revision_after_write_or_none(
+    *,
+    store: CouchDBSourceStore,
+    session_id_hash: str,
+) -> ResolvedSourceRevision | None:
+    try:
+        return _active_revision_after_write(
+            store=store,
+            session_id_hash=session_id_hash,
+        )
+    except SourceRevisionResolutionError:
+        return None
+
+
+def _reconcile_successor_after_source_write(
+    *,
+    store: CouchDBSourceStore,
+    session_id_hash: str,
+    predecessor: ResolvedSourceRevision,
+    source_documents: list[dict],
+    provider: str,
+    project: str,
+) -> ResolvedSourceRevision:
+    """CAS a successor and converge coverage/projection before acknowledgement."""
+
+    source_document_ids = tuple(
+        sorted(
+            {
+                *active_source_origin_document_ids(predecessor),
+                *(str(document["_id"]) for document in source_documents),
+            }
+        )
+    )
+    activated = activate_source_revision(
+        store=store,
+        session_id_hash=session_id_hash,
+        source_document_ids=source_document_ids,
+        expected_predecessor=predecessor,
+    )
+    coverage = update_coverage_with_tool_evidence(
+        session_id_hash=session_id_hash,
+        store=store,
+    )
+    if (
+        coverage is None
+        or str(coverage.get("source_hash") or "") != activated.source_hash
+        or str(coverage.get("active_source_manifest_id") or "")
+        != str(activated.manifest_id or "")
+    ):
+        raise SourceStoreConflict("successor coverage did not converge")
+    mark_projection_pending_if_source_changed(
+        session_id_hash=session_id_hash,
+        provider=provider,
+        project=project,
+        source_hash=activated.source_hash,
+        store=store,
+        source_changed=activated.source_hash != predecessor.source_hash,
+    )
+    current = resolve_active_source_revision(store=store, session_id_hash=session_id_hash)
+    persisted_coverage = store.get(coverage_manifest_doc_id(session_id_hash)) or {}
+    if (
+        current.manifest_id != activated.manifest_id
+        or current.source_hash != activated.source_hash
+        or str(persisted_coverage.get("source_hash") or "") != current.source_hash
+        or str(persisted_coverage.get("active_source_manifest_id") or "")
+        != str(current.manifest_id or "")
+    ):
+        raise SourceStoreConflict("successor currentness changed during reconciliation")
+    return activated
+
+
+def _imported_result(
+    *,
+    provider: str,
+    session_id_hash: str,
+    resolution,
+    conversation_chunk_count: int,
+    successor_activated: bool = False,
+) -> ImportResult:
+    notes = tuple(resolution.notes)
+    if successor_activated:
+        notes = (*notes, "successor_activated")
     return ImportResult(
         provider=provider,
         status=ImportStatus.IMPORTED,
-        session_id_hash=parsed.session.session_id_hash,
+        session_id_hash=session_id_hash,
         project=resolution.project,
         project_source=resolution.source,
         project_ambiguous=resolution.ambiguous,
         index_project_mismatch=resolution.index_mismatch,
         eligible_for_retirement=resolution.eligible_for_retirement,
-        conversation_chunk_count=len(chunks),
-        notes=resolution.notes,
+        conversation_chunk_count=conversation_chunk_count,
+        notes=notes,
+    )
+
+
+def _active_revision_blocked_result(*, provider: str, session_id_hash: str, resolution) -> ImportResult:
+    return ImportResult(
+        provider=provider,
+        status=ImportStatus.ACTIVE_SOURCE_REVISION_BLOCKED,
+        session_id_hash=session_id_hash,
+        project=resolution.project,
+        project_source=resolution.source,
+        project_ambiguous=resolution.ambiguous,
+        index_project_mismatch=resolution.index_mismatch,
+        notes=("active_source_revision_requires_successor", "no_source_mutation"),
+    )
+
+
+def _active_revision_uncertain_result(
+    *, provider: str, session_id_hash: str, resolution
+) -> ImportResult:
+    return ImportResult(
+        provider=provider,
+        status=ImportStatus.ACTIVE_SOURCE_REVISION_UNCERTAIN,
+        session_id_hash=session_id_hash,
+        project=resolution.project,
+        project_source=resolution.source,
+        project_ambiguous=resolution.ambiguous,
+        index_project_mismatch=resolution.index_mismatch,
+        notes=(
+            "active_source_revision_transition_uncertain",
+            "no_import_acknowledgement",
+        ),
     )
 
 

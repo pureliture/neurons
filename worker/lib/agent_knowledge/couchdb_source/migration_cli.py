@@ -769,22 +769,27 @@ def main(argv: list[str] | None = None) -> int:
         roots = default_source_roots()
         roots.update(roots_override)
         runtime_dir = Path(args.runtime_dir) if args.runtime_dir else None
+        source_context_seed_errors = 0
         if args.dry_run:
             # Full-generation evidence storage resolves the current source set,
             # including its transcript session and chunks. Seed that context only
             # in the disposable store, without limiting by source file: the tool
             # evidence limit applies later to complete selected sessions.
-            run_migration(
+            seed_report = run_migration(
                 store=store,
                 roots=roots,
                 providers=args.provider,
                 runtime_dir=runtime_dir,
                 dry_run=True,
             )
+            source_context_seed_errors = seed_report["errors"]
         report = run_tool_evidence(
             store=store, roots=roots, providers=args.provider, limit=args.limit,
             runtime_dir=runtime_dir,
         )
+        if args.dry_run:
+            report["source_context_seed_errors"] = source_context_seed_errors
+            report["errors"] += source_context_seed_errors
         report["status"] = "ok" if report["errors"] == 0 else "error"
         print(json.dumps(report, sort_keys=True))
         return 0 if report["errors"] == 0 else 1
